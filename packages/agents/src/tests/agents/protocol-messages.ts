@@ -24,7 +24,6 @@ export class TestProtocolMessagesAgent extends Agent<
   private _stateSentinel: { count: number } = this._state;
 
   initialState = { count: 0 };
-  static options = { hibernate: true };
 
   shouldSendProtocolMessages(
     _connection: Connection,

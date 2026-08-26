@@ -1,4 +1,5 @@
 import { Agent, type Connection, type WSMessage } from "agents";
+import { VoiceProviderError } from "../../errors";
 import { withVoiceInput } from "../../voice-input";
 import type {
   Transcriber,
@@ -17,13 +18,15 @@ class TestTranscriberSession implements TranscriberSession {
   #totalBytes = 0;
   #utteranceCount = 0;
   #closed = false;
-  #onInterim: ((text: string) => void) | undefined;
-  #onUtterance: ((text: string) => void) | undefined;
+  #onInterim: TranscriberSessionOptions["onInterim"];
+  #onUtterance: TranscriberSessionOptions["onUtterance"];
+  #onFatalError: TranscriberSessionOptions["onFatalError"];
   #utteranceThreshold: number;
 
   constructor(options?: TranscriberSessionOptions, utteranceThreshold = 20000) {
     this.#onInterim = options?.onInterim;
     this.#onUtterance = options?.onUtterance;
+    this.#onFatalError = options?.onFatalError;
     this.#utteranceThreshold = utteranceThreshold;
   }
 
@@ -40,34 +43,84 @@ class TestTranscriberSession implements TranscriberSession {
     }
   }
 
+  reportFatalError(error: Error): void {
+    this.#onFatalError?.(error);
+  }
+
   close(): void {
     this.#closed = true;
   }
 }
 
+class RejectingReadyTranscriber implements Transcriber {
+  createSession(options?: TranscriberSessionOptions): TranscriberSession {
+    const failure = new VoiceProviderError("provider startup failed", {
+      code: "provider_unavailable"
+    });
+    return {
+      feed() {},
+      waitUntilReady: () =>
+        new Promise<void>((_resolve, reject) => {
+          queueMicrotask(() => {
+            options?.onFatalError?.(failure);
+            reject(failure);
+          });
+        }),
+      close() {}
+    };
+  }
+}
+
+class DetachedFailingTranscriber implements Transcriber {
+  createSession(options?: TranscriberSessionOptions): TranscriberSession {
+    let closed = false;
+    queueMicrotask(() => {
+      if (closed) return;
+      options?.onFatalError?.(
+        new VoiceProviderError("detached provider failed to connect", {
+          code: "socket_upgrade_failed"
+        })
+      );
+    });
+    return {
+      feed() {},
+      close() {
+        closed = true;
+      }
+    };
+  }
+}
+
 class TestTranscriber implements Transcriber {
   #utteranceThreshold: number;
+  sessions: TestTranscriberSession[] = [];
 
   constructor(utteranceThreshold = 20000) {
     this.#utteranceThreshold = utteranceThreshold;
   }
 
   createSession(options?: TranscriberSessionOptions): TranscriberSession {
-    return new TestTranscriberSession(options, this.#utteranceThreshold);
+    const session = new TestTranscriberSession(
+      options,
+      this.#utteranceThreshold
+    );
+    this.sessions.push(session);
+    return session;
   }
 }
 
 // --- Test agents ---
 
 const InputBase = withVoiceInput(Agent);
+const DiagnosticInputBase = withVoiceInput(Agent, {
+  diagnostics: { browserConsole: true }
+});
 
 /**
  * Continuous STT voice input agent with test transcriber.
  * Tracks onTranscript calls and consumer lifecycle invocations for assertions.
  */
 export class TestVoiceInputAgent extends InputBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
 
   #transcripts: string[] = [];
@@ -79,6 +132,17 @@ export class TestVoiceInputAgent extends InputBase {
   #beforeCallStartMode: "allow" | "pending" = "allow";
   #resolveBeforeCallStart: ((allowed: boolean) => void) | null = null;
   #onCallStartShouldThrow = false;
+  #transcriberMode: "default" | "detached_failure" | "reject_ready" = "default";
+
+  createTranscriber(_connection: Connection): Transcriber | null {
+    if (this.#transcriberMode === "detached_failure") {
+      return new DetachedFailingTranscriber();
+    }
+    if (this.#transcriberMode === "reject_ready") {
+      return new RejectingReadyTranscriber();
+    }
+    return null;
+  }
 
   onTranscript(text: string, _connection: Connection) {
     this.#transcripts.push(text);
@@ -162,6 +226,31 @@ export class TestVoiceInputAgent extends InputBase {
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
           break;
+        case "_use_detached_failing_transcriber":
+          this.#transcriberMode = "detached_failure";
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_use_rejecting_ready_transcriber":
+          this.#transcriberMode = "reject_ready";
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_report_transcriber_fatal_at":
+          if (typeof parsed.index === "number") {
+            this.transcriber.sessions[parsed.index]?.reportFatalError(
+              new Error(
+                (parsed.error as { message?: string } | undefined)?.message ??
+                  "transcriber failed"
+              )
+            );
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
         case "_custom":
           this.#customMessages.push(parsed.data as string);
           connection.send(JSON.stringify({ type: "_ack", command: "_custom" }));
@@ -171,12 +260,16 @@ export class TestVoiceInputAgent extends InputBase {
   }
 }
 
+export class TestDiagnosticVoiceInputAgent extends DiagnosticInputBase {
+  transcriber = new TestTranscriber();
+
+  onTranscript(_text: string, _connection: Connection): void {}
+}
+
 /**
  * Voice input agent that rejects calls via beforeCallStart.
  */
 export class TestRejectCallVoiceInputAgent extends InputBase {
-  static options = { hibernate: false };
-
   transcriber = new TestTranscriber();
 
   beforeCallStart(_connection: Connection): boolean {

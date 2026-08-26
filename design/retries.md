@@ -15,7 +15,7 @@ The `cloudflare/actors` library includes well-tested retry primitives (`tryN`, `
 3. **Per-call-site configurability** — `schedule()`, `scheduleEvery()`, and `queue()` accept an optional `{ retry?: RetryOptions }` parameter so developers can tune retry behavior per task.
 4. **Backward compatible** — all new parameters are optional. Existing code works unchanged. Schema migrations use `ADD COLUMN IF NOT EXISTS` pattern.
 5. **Sensible defaults** — 3 attempts, 100ms base delay, jittered exponential backoff. No configuration needed for the common case.
-6. **Class-level defaults** — override defaults for an entire agent via `static options = { retry: { ... } }`, following the existing pattern for `hibernate`, `sendIdentityOnConnect`, etc.
+6. **Class-level defaults** — override defaults for an entire agent via `static options = { retry: { ... } }`, following the existing static-options pattern used by `sendIdentityOnConnect` and recovery settings.
 
 ## Architecture
 

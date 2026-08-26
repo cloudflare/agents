@@ -279,6 +279,21 @@ class Researcher extends Think<Env> {
 
 Quick Actions require a Worker `compatibility_date` of `2026-03-24` or later and `remote: true` on the browser binding for local `wrangler dev`.
 
+## Using Kitesurf
+
+To use Kitesurf with the CDP-based `browser_execute` tool, select it in the session options:
+
+```ts
+const tools = createBrowserTools({
+  ctx: this.ctx,
+  browser: this.env.BROWSER,
+  loader: this.env.LOADER,
+  session: { browser: "kitesurf" }
+});
+```
+
+A Kitesurf browser is scoped to its CDP WebSocket. It therefore supports only one-shot execution. Session reuse, pause and resume, Live View, recording, `keepAliveMs`, protocol discovery, and Kitesurf-backed Quick Actions are not available.
+
 ## Live View and human-in-the-loop
 
 [Live View](https://developers.cloudflare.com/browser-run/features/live-view/) lets a human open a URL and watch — or take control of — a running browser session in real time. It is the building block for human-in-the-loop steps such as logging in, solving a CAPTCHA, completing MFA, or entering data you do not want to pass through an automation script.

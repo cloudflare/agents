@@ -172,6 +172,50 @@ describe("VoiceInput — protocol basics", () => {
   });
 });
 
+describe("VoiceInput — diagnostics", () => {
+  it("uses the same server opt-in for welcome and STT lifecycle forwarding", async () => {
+    const { ws } = await connectWS(
+      uniquePath("test-diagnostic-voice-input-agent")
+    );
+    const welcome = (await waitForType(ws, "welcome")) as Record<
+      string,
+      unknown
+    >;
+    expect(welcome.diagnostics).toEqual({ browser_console: true });
+    await waitForStatus(ws, "idle");
+
+    const messagesPromise = collectMessagesUntil(
+      ws,
+      (message) =>
+        message.type === "diagnostic" && message.event === "turn.ended"
+    );
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+    for (let i = 0; i < 4; i++) ws.send(new ArrayBuffer(5000));
+    const messages = await messagesPromise;
+    const diagnostics = messages.filter(
+      (message) => message.type === "diagnostic"
+    );
+    const events = diagnostics.map((message) => message.event);
+
+    expect(events).toEqual(
+      expect.arrayContaining([
+        "call.starting",
+        "stt.starting",
+        "stt.ready",
+        "stt.interim",
+        "stt.utterance",
+        "turn.started",
+        "after_transcribe.completed",
+        "turn.ended"
+      ])
+    );
+    expect(JSON.stringify(diagnostics)).not.toContain("utterance 1");
+
+    ws.close();
+  });
+});
+
 describe("VoiceInput — consumer lifecycle passthrough", () => {
   it("calls consumer onConnect", async () => {
     const { ws } = await connectWS(uniquePath("test-voice-input-agent"));
@@ -206,6 +250,7 @@ describe("VoiceInput — continuous STT pipeline", () => {
     await waitForStatus(ws, "listening");
 
     // Send enough audio to trigger the test transcriber (threshold = 20000 bytes)
+    const turnMetricsPromise = waitForType(ws, "turn_metrics");
     for (let i = 0; i < 5; i++) {
       ws.send(new ArrayBuffer(5000));
     }
@@ -222,6 +267,20 @@ describe("VoiceInput — continuous STT pipeline", () => {
 
     const state = await getAgentState(ws);
     expect(state.transcripts).toHaveLength(1);
+
+    const turnMetrics = (await turnMetricsPromise) as Record<string, unknown>;
+    expect(turnMetrics).toMatchObject({
+      type: "turn_metrics",
+      turnId: expect.any(String),
+      source: "speech",
+      outcome: "completed",
+      turnTotalMs: expect.any(Number),
+      afterTranscribeMs: expect.any(Number)
+    });
+    expect(turnMetrics).not.toHaveProperty("speechStartToFirstInterimMs");
+    expect(turnMetrics).not.toHaveProperty("speechStartToFinalMs");
+    expect(turnMetrics).not.toHaveProperty("modelStreamConsumptionMs");
+    expect(turnMetrics).not.toHaveProperty("ttsWorkMs");
 
     ws.close();
   });
@@ -273,6 +332,159 @@ describe("VoiceInput — continuous STT pipeline", () => {
     expect(state.transcripts).toHaveLength(2);
 
     ws.close();
+  });
+});
+
+describe("VoiceInput — transcriber lifecycle errors", () => {
+  it("waits for transcriber readiness and reports a structured startup failure", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath("test-voice-input-agent"));
+    try {
+      await waitForStatus(ws, "idle");
+      sendJSON(ws, { type: "_use_rejecting_ready_transcriber" });
+      await waitForAck(ws, "_use_rejecting_ready_transcriber");
+
+      const startupMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const startupMessages = await startupMessagesPromise;
+
+      expect(startupMessages).toContainEqual({
+        type: "error",
+        message: "Speech recognition failed to start",
+        code: "stt_startup_failed",
+        stage: "stt",
+        retryable: false
+      });
+      expect(startupMessages).not.toContainEqual({
+        type: "status",
+        status: "listening"
+      });
+      expect(startupMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+      expect(errorLog).toHaveBeenCalledWith({
+        component: "VoiceInput",
+        stage: "transcriber_startup",
+        message: "Speech recognition failed to start",
+        connectionId: expect.any(String),
+        error: expect.objectContaining({
+          name: "VoiceProviderError",
+          message: "provider startup failed",
+          code: "provider_unavailable"
+        })
+      });
+
+      const state = await getAgentState(ws);
+      expect(state).toMatchObject({ callStart: 0, callEnd: 1 });
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("ignores a stale fatal callback from an earlier input session", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath("test-voice-input-agent"));
+    try {
+      await waitForStatus(ws, "idle");
+
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+      sendJSON(ws, { type: "end_call" });
+      await waitForStatus(ws, "idle");
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+
+      const afterStalePromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "_state"
+      );
+      sendJSON(ws, {
+        type: "_report_transcriber_fatal_at",
+        index: 0,
+        error: { message: "stale input session failure" }
+      });
+      sendJSON(ws, { type: "_get_state" });
+      const afterStale = await afterStalePromise;
+      expect(afterStale.some((msg) => msg.type === "error")).toBe(false);
+      expect(afterStale).not.toContainEqual({ type: "status", status: "idle" });
+
+      const terminalMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, {
+        type: "_report_transcriber_fatal_at",
+        index: 1,
+        error: { message: "current input session failure" }
+      });
+      const terminalMessages = await terminalMessagesPromise;
+      expect(
+        terminalMessages.filter((msg) => msg.type === "error")
+      ).toHaveLength(1);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          stage: "transcriber_runtime",
+          error: expect.objectContaining({
+            message: "current input session failure"
+          })
+        })
+      );
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("ends a call when a detached transcriber connection fails", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath("test-voice-input-agent"));
+    try {
+      await waitForStatus(ws, "idle");
+      sendJSON(ws, { type: "_use_detached_failing_transcriber" });
+      await waitForAck(ws, "_use_detached_failing_transcriber");
+
+      const terminalMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const terminalMessages = await terminalMessagesPromise;
+
+      expect(terminalMessages).toContainEqual({
+        type: "error",
+        message: "Speech recognition connection was lost",
+        code: "stt_connection_lost",
+        stage: "stt",
+        retryable: true
+      });
+      expect(terminalMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+      expect(errorLog).toHaveBeenCalledWith({
+        component: "VoiceInput",
+        stage: "transcriber_runtime",
+        message: "Speech recognition connection was lost",
+        connectionId: expect.any(String),
+        error: expect.objectContaining({
+          name: "VoiceProviderError",
+          message: "detached provider failed to connect",
+          code: "socket_upgrade_failed"
+        })
+      });
+
+      const state = await getAgentState(ws);
+      expect(state).toMatchObject({ callStart: 1, callEnd: 1 });
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
   });
 });
 

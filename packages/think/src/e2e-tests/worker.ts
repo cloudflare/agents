@@ -174,7 +174,6 @@ const TOOL_ROLLBACK_EXEC_DELAY_MS = 600;
  */
 export class ThinkToolRollbackE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
   override maxSteps = 500;
   private _ledgerReady = false;
 
@@ -265,7 +264,6 @@ export class ThinkToolRollbackE2EAgent extends Think<Env> {
  */
 export class ThinkPersistFalseE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
   override maxSteps = 500;
   private _ledgerReady = false;
 
@@ -441,8 +439,6 @@ function createSlowE2EMockModel(): LanguageModel {
 }
 
 export class ThinkRecoveryE2EAgent extends Think<Env> {
-  override chatRecovery = true;
-
   override getModel(): LanguageModel {
     return createSlowE2EMockModel();
   }
@@ -606,7 +602,6 @@ function createStallThenStreamMockModel(nextCall: () => number): LanguageModel {
 
 export class ThinkStallRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
   // Small window so the e2e is fast: the first inference hangs, the watchdog
   // fires within ~2s, and the scheduled continuation completes the turn.
   override chatStreamStallTimeoutMs = 2_000;
@@ -728,7 +723,6 @@ const CHILD_TASK_RUN_ID = "child-task-1";
  */
 export class ThinkTaskParentE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
   override maxSteps = 50;
 
   override getModel(): LanguageModel {
@@ -840,7 +834,6 @@ const NATURAL_CHILD_TASK_RUN_ID = "agent-tool:task-1";
  */
 export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
   override maxSteps = 50;
 
   override getModel(): LanguageModel {
@@ -958,7 +951,6 @@ const SLOW_CHILD_EXEC_DELAY_MS = 2_700;
  * budget. Production-default keepAlive (no 2s override).
  */
 export class ThinkSlowChildE2EAgent extends Think<Env> {
-  override chatRecovery = true;
   override maxSteps = 200;
   private _ledgerReady = false;
 
@@ -1037,7 +1029,6 @@ export class ThinkSlowChildE2EAgent extends Think<Env> {
  * `interrupted` instead of `completed`.
  */
 export class ThinkSlowChildParentE2EAgent extends Think<Env> {
-  override chatRecovery = true;
   override maxSteps = 50;
 
   override getModel(): LanguageModel {
@@ -1678,7 +1669,6 @@ const SUBMISSION_STATUS_LOG_KEY = "test:submission-status-log";
 
 export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
 
   override getModel(): LanguageModel {
     return createSlowE2EMockModel();
@@ -1842,9 +1832,6 @@ function makeMessengerThreadSnapshot(): Record<string, unknown> {
 
 export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  // The reply-fiber recovery is independent of chatRecovery; keep chatRecovery
-  // off so the answer-mode recovery turn does not spawn nested chat fibers.
-  override chatRecovery = false;
 
   override getModel(): LanguageModel {
     return createSlowE2EMockModel();
@@ -2035,7 +2022,6 @@ function createStructuredGreetingModel(chunkDelayMs: number): LanguageModel {
 
 export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
   override maxSteps = 4;
 
   override getModel(): LanguageModel {
@@ -2180,7 +2166,6 @@ function createActionPauseMockModel(): LanguageModel {
 
 export class ThinkActionPauseRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override chatRecovery = true;
   override maxSteps = 6;
 
   override getModel(): LanguageModel {

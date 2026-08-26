@@ -342,15 +342,11 @@ const history = await chat.getHistory();
 
 Side-by-side with `this.subAgent(...)`: inside a parent DO, `this.subAgent(Cls, name)` is the direct path. `getSubAgentByName(parent, Cls, name)` is for callers _outside_ the parent DO that don't want to write an explicit bridge method for every child method they care about.
 
-### D9. Implementation location — agents first, partyserver later
+### D9. Implementation location
 
-partyserver is Cloudflare-specific, so facet mechanics could live there. But:
-
-- `ctx.facets` is already wired through agents' `FacetCapableCtx`.
-- The "fetch an upgrade through a Fetcher" pattern has no generic partyserver abstraction yet.
-- It's faster to iterate on the semantics in one package.
-
-Ship in `agents` first, extract URL parsing and forwarding primitives to partyserver once the shape has stabilized.
+Facet routing remains in `agents`: it owns Agent paths, authorization hooks,
+and `FacetCapableCtx`. Generic Durable Object dispatch lives in
+`agents/lifecycle`; there is no separate PartyServer package to extract into.
 
 ## Edge cases and semantics
 
@@ -358,7 +354,7 @@ Consolidated list of corner cases and the answers we've committed to:
 
 - **Hook throws.** Propagates. The DO runtime surfaces 500 to the client. Users who want custom error handling wrap in try/catch themselves — matches how `onChatMessage` errors behave today.
 - **Hook ordering vs class-existence.** The hook runs _before_ the framework checks that the child class exists in `ctx.exports`. This lets users intercept with a custom response even for unknown classes. If the hook returns void and the class is missing, the framework returns a default 404 with a diagnostic body.
-- **Request URL rewrites.** The hook receives the original request with its full URL intact — including the `/sub/{class}/{name}` segment — mirroring how partyserver's `onBeforeConnect` / `onBeforeRequest` pass through the un-stripped URL. The routing decision for which facet to wake is fixed at parse time; if the hook returns a modified `Request`, its headers, body, method, and query string flow to the child, but the **pathname** the child sees is always `match.remainingPath` (the tail after `/sub/{class}/{name}`). Customize via headers/body rather than URL-rewriting if the child's path needs to look different.
+- **Request URL rewrites.** The hook receives the original request with its full URL intact — including the `/sub/{class}/{name}` segment — matching how lifecycle `onBeforeConnect` / `onBeforeRequest` hooks receive the unstripped URL. The routing decision for which facet to wake is fixed at parse time; if the hook returns a modified `Request`, its headers, body, method, and query string flow to the child, but the **pathname** the child sees is always `match.remainingPath` (the tail after `/sub/{class}/{name}`). Customize via headers/body rather than URL-rewriting if the child's path needs to look different.
 - **Header/auth propagation.** Headers flow through to the child verbatim unless the hook rewrites. Cookies, `Authorization`, custom headers — all visible to the child as sent by the client.
 - **Reconnect terminal vs transient.** Documented in D6. `useAgent` stops on 4xx and WS codes 1008 / 4xxx; retries everything else.
 - **Basepath composition.** Router strips `basePath` first, then parses `/{prefix}/{class}/{name}[/sub/...]`. Nothing special for sub-agents.

@@ -1386,31 +1386,6 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
-   * Emit `afterChunks` chunks then hang the stream forever. With
-   * `chatStreamStallTimeoutMs` set, the inactivity watchdog should abort the
-   * turn and surface a terminal stream error instead of parking indefinitely.
-   */
-  async testChatWithStall(
-    afterChunks: number,
-    timeoutMs: number
-  ): Promise<TestChatResult> {
-    this._stallAfterChunks = afterChunks;
-    this.chatStreamStallTimeoutMs = timeoutMs;
-    // Assert the watchdog → TERMINAL behavior with recovery OFF. (With recovery
-    // on — the Think default — a stall now routes into bounded recovery; see
-    // `testChatWithStallThenRecover`.)
-    const prevRecovery = this.chatRecovery;
-    this.chatRecovery = false;
-    try {
-      return await this.testChat("trigger stall");
-    } finally {
-      this._stallAfterChunks = null;
-      this.chatStreamStallTimeoutMs = 0;
-      this.chatRecovery = prevRecovery;
-    }
-  }
-
-  /**
    * #1626: the FIRST inference hangs after `afterChunks` chunks (watchdog
    * aborts it), which must now route into bounded recovery instead of failing
    * terminally; the scheduled continuation then streams normally to completion.
@@ -3718,14 +3693,28 @@ function createDurablePauseMockModel(): LanguageModel {
           (m as Record<string, unknown>).role === "tool"
       );
       // Only park when a user explicitly asked for it on this turn — so a
-      // post-resolution continuation (driven by a system note, no fresh user
-      // ask) responds with text instead of re-parking.
-      const userAskedToPause = messages.some((m: unknown) => {
+      // post-resolution continuation (driven by provider-projected framework
+      // context, not a fresh user ask) responds with text instead of re-parking.
+      const hasExecutionOutcomeContext = messages.some((m: unknown) => {
         if (typeof m !== "object" || m === null) return false;
         const mm = m as Record<string, unknown>;
         if (mm.role !== "user") return false;
-        return JSON.stringify(mm.content ?? "").includes("pauseAction");
+        const content = JSON.stringify(mm.content ?? "");
+        return (
+          content.includes("[execute tool]") ||
+          content.includes("[durable action]")
+        );
       });
+      const userAskedToPause =
+        !hasExecutionOutcomeContext &&
+        messages.some((m: unknown) => {
+          if (typeof m !== "object" || m === null) return false;
+          const mm = m as Record<string, unknown>;
+          return (
+            mm.role === "user" &&
+            JSON.stringify(mm.content ?? "").includes("pauseAction")
+          );
+        });
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -4471,6 +4460,22 @@ export class ThinkToolsTestAgent extends Think {
 
   async getDurablePauseExecCount(): Promise<number> {
     return this._durablePauseExecCount;
+  }
+
+  /** Simulate compaction removing a durable-pause action's tool part. */
+  async stripDurablePausePartsForTest(): Promise<void> {
+    for (const message of this.messages) {
+      if (message.role !== "assistant") continue;
+      const remaining = message.parts.filter(
+        (part) => part.type !== "tool-pauseAction"
+      );
+      if (remaining.length === message.parts.length) continue;
+      const parts: UIMessage["parts"] =
+        remaining.length > 0
+          ? remaining
+          : [{ type: "text", text: "(summarized)" }];
+      await this.updateMessageInHistory({ ...message, parts });
+    }
   }
 
   /** Compile tools and directly invoke the durable-pause action to park it. */
@@ -6933,7 +6938,6 @@ export class ThinkRecoveryTestAgent extends Think {
     error?: string;
   }> {
     this._rejectPrefill = true;
-    this.chatRecovery = false;
     const result = await this.continueLastTurn();
     return {
       status: result.status,
@@ -6970,15 +6974,14 @@ export class ThinkRecoveryTestAgent extends Think {
   /**
    * Drive a real chat request through `_handleChatRequest` that fails before
    * the stream starts (a `beforeTurn` throw stands in for a message
-   * reconciliation/persist failure). Recovery is disabled so the error reaches
-   * the outer catch instead of being intercepted by the recovery fiber.
+   * reconciliation or persistence failure). The recovery fiber must propagate
+   * the error to the outer request handler.
    */
   async simulatePreStreamChatFailureForTest(input: {
     requestId: string;
     userText: string;
     error: string;
   }): Promise<void> {
-    this.chatRecovery = false;
     this._throwBeforeTurnMessage = input.error;
     const connection = { id: "c-prestream", send() {} };
     const event = {
@@ -8079,11 +8082,14 @@ export class ThinkRecoveryTestAgent extends Think {
 }
 
 // ── ThinkNonRecoveryTestAgent ───────────────────────────────
-// Same as ThinkRecoveryTestAgent but with chatRecovery = false.
+// Simulates previously compiled JavaScript that set chatRecovery = false.
 
 export class ThinkNonRecoveryTestAgent extends Think {
-  override chatRecovery = false;
+  // @ts-expect-error `false` is no longer accepted, but stale JavaScript must
+  // still take the always-on durable recovery path.
+  override chatRecovery: ChatRecoveryConfig = false;
   private _turnCallCount = 0;
+  private _stashSucceeded = false;
 
   override getModel(): LanguageModel {
     return createMockModel("Continued response.");
@@ -8091,6 +8097,8 @@ export class ThinkNonRecoveryTestAgent extends Think {
 
   override beforeTurn(_ctx: TurnContext): void {
     this._turnCallCount++;
+    this.stash({ source: "legacy-false-config" });
+    this._stashSucceeded = true;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -8116,6 +8124,10 @@ export class ThinkNonRecoveryTestAgent extends Think {
 
   async getTurnCallCount(): Promise<number> {
     return this._turnCallCount;
+  }
+
+  async getStashSucceeded(): Promise<boolean> {
+    return this._stashSucceeded;
   }
 }
 

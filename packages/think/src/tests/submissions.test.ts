@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import type { ThinkProgrammaticTestAgent } from "./agents/think-session";
@@ -175,7 +175,7 @@ type ThinkSubmissionTestStub = {
 async function freshAgent(
   name = crypto.randomUUID()
 ): Promise<ThinkSubmissionTestStub> {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkProgrammaticTestAgent as unknown as DurableObjectNamespace<ThinkProgrammaticTestAgent>,
     name
   ) as unknown as Promise<ThinkSubmissionTestStub>;

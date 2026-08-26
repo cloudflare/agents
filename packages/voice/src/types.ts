@@ -19,6 +19,80 @@ export const VOICE_PROTOCOL_VERSION = 1;
 
 export type VoiceStatus = "idle" | "listening" | "thinking" | "speaking";
 
+// --- Diagnostics ---
+
+/** Server-side diagnostic configuration shared by both voice mixins. */
+export interface VoiceDiagnosticsOptions {
+  /** Forward safe server diagnostics and enable browser console logging. */
+  browserConsole?: boolean;
+}
+
+/**
+ * A bounded diagnostic record forwarded by the voice protocol.
+ * Event names and metadata are intentionally open and are not stable API.
+ */
+export interface VoiceDiagnosticEvent {
+  event: string;
+  timestamp: number;
+  data?: Record<string, unknown>;
+}
+
+// --- Stable per-turn metrics ---
+
+export type VoiceTurnSource = "speech" | "text";
+
+export type VoiceTurnOutcome =
+  | "completed"
+  | "no_output"
+  | "output_limit"
+  | "content_filtered"
+  | "model_error"
+  | "tts_error"
+  | "aborted"
+  | "skipped"
+  | "error";
+
+/**
+ * Stable, content-free summary of one allocated voice turn.
+ *
+ * `turnId`, `source`, and `outcome` are dimensions used to correlate and
+ * interpret the measurements; every other field is a duration. Optional
+ * timings are omitted when their lifecycle landmark was not reached. Timings
+ * use one server clock, overlap, and are not additive. Browser playback timing
+ * is excluded because browser and Worker clocks are independent.
+ */
+export interface VoiceTurnMetrics {
+  /** SDK-assigned correlation ID for this turn. */
+  turnId: string;
+  /** Whether the turn originated from finalized speech or a text message. */
+  source: VoiceTurnSource;
+  /** Terminal result, emitted exactly once for the allocated turn. */
+  outcome: VoiceTurnOutcome;
+  /** Turn allocation to terminal summary, in milliseconds. */
+  turnTotalMs: number;
+  /** Provider speech start to the first interim transcript. */
+  speechStartToFirstInterimMs?: number;
+  /** Provider speech start to the finalized transcript. */
+  speechStartToFinalMs?: number;
+  /** Time spent in the server's `afterTranscribe` hook. */
+  afterTranscribeMs?: number;
+  /** Model invocation to the first non-whitespace text delta. */
+  modelToFirstTextMs?: number;
+  /** Cumulative duration of reasoning blocks exposed by the model stream. */
+  exposedReasoningMs?: number;
+  /** Model invocation through normalized stream consumption. */
+  modelStreamConsumptionMs?: number;
+  /** Finalized input through the first server audio send. */
+  finalInputToFirstAudioMs?: number;
+
+  /** First TTS provider invocation through the first server audio send. */
+  ttsToFirstAudioMs?: number;
+  /** First TTS provider invocation through completion of all sentence work. */
+  ttsWallMs?: number;
+  /** Cumulative overlapping TTS sentence hook and provider work. */
+  ttsWorkMs?: number;
+}
+
 // --- Audio format ---
 
 /** Audio format the server uses for binary audio payloads. */
@@ -27,6 +101,48 @@ export type VoiceAudioFormat = "mp3" | "pcm16" | "wav" | "opus";
 // --- Conversation message role ---
 
 export type VoiceRole = "user" | "assistant";
+
+// --- Structured voice errors ---
+
+/** Stable machine-readable error codes emitted by the voice protocol. */
+export type VoiceErrorCode = "stt_startup_failed" | "stt_connection_lost";
+
+/** Stable pipeline stage associated with a structured voice error. */
+export type VoiceErrorStage = "stt";
+
+/** Client-safe error detail. `message` remains for string-event compatibility. */
+export interface VoiceError {
+  message: string;
+  code?: VoiceErrorCode;
+  stage?: VoiceErrorStage;
+  retryable?: boolean;
+}
+
+// --- LLM completion outcomes ---
+
+/** Stable machine-readable outcomes for non-ordinary LLM completions. */
+export type VoiceCompletionOutcomeCode =
+  | "no_output"
+  | "output_limit"
+  | "content_filtered"
+  | "model_error";
+
+/** Normalized finish reasons emitted by the supported AI SDK stream shape. */
+export type VoiceModelFinishReason =
+  | "stop"
+  | "length"
+  | "content-filter"
+  | "tool-calls"
+  | "error"
+  | "other";
+
+/** Bounded completion metadata exposed by the voice protocol. */
+export interface VoiceCompletionOutcome {
+  code: VoiceCompletionOutcomeCode;
+  stage: "llm";
+  finishReason?: VoiceModelFinishReason;
+  partialOutput: boolean;
+}
 
 // --- Wire protocol: Client → Server ---
 
@@ -42,7 +158,12 @@ export type VoiceClientMessage =
 // --- Wire protocol: Server → Client ---
 
 export type VoiceServerMessage =
-  | { type: "welcome"; protocol_version: number }
+  | {
+      type: "welcome";
+      protocol_version: number;
+      diagnostics?: { browser_console: true };
+    }
+  | ({ type: "diagnostic" } & VoiceDiagnosticEvent)
   | { type: "status"; status: VoiceStatus }
   | { type: "audio_config"; format: VoiceAudioFormat; sampleRate?: number }
   | { type: "transcript"; role: VoiceRole; text: string }
@@ -58,14 +179,43 @@ export type VoiceServerMessage =
       first_audio_ms: number;
       total_ms: number;
     }
-  | { type: "error"; message: string };
+  | ({ type: "turn_metrics" } & VoiceTurnMetrics)
+  | ({ type: "completion_outcome" } & VoiceCompletionOutcome)
+  | ({ type: "error" } & VoiceError);
 
 // --- Pipeline metrics (structured form for consumers) ---
 
+/**
+ * Compact compatibility summary for successful, non-empty speech turns.
+ * These overlapping latency landmarks and work totals are not additive.
+ * Use `VoiceTurnMetrics` for stable detailed timing and terminal summaries of
+ * unsuccessful, aborted, skipped, or text turns.
+ */
 export interface VoicePipelineMetrics {
+  /**
+   * Time from immediately before `onTurn()` until normalized model-stream
+   * consumption completes. This can include tool work and consumer waits while
+   * consuming the stream. It is not time to first text.
+   */
   llm_ms: number;
+  /**
+   * Cumulative per-sentence work from immediately before `beforeSynthesize`
+   * until that sentence's synthesis and hook work settles. Sentence work can
+   * overlap both other sentences and model consumption, so this value can
+   * exceed wall time and overlaps the other metrics.
+   */
   tts_ms: number;
+  /**
+   * Time from turn-pipeline start, before `afterTranscribe`, to the first server
+   * audio send. Includes post-STT hooks, model work, and TTS, but excludes STT
+   * and browser playback. `0` means the server sent no audio.
+   */
   first_audio_ms: number;
+  /**
+   * Time from the same turn-pipeline start until model consumption and TTS
+   * draining complete. Measured before final context, persistence, and status
+   * work. Excludes STT and browser playback.
+   */
   total_ms: number;
 }
 
@@ -133,6 +283,12 @@ export interface TranscriberSessionOptions {
    * For Nova 3: fires on `Results` with `speech_final: true`.
    */
   onUtterance?: (transcript: string) => void;
+  /**
+   * Called when the session can no longer transcribe because its provider
+   * connection failed or closed unexpectedly. Providers must not call this
+   * for teardown initiated by {@link TranscriberSession.close}.
+   */
+  onFatalError?: (error: Error) => void;
 }
 
 /**
@@ -232,6 +388,13 @@ export interface VoiceAudioInput {
 
 // --- Voice transport ---
 
+/** Details a transport can provide when its connection closes. */
+export interface VoiceTransportCloseInfo {
+  code?: number;
+  reason?: string;
+  wasClean?: boolean;
+}
+
 /**
  * Abstraction over the data channel between client and server.
  * The default implementation wraps PartySocket (WebSocket).
@@ -253,7 +416,7 @@ export interface VoiceTransport {
 
   // --- Event callbacks (set by VoiceClient) ---
   onopen: (() => void) | null;
-  onclose: (() => void) | null;
+  onclose: ((info?: VoiceTransportCloseInfo) => void) | null;
   onerror: ((error?: unknown) => void) | null;
   /** Called when a JSON string message arrives from the server. */
   onmessage: ((data: string | ArrayBuffer | Blob) => void) | null;

@@ -20,11 +20,25 @@ import {
 
 type JSONRPCMessage = V1JSONRPCMessage;
 type MessageExtraInfo = V1MessageExtraInfo;
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "../agent-routing";
 import type { McpAgent } from ".";
 import { raceWithSignal } from "./abort";
 
 export const RPC_DO_PREFIX = "rpc:";
+
+/** Narrow an unknown runtime binding to an MCP Durable Object namespace. */
+export function isDurableObjectNamespace(
+  namespace: unknown
+): namespace is DurableObjectNamespace<McpAgent> {
+  return (
+    typeof namespace === "object" &&
+    namespace !== null &&
+    "newUniqueId" in namespace &&
+    typeof namespace.newUniqueId === "function" &&
+    "idFromName" in namespace &&
+    typeof namespace.idFromName === "function"
+  );
+}
 
 function makeInvalidRequestError(id: unknown): JSONRPCMessage {
   return {
@@ -82,7 +96,7 @@ export class RPCClientTransport implements V2Transport {
     }
 
     const doName = `${RPC_DO_PREFIX}${this._name}`;
-    this._stub = await getServerByName<Cloudflare.Env, McpAgent>(
+    this._stub = await getAgentByName<Cloudflare.Env, McpAgent>(
       this._namespace,
       doName,
       { props: this._props }

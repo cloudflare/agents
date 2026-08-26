@@ -171,6 +171,7 @@ function TestVoiceInputComponent({
   }, [
     result.transcript,
     result.interimTranscript,
+    result.turnMetrics,
     result.isListening,
     result.audioLevel,
     result.isMuted,
@@ -316,6 +317,33 @@ describe("useVoiceInput", () => {
     });
   });
 
+  describe("stable turn metrics", () => {
+    it("should expose the latest STT-only summary", async () => {
+      const { getResult } = await renderHook();
+
+      act(() => {
+        fireJSON({
+          type: "turn_metrics",
+          turnId: "turn_input_react",
+          source: "speech",
+          outcome: "completed",
+          turnTotalMs: 30,
+          afterTranscribeMs: 2
+        });
+      });
+
+      await vi.waitFor(() => {
+        expect(getResult().turnMetrics).toEqual({
+          turnId: "turn_input_react",
+          source: "speech",
+          outcome: "completed",
+          turnTotalMs: 30,
+          afterTranscribeMs: 2
+        });
+      });
+    });
+  });
+
   describe("interim transcript", () => {
     it("should show interim transcript from streaming STT", async () => {
       const { container } = await renderHook();
@@ -446,6 +474,28 @@ describe("useVoiceInput", () => {
       expect(socketSend).toHaveBeenCalledWith(
         JSON.stringify({ type: "end_call" })
       );
+    });
+
+    it("should clear interim transcript on stop()", async () => {
+      const { getResult } = await renderHook();
+
+      await act(async () => {
+        await getResult().start();
+      });
+      act(() => {
+        fireJSON({ type: "transcript_interim", text: "unfinished phrase" });
+      });
+      await vi.waitFor(() => {
+        expect(getResult().interimTranscript).toBe("unfinished phrase");
+      });
+
+      act(() => {
+        getResult().stop();
+      });
+
+      await vi.waitFor(() => {
+        expect(getResult().interimTranscript).toBeNull();
+      });
     });
 
     it("should stop microphone tracks on stop()", async () => {

@@ -36,20 +36,35 @@ export type {
   BuildAgentPathOptions,
   SubAgentPathMatch
 } from "./sub-routing";
-import { signAgentHeaders } from "./email";
+import { signAgentHeaders, type SendEmailOptions } from "./email";
+import { sendAgentEmail } from "./email-send";
+export type { EmailSendBinding, SendEmailOptions } from "./email";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
-import { RpcTarget, exports as workerExports } from "cloudflare:workers";
+import {
+  DurableObject,
+  RpcTarget,
+  exports as workerExports
+} from "cloudflare:workers";
 import {
   type Connection,
   type ConnectionContext,
-  type PartyServerOptions,
-  Server,
-  type WSMessage,
-  getServerByName,
-  routePartykitRequest
-} from "partyserver";
+  Lifecycle,
+  type WSMessage
+} from "./lifecycle/durable-object-lifecycle";
+import {
+  getCurrentAgent as getCurrentLifecycleAgent,
+  type CurrentAgentContext
+} from "./lifecycle/current-agent";
+import { getAgentByName, type AgentOptions } from "./agent-routing";
+export {
+  getAgentByName,
+  routeAgentRequest,
+  type AgentGetOptions,
+  type AgentOptions,
+  type RoutingRetryOptions
+} from "./agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 export { camelCaseToKebabCase } from "./utils";
 import {
@@ -67,11 +82,7 @@ export {
   isDurableObjectStorageReset,
   isPlatformTransientError
 } from "./retries";
-import {
-  MCPClientManager,
-  normalizeServerId,
-  type MCPClientOAuthResult
-} from "./mcp/client";
+import { MCPClientManager, normalizeServerId } from "./mcp/client";
 import type {
   WorkflowCallback,
   WorkflowTrackingRow,
@@ -94,6 +105,7 @@ import {
   type Observability,
   type ObservabilityEvent
 } from "./observability";
+import { agentSpanAttributes } from "./observability/agent-span-attributes";
 import { tracer } from "./observability/tracing/cloudflare";
 import {
   withInvocationScope,
@@ -104,6 +116,7 @@ import {
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
+import { ensureMcpServerTable } from "./mcp/client-storage";
 import type { McpAgent } from "./mcp";
 export {
   AGENT_TOOL_PROGRESS_PART,
@@ -163,50 +176,9 @@ export type {
 export type {
   Connection,
   ConnectionContext,
-  RoutingRetryOptions,
   WSMessage
-} from "partyserver";
+} from "./lifecycle/durable-object-lifecycle";
 export { MessageType } from "./types";
-
-/**
- * Structural type for Cloudflare's `send_email` binding.
- * Accepts both raw MIME messages and structured builder objects.
- */
-export type EmailSendBinding = {
-  send(
-    message:
-      | EmailMessage
-      | {
-          from: string | { email: string; name?: string };
-          to: string | string[];
-          subject: string;
-          replyTo?: string | { email: string; name?: string };
-          cc?: string | string[];
-          bcc?: string | string[];
-          headers?: Record<string, string>;
-          text?: string;
-          html?: string;
-        }
-  ): Promise<EmailSendResult>;
-};
-
-/**
- * Options for Agent.sendEmail()
- */
-export type SendEmailOptions = {
-  binding: EmailSendBinding;
-  to: string | string[];
-  from: string | { email: string; name?: string };
-  subject: string;
-  text?: string;
-  html?: string;
-  replyTo?: string | { email: string; name?: string };
-  cc?: string | string[];
-  bcc?: string | string[];
-  inReplyTo?: string;
-  headers?: Record<string, string>;
-  secret?: string;
-};
 
 /**
  * RPC request message from client
@@ -613,7 +585,7 @@ type Promisify<T> = T extends Promise<unknown> ? T : Promise<T>;
  * A typed RPC stub for a sub-agent. Exposes all public instance methods
  * as callable RPC methods with Promise-wrapped return types.
  *
- * Methods inherited from `Agent` / `Server` / `DurableObject` internals
+ * Methods owned by `Agent`, its lifecycle, or `DurableObject` internals
  * are excluded — only user-defined methods on the subclass are exposed.
  */
 export type SubAgentStub<T extends Agent> = {
@@ -1397,8 +1369,6 @@ const _sendIdentityWarnedClasses = new WeakSet<Function>();
  * Child classes can override specific options without spreading.
  */
 export const DEFAULT_AGENT_STATIC_OPTIONS = {
-  /** Whether the Agent should hibernate when inactive */
-  hibernate: true,
   /** Whether to send identity (name, agent) to clients on connect */
   sendIdentityOnConnect: true,
   /**
@@ -1466,7 +1436,6 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
  * Fully resolved agent options — all fields are defined with concrete values.
  */
 interface ResolvedAgentOptions {
-  hibernate: boolean;
   sendIdentityOnConnect: boolean;
   hungScheduleTimeoutSeconds: number;
   keepAliveIntervalMs: number;
@@ -1485,10 +1454,8 @@ interface ResolvedAgentOptions {
  * Configuration options for the Agent.
  * Override in subclasses via `static options`.
  * All fields are optional - defaults are applied at runtime.
- * Note: `hibernate` defaults to `true` if not specified.
  */
 export interface AgentStaticOptions {
-  hibernate?: boolean;
   sendIdentityOnConnect?: boolean;
   hungScheduleTimeoutSeconds?: number;
   /**
@@ -1617,38 +1584,15 @@ function resolveRetryConfig(
 // layers (e.g. `@cloudflare/think`) classify with the SAME matcher instead of
 // drifting copies.
 
-export function getCurrentAgent<
-  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
->(): {
-  agent: T | undefined;
-  connection: Connection | undefined;
-  request: Request | undefined;
-  email: AgentEmail | undefined;
-} {
-  const store = agentContext.getStore() as
-    | {
-        agent: T;
-        connection: Connection | undefined;
-        request: Request | undefined;
-        email: AgentEmail | undefined;
-      }
-    | undefined;
-  if (!store) {
-    return {
-      agent: undefined,
-      connection: undefined,
-      request: undefined,
-      email: undefined
-    };
-  }
-  return store;
-}
+/** Compatibility alias for the lifecycle-owned current Agent accessor. */
+export const getCurrentAgent = getCurrentLifecycleAgent as <
+  T extends DurableObject = Agent<Cloudflare.Env>
+>() => CurrentAgentContext<T, AgentEmail>;
 
 /**
- * Wraps a method to run within the agent context, ensuring getCurrentAgent() works properly
- * @param agent The agent instance
- * @param method The method to wrap
- * @returns A wrapped method that runs within the agent context
+ * Restore Agent context when a public method is entered outside a Lifecycle
+ * hook, notably through native Durable Object RPC or cross-Agent re-entry.
+ * Lifecycle already owns context for its capability and semantic user hooks.
  */
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
@@ -1705,7 +1649,51 @@ export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
-> extends Server<Env, Props> {
+> extends DurableObject<Env> {
+  /** Runtime lifecycle and reusable durable capabilities for this Agent. */
+  readonly lifecycle = Lifecycle.install<Env, Props>(this);
+
+  /** Run user initialization after lifecycle components have started. */
+  onStart(_props?: Props): void | Promise<void> {}
+
+  /** Handle an HTTP request not claimed by a lifecycle component. */
+  onRequest(_request: Request): Response | Promise<Response> {
+    return new Response("Not implemented", { status: 404 });
+  }
+
+  /** Handle a newly accepted hibernating WebSocket connection. */
+  onConnect(
+    _connection: Connection,
+    _context: ConnectionContext
+  ): void | Promise<void> {}
+
+  /** Handle a message from a hibernating WebSocket connection. */
+  onMessage(
+    _connection: Connection,
+    _message: WSMessage
+  ): void | Promise<void> {}
+
+  /** Handle a hibernating WebSocket connection closing. */
+  onClose(
+    _connection: Connection,
+    _code: number,
+    _reason: string,
+    _wasClean: boolean
+  ): void | Promise<void> {}
+
+  /** Return tags persisted with a hibernating WebSocket connection. */
+  getConnectionTags(
+    _connection: Connection,
+    _context: ConnectionContext
+  ): string[] | Promise<string[]> {
+    return [];
+  }
+
+  /** @internal Ensure lifecycle startup before a native RPC implementation. */
+  async __unsafe_ensureInitialized(props?: Props): Promise<void> {
+    await this.lifecycle.start(props);
+  }
+
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
@@ -1905,7 +1893,7 @@ export class Agent<
    *   static options = { sendIdentityOnConnect: false };
    * }
    */
-  static options: AgentStaticOptions = { hibernate: true };
+  static options: AgentStaticOptions = {};
 
   /**
    * Resolved options (merges defaults with subclass overrides).
@@ -1918,8 +1906,6 @@ export class Agent<
     const ctor = this.constructor as typeof Agent;
     const userRetry = ctor.options?.retry;
     this._cachedOptions = {
-      hibernate:
-        ctor.options?.hibernate ?? DEFAULT_AGENT_STATIC_OPTIONS.hibernate,
       sendIdentityOnConnect:
         ctor.options?.sendIdentityOnConnect ??
         DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect,
@@ -2020,8 +2006,11 @@ export class Agent<
     return tracer.withSpan(
       operation,
       {
-        "cloudflare.agents.agent.id": agentId,
-        "cloudflare.agents.agent.name": this._ParentClass.name,
+        ...agentSpanAttributes({
+          agentClassName: this._ParentClass.name,
+          sessionId: this.ctx.id.toString(),
+          sessionName: agentId
+        }),
         "cloudflare.agents.operation.name": operation,
         "cloudflare.agents.storage.grouped": true,
         "cloudflare.agents.storage.system": "durable_object",
@@ -2096,17 +2085,7 @@ export class Agent<
       versionRow.length > 0 ? Number(versionRow[0].state) : 0;
 
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
-      this.sql`
-          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-            id TEXT PRIMARY KEY NOT NULL,
-            name TEXT NOT NULL,
-            server_url TEXT NOT NULL,
-            callback_url TEXT NOT NULL,
-            client_id TEXT,
-            auth_url TEXT,
-            server_options TEXT
-          )
-        `;
+      ensureMcpServerTable(this.ctx.storage);
 
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_queues (
@@ -2468,8 +2447,9 @@ export class Agent<
           }
         );
 
-        // Initialize MCPClientManager AFTER tables are created
+        // Initialize MCPClientManager AFTER tables are created.
         return new MCPClientManager(this._ParentClass.name, "0.0.1", {
+          env: this.env,
           storage: this.ctx.storage,
           createAuthProvider: (callbackUrl) =>
             this.createMcpOAuthProvider(callbackUrl)
@@ -2477,10 +2457,14 @@ export class Agent<
       }
     );
 
-    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
+    this.lifecycle.use(this.mcp);
+
+    // MCP starts before Agent restores facet routing state. Defer its initial
+    // publication until broadcasts can be routed to the correct owner.
+    let mcpBroadcastReady = false;
     this._disposables.add(
-      this.mcp.onServerStateChanged(async () => {
-        this.broadcastMcpServers();
+      this.mcp.onServerStateChanged(() => {
+        if (mcpBroadcastReady) this.broadcastMcpServers();
       })
     );
 
@@ -2537,26 +2521,22 @@ export class Agent<
     this.onRequest = (request: Request) => {
       return runInInvocation(
         { agent: this, connection: undefined, request, email: undefined },
-        async () => {
-          // Handle MCP OAuth callback if this is one
-          const oauthResponse = await this.handleMcpOAuthCallback(request);
-          if (oauthResponse) {
-            return oauthResponse;
-          }
-
-          return this._tryCatch(() => _onRequest(request));
-        }
+        () => this._tryCatch(() => _onRequest(request))
       );
     };
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       const replyBridge = subAgentRpcReplyContext.getStore()?.bridge;
+      // Lifecycle establishes the root socket context before entering this
+      // wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketMessage(
-          connection,
-          message,
-          replyBridge
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketMessage(
+            connection,
+            message,
+            replyBridge
+          )
         )
       ) {
         return;
@@ -2710,13 +2690,13 @@ export class Agent<
           subAgentOuterUrl
         );
       }
+      // Lifecycle establishes the root socket/request context before entering
+      // this wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketConnect(
-          connection,
-          ctx.request,
-          {
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketConnect(connection, ctx.request, {
             gate: false
-          }
+          })
         )
       ) {
         return;
@@ -2820,12 +2800,16 @@ export class Agent<
       reason: string,
       wasClean: boolean
     ) => {
+      // Lifecycle establishes the root socket context before entering this
+      // wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketClose(
-          connection,
-          code,
-          reason,
-          wasClean
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketClose(
+            connection,
+            code,
+            reason,
+            wasClean
+          )
         )
       ) {
         return;
@@ -2856,56 +2840,11 @@ export class Agent<
           email: undefined
         },
         async () => {
-          await this._withAgentSpan(
-            "restore_agent_state",
-            "startup",
-            {},
-            async () => {
-              // Hydrate _isFacet from persistent storage so the flag
-              // survives hibernation (the DO constructor resets it to false).
-              const isFacet =
-                await this.ctx.storage.get<boolean>("cf_agents_is_facet");
-              if (isFacet) this._isFacet = true;
-
-              const storedFacetName = await this.ctx.storage.get<string>(
-                "cf_agents_facet_name"
-              );
-              if (typeof storedFacetName === "string") {
-                this._facetName = storedFacetName;
-              }
-
-              const storedParentPath = await this.ctx.storage.get<
-                Array<{ className: string; name: string }>
-              >("cf_agents_parent_path");
-              if (isValidParentPath(storedParentPath)) {
-                this._parentPath = storedParentPath;
-              }
-              try {
-                await this._cf_hydrateSubAgentConnectionsFromRoot();
-              } catch (error) {
-                console.warn(
-                  "[Agent] Unable to hydrate sub-agent WebSocket connections:",
-                  error
-                );
-              }
-            }
-          );
+          await this._restoreAgentFacetContext();
 
           await this._tryCatch(async () => {
-            // Restore MCP connections before fiber/chat recovery so recovered
-            // turns see MCP tools. Restored connections re-advertise the
-            // capabilities persisted from the previous session; the handlers
-            // behind them attach when onStart() configures them.
-            await this._withAgentSpan(
-              "restore_mcp_connections",
-              "startup",
-              {},
-              async () => {
-                await this.mcp.restoreConnectionsFromStorage(this.name);
-                await this._restoreRpcMcpServers();
-                this.broadcastMcpServers();
-              }
-            );
+            mcpBroadcastReady = true;
+            this.broadcastMcpServers();
 
             const startupAgentToolRunIds = await this._withAgentSpan(
               "recover_agent_work",
@@ -2949,16 +2888,13 @@ export class Agent<
 
             const chatRecoveryAfter = (this as { chatRecovery?: unknown })
               .chatRecovery;
-            // Warn when onStart swaps in a recovery config that would have
-            // mattered: a custom config object OR `chatRecovery = true`
-            // (enabling recovery / its defaults too late). Setting `false`
-            // (disabling) is intentionally NOT warned — recovery already ran
-            // with the pre-onStart value, so disabling here is a benign no-op
-            // for the wake that just happened, not the silent-misconfig bug.
+            // Warn when onStart swaps in any recognized recovery config. A
+            // custom config is applied too late for this wake, while a legacy
+            // `false` value no longer disables durable recovery.
             const chatRecoveryAfterMatters =
+              typeof chatRecoveryAfter === "boolean" ||
               (typeof chatRecoveryAfter === "object" &&
-                chatRecoveryAfter !== null) ||
-              chatRecoveryAfter === true;
+                chatRecoveryAfter !== null);
             if (
               !this._warnedChatRecoveryInOnStart &&
               chatRecoveryBefore !== chatRecoveryAfter &&
@@ -2987,6 +2923,43 @@ export class Agent<
       this._withAgentSpan("agent_start", "startup", {}, (update) =>
         startAgent(props, update)
       );
+  }
+
+  private async _restoreAgentFacetContext(): Promise<void> {
+    await this._withAgentSpan(
+      "restore_agent_state",
+      "startup",
+      {},
+      async () => {
+        // Facet identity and bridges belong to Agent, not to any capability.
+        const isFacet =
+          await this.ctx.storage.get<boolean>("cf_agents_is_facet");
+        if (isFacet) this._isFacet = true;
+
+        const storedFacetName = await this.ctx.storage.get<string>(
+          "cf_agents_facet_name"
+        );
+        if (typeof storedFacetName === "string") {
+          this._facetName = storedFacetName;
+        }
+
+        const storedParentPath = await this.ctx.storage.get<
+          Array<{ className: string; name: string }>
+        >("cf_agents_parent_path");
+        if (isValidParentPath(storedParentPath)) {
+          this._parentPath = storedParentPath;
+        }
+
+        try {
+          await this._cf_hydrateSubAgentConnectionsFromRoot();
+        } catch (error) {
+          console.warn(
+            "[Agent] Unable to hydrate sub-agent WebSocket connections:",
+            error
+          );
+        }
+      }
+    );
   }
 
   /**
@@ -3137,41 +3110,9 @@ export class Agent<
   private _ensureConnectionWrapped(connection: Connection) {
     if (this._rawStateAccessors.has(connection)) return;
 
-    // As of compatibility date 2026-03-17 the runtime defaults a server-side
-    // WebSocket's `binaryType` to "blob" (the `websocket_standard_binary_type`
-    // flag), so binary frames arrive as `Blob` instead of `ArrayBuffer`. The
-    // Agent protocol and every downstream consumer (e.g. voice audio frames,
-    // user-defined `onMessage` handlers that do `message instanceof ArrayBuffer`)
-    // have always relied on binary frames being delivered as `ArrayBuffer`.
-    //
-    // For non-hibernating agents (`static options = { hibernate: false }`)
-    // messages are delivered through `addEventListener("message", ...)`, where
-    // this new default applies and would silently break binary handling. Pin
-    // it back to "arraybuffer" so the contract holds regardless of the app's
-    // compatibility date. This first runs in `onConnect` before the client can
-    // send any frame, so it takes effect for every message on the connection.
-    //
-    // This is defense-in-depth: partyserver >= 0.5.7 also pins `binaryType` in
-    // `accept()`, but agents may run against an older partyserver or a custom
-    // connection, so we keep our own pin. It runs once per connection per
-    // isolate lifetime (gated by the `_rawStateAccessors` check above); after a
-    // hibernation wake that in-memory map is empty, so it re-pins on the first
-    // call. The hibernatable `webSocketMessage` handler always delivers
-    // `ArrayBuffer` regardless of this flag, so for hibernating agents this is a
-    // harmless no-op.
-    try {
-      if (connection.binaryType !== "arraybuffer") {
-        connection.binaryType = "arraybuffer";
-      }
-    } catch {
-      // Some connection shims may not expose a settable `binaryType`; the
-      // protocol still works for string frames, so ignore and continue.
-    }
-
-    // Determine whether `state` is an accessor (getter) or a data property.
-    // partyserver always defines `state` as a getter via Object.defineProperties,
-    // but we handle the data-property case to stay robust for hibernate: false
-    // and any future connection implementations.
+    // Hibernating lifecycle connections expose attachment-backed state as a
+    // configurable accessor. Virtual facet connections use a data property,
+    // so retain both projections below.
     const descriptor = Object.getOwnPropertyDescriptor(connection, "state");
 
     let getRaw: () => Record<string, unknown> | null;
@@ -3627,46 +3568,9 @@ export class Agent<
    */
   async sendEmail(options: SendEmailOptions): Promise<EmailSendResult> {
     return this._tryCatch(async () => {
-      if (!options.binding) {
-        throw new Error(
-          "binding is required. Pass your send_email binding, " +
-            "e.g. this.sendEmail({ binding: this.env.EMAIL, ... })."
-        );
-      }
-
-      const agentName = camelCaseToKebabCase(this._ParentClass.name);
-      const agentId = this.name;
-
-      const headers: Record<string, string> = {
-        ...options.headers,
-        "X-Agent-Name": agentName,
-        "X-Agent-ID": agentId
-      };
-
-      if (options.inReplyTo) {
-        headers["In-Reply-To"] = options.inReplyTo;
-      }
-
-      if (typeof options.secret === "string") {
-        const signedHeaders = await signAgentHeaders(
-          options.secret,
-          agentName,
-          agentId
-        );
-        headers["X-Agent-Sig"] = signedHeaders["X-Agent-Sig"];
-        headers["X-Agent-Sig-Ts"] = signedHeaders["X-Agent-Sig-Ts"];
-      }
-
-      const result = await options.binding.send({
-        from: options.from,
-        to: options.to,
-        subject: options.subject,
-        text: options.text,
-        html: options.html,
-        replyTo: options.replyTo,
-        cc: options.cc,
-        bcc: options.bcc,
-        headers
+      const result = await sendAgentEmail(options, {
+        agentName: camelCaseToKebabCase(this._ParentClass.name),
+        agentId: this.name
       });
 
       const fromAddr =
@@ -3690,12 +3594,12 @@ export class Agent<
   }
 
   /**
-   * Automatically wrap custom methods with agent context
-   * This ensures getCurrentAgent() works in all custom methods without decorators
+   * Wrap public subclass methods that may be entered outside Lifecycle, such as
+   * native Durable Object RPC. Lifecycle hooks already have Agent context.
    */
   private _autoWrapCustomMethods() {
-    // Collect all methods from base prototypes (Agent and Server)
-    const basePrototypes = [Agent.prototype, Server.prototype];
+    // Agent.prototype traversal also covers the DurableObject base class.
+    const basePrototypes = [Agent.prototype];
     const baseMethods = new Set<string>();
     for (const baseProto of basePrototypes) {
       let proto = baseProto;
@@ -3751,12 +3655,9 @@ export class Agent<
     }
   }
 
-  override onError(
-    connection: Connection,
-    error: unknown
-  ): void | Promise<void>;
-  override onError(error: unknown): void | Promise<void>;
-  override onError(connectionOrError: Connection | unknown, error?: unknown) {
+  onError(connection: Connection, error: unknown): void | Promise<void>;
+  onError(error: unknown): void | Promise<void>;
+  onError(connectionOrError: Connection | unknown, error?: unknown) {
     let theError: unknown;
     if (connectionOrError && error) {
       theError = error;
@@ -4069,7 +3970,7 @@ export class Agent<
       );
     }
 
-    return (await getServerByName<Cloudflare.Env, Agent>(
+    return (await getAgentByName<Cloudflare.Env, Agent>(
       binding as unknown as DurableObjectNamespace<Agent>,
       root.name
     )) as unknown as RootFacetRpcSurface;
@@ -6731,31 +6632,22 @@ export class Agent<
     }
   }
 
-  /**
-   * Override PartyServer's onAlarm hook as a no-op.
-   * Agent handles alarm logic directly in the alarm() method override,
-   * but super.alarm() calls onAlarm() after #ensureInitialized(),
-   * so we suppress the default "Implement onAlarm" warning.
-   */
+  /** Lifecycle alarm callback; Agent scheduling runs in the platform alarm. */
   onAlarm(): void {}
 
   /**
    * Method called when an alarm fires.
    * Executes any scheduled tasks that are due.
    *
-   * Calls super.alarm() first to ensure PartyServer's #ensureInitialized()
-   * runs, which resolves this.name from ctx.id.name (including for
-   * facets, which are spawned with an explicit id so they have their
-   * own ctx.id.name; pre-2026-03-15 alarms fall back to the legacy
-   * __ps_name storage record) and calls onStart() if needed.
+   * Runs the lifecycle alarm phase before due schedules and housekeeping.
    *
    * @remarks
    * To schedule a task, please use the `this.schedule` method instead.
    * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
   async alarm() {
-    // A pending destroy (#1625) pre-empts everything — including
-    // `super.alarm()`'s onStart, which would re-initialize user state on a
+    // A pending destroy (#1625) pre-empts everything — including lifecycle
+    // startup, which would re-initialize user state on a
     // condemned agent. This is both the landing point for the deferred
     // teardown scheduled by `_cf_scheduleDestroy` (which arms an immediate
     // alarm precisely so teardown runs here, with this invocation's full
@@ -6787,14 +6679,13 @@ export class Agent<
   }
 
   /**
-   * The alarm body: PartyServer init + due-schedule processing + housekeeping +
+   * The alarm body: lifecycle init + due-schedule processing + housekeeping +
    * next-alarm arm. Extracted from {@link alarm} so the memory-limit circuit
    * breaker can wrap it at the outermost frame (see {@link alarm}).
    */
   private async _cf_runAlarmBody() {
-    // Ensure PartyServer initialization (name resolution, onStart) runs
-    // before processing any scheduled tasks.
-    await super.alarm();
+    // Initialize components and the Agent before processing scheduled tasks.
+    await this.lifecycle.alarm();
 
     const now = Math.floor(Date.now() / 1000);
 
@@ -6953,7 +6844,7 @@ export class Agent<
   /**
    * The schedule row id currently executing in the alarm loop, so the
    * memory-limit circuit breaker can purge the exact looping row (#1825).
-   * `undefined` outside a callback (e.g. an OOM from `super.alarm()`/onStart).
+   * `undefined` outside a callback (e.g. an OOM during lifecycle startup).
    */
   private _cf_executingScheduleRowId?: string;
 
@@ -7130,14 +7021,14 @@ export class Agent<
    *
    * @experimental The API surface may change before stabilizing.
    */
-  override async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request): Promise<Response> {
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     const match = _parseSubAgentPath(request.url, {
       knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
     });
 
     if (!match) {
-      return super.fetch(request);
+      return this.lifecycle.fetch(request);
     }
 
     // Hook runs in the parent's isolate before any facet work.
@@ -7153,13 +7044,15 @@ export class Agent<
       const routedUrl = new URL(forwardReq.url);
       routedUrl.pathname = new URL(request.url).pathname;
       acceptHeaders.set(SUB_AGENT_OUTER_URL_HEADER, routedUrl.toString());
-      return super.fetch(new Request(forwardReq, { headers: acceptHeaders }));
+      return this.lifecycle.fetch(
+        new Request(forwardReq, { headers: acceptHeaders })
+      );
     }
 
     return this._cf_forwardToFacet(forwardReq, match);
   }
 
-  override broadcast(
+  broadcast(
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
@@ -7168,16 +7061,14 @@ export class Agent<
       return;
     }
 
-    for (const connection of super.getConnections()) {
+    for (const connection of this.lifecycle.getConnections()) {
       if (without?.includes(connection.id)) continue;
       if (this._cf_connectionHasSubAgentTarget(connection)) continue;
       connection.send(msg);
     }
   }
 
-  override getConnection<TState = unknown>(
-    id: string
-  ): Connection<TState> | undefined {
+  getConnection<TState = unknown>(id: string): Connection<TState> | undefined {
     if (this._isFacet) {
       const stored = this._cf_virtualSubAgentConnections.get(id);
       if (stored) {
@@ -7185,26 +7076,26 @@ export class Agent<
           stored.meta
         ) as Connection<TState>;
       }
-      // Do NOT fall through to `super.getConnection()` on a facet — it resolves
+      // Do not read lifecycle-owned root connections from a facet — that resolves
       // to the host/root DO's hibernatable sockets and reading them from the
       // facet's I/O context throws a cross-DO Native I/O error. See issue #1677.
       return undefined;
     }
 
-    const connection = super.getConnection<TState>(id);
+    const connection = this.lifecycle.getConnection<TState>(id);
     if (!connection || this._cf_connectionHasSubAgentTarget(connection)) {
       return undefined;
     }
     return connection;
   }
 
-  override *getConnections<TState = unknown>(
+  *getConnections<TState = unknown>(
     tag?: string
   ): Iterable<Connection<TState>> {
     if (this._isFacet) {
       // A facet's client connections are all virtual — they are real
       // WebSockets owned by the ROOT DO and bridged in. We must NOT fall
-      // through to `super.getConnections()` here: on a facet that resolves to
+      // through to `this.lifecycle.getConnections()` here: on a facet that resolves to
       // the host/root DO's hibernatable sockets, and reading their attachments
       // from the facet's I/O context throws
       // "Cannot perform I/O on behalf of a different Durable Object (Native)".
@@ -7219,7 +7110,7 @@ export class Agent<
       return;
     }
 
-    for (const connection of super.getConnections<TState>(tag)) {
+    for (const connection of this.lifecycle.getConnections<TState>(tag)) {
       if (this._cf_connectionHasSubAgentTarget(connection)) continue;
       yield connection;
     }
@@ -7366,7 +7257,7 @@ export class Agent<
       return;
     }
 
-    for (const connection of super.getConnections()) {
+    for (const connection of this.lifecycle.getConnections()) {
       if (without?.includes(connection.id)) continue;
       const targetPath = this._cf_subAgentTargetPath(connection);
       if (!targetPath) continue;
@@ -7379,7 +7270,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<SubAgentConnectionMeta[]> {
     const metas: SubAgentConnectionMeta[] = [];
-    for (const connection of super.getConnections()) {
+    for (const connection of this.lifecycle.getConnections()) {
       const meta = this._cf_subAgentConnectionMetaForPath(
         connection,
         ownerPath
@@ -7393,7 +7284,7 @@ export class Agent<
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
-    const connection = super.getConnection(connectionId);
+    const connection = this.lifecycle.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
     }
@@ -7405,7 +7296,7 @@ export class Agent<
     code?: number,
     reason?: string
   ): Promise<void> {
-    const connection = super.getConnection(connectionId);
+    const connection = this.lifecycle.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
     }
@@ -7416,7 +7307,7 @@ export class Agent<
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
-    const connection = super.getConnection(connectionId);
+    const connection = this.lifecycle.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return null;
     }
@@ -7824,7 +7715,6 @@ export class Agent<
       id: meta.id,
       uri: meta.uri,
       tags: meta.tags,
-      server: this.name,
       get state() {
         return getStored().meta.state;
       },
@@ -8002,8 +7892,12 @@ export class Agent<
     if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
     }
+    // Hand the body through as a stream. Reading it here (e.g.
+    // `await req.arrayBuffer()`) materialises the entire body in the
+    // parent DO's isolate, ahead of any application-level intake limit,
+    // and re-materialises it once per `/sub/` hop — see #2015.
     if (req.body && req.method !== "GET" && req.method !== "HEAD") {
-      forwardedInit.body = await req.arrayBuffer();
+      forwardedInit.body = req.body;
     }
     const forwarded = new Request(rewritten, forwardedInit);
     return fetcher.fetch(forwarded);
@@ -8125,7 +8019,7 @@ export class Agent<
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
     identityName = name
   ): Promise<void> {
-    const routedName = super.name;
+    const routedName = this.lifecycle.name;
     if (routedName !== identityName) {
       throw new Error(
         `Facet bootstrap mismatch: expected routed identity "${identityName}" but got "${routedName}". ` +
@@ -8143,7 +8037,7 @@ export class Agent<
       this.ctx.storage.put("cf_agents_facet_name", name),
       this.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
-    // Fire onStart() now since this RPC bypasses Server.fetch(), which is the
+    // Fire onStart() now since native RPC bypasses lifecycle fetch, which is the
     // entry point that normally triggers it. Protocol broadcasts during this
     // bootstrap window are safe: on a facet `getConnections()` returns only
     // virtual sub-agent connections and `broadcast()` routes to the parent
@@ -8151,9 +8045,10 @@ export class Agent<
     await this.__unsafe_ensureInitialized();
   }
 
-  override get name(): string {
+  get name(): string {
+    const routedName = this.lifecycle.name;
     return (
-      this._facetName ?? logicalNameFromPathV2Identity(super.name) ?? super.name
+      this._facetName ?? logicalNameFromPathV2Identity(routedName) ?? routedName
     );
   }
 
@@ -8278,7 +8173,7 @@ export class Agent<
           `exported under that class name and registered as a Durable Object binding.`
       );
     }
-    return await getServerByName<Cloudflare.Env, T>(binding, parent.name);
+    return await getAgentByName<Cloudflare.Env, T>(binding, parent.name);
   }
 
   private _cf_getTopLevelNamespaceByClassName<T extends Agent>(
@@ -8324,7 +8219,7 @@ export class Agent<
       );
     }
 
-    const rootStubPromise = getServerByName<Cloudflare.Env, Agent>(
+    const rootStubPromise = getAgentByName<Cloudflare.Env, Agent>(
       rootBinding,
       root.name
     );
@@ -11520,7 +11415,8 @@ export class Agent<
     // Create the workflow instance
     const instance = await workflow.create({
       id: workflowId,
-      params: augmentedParams
+      params: augmentedParams,
+      retention: options?.retention
     });
 
     // Track the workflow in our database
@@ -12361,52 +12257,6 @@ export class Agent<
     return undefined;
   }
 
-  private async _restoreRpcMcpServers(): Promise<void> {
-    const rpcServers = this.mcp.getRpcServersFromStorage();
-    for (const server of rpcServers) {
-      if (this.mcp.mcpConnections[server.id]) {
-        continue;
-      }
-
-      const opts: { bindingName: string; props?: Record<string, unknown> } =
-        server.server_options ? JSON.parse(server.server_options) : {};
-
-      const namespace = (this.env as Record<string, unknown>)[
-        opts.bindingName
-      ] as DurableObjectNamespace<McpAgent> | undefined;
-      if (!namespace) {
-        console.warn(
-          `[Agent] Cannot restore RPC MCP server "${server.name}": binding "${opts.bindingName}" not found in env`
-        );
-        continue;
-      }
-
-      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
-
-      try {
-        await this.mcp.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
-          reconnect: { id: server.id },
-          transport: {
-            type: "rpc" as TransportType,
-            namespace,
-            name: normalizedName,
-            props: opts.props
-          }
-        });
-
-        const conn = this.mcp.mcpConnections[server.id];
-        if (conn && conn.connectionState === MCPConnectionState.CONNECTED) {
-          await this.mcp.discoverIfConnected(server.id);
-        }
-      } catch (error) {
-        console.error(
-          `[Agent] Error restoring RPC MCP server "${server.name}":`,
-          error
-        );
-      }
-    }
-  }
-
   // ==========================================
   // Workflow Lifecycle Callbacks
   // ==========================================
@@ -13090,100 +12940,6 @@ export class Agent<
       })
     );
   }
-
-  /**
-   * Handle MCP OAuth callback request if it's an OAuth callback.
-   *
-   * This method encapsulates the entire OAuth callback flow:
-   * 1. Checks if the request is an MCP OAuth callback
-   * 2. Processes the OAuth code exchange
-   * 3. Establishes the connection if successful
-   * 4. Broadcasts MCP server state updates
-   * 5. Returns the appropriate HTTP response
-   *
-   * @param request The incoming HTTP request
-   * @returns Response if this was an OAuth callback, null otherwise
-   */
-  private async handleMcpOAuthCallback(
-    request: Request
-  ): Promise<Response | null> {
-    // Check if this is an OAuth callback request
-    const isCallback = this.mcp.isCallbackRequest(request);
-    if (!isCallback) {
-      return null;
-    }
-
-    // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
-    // This fires onServerStateChanged event which triggers broadcast
-    const result = await this.mcp.handleCallbackRequest(request);
-
-    // If auth was successful, establish the connection in the background
-    // (establishConnection handles retries internally using per-server retry config)
-    if (result.authSuccess) {
-      this.mcp.establishConnection(result.serverId).catch((error) => {
-        console.error(
-          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
-          error
-        );
-      });
-    }
-
-    this.broadcastMcpServers();
-
-    // Return the HTTP response for the OAuth callback
-    return this.handleOAuthCallbackResponse(result, request);
-  }
-
-  /**
-   * Handle OAuth callback response using MCPClientManager configuration
-   * @param result OAuth callback result
-   * @param request The original request (needed for base URL)
-   * @returns Response for the OAuth callback
-   */
-  private handleOAuthCallbackResponse(
-    result: MCPClientOAuthResult,
-    request: Request
-  ): Response {
-    const config = this.mcp.getOAuthCallbackConfig();
-
-    // Use custom handler if configured
-    if (config?.customHandler) {
-      return config.customHandler(result);
-    }
-
-    const baseOrigin = new URL(request.url).origin;
-
-    // Redirect to success URL if configured
-    if (config?.successRedirect && result.authSuccess) {
-      try {
-        return Response.redirect(
-          new URL(config.successRedirect, baseOrigin).href
-        );
-      } catch (e) {
-        console.error(
-          "Invalid successRedirect URL:",
-          config.successRedirect,
-          e
-        );
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    // Redirect to error URL if configured
-    if (config?.errorRedirect && !result.authSuccess) {
-      try {
-        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
-          result.authError || "Unknown error"
-        )}`;
-        return Response.redirect(new URL(errorUrl, baseOrigin).href);
-      } catch (e) {
-        console.error("Invalid errorRedirect URL:", config.errorRedirect, e);
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    return Response.redirect(baseOrigin);
-  }
 }
 
 // A set of classes that have been wrapped with agent context
@@ -13201,38 +12957,6 @@ export type AgentNamespace<Agentic extends Agent<Cloudflare.Env>> =
  * Agent's durable context
  */
 export type AgentContext = DurableObjectState;
-
-/**
- * Configuration options for Agent routing
- */
-export type AgentOptions<Env> = PartyServerOptions<Env>;
-
-export type AgentGetOptions<
-  Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
-> = Pick<
-  PartyServerOptions<Env, Props>,
-  "jurisdiction" | "locationHint" | "props" | "routingRetry"
->;
-
-/**
- * Route a request to the appropriate Agent
- * @param request Request to route
- * @param env Environment containing Agent bindings
- * @param options Routing options
- * @returns Response from the Agent or undefined if no route matched
- */
-export async function routeAgentRequest<Env>(
-  request: Request,
-  env: Env,
-  options?: AgentOptions<Env>
-) {
-  // oxlint-disable-next-line typescript/no-explicit-any
-  return routePartykitRequest(request, env as any, {
-    prefix: "agents",
-    ...(options as PartyServerOptions<Record<string, unknown>>)
-  });
-}
 
 // Email routing - deprecated resolver kept in root for upgrade discoverability
 // Other email utilities moved to agents/email subpath
@@ -13394,27 +13118,6 @@ export async function routeAgentEmail<
     _secureRouted: routingInfo._secureRouted,
     _bridge: bridge
   });
-}
-
-/**
- * Get or create an Agent by name
- * @template Env Environment type containing bindings
- * @template T Type of the Agent class
- * @param namespace Agent namespace
- * @param name Name of the Agent instance
- * @param options Options for Agent creation
- * @returns Promise resolving to an Agent instance stub
- */
-export async function getAgentByName<
-  Env extends Cloudflare.Env = Cloudflare.Env,
-  T extends Agent<Env> = Agent<Env>,
-  Props extends Record<string, unknown> = Record<string, unknown>
->(
-  namespace: DurableObjectNamespace<T>,
-  name: string,
-  options?: AgentGetOptions<Env, Props>
-) {
-  return getServerByName<Env, T>(namespace, name, options);
 }
 
 /**

@@ -19,7 +19,6 @@
     "@playwright/test": "^1.61.1",
     "@tanstack/ai": "0.38.0",
     "ai": "^7.0.0",
-    "vitest": "4.1.9",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

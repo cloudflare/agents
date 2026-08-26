@@ -9,6 +9,7 @@ import type {
 } from "ai";
 import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { chatThrottleOptions } from "./chat-throttle";
 import type { OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
@@ -383,7 +384,12 @@ export type UseAgentChatOptions<
   // oxlint-disable-next-line no-unused-vars -- kept for backward compat
   State = unknown,
   ChatMessage extends UIMessage = UIMessage
-> = Omit<UseChatParams<ChatMessage>, "fetch" | "onToolCall"> & {
+> = Omit<
+  UseChatParams<ChatMessage>,
+  // Both throttle names are redeclared below: ours accepts `false`, and
+  // intersecting with the SDK's `throttle?: number` would drop that.
+  "fetch" | "onToolCall" | "throttle" | "experimental_throttle"
+> & {
   /** Agent connection from useAgent (accepts both typed and untyped agents) */
   agent: AgentConnection & {
     agent: string;
@@ -400,6 +406,17 @@ export type UseAgentChatOptions<
   credentials?: RequestCredentials;
   /** Request headers */
   headers?: HeadersInit;
+  /**
+   * Milliseconds to coalesce chat state updates before re-rendering,
+   * defaulting to 50.
+   *
+   * Streaming writes chat state once per chunk, so without a throttle a fast
+   * burst of chunks renders once per chunk. The first chunk is never delayed.
+   * Pass `false` to render every chunk as it arrives.
+   */
+  throttle?: number | false;
+  /** @deprecated Use `throttle`. */
+  experimental_throttle?: number;
   /**
    * Callback for handling client-side tool execution.
    * Called when a tool without server-side `execute` is invoked by the LLM.
@@ -690,6 +707,8 @@ export function useAgentChat<
     syncMessagesToServer = true,
     body: bodyOption,
     prepareSendMessagesRequest,
+    throttle,
+    experimental_throttle,
     ...rest
   } = options;
 
@@ -1017,6 +1036,7 @@ export function useAgentChat<
   // the Chat stable across socket recreations.
   const useChatHelpers = useChat<ChatMessage>({
     ...rest,
+    ...chatThrottleOptions({ experimental_throttle, throttle }),
     onData,
     messages: initialMessages,
     transport: customTransport,
@@ -1238,9 +1258,6 @@ export function useAgentChat<
     Map<string, unknown>
   >(new Map());
 
-  // Ref to access current messages in callbacks without stale closures
-  const messagesRef = useRef(chatMessages);
-  messagesRef.current = chatMessages;
   const initialMessagesRef = useRef(initialMessages);
   initialMessagesRef.current = initialMessages;
 
@@ -1293,7 +1310,10 @@ export function useAgentChat<
   } | null>(null);
 
   const preserveProtectedStreamingAssistant = useCallback(
-    (messages: readonly ChatMessage[]): ChatMessage[] => {
+    (
+      messages: readonly ChatMessage[],
+      currentMessages: readonly ChatMessage[]
+    ): ChatMessage[] => {
       const protection = protectedStreamingAssistantRef.current;
       if (!protection) {
         return [...messages];
@@ -1322,7 +1342,7 @@ export function useAgentChat<
       }
 
       const protectedAssistant =
-        messagesRef.current.find(
+        currentMessages.find(
           (message) => message.id === protection.assistantId
         ) ?? messages.find((message) => message.id === protection.assistantId);
       if (!protectedAssistant) {
@@ -1342,29 +1362,23 @@ export function useAgentChat<
       return;
     }
 
-    const assistantInfo = findLastAssistantMessage(messagesRef.current);
-    if (!assistantInfo) {
-      return;
-    }
-
-    if (
-      protectedStreamingAssistantRef.current?.assistantId !==
-      assistantInfo.message.id
-    ) {
-      protectedStreamingAssistantRef.current = {
-        assistantId: assistantInfo.message.id,
-        anchorMessageId:
-          messagesRef.current[assistantInfo.index - 1]?.id ?? null
-      };
-    }
-
-    setMessages((prevMessages: ChatMessage[]) => {
-      const protection = protectedStreamingAssistantRef.current;
-      if (!protection) {
-        return prevMessages;
+    setMessages((currentMessages: ChatMessage[]) => {
+      const assistantInfo = findLastAssistantMessage(currentMessages);
+      if (!assistantInfo) {
+        return currentMessages;
       }
 
-      return moveMessageToEnd(prevMessages, protection.assistantId);
+      if (
+        protectedStreamingAssistantRef.current?.assistantId !==
+        assistantInfo.message.id
+      ) {
+        protectedStreamingAssistantRef.current = {
+          assistantId: assistantInfo.message.id,
+          anchorMessageId: currentMessages[assistantInfo.index - 1]?.id ?? null
+        };
+      }
+
+      return moveMessageToEnd(currentMessages, assistantInfo.message.id);
     });
   }, [setMessages]);
 
@@ -1886,38 +1900,43 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES: {
-          let next = preserveProtectedStreamingAssistant(data.messages);
-          // A cross-tab observer builds the in-flight assistant via the
-          // broadcast accumulator, not the local transport — so
-          // `protectedStreamingAssistantRef` is never armed for it. Without
-          // this, a behind-the-stream snapshot would replace the observed
-          // assistant's streamed parts until the next chunk re-merges them
-          // (the same disappear/reappear the originating tab gets without the
-          // start-chunk re-arm above). Re-apply the accumulator — it adopted
-          // the server id from the `start` chunk, so `mergeInto` replaces the
-          // snapshot's copy in place (or appends a not-yet-persisted turn).
-          const observed = streamStateRef.current;
-          if (
-            observed.status === "observing" &&
-            observed.accumulator.parts.length > 0
-          ) {
-            // Only re-apply the live accumulator when it is at least as
-            // complete as the snapshot's copy of the same message. A fresh
-            // observer rebuilding its accumulator from a chunk-0 replay can
-            // briefly trail a fully-persisted snapshot; merging then would drop
-            // parts until replay catches up. In steady-state live observing the
-            // accumulator is always at or ahead of the snapshot, so this still
-            // fixes the disappear/reappear flicker.
-            const snapshotIdx = next.findIndex(
-              (m) => m.id === observed.accumulator.messageId
+          setMessages((currentMessages: ChatMessage[]) => {
+            let next = preserveProtectedStreamingAssistant(
+              data.messages,
+              currentMessages
             );
-            const snapshotParts =
-              snapshotIdx >= 0 ? next[snapshotIdx].parts.length : 0;
-            if (observed.accumulator.parts.length >= snapshotParts) {
-              next = observed.accumulator.mergeInto(next) as ChatMessage[];
+            // A cross-tab observer builds the in-flight assistant via the
+            // broadcast accumulator, not the local transport — so
+            // `protectedStreamingAssistantRef` is never armed for it. Without
+            // this, a behind-the-stream snapshot would replace the observed
+            // assistant's streamed parts until the next chunk re-merges them
+            // (the same disappear/reappear the originating tab gets without the
+            // start-chunk re-arm above). Re-apply the accumulator — it adopted
+            // the server id from the `start` chunk, so `mergeInto` replaces the
+            // snapshot's copy in place (or appends a not-yet-persisted turn).
+            const observed = streamStateRef.current;
+            if (
+              observed.status === "observing" &&
+              observed.accumulator.parts.length > 0
+            ) {
+              // Only re-apply the live accumulator when it is at least as
+              // complete as the snapshot's copy of the same message. A fresh
+              // observer rebuilding its accumulator from a chunk-0 replay can
+              // briefly trail a fully-persisted snapshot; merging then would drop
+              // parts until replay catches up. In steady-state live observing the
+              // accumulator is always at or ahead of the snapshot, so this still
+              // fixes the disappear/reappear flicker.
+              const snapshotIdx = next.findIndex(
+                (m) => m.id === observed.accumulator.messageId
+              );
+              const snapshotParts =
+                snapshotIdx >= 0 ? next[snapshotIdx].parts.length : 0;
+              if (observed.accumulator.parts.length >= snapshotParts) {
+                next = observed.accumulator.mergeInto(next) as ChatMessage[];
+              }
             }
-          }
-          setMessages(next);
+            return next;
+          });
           break;
         }
 
@@ -2087,7 +2106,8 @@ export function useAgentChat<
                   chunkData.type === "start" &&
                   typeof chunkData.messageId === "string"
                 ) {
-                  localResponseIds.set(data.id, chunkData.messageId);
+                  const messageId = chunkData.messageId;
+                  localResponseIds.set(data.id, messageId);
                   // Re-arm streaming protection to the ACTUAL assistant id for
                   // this turn. `protectStreamingAssistantTail` runs at send
                   // time — before the assistant message is minted — so it can
@@ -2100,19 +2120,22 @@ export function useAgentChat<
                   // are skipped: they extend the existing protected assistant.
                   if (!data.continuation) {
                     const protection = protectedStreamingAssistantRef.current;
-                    if (protection?.assistantId !== chunkData.messageId) {
-                      const msgs = messagesRef.current;
-                      const idx = msgs.findIndex(
-                        (m) => m.id === chunkData.messageId
-                      );
-                      const anchorMessageId =
-                        idx >= 0
-                          ? (msgs[idx - 1]?.id ?? null)
-                          : (msgs[msgs.length - 1]?.id ?? null);
-                      protectedStreamingAssistantRef.current = {
-                        assistantId: chunkData.messageId,
-                        anchorMessageId
-                      };
+                    if (protection?.assistantId !== messageId) {
+                      setMessages((currentMessages: ChatMessage[]) => {
+                        const idx = currentMessages.findIndex(
+                          (message) => message.id === messageId
+                        );
+                        const anchorMessageId =
+                          idx >= 0
+                            ? (currentMessages[idx - 1]?.id ?? null)
+                            : (currentMessages[currentMessages.length - 1]
+                                ?.id ?? null);
+                        protectedStreamingAssistantRef.current = {
+                          assistantId: messageId,
+                          anchorMessageId
+                        };
+                        return currentMessages;
+                      });
                     }
                   }
                   // EVERY replayed `start` rebuilds the message from chunk 0,
@@ -2129,9 +2152,7 @@ export function useAgentChat<
                     observedToolContinuationRequestIdRef.current !== data.id
                   ) {
                     pendingReplayResumeRequestIdsRef.current.delete(data.id);
-                    resetMatchingHydratedAssistantForReplay(
-                      chunkData.messageId
-                    );
+                    resetMatchingHydratedAssistantForReplay(messageId);
                   }
                 }
               } catch {
@@ -2264,8 +2285,7 @@ export function useAgentChat<
             error: data.error,
             replay: data.replay,
             replayComplete: data.replayComplete,
-            continuation: data.continuation,
-            currentMessages: data.continuation ? messagesRef.current : undefined
+            continuation: data.continuation
           });
 
           streamStateRef.current = result.state;
@@ -2486,19 +2506,21 @@ export function useAgentChat<
       // Find the toolCallId from the approval ID
       // The approval ID is stored on the tool part's approval.id field
       let toolCallId: string | undefined;
-      for (const msg of messagesRef.current) {
-        for (const part of msg.parts) {
-          if (
-            "toolCallId" in part &&
-            "approval" in part &&
-            (part.approval as { id?: string })?.id === approvalId
-          ) {
-            toolCallId = part.toolCallId as string;
-            break;
+      setMessages((currentMessages: ChatMessage[]) => {
+        for (const msg of currentMessages) {
+          for (const part of msg.parts) {
+            if (
+              "toolCallId" in part &&
+              "approval" in part &&
+              (part.approval as { id?: string })?.id === approvalId
+            ) {
+              toolCallId = part.toolCallId as string;
+              return currentMessages;
+            }
           }
         }
-        if (toolCallId) break;
-      }
+        return currentMessages;
+      });
 
       if (toolCallId) {
         // Send approval to server first (server updates message in place)
@@ -2697,28 +2719,25 @@ export function useAgentChat<
       );
     },
     setMessages: (messagesOrUpdater: Parameters<typeof setMessages>[0]) => {
-      // Resolve functional updaters to get the actual messages array
-      // before syncing to server. Without this, updater functions would
-      // send an empty array and wipe server-side messages.
-      let resolvedMessages: ChatMessage[];
-      if (typeof messagesOrUpdater === "function") {
-        resolvedMessages = messagesOrUpdater(messagesRef.current);
-      } else {
-        resolvedMessages = messagesOrUpdater;
-      }
+      setMessages((currentMessages: ChatMessage[]) => {
+        const resolvedMessages =
+          typeof messagesOrUpdater === "function"
+            ? messagesOrUpdater(currentMessages)
+            : messagesOrUpdater;
 
-      if (resolvedMessages.length === 0) {
-        markInitialMessagesSeeded();
-      }
-      setMessages(resolvedMessages);
-      if (syncMessagesToServer) {
-        agent.send(
-          JSON.stringify({
-            messages: resolvedMessages,
-            type: MessageType.CF_AGENT_CHAT_MESSAGES
-          })
-        );
-      }
+        if (resolvedMessages.length === 0) {
+          markInitialMessagesSeeded();
+        }
+        if (syncMessagesToServer) {
+          agent.send(
+            JSON.stringify({
+              messages: resolvedMessages,
+              type: MessageType.CF_AGENT_CHAT_MESSAGES
+            })
+          );
+        }
+        return resolvedMessages;
+      });
     }
   };
 }

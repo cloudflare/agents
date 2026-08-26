@@ -316,7 +316,7 @@ The Worker must pass the incoming request to `routeAgentRequest()`. Each ancesto
 
 `buildAgentUrl()` accepts an HTTP(S) or WS(S) origin without a pathname, query, fragment, or credentials. Set callback query parameters through the returned URL's `searchParams`. If you use a custom routing prefix, pass the same value to both `buildAgentPath()` and `routeAgentRequest()`.
 
-Root Agent names follow PartyServer's existing raw pathname-segment behavior and must already be externally routable. The `sub` segment is reserved in routing prefixes, class and binding names, and root Agent names. Descendant names are URL-encoded by the helper, so names containing spaces, Unicode, `/`, or URL-reserved characters round-trip safely.
+Root Agent names follow `routeAgentRequest`'s raw pathname-segment behavior and must already be externally routable. The `sub` segment is reserved in routing prefixes, class and binding names, and root Agent names. Descendant names are URL-encoded by the helper, so names containing spaces, Unicode, `/`, or URL-reserved characters round-trip safely.
 
 ### Custom routing
 

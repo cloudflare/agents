@@ -1,3 +1,4 @@
+import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
@@ -215,16 +216,15 @@ describe("runFiber", () => {
     it("restores MCP connections before fiber recovery runs", async () => {
       // Unique name: DO storage persists across test runs, and a leftover
       // server row would make the ordering assertion vacuous.
-      const agent = await getAgentByName(
-        env.TestRunFiberAgent,
-        `recovery-mcp-ordering-${crypto.randomUUID()}`
-      );
+      const name = `recovery-mcp-ordering-${crypto.randomUUID()}`;
+      let agent = await getAgentByName(env.TestRunFiberAgent, name);
 
-      // Simulate pre-eviction state: a stored MCP server and an interrupted
-      // fiber, then re-run the wake sequence the wrapped onStart performs.
+      // Simulate pre-eviction state, then force a real reconstruction. The
+      // lifecycle restores MCP before Agent fiber recovery runs.
       await agent.seedMcpServerRow("mcp-seeded");
       await agent.insertInterruptedFiber("fiber-mcp", "mcp-ordering");
-      await agent.rerunWakeSequence();
+      await evictDurableObject(agent);
+      agent = await getAgentByName(env.TestRunFiberAgent, name);
 
       const recovered =
         (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];

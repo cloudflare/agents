@@ -4,7 +4,8 @@ import {
   type VoiceClientOptions,
   type VoiceStatus,
   type TranscriptMessage,
-  type VoicePipelineMetrics
+  type VoicePipelineMetrics,
+  type VoiceTurnMetrics
 } from "./voice-client";
 
 // Re-export types so consumers can import everything from agents/voice-react
@@ -16,9 +17,17 @@ export type {
   VoiceTransport,
   TranscriptMessage,
   VoicePipelineMetrics,
+  VoiceTurnMetrics,
+  VoiceTurnOutcome,
+  VoiceTurnSource,
   VoiceClientOptions,
   VoiceClientEvent,
-  VoiceClientEventMap
+  VoiceClientEventMap,
+  VoiceConnectionDiagnostic,
+  VoiceTransportCloseInfo,
+  VoiceError,
+  VoiceErrorCode,
+  VoiceErrorStage
 } from "./voice-client";
 export { WebSocketVoiceTransport } from "./voice-client";
 
@@ -46,6 +55,8 @@ export interface UseVoiceAgentReturn {
    */
   interimTranscript: string | null;
   metrics: VoicePipelineMetrics | null;
+  /** Last stable terminal summary for a speech or text turn. */
+  turnMetrics: VoiceTurnMetrics | null;
   audioLevel: number;
   isMuted: boolean;
   connected: boolean;
@@ -88,6 +99,8 @@ export interface UseVoiceInputReturn {
    * Updates in real time as the user speaks. null when not available.
    */
   interimTranscript: string | null;
+  /** Last stable terminal summary for a speech turn. */
+  turnMetrics: VoiceTurnMetrics | null;
   /** Whether the mic is actively listening. */
   isListening: boolean;
   /** Current audio level (0–1) for visual feedback (e.g. waveform). */
@@ -147,6 +160,7 @@ export function useVoiceInput(
     null
   );
   const [isListening, setIsListening] = useState(false);
+  const [turnMetrics, setTurnMetrics] = useState<VoiceTurnMetrics | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +169,7 @@ export function useVoiceInput(
   useEffect(() => {
     setIsListening(false);
     setInterimTranscript(null);
+    setTurnMetrics(null);
     setAudioLevel(0);
     setIsMuted(false);
     setError(null);
@@ -179,6 +194,7 @@ export function useVoiceInput(
     };
 
     const onInterim = () => setInterimTranscript(client.interimTranscript);
+    const onTurnMetrics = (value: VoiceTurnMetrics) => setTurnMetrics(value);
     const onAudioLevel = () => setAudioLevel(client.audioLevel);
     const onMute = () => setIsMuted(client.isMuted);
     const onError = () => setError(client.error);
@@ -190,6 +206,7 @@ export function useVoiceInput(
 
     client.addEventListener("transcriptchange", onTranscript);
     client.addEventListener("interimtranscript", onInterim);
+    client.addEventListener("turnmetrics", onTurnMetrics);
     client.addEventListener("audiolevelchange", onAudioLevel);
     client.addEventListener("mutechange", onMute);
     client.addEventListener("error", onError);
@@ -198,6 +215,7 @@ export function useVoiceInput(
     return () => {
       client.removeEventListener("transcriptchange", onTranscript);
       client.removeEventListener("interimtranscript", onInterim);
+      client.removeEventListener("turnmetrics", onTurnMetrics);
       client.removeEventListener("audiolevelchange", onAudioLevel);
       client.removeEventListener("mutechange", onMute);
       client.removeEventListener("error", onError);
@@ -215,6 +233,7 @@ export function useVoiceInput(
   return {
     transcript,
     interimTranscript,
+    turnMetrics,
     isListening,
     audioLevel,
     isMuted,
@@ -281,6 +300,7 @@ export function useVoiceAgent(
   const [status, setStatus] = useState<VoiceStatus>("idle");
   const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
   const [metrics, setMetrics] = useState<VoicePipelineMetrics | null>(null);
+  const [turnMetrics, setTurnMetrics] = useState<VoiceTurnMetrics | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -299,6 +319,7 @@ export function useVoiceAgent(
     setStatus("idle");
     setTranscript([]);
     setMetrics(null);
+    setTurnMetrics(null);
     setAudioLevel(0);
     setIsMuted(false);
     setConnected(false);
@@ -335,6 +356,7 @@ export function useVoiceAgent(
     const onStatus = (s: VoiceStatus) => setStatus(s);
     const onTranscript = (t: TranscriptMessage[]) => setTranscript(t);
     const onMetrics = (m: VoicePipelineMetrics | null) => setMetrics(m);
+    const onTurnMetrics = (value: VoiceTurnMetrics) => setTurnMetrics(value);
     const onAudioLevel = (level: number) => setAudioLevel(level);
     const onMute = (muted: boolean) => setIsMuted(muted);
     const onConnection = (c: boolean) => setConnected(c);
@@ -346,6 +368,7 @@ export function useVoiceAgent(
     client.addEventListener("transcriptchange", onTranscript);
     client.addEventListener("interimtranscript", onInterim);
     client.addEventListener("metricschange", onMetrics);
+    client.addEventListener("turnmetrics", onTurnMetrics);
     client.addEventListener("audiolevelchange", onAudioLevel);
     client.addEventListener("mutechange", onMute);
     client.addEventListener("connectionchange", onConnection);
@@ -357,6 +380,7 @@ export function useVoiceAgent(
       client.removeEventListener("transcriptchange", onTranscript);
       client.removeEventListener("interimtranscript", onInterim);
       client.removeEventListener("metricschange", onMetrics);
+      client.removeEventListener("turnmetrics", onTurnMetrics);
       client.removeEventListener("audiolevelchange", onAudioLevel);
       client.removeEventListener("mutechange", onMute);
       client.removeEventListener("connectionchange", onConnection);
@@ -405,6 +429,7 @@ export function useVoiceAgent(
     transcript,
     interimTranscript,
     metrics,
+    turnMetrics,
     audioLevel,
     isMuted,
     connected,

@@ -240,7 +240,13 @@ describe("PlivoAdapter.handleRequest", () => {
     });
     await tick();
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("not found in env")
+      expect.objectContaining({
+        component: "PlivoAdapter",
+        stage: "configuration",
+        error: expect.objectContaining({
+          message: expect.stringContaining("MyAgent")
+        })
+      })
     );
   });
 

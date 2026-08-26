@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import { createFetchTools } from "../tools/fetch";
 import type {
@@ -584,7 +584,7 @@ describe("fetch — observability", () => {
 
 describe("Think — fetchTools integration", () => {
   function agent(name: string) {
-    return getServerByName(
+    return getAgentByName(
       env.ThinkFetchToolsTestAgent as unknown as DurableObjectNamespace<ThinkFetchToolsTestAgent>,
       name
     ) as unknown as Promise<{

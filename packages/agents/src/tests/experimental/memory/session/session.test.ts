@@ -638,14 +638,19 @@ describe("ContextBlocks — edge cases", () => {
 // ── Compaction tests ─────────────────────────────────────────────
 
 function createCompactableSession(
-  compactFn: (msgs: SessionMessage[]) => Promise<CompactResult | null>
+  compactFn: (msgs: SessionMessage[]) => Promise<CompactResult | null>,
+  selectHistory?: (
+    messages: SessionMessage[],
+    leafId?: string | null
+  ) => SessionMessage[]
 ) {
   const messages: SessionMessage[] = [];
   const compactions: StoredCompaction[] = [];
 
   const storage: SessionProvider = {
     getMessage: (id) => messages.find((m) => m.id === id) ?? null,
-    getHistory: () => messages,
+    getHistory: (leafId) =>
+      selectHistory ? selectHistory(messages, leafId) : messages,
     getLatestLeaf: () => messages[messages.length - 1] ?? null,
     getBranches: () => [],
     getPathLength: () => messages.length,
@@ -734,6 +739,59 @@ describe("Session.compact()", () => {
     expect(compactions[0].summary).toBe("Summary of m1-m3");
     expect(compactions[0].fromMessageId).toBe("m1");
     expect(compactions[0].toMessageId).toBe("m3");
+  });
+
+  it("compacts an explicit branch without extending a sibling overlay", async () => {
+    const compactedMessageIds: string[][] = [];
+    const { session, messages, compactions } = createCompactableSession(
+      async (history): Promise<CompactResult> => {
+        compactedMessageIds.push(history.map((message) => message.id));
+        return {
+          fromMessageId: "m1",
+          toMessageId: "m1",
+          summary: "Selected branch summary"
+        };
+      },
+      (allMessages, leafId) =>
+        leafId === "m2" ? allMessages.slice(0, 3) : allMessages
+    );
+
+    messages.push(
+      { id: "m0", role: "user", parts: [{ type: "text", text: "start" }] },
+      {
+        id: "m1",
+        role: "assistant",
+        parts: [{ type: "text", text: "first answer" }]
+      },
+      {
+        id: "m2",
+        role: "user",
+        parts: [{ type: "text", text: "follow-up" }]
+      },
+      {
+        id: "old-assistant",
+        role: "assistant",
+        parts: [{ type: "text", text: "superseded answer" }]
+      }
+    );
+
+    compactions.push({
+      id: "sibling-compaction",
+      fromMessageId: "m0",
+      toMessageId: "old-assistant",
+      summary: "Sibling branch summary",
+      createdAt: new Date().toISOString()
+    });
+
+    await session.compact("m2");
+
+    expect(compactedMessageIds).toEqual([["m0", "m1", "m2"]]);
+    expect(compactions).toHaveLength(2);
+    expect(compactions[1]).toMatchObject({
+      fromMessageId: "m1",
+      toMessageId: "m1",
+      summary: "Selected branch summary"
+    });
   });
 
   it("returns null when compaction function returns null", async () => {

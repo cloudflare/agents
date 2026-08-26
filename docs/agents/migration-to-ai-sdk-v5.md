@@ -2,7 +2,7 @@
 
 This guide covers the changes needed when upgrading from AI SDK v4 to v5 with `@cloudflare/ai-chat`.
 
-> If you are on AI SDK v5 and upgrading to v6, see the [v6 migration guide](./migration-to-ai-sdk-v6.md) instead.
+> The current `agents` and `@cloudflare/ai-chat` packages support AI SDK v6 and v7, not v5. If an application is still on v4, apply the intermediate changes on this page and then continue through the [v6 migration guide](./migration-to-ai-sdk-v6.md). Do not install AI SDK v5 alongside the current Cloudflare packages.
 
 ## Message format: `content` to `parts`
 
@@ -71,7 +71,7 @@ chunk.type === "text-delta" && chunk.delta;
 
 ## Migration checklist
 
-1. Update dependencies: `npm update agents ai`
+1. Apply this intermediate checklist without installing v5, then continue through the [v6 migration guide](./migration-to-ai-sdk-v6.md) and install the supported package majors shown there
 2. Replace `import type { Message }` with `import type { UIMessage }`
 3. Replace `"ai/react"` imports with `"@ai-sdk/react"`
 4. Rename `parameters` to `inputSchema` in tool definitions

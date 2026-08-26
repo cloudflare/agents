@@ -48,14 +48,14 @@ const EXPECTED_SCHEMA_DDL = [
           completed_at INTEGER
         )`,
   `CREATE TABLE cf_agents_mcp_servers (
-            id TEXT PRIMARY KEY NOT NULL,
-            name TEXT NOT NULL,
-            server_url TEXT NOT NULL,
-            callback_url TEXT NOT NULL,
-            client_id TEXT,
-            auth_url TEXT,
-            server_options TEXT
-          )`,
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      server_url TEXT NOT NULL,
+      callback_url TEXT NOT NULL,
+      client_id TEXT,
+      auth_url TEXT,
+      server_options TEXT
+    )`,
   `CREATE TABLE cf_agents_queues (
           id TEXT PRIMARY KEY NOT NULL,
           payload TEXT,

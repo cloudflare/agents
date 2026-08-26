@@ -36,7 +36,6 @@ export class MyAssistant extends Think<Env> {
     sendIdentityOnConnect: true
   };
   override maxSteps = 10;
-  chatRecovery = true;
   extensionLoader = this.env.LOADER;
 
   /**

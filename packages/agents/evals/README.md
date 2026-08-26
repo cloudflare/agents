@@ -1,13 +1,9 @@
 ## evals for core agent functionality
 
-setup a .env file with (any of) the following:
+The scheduling eval uses Workers AI by default. Create
+`packages/agents/evals/.env` with:
 
+```dotenv
+CLOUDFLARE_ACCOUNT_ID=<your account ID>
+CLOUDFLARE_API_TOKEN=<your API token>
 ```
-OPENAI_API_KEY=<your openai key>
-GOOGLE_GENERATIVE_AI_API_KEY=<your google key>
-ANTHROPIC_API_KEY=<your anthropic key>
-```
-
-Choose a model in `src/scheduling.eval.ts`
-
-Then run the evals with `npx evalite`

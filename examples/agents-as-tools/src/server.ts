@@ -28,8 +28,6 @@ function inputText(input: unknown): string {
 }
 
 class DemoToolAgent extends Think<Env> {
-  override chatRecovery = true;
-
   override getModel() {
     return "@cf/moonshotai/kimi-k2.7-code";
   }
