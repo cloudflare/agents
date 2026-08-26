@@ -1,10 +1,18 @@
-import { BrainIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, BrainIcon } from "@phosphor-icons/react";
 
 /** Placeholder Exo Harness blog post, ready for the final article copy. */
 export function ExoHarnessBlogPost() {
   return (
     <main className="flex-1 overflow-y-auto bg-kumo-base">
       <article className="mx-auto max-w-[760px] px-6 py-16 sm:py-24">
+        <a
+          href="/"
+          className="mb-12 flex w-fit items-center gap-2 text-sm font-medium text-kumo-secondary no-underline hover:text-kumo-default"
+        >
+          <ArrowLeftIcon size={16} />
+          Back to agent
+        </a>
+
         <header>
           <p className="text-sm font-semibold uppercase tracking-[0.16em] text-kumo-accent">
             Exo Harness
