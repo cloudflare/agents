@@ -7,12 +7,14 @@ import {
   Button,
   Empty,
   InputArea,
+  LinkButton,
   PoweredByCloudflare,
   Surface,
   Text
 } from "@cloudflare/kumo";
 import {
   AlarmIcon,
+  ArticleIcon,
   BrainIcon,
   FolderIcon,
   InfoIcon,
@@ -37,6 +39,7 @@ import { JournalTab } from "./ui/journal-tab";
 import { WorkspaceTab } from "./ui/workspace-tab";
 import { ContextTab } from "./ui/context-tab";
 import { TasksTab } from "./ui/tasks-tab";
+import { ExoHarnessBlogPost } from "./ui/blog-post";
 import "./styles.css";
 
 type Tab = "self" | "context" | "tasks" | "journal" | "workspace";
@@ -59,6 +62,52 @@ function clampPanelWidth(width: number): number {
   return Math.min(
     Math.max(width, PANEL_MIN_WIDTH),
     Math.max(max, PANEL_MIN_WIDTH)
+  );
+}
+
+function ExoHarnessHeader({
+  badges,
+  children
+}: {
+  badges?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <header className="px-5 py-3 bg-kumo-base border-b border-kumo-line shrink-0">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <BrainIcon size={20} className="text-kumo-accent" />
+          <a
+            href="/"
+            className="text-lg font-semibold text-kumo-default no-underline"
+          >
+            Exo Harness
+          </a>
+          {badges}
+        </div>
+        <nav aria-label="Exo Harness" className="flex items-center gap-3">
+          {children}
+        </nav>
+      </div>
+    </header>
+  );
+}
+
+function BlogPage() {
+  return (
+    <div className="flex h-screen flex-col bg-kumo-elevated">
+      <ExoHarnessHeader>
+        <LinkButton
+          href="/blog"
+          variant="secondary"
+          icon={<ArticleIcon size={16} />}
+        >
+          Blog post
+        </LinkButton>
+        <ModeToggle />
+      </ExoHarnessHeader>
+      <ExoHarnessBlogPost />
+    </div>
   );
 }
 
@@ -146,42 +195,43 @@ function App() {
 
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
-      {/* Header */}
-      <header className="px-5 py-3 bg-kumo-base border-b border-kumo-line shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <BrainIcon size={20} className="text-kumo-accent" />
-            <h1 className="text-lg font-semibold text-kumo-default">
-              Exo Harness
-            </h1>
+      <ExoHarnessHeader
+        badges={
+          <>
             <Badge variant="secondary">My agent</Badge>
             <Badge variant="primary">
               v{exoState.activeVersion}
               {exoState.activeSha ? ` · ${shortSha(exoState.activeSha)}` : ""}
             </Badge>
             <Badge variant="secondary">self-modifying</Badge>
-          </div>
-          <div className="flex items-center gap-3">
-            <ConnectionIndicator status={connectionStatus} />
-            <ModeToggle />
-            <Button
-              variant="secondary"
-              icon={<TrashIcon size={16} />}
-              onClick={clearHistory}
-            >
-              Clear chat
-            </Button>
-            <Button
-              variant="secondary"
-              icon={<SkullIcon size={16} />}
-              onClick={murderAgent}
-              aria-label="Murder this agent (destroys its entire self)"
-            >
-              Murder agent
-            </Button>
-          </div>
-        </div>
-      </header>
+          </>
+        }
+      >
+        <LinkButton
+          href="/blog"
+          variant="secondary"
+          icon={<ArticleIcon size={16} />}
+        >
+          Blog post
+        </LinkButton>
+        <ConnectionIndicator status={connectionStatus} />
+        <ModeToggle />
+        <Button
+          variant="secondary"
+          icon={<TrashIcon size={16} />}
+          onClick={clearHistory}
+        >
+          Clear chat
+        </Button>
+        <Button
+          variant="secondary"
+          icon={<SkullIcon size={16} />}
+          onClick={murderAgent}
+          aria-label="Murder this agent (destroys its entire self)"
+        >
+          Murder agent
+        </Button>
+      </ExoHarnessHeader>
 
       <div className="flex flex-1 min-h-0">
         {/* Chat pane */}
@@ -394,4 +444,8 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const isBlogPage = window.location.pathname.replace(/\/+$/, "") === "/blog";
+
+createRoot(document.getElementById("root")!).render(
+  isBlogPage ? <BlogPage /> : <App />
+);
