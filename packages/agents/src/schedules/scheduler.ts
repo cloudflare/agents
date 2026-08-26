@@ -91,6 +91,108 @@ function resolveRetryConfig(
 }
 
 /**
+ * @internal Create or migrate the schedule table. Idempotent. Shared with
+ * Agent's constructor-time schema initialization so a brand-new Agent
+ * exposes the table before Lifecycle startup completes, exactly as it did
+ * before Scheduler was extracted; {@link Scheduler.onStart} applies the
+ * same migration for plain Lifecycle Objects.
+ */
+export function ensureScheduleTable(storage: DurableObjectStorage): void {
+  const rawSql = (query: string, ...params: (string | number | null)[]) =>
+    storage.sql.exec(query, ...params);
+
+  rawSql(`
+      CREATE TABLE IF NOT EXISTS cf_agents_schedules (
+        id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+        callback TEXT,
+        payload TEXT,
+        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
+        time INTEGER,
+        delayInSeconds INTEGER,
+        cron TEXT,
+        intervalSeconds INTEGER,
+        running INTEGER DEFAULT 0,
+        created_at INTEGER DEFAULT (unixepoch()),
+        execution_started_at INTEGER,
+        retry_options TEXT,
+        owner_path TEXT,
+        owner_path_key TEXT
+      )
+    `);
+
+  const addColumnIfMissing = (statement: string): void => {
+    try {
+      rawSql(statement);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("duplicate column")) throw error;
+    }
+  };
+  addColumnIfMissing(
+    "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
+  );
+  addColumnIfMissing(
+    "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
+  );
+  addColumnIfMissing(
+    "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
+  );
+  addColumnIfMissing(
+    "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
+  );
+  addColumnIfMissing(
+    "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path TEXT"
+  );
+  addColumnIfMissing(
+    "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path_key TEXT"
+  );
+
+  const rows = rawSql(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
+  ).toArray();
+  const ddl = typeof rows[0]?.sql === "string" ? rows[0].sql : "";
+  if (ddl && !ddl.includes("'interval'")) {
+    rawSql("DROP TABLE IF EXISTS cf_agents_schedules_new");
+    rawSql(`
+        CREATE TABLE cf_agents_schedules_new (
+          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+          callback TEXT,
+          payload TEXT,
+          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
+          time INTEGER,
+          delayInSeconds INTEGER,
+          cron TEXT,
+          intervalSeconds INTEGER,
+          running INTEGER DEFAULT 0,
+          created_at INTEGER DEFAULT (unixepoch()),
+          execution_started_at INTEGER,
+          retry_options TEXT,
+          owner_path TEXT,
+          owner_path_key TEXT
+        )
+      `);
+    rawSql(`
+      INSERT INTO cf_agents_schedules_new
+        (id, callback, payload, type, time, delayInSeconds, cron,
+         intervalSeconds, running, created_at, execution_started_at,
+         retry_options, owner_path, owner_path_key)
+      SELECT id, callback, payload, type, time, delayInSeconds, cron,
+             intervalSeconds, running, created_at, execution_started_at,
+             retry_options, owner_path, owner_path_key
+      FROM cf_agents_schedules
+    `);
+    rawSql("DROP TABLE cf_agents_schedules");
+    rawSql("ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules");
+  }
+
+  // Keep-alive no longer uses schedule rows. Remove orphaned heartbeat rows
+  // left by older Scheduler versions.
+  rawSql(
+    "DELETE FROM cf_agents_schedules WHERE callback = '_cf_keepAliveHeartbeat'"
+  );
+}
+
+/**
  * Persistent task scheduling for a Lifecycle Object.
  *
  * Construct with the host and install the same instance with
@@ -139,7 +241,7 @@ export class Scheduler<
       (await storage.get<number>(SCHEDULE_SCHEMA_VERSION_KEY)) ?? 0;
     if (version >= CURRENT_SCHEDULE_SCHEMA_VERSION) return;
 
-    this.#migrateSchema();
+    ensureScheduleTable(this.lifecycle.storage);
     await storage.put(
       SCHEDULE_SCHEMA_VERSION_KEY,
       CURRENT_SCHEDULE_SCHEMA_VERSION
@@ -479,103 +581,6 @@ export class Scheduler<
     } catch (cause) {
       throw new SqlError(query, cause);
     }
-  }
-
-  #migrateSchema(): void {
-    const rawSql = (query: string, ...params: (string | number | null)[]) =>
-      this.lifecycle.storage.sql.exec(query, ...params);
-
-    rawSql(`
-        CREATE TABLE IF NOT EXISTS cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          intervalSeconds INTEGER,
-          running INTEGER DEFAULT 0,
-          created_at INTEGER DEFAULT (unixepoch()),
-          execution_started_at INTEGER,
-          retry_options TEXT,
-          owner_path TEXT,
-          owner_path_key TEXT
-        )
-      `);
-
-    const addColumnIfMissing = (statement: string): void => {
-      try {
-        rawSql(statement);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.toLowerCase().includes("duplicate column")) throw error;
-      }
-    };
-    addColumnIfMissing(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
-    );
-    addColumnIfMissing(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
-    );
-    addColumnIfMissing(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
-    );
-    addColumnIfMissing(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
-    );
-    addColumnIfMissing(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path TEXT"
-    );
-    addColumnIfMissing(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path_key TEXT"
-    );
-
-    const rows = rawSql(
-      "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
-    ).toArray();
-    const ddl = typeof rows[0]?.sql === "string" ? rows[0].sql : "";
-    if (ddl && !ddl.includes("'interval'")) {
-      rawSql("DROP TABLE IF EXISTS cf_agents_schedules_new");
-      rawSql(`
-          CREATE TABLE cf_agents_schedules_new (
-            id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-            callback TEXT,
-            payload TEXT,
-            type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-            time INTEGER,
-            delayInSeconds INTEGER,
-            cron TEXT,
-            intervalSeconds INTEGER,
-            running INTEGER DEFAULT 0,
-            created_at INTEGER DEFAULT (unixepoch()),
-            execution_started_at INTEGER,
-            retry_options TEXT,
-            owner_path TEXT,
-            owner_path_key TEXT
-          )
-        `);
-      rawSql(`
-        INSERT INTO cf_agents_schedules_new
-          (id, callback, payload, type, time, delayInSeconds, cron,
-           intervalSeconds, running, created_at, execution_started_at,
-           retry_options, owner_path, owner_path_key)
-        SELECT id, callback, payload, type, time, delayInSeconds, cron,
-               intervalSeconds, running, created_at, execution_started_at,
-               retry_options, owner_path, owner_path_key
-        FROM cf_agents_schedules
-      `);
-      rawSql("DROP TABLE cf_agents_schedules");
-      rawSql(
-        "ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules"
-      );
-    }
-
-    // Keep-alive no longer uses schedule rows. Remove orphaned heartbeat rows
-    // left by older Scheduler versions.
-    rawSql(
-      "DELETE FROM cf_agents_schedules WHERE callback = '_cf_keepAliveHeartbeat'"
-    );
   }
 
   /**

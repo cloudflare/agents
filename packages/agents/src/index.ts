@@ -122,7 +122,7 @@ import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
-import { Scheduler } from "./schedules/scheduler";
+import { ensureScheduleTable, Scheduler } from "./schedules/scheduler";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
@@ -2041,6 +2041,11 @@ export class Agent<
         "DELETE FROM cf_agents_state WHERE id = ?",
         STATE_WAS_CHANGED
       );
+
+      // The Scheduler capability owns this table, but a brand-new Agent must
+      // expose it synchronously from construction (pre-Scheduler behavior);
+      // Scheduler.onStart applies the same idempotent migration later.
+      ensureScheduleTable(this.ctx.storage);
 
       // v3: durable fibers table for runFiber
       this.sql`

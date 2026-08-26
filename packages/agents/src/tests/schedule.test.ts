@@ -399,6 +399,19 @@ describe("schedule operations", () => {
     });
   });
 
+  describe("fresh-agent schema availability", () => {
+    it("exposes the schedules table synchronously before first startup", async () => {
+      const stub = env.TestScheduleAgent.getByName(crypto.randomUUID());
+      // Construct only — no lifecycle start. The constructor-time schema
+      // initialization must create cf_agents_schedules exactly as it did
+      // before the Scheduler capability was extracted.
+      await runInDurableObject(stub, (instance: TestScheduleAgent) => {
+        expect(instance.getSchedules()).toEqual([]);
+        expect(instance.getSchedule("missing")).toBeUndefined();
+      });
+    });
+  });
+
   describe("schedule() onStart() warning", () => {
     it("should warn when schedule() is called inside onStart() without idempotent", async () => {
       const agentStub = await getAgentByName(
