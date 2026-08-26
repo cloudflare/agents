@@ -3,6 +3,7 @@ import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think } from "../../think";
 import { Agent } from "agents";
 import type {
+  Connection,
   AgentToolEventMessage,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
@@ -45,6 +46,7 @@ import type {
   ChunkContext
 } from "../../think";
 import {
+  CHAT_MESSAGE_TYPES,
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator
@@ -500,6 +502,7 @@ class TestCollectingCallback implements StreamCallback {
 
 export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
+  private _nextSubAgentConnectionSendDelayMs = 0;
   private _chatErrorLog: string[] = [];
   private _errorConfig: {
     afterChunks: number;
@@ -528,6 +531,23 @@ export class ThinkTestAgent extends Think {
     progressBody: string;
     milestoneBody: string;
   } | null = null;
+
+  /** Delay the next root-owned sub-agent send to expose routing races. */
+  async delayNextSubAgentConnectionSendForTest(delayMs: number): Promise<void> {
+    this._nextSubAgentConnectionSendDelayMs = delayMs;
+  }
+
+  override async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    if (this._nextSubAgentConnectionSendDelayMs > 0) {
+      const delayMs = this._nextSubAgentConnectionSendDelayMs;
+      this._nextSubAgentConnectionSendDelayMs = 0;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    await super._cf_sendToSubAgentConnection(connectionId, message);
+  }
 
   /** Slow the streamed turn so the parent tails it while it's still live. */
   async setStreamChunkDelayForTest(ms: number): Promise<void> {
@@ -1073,6 +1093,34 @@ export class ThinkTestAgent extends Think {
   async testStoreResumableChunk(streamId: string, body: string): Promise<void> {
     this._resumableStream.storeChunk(streamId, body);
     this._resumableStream.flushBuffer();
+  }
+
+  /** Emit the real resume notification followed by a terminal broadcast. */
+  async testSendStreamResumingBeforeTerminal(requestId: string): Promise<void> {
+    const streamId = this._resumableStream.start(requestId);
+    const [connection] = [...this.getConnections()];
+    if (!connection) {
+      throw new Error(
+        "ThinkTestAgent.testSendStreamResumingBeforeTerminal requires a connection"
+      );
+    }
+
+    // SAFETY: This test-only method drives Think's private resume path with a
+    // real connection returned by this Agent instance.
+    (
+      this as unknown as {
+        _notifyStreamResuming(connection: Connection): void;
+      }
+    )._notifyStreamResuming(connection);
+    this._resumableStream.complete(streamId);
+    this.broadcast(
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        id: requestId,
+        done: true,
+        body: ""
+      })
+    );
   }
 
   /** Pair with `testStartResumableStream` — clean up the simulated stream. */

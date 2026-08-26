@@ -6,6 +6,7 @@ import type {
   StreamingResponse
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
+import { MessageType } from "../../types.ts";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
 // A SubAgent with its own SQLite counter table.
@@ -1013,6 +1014,11 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
     }
   }
 
+  /** Relays a child broadcast from a fresh RPC context with no frame bridge. */
+  async relayBroadcastFromFreshContext(message: string): Promise<void> {
+    await this._cf_broadcastToSubAgent(this.selfPath, message);
+  }
+
   /**
    * Calls `this.setState(...)` from a facet RPC. `setState` drives
    * `_broadcastProtocol()` internally, so this exercises facet state
@@ -1082,7 +1088,125 @@ export class CustomBoundSubAgentParent extends Agent {
 
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
+class DelayedForwardingSubAgentBridge extends RpcTarget {
+  constructor(
+    private readonly connectionId: string,
+    private readonly delayedMessage: string | undefined,
+    private readonly sendToConnection: (
+      connectionId: string,
+      message: string | ArrayBuffer | ArrayBufferView
+    ) => Promise<void>
+  ) {
+    super();
+  }
+
+  async send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    if (message === this.delayedMessage) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    await this.sendToConnection(this.connectionId, message);
+  }
+}
+
 export class TestSubAgentParent extends Agent {
+  private _rootResolutionFailuresRemaining = 0;
+  private _nextRootResolutionDelayMs = 0;
+  private _subAgentBroadcastFailuresRemaining = 0;
+
+  failNextRootResolution(): void {
+    this._rootResolutionFailuresRemaining += 1;
+  }
+
+  delayNextRootResolution(delayMs: number): void {
+    this._nextRootResolutionDelayMs = delayMs;
+  }
+
+  /** Forwards one frame through a deliberately slow live bridge. */
+  async forwardLiveThenDetachedMessages(
+    childName: string,
+    liveMessage: string,
+    detachedMessage: string
+  ): Promise<void> {
+    const [meta] = await this._cf_subAgentConnectionMetas([
+      ...this.selfPath,
+      { className: SlowReplySubAgent.name, name: childName }
+    ]);
+    if (!meta) {
+      throw new Error(
+        "TestSubAgentParent.forwardLiveThenDetachedMessages requires a child WebSocket"
+      );
+    }
+
+    const sendToConnection = (
+      connectionId: string,
+      message: string | ArrayBuffer | ArrayBufferView
+    ) => this._cf_sendToSubAgentConnection(connectionId, message);
+    const operationBridge = new DelayedForwardingSubAgentBridge(
+      meta.id,
+      liveMessage,
+      sendToConnection
+    );
+    const replyBridge = new DelayedForwardingSubAgentBridge(
+      meta.id,
+      undefined,
+      sendToConnection
+    );
+    const child = await this.subAgent(SlowReplySubAgent, childName);
+    // SAFETY: SubAgentStub omits Agent's internal forwarding method, while this
+    // fixture supplies the same message, metadata, and RpcTarget bridge shape.
+    await (
+      child as unknown as {
+        _cf_handleSubAgentWebSocketMessage(
+          message: string,
+          bridge: DelayedForwardingSubAgentBridge,
+          connectionMeta: typeof meta,
+          reply: DelayedForwardingSubAgentBridge
+        ): Promise<void>;
+      }
+    )._cf_handleSubAgentWebSocketMessage(
+      JSON.stringify({
+        args: [liveMessage, detachedMessage],
+        id: crypto.randomUUID(),
+        method: "sendLiveThenDetachedMessages",
+        type: MessageType.RPC
+      }),
+      operationBridge,
+      meta,
+      replyBridge
+    );
+  }
+
+  failNextSubAgentBroadcast(): void {
+    this._subAgentBroadcastFailuresRemaining += 1;
+  }
+
+  override async _cf_broadcastToSubAgent(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    if (this._subAgentBroadcastFailuresRemaining > 0) {
+      this._subAgentBroadcastFailuresRemaining -= 1;
+      throw new Error("TestSubAgentParent broadcast forwarding failed");
+    }
+    await super._cf_broadcastToSubAgent(ownerPath, message, without);
+  }
+
+  override async __unsafe_ensureInitialized(
+    props?: Record<string, unknown>
+  ): Promise<void> {
+    if (this._rootResolutionFailuresRemaining > 0) {
+      this._rootResolutionFailuresRemaining -= 1;
+      throw new Error("TestSubAgentParent root resolution failed");
+    }
+    if (this._nextRootResolutionDelayMs > 0) {
+      const delayMs = this._nextRootResolutionDelayMs;
+      this._nextRootResolutionDelayMs = 0;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    await super.__unsafe_ensureInitialized(props);
+  }
+
   async delayedEchoFromParent(value: string): Promise<string> {
     await new Promise((resolve) => setTimeout(resolve, 150));
     return `parent:${value}`;
@@ -1821,6 +1945,14 @@ export class TestSubAgentParent extends Agent {
     return child.tryBroadcast(msg);
   }
 
+  async subAgentRelayBroadcastFromFreshContext(
+    subAgentName: string,
+    message: string
+  ): Promise<void> {
+    const child = await this.subAgent(BroadcastSubAgent, subAgentName);
+    await child.relayBroadcastFromFreshContext(message);
+  }
+
   async subAgentTrySetState(
     subAgentName: string,
     count: number,
@@ -2217,14 +2349,18 @@ class _UnboundParent extends Agent {
 }
 export { _UnboundParent as TestUnboundParentAgent };
 
-// Regression fixture for issue #1991. The onMessage wrapper is intentional:
-// facet RPC replies must retain their originating bridge through application
-// and framework middleware before the Agent protocol dispatcher handles them.
+// Regression fixture for issues #1991 and #2055. The onMessage wrapper is
+// intentional: frame-bound RPC replies must retain their originating bridge
+// through middleware, while later connection operations route through the root.
 export class SlowReplySubAgent extends Agent {
   onStart(): void {
     const handleMessage = this.onMessage.bind(this);
     this.onMessage = async (connection, message) => {
       await new Promise((resolve) => setTimeout(resolve, 25));
+      if (message === "close-connection-during-live-frame") {
+        connection.close(4001, "live-frame-close");
+        return;
+      }
       await handleMessage(connection, message);
     };
   }
@@ -2244,6 +2380,215 @@ export class SlowReplySubAgent extends Agent {
   async parentEcho(value: string): Promise<string> {
     const parent = await this.parentAgent(TestSubAgentParent);
     return await parent.delayedEchoFromParent(value);
+  }
+
+  /** Schedules a direct connection message after the current frame completes. */
+  @callable()
+  sendConnectionMessageAfterDelay(message: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessageAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(message);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Sends a direct connection message during the current frame. */
+  @callable()
+  sendConnectionMessageNow(message: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessageNow requires an active connection"
+      );
+    }
+
+    connection.send(message);
+    return "sent";
+  }
+
+  /** Sends once in the live frame and once after that frame completes. */
+  @callable()
+  sendLiveThenDetachedMessages(
+    liveMessage: string,
+    detachedMessage: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendLiveThenDetachedMessages requires an active connection"
+      );
+    }
+
+    connection.send(liveMessage);
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(detachedMessage);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Sends a detached buffer to exercise live bridge failure reporting. */
+  @callable()
+  sendDetachedConnectionMessageNow(): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendDetachedConnectionMessageNow requires an active connection"
+      );
+    }
+
+    const message = new ArrayBuffer(1);
+    structuredClone(message, { transfer: [message] });
+    connection.send(message);
+    return "sent";
+  }
+
+  /** Broadcasts during the current frame. */
+  @callable()
+  broadcastMessageNow(message: string): string {
+    this.broadcast(message);
+    return "broadcast";
+  }
+
+  /** Schedules consecutive messages after the current frame completes. */
+  @callable()
+  sendConnectionMessagesAfterDelay(messages: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessagesAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        for (const message of messages) connection.send(message);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Schedules a connection state update after the current frame completes. */
+  @callable()
+  setConnectionMarkerAfterDelay(marker: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkerAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.setState({ delayedMarker: marker });
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Updates connection state during the current frame. */
+  @callable()
+  setConnectionMarkerNow(marker: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkerNow requires an active connection"
+      );
+    }
+
+    connection.setState({ delayedMarker: marker });
+    return "set";
+  }
+
+  /** Schedules consecutive state updates after the current frame completes. */
+  @callable()
+  setConnectionMarkersAfterDelay(markers: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkersAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        for (const marker of markers) {
+          connection.setState({ delayedMarker: marker });
+        }
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Returns the marker persisted in the current connection state. */
+  @callable()
+  getConnectionMarker(): string | null {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.getConnectionMarker requires an active connection"
+      );
+    }
+
+    const state = connection.state;
+    if (
+      typeof state !== "object" ||
+      state === null ||
+      !("delayedMarker" in state)
+    ) {
+      return null;
+    }
+    return typeof state.delayedMarker === "string" ? state.delayedMarker : null;
+  }
+
+  /** Schedules a message followed by close after the current frame completes. */
+  @callable()
+  sendThenCloseConnectionAfterDelay(
+    message: string,
+    code: number,
+    reason: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendThenCloseConnectionAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(message);
+        connection.close(code, reason);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Schedules a connection close after the current frame completes. */
+  @callable()
+  closeConnectionAfterDelay(code: number, reason: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.closeConnectionAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.close(code, reason);
+      })
+    );
+    return "scheduled";
   }
 
   @callable({ streaming: true })
