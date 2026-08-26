@@ -901,9 +901,9 @@ async cancel(id): Promise<boolean>
 
 Read and cancel schedules — the primitive's equivalents of
 [`getScheduleById()`](#getschedulebyid), [`listSchedules()`](#listschedules),
-and [`cancelSchedule()`](#cancelschedule) below. Deprecated synchronous
-`getSchedule()`/`getSchedules()` also exist on the Scheduler for Agent
-compatibility.
+and [`cancelSchedule()`](#cancelschedule) below. (Internal synchronous
+variants on the Scheduler back Agent's deprecated `getSchedule()` and
+`getSchedules()`; they are not part of the primitive's contract.)
 
 ### Agent methods
 

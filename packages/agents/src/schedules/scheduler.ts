@@ -445,11 +445,12 @@ export class Scheduler<
     return result.ok;
   }
 
+  // ── Host-owned policy apertures ──────────────────────────────────────────
+
   /**
-   * Get a schedule by ID.
-   *
-   * @deprecated Use {@link get}. This synchronous API cannot cross Durable
-   * Object boundaries and throws inside routed sub-agents.
+   * @internal Synchronous read backing Agent's deprecated `getSchedule()`.
+   * Not part of the primitive's contract — use {@link get}. Cannot cross
+   * Durable Object boundaries and throws inside routed sub-agents.
    */
   getSchedule<T = string>(id: string): Schedule<T> | undefined {
     if (this.lifecycle.routes.source) {
@@ -462,10 +463,9 @@ export class Scheduler<
   }
 
   /**
-   * List schedules matching criteria.
-   *
-   * @deprecated Use {@link list}. This synchronous API cannot cross Durable
-   * Object boundaries and throws inside routed sub-agents.
+   * @internal Synchronous read backing Agent's deprecated `getSchedules()`.
+   * Not part of the primitive's contract — use {@link list}. Cannot cross
+   * Durable Object boundaries and throws inside routed sub-agents.
    */
   getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
     if (this.lifecycle.routes.source) {
@@ -476,8 +476,6 @@ export class Scheduler<
     }
     return this.#listForOwner(null, criteria);
   }
-
-  // ── Host-owned policy apertures ──────────────────────────────────────────
 
   /** @internal Remove rows owned by one routed Lifecycle subtree. */
   cleanupRoutePrefix(prefix: string): void {
