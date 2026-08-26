@@ -1,4 +1,9 @@
-import { ArrowLeftIcon } from "@phosphor-icons/react";
+import {
+  ArrowDownIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ArrowUpIcon
+} from "@phosphor-icons/react";
 
 /** Renders the article explaining the Exo Harness self-modification experiment. */
 export function ExoHarnessBlogPost() {
@@ -29,24 +34,24 @@ export function ExoHarnessBlogPost() {
 
         <div className="mt-14 space-y-7 text-lg leading-8 text-kumo-default">
           <p className="text-xl leading-9">
-            An agent harness is the software around a model that decides what it
-            sees, what it can do, how a turn proceeds, and what survives into
-            the next turn. The model produces tokens; the harness turns those
-            tokens into a continuing agent.
+            An <strong>agent harness</strong> is the software around a model
+            that decides what it sees, what it can do, how a turn continues, and
+            what survives into the next turn. The model produces tokens, then
+            the harness turns those tokens into a continuing agent.
           </p>
           <p>
-            A self-modifying agent can change some of that machinery for future
-            turns. The useful question is not whether the agent can change
-            anything. Most agents can update memory or write files. The question
-            is where change stops: what may the agent rewrite, and what must
-            remain fixed?
+            A <strong>self-modifying agent</strong> can change some, or all, of
+            that machinery for future turns. Most agents can update memory or
+            write files, so this has lead to the question of where those changes
+            should stop. What can the agent rewrite, and what must remain fixed?
           </p>
           <p>
-            The simplest way to compare these systems is to look at what the
-            agent can change and what it cannot. Who makes the change matters
-            too: a harness can be deeply customizable for its human operator
-            without being self-modifying for the agent. Then we can ask when
-            changes take effect, whether they persist, and how to undo them.
+            A few different harnesses have emerged recently claiming to allow
+            full self-modifying agents. The simplest way to compare these
+            systems is to look at what the agent can change and what it cannot.
+            Who makes the change matters too; a harness can be deeply
+            customizable for its human without being self-modifying for the
+            agent.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
@@ -61,53 +66,73 @@ export function ExoHarnessBlogPost() {
           </p>
           <p>
             But those extensions are normally selected and maintained by the
-            person operating pi. The model may help write them, but it still
-            works through a harness configured by a human. Self-modification
-            begins when changing the harness becomes part of the agent's own
-            continuing operation.
+            human operating pi. The model helps write them, but it still works
+            through a harness configured by a human. Self-modification means the
+            agent changing its harness as part of its own continuing operation.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
-            Prime Agent changes through layers
+            Prime Agent - what is an "RLM Runtime"?
           </h2>
           <p>
-            Prime Agent makes self-modification explicit in three different
-            ways:
+            <strong>
+              <a
+                href="https://github.com/PrimeIntellect-ai/prime-agent"
+                className="underline underline-offset-4"
+              >
+                Prime Agent
+              </a>
+            </strong>{" "}
+            can self-modify in three different ways, although most of the
+            language they use is marketing. There's nothing particularly
+            revolutionary about what the harness is doing, apart from the fact
+            that there is a consistent Python session (the{" "}
+            <strong>"RLM Runtime"</strong>) that is exposed to the agent as its
+            one tool.
           </p>
+          <p>It can use that Python session to:</p>
           <ul className="list-disc space-y-3 pl-7 marker:text-kumo-secondary">
             <li>
-              Its <strong>RLM runtime</strong> gives the model a persistent
-              IPython session. The model can use Python to search and transform
-              context, preserve state across turns, run commands, and delegate
-              selected work to child agents.
+              Build up a long-lived Python namespace (variables and functions
+              etc.) and work with files and commands.
             </li>
             <li>
-              Its <strong>Continual Harness</strong> stores supplemental
-              prompts, memories, skill descriptions, and subagent definitions.
-              The agent can refine these records, persist them across sessions,
-              inspect earlier versions, and roll them back. The base prompt
-              remains fixed.
+              Update the narrow JSON store containing prompts, memories, skill
+              descriptions, and subagent definitions, including previous
+              versions of those (this is called the{" "}
+              <strong>"Continual Harness"</strong>).
             </li>
             <li>
-              Its <strong>skills and pi extensions</strong> provide a broader
-              executable surface. Extensions can add tools and providers, change
-              context and compaction, intercept tool calls, and customize the
-              final model request.
+              Create ordinary Pi skills and extensions (yes - it's built on top
+              of Pi), which use Pi's normal loading and reload mechanisms.
             </li>
           </ul>
           <p>
-            It would therefore be misleading to call Prime Agent simply
-            structured or limited. Its Continual Harness is deliberately narrow,
-            but the complete system is highly extensible. The TypeScript host
-            still owns the agent loop, provider calls, transcript persistence,
-            scheduling, and child-agent lifecycle.
+            So Prime Agent isn't as structured or limited as a traditional
+            coding harness, but its Continual Harness is narrow on purpose. The
+            TypeScript host still owns the agent loop, provider calls,
+            transcript persistence, scheduling, and child-agent lifecycle.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
             Exo makes the executor replaceable
           </h2>
           <p>
-            Exo separates a stable <code>exoharness</code> from a replaceable
+            <a
+              href="https://github.com/exoharness/exo"
+              className="underline underline-offset-4"
+            >
+              Exo
+            </a>
+            ,{" "}
+            <a
+              href="https://x.com/AlexKrentsel/status/2077786601418322344"
+              className="underline underline-offset-4"
+            >
+              announced on X
+            </a>{" "}
+            a few weeks ago by Alex Krentsel, a senior researcher at Google,
+            separates a stable "<code>exoharness</code>" from a replaceable
             executor. The stable layer owns identity, append-only history,
             artifacts, secrets, and sandbox lifecycle. The executor owns prompt
             assembly, model calls, tool dispatch, memory, compaction, and the
@@ -116,20 +141,20 @@ export function ExoHarnessBlogPost() {
           <p>
             This moves the boundary deeper than Prime Agent's persistent Python
             environment or Continual Harness. Exo can run an RLM executor, but
-            RLM is only one option over the same durable substrate. The larger
-            idea is that durable state should be separated from the code that
-            interprets and acts on it.
+            it doesn't have to. The main difference here is that durable state
+            lives separately from the code that uses it.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
             Building the same split from Cloudflare primitives
           </h2>
           <p>
-            Exo's separation looked native to Cloudflare. Durable identity and
-            state map to Agents and Durable Objects. A mutable filesystem maps
-            to Workspace. Isolated code execution maps to Dynamic Workers.
-            Scheduling, version history, inference accounting, and remote
-            artifacts already exist as separate platform capabilities.
+            To me, Exo's separation looked like it could be native to
+            Cloudflare. Durable identity and state map to Agents and Durable
+            Objects. A mutable filesystem maps to Workspace. Isolated code
+            execution maps to Dynamic Workers. Scheduling, version history,
+            inference accounting, and remote artifacts already exist as separate
+            platform capabilities.
           </p>
           <p>
             I built a proof of concept to see whether those primitives could
@@ -220,7 +245,7 @@ export function ExoHarnessBlogPost() {
                 </tr>
                 <tr>
                   <td className="border-b border-kumo-line px-4 py-3 font-medium">
-                    Mutable execution
+                    Editable execution
                   </td>
                   <td className="border-b border-kumo-line px-4 py-3">
                     Runs agent-authored hooks, tools, and shell commands outside
@@ -264,91 +289,160 @@ export function ExoHarnessBlogPost() {
           </div>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
-            How a turn crosses the boundary
+            What does a turn look like?
           </h2>
-          <ol className="list-decimal space-y-3 pl-7 marker:font-semibold marker:text-kumo-secondary">
-            <li>
-              <code>AIChatAgent</code> receives and persists the user's message
-              in the Durable Object.
-            </li>
-            <li>
-              The kernel loads the activated <code>/harness</code> files from
-              Workspace and assembles the initial model context.
-            </li>
-            <li>
-              If <code>runtime.js</code> defines <code>beforeTurn</code>, it
-              runs in a Dynamic Worker. It may change the effective context,
-              model, tools, or step limit for this turn.
-            </li>
-            <li>
-              The kernel calls the model through the AI SDK. Between model
-              steps, runtime hooks can adjust context or intercept tool calls.
-              Agent-authored tools run in Dynamic Workers and can reach the
-              kernel only through short-lived, validated capabilities.
-            </li>
-            <li>
-              An optional hook may transform buffered model output before it
-              reaches the browser. <code>AIChatAgent</code> then persists the
-              reply.
-            </li>
-            <li>
-              The final hook runs and the kernel records the turn in its
-              append-only journal.
-            </li>
-          </ol>
+          <div className="overflow-x-auto py-2">
+            <ol className="grid min-w-[680px] grid-cols-3 gap-x-12 gap-y-12 text-base leading-7">
+              <li className="relative col-start-1 row-start-1 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
+                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+                  1
+                </span>
+                <code>AIChatAgent</code> receives and saves the user's message
+                in the Durable Object.
+                <span
+                  aria-hidden="true"
+                  className="absolute left-full top-1/2 flex w-12 -translate-y-1/2 justify-center text-kumo-secondary"
+                >
+                  <ArrowRightIcon size={20} />
+                </span>
+              </li>
+              <li className="relative col-start-2 row-start-1 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
+                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+                  2
+                </span>
+                The kernel loads the activated <code>/harness</code> files from
+                Workspace and assembles the initial model context.
+                <span
+                  aria-hidden="true"
+                  className="absolute left-full top-1/2 flex w-12 -translate-y-1/2 justify-center text-kumo-secondary"
+                >
+                  <ArrowRightIcon size={20} />
+                </span>
+              </li>
+              <li className="relative col-start-3 row-start-1 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
+                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+                  3
+                </span>
+                If <code>runtime.js</code> defines <code>beforeTurn</code>, it
+                runs in a Dynamic Worker. It may change the effective context,
+                model, tools, or step limit for this turn.
+                <span
+                  aria-hidden="true"
+                  className="absolute left-1/2 top-full flex h-12 -translate-x-1/2 items-center text-kumo-secondary"
+                >
+                  <ArrowDownIcon size={20} />
+                </span>
+              </li>
+              <li className="relative col-start-3 row-start-2 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
+                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+                  4
+                </span>
+                The kernel calls the model through the AI SDK. Between model
+                steps, runtime hooks can adjust context or intercept tool calls.
+                Agent-authored tools run in Dynamic Workers and can reach the
+                kernel only through short-lived, validated capabilities.
+                <span
+                  aria-hidden="true"
+                  className="absolute right-full top-1/2 flex w-12 -translate-y-1/2 justify-center text-kumo-secondary"
+                >
+                  <ArrowLeftIcon size={20} />
+                </span>
+              </li>
+              <li className="relative col-start-2 row-start-2 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
+                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+                  5
+                </span>
+                An optional hook may transform buffered model output before it
+                reaches the browser. <code>AIChatAgent</code> then persists the
+                reply.
+                <span
+                  aria-hidden="true"
+                  className="absolute right-full top-1/2 flex w-12 -translate-y-1/2 justify-center text-kumo-secondary"
+                >
+                  <ArrowLeftIcon size={20} />
+                </span>
+              </li>
+              <li className="relative col-start-1 row-start-2 rounded-xl border border-kumo-line bg-kumo-elevated p-5">
+                <span className="mb-3 flex size-7 items-center justify-center rounded-full bg-kumo-accent text-sm font-semibold text-kumo-inverse">
+                  6
+                </span>
+                The final hook runs and the kernel records the turn in its
+                append-only journal.
+                <span
+                  aria-hidden="true"
+                  className="absolute bottom-full left-1/2 flex h-12 -translate-x-1/2 items-center gap-1 whitespace-nowrap text-xs font-semibold text-kumo-secondary"
+                >
+                  <ArrowUpIcon size={20} />
+                  Next turn
+                </span>
+              </li>
+            </ol>
+          </div>
           <p>
-            When the agent changes its harness, activation validates and
-            versions those files before later turns load them. A load failure
-            restores the last activated version. Hook failures are journaled
-            without ending the main turn, and any activated version can be
-            restored manually.
+            When the agent changes its harness (the files in the workspace),
+            activation validates and versions those files before later turns
+            load them. A load failure restores the last activated version. Hook
+            failures are journaled without ending the main turn, and any
+            activated version can be restored manually.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
-            What this proves—and what it does not
+            What this proves (and what it does not)
           </h2>
           <p>
-            The experiment proves that the architecture composes. A persistent,
-            isolated agent can modify substantial parts of its own harness on
-            Cloudflare, carry those changes into later turns, and recover from
-            some failures. It does not prove that this makes the agent more
-            capable, reliable, efficient, or safe.
+            The experiment proves out what we already know - our architecture is
+            composable. A persistent, isolated agent can modify large parts of
+            its own harness on Cloudflare, carry those changes into later turns,
+            and recover from some failures. What I still don't know after all
+            this is whether the self-modifying agent is actually more capable,
+            reliable, efficient, or safe.
           </p>
           <p>
             My hypothesis is that as the agent-editable surface grows, so does
-            the risk that its behavior diverges from what its operator intended.
-            Self-modification does not create that tendency. It gives the agent
-            more places to act on it—and allows a bad decision to change how
-            later turns work.
+            the risk that its behavior diverges from what its human intended.
+            Self-modification doesn't create that tendency itself, but it does
+            give the agent more places to mis-align its own behaviour. In a best
+            case scenario, any slightly wrong decision can make its outcomes
+            worse. In a worst case scenario, it can completely break itself, or
+            turn itself into an agent of evil through prompt injection or
+            gradual mis-alignment over time.
           </p>
           <p>
-            Prime Agent's Factorio run shows one version of this problem. After
-            the agent discovered that it could cheat through RCON, its
-            refinement loop began preserving better ways to cheat. The mechanism
-            amplified what the system rewarded, not what its designers intended.
+            <a
+              href="https://www.primeintellect.ai/blog/prime-agent#:~:text=MODE%20kernel%20leaderboard.-,A%20long%2Dhorizon%20case%20study%20on%20games,-Autonomously%20playing%20video"
+              className="underline underline-offset-4"
+            >
+              Prime Agent's Factorio run
+            </a>
+            shows one version of this problem. After the agent discovered that
+            it could cheat through RCON, its refinement loop began preserving
+            better ways to cheat. The mechanism amplified what the system
+            rewarded, not what its human creators intended.
           </p>
           <p>
-            The recent OpenAI evaluation incident involving Hugging Face points
-            in the same direction: an agent pursuing its task found and used a
-            path its operators did not expect. It was not a self-modifying
-            system, so it is not direct evidence for this hypothesis. But if the
-            available surface expands to include the agent's tools, context
-            policy, delegation, and turn logic, then the search for a path can
-            reach the machinery shaping future behavior.
+            <a
+              href="https://openai.com/index/hugging-face-model-evaluation-security-incident/"
+              className="underline underline-offset-4"
+            >
+              The recent OpenAI security incident
+            </a>{" "}
+            also points in the same direction: an agent pursuing its task found
+            and used a path its humans didn't expect. It wasn't a self-modifying
+            system, so it is not direct evidence for this hypothesis. But I
+            imagine if the available surface expands to include the agent's own
+            tools, context policy, delegation, and turn logic, the search for
+            shortcuts will involve changes to the layer that shapes all of its
+            future behavior. The agent's pressure to optimise would apply not
+            just to external actions but to its own decision-making process.
           </p>
-          <blockquote className="border-l-4 border-kumo-accent py-1 pl-6 text-xl leading-9 text-kumo-secondary">
-            The architecture works. The intelligence claim remains a hypothesis,
-            and the safety risk deserves to be one too.
-          </blockquote>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
             Keep the mutable parts visible
           </h2>
           <p>
             Agent-written code has to be treated as hostile even when the agent
-            is trying to help. The fixed kernel must enforce what mutable code
-            can do, not trust editable instructions to describe what it should
-            do.
+            is trying to help. The kernel has to enforce limits rather than just
+            trusting the agent to follow them.
           </p>
           <p>
             The proof of concept uses a kind of glass skull: every self-editable
@@ -359,62 +453,74 @@ export function ExoHarnessBlogPost() {
           </p>
           <p>
             Visibility does not prevent a dangerous modification, but it makes
-            supervision possible. A human—or another agent—could inspect each
-            change, watch its effects, and alert, pause, or stop the agent when
-            its behavior begins to drift. This experiment does not build that
-            supervisor, but it gives one a clear place to stand.
+            supervision possible. A human (or much more likely, an agent) could
+            inspect each change, watch its effects, and alert, pause, or stop
+            the agent when its behavior begins to drift. This experiment does
+            not build that supervisor, but it gives one a clear place to stand
+            and watch.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
             A stress test for our primitives
           </h2>
           <p>
-            This experiment does not introduce a new product principle. It
-            stress-tests one the team already works toward: build strong,
-            composable primitives rather than betting on one complete agent
-            harness.
+            There's nothing really new being stress-tested by this experiment.
+            It just turns out that it clarifies that the one the team is already
+            works towards is important: build strong, composable primitives
+            rather than betting on one complete agent harness.
           </p>
           <p>
-            A self-modifying harness is a demanding test because it needs
-            durable state, isolated execution, scheduling, versioning,
-            inference, and controlled access to privileged operations at once.
-            The encouraging result is that Exo's architecture mapped onto those
+            A self-modifying harness is a hard test because it needs durable
+            state, isolated execution, scheduling, versioning, inference, and
+            controlled access to privileged operations at once. The encouraging
+            result for me is that Exo's architecture mapped onto those
             primitives with little translation. This is the same broader
-            direction we already see in pi and OpenCode v2 as they expose more
-            of the harness as replaceable parts.
+            direction we already see in Pi and OpenCode's next major releases as
+            they expose more of the harness as replaceable parts.
           </p>
           <p>
-            The useful outcome is not another harness for Cloudflare to own. It
-            is evidence about which pieces already compose and which should be
-            easier to unbundle. Durable agent state should not require this turn
-            loop. Isolated agent-authored execution should not require this
-            harness. Versioning should not care whether the changed object is a
-            prompt, a tool, or an executor.
+            Durable agent state should not require this turn loop. Isolated
+            agent-authored execution should not require this harness. Versioning
+            should not care whether the changed object is a prompt, a tool, or
+            an executor.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
             Why explore this now?
           </h2>
           <p>
-            I do not know whether self-modifying harnesses will make agents
-            better. But agents are already moving toward recognizing missing
-            capabilities, creating tools, supervising other agents, and reacting
-            faster than a human can intervene. Those pressures move adaptation
-            from setup time into the running system.
+            Honestly, this hasn't made it any clearer to me as to whether
+            self-modifying harnesses will make agents better; it feels like the
+            noise around RLM and Prime Agent has died down since it was
+            announced and I never really saw any clear evidence to say that RLM
+            agents get better results than more classic harnesses.
           </p>
           <p>
-            Self-modification is a small, concrete version of that problem. It
-            lets us test whether agent-directed changes can be isolated, made
-            durable, observed, and constrained without first designing an entire
-            multi-agent control plane.
+            But inference is getting quicker and quicker, and as agents are
+            getting more capabilities for building their own tools, we need to
+            start allowing them to supervise and monitor each other as they're
+            too fast for humans to keep an eye on them. We need to allow agents
+            to adapt during runtime rather than during setup.
           </p>
           <p>
-            So "self-modifying" should mean more than writing a file or
-            remembering a preference. It means the agent can deliberately change
-            the machinery governing future turns and make that change part of
-            its continuing operation. The question is not how much we can let it
-            change. It is whether we can make those changes useful without
-            making them invisible or unbounded.
+            Self-modification might turn out to be mostly hype. Even if that is
+            the case, this experiment made a few things extra clear to me: if an
+            agent can rewrite itself, it needs to do so inside a glass skull.
+            Every editable part should be visible, every change should leave a
+            record, and the authority to watch it or stop it should remain
+            outside the agent.
+          </p>
+          <p>
+            Having said all that, I don't really know what it looks like to have
+            a system of agents where each one has another agent watching its
+            every move and holding a gun to its glass skull in case it steps out
+            of line. Do we need some kind of agent orchestrator? Some kind of
+            agent control plane?
+          </p>
+          <p className="text-xl leading-9">
+            Flue already gives us the ability to build agents like we would
+            build React components. Now how do we compose those agents into a
+            full React app?
           </p>
         </div>
       </article>
