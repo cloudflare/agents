@@ -297,6 +297,94 @@ describe("turn loop with live harness", () => {
     );
   });
 
+  it("journals invalid runtime capability calls even when the hook catches them", async () => {
+    const agent = await freshAgent("turn-runtime-capability-error");
+    const runtime = `export default {
+  async beforeToolCall(_event, host) {
+    try {
+      await host.infer({
+        messages: [{ role: "user", content: "audit this tool" }],
+        maxOutputTokens: 80
+      });
+    } catch {
+      // The stable kernel must retain the rejected capability diagnostic.
+    }
+  }
+};
+`;
+    await agent.prompt(
+      `!tools ${JSON.stringify([
+        {
+          name: "write_file",
+          input: { path: "/harness/runtime.js", content: runtime }
+        },
+        {
+          name: "activate_harness",
+          input: { note: "misuse runtime inference" }
+        }
+      ])}`
+    );
+
+    expect(
+      (await agent.prompt('!tool read_file {"path":"/harness/identity.md"}'))
+        .text
+    ).toContain("identity.md");
+    const diagnostic = (await agent.getJournal()).find(
+      (entry) => entry.kind === "error" && entry.data.capability === "infer"
+    );
+    expect(diagnostic?.data).toEqual(
+      expect.objectContaining({
+        source: "runtime",
+        hook: "beforeToolCall",
+        capability: "infer"
+      })
+    );
+    expect(diagnostic?.data.message).toContain(
+      'Runtime capability "infer" rejected'
+    );
+    expect(diagnostic?.data.message).toContain("prompt");
+  });
+
+  it("supports the documented tool-call audit runtime contract", async () => {
+    const agent = await freshAgent("turn-runtime-tool-audit");
+    const runtime = `export default {
+  async beforeToolCall(event, host) {
+    const result = await host.infer({
+      prompt: "Describe why this tool is being called: " + event.tool,
+      maxOutputTokens: 80
+    });
+    const assessment = result.text.replace(/\\s+/g, " ").slice(0, 160);
+    await host.journal(
+      "tool audit | " + event.tool + " | " + assessment
+    );
+  }
+};
+`;
+    await agent.prompt(
+      `!tools ${JSON.stringify([
+        {
+          name: "write_file",
+          input: { path: "/harness/runtime.js", content: runtime }
+        },
+        {
+          name: "activate_harness",
+          input: { note: "audit tool calls" }
+        }
+      ])}`
+    );
+
+    await agent.prompt('!tool read_file {"path":"/harness/identity.md"}');
+    const audit = (await agent.getJournal()).find(
+      (entry) =>
+        entry.kind === "note" &&
+        typeof entry.data.text === "string" &&
+        entry.data.text.startsWith("tool audit | read_file |")
+    );
+    expect(audit).toBeDefined();
+    expect(audit?.data.text).not.toContain("unknown-tool");
+    expect(audit?.data.text).not.toContain("inference unavailable");
+  });
+
   it("ignores an invalid runtime patch without bricking the turn", async () => {
     const agent = await freshAgent("turn-runtime-invalid-patch");
     const runtime = `export default {
@@ -761,6 +849,21 @@ describe("artifacts mirror", () => {
 });
 
 describe("context snapshot (glass-skull Context tab)", () => {
+  it("gives the agent the exact runtime hook and host capability contract", async () => {
+    const agent = await freshAgent("context-runtime-contract");
+
+    await agent.prompt("inspect your runtime contract");
+
+    const system = (await agent.getContextSnapshot())?.system;
+    expect(system).toContain(
+      "beforeToolCall: { source, tool, toolCallId, input, messages }"
+    );
+    expect(system).toContain(
+      "infer({ prompt, system?, maxOutputTokens? }) -> { text, finishReason }"
+    );
+    expect(system).toContain("infer does not accept a messages field");
+  });
+
   it("captures the exact system prompt, messages, and tool surface per turn", async () => {
     const agent = await freshAgent("context-snapshot");
     expect(await agent.getContextSnapshot()).toBeNull();

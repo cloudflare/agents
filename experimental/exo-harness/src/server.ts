@@ -144,6 +144,27 @@ const RUNTIME_SCHEDULE_SCHEMA = z
 
 const MAX_RUNTIME_INFERENCES_PER_HOOK = 4;
 
+const RUNTIME_API_CONTRACT_BRIEFING = [
+  "Runtime interface contract (exact; do not guess field names):",
+  "- beforeTurn: { source, system, messages, tools, model, maxSteps }",
+  "- beforeStep: { source, stepNumber, instructions, messages, steps }",
+  "- beforeToolCall: { source, tool, toolCallId, input, messages }",
+  "- afterToolCall: { source, tool, toolCallId, input, messages, output }",
+  "- transformOutput: { source, text }",
+  "- afterTurn: { source, status, plus the completed turn result }",
+  "Hook returns:",
+  "- beforeTurn/beforeStep: { system?, appendSystem?, messages?, appendMessages?, model?, activeTools?, toolChoice? }; beforeTurn also accepts maxSteps",
+  '- beforeToolCall: { action: "allow", input? } | { action: "block", reason } | { action: "substitute", output }',
+  "- afterToolCall: { output }; transformOutput: { text }; afterTurn return is ignored",
+  "Host capabilities:",
+  "- infer({ prompt, system?, maxOutputTokens? }) -> { text, finishReason } (maximum four calls per hook); infer does not accept a messages field",
+  "- executeTool(name, input)",
+  "- readMessages() -> UIMessage[]; appendMessages(UIMessage[]) only in beforeTurn/afterTurn, with new message ids",
+  "- journal(text); readJournal(limit?); cancelTask(id)",
+  "- scheduleTask({ instruction, and exactly one of delaySeconds, at, cron }); unavailable during scheduled turns",
+  "runtime.js may import Workspace-backed node:fs or node:fs/promises."
+].join("\n");
+
 type RuntimeTurnPatch = z.infer<typeof RUNTIME_TURN_PATCH_SCHEMA>;
 type ExoPrepareStepContext = Parameters<PrepareStepFunction<ToolSet>>[0];
 
@@ -271,10 +292,15 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
             },
             "ws:kernel": {
               call: async (method, args) => {
-                const value = await this.#callRuntimeCapability(method, args);
-                // SAFETY: every capability result is structured-clone data;
-                // the backend's recursive value type is not exported.
-                return value as never;
+                try {
+                  const value = await this.#callRuntimeCapability(method, args);
+                  // SAFETY: every capability result is structured-clone data;
+                  // the backend's recursive value type is not exported.
+                  return value as never;
+                } catch (error) {
+                  this.#recordRuntimeCapabilityError(method, args, error);
+                  throw error;
+                }
               }
             }
           }
@@ -293,6 +319,26 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
     const workspace = this.ws();
     await workspace.ready();
     return workspace.stub();
+  }
+
+  /** Preserve rejected host calls even when runtime code catches the error. */
+  #recordRuntimeCapabilityError(
+    method: string,
+    args: unknown[],
+    error: unknown
+  ): void {
+    const capabilityToken = args[0];
+    if (typeof capabilityToken !== "string") return;
+    const context = this.#runtimeCapabilities.get(capabilityToken);
+    if (!context) return;
+    const capability = method.slice(0, 100);
+    this.store().appendJournal("error", {
+      source: "runtime",
+      hook: context.hook,
+      capability,
+      message: runtimeCapabilityErrorMessage(capability, error)
+    });
+    this.refreshSyncedState();
   }
 
   /** Dispatch one call from a hook-scoped ws:kernel capability. */
@@ -1259,8 +1305,7 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
       contextLine,
       "- /harness/tools/*.js — your harness tools (ES modules; see tools/echo.js for the format)",
       "- /harness/runtime.js — optional default-export object controlling beforeTurn, beforeStep, beforeToolCall, afterToolCall, transformOutput, and afterTurn",
-      "  Hooks receive (event, host). host supports infer (up to four calls per hook), executeTool, readMessages, appendMessages, journal, readJournal, scheduleTask, and cancelTask; runtime.js can import node:fs for its own files.",
-      "  beforeTurn/beforeStep may return system/messages/appendMessages/model/activeTools/toolChoice; beforeTurn may also set maxSteps. Tool hooks may block, substitute, or replace output; transformOutput returns { text }.",
+      RUNTIME_API_CONTRACT_BRIEFING,
       "",
       "To change yourself: edit those files with write_file, then call",
       "activate_harness to validate and commit a new version. If a broken edit",
@@ -1424,6 +1469,25 @@ export class ExoKernel extends AIChatAgent<ExoHarnessEnv, ExoState> {
     await this.core().ensureGenesis();
     return this.core().rollbackTo(version);
   }
+}
+
+function runtimeCapabilityErrorMessage(
+  capability: string,
+  error: unknown
+): string {
+  const detail =
+    error instanceof z.ZodError
+      ? error.issues
+          .map(
+            (issue) =>
+              `${issue.path.length > 0 ? issue.path.join(".") : "input"}: ${issue.message}`
+          )
+          .join("; ")
+      : publicModelError(error);
+  return `Runtime capability "${capability}" rejected: ${detail}`.slice(
+    0,
+    2000
+  );
 }
 
 export default {

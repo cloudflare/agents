@@ -41,8 +41,13 @@ backend is the planned phase 2.
 
 `/harness/runtime.js` can default-export any of `beforeTurn`, `beforeStep`,
 `beforeToolCall`, `afterToolCall`, `transformOutput`, and `afterTurn`. Hooks
-receive `(event, host)`. Turn hooks can replace or append model messages,
-change instructions, and choose the model or active tools; `beforeTurn` can
+receive `(event, host)`. The tool-call event is exactly
+`{ source, tool, toolCallId, input, messages }`; use `event.tool`, not
+`event.toolName`. `host.infer` accepts
+`{ prompt, system?, maxOutputTokens? }` and returns `{ text, finishReason }`;
+it does not accept a `messages` field. Turn hooks can replace or append model
+messages, change instructions, and choose the model or active tools;
+`beforeTurn` can
 also change the step limit. Tool hooks can block execution, substitute a
 result, or rewrite the
 result seen by the model. `transformOutput` buffers one text block and can
@@ -77,9 +82,10 @@ export default {
 The stable kernel still owns Access identity, tenant boundaries, model
 accounting, append-only history, task limits, capability expiry, versioning,
 and rollback. Each hook can launch at most four side inferences; all still
-count against the rolling per-user model ceiling. Hook failures are journaled
-and ignored so a bad runtime cannot
-brick the agent; invalid runtime modules fail activation and trigger the same
+count against the rolling per-user model ceiling. Hook failures and rejected
+host-capability calls are journaled even when runtime code catches them, then
+ignored so a bad runtime cannot brick the agent; invalid runtime modules fail
+activation and trigger the same
 last-good rollback as broken tools.
 
 When an `ARTIFACTS` binding is configured (`wrangler.jsonc`), genesis and
