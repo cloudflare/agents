@@ -5,10 +5,11 @@ sibling of `../agents/` (which holds Agent-level fixture classes). One file
 per capability, all registered in the shared workers project
 (`../worker.ts` + `../wrangler.jsonc`), all driving real Durable Objects.
 
-- `harness.ts` — the generic tier: a bare `CapabilityHarnessObject` plus
-  `withCapabilityHarness()`, which binds per-test-constructed capabilities to
-  a real `Lifecycle` over real SQLite storage. A new capability gets
-  isolation tests from this with zero new wiring.
+- `harness.ts` — the generic tier's bare `CapabilityHarnessObject`. Its
+  driver, `withCapabilityHarness()` (in `../shared/capability-harness.ts`),
+  binds per-test-constructed capabilities to a real `Lifecycle` over real
+  SQLite storage — a new capability gets isolation tests with zero new
+  wiring.
 - `lifecycle.ts` — fixtures for the Lifecycle core itself:
   `PlainLifecycleObject` (probe capabilities for phases, alarms, context,
   routing, events, WebSockets) and `RetryableStartObject` (startup-failure
@@ -18,12 +19,16 @@ per capability, all registered in the shared workers project
   `ScheduledLifecycleObject` (Scheduler through full Lifecycle + eviction),
   and `backdateScheduleRow()`.
 - `mcp-client.ts` — `PlainMcpClientObject` (manager as an installed
-  capability) and `withMcpHarness()` (per-test managers over shared real
-  storage, simulating hibernation wake-ups).
+  capability); its driver `withMcpHarness()` (in `../shared/mcp-harness.ts`)
+  creates per-test managers over shared real storage, simulating hibernation
+  wake-ups.
 
-Shared drivers live in `../shared/`: `captureDiagnosticsEvents()` observes a
-capability's events on the real `agents:*` channels; `captureConsoleWarnings()`
-asserts warning behavior through its output.
+Files here are part of the shared test worker's module graph, so they must
+stay loadable outside the vitest pool (the React project boots the worker
+under `wrangler dev`): never import `cloudflare:test` from this directory.
+Drivers that need it live in `../shared/` instead — `withCapabilityHarness()`,
+`withMcpHarness()`, `captureDiagnosticsEvents()` (observes a capability's
+events on the real `agents:*` channels), and `captureConsoleWarnings()`.
 
 ## Where the tests live
 

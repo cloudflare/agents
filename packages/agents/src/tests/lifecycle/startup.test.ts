@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 
 import { describe, expect, it } from "vitest";
 import { LifecycleCapability, type LifecycleServices } from "../../lifecycle";
-import { withCapabilityHarness } from "../capabilities/harness";
+import { withCapabilityHarness } from "../shared/capability-harness";
 
 class ServiceProbeCapability extends LifecycleCapability {
   constructor(id = "service-probe") {

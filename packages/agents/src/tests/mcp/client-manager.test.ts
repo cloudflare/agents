@@ -14,7 +14,7 @@ import type { Tool } from "@modelcontextprotocol/client";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
 import { z } from "zod";
-import { withMcpHarness, type McpHarness } from "../capabilities/mcp-client";
+import { withMcpHarness, type McpHarness } from "../shared/mcp-harness";
 
 function createMockStateStorage() {
   const storage = new Map<string, { serverId: string; createdAt: number }>();

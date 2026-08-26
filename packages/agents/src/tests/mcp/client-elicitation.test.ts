@@ -5,7 +5,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { MCPClientConnection } from "../../mcp/client/connection";
-import { type McpHarness, withMcpHarness } from "../capabilities/mcp-client";
+import { type McpHarness, withMcpHarness } from "../shared/mcp-harness";
 
 const elicitRequest: ElicitRequest = {
   method: "elicitation/create",

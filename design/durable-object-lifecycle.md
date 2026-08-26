@@ -87,8 +87,8 @@ Object or Agent context as appropriate.
 ## Testing capabilities
 
 Capabilities are testable at every layer without module mocks or fake
-services. Harness Durable Objects live one-per-capability in `tests/capabilities/` (see
-its AGENTS.md), so every capability follows the same pattern:
+services. Harness Durable Objects live one-per-capability in `tests/capabilities/`, with
+their pool-only drivers in `tests/shared/` (see `tests/capabilities/AGENTS.md`), so every capability follows the same pattern:
 
 1. **Pure domain logic** (timing parsers, selection rules) lives in
    dependency-free modules and is unit tested directly, e.g.

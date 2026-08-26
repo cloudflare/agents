@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../worker";
 import type { MCPClientManager } from "../../mcp/client";
 import type { MCPServerRow } from "../../mcp/client/storage";
-import { type McpHarness, withMcpHarness } from "../capabilities/mcp-client";
+import { type McpHarness, withMcpHarness } from "../shared/mcp-harness";
 
 type RecordedRequest = {
   method: string;
