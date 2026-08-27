@@ -1,0 +1,23 @@
+packages/agents/src/capnweb-agent-client.ts
+  s_b3be5a835f928d::t_8b205597727602 1-455
+packages/agents/src/capnweb-connection.ts
+  s_b3be5a835f928d::t_193a228bbd7119 1-98
+packages/agents/src/react.tsx
+  s_b3be5a835f928d::t_3f9d0409bbe6ac 23,41-53,149-303,326-333,518,521,563-566,788-795,798-821,824-845,847,849-855,857,859-860,862-864,866-907,909-912,915-917,920-925,927-963,986,1034-1044,1082,1084-1088
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a190bf23df900e2112690c52641110ffa5717a8c",
+  "prompts": {},
+  "sessions": {
+    "s_b3be5a835f928d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e60c15-51cf-4a50-b840-9e77737af7be",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
