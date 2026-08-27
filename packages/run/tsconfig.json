@@ -1,0 +1,10 @@
+{
+  "extends": "../agents/agents.tsconfig.json",
+  "compilerOptions": {
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["scripts/**/*.ts", "src/**/*.ts"]
+}

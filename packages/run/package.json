@@ -1,0 +1,40 @@
+{
+  "name": "@cloudflare/run",
+  "version": "0.0.0",
+  "description": "Run JavaScript in isolated Cloudflare Dynamic Workers",
+  "repository": {
+    "directory": "packages/run",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "dynamic-workers",
+    "sandbox",
+    "code-execution"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ]
+}

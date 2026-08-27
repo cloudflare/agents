@@ -1,0 +1,13 @@
+{
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
+  "vars": {
+    "PARENT_ONLY": "parent binding"
+  },
+  "main": "src/index.ts"
+}
