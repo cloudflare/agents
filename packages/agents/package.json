@@ -117,6 +117,11 @@
       "import": "./dist/client.js",
       "require": "./dist/client.js"
     },
+    "./fibers": {
+      "types": "./dist/fibers/index.d.ts",
+      "import": "./dist/fibers/index.js",
+      "require": "./dist/fibers/index.js"
+    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",
