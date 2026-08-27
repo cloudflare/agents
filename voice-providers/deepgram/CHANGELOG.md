@@ -1,4 +1,4 @@
-# @cloudflare/voice-telnyx
+# @cloudflare/voice-deepgram
 
 ## 0.1.0
 
@@ -14,9 +14,3 @@
   - Add stable typed per-turn timing summaries for speech, text, terminal outcomes, model streaming, reasoning exposed by the model stream, and overlapping TTS work through `VoiceClient` and the React hooks.
   - Keep the existing four-field metrics wire shape compatible while making no-audio and streamed TTS accounting consistent.
   - Update the bundled voice providers to propagate lifecycle failures and log errors consistently.
-
-## 0.0.2
-
-### Patch Changes
-
-- [#1461](https://github.com/cloudflare/agents/pull/1461) [`d44f59a`](https://github.com/cloudflare/agents/commit/d44f59adac2d7d97602d60a255bc731e794d3656) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Release the Telnyx voice provider package with STT, TTS, and browser telephony support for Cloudflare Agents voice pipelines.

@@ -1,5 +1,23 @@
 # @cloudflare/think
 
+## 0.17.0
+
+### Minor Changes
+
+- [#2071](https://github.com/cloudflare/agents/pull/2071) [`9620b58`](https://github.com/cloudflare/agents/commit/9620b58fcc78035e1dd9a65a647455f83328bc28) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Make durable chat recovery unconditional for `AIChatAgent` and `Think`.
+
+  Every chat turn now runs in a recovery fiber, including WebSocket, programmatic, retry, and continuation paths. `chatRecovery` accepts `true` or a configuration object; `false` is no longer supported. Previously compiled JavaScript that still supplies `false` safely receives the default recovery configuration.
+
+  To keep durable bookkeeping while preventing automatic inference after an interruption, return `{ continue: false }` from `onChatRecovery()`. Use durable cancellation, side-effect, or spend state in that hook and tune `chatRecovery` budgets when retries must be bounded.
+
+### Patch Changes
+
+- [#2059](https://github.com/cloudflare/agents/pull/2059) [`d5973c0`](https://github.com/cloudflare/agents/commit/d5973c0bb351fd77240550e27a4be4eeb2aa74d5) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Preserve orphaned durable execution outcomes as framework-authored notes, then project them to user context for inference so provider transcript validation cannot reject their arbitrary position. Existing outcome notes receive the same projection without rewriting stored history.
+
+- [#1897](https://github.com/cloudflare/agents/pull/1897) [`29b0107`](https://github.com/cloudflare/agents/commit/29b01079e4cf1ae82918b019f97a247317f49912) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `Scheduler`, a reusable Lifecycle capability for persistent delayed, dated, cron, and interval callbacks, under `agents/schedules`. Scheduled callbacks are registered on the Scheduler itself (`new Scheduler({ callbacks: { ... } })`), and `set()` / `every()` type both the callback name and the payload against that registration, so the typed scheduling surface and the runtime dispatch target are the same object. `LifecycleCapability` supplies every capability with storage, readiness, startup state, alarm coordination, a host invocation boundary, best-effort events, and generic capability routing — Scheduler consumes only that standard surface plus its callbacks and policy options, so any host that installs it configures nothing else. Lifecycle owns the physical Durable Object alarm and routes matching capability messages between Agent facets through one internal transport aperture, preserving existing root-owned facet schedule rows without Scheduler-specific Agent RPC methods or an Agent adapter. `Agent` uses the same Scheduler behind its existing APIs — name-based `this.schedule(60, "methodName")` keeps dispatching to Agent methods through a composition-root resolver — and preserves callback context, observability, retries, OOM handling, and alarm behavior. MCP now receives storage from Lifecycle when installed. Explicit destruction disposes live capability resources once, then clears shared Durable Object storage with `deleteAll()`. Think workflow notifications now contribute their wake time through Lifecycle instead of writing the physical alarm directly. The previous `agents/schedule` parser entry point remains as a deprecated compatibility alias. Agent exposes the composition root as experimental `this.lifecycle` and `this.scheduler` properties. The `agents/lifecycle` entry point and the capability surfaces built on it (`Scheduler`, installing `MCPClientManager` directly as a capability) are experimental and may change between releases; Agent's established APIs are unaffected.
+
+  Compatibility notes: `MCPClientManagerOptions.storage` is removed — the manager receives storage from the Lifecycle it is installed on, so standalone construction with an explicit `DurableObjectStorage` is no longer supported. Scheduled callbacks now receive the documented parsed `Schedule` object as their second argument (previously the raw storage row, whose `payload` was an unparsed JSON string). The internal `_cf_*ForFacet` schedule RPC methods are replaced by the generic `_cf_routeLifecycle` capability aperture; facets always run the same deployed script, so no coordination is required.
+
 ## 0.16.0
 
 ### Minor Changes

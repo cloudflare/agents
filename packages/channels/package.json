@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/channels",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Transport-neutral messaging channels for Cloudflare Agents",
   "repository": {
     "directory": "packages/channels",
