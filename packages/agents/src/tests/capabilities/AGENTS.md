@@ -27,8 +27,9 @@ Files here are part of the shared test worker's module graph, so they must
 stay loadable outside the vitest pool (the React project boots the worker
 under `wrangler dev`): never import `cloudflare:test` from this directory.
 Drivers that need it live in `../shared/` instead — `withCapabilityHarness()`,
-`withMcpHarness()`, `captureDiagnosticsEvents()` (observes a capability's
-events on the real `agents:*` channels), and `captureConsoleWarnings()`.
+`withMcpHarness()`, and `captureDiagnosticsEvents()` (observes a capability's
+events on the real `agents:*` channels). `console-capture.ts` lives here
+because it is worker-safe and fixtures import it.
 
 ## Where the tests live
 

@@ -55,23 +55,6 @@ Example outputs:
 `;
 }
 
-let didWarnAboutUnstableGetSchedulePrompt = false;
-
-/**
- * @deprecated this has been renamed to getSchedulePrompt, and unstable_getSchedulePrompt will be removed in the next major version
- * @param event - The event to get the schedule prompt for
- * @returns The schedule prompt
- */
-export function unstable_getSchedulePrompt(event: { date: Date }) {
-  if (!didWarnAboutUnstableGetSchedulePrompt) {
-    didWarnAboutUnstableGetSchedulePrompt = true;
-    console.warn(
-      "unstable_getSchedulePrompt is deprecated, use getSchedulePrompt instead. unstable_getSchedulePrompt will be removed in the next major version."
-    );
-  }
-  return getSchedulePrompt(event);
-}
-
 /**
  * The schema for parsing natural language scheduling requests.
  *
@@ -132,9 +115,3 @@ export const scheduleSchema = z.object({
  * The type for the schedule prompt
  */
 export type ParsedSchedule = z.infer<typeof scheduleSchema>;
-
-/**
- * @deprecated this has been renamed to scheduleSchema, and unstable_scheduleSchema will be removed in the next major version
- * @returns The schedule schema
- */
-export const unstable_scheduleSchema = scheduleSchema;

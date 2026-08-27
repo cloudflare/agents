@@ -252,8 +252,9 @@ export class Scheduler<
    * hung-interval, and error policy. Registering `callbacks` types
    * {@link set} and {@link every} against the map — names and
    * payloads are checked where the handlers are declared and where they are
-   * scheduled. Names outside the map fall back to methods on the installed
-   * host, which is how `Agent`'s name-based scheduling API is implemented.
+   * scheduled. Names outside the map are rejected unless a composition-root
+   * resolver supplies them — the internal aperture behind `Agent`'s
+   * name-based scheduling API.
    */
   constructor(options: SchedulerOptions<Handlers> = {}) {
     super("scheduler");
@@ -458,7 +459,8 @@ export class Scheduler<
     if (this.lifecycle.routes.source) {
       throw new Error(
         "getSchedule() is synchronous and cannot read routed schedule storage. " +
-          "Use await scheduler.get(id) instead."
+          "Use await getScheduleById(id) on Agent, or await scheduler.get(id) " +
+          "on a standalone Scheduler."
       );
     }
     return this.#getForOwner(null, id);
@@ -475,21 +477,22 @@ export class Scheduler<
     if (this.lifecycle.routes.source) {
       throw new Error(
         "getSchedules() is synchronous and cannot read routed schedule storage. " +
-          "Use await scheduler.list(criteria) instead."
+          "Use await listSchedules(criteria) on Agent, or await " +
+          "scheduler.list(criteria) on a standalone Scheduler."
       );
     }
     return this.#listForOwner(null, criteria);
   }
 
   /** @internal Remove rows owned by one routed Lifecycle subtree. */
-  cleanupRoutePrefix(prefix: string): void {
+  __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): void {
     this.#cancelOwners(
       (owner) => owner.key === prefix || owner.key.startsWith(`${prefix}/`)
     );
   }
 
   /** @internal Apply Agent's outer alarm memory-limit policy to Scheduler rows. */
-  handleAlarmMemoryLimit(options: {
+  __DO_NOT_USE_WILL_BREAK__handleAlarmMemoryLimit(options: {
     readonly callbacks: ReadonlyArray<string>;
     readonly sealed: boolean;
     readonly nextTime?: number;
@@ -1039,8 +1042,8 @@ export class Scheduler<
 
   /**
    * Warn when many stale one-shot rows share the same callback — this
-   * usually means schedule() was called repeatedly (e.g. in onStart)
-   * without idempotent:true and rows accumulated across restarts.
+   * usually means one-shot schedules were created repeatedly (e.g. in
+   * onStart) without idempotent:true and rows accumulated across restarts.
    */
   #warnStaleOneShots(dueRows: ReadonlyArray<ScheduleStorageRow>): void {
     const DUPLICATE_SCHEDULE_THRESHOLD = 10;
@@ -1058,9 +1061,9 @@ export class Scheduler<
       try {
         console.warn(
           `Processing ${count} stale "${callback}" schedules in a single alarm cycle. ` +
-            `This usually means schedule() is being called repeatedly without ` +
-            `the idempotent option. Consider using scheduleEvery() for recurring ` +
-            `tasks or passing { idempotent: true } to schedule().`
+            `This usually means one-shot schedules are created repeatedly without ` +
+            `the idempotent option. Consider an interval schedule for recurring ` +
+            `tasks, or pass { idempotent: true } when creating one-shot schedules.`
         );
         this.#emit("schedule:duplicate_warning", {
           callback,

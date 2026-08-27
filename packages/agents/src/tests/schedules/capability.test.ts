@@ -14,7 +14,8 @@ import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
  * Scheduler. Tests drive real Lifecycle startup, real storage, real platform
  * alarms, and the real diagnostics event sink — no fakes. Alarm arbitration
  * across multiple capabilities and Agent's full surface are covered by
- * lifecycle.test.ts and ../schedule.test.ts respectively.
+ * ../lifecycle/alarm-arbitration.test.ts and ../schedule.test.ts
+ * respectively.
  */
 
 function captureScheduleEvents(name: string) {

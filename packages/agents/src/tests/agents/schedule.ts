@@ -4,7 +4,7 @@ import {
   getCurrentAgent,
   type Schedule
 } from "../../index.ts";
-import { captureConsoleWarnings } from "../shared/console-capture";
+import { captureConsoleWarnings } from "../capabilities/console-capture";
 
 /**
  * Test agent that verifies this.name is accessible during scheduled callback

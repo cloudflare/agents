@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { getCurrentAgent, routeAgentRequest } from "agents";
-import { Lifecycle } from "agents/lifecycle";
+import { routeAgentRequest } from "agents";
+import { getCurrentAgent, Lifecycle } from "agents/lifecycle";
 import { Scheduler, type Schedule } from "agents/schedules";
 
 type ReminderPayload = {

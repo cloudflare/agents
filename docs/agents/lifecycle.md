@@ -178,6 +178,11 @@ Lifecycle selects the earliest contribution from every capability and the
 host. It runs all capability `onAlarm()` hooks, then host `onAlarm()`, then
 recalculates the physical alarm. Capabilities do not depend on Scheduler or on
 each other merely to receive alarm wakes.
+A contribution can be `{ time, exclusive: true }` when its wake time must
+replace ordinary wake candidates, such as a pending teardown. This changes only
+which physical alarm is armed; when that alarm fires, normal capability and host
+hook order still applies. Hosts can implement `getNextAlarm()` for alarm work
+that has not yet been extracted into a capability.
 
 ## Capability events
 
@@ -224,11 +229,6 @@ transports and listeners. It does not delete capability tables. An explicit
 Lifecycle Object destruction disposes live resources once, then calls
 `storage.deleteAll()` once for all shared durable state. Eviction calls neither.
 
-A contribution can be `{ time, exclusive: true }` when its wake time must
-replace ordinary wake candidates, such as a pending teardown. This changes only
-which physical alarm is armed; when that alarm fires, normal capability and host
-hook order still applies. Hosts can implement `getNextAlarm()` for alarm work
-that has not yet been extracted into a capability.
 
 ## Lifecycle Object context
 

@@ -1,4 +1,5 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { Lifecycle, type DurableObjectCapability } from "../../lifecycle";
 
 /** What a capability-harness test body receives. */

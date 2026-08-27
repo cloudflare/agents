@@ -72,6 +72,5 @@ scheduleSchema.parse({
 getSchedulePrompt({ date: new Date() }) satisfies string;
 legacyGetSchedulePrompt({ date: new Date() }) satisfies string;
 
-type _LegacyParserCompatibility = LegacyParsedSchedule extends ParsedSchedule
-  ? true
-  : false;
+// Legacy `agents/schedule` Schedule stays assignable to ParsedSchedule.
+null as unknown as LegacyParsedSchedule satisfies ParsedSchedule;

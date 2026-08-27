@@ -1478,8 +1478,8 @@ function parseRetryOptions(
 
 /**
  * Resolve per-task retry options against class-level defaults and call
- * `tryN`. This is the shared retry-execution path used by both queue
- * flush and schedule alarm handlers.
+ * `tryN`. This is the retry-execution path for queue flush; Scheduler owns
+ * its own copy for schedule callbacks.
  */
 function resolveRetryConfig(
   taskRetry: RetryOptions | undefined,
@@ -1562,7 +1562,11 @@ export class Agent<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
-  /** Runtime lifecycle and reusable durable capabilities for this Agent. */
+  /**
+   * Runtime lifecycle and reusable durable capabilities for this Agent.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
   readonly lifecycle = Lifecycle.install<Env, Props>(this);
 
   /** Run user initialization after lifecycle components have started. */
@@ -1710,7 +1714,13 @@ export class Agent<
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  /** Durable scheduling capability installed into this Agent's Lifecycle. */
+  /**
+   * Durable scheduling capability installed into this Agent's Lifecycle.
+   *
+   * @experimental The API surface may change before stabilizing. Agent's
+   * schedule()/scheduleEvery()/getScheduleById()/listSchedules()/
+   * cancelSchedule() methods are the stable surface.
+   */
   readonly scheduler: Scheduler;
 
   readonly mcp: MCPClientManager;
@@ -3944,7 +3954,8 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     const prefix = agentPathKey(ownerPath);
-    if (prefix) this.scheduler.cleanupRoutePrefix(prefix);
+    if (prefix)
+      this.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix);
     this._deleteFacetRunRowsForPrefix(ownerPath);
     await this._rearmAlarm();
   }
@@ -4116,7 +4127,6 @@ export class Agent<
    * Unlike the deprecated synchronous {@link getSchedule}, this works inside
    * sub-agents by delegating to the top-level parent that owns the alarm.
    *
-   * @template T Type of the payload data
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
    */
@@ -4142,7 +4152,6 @@ export class Agent<
    * Unlike the deprecated synchronous {@link getSchedules}, this works inside
    * sub-agents by delegating to the top-level parent that owns the alarm.
    *
-   * @template T Type of the payload data
    * @param criteria Criteria to filter schedules
    * @returns Array of matching Schedule objects
    */
@@ -5834,7 +5843,7 @@ export class Agent<
     if (sealed) {
       // Surgical purge: remove ONLY the looping rows (the recovery callbacks
       // and the exact row that was executing) so unrelated schedules survive.
-      this.scheduler.handleAlarmMemoryLimit({
+      this.scheduler.__DO_NOT_USE_WILL_BREAK__handleAlarmMemoryLimit({
         callbacks: recoveryCallbacks,
         sealed: true
       });
@@ -5854,7 +5863,7 @@ export class Agent<
       // A genuinely transient spike can clear in the meantime.
       const backoffSeconds = Math.min(300, 30 * strikes);
       const nextTime = Math.floor(Date.now() / 1000) + backoffSeconds;
-      this.scheduler.handleAlarmMemoryLimit({
+      this.scheduler.__DO_NOT_USE_WILL_BREAK__handleAlarmMemoryLimit({
         callbacks: recoveryCallbacks,
         sealed: false,
         nextTime

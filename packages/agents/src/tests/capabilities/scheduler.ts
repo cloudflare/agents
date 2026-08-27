@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
 import { setLifecycleEventSink } from "../../lifecycle/durable-object-lifecycle";
 import { Scheduler, type Schedule } from "../../schedules";
-import { captureConsoleWarnings } from "../shared/console-capture";
+import { captureConsoleWarnings } from "./console-capture";
 
 /** One recorded scheduled-callback invocation on a harness object. */
 export type SchedulerInvocation = {

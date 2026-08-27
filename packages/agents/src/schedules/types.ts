@@ -50,6 +50,8 @@ export type Schedule<T = string> = {
 /**
  * Constraint for a Scheduler's registered callback map: named handlers
  * receiving the parsed payload and the schedule that fired.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export type SchedulerHandlers = Record<
   string,
@@ -65,13 +67,19 @@ export type SchedulerHandlers = Record<
  * must be registered or supplied by a composition-root resolver (the
  * aperture behind Agent's name-based scheduling API); a bare Scheduler
  * rejects it otherwise.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export type SchedulerCallbacks = Record<
   string,
   (payload: unknown, schedule: Schedule<unknown>) => unknown
 >;
 
-/** The payload type a registered scheduler callback accepts. */
+/**
+ * The payload type a registered scheduler callback accepts.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
 export type SchedulerPayload<Handler> = Handler extends (
   payload: infer Payload,
   ...rest: never[]
@@ -108,7 +116,6 @@ export type ScheduleStorageRow = {
   delayInSeconds?: number;
   cron?: string;
   intervalSeconds?: number;
-  retry?: RetryOptions;
   running?: number;
   execution_started_at?: number | null;
   retry_options?: string | null;

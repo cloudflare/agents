@@ -9,7 +9,7 @@ lands.
 | ---------------------------- | --------- | --------------------------------------------------------------------------- |
 | [`lifecycle`](./lifecycle)   | Available | A plain `DurableObject` composed with `Lifecycle` and a reusable capability |
 | [`schedules`](./schedules)   | This PR   | `Scheduler` installed as a reusable lifecycle capability                    |
-| [`mcp-client`](./mcp-client) | This PR   | `MCPClientManager` installed as a reusable lifecycle capability             |
+| [`mcp-client`](./mcp-client) | Available | `MCPClientManager` installed as a reusable lifecycle capability             |
 
 Each example is an independent workspace package and should stay focused on one
 capability. Once the APIs are stable, move the examples into the main examples
