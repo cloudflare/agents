@@ -44,6 +44,10 @@
       {
         "name": "FacetRecoveryChild",
         "class_name": "FacetRecoveryChild"
+      },
+      {
+        "name": "FiberKillTestAgent",
+        "class_name": "FiberKillTestAgent"
       }
     ]
   },
@@ -63,6 +67,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["PoisonBackoffAgent", "FacetRecoveryParent"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["FiberKillTestAgent"]
     }
   ]
 }

@@ -7,6 +7,11 @@
  */
 import { Agent, callable, routeAgentRequest } from "agents";
 import type {
+  FiberHandlers,
+  FiberInterruption,
+  FiberStep
+} from "agents/fibers";
+import type {
   FiberInspection,
   FiberRecoveryContext as RunFiberRecoveryContext,
   FiberRecoveryResult,
@@ -17,6 +22,7 @@ import type { Observability } from "agents/observability";
 
 type Env = {
   RunFiberTestAgent: DurableObjectNamespace<RunFiberTestAgent>;
+  FiberKillTestAgent: DurableObjectNamespace<FiberKillTestAgent>;
   SubAgentFiberParent: DurableObjectNamespace<SubAgentFiberParent>;
   SubAgentFiberChild: DurableObjectNamespace<SubAgentFiberChild>;
   PoisonRowAgent: DurableObjectNamespace<PoisonRowAgent>;
@@ -775,6 +781,136 @@ export class FacetRecoveryParent extends Agent<Record<string, unknown>> {
   }> {
     const child = await this.subAgent(FacetRecoveryChild, childName);
     return child.getScanStatus();
+  }
+}
+
+// ── FiberKillTestAgent (the Fibers capability under real SIGKILL) ─────
+
+/**
+ * Drives the `fibers` capability through a real process kill: journaled step
+ * executions are recorded in the host's own SQLite (instance memory dies
+ * with the process), so the restart can prove which steps re-ran and which
+ * replayed from the journal. Only Fibers is exercised — no legacy fiber
+ * APIs.
+ */
+export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  override readonly fiberDefinitions = {
+    slowSteps: async (input: { totalSteps: number }, step: FiberStep) => {
+      for (let i = 0; i < input.totalSteps; i++) {
+        await step.do(`step:${i}`, async () => {
+          await fiberSleep(1000);
+          this.sql`
+            INSERT INTO e2e_fiber_step_executions (step_index, executed_at)
+            VALUES (${i}, ${Date.now()})
+          `;
+          return i;
+        });
+      }
+      return { totalSteps: input.totalSteps };
+    },
+
+    guardedSteps: {
+      run: async (input: { totalSteps: number }, step: FiberStep) => {
+        for (let i = 0; i < input.totalSteps; i++) {
+          await step.do(`step:${i}`, async ({ checkpoint }) => {
+            checkpoint({ lastStarted: i });
+            await fiberSleep(1000);
+            return i;
+          });
+        }
+        return "ran-to-completion";
+      },
+      recover: async (
+        interruption: FiberInterruption<{ totalSteps: number }>
+      ) => {
+        this.sql`
+          INSERT INTO e2e_fiber_recoveries
+            (run_id, interrupted_step, checkpoint_json, recovered_at)
+          VALUES
+            (${interruption.runId},
+             ${interruption.interruptedStep?.name ?? null},
+             ${JSON.stringify(interruption.interruptedStep?.checkpoint ?? null)},
+             ${Date.now()})
+        `;
+        return { action: "complete" as const, result: "recovered-e2e" };
+      }
+    }
+  } satisfies FiberHandlers;
+
+  onStart(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS e2e_fiber_step_executions (
+        step_index INTEGER NOT NULL,
+        executed_at INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS e2e_fiber_recoveries (
+        run_id TEXT NOT NULL,
+        interrupted_step TEXT,
+        checkpoint_json TEXT,
+        recovered_at INTEGER NOT NULL
+      )
+    `;
+  }
+
+  @callable()
+  async startSlowStepsRun(totalSteps: number): Promise<string> {
+    const receipt = await this.fibers.run(
+      "slowSteps",
+      { totalSteps },
+      { runId: "e2e-slow-steps" }
+    );
+    return receipt.runId;
+  }
+
+  @callable()
+  async startGuardedRun(totalSteps: number): Promise<string> {
+    const receipt = await this.fibers.run(
+      "guardedSteps",
+      { totalSteps },
+      { runId: "e2e-guarded" }
+    );
+    return receipt.runId;
+  }
+
+  @callable()
+  async getRunState(
+    runId: string
+  ): Promise<{ state: string; result: unknown } | null> {
+    const snapshot = await this.fibers.get(runId);
+    if (!snapshot) return null;
+    return {
+      state: snapshot.state,
+      result: snapshot.state === "completed" ? snapshot.result : null
+    };
+  }
+
+  @callable()
+  getStepExecutions(): Array<{ step_index: number }> {
+    return this.sql<{ step_index: number }>`
+      SELECT step_index FROM e2e_fiber_step_executions
+      ORDER BY executed_at ASC, step_index ASC
+    `;
+  }
+
+  @callable()
+  getRecoveries(): Array<{
+    run_id: string;
+    interrupted_step: string | null;
+    checkpoint_json: string | null;
+  }> {
+    return this.sql<{
+      run_id: string;
+      interrupted_step: string | null;
+      checkpoint_json: string | null;
+    }>`
+      SELECT run_id, interrupted_step, checkpoint_json
+      FROM e2e_fiber_recoveries
+      ORDER BY recovered_at ASC
+    `;
   }
 }
 

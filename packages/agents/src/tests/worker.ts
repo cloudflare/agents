@@ -29,11 +29,13 @@ import type {
 } from "./capabilities/scheduler.ts";
 export {
   FiberBatchHarnessObject,
-  FiberHarnessObject
+  FiberHarnessObject,
+  FiberSchedulerCoexistObject
 } from "./capabilities/fibers.ts";
 import type {
   FiberBatchHarnessObject,
-  FiberHarnessObject
+  FiberHarnessObject,
+  FiberSchedulerCoexistObject
 } from "./capabilities/fibers.ts";
 export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
@@ -194,6 +196,7 @@ export type Env = {
   SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
   FiberHarnessObject: DurableObjectNamespace<FiberHarnessObject>;
   FiberBatchHarnessObject: DurableObjectNamespace<FiberBatchHarnessObject>;
+  FiberSchedulerCoexistObject: DurableObjectNamespace<FiberSchedulerCoexistObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;

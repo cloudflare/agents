@@ -9,11 +9,13 @@ import {
 import { Scheduler } from "../../schedules";
 
 /**
- * Minimal real host for capability-level Fibers tests: a Durable Object with
- * the Fibers capability (plus a Scheduler, to prove alarm coexistence)
- * installed through a real Lifecycle, driven by real storage and real
- * platform alarms. This is the platform-dispatch half of the capability
- * testing pattern (see `capability-harness.ts` for the isolation half).
+ * Minimal real host for capability-level Fibers tests: a Durable Object
+ * whose ONLY capability is Fibers, installed through a real Lifecycle and
+ * driven by real storage and real platform alarms — proving the capability
+ * stands alone. Coexistence with other capabilities on the shared alarm is
+ * proven separately by {@link FiberSchedulerCoexistObject}. This is the
+ * platform-dispatch half of the capability testing pattern (see
+ * `capability-harness.ts` for the isolation half).
  *
  * Instance counters record which step callbacks actually executed, so tests
  * can distinguish real execution from journal hits during replay.
@@ -225,6 +227,36 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
       this.runErrors.push(
         error instanceof Error ? error.message : String(error)
       );
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this).use(this.fibers);
+}
+
+/**
+ * Fibers and the Scheduler installed together on one Lifecycle: proves two
+ * independent capabilities arbitrate the single physical Durable Object
+ * alarm correctly — the sooner deadline wins, and settling one capability's
+ * work re-arms for the other instead of deleting its wake-up.
+ */
+export class FiberSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
+  /** Step callbacks that actually ran. */
+  readonly stepRuns: string[] = [];
+
+  readonly fibers = new Fibers({
+    definitions: {
+      sleeper: async (input: { ms: number }, step: FiberStep) => {
+        await step.do("before", () => {
+          this.stepRuns.push("sleeper:before");
+          return "before";
+        });
+        await step.sleep("nap", input.ms);
+        await step.do("after", () => {
+          this.stepRuns.push("sleeper:after");
+          return "after";
+        });
+        return "done";
+      }
     }
   });
 

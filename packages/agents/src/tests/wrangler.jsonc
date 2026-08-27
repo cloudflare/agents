@@ -45,6 +45,10 @@
         "name": "FiberBatchHarnessObject"
       },
       {
+        "class_name": "FiberSchedulerCoexistObject",
+        "name": "FiberSchedulerCoexistObject"
+      },
+      {
         "class_name": "PlainMcpClientObject",
         "name": "PlainMcpClientObject"
       },
@@ -383,6 +387,7 @@
         "SchedulerStartupWarnObject",
         "FiberHarnessObject",
         "FiberBatchHarnessObject",
+        "FiberSchedulerCoexistObject",
         "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",

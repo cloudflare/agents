@@ -6,7 +6,8 @@ import {
   seedFiberRun,
   seedFiberStep,
   type FiberBatchHarnessObject,
-  type FiberHarnessObject
+  type FiberHarnessObject,
+  type FiberSchedulerCoexistObject
 } from "../capabilities/fibers";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 import type { Fibers, FiberRunSnapshot, FiberValue } from "../../fibers";
@@ -507,10 +508,10 @@ describe("Fibers capability", () => {
   });
 
   it("coexists with the Scheduler on the shared alarm", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.FiberSchedulerCoexistObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: FiberSchedulerCoexistObject, state) => {
         const schedule = await instance.scheduler.set(120, "remind", "tick");
         expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
 
