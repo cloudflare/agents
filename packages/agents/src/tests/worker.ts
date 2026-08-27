@@ -5,6 +5,31 @@ import {
   routeSubAgentRequest
 } from "../index.ts";
 
+// Capability test fixtures (harness Durable Objects); see
+// tests/capabilities/AGENTS.md for the capability testing pattern.
+export { CapabilityHarnessObject } from "./capabilities/harness.ts";
+import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
+export {
+  PlainLifecycleObject,
+  RetryableStartObject
+} from "./capabilities/lifecycle.ts";
+import type {
+  PlainLifecycleObject,
+  RetryableStartObject
+} from "./capabilities/lifecycle.ts";
+export {
+  ScheduledLifecycleObject,
+  SchedulerHarnessObject,
+  SchedulerStartupWarnObject
+} from "./capabilities/scheduler.ts";
+import type {
+  ScheduledLifecycleObject,
+  SchedulerHarnessObject,
+  SchedulerStartupWarnObject
+} from "./capabilities/scheduler.ts";
+export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
+import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
+
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
 export {
@@ -151,6 +176,13 @@ import type {
 
 export type Env = {
   LOADER: WorkerLoader;
+  CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
+  PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
+  RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
+  ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
+  SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
+  SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
+  PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;

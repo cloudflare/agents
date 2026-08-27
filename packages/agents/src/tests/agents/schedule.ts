@@ -1,4 +1,10 @@
-import { Agent, callable, type Schedule } from "../../index.ts";
+import {
+  Agent,
+  callable,
+  getCurrentAgent,
+  type Schedule
+} from "../../index.ts";
+import { captureConsoleWarnings } from "../capabilities/console-capture";
 
 /**
  * Test agent that verifies this.name is accessible during scheduled callback
@@ -11,9 +17,26 @@ export class TestAlarmInitAgent extends Agent {
   _capturedName: string | null = null;
   _onStartCalled = false;
   _callbackError: string | null = null;
+  _scheduleContextEvents: string[] = [];
+
+  override observability = {
+    emit: (event: { type: string }) => {
+      if (event.type !== "schedule:execute") return;
+      const current = getCurrentAgent().agent;
+      this._scheduleContextEvents.push(
+        current === undefined ? "capability:no-context" : "capability:context"
+      );
+    }
+  };
 
   async onStart() {
     this._onStartCalled = true;
+  }
+
+  onAlarm(): void {
+    this._scheduleContextEvents.push(
+      getCurrentAgent().agent === this ? "host:context" : "host:missing-context"
+    );
   }
 
   // Callback that reads this.name — would throw before the fix if
@@ -28,6 +51,20 @@ export class TestAlarmInitAgent extends Agent {
 
   async scheduleNameCheck(delaySeconds: number): Promise<string> {
     const schedule = await this.schedule(delaySeconds, "nameCheckCallback");
+    return schedule.id;
+  }
+
+  contextCheckCallback(): void {
+    this._scheduleContextEvents.push(
+      getCurrentAgent().agent === this
+        ? "callback:context"
+        : "callback:missing-context"
+    );
+  }
+
+  async scheduleContextCheck(delaySeconds: number): Promise<string> {
+    this._scheduleContextEvents = [];
+    const schedule = await this.schedule(delaySeconds, "contextCheckCallback");
     return schedule.id;
   }
 
@@ -56,8 +93,20 @@ export class TestDestroyScheduleAgent extends Agent<
     return this.state.status;
   }
 
+  async makeSelfDestructingAlarmDue(): Promise<void> {
+    const past = Math.floor(Date.now() / 1000) - 1;
+    this.sql`
+      UPDATE cf_agents_schedules SET time = ${past} WHERE callback = 'destroy'
+    `;
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+  }
+
   getStatus() {
     return this.state.status;
+  }
+
+  onAlarm(): void {
+    throw new Error("onAlarm must not run after a scheduled destroy");
   }
 }
 
@@ -65,19 +114,23 @@ export class TestDestroyScheduleAgent extends Agent<
  * Agent that calls schedule() in onStart() without idempotent — should warn.
  */
 export class TestOnStartScheduleWarnAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback");
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback");
+    });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`Scheduling "${cb}"`)
+    );
   }
 
   @callable()
@@ -93,21 +146,25 @@ export class TestOnStartScheduleWarnAgent extends Agent {
  * Agent that calls schedule() in onStart() WITH idempotent — should not warn.
  */
 export class TestOnStartScheduleNoWarnAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback", undefined, {
-      idempotent: true
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback", undefined, {
+        idempotent: true
+      });
     });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`Scheduling "${cb}"`)
+    );
   }
 
   @callable()
@@ -124,21 +181,25 @@ export class TestOnStartScheduleNoWarnAgent extends Agent {
  * NOT warn because the user explicitly opted out.
  */
 export class TestOnStartScheduleExplicitFalseAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback", undefined, {
-      idempotent: false
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback", undefined, {
+        idempotent: false
+      });
     });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`Scheduling "${cb}"`)
+    );
   }
 }
 

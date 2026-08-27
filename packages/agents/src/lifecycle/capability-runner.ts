@@ -1,4 +1,33 @@
+import { lifecycleCapabilityId } from "./capability";
+import type { LifecycleRouteContext } from "./capability";
+
 type MaybePromise<T> = T | Promise<T>;
+
+/** One capability's requested physical alarm. */
+export type AlarmContribution =
+  | number
+  | {
+      /** Epoch time in milliseconds. */
+      readonly time: number;
+      /** Ignore ordinary wake-time candidates while this request exists. */
+      readonly exclusive: true;
+    }
+  | null;
+
+/** One best-effort event published by a Lifecycle capability. */
+export type LifecycleEvent = {
+  /** Stable capability or subsystem name. */
+  readonly source: string;
+  /** Stable event name within that source. */
+  readonly type: string;
+  /** Event-specific data. */
+  readonly payload: unknown;
+};
+
+/** Terminal sink for best-effort Lifecycle events. */
+export type LifecycleEventSink = (
+  event: LifecycleEvent
+) => void | Promise<void>;
 
 /** Context supplied when durable capabilities start. */
 export type CapabilityStartContext<Props extends object = object> = {
@@ -15,10 +44,12 @@ export type CapabilityRequestContext = {
 /**
  * A capability installed into a Durable Object lifecycle.
  *
- * Dependencies such as storage, bindings, clocks, and protocol adapters should
- * be supplied explicitly when constructing the capability. Hook parameters
- * carry only data specific to the current phase; capability hooks do not run in
- * the host's ambient `getCurrentAgent()` context.
+ * Capabilities extending `LifecycleCapability` receive the standard storage,
+ * readiness, alarm, event, and routing surface. Host-specific bindings and
+ * protocol adapters remain explicit constructor dependencies. Hook parameters
+ * carry only phase data; hooks do not run in ambient host context.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export interface DurableObjectCapability<Props extends object = object> {
   /** Initialize or recover the capability before the host handles work. */
@@ -35,6 +66,15 @@ export interface DurableObjectCapability<Props extends object = object> {
 
   /** Run work assigned to the capability when the host's alarm fires. */
   onAlarm?(): MaybePromise<void>;
+
+  /** Handle one message routed to this capability identity. */
+  onRoute?(context: LifecycleRouteContext): MaybePromise<unknown>;
+
+  /** Return this capability's next requested physical alarm. */
+  getNextAlarm?(): MaybePromise<AlarmContribution>;
+
+  /** Release live or in-memory resources during explicit host destruction. */
+  dispose?(): MaybePromise<void>;
 }
 
 /**
@@ -107,6 +147,45 @@ export class CapabilityRunner<Props extends object = object> {
       if (response !== undefined) return response;
     }
     return undefined;
+  }
+
+  /** Return alarm requests from every installed capability. */
+  async getAlarmContributions(): Promise<AlarmContribution[]> {
+    await this.#ensureReady("contribute an alarm");
+    const contributions: AlarmContribution[] = [];
+    for (const capability of this.#getCapabilities()) {
+      const contribution = await capability.getNextAlarm?.();
+      if (contribution !== undefined) contributions.push(contribution);
+    }
+    return contributions;
+  }
+
+  /** Route one message to an installed named capability. */
+  async route(
+    capabilityId: string,
+    context: LifecycleRouteContext
+  ): Promise<unknown> {
+    await this.#ensureReady("route a capability message");
+    const capability = this.#getCapabilities().find(
+      (candidate) => lifecycleCapabilityId(candidate) === capabilityId
+    );
+    if (!capability?.onRoute) {
+      throw new Error(
+        `Lifecycle capability ${JSON.stringify(capabilityId)} cannot receive routed messages`
+      );
+    }
+    return capability.onRoute(context);
+  }
+
+  /** Dispose installed capabilities in reverse registration order. */
+  async dispose(): Promise<void> {
+    for (const capability of [...this.#getCapabilities()].reverse()) {
+      try {
+        await capability.dispose?.();
+      } catch (error) {
+        console.error("Lifecycle capability disposal failed", error);
+      }
+    }
   }
 
   /** Run every capability's alarm hook in declaration order. */

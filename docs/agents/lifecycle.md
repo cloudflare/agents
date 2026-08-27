@@ -1,5 +1,9 @@
 # Durable Object lifecycle
 
+> **Experimental.** Everything exported from `agents/lifecycle` — and the
+> capabilities built on it, including `Scheduler` — may change between
+> releases while the composition surface stabilizes.
+
 `agents/lifecycle` lets reusable durable capabilities work in both `Agent` and a
 plain Cloudflare Durable Object. It uses composition: your class extends the
 platform `DurableObject`, then constructs a lifecycle with `this`.
@@ -127,9 +131,103 @@ Capabilities run in registration order. Startup and alarms run every hook
 sequentially. Request handling stops at the first returned `Response`. A phase
 failure propagates, and failed startup can be retried.
 
-Pass dependencies to a capability explicitly. A capability should not receive
-the entire host merely to reach storage, bindings, authentication,
-observability, or protocol methods.
+Capabilities extending `LifecycleCapability` receive one standard service
+surface: storage, readiness, startup state, alarm coordination, a host
+invocation boundary, best-effort events, and capability routing.
+Host-specific bindings, authentication, and protocol adapters remain explicit
+constructor dependencies. Lifecycle never grants a capability the complete
+host implicitly.
+
+Capability hooks run outside host context, but user callbacks run through
+`this.lifecycle.runInHostContext(fn)` inside the host invocation context.
+Scheduler dispatches its registered callbacks through this boundary, and a
+future capability that calls user code should do the same.
+
+## Shared alarm ownership
+
+Lifecycle owns the Durable Object's single physical alarm. A capability that
+needs a future wake-up keeps its work in its own durable storage and implements
+`getNextAlarm()`:
+
+```ts
+import { LifecycleCapability, type AlarmContribution } from "agents/lifecycle";
+
+class Cleanup extends LifecycleCapability {
+  constructor() {
+    super("cleanup");
+  }
+
+  async getNextAlarm(): Promise<AlarmContribution> {
+    return (await this.lifecycle.storage.get<number>("cleanup:next")) ?? null;
+  }
+
+  async onAlarm(): Promise<void> {
+    const next = await this.lifecycle.storage.get<number>("cleanup:next");
+    if (next === undefined || next > Date.now()) return;
+    await this.lifecycle.storage.delete("cleanup:next");
+  }
+
+  async scheduleCleanup(time: number): Promise<void> {
+    await this.lifecycle.storage.put("cleanup:next", time);
+    await this.lifecycle.alarms.rearm();
+  }
+}
+```
+
+Lifecycle selects the earliest contribution from every capability and the
+host. It runs all capability `onAlarm()` hooks, then host `onAlarm()`, then
+recalculates the physical alarm. Capabilities do not depend on Scheduler or on
+each other merely to receive alarm wakes.
+A contribution can be `{ time, exclusive: true }` when its wake time must
+replace ordinary wake candidates, such as a pending teardown. This changes only
+which physical alarm is armed; when that alarm fires, normal capability and host
+hook order still applies. Hosts can implement `getNextAlarm()` for alarm work
+that has not yet been extracted into a capability.
+
+## Capability events
+
+Capabilities publish best-effort telemetry through their standard service
+surface. Lifecycle assigns the capability source from the stable ID passed to
+`super()`:
+
+```ts
+class Cleanup extends LifecycleCapability {
+  constructor() {
+    super("cleanup");
+  }
+
+  reportRemoval(key: string): void {
+    this.lifecycle.events.emit("cleanup:remove", { key });
+  }
+}
+```
+
+Lifecycle publishes events from a plain Lifecycle Object to the existing
+`agents:*` diagnostics channels according to the event type. Delivery is
+best-effort, runs outside ambient host context, and does not fail the emitting
+capability when a telemetry sink throws. Persist an outbox in the capability
+when delivery is part of the durable business operation.
+
+## Capability routing
+
+Every `LifecycleCapability` also receives `lifecycle.routes`. `toRoot()` routes
+a message to the matching capability ID on the root Lifecycle; `to(address, …)`
+routes to another addressed Lifecycle. Lifecycle owns the generic envelope and
+dispatch. A host with child objects supplies the transport internally.
+
+Agent uses this for facet schedules: Scheduler sends owner-scoped CRUD to the
+root Scheduler and routes due callbacks back to the matching facet Scheduler.
+Existing rows remain in the root `cf_agents_schedules` table. Scheduler does not
+implement facet traversal, and Agent exposes only one internal generic Lifecycle
+route aperture.
+
+## Explicit disposal
+
+`lifecycle.dispose()` calls each capability's optional `dispose()` method in
+reverse installation order. This phase releases live resources such as MCP
+transports and listeners. It does not delete capability tables. An explicit
+Lifecycle Object destruction disposes live resources once, then calls
+`storage.deleteAll()` once for all shared durable state. Eviction calls neither.
 
 ## Lifecycle Object context
 

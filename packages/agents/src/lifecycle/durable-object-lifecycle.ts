@@ -1,10 +1,21 @@
 import { DurableObject } from "cloudflare:workers";
 import { nanoid } from "nanoid";
 
+import { publishDiagnosticsEvent } from "../observability/diagnostics";
 import {
+  type AlarmContribution,
   CapabilityRunner,
-  type DurableObjectCapability
+  type DurableObjectCapability,
+  type LifecycleEvent,
+  type LifecycleEventSink
 } from "./capability-runner";
+import {
+  bindLifecycleCapability,
+  lifecycleCapabilityId,
+  LifecycleCapability,
+  type LifecycleRouteAddress,
+  type LifecycleServices
+} from "./capability";
 import {
   createConnection,
   ConnectionManager,
@@ -25,7 +36,9 @@ import type {
 } from "./types";
 
 export {
+  type AlarmContribution,
   type CapabilityRequestContext,
+  type LifecycleEvent,
   type CapabilityStartContext,
   type DurableObjectCapability
 } from "./capability-runner";
@@ -97,6 +110,27 @@ function mutableRequest(request: Request): Request {
   return new Request(request);
 }
 
+function selectAlarm(
+  contributions: ReadonlyArray<AlarmContribution>
+): number | null {
+  let ordinary: number | null = null;
+  let exclusive: number | null = null;
+  for (const contribution of contributions) {
+    if (contribution === null) continue;
+    const time =
+      typeof contribution === "number" ? contribution : contribution.time;
+    if (!Number.isFinite(time) || time < 0) {
+      throw new Error(`Invalid alarm contribution: ${String(time)}`);
+    }
+    if (typeof contribution === "object" && contribution.exclusive) {
+      exclusive = exclusive === null ? time : Math.min(exclusive, time);
+    } else {
+      ordinary = ordinary === null ? time : Math.min(ordinary, time);
+    }
+  }
+  return exclusive ?? ordinary;
+}
+
 /**
  * Decode props from the internal lifecycle props header.
  *
@@ -118,6 +152,23 @@ function decodeProps(header: string): unknown {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+/** Internal envelope transported between routed Lifecycle instances. */
+export type LifecycleRouteEnvelope = {
+  readonly capability: string;
+  readonly source: LifecycleRouteAddress | undefined;
+  readonly payload: unknown;
+};
+
+/** Internal transport supplied by a host with routed child Lifecycles. */
+export type LifecycleRouteTransport = {
+  readonly source: LifecycleRouteAddress | undefined;
+  readonly toRoot: (envelope: LifecycleRouteEnvelope) => Promise<unknown>;
+  readonly to: (
+    target: LifecycleRouteAddress,
+    envelope: LifecycleRouteEnvelope
+  ) => Promise<unknown>;
+};
+
 type LifecycleHost<
   Env extends object,
   Props extends Record<string, unknown>
@@ -127,11 +178,49 @@ type LifecycleHost<
 };
 
 /**
+ * Boundary wrapping user callbacks that capabilities run through
+ * `LifecycleServices.runInHostContext`. The default boundary is
+ * {@link runInLifecycleHostContext}; a host composition root may substitute
+ * its own invocation wrapper (Agent adds tracing span scope).
+ */
+export type LifecycleHostInvoker = <T>(run: () => T) => T;
+
+const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
+const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
+const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
+
+/** @internal Adapt the host invocation boundary at a composition root. */
+export function setLifecycleHostInvoker<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, invoker: LifecycleHostInvoker): void {
+  lifecycleHostInvokers.set(lifecycle, invoker);
+}
+
+/** @internal Supply a host's routed Lifecycle transport. */
+export function setLifecycleRouteTransport<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, transport: LifecycleRouteTransport): void {
+  lifecycleRouteTransports.set(lifecycle, transport);
+}
+
+/** @internal Adapt Lifecycle's default diagnostics sink at a composition root. */
+export function setLifecycleEventSink<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, sink: LifecycleEventSink): void {
+  lifecycleEventSinks.set(lifecycle, sink);
+}
+
+/**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
  * Construct this as an instance field on a class that directly extends
  * `DurableObject`, then call {@link Lifecycle.installHandlers}
  * from that class's constructor.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export class Lifecycle<
   Env extends object = Cloudflare.Env,
@@ -147,6 +236,10 @@ export class Lifecycle<
   readonly #connectionManager: ConnectionManager;
 
   #status: "zero" | "starting" | "started" = "zero";
+  #alarmRearmQueue: Promise<void> = Promise.resolve();
+  #rearmRequestedDuringStart = false;
+  #pendingEvents: LifecycleEvent[] = [];
+  #alarmsDisabled = false;
   #capabilitiesLocked = false;
   #handlersInstalled = false;
 
@@ -221,8 +314,156 @@ export class Lifecycle<
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
+    const capabilityId = lifecycleCapabilityId(capability);
+    if (
+      capabilityId &&
+      this.#capabilities.some(
+        (candidate) => lifecycleCapabilityId(candidate) === capabilityId
+      )
+    ) {
+      throw new Error(
+        `Lifecycle capability ${JSON.stringify(capabilityId)} is already installed`
+      );
+    }
     this.#capabilities.push(capability);
+    if (capability instanceof LifecycleCapability) {
+      bindLifecycleCapability(
+        capability,
+        this.#servicesForCapability(capability.capabilityId)
+      );
+    }
     return this;
+  }
+
+  #servicesForCapability(capabilityId: string): LifecycleServices {
+    const lifecycle = this;
+    const envelope = (payload: unknown): LifecycleRouteEnvelope => ({
+      capability: capabilityId,
+      source: lifecycleRouteTransports.get(lifecycle)?.source,
+      payload
+    });
+    return Object.freeze({
+      storage: this.#ctx.storage,
+      ready: () => this.#readyForCapabilityOperation(),
+      starting: () => this.#status === "starting",
+      alarms: Object.freeze({
+        rearm: () => this.rearmAlarm(),
+        disabled: () => this.#alarmsDisabled
+      }),
+      runInHostContext: async (fn: () => unknown) =>
+        this.#runInHostBoundary(fn),
+      events: Object.freeze({
+        emit: (type: string, payload: unknown) =>
+          this.#emitCapabilityEvent({ source: capabilityId, type, payload })
+      }),
+      routes: Object.freeze({
+        get source() {
+          return lifecycleRouteTransports.get(lifecycle)?.source;
+        },
+        toRoot: (payload: unknown) => {
+          const transport = lifecycleRouteTransports.get(lifecycle);
+          return transport
+            ? transport.toRoot(envelope(payload))
+            : this.#dispatchRoute(envelope(payload));
+        },
+        to: (target: LifecycleRouteAddress, payload: unknown) => {
+          const transport = lifecycleRouteTransports.get(lifecycle);
+          if (!transport) {
+            throw new Error(
+              "Lifecycle has no transport for routed capabilities"
+            );
+          }
+          return transport.to(target, envelope(payload));
+        }
+      })
+    });
+  }
+
+  /**
+   * Run a user callback inside the host invocation boundary — plain host
+   * context by default, or the composition root's substitute (Agent installs
+   * its tracing invocation scope).
+   */
+  #runInHostBoundary(fn: () => unknown): Promise<unknown> {
+    const boundary = lifecycleHostInvokers.get(this);
+    return Promise.resolve(
+      boundary
+        ? boundary(fn)
+        : runInLifecycleHostContext({ host: this.#host }, fn)
+    );
+  }
+
+  async #readyForCapabilityOperation(): Promise<void> {
+    if (this.#status === "starting" || this.#status === "started") return;
+    await this.start();
+  }
+
+  async #dispatchRoute(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    await this.#ensureInitialized();
+    return runWithoutCurrentAgent(() =>
+      this.#capabilityRunner.route(envelope.capability, {
+        source: envelope.source,
+        payload: envelope.payload
+      })
+    );
+  }
+
+  /** @internal Deliver a generic capability envelope to this Lifecycle. */
+  route(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    return this.#dispatchRoute(envelope);
+  }
+
+  #emitCapabilityEvent(event: LifecycleEvent): void {
+    if (event.source.trim() === "" || event.type.trim() === "") {
+      throw new Error("Lifecycle events require non-empty source and type");
+    }
+    if (this.#status !== "started") {
+      this.#pendingEvents.push(event);
+      return;
+    }
+    this.#publishCapabilityEvent(event);
+  }
+
+  #publishCapabilityEvent(event: LifecycleEvent): void {
+    runWithoutCurrentAgent(() => {
+      const sink = lifecycleEventSinks.get(this);
+      try {
+        if (!sink) {
+          publishDiagnosticsEvent({
+            source: event.source,
+            type: event.type,
+            agent: this.#parentClassName,
+            name: this.name,
+            payload: event.payload,
+            timestamp: Date.now()
+          });
+          return;
+        }
+        const pending = sink(event);
+        if (pending !== undefined) {
+          this.#ctx.waitUntil(
+            Promise.resolve(pending).catch((error) => {
+              this.#reportEventSinkFailure(event, error);
+            })
+          );
+        }
+      } catch (error) {
+        this.#reportEventSinkFailure(event, error);
+      }
+    });
+  }
+
+  #reportEventSinkFailure(event: LifecycleEvent, error: unknown): void {
+    console.error(
+      `Lifecycle event sink failed for ${event.source}:${event.type}`,
+      error
+    );
+  }
+
+  #deliverPendingEvents(): void {
+    for (const event of this.#pendingEvents.splice(0)) {
+      this.#publishCapabilityEvent(event);
+    }
   }
 
   /**
@@ -480,7 +721,16 @@ export class Lifecycle<
     });
     // Re-throw outside blockConcurrencyWhile so the input gate is not
     // permanently broken and a later invocation can retry startup.
-    if (error) throw error;
+    if (error) {
+      this.#rearmRequestedDuringStart = false;
+      this.#pendingEvents.length = 0;
+      throw error;
+    }
+    this.#deliverPendingEvents();
+    if (this.#rearmRequestedDuringStart) {
+      this.#rearmRequestedDuringStart = false;
+      await this.rearmAlarm();
+    }
   }
 
   #legacyName: string | undefined;
@@ -538,6 +788,58 @@ export class Lifecycle<
 
   #props?: Props;
 
+  /**
+   * Recompute the physical Durable Object alarm from every capability.
+   *
+   * Concurrent requests are serialized so a later durable-state change cannot
+   * be overwritten by an earlier alarm calculation.
+   */
+  async rearmAlarm(): Promise<void> {
+    if (this.#alarmsDisabled) return;
+    if (this.#status === "starting") {
+      this.#rearmRequestedDuringStart = true;
+      return;
+    }
+    if (this.#status === "zero") await this.start();
+
+    const prior = this.#alarmRearmQueue;
+    const next = prior
+      .catch(() => {})
+      .then(async () => {
+        if (this.#alarmsDisabled) return;
+        const contributions = await runWithoutCurrentAgent(() =>
+          this.#capabilityRunner.getAlarmContributions()
+        );
+        const hostContribution = await runInLifecycleHostContext(
+          { host: this.#host },
+          () => this.#host.getNextAlarm?.()
+        );
+        if (hostContribution !== undefined) {
+          contributions.push(hostContribution);
+        }
+        const alarm = selectAlarm(contributions);
+        if (alarm === null) {
+          await this.#ctx.storage.deleteAlarm();
+        } else {
+          await this.#ctx.storage.setAlarm(alarm);
+        }
+      });
+    this.#alarmRearmQueue = next;
+    await next;
+  }
+
+  /** Dispose installed capabilities in reverse registration order. */
+  async dispose(): Promise<void> {
+    await runWithoutCurrentAgent(() => this.#capabilityRunner.dispose());
+  }
+
+  /** Permanently disable and clear alarms during explicit object teardown. */
+  async disableAlarms(): Promise<void> {
+    this.#alarmsDisabled = true;
+    await this.#alarmRearmQueue.catch(() => {});
+    await this.#ctx.storage.deleteAlarm();
+  }
+
   /** Dispatch lifecycle and host alarm callbacks after startup. */
   async alarm(): Promise<void> {
     await this.#ensureInitialized();
@@ -545,5 +847,6 @@ export class Lifecycle<
     await runInLifecycleHostContext({ host: this.#host }, () =>
       this.#host.onAlarm?.()
     );
+    await this.rearmAlarm();
   }
 }

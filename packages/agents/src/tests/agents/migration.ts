@@ -1,5 +1,7 @@
 import { Agent } from "../../index.ts";
 
+const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
+
 /**
  * Test agent for verifying SQL schema migrations.
  * Provides methods to simulate old table schemas and re-run migration logic.
@@ -36,6 +38,7 @@ export class TestMigrationAgent extends Agent {
       INSERT INTO cf_agents_schedules (id, callback, payload, type, time, delayInSeconds)
       VALUES ('test-old-row', 'testCallback', '"hello"', 'delayed', 1000, 5)
     `);
+    await this.ctx.storage.delete(SCHEDULE_SCHEMA_VERSION_KEY);
   }
 
   /**
@@ -69,81 +72,12 @@ export class TestMigrationAgent extends Agent {
       INSERT INTO cf_agents_schedules (id, callback, payload, type, time, delayInSeconds)
       VALUES ('test-old-row', 'testCallback', '"hello"', 'delayed', 1000, 5)
     `);
+    await this.ctx.storage.delete(SCHEDULE_SCHEMA_VERSION_KEY);
   }
 
-  /**
-   * Run the column-add + CHECK-constraint migration logic.
-   * This is the same code that runs in the Agent constructor.
-   */
+  /** Enter Scheduler's real async API, which starts Lifecycle and migrates. */
   async runMigration(): Promise<void> {
-    // Step 1: Add missing columns (same as constructor)
-    const addColumnIfNotExists = (sql: string) => {
-      try {
-        this.ctx.storage.sql.exec(sql);
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        if (!message.toLowerCase().includes("duplicate column")) {
-          throw e;
-        }
-      }
-    };
-
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
-    );
-
-    // Step 2: Recreate table if CHECK constraint is missing 'interval'
-    const rows = this.ctx.storage.sql
-      .exec(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
-      )
-      .toArray();
-    if (rows.length > 0) {
-      const ddl = String(rows[0].sql);
-      if (!ddl.includes("'interval'")) {
-        // Drop any leftover temp table from a previous partial migration
-        this.ctx.storage.sql.exec(
-          "DROP TABLE IF EXISTS cf_agents_schedules_new"
-        );
-        this.ctx.storage.sql.exec(`
-          CREATE TABLE cf_agents_schedules_new (
-            id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-            callback TEXT,
-            payload TEXT,
-            type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-            time INTEGER,
-            delayInSeconds INTEGER,
-            cron TEXT,
-            intervalSeconds INTEGER,
-            running INTEGER DEFAULT 0,
-            created_at INTEGER DEFAULT (unixepoch()),
-            execution_started_at INTEGER,
-            retry_options TEXT
-          )
-        `);
-        this.ctx.storage.sql.exec(`
-          INSERT INTO cf_agents_schedules_new
-            (id, callback, payload, type, time, delayInSeconds, cron,
-             intervalSeconds, running, created_at, execution_started_at, retry_options)
-          SELECT id, callback, payload, type, time, delayInSeconds, cron,
-                 intervalSeconds, running, created_at, execution_started_at, retry_options
-          FROM cf_agents_schedules
-        `);
-        this.ctx.storage.sql.exec("DROP TABLE cf_agents_schedules");
-        this.ctx.storage.sql.exec(
-          "ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules"
-        );
-      }
-    }
+    await this.scheduler.list();
   }
 
   /**

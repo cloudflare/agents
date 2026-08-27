@@ -10,6 +10,10 @@ import {
 import {
   getCurrentAgent,
   Lifecycle,
+  LifecycleCapability,
+  type AlarmContribution,
+  type LifecycleEvent,
+  type LifecycleServices,
   type LifecycleObject,
   type Connection,
   type ConnectionContext,
@@ -43,6 +47,9 @@ expectTypeOf<ProbeLifecycleObject["onRequest"]>().toEqualTypeOf<
 >();
 expectTypeOf<ProbeLifecycleObject["onAlarm"]>().toEqualTypeOf<
   (() => void | Promise<void>) | undefined
+>();
+expectTypeOf<ProbeLifecycleObject["getNextAlarm"]>().toEqualTypeOf<
+  (() => AlarmContribution | Promise<AlarmContribution>) | undefined
 >();
 expectTypeOf<ProbeLifecycleObject["onConnect"]>().toEqualTypeOf<
   | ((
@@ -87,11 +94,40 @@ expectTypeOf(getCurrentRootAgent<LifecycleTypeProbe>().agent).toEqualTypeOf<
   LifecycleTypeProbe | undefined
 >();
 
+class ServiceCapability extends LifecycleCapability {
+  constructor() {
+    super("type-probe");
+  }
+
+  probe(): void {
+    expectTypeOf(this.lifecycle).toEqualTypeOf<LifecycleServices>();
+    expectTypeOf(this.lifecycle.storage).toEqualTypeOf<DurableObjectStorage>();
+    expectTypeOf(this.lifecycle.starting()).toEqualTypeOf<boolean>();
+    expectTypeOf(this.lifecycle.alarms.rearm()).toEqualTypeOf<Promise<void>>();
+    expectTypeOf(this.lifecycle.alarms.disabled()).toEqualTypeOf<boolean>();
+    expectTypeOf(this.lifecycle.runInHostContext(() => 1)).toEqualTypeOf<
+      Promise<unknown>
+    >();
+    this.lifecycle.events.emit("probe:started", { ready: true });
+    this.lifecycle.routes.toRoot({ ready: true });
+  }
+}
+
+new ServiceCapability() satisfies DurableObjectCapability;
+
+const event = {
+  source: "type-probe",
+  type: "probe:started",
+  payload: { ready: true }
+} satisfies LifecycleEvent;
+expectTypeOf(event).toMatchTypeOf<LifecycleEvent>();
+
 const capability: DurableObjectCapability = {
   onStart: ({ props }) => {
     expectTypeOf(props).toEqualTypeOf<object | undefined>();
   },
-  onRequest: ({ request }) => new Response(request.url)
+  onRequest: ({ request }) => new Response(request.url),
+  getNextAlarm: () => ({ time: Date.now(), exclusive: true })
 };
 
 expectTypeOf(capability).toMatchTypeOf<DurableObjectCapability>();

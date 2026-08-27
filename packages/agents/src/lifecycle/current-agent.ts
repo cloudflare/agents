@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DurableObject } from "cloudflare:workers";
 
+import type { AlarmContribution } from "./capability-runner";
 import type { Lifecycle, WSMessage } from "./durable-object-lifecycle";
 import type { Connection, ConnectionContext } from "./types";
 
@@ -9,6 +10,8 @@ import type { Connection, ConnectionContext } from "./types";
  *
  * Pass a more specific Lifecycle Object type to {@link getCurrentAgent} when
  * shared host code needs APIs implemented by a particular object.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export interface LifecycleObject<
   Env extends object = Cloudflare.Env,
@@ -18,6 +21,7 @@ export interface LifecycleObject<
   onStart?(props?: Props): void | Promise<void>;
   onRequest?(request: Request): Response | Promise<Response>;
   onAlarm?(): void | Promise<void>;
+  getNextAlarm?(): AlarmContribution | Promise<AlarmContribution>;
   onConnect?(
     connection: Connection,
     context: ConnectionContext

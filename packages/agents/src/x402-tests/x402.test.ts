@@ -46,7 +46,7 @@ import {
   withX402Client,
   type X402Config,
   type X402ClientConfig
-} from "../mcp/x402";
+} from "../mcp/client/x402";
 
 // Helper: create a minimal McpServer mock
 // We avoid naming anything `_registeredTools` since McpServer has a private field

@@ -21,7 +21,7 @@ import {
 import {
   MCPClientConnection,
   MCPConnectionState
-} from "../../mcp/client-connection.ts";
+} from "../../mcp/client/connection.ts";
 
 type ToolExtraInfo = RequestHandlerExtra<ServerRequest, ServerNotification>;
 

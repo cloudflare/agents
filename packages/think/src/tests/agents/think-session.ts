@@ -5519,34 +5519,35 @@ export class ThinkProgrammaticTestAgent extends Think {
   }> {
     const submissionId = `alarm-owned-${crypto.randomUUID()}`;
     const internal = this as unknown as {
-      _cf_executingScheduleRowId?: string;
+      _drainThinkSubmissions(): Promise<void>;
       _drainSubmissions(): Promise<void>;
       _scheduleSubmissionDrain(): Promise<void>;
     };
-    const originalDrain = internal._drainSubmissions;
+    const originalScheduledDrain = internal._drainThinkSubmissions;
+    const originalInlineDrain = internal._drainSubmissions;
     let alarmDrainCalls = 0;
     let inlineDrainCalls = 0;
+
+    // Probe the two domain entrypoints directly. The named callback is the
+    // alarm-owned path; _drainSubmissions is the private inline implementation.
+    internal._drainThinkSubmissions = async () => {
+      alarmDrainCalls += 1;
+    };
     internal._drainSubmissions = async () => {
-      if (internal._cf_executingScheduleRowId === undefined) {
-        inlineDrainCalls += 1;
-      } else {
-        alarmDrainCalls += 1;
-      }
+      inlineDrainCalls += 1;
     };
 
     try {
       const submission = await this.testSubmitMessages("alarm owned", {
         submissionId
       });
-      // A DO alarm may interleave while this RPC awaits. The base Agent sets
-      // _cf_executingScheduleRowId only around an awaited schedule callback,
-      // which distinguishes the correct owner from the old inline starter.
       for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       return { alarmDrainCalls, inlineDrainCalls, submission };
     } finally {
-      internal._drainSubmissions = originalDrain;
+      internal._drainThinkSubmissions = originalScheduledDrain;
+      internal._drainSubmissions = originalInlineDrain;
       // The probe's no-op alarm consumed its schedule row while leaving the
       // submission pending. Re-arm the real drain for the eventual assertion.
       await internal._scheduleSubmissionDrain();

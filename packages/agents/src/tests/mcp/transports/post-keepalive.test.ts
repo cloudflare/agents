@@ -13,7 +13,7 @@ import { z } from "zod";
 import {
   WorkerTransport,
   type WorkerTransportOptions
-} from "../../../mcp/worker-transport";
+} from "../../../mcp/server/worker-transport";
 
 /**
  * Regression tests for cloudflare/agents#1583 and the SDK v1.30 keepalive

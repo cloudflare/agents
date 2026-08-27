@@ -13,6 +13,34 @@
   "durable_objects": {
     "bindings": [
       {
+        "class_name": "CapabilityHarnessObject",
+        "name": "CapabilityHarnessObject"
+      },
+      {
+        "class_name": "PlainLifecycleObject",
+        "name": "PlainLifecycleObject"
+      },
+      {
+        "class_name": "RetryableStartObject",
+        "name": "RetryableStartObject"
+      },
+      {
+        "class_name": "ScheduledLifecycleObject",
+        "name": "ScheduledLifecycleObject"
+      },
+      {
+        "class_name": "SchedulerHarnessObject",
+        "name": "SchedulerHarnessObject"
+      },
+      {
+        "class_name": "SchedulerStartupWarnObject",
+        "name": "SchedulerStartupWarnObject"
+      },
+      {
+        "class_name": "PlainMcpClientObject",
+        "name": "PlainMcpClientObject"
+      },
+      {
         "class_name": "TestMcpAgent",
         "name": "MCP_OBJECT"
       },
@@ -335,6 +363,13 @@
   "migrations": [
     {
       "new_sqlite_classes": [
+        "CapabilityHarnessObject",
+        "PlainLifecycleObject",
+        "RetryableStartObject",
+        "ScheduledLifecycleObject",
+        "SchedulerHarnessObject",
+        "SchedulerStartupWarnObject",
+        "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
         "TestEmailAgent",

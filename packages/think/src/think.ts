@@ -9910,7 +9910,7 @@ export class Think<
     void this.keepAliveWhile(() => this._drainWorkflowNotifications()).catch(
       (error) => {
         console.error("[Think] Failed to drain workflow notifications", error);
-        void this._scheduleWorkflowNotificationAlarm();
+        void this._rearmWorkflowNotificationAlarm();
       }
     );
   }
@@ -9973,28 +9973,32 @@ export class Think<
     } finally {
       this._drainingWorkflowNotifications = false;
     }
-    await this._scheduleWorkflowNotificationAlarm();
+    await this._rearmWorkflowNotificationAlarm();
   }
 
-  private async _scheduleWorkflowNotificationAlarm(): Promise<void> {
+  private _nextWorkflowNotificationAlarm(): number | null {
     this._ensureWorkflowNotificationTable();
-    const pending = this.sql<{ attempts: number }>`
-      SELECT attempts
+    const pending = this.sql<{ attempts: number; updated_at: number }>`
+      SELECT attempts, updated_at
       FROM cf_think_workflow_notifications
       WHERE delivered_at IS NULL
       ORDER BY created_at ASC, notification_id ASC
       LIMIT 1
     `;
-    if (!pending[0]) return;
+    if (!pending[0]) return null;
     const delayMs = Math.min(
       5 * 60 * 1000,
       1000 * 2 ** Math.min(pending[0].attempts, 8)
     );
-    const nextAlarm = Date.now() + delayMs;
-    const existingAlarm = await this.ctx.storage.getAlarm();
-    if (existingAlarm === null || existingAlarm > nextAlarm) {
-      await this.ctx.storage.setAlarm(nextAlarm);
-    }
+    return Math.max(pending[0].updated_at + delayMs, Date.now() + 1);
+  }
+
+  protected override _getExtensionAlarm(): number | null {
+    return this._nextWorkflowNotificationAlarm();
+  }
+
+  private _rearmWorkflowNotificationAlarm(): Promise<void> {
+    return this.lifecycle.rearmAlarm();
   }
 
   async inspectSubmission(
