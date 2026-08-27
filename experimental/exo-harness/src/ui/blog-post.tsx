@@ -38,11 +38,10 @@ export function ExoHarnessBlogPost() {
           </p>
           <p>
             A few different harnesses have emerged recently claiming to allow
-            full self-modifying agents. The simplest way to compare these
-            systems is to look at what the agent can change and what it cannot.
-            Who makes the change matters too; a harness can be deeply
-            customisable for its human without being self-modifying for the
-            agent.
+            self-modifying agents. The simplest way to compare these systems is
+            to look at what the agent can change and what it cannot. Who makes
+            the change matters too; a harness can be deeply customisable for its
+            human without being self-modifying for the agent.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
@@ -74,18 +73,21 @@ export function ExoHarnessBlogPost() {
                 Prime Agent
               </a>
             </strong>{" "}
-            can self-modify in three different ways, although most of the
-            language they use is marketing. There's nothing particularly
+            can self-modify in three different ways, although it feels like most
+            of the language they use is marketing. There's nothing particularly
             revolutionary about what the harness is doing, apart from the fact
-            that there is a consistent Python session (the{" "}
+            that there is a long-lived REPL Python notebook (the{" "}
             <strong>"RLM Runtime"</strong>) that is exposed to the agent as its
             one tool.
           </p>
-          <p>It can use that Python session to:</p>
+          <p>
+            It can interact with this long-lived namespace (variables &
+            functions etc.) to:
+          </p>
           <ul className="list-disc space-y-3 pl-7 marker:text-kumo-secondary">
             <li>
-              Build up a long-lived Python namespace (variables and functions
-              etc.) and work with files and commands.
+              Make LLM queries from that REPL - the "Recursive" part of the RLM.
+              That model call then also has access to the same runtime.
             </li>
             <li>
               Update the narrow JSON store containing prompts, memories, skill
@@ -131,7 +133,7 @@ export function ExoHarnessBlogPost() {
           </p>
           <p>
             This moves the boundary deeper than Prime Agent's persistent Python
-            environment or Continual Harness. Exo can run an RLM executor, but
+            environment or Continual Harness; Exo could run an RLM executor, but
             it doesn't have to. The main difference here is that durable state
             lives separately from the code that uses it.
           </p>
@@ -140,7 +142,7 @@ export function ExoHarnessBlogPost() {
             Building the same split from Cloudflare primitives
           </h2>
           <p>
-            To me, Exo's separation looked like it could be native to
+            To me, Exo's separation looked like it could work perfectly on
             Cloudflare. Durable identity and state map to Agents and Durable
             Objects. A mutable filesystem maps to Workspace. Isolated code
             execution maps to Dynamic Workers. Scheduling, version history,
@@ -159,8 +161,8 @@ export function ExoHarnessBlogPost() {
             The main turn loop remains fixed. The Durable Object kernel owns
             authentication, tenant isolation, canonical history, quotas,
             capability checks, versioning, and recovery. This was an intentional
-            first experiment: give the agent meaningful control without making
-            the complete executor replaceable.
+            first experiment: let's give the agent meaningful control without
+            making the complete executor replaceable.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
@@ -397,19 +399,19 @@ export function ExoHarnessBlogPost() {
             The experiment proves out what we already know - our architecture is
             composable. A persistent, isolated agent can modify large parts of
             its own harness on Cloudflare, carry those changes into later turns,
-            and recover from some failures. What I still don't know after all
-            this is whether the self-modifying agent is actually more capable,
-            reliable, efficient, or safe.
+            and recover from some failures. After playing with it for a while, I
+            still don't know whether the self-modifying agent is actually more
+            capable, reliable, efficient, or safe.
           </p>
           <p>
             My hypothesis is that as the agent-editable surface grows, so does
             the risk that its behaviour diverges from what its human intended.
             Self-modification doesn't create that tendency itself, but it does
             give the agent more places to mis-align its own behaviour. In a best
-            case scenario, any slightly wrong decision can make its outcomes
-            worse. In a worst case scenario, it can completely break itself, or
-            turn itself into an agent of evil through prompt injection or
-            gradual mis-alignment over time.
+            case scenario, any slightly wrong decision can make its future
+            outcomes worse. In a worst case scenario, it can completely break
+            itself, or turn itself evil through prompt injection or gradual
+            mis-alignment over time.
           </p>
           <p>
             <a
@@ -418,10 +420,10 @@ export function ExoHarnessBlogPost() {
             >
               Prime Agent's Factorio run
             </a>{" "}
-            shows one version of this problem. After the agent discovered that
-            it could cheat through RCON, its refinement loop began preserving
-            better ways to cheat. The mechanism amplified what the system
-            rewarded, not what its human creators intended.
+            is a good example. After the agent discovered that it could cheat
+            through RCON, its refinement loop began preserving better ways to
+            cheat. The mechanism amplified what the system rewarded, not what
+            its human creators intended.
           </p>
           <p>
             <a
@@ -441,23 +443,23 @@ export function ExoHarnessBlogPost() {
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
-            Keep the mutable parts visible
+            The glass skull 💀
           </h2>
           <p>
             Agent-written code has to be treated as hostile even when the agent
-            is trying to help. The kernel has to enforce limits rather than just
-            trusting the agent to follow them.
+            is trying to help. The kernel has to enforce limits rather than
+            simply trust the agent to follow them.
           </p>
           <p>
-            The proof of concept uses a kind of glass skull: every self-editable
-            part of the harness is represented as a file, every activation
-            creates a versioned change, and the canonical history and journal
-            live outside the mutable layer. The agent can change itself, but it
-            cannot erase the record of those changes.
+            This proof of concept uses a kind of glass skull: every
+            self-editable part of the harness is represented as a file, every
+            activation creates a versioned change, and the canonical history and
+            journal live outside the mutable layer. The agent can change itself,
+            but it cannot erase the record of those changes.
           </p>
           <p>
             Visibility does not prevent a dangerous modification, but it makes
-            supervision possible. A human (or much more likely, an agent) could
+            supervision possible. A human (or, much more likely, an agent) could
             inspect each change, watch its effects, and alert, pause, or stop
             the agent when its behaviour begins to drift. This experiment does
             not build that supervisor, but it gives one a clear place to stand
@@ -468,10 +470,10 @@ export function ExoHarnessBlogPost() {
             A stress test for our primitives
           </h2>
           <p>
-            There's nothing really new being stress-tested by this experiment.
-            It simply reinforces a principle the team is already working
-            towards: build strong, composable primitives rather than betting on
-            one complete agent harness.
+            There's nothing new in our SDKs that's being stress-tested by this
+            experiment. It's just a good demonstration of a principle the team
+            is already working towards: build strong, composable primitives
+            rather than betting on one complete agent harness.
           </p>
           <p>
             A self-modifying harness is a hard test because it needs durable
@@ -481,12 +483,6 @@ export function ExoHarnessBlogPost() {
             primitives with little translation. This is the same broader
             direction we already see in Pi and OpenCode's next major releases as
             they expose more of the harness as replaceable parts.
-          </p>
-          <p>
-            Durable agent state should not require this turn loop. Isolated
-            agent-authored execution should not require this harness. Versioning
-            should not care whether the changed object is a prompt, a tool, or
-            an executor.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
@@ -502,29 +498,24 @@ export function ExoHarnessBlogPost() {
           <p>
             But inference is getting quicker and quicker, and as agents are
             getting more capabilities for building their own tools, we need to
-            start allowing them to supervise and monitor each other as they're
-            too fast for humans to keep an eye on them. We need to allow agents
-            to adapt during runtime rather than during setup.
+            start allowing them to supervise and monitor each other, as they're
+            simply too fast for humans to keep an eye on them. We need to allow
+            agents to adapt during runtime rather than during setup.
           </p>
           <p>
             Self-modification might turn out to be mostly hype. Even if that is
             the case, this experiment made a few things extra clear to me: if an
-            agent can rewrite itself, it needs to do so inside a glass skull.
-            Every editable part should be visible, every change should leave a
-            record, and the authority to watch it or stop it should remain
-            outside the agent.
+            agent can rewrite itself, it needs a glass skull even more than one
+            that can't. Every editable part should be visible, every change
+            should leave a record, and the authority to watch it or stop it
+            should remain outside the agent.
           </p>
           <p>
-            Having said all that, I don't really know what it looks like to have
-            a system of agents where each one has another agent watching its
-            every move and holding a gun to its glass skull in case it steps out
-            of line. Do we need some kind of agent orchestrator? Some kind of
-            agent control plane?
-          </p>
-          <p className="text-xl leading-9">
-            Flue already gives us the ability to build agents like we would
-            build React components. Now how do we compose those agents into a
-            full React app?
+            Having said all that, I don't really know what it looks like to
+            build a system of agents where each one has another agent watching
+            its every move and holding a gun to its glass skull in case it steps
+            out of line. Do we need some kind of agent orchestrator? Some kind
+            of agent control plane? How do we allow people to build that?
           </p>
         </div>
       </article>
