@@ -27,6 +27,13 @@ export {
   ThinkClientToolsAgent,
   ThinkSessionTestAgent,
   ThinkSystemPromptSkillsWarningAgent,
+  ThinkDefaultSystemPromptSkillsAgent,
+  ThinkInheritedSystemPromptSkillsAgent,
+  ThinkSystemPromptFieldSkillsAgent,
+  ThinkMissingClassifierWarningAgent,
+  ThinkClassifierMethodAgent,
+  ThinkInheritedClassifierAgent,
+  ThinkClassifierFieldAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -69,6 +76,13 @@ import type {
   ThinkClientToolsAgent,
   ThinkSessionTestAgent,
   ThinkSystemPromptSkillsWarningAgent,
+  ThinkDefaultSystemPromptSkillsAgent,
+  ThinkInheritedSystemPromptSkillsAgent,
+  ThinkSystemPromptFieldSkillsAgent,
+  ThinkMissingClassifierWarningAgent,
+  ThinkClassifierMethodAgent,
+  ThinkInheritedClassifierAgent,
+  ThinkClassifierFieldAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -215,6 +229,13 @@ export type Env = {
   ThinkClientToolsAgent: DurableObjectNamespace<ThinkClientToolsAgent>;
   ThinkSessionTestAgent: DurableObjectNamespace<ThinkSessionTestAgent>;
   ThinkSystemPromptSkillsWarningAgent: DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>;
+  ThinkDefaultSystemPromptSkillsAgent: DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>;
+  ThinkInheritedSystemPromptSkillsAgent: DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>;
+  ThinkSystemPromptFieldSkillsAgent: DurableObjectNamespace<ThinkSystemPromptFieldSkillsAgent>;
+  ThinkMissingClassifierWarningAgent: DurableObjectNamespace<ThinkMissingClassifierWarningAgent>;
+  ThinkClassifierMethodAgent: DurableObjectNamespace<ThinkClassifierMethodAgent>;
+  ThinkInheritedClassifierAgent: DurableObjectNamespace<ThinkInheritedClassifierAgent>;
+  ThinkClassifierFieldAgent: DurableObjectNamespace<ThinkClassifierFieldAgent>;
   ThinkAsyncConfigSessionAgent: DurableObjectNamespace<ThinkAsyncConfigSessionAgent>;
   ThinkConfigTestAgent: DurableObjectNamespace<ThinkConfigTestAgent>;
   ThinkLegacyConfigMigrationAgent: DurableObjectNamespace<ThinkLegacyConfigMigrationAgent>;

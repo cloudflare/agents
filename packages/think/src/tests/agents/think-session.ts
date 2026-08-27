@@ -3510,6 +3510,73 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
   }
 }
 
+// Repro for #2165: Agent's context wrapper writes inherited methods onto the
+// concrete prototype. A skills-enabled subclass that keeps Think's default
+// system prompt must not be mistaken for an override.
+function mapReadingSkills() {
+  return [
+    skills.fromManifest({
+      id: "default-prompt-test-skills",
+      fingerprint: "v1",
+      skills: [
+        {
+          name: "map-reading",
+          description: "How to read a map.",
+          body: "Check the scale before measuring distance."
+        }
+      ]
+    })
+  ];
+}
+
+export class ThinkDefaultSystemPromptSkillsAgent extends ThinkSessionTestAgent {
+  override getSkills() {
+    return mapReadingSkills();
+  }
+}
+
+class ThinkInheritedSystemPromptAgent extends ThinkSessionTestAgent {
+  override getSystemPrompt(): string {
+    return "You are an experienced cartographer.";
+  }
+}
+
+export class ThinkInheritedSystemPromptSkillsAgent extends ThinkInheritedSystemPromptAgent {
+  override getSkills() {
+    return mapReadingSkills();
+  }
+}
+
+export class ThinkSystemPromptFieldSkillsAgent extends ThinkSessionTestAgent {
+  override getSkills() {
+    return mapReadingSkills();
+  }
+
+  override getSystemPrompt = () => "You are an experienced cartographer.";
+}
+
+class ThinkClassifierTestAgent extends ThinkSessionTestAgent {
+  override contextOverflow = { reactive: true };
+
+  override getModel(): LanguageModel {
+    return createInBandErrorMockModel("prompt is too long");
+  }
+}
+
+export class ThinkMissingClassifierWarningAgent extends ThinkClassifierTestAgent {}
+
+export class ThinkClassifierMethodAgent extends ThinkClassifierTestAgent {
+  override classifyChatError(): undefined {
+    return undefined;
+  }
+}
+
+export class ThinkInheritedClassifierAgent extends ThinkClassifierMethodAgent {}
+
+export class ThinkClassifierFieldAgent extends ThinkClassifierTestAgent {
+  override classifyChatError = () => undefined;
+}
+
 // ── ThinkAsyncConfigSessionAgent ─────────────────────────────
 // Tests async configureSession — simulates reading config before setup.
 
