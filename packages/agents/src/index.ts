@@ -63,6 +63,7 @@ import {
   type CurrentAgentContext
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
+import { callablesFromDecorated, WebSockets } from "./websockets";
 export {
   getAgentByName,
   routeAgentRequest,
@@ -383,17 +384,18 @@ function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
   );
 }
 
-/**
- * Metadata for a callable method
- */
-export type CallableMetadata = {
-  /** Optional description of what the method does */
-  description?: string;
-  /** Whether the method supports streaming responses */
-  streaming?: boolean;
-};
-
-const callableMetadata = new WeakMap<Function, CallableMetadata>();
+export {
+  callable,
+  unstable_callable,
+  type CallableMetadata
+} from "./callable-decorator";
+import {
+  copyCallableMetadata,
+  decoratedMethods,
+  getCallableMetadata,
+  isCallableMethod,
+  type CallableMetadata
+} from "./callable-decorator";
 
 export { SqlError } from "./sql-error";
 
@@ -594,40 +596,6 @@ export type SubAgentStub<T extends Agent> = {
       : never]: T[K] extends (...args: infer A) => infer R
     ? (...args: A) => Promisify<R>
     : never;
-};
-
-/**
- * Decorator that marks a method as callable by clients
- * @param metadata Optional metadata about the callable method
- */
-export function callable(metadata: CallableMetadata = {}) {
-  return function callableDecorator<This, Args extends unknown[], Return>(
-    target: (this: This, ...args: Args) => Return,
-    _context: ClassMethodDecoratorContext
-  ) {
-    if (!callableMetadata.has(target)) {
-      callableMetadata.set(target, metadata);
-    }
-
-    return target;
-  };
-}
-
-let didWarnAboutUnstableCallable = false;
-
-/**
- * Decorator that marks a method as callable by clients
- * @deprecated this has been renamed to callable, and unstable_callable will be removed in the next major version
- * @param metadata Optional metadata about the callable method
- */
-export const unstable_callable = (metadata: CallableMetadata = {}) => {
-  if (!didWarnAboutUnstableCallable) {
-    didWarnAboutUnstableCallable = true;
-    console.warn(
-      "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
-    );
-  }
-  return callable(metadata);
 };
 
 export type QueueItem<T = string> = {
@@ -1569,6 +1537,34 @@ export class Agent<
    */
   readonly lifecycle = Lifecycle.install<Env, Props>(this);
 
+  /**
+   * WebSocket connection subsystem. Constructed as a field initializer
+   * so it exists before the constructor installs it; the handler arrows
+   * defer to `this.*`, so they always hit the framework-wrapped hooks.
+   * Those wrappers still open their own invocation scope even though
+   * the capability's dispatch already entered one via the host invoker
+   * — the inner wrap is kept because the wrapped hooks are also invoked
+   * from paths that do not pass through the capability (facet bridging,
+   * direct calls).
+   */
+  private readonly _webSockets = new WebSockets({
+    handlers: {
+      onConnect: (connection, ctx) => this.onConnect(connection, ctx),
+      onMessage: (connection, message) => this.onMessage(connection, message),
+      onClose: (connection, code, reason, wasClean) =>
+        this.onClose(connection, code, reason, wasClean),
+      onError: (connection, error) => this.onError(connection, error)
+    },
+    // Agent's callable interface comes from its existing public
+    // surface — @callable()-decorated methods — served here over the
+    // Cap'n Web endpoint and, natively, over the legacy JSON RPC
+    // protocol: one interface on every wire, no new Agent members.
+    // Capability hosts pass an RpcTarget directly instead.
+    callables: callablesFromDecorated(this),
+    getConnectionTags: (connection, ctx) =>
+      this.getConnectionTags(connection, ctx)
+  });
+
   /** Run user initialization after lifecycle components have started. */
   onStart(_props?: Props): void | Promise<void> {}
 
@@ -2268,12 +2264,14 @@ export class Agent<
     // capability callbacks tomorrow) enter through Agent's invocation
     // boundary so they get the same tracing span scope as every other Agent
     // entry point.
-    setLifecycleHostInvoker(this.lifecycle, (run) =>
+    // Connection-scoped callbacks (e.g. from a WebSockets capability)
+    // carry their live connection/request in the scope.
+    setLifecycleHostInvoker(this.lifecycle, (run, scope) =>
       runInInvocation(
         {
           agent: this,
-          connection: undefined,
-          request: undefined,
+          connection: scope?.connection,
+          request: scope?.request,
           email: undefined
         },
         run
@@ -2348,7 +2346,10 @@ export class Agent<
       }
     );
 
-    this.lifecycle.use(this.scheduler).use(this.mcp);
+    // Agent's WebSocket connections ride the WebSockets capability —
+    // Lifecycle itself no longer models connections. The handlers call
+    // through `this.*` so they always hit the framework-wrapped hooks.
+    this.lifecycle.use(this.scheduler).use(this.mcp).use(this._webSockets);
 
     // MCP starts before Agent restores facet routing state. Defer its initial
     // publication until broadcasts can be routed to the correct owner.
@@ -2498,7 +2499,7 @@ export class Agent<
                 throw new Error(`Method ${method} is not callable`);
               }
 
-              const metadata = callableMetadata.get(methodFn as Function);
+              const metadata = getCallableMetadata(methodFn as Function);
 
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
@@ -3532,9 +3533,9 @@ export class Agent<
 
         // if the method is callable, copy the metadata from the original method
         if (this._isCallable(methodName)) {
-          callableMetadata.set(
-            wrappedFunction,
-            callableMetadata.get(this[methodName as keyof this] as Function)!
+          copyCallableMetadata(
+            this[methodName as keyof this] as Function,
+            wrappedFunction
           );
         }
 
@@ -5946,7 +5947,7 @@ export class Agent<
       return;
     }
 
-    for (const connection of this.lifecycle.getConnections()) {
+    for (const connection of this._webSockets.getConnections()) {
       if (without?.includes(connection.id)) continue;
       if (this._cf_connectionHasSubAgentTarget(connection)) continue;
       connection.send(msg);
@@ -5967,7 +5968,7 @@ export class Agent<
       return undefined;
     }
 
-    const connection = this.lifecycle.getConnection<TState>(id);
+    const connection = this._webSockets.getConnection<TState>(id);
     if (!connection || this._cf_connectionHasSubAgentTarget(connection)) {
       return undefined;
     }
@@ -5980,7 +5981,7 @@ export class Agent<
     if (this._isFacet) {
       // A facet's client connections are all virtual — they are real
       // WebSockets owned by the ROOT DO and bridged in. We must NOT fall
-      // through to `this.lifecycle.getConnections()` here: on a facet that resolves to
+      // through to `this._webSockets.getConnections()` here: on a facet that resolves to
       // the host/root DO's hibernatable sockets, and reading their attachments
       // from the facet's I/O context throws
       // "Cannot perform I/O on behalf of a different Durable Object (Native)".
@@ -5995,7 +5996,7 @@ export class Agent<
       return;
     }
 
-    for (const connection of this.lifecycle.getConnections<TState>(tag)) {
+    for (const connection of this._webSockets.getConnections<TState>(tag)) {
       if (this._cf_connectionHasSubAgentTarget(connection)) continue;
       yield connection;
     }
@@ -6142,7 +6143,7 @@ export class Agent<
       return;
     }
 
-    for (const connection of this.lifecycle.getConnections()) {
+    for (const connection of this._webSockets.getConnections()) {
       if (without?.includes(connection.id)) continue;
       const targetPath = this._cf_subAgentTargetPath(connection);
       if (!targetPath) continue;
@@ -6155,7 +6156,7 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<SubAgentConnectionMeta[]> {
     const metas: SubAgentConnectionMeta[] = [];
-    for (const connection of this.lifecycle.getConnections()) {
+    for (const connection of this._webSockets.getConnections()) {
       const meta = this._cf_subAgentConnectionMetaForPath(
         connection,
         ownerPath
@@ -6169,7 +6170,7 @@ export class Agent<
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
-    const connection = this.lifecycle.getConnection(connectionId);
+    const connection = this._webSockets.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
     }
@@ -6181,7 +6182,7 @@ export class Agent<
     code?: number,
     reason?: string
   ): Promise<void> {
-    const connection = this.lifecycle.getConnection(connectionId);
+    const connection = this._webSockets.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return;
     }
@@ -6192,7 +6193,7 @@ export class Agent<
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
-    const connection = this.lifecycle.getConnection(connectionId);
+    const connection = this._webSockets.getConnection(connectionId);
     if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
       return null;
     }
@@ -10174,7 +10175,7 @@ export class Agent<
    * @returns True if the method is marked as callable
    */
   private _isCallable(method: string): boolean {
-    return callableMetadata.has(this[method as keyof this] as Function);
+    return isCallableMethod(this[method as keyof this] as Function);
   }
 
   /**
@@ -10182,34 +10183,7 @@ export class Agent<
    * @returns A map of method names to their metadata
    */
   getCallableMethods(): Map<string, CallableMetadata> {
-    const result = new Map<string, CallableMetadata>();
-
-    // Walk the entire prototype chain to find callable methods from parent classes
-    let prototype = Object.getPrototypeOf(this);
-    while (prototype && prototype !== Object.prototype) {
-      for (const name of Object.getOwnPropertyNames(prototype)) {
-        if (name === "constructor") continue;
-        // Don't override child class methods (first one wins)
-        if (result.has(name)) continue;
-
-        try {
-          const fn = prototype[name];
-          if (typeof fn === "function") {
-            const meta = callableMetadata.get(fn as Function);
-            if (meta) {
-              result.set(name, meta);
-            }
-          }
-        } catch (e) {
-          if (!(e instanceof TypeError)) {
-            throw e;
-          }
-        }
-      }
-      prototype = Object.getPrototypeOf(prototype);
-    }
-
-    return result;
+    return new Map(decoratedMethods(this));
   }
 
   // ==========================================

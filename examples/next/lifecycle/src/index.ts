@@ -1,12 +1,11 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import {
   Lifecycle,
   type CapabilityRequestContext,
-  type Connection,
-  type DurableObjectCapability,
-  type WSMessage
+  type DurableObjectCapability
 } from "agents/lifecycle";
+import { WebSockets } from "agents/websockets";
 
 type Activity = {
   requests: number;
@@ -58,11 +57,51 @@ class ActivityCapability implements DurableObjectCapability {
   }
 }
 
+/**
+ * Remote methods served over the Cap'n Web callables endpoint
+ * (`?__agents_rpc=capnweb`). The target's prototype methods are the
+ * complete remote interface.
+ */
+class ActivityCallables extends RpcTarget {
+  constructor(private readonly host: DoAgent) {
+    super();
+  }
+
+  activity(): Promise<Activity> {
+    return this.host.getActivity();
+  }
+}
+
 /** A plain Durable Object composed with the Agents lifecycle. */
 export class DoAgent extends DurableObject<Env> {
   private readonly activity = new ActivityCapability(this.ctx.storage);
   private wake: Wake | undefined;
-  readonly lifecycle = Lifecycle.install(this).use(this.activity);
+
+  // WebSockets are opt-in: Lifecycle itself does not model connections.
+  // The capability owns upgrades, hibernating sockets, handler
+  // dispatch, and the Cap'n Web callables endpoint.
+  private readonly webSockets = new WebSockets({
+    callables: new ActivityCallables(this),
+    handlers: {
+      onConnect: (connection) => {
+        connection.send(
+          JSON.stringify({
+            type: "connected",
+            name: this.lifecycle.name,
+            wake: this.wake,
+            activity: this.activity.getActivity()
+          })
+        );
+      },
+      onMessage: (connection, message) => {
+        connection.send(`echo:${String(message)}`);
+      }
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.activity)
+    .use(this.webSockets);
 
   onStart(): void {
     this.wake = {
@@ -84,21 +123,6 @@ export class DoAgent extends DurableObject<Env> {
 
   onAlarm(): void {
     console.log("alarm", this.lifecycle.name, this.activity.getActivity());
-  }
-
-  onConnect(connection: Connection): void {
-    connection.send(
-      JSON.stringify({
-        type: "connected",
-        name: this.lifecycle.name,
-        wake: this.wake,
-        activity: this.activity.getActivity()
-      })
-    );
-  }
-
-  onMessage(connection: Connection, message: WSMessage): void {
-    connection.send(`echo:${String(message)}`);
   }
 
   async getActivity(): Promise<Activity> {

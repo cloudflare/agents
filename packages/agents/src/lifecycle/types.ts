@@ -14,6 +14,14 @@ type ImmutableMap<K, V> = ReadonlyMap<Immutable<K>, Immutable<V>>;
 type ImmutableSet<T> = ReadonlySet<Immutable<T>>;
 type ImmutableObject<T> = { readonly [K in keyof T]: Immutable<T[K]> };
 
+/** A payload delivered on a WebSocket connection. */
+export type WSMessage = ArrayBuffer | ArrayBufferView | string;
+
+// Connection vocabulary is shared language: the WebSockets capability
+// implements it, and Lifecycle's host-context scope references it. The
+// connection MACHINERY lives entirely in the capability
+// (`src/websockets/`); only the types are defined here.
+
 /** Immutable state persisted in a hibernating WebSocket attachment. */
 export type ConnectionState<T> = ImmutableObject<T> | null;
 

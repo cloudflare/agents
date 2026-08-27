@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
 import {
   getCurrentAgent as getCurrentRootAgent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
@@ -7,10 +7,9 @@ import {
   getCurrentAgent,
   Lifecycle,
   LifecycleCapability,
-  type Connection,
-  type DurableObjectCapability,
-  type WSMessage
+  type DurableObjectCapability
 } from "../../lifecycle";
+import { WebSockets } from "../../websockets";
 
 type StartupProps = { label: string };
 
@@ -158,6 +157,41 @@ function currentWebSocketContext(
 }
 
 /**
+ * Callables target served by the WebSockets capability. The private
+ * field proves methods run with the real instance as `this`.
+ */
+class PlainHostCallables extends RpcTarget {
+  readonly #greeting = "host";
+
+  add(a: number, b: number): number {
+    return a + b;
+  }
+
+  fail(message: string): never {
+    throw new Error(message);
+  }
+
+  hostContext(): boolean {
+    return getCurrentAgent().agent !== undefined;
+  }
+
+  greeting(): string {
+    return this.#greeting;
+  }
+
+  streamNumbers(): ReadableStream<number> {
+    return new ReadableStream<number>({
+      start(controller) {
+        controller.enqueue(1);
+        controller.enqueue(2);
+        controller.enqueue(3);
+        controller.close();
+      }
+    });
+  }
+}
+
+/**
  * A plain Durable Object composed with Lifecycle and an assortment of probe
  * capabilities. The Lifecycle test suites drive it to prove phase ordering,
  * shared alarm arbitration, context boundaries, routing, identity, and
@@ -170,6 +204,22 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   readonly #startupEvent = new StartupEventProbe();
   readonly #routedCapability = new RoutedCapabilityProbe();
   readonly #hostBoundary = new HostBoundaryProbe();
+  readonly #webSockets = new WebSockets({
+    handlers: {
+      onConnect: (connection) => {
+        this.#webSocketContexts.push(currentWebSocketContext("connect"));
+        connection.send(`connected:${this.lifecycle.name}`);
+      },
+      onMessage: (connection, message) => {
+        this.#webSocketContexts.push(currentWebSocketContext("message"));
+        connection.send(`echo:${String(message)}`);
+      },
+      onClose: () => {
+        this.#webSocketContexts.push(currentWebSocketContext("close"));
+      }
+    },
+    callables: new PlainHostCallables()
+  });
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
   #firstAlarm: number | null = null;
@@ -185,6 +235,7 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
     .use(this.#startupEvent)
     .use(this.#routedCapability)
     .use(this.#hostBoundary)
+    .use(this.#webSockets)
     .use({
       onStart: ({ props }) => {
         this.#events.push(`capability:start:${props?.label ?? "none"}`);
@@ -252,20 +303,6 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       getCurrentAgent<PlainLifecycleObject>().agent === this
     );
     return this.#hostAlarm;
-  }
-
-  onConnect(connection: Connection): void {
-    this.#webSocketContexts.push(currentWebSocketContext("connect"));
-    connection.send(`connected:${this.lifecycle.name}`);
-  }
-
-  onMessage(connection: Connection, message: WSMessage): void {
-    this.#webSocketContexts.push(currentWebSocketContext("message"));
-    connection.send(`echo:${String(message)}`);
-  }
-
-  onClose(): void {
-    this.#webSocketContexts.push(currentWebSocketContext("close"));
   }
 
   installHandlersAgainForTest(): string {
