@@ -1,6 +1,12 @@
 import { RpcTarget } from "cloudflare:workers";
 import { createDynamicWorkerModules } from "./dynamic-worker-harness";
-import type { RunHostFunctionManifestEntry } from "./dynamic-worker-harness";
+import type {
+  RunHostFunctionDispatcherContract,
+  RunHostFunctionManifestEntry,
+  RunHostFunctionResponse,
+  RunWorkerErrorRecord,
+  RunWorkerResponse
+} from "./dynamic-worker-protocol";
 import { RunError } from "./run-error";
 import type { HostFunctions, RunLog, RunOptions, RunResult } from "./run-types";
 
@@ -9,11 +15,10 @@ const RUN_CHILD_COMPATIBILITY_FLAGS = ["nodejs_compat"];
 const RUN_DEFAULT_CPU_MS = 5_000;
 const RUN_DEFAULT_SUBREQUESTS = 256;
 
-type RunHostFunctionResponse =
-  | { readonly status: "completed"; readonly value: unknown }
-  | { readonly status: "failed" };
-
-class RunHostFunctionDispatcher extends RpcTarget {
+class RunHostFunctionDispatcher
+  extends RpcTarget
+  implements RunHostFunctionDispatcherContract
+{
   readonly #hostFunctions: HostFunctions;
 
   constructor(hostFunctions: HostFunctions) {
@@ -47,31 +52,18 @@ interface RunWorkerEntrypoint {
   ): Promise<unknown>;
 }
 
-interface RunWorkerErrorRecord {
-  readonly name: string;
-  readonly message: string;
-  readonly stack?: string;
-  readonly code?: string;
-}
-
-type RunWorkerResponse =
-  | {
-      readonly status: "completed";
-      readonly value: unknown;
-      readonly logs: RunLog[];
-    }
-  | {
-      readonly status: "failed";
-      readonly error: RunWorkerErrorRecord;
-      readonly logs: RunLog[];
-    };
-
-function disposeRunResource(resource: object): void {
-  if (!(Symbol.dispose in resource)) return;
-  const dispose = Reflect.get(resource, Symbol.dispose);
-  if (typeof dispose !== "function") return;
+function disposeRunResource(resource: unknown): void {
   try {
-    Reflect.apply(dispose, resource, []);
+    if (
+      (typeof resource !== "object" && typeof resource !== "function") ||
+      resource === null
+    ) {
+      return;
+    }
+    const dispose = Reflect.get(resource, Symbol.dispose);
+    if (typeof dispose === "function") {
+      Reflect.apply(dispose, resource, []);
+    }
   } catch {
     // Cleanup is best effort and must not mask the execution result.
   }
@@ -125,43 +117,49 @@ function parseRunWorkerResponse(value: unknown): RunWorkerResponse | undefined {
     return undefined;
   }
 
-  return {
-    status,
-    error: {
-      name,
-      message,
-      ...(stack === undefined ? {} : { stack }),
-      ...(code === undefined ? {} : { code })
-    },
-    logs
+  const errorRecord: RunWorkerErrorRecord = {
+    name,
+    message,
+    ...(stack === undefined ? {} : { stack }),
+    ...(code === undefined ? {} : { code })
   };
+  return { status, error: errorRecord, logs };
 }
 
-function isRunCompileFailure(cause: unknown): boolean {
-  if (cause instanceof SyntaxError) return true;
-  if (typeof cause !== "object" || cause === null) return false;
-  if (Reflect.get(cause, "name") === "SyntaxError") return true;
-  const message = Reflect.get(cause, "message");
-  return (
-    typeof message === "string" && message.includes("Uncaught SyntaxError:")
-  );
-}
-
-function isRunSerializationFailure(cause: unknown): boolean {
-  if (typeof cause !== "object" || cause === null) return false;
-  if (Reflect.get(cause, "name") === "DataCloneError") return true;
-  const message = Reflect.get(cause, "message");
-  return typeof message === "string" && message.includes("could not be cloned");
+function readRunFailureDiagnostic(
+  cause: unknown,
+  property: "name" | "message"
+): string | undefined {
+  if (
+    (typeof cause !== "object" && typeof cause !== "function") ||
+    cause === null
+  ) {
+    return undefined;
+  }
+  try {
+    const value = Reflect.get(cause, property);
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function createRunWorkerError(cause: unknown): RunError {
-  if (isRunCompileFailure(cause)) {
+  const name = readRunFailureDiagnostic(cause, "name");
+  const message = readRunFailureDiagnostic(cause, "message");
+  if (
+    name === "SyntaxError" ||
+    message?.includes("Uncaught SyntaxError:") === true
+  ) {
     return new RunError("Run source could not be compiled.", {
       code: "RUN_COMPILE_ERROR",
       cause
     });
   }
-  if (isRunSerializationFailure(cause)) {
+  if (
+    name === "DataCloneError" ||
+    message?.includes("could not be cloned") === true
+  ) {
     return new RunError("Run data could not be serialized.", {
       code: "RUN_SERIALIZATION_ERROR",
       cause

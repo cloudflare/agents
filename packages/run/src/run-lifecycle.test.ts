@@ -3,21 +3,43 @@ import { run } from "./index";
 
 type RecordingLoaderBehavior = {
   readonly response?: unknown;
-  readonly loadError?: Error;
+  readonly loadError?: unknown;
   readonly entrypointError?: Error;
   readonly evaluateError?: Error;
   readonly entrypointDisposeError?: Error;
   readonly workerDisposeError?: Error;
+  readonly disposeInspection?: "presence" | "lookup";
 };
 
-function createRecordingLoader(behavior: RecordingLoaderBehavior = {}): {
-  readonly loader: WorkerLoader;
-  readonly events: string[];
-  readonly loadedCode: WorkerLoaderWorkerCode[];
-} {
+function createRecordingLoader(behavior: RecordingLoaderBehavior = {}) {
   const events: string[] = [];
   const loadedCode: WorkerLoaderWorkerCode[] = [];
-  const entrypoint = {
+  const failDisposeInspection = <Resource extends object>(
+    resource: Resource
+  ): Resource =>
+    behavior.disposeInspection
+      ? new Proxy(resource, {
+          get(target, property, receiver) {
+            if (
+              behavior.disposeInspection === "lookup" &&
+              property === Symbol.dispose
+            ) {
+              throw new Error("Disposal lookup failed.");
+            }
+            return Reflect.get(target, property, receiver);
+          },
+          has(target, property) {
+            if (
+              behavior.disposeInspection === "presence" &&
+              property === Symbol.dispose
+            ) {
+              throw new Error("Disposal presence check failed.");
+            }
+            return Reflect.has(target, property);
+          }
+        })
+      : resource;
+  const entrypoint = failDisposeInspection({
     async evaluate(): Promise<unknown> {
       if (behavior.evaluateError) throw behavior.evaluateError;
       return (
@@ -34,8 +56,8 @@ function createRecordingLoader(behavior: RecordingLoaderBehavior = {}): {
         throw behavior.entrypointDisposeError;
       }
     }
-  };
-  const worker = {
+  });
+  const worker = failDisposeInspection({
     getEntrypoint(): typeof entrypoint {
       if (behavior.entrypointError) throw behavior.entrypointError;
       return entrypoint;
@@ -44,13 +66,13 @@ function createRecordingLoader(behavior: RecordingLoaderBehavior = {}): {
       events.push("worker");
       if (behavior.workerDisposeError) throw behavior.workerDisposeError;
     }
-  };
+  });
   const loader: WorkerLoader = {
     get(): WorkerStub {
       throw new Error("Recording Loader does not implement get().");
     },
     load(code): WorkerStub {
-      if (behavior.loadError) throw behavior.loadError;
+      if (behavior.loadError !== undefined) throw behavior.loadError;
       loadedCode.push(code);
       // SAFETY: This recording Worker implements every WorkerStub operation Run uses plus its native disposal contract.
       return worker as unknown as WorkerStub;
@@ -136,6 +158,23 @@ it.each([
   }
 );
 
+it("rejects source that escapes the async function body before loading", async () => {
+  const recording = createRecordingLoader();
+
+  const failure = await run({
+    loader: recording.loader,
+    source: `}
+console.log("This must not run during module initialization.");
+if (true) {`
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_COMPILE_ERROR"
+  });
+  expect(recording.loadedCode).toEqual([]);
+});
+
 it("classifies Loader failures without losing the trusted cause", async () => {
   const cause = new Error("Loader unavailable");
   const recording = createRecordingLoader({ loadError: cause });
@@ -143,7 +182,7 @@ it("classifies Loader failures without losing the trusted cause", async () => {
   const failure = await run({
     loader: recording.loader,
     source: "return 42;"
-  }).catch((error: unknown) => error);
+  }).catch((caught: unknown) => caught);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -151,6 +190,28 @@ it("classifies Loader failures without losing the trusted cause", async () => {
     cause
   });
   expect(recording.events).toEqual([]);
+});
+
+it("contains failures while inspecting Loader error diagnostics", async () => {
+  const diagnosticFailure = new Error("Diagnostic getter failed.");
+  const cause = Object.defineProperty({}, "name", {
+    get() {
+      throw diagnosticFailure;
+    }
+  });
+  const recording = createRecordingLoader({ loadError: cause });
+
+  const failure = await run({
+    loader: recording.loader,
+    source: "return 42;"
+  }).catch((caught: unknown) => caught);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_WORKER_ERROR",
+    cause
+  });
+  expect(failure).not.toBe(diagnosticFailure);
 });
 
 it("rejects a malformed child protocol response after disposal", async () => {
@@ -161,7 +222,7 @@ it("rejects a malformed child protocol response after disposal", async () => {
   const failure = await run({
     loader: recording.loader,
     source: "return 42;"
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -188,7 +249,7 @@ it("contains a child protocol response that throws during inspection", async () 
   const failure = await run({
     loader: recording.loader,
     source: "return 42;"
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -229,3 +290,18 @@ it("does not let disposal failures mask a completed result", async () => {
   ).resolves.toMatchObject({ status: "completed", value: 42 });
   expect(recording.events).toEqual(["entrypoint", "worker"]);
 });
+
+it.each([
+  ["presence", ["entrypoint", "worker"]],
+  ["lookup", []]
+] as const)(
+  "does not let disposal %s failures mask a completed result",
+  async (disposeInspection, expectedEvents) => {
+    const recording = createRecordingLoader({ disposeInspection });
+
+    await expect(
+      run<number>({ loader: recording.loader, source: "return 42;" })
+    ).resolves.toMatchObject({ status: "completed", value: 42 });
+    expect(recording.events).toEqual(expectedEvents);
+  }
+);

@@ -123,7 +123,7 @@ it("rejects an escaping sanitized host failure as RunError", async () => {
         }
       }
     }
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -138,7 +138,7 @@ it("classifies malformed JavaScript as a compile error", async () => {
   const failure = await run({
     loader: LOCAL_DYNAMIC_WORKER_LOADER,
     source: "return (;"
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toBeInstanceOf(RunError);
   expect(failure).toMatchObject({
@@ -159,7 +159,7 @@ it.each([
   const failure = await run({
     loader: LOCAL_DYNAMIC_WORKER_LOADER,
     source
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -179,7 +179,7 @@ Object.defineProperty(error, "message", {
 });
 throw error;
 `
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -189,11 +189,56 @@ throw error;
   expect(String(failure)).not.toContain("message getter escaped");
 });
 
+it("contains guest changes to WeakSet methods used for error branding", async () => {
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+WeakSet.prototype.add = () => { throw new Error("brand add escaped"); };
+WeakSet.prototype.has = () => { throw new Error("brand check escaped"); };
+await tools.fail();
+`,
+    hostFunctions: {
+      tools: {
+        fail() {
+          throw new Error("private host detail");
+        }
+      }
+    }
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_HOST_FUNCTION_ERROR",
+    message: "Host function failed."
+  });
+  expect(String(failure)).not.toContain("brand");
+});
+
+it("contains a generated proxy that throws during error inspection", async () => {
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+console.warn("before proxy failure");
+throw new Proxy({}, {
+  getPrototypeOf() { throw new Error("prototype trap escaped"); }
+});
+`
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_EXECUTION_ERROR",
+    message: "Generated code threw an error.",
+    logs: [{ level: "warn", message: "before proxy failure" }]
+  });
+  expect(String(failure)).not.toContain("prototype trap escaped");
+});
+
 it("retains captured logs on a generated failure", async () => {
   const failure = await run({
     loader: LOCAL_DYNAMIC_WORKER_LOADER,
     source: 'console.warn("before failure"); throw new Error("boom");'
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -213,7 +258,7 @@ it("classifies a host result serialization failure", async () => {
         }
       }
     }
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -226,7 +271,7 @@ it("classifies a final result serialization failure", async () => {
   const failure = await run({
     loader: LOCAL_DYNAMIC_WORKER_LOADER,
     source: 'return Symbol("not serializable");'
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",
@@ -258,7 +303,7 @@ it("blocks direct outbound fetch from generated code", async () => {
   const failure = await run({
     loader: LOCAL_DYNAMIC_WORKER_LOADER,
     source: 'return await fetch("https://example.com");'
-  }).catch((error: unknown) => error);
+  }).catch((cause: unknown) => cause);
 
   expect(failure).toMatchObject({
     name: "RunError",

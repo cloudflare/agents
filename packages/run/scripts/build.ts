@@ -1,5 +1,6 @@
 import { build } from "tsdown";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
+import { dynamicWorkerSourcePlugin } from "./dynamic-worker-source-plugin";
 
 async function main(): Promise<void> {
   await build({
@@ -12,13 +13,14 @@ async function main(): Promise<void> {
     },
     format: "esm",
     sourcemap: true,
-    fixedExtension: false
+    fixedExtension: false,
+    plugins: [dynamicWorkerSourcePlugin()]
   });
 
   formatDeclarationFiles();
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
+main().catch((cause: unknown) => {
+  console.error(cause);
   process.exit(1);
 });
