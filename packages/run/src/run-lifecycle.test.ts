@@ -232,6 +232,58 @@ it("rejects a malformed child protocol response after disposal", async () => {
   expect(recording.events).toEqual(["entrypoint", "worker"]);
 });
 
+it("maps a package-owned child protocol failure without exposing its message", async () => {
+  const recording = createRecordingLoader({
+    response: {
+      status: "failed",
+      error: {
+        name: "RunWorkerProtocolError",
+        message: "private protocol detail",
+        code: "RUN_WORKER_ERROR",
+        hostFunction: "tools.read"
+      },
+      logs: []
+    }
+  });
+
+  const failure = await run({
+    loader: recording.loader,
+    source: "return 42;"
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_WORKER_ERROR",
+    message: "Dynamic Worker host protocol failed.",
+    details: { hostFunction: "tools.read" }
+  });
+  expect(String(failure)).not.toContain("private protocol detail");
+  expect(recording.events).toEqual(["entrypoint", "worker"]);
+});
+
+it("rejects an unrecognized child error-detail path", async () => {
+  const recording = createRecordingLoader({
+    response: {
+      status: "failed",
+      error: {
+        name: "RunSerializationError",
+        message: "private path detail",
+        code: "RUN_SERIALIZATION_ERROR",
+        path: "private.host.payload"
+      },
+      logs: []
+    }
+  });
+
+  await expect(
+    run({ loader: recording.loader, source: "return 42;" })
+  ).rejects.toMatchObject({
+    code: "RUN_WORKER_ERROR",
+    message: "Dynamic Worker returned an invalid response."
+  });
+  expect(recording.events).toEqual(["entrypoint", "worker"]);
+});
+
 it("contains a child protocol response that throws during inspection", async () => {
   const protocolFailure = new Error("protocol getter failed");
   const recording = createRecordingLoader({

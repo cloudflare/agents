@@ -1,5 +1,6 @@
 import { expectTypeOf } from "vitest";
 import {
+  getHostFunctionContext,
   run,
   RunError,
   type HostFunction,
@@ -40,3 +41,6 @@ expectTypeOf<RunError["details"]>().toEqualTypeOf<
   RunErrorDetails | undefined
 >();
 expectTypeOf<HostFunctionContext["signal"]>().toEqualTypeOf<AbortSignal>();
+expectTypeOf(
+  getHostFunctionContext
+).returns.toEqualTypeOf<HostFunctionContext>();

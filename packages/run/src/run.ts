@@ -1,49 +1,18 @@
-import { RpcTarget } from "cloudflare:workers";
 import { createDynamicWorkerModules } from "./dynamic-worker-harness";
 import type {
-  RunHostFunctionDispatcherContract,
   RunHostFunctionManifestEntry,
-  RunHostFunctionResponse,
   RunWorkerErrorRecord,
   RunWorkerResponse
 } from "./dynamic-worker-protocol";
+import { createRunHostFunctionDispatch } from "./host-function-dispatch";
+import type { RunHostFunctionDispatcher } from "./host-function-dispatch";
 import { RunError } from "./run-error";
-import type { HostFunctions, RunLog, RunOptions, RunResult } from "./run-types";
+import type { RunLog, RunOptions, RunResult } from "./run-types";
 
 const RUN_CHILD_COMPATIBILITY_DATE = "2026-08-27";
 const RUN_CHILD_COMPATIBILITY_FLAGS = ["nodejs_compat"];
 const RUN_DEFAULT_CPU_MS = 5_000;
 const RUN_DEFAULT_SUBREQUESTS = 256;
-
-class RunHostFunctionDispatcher
-  extends RpcTarget
-  implements RunHostFunctionDispatcherContract
-{
-  readonly #hostFunctions: HostFunctions;
-
-  constructor(hostFunctions: HostFunctions) {
-    super();
-    this.#hostFunctions = hostFunctions;
-  }
-
-  async callHostFunction(
-    namespace: string,
-    functionName: string,
-    args: unknown[]
-  ): Promise<RunHostFunctionResponse> {
-    const hostFunction = this.#hostFunctions[namespace]?.[functionName];
-    if (typeof hostFunction !== "function") return { status: "failed" };
-
-    try {
-      return {
-        status: "completed",
-        value: await Reflect.apply(hostFunction, undefined, args)
-      };
-    } catch {
-      return { status: "failed" };
-    }
-  }
-}
 
 interface RunWorkerEntrypoint {
   evaluate(
@@ -91,6 +60,76 @@ function parseRunLogs(value: unknown): RunLog[] | undefined {
   return logs;
 }
 
+function parseRunWorkerErrorRecord(
+  value: unknown
+): RunWorkerErrorRecord | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const name = Reflect.get(value, "name");
+  const message = Reflect.get(value, "message");
+  const stack = Reflect.get(value, "stack");
+  if (
+    typeof name !== "string" ||
+    typeof message !== "string" ||
+    (stack !== undefined && typeof stack !== "string")
+  ) {
+    return undefined;
+  }
+
+  const diagnostic = {
+    name,
+    message,
+    ...(stack === undefined ? {} : { stack })
+  };
+  const code = Reflect.get(value, "code");
+  const path = Reflect.get(value, "path");
+  const hostFunction = Reflect.get(value, "hostFunction");
+  const hostFailureId = Reflect.get(value, "hostFailureId");
+  switch (code) {
+    case undefined:
+      return path === undefined &&
+        hostFunction === undefined &&
+        hostFailureId === undefined
+        ? diagnostic
+        : undefined;
+    case "RUN_HOST_FUNCTION_ERROR":
+      return path === undefined &&
+        hostFunction === undefined &&
+        typeof hostFailureId === "number" &&
+        Number.isSafeInteger(hostFailureId) &&
+        hostFailureId > 0
+        ? { ...diagnostic, code, hostFailureId }
+        : undefined;
+    case "RUN_INVALID_INPUT":
+      return path === "hostFunctions.namespace" &&
+        hostFunction === undefined &&
+        hostFailureId === undefined
+        ? { ...diagnostic, code, path }
+        : undefined;
+    case "RUN_SERIALIZATION_ERROR":
+      if (hostFailureId !== undefined) return undefined;
+      if (path === "result" && hostFunction === undefined) {
+        return { ...diagnostic, code, path };
+      }
+      return (path === "hostFunction.arguments" ||
+        path === "hostFunction.result") &&
+        typeof hostFunction === "string"
+        ? { ...diagnostic, code, path, hostFunction }
+        : undefined;
+    case "RUN_WORKER_ERROR":
+      return path === undefined &&
+        hostFailureId === undefined &&
+        (hostFunction === undefined || typeof hostFunction === "string")
+        ? {
+            ...diagnostic,
+            code,
+            ...(hostFunction === undefined ? {} : { hostFunction })
+          }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
 function parseRunWorkerResponse(value: unknown): RunWorkerResponse | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const status = Reflect.get(value, "status");
@@ -102,28 +141,8 @@ function parseRunWorkerResponse(value: unknown): RunWorkerResponse | undefined {
   }
   if (status !== "failed") return undefined;
 
-  const error = Reflect.get(value, "error");
-  if (typeof error !== "object" || error === null) return undefined;
-  const name = Reflect.get(error, "name");
-  const message = Reflect.get(error, "message");
-  const stack = Reflect.get(error, "stack");
-  const code = Reflect.get(error, "code");
-  if (
-    typeof name !== "string" ||
-    typeof message !== "string" ||
-    (stack !== undefined && typeof stack !== "string") ||
-    (code !== undefined && typeof code !== "string")
-  ) {
-    return undefined;
-  }
-
-  const errorRecord: RunWorkerErrorRecord = {
-    name,
-    message,
-    ...(stack === undefined ? {} : { stack }),
-    ...(code === undefined ? {} : { code })
-  };
-  return { status, error: errorRecord, logs };
+  const error = parseRunWorkerErrorRecord(Reflect.get(value, "error"));
+  return error === undefined ? undefined : { status, error, logs };
 }
 
 function readRunFailureDiagnostic(
@@ -171,33 +190,58 @@ function createRunWorkerError(cause: unknown): RunError {
   });
 }
 
-function createRunHostManifest(
-  hostFunctions: HostFunctions
-): RunHostFunctionManifestEntry[] {
-  return Object.entries(hostFunctions).map(([namespace, functions]) => {
-    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(namespace)) {
-      throw new RunError("Host function namespace is not a valid identifier.", {
-        code: "RUN_INVALID_INPUT"
+function createRunExecutionError(
+  response: Extract<RunWorkerResponse, { status: "failed" }>,
+  dispatcher: RunHostFunctionDispatcher
+): RunError {
+  let error: RunError;
+  if (response.error.code === "RUN_HOST_FUNCTION_ERROR") {
+    const failure = dispatcher.takeHostFunctionFailure(
+      response.error.hostFailureId
+    );
+    if (failure.status === "missing") {
+      return new RunError("Dynamic Worker returned an unknown host failure.", {
+        code: "RUN_WORKER_ERROR",
+        logs: response.logs
       });
     }
-    return { namespace, functions: Object.keys(functions) };
-  });
-}
+    error = new RunError("Host function failed.", {
+      code: "RUN_HOST_FUNCTION_ERROR",
+      cause: failure.cause,
+      details: { hostFunction: failure.hostFunction },
+      logs: response.logs
+    });
+  } else {
+    const details =
+      response.error.path === undefined &&
+      response.error.hostFunction === undefined
+        ? undefined
+        : {
+            ...(response.error.path === undefined
+              ? {}
+              : { path: response.error.path }),
+            ...(response.error.hostFunction === undefined
+              ? {}
+              : { hostFunction: response.error.hostFunction })
+          };
+    const code =
+      response.error.code === "RUN_SERIALIZATION_ERROR" ||
+      response.error.code === "RUN_INVALID_INPUT" ||
+      response.error.code === "RUN_WORKER_ERROR"
+        ? response.error.code
+        : "RUN_EXECUTION_ERROR";
+    error = new RunError(
+      code === "RUN_WORKER_ERROR"
+        ? "Dynamic Worker host protocol failed."
+        : response.error.message,
+      {
+        code,
+        ...(details === undefined ? {} : { details }),
+        logs: response.logs
+      }
+    );
+  }
 
-function createRunExecutionError(
-  response: Extract<RunWorkerResponse, { status: "failed" }>
-): RunError {
-  const code =
-    response.error.code === "RUN_HOST_FUNCTION_ERROR" ||
-    response.error.code === "RUN_SERIALIZATION_ERROR"
-      ? response.error.code
-      : "RUN_EXECUTION_ERROR";
-  const error = new RunError(
-    code === "RUN_HOST_FUNCTION_ERROR"
-      ? "Host function failed."
-      : response.error.message,
-    { code, logs: response.logs }
-  );
   if (response.error.stack !== undefined) error.stack = response.error.stack;
   return error;
 }
@@ -206,9 +250,11 @@ function createRunExecutionError(
 export async function run<Output = unknown>(
   options: RunOptions
 ): Promise<RunResult<Output>> {
-  const hostFunctions = options.hostFunctions ?? {};
-  const hostManifest = createRunHostManifest(hostFunctions);
-  const dispatcher = new RunHostFunctionDispatcher(hostFunctions);
+  const configuredHostFunctions =
+    options.hostFunctions === undefined ? {} : options.hostFunctions;
+  const { dispatcher, manifest: hostManifest } = createRunHostFunctionDispatch(
+    configuredHostFunctions
+  );
 
   let worker: WorkerStub;
   try {
@@ -260,7 +306,7 @@ export async function run<Output = unknown>(
         });
       }
       if (response.status === "failed") {
-        throw createRunExecutionError(response);
+        throw createRunExecutionError(response, dispatcher);
       }
 
       // SAFETY: Output is explicitly a caller assertion; Workers RPC supplied the runtime value.

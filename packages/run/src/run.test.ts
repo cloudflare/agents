@@ -1,19 +1,7 @@
 import { env } from "cloudflare:workers";
 import { expect, it, vi } from "vitest";
 import { run, RunError } from "./index";
-
-const LOCAL_DYNAMIC_WORKER_LOADER: WorkerLoader = {
-  get(name, getCode) {
-    return env.LOADER.get(name, async () => ({
-      ...(await getCode()),
-      compatibilityDate: "2026-08-06"
-    }));
-  },
-  load(code) {
-    // ponytail: local workerd currently stops at 2026-08-06; remove this adapter once it supports Run's pinned 2026-08-27 child date.
-    return env.LOADER.load({ ...code, compatibilityDate: "2026-08-06" });
-  }
-};
+import { LOCAL_DYNAMIC_WORKER_LOADER } from "./run-test-worker-loader";
 
 it("returns an explicit JavaScript value from a fresh Dynamic Worker", async () => {
   const result = await run<number>({
@@ -189,12 +177,12 @@ throw error;
   expect(String(failure)).not.toContain("message getter escaped");
 });
 
-it("contains guest changes to WeakSet methods used for error branding", async () => {
+it("contains guest changes to collection methods used for error branding", async () => {
   const failure = await run({
     loader: LOCAL_DYNAMIC_WORKER_LOADER,
     source: `
-WeakSet.prototype.add = () => { throw new Error("brand add escaped"); };
-WeakSet.prototype.has = () => { throw new Error("brand check escaped"); };
+WeakMap.prototype.set = () => { throw new Error("brand set escaped"); };
+WeakMap.prototype.get = () => { throw new Error("brand get escaped"); };
 await tools.fail();
 `,
     hostFunctions: {
@@ -212,6 +200,24 @@ await tools.fail();
     message: "Host function failed."
   });
   expect(String(failure)).not.toContain("brand");
+});
+
+it("captures logs after generated code changes Array methods", async () => {
+  const result = await run<number>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+Array.prototype.push = () => { throw new Error("changed push"); };
+Array.prototype.join = () => { throw new Error("changed join"); };
+console.log("still", "captured");
+return 42;
+`
+  });
+
+  expect(result).toEqual({
+    status: "completed",
+    value: 42,
+    logs: [{ level: "log", message: "still captured" }]
+  });
 });
 
 it("contains a generated proxy that throws during error inspection", async () => {
@@ -232,6 +238,30 @@ throw new Proxy({}, {
     logs: [{ level: "warn", message: "before proxy failure" }]
   });
   expect(String(failure)).not.toContain("prototype trap escaped");
+});
+
+it("bounds generated error messages before they cross RPC", async () => {
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+const message = "🔥".repeat(20_000);
+TextEncoder.prototype.encode = () => { throw new Error("changed encode"); };
+String.prototype.slice = () => { throw new Error("changed slice"); };
+String.prototype.charCodeAt = () => { throw new Error("changed charCodeAt"); };
+Math.ceil = () => { throw new Error("changed ceil"); };
+throw new Error(message);
+`
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_EXECUTION_ERROR"
+  });
+  if (!(failure instanceof RunError)) throw failure;
+  expect(
+    new TextEncoder().encode(failure.message).byteLength
+  ).toBeLessThanOrEqual(16 * 1024);
+  expect(failure.message).toMatch(/…$/u);
 });
 
 it("retains captured logs on a generated failure", async () => {
