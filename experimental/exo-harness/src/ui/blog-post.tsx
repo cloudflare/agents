@@ -76,7 +76,7 @@ export function ExoHarnessBlogPost() {
             can self-modify in three different ways, although it feels like most
             of the language they use is marketing. There's nothing particularly
             revolutionary about what the harness is doing, apart from the fact
-            that there is a long-lived REPL Python notebook (the{" "}
+            that there is a long-lived REPL Python kernel (the{" "}
             <strong>"RLM Runtime"</strong>) that is exposed to the agent as its
             one tool.
           </p>
@@ -87,13 +87,14 @@ export function ExoHarnessBlogPost() {
           <ul className="list-disc space-y-3 pl-7 marker:text-kumo-secondary">
             <li>
               Make LLM queries from that REPL - the "Recursive" part of the RLM.
-              That model call then also has access to the same runtime.
+              That model call then has its own session, kernel, tree, history
+              etc.
             </li>
             <li>
               Update the narrow JSON store containing prompts, memories, skill
-              descriptions, and subagent definitions, including previous
-              versions of those (this is called the{" "}
-              <strong>"Continual Harness"</strong>).
+              descriptions, and subagent definitions (this is called the{" "}
+              <strong>"Continual Harness"</strong>). Previous versions of it are
+              also available to the model.
             </li>
             <li>
               Create ordinary Pi skills and extensions (yes - it's built on top
@@ -134,8 +135,8 @@ export function ExoHarnessBlogPost() {
           <p>
             This moves the boundary deeper than Prime Agent's persistent Python
             environment or Continual Harness; Exo could run an RLM executor, but
-            it doesn't have to. The main difference here is that durable state
-            lives separately from the code that uses it.
+            it doesn't have to. The main difference here is that the complete
+            executor can be replaced.
           </p>
 
           <h2 className="pt-6 text-3xl font-semibold tracking-tight">
@@ -308,8 +309,8 @@ export function ExoHarnessBlogPost() {
                 </span>
                 <strong className="mb-2 block">Load the harness</strong>
                 <span className="text-kumo-secondary">
-                  The kernel loads the activated <code>/harness</code> files
-                  from Workspace and assembles the initial model context.
+                  The kernel loads the live <code>/harness</code> files from
+                  Workspace and assembles the initial model context.
                 </span>
                 <span
                   aria-hidden="true"
