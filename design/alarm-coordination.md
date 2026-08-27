@@ -13,6 +13,10 @@ resource so capabilities do not overwrite one another's wake-ups.
   capability keeps its own schema, retry policy, and recovery semantics.
 - **Scheduler** — the capability for persistent named callbacks. It is one alarm
   contributor, not the general alarm service.
+- **Fibers** — the capability for durable replayable execution. Every
+  non-terminal run carries an authoritative `next_at` deadline (acceptance,
+  sleeps, retries, and claim backstops all write it), and the capability
+  contributes the minimum as one more ordinary contribution.
 - **Host contribution** — temporary support for host work that has not yet been
   extracted into a capability.
 

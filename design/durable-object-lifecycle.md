@@ -38,9 +38,11 @@ recalculation, chooses the earliest contribution, runs every capability's
 `onAlarm()` followed by the host's `onAlarm()`, then recalculates once more.
 
 Capabilities own their durable work. Scheduler stores named callback rows in
-its table; a future Fiber capability can store resumable jobs in its own table;
-an MCP capability can store reconnect state in its own table. They coordinate
-only through Lifecycle's alarm contract and do not depend on Scheduler.
+its table; the Fibers capability stores replayable runs and step journals in
+its own tables and contributes its earliest run deadline the same way
+([rfc-fibers.md](./rfc-fibers.md)); an MCP capability can store reconnect
+state in its own table. They coordinate only through Lifecycle's alarm
+contract and do not depend on Scheduler.
 
 A host can also implement `getNextAlarm()` for work not yet extracted into a
 capability. Exclusive contributions replace ordinary wake-time candidates,
@@ -177,3 +179,4 @@ a migration fallback. It never writes a duplicate name.
 
 - [Alarm coordination](./alarm-coordination.md)
 - [Durable Object lifecycle composition](./rfc-durable-object-lifecycle.md)
+- [Fibers: durable replayable execution as a Lifecycle capability](./rfc-fibers.md)
