@@ -102,6 +102,10 @@
         "name": "TestScheduleAgent"
       },
       {
+        "class_name": "TestFiberAgent",
+        "name": "TestFiberAgent"
+      },
+      {
         "class_name": "TestOnStartScheduleWarnAgent",
         "name": "TestOnStartScheduleWarnAgent"
       },
@@ -394,6 +398,7 @@
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",
         "TestScheduleAgent",
+        "TestFiberAgent",
         "TestOnStartScheduleWarnAgent",
         "TestOnStartScheduleNoWarnAgent",
         "TestOnStartScheduleExplicitFalseAgent",

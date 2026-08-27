@@ -2752,5 +2752,15 @@ Accepted with one amendment. The architectural direction:
 - Think retains specialized chat recovery policy through a named internal Fiber definition.
 
 The first implementation PR ships Phases 1 and 2 — replay Fibers plus the
-optional `{ run, recover }` recovery callback — without the legacy adapters,
-so the change stays reviewable.
+optional `{ run, recover }` recovery callback — and the internal-framework
+half of Phases 3 and 4: `Agent` installs `this.fibers` (subclass definitions
+on an overridable `fiberDefinitions` field, framework definitions through the
+composition-root aperture), and Think chat turns, AIChatAgent chat turns, and
+Think messenger replies execute on the capability. Their live closures run as
+one journaled step with checkpoint-backed `stash()`; unclean interruptions
+synthesize the legacy `FiberRecoveryContext` and route through the unchanged
+`_handleInternalFiberRecovery` → ChatRecoveryEngine seam (messenger recovery
+likewise), so the recovery brain did not move. The legacy `runFiber()` /
+`startFiber()` user APIs are untouched and still recovered by their own scan,
+and facet-hosted turns stay on the legacy engine until routed Fibers land —
+deprecation still waits for migration evidence.

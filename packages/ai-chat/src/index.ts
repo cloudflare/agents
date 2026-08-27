@@ -661,6 +661,94 @@ export class AIChatAgent<
    */
   waitForMcpConnections: boolean | { timeout: number } = { timeout: 10_000 };
 
+  /**
+   * Live chat-turn closures keyed by run nonce. A closure exists only in the
+   * isolate that accepted the turn; recovery after interruption never re-runs
+   * it — the definition's `recover` callback hands the interruption to the
+   * shared ChatRecoveryEngine instead.
+   */
+  private readonly _liveChatTurnClosures = new Map<
+    string,
+    {
+      initial: unknown;
+      wrap: (data: unknown) => unknown;
+      run: () => Promise<unknown>;
+      settle: {
+        resolve: (value: unknown) => void;
+        reject: (error: unknown) => void;
+      };
+    }
+  >();
+
+  /**
+   * The chat-turn Fiber definition. Every chat turn runs as one journaled
+   * step on the `fibers` capability: the live closure executes under the
+   * fiber stash context (so `this.stash()` keeps checkpointing), and an
+   * unclean interruption routes through the same `_handleInternalFiberRecovery`
+   * seam the legacy fiber scan used — the ChatRecoveryEngine and every hook
+   * behind it are unchanged.
+   */
+  private _registerChatTurnFiberDefinition(): void {
+    const chatFiberName = (this.constructor as typeof AIChatAgent)
+      .CHAT_FIBER_NAME;
+    this._registerInternalFiberDefinition(chatFiberName, {
+      run: async (input, step) => {
+        const { nonce } = input as { requestId: string; nonce: string };
+        await step.do(
+          "model-turn",
+          { retries: { limit: 1 }, timeout: "1 day" },
+          async ({ checkpoint, signal }) => {
+            const entry = this._liveChatTurnClosures.get(nonce);
+            if (!entry) {
+              // The accepted run reached a fresh isolate before its live
+              // closure ever executed. Stream-metadata evidence drives
+              // user-visible recovery for this turn.
+              throw new Error(
+                "Chat turn closure is no longer available in this isolate"
+              );
+            }
+            // SAFETY: chat fiber snapshots are the same JSON envelopes the
+            // legacy stash wrapper persisted; the serializer validates them.
+            checkpoint(entry.initial as Parameters<typeof checkpoint>[0]);
+            try {
+              const value = await this.keepAliveWhile(() =>
+                this._withFiberStash(
+                  {
+                    id: nonce,
+                    signal,
+                    stash: (data) =>
+                      checkpoint(
+                        entry.wrap(data) as Parameters<typeof checkpoint>[0]
+                      )
+                  },
+                  () => entry.run()
+                )
+              );
+              entry.settle.resolve(value);
+            } catch (error) {
+              entry.settle.reject(error);
+              throw error;
+            }
+            return undefined;
+          }
+        );
+      },
+      recover: async (interruption) => {
+        const input = interruption.input as { requestId: string };
+        const ctx: FiberRecoveryContext = {
+          id: interruption.runId,
+          name: `${chatFiberName}:${input.requestId}`,
+          snapshot: (interruption.interruptedStep?.checkpoint ??
+            null) as unknown,
+          createdAt: interruption.createdAt,
+          recoveryReason: "interrupted"
+        };
+        await this._handleInternalFiberRecovery(ctx);
+        return { action: "complete" as const, result: undefined };
+      }
+    });
+  }
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -675,20 +763,51 @@ export class AIChatAgent<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
+    const wrap = (data: unknown) =>
+      wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
 
-    return this._runFiberWithStashWrapper(
-      `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-      async () => fn(),
-      {
-        initialSnapshot: wrapChatFiberSnapshot(
-          "__cfAIChatFiberSnapshot",
-          snapshot,
-          null
-        ),
-        wrapStash: (data) =>
-          wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data)
-      }
-    );
+    // Facet-hosted turns stay on the legacy fiber engine: the Fibers
+    // capability does not accept runs on routed sub-agents yet, and facet
+    // recovery routes through the root's facet-run index.
+    if (this.parentPath.length > 0) {
+      return this._runFiberWithStashWrapper(
+        `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+        async () => fn(),
+        { initialSnapshot: wrap(null), wrapStash: wrap }
+      );
+    }
+
+    const nonce = nanoid();
+    let resolveOutcome!: (value: unknown) => void;
+    let rejectOutcome!: (error: unknown) => void;
+    const outcome = new Promise<unknown>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    // Rejections can land while `runAttached` is still being awaited (before
+    // the outcome listener attaches); mark them handled so workerd does not
+    // report an unhandled rejection the wrapper is about to consume.
+    outcome.catch(() => {});
+    // The turn closure re-enters the caller's invocation context (live
+    // connection/request), exactly as legacy inline fiber execution did: the
+    // capability's host boundary intentionally carries no connection.
+    const ambient = agentContext.getStore();
+    this._liveChatTurnClosures.set(nonce, {
+      initial: wrap(null),
+      wrap,
+      run: ambient ? () => agentContext.run(ambient, fn) : fn,
+      settle: { resolve: resolveOutcome, reject: rejectOutcome }
+    });
+    try {
+      await this.fibers.__DO_NOT_USE_WILL_BREAK__runAttached(
+        (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
+        { requestId, continuation, nonce },
+        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+      );
+      return (await outcome) as T;
+    } finally {
+      this._liveChatTurnClosures.delete(nonce);
+    }
   }
 
   /**
@@ -799,6 +918,7 @@ export class AIChatAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
+    this._registerChatTurnFiberDefinition();
     withAgentSpan(
       this,
       "chat_initialization",

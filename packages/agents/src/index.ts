@@ -127,6 +127,8 @@ import {
   Scheduler,
   setSchedulerCallbackResolver
 } from "./schedules/scheduler";
+import { Fibers, setFiberDefinitionResolver } from "./fibers/fibers";
+import type { FiberCallbacks, FiberHandlers } from "./fibers/types";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
@@ -1723,6 +1725,44 @@ export class Agent<
    */
   readonly scheduler: Scheduler;
 
+  /**
+   * Durable replayable execution capability installed into this Agent's
+   * Lifecycle. Declare definitions on the overridable
+   * {@link fiberDefinitions} property and start runs with
+   * `this.fibers.run(name, input, options)`.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly fibers: Fibers;
+
+  /**
+   * Named Fiber definitions for this Agent, resolved lazily on every
+   * dispatch. Declare as a field so the map is rebuilt on every Durable
+   * Object wake — that is what lets in-flight runs resolve their persisted
+   * definition names after a restart:
+   *
+   * ```ts
+   * readonly fiberDefinitions = {
+   *   "build-report@v1": async (input: ReportInput, step: FiberStep) => {
+   *     // ...
+   *   }
+   * } satisfies FiberHandlers;
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  declare readonly fiberDefinitions?: FiberHandlers;
+
+  /**
+   * Framework-internal Fiber definitions (chat turns, messenger replies),
+   * consulted before {@link fiberDefinitions}. Their `__cf`-prefixed names
+   * cannot be started through the public `fibers.run()`.
+   */
+  private readonly _internalFiberDefinitions = new Map<
+    string,
+    FiberCallbacks[string]
+  >();
+
   readonly mcp: MCPClientManager;
 
   /**
@@ -2309,6 +2349,34 @@ export class Agent<
         ).call(this, payload, schedule);
     });
 
+    this.fibers = new Fibers({
+      onError: (error: unknown) =>
+        runInInvocation(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          () => this.onError(error)
+        )
+    });
+
+    // Agent's definitions live on the class, not in the capability
+    // constructor: framework-internal definitions first (registered by
+    // subclasses like Think through `_registerInternalFiberDefinition`),
+    // then the subclass's overridable `fiberDefinitions` field. Both are
+    // resolved lazily, so field initialization order never matters.
+    setFiberDefinitionResolver(this.fibers, (name) => {
+      // SAFETY: declared definitions are constrained with `never` parameters
+      // so concrete definition types satisfy the map under contravariance —
+      // the same erasure the Fibers constructor map performs.
+      return (this._internalFiberDefinitions.get(name) ??
+        this.fiberDefinitions?.[name]) as ReturnType<
+        Parameters<typeof setFiberDefinitionResolver>[1]
+      >;
+    });
+
     this.mcp = this._withAgentSpan(
       "agent_initialization",
       "initialization",
@@ -2348,7 +2416,7 @@ export class Agent<
       }
     );
 
-    this.lifecycle.use(this.scheduler).use(this.mcp);
+    this.lifecycle.use(this.scheduler).use(this.mcp).use(this.fibers);
 
     // MCP starts before Agent restores facet routing state. Defer its initial
     // publication until broadcasts can be routed to the correct owner.
@@ -2752,6 +2820,10 @@ export class Agent<
               async () => {
                 this._checkOrphanedWorkflows();
                 await this._checkRunFibers();
+                // New-engine runs recover at the same startup point as the
+                // legacy fiber scan: interrupted Fibers runs (including chat
+                // turns) settle or reschedule before the user's onStart.
+                await this.fibers.__DO_NOT_USE_WILL_BREAK__dispatchDueRuns();
                 return this._agentToolRunRecoveryRunIds();
               }
             );
@@ -5143,6 +5215,38 @@ export class Agent<
       throw new Error("stash() called outside a fiber");
     }
     ctx.stash(data);
+  }
+
+  /**
+   * Register one framework-internal Fiber definition on this Agent's
+   * `fibers` capability. Subclasses (Think, AIChatAgent) call this from
+   * their constructors so the definition is rebuilt on every wake; names use
+   * the reserved `__cf` prefix so users cannot start them through the public
+   * `fibers.run()`.
+   * @internal
+   */
+  protected _registerInternalFiberDefinition(
+    name: string,
+    definition: FiberCallbacks[string]
+  ): void {
+    this._internalFiberDefinitions.set(name, definition);
+  }
+
+  /**
+   * Run `fn` inside the fiber stash context so `this.stash()` keeps working
+   * for turns executing on the `fibers` capability exactly as it does inside
+   * legacy `runFiber()` closures.
+   * @internal
+   */
+  protected _withFiberStash<T>(
+    context: {
+      id: string;
+      signal: AbortSignal;
+      stash: (data: unknown) => void;
+    },
+    fn: () => Promise<T>
+  ): Promise<T> {
+    return _fiberALS.run(context, fn);
   }
 
   /**

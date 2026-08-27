@@ -152,6 +152,16 @@ export interface MessengerThinkHost extends MessengerThinkTarget {
     options?: StartFiberOptions
   ): Promise<MessengerFiberStartResult>;
   resolveFiber(id: string, result: FiberRecoveryResult): Promise<boolean>;
+  /**
+   * Durably accept one messenger reply run on the host's Fibers capability
+   * and execute it inline while this isolate lives. The same idempotency key
+   * joins the existing run (`accepted: false`).
+   */
+  _runMessengerReplyFiber(input: {
+    nonce: string;
+    idempotencyKey: string;
+    metadata: Record<string, unknown>;
+  }): Promise<{ accepted: boolean }>;
   subAgent<T extends Agent>(
     agentClass: SubAgentClass<T>,
     name: string
@@ -176,6 +186,21 @@ export function chatSdkMessenger(
 
 export class ThinkMessengerRuntime {
   private chat?: Chat<Record<string, Adapter>>;
+  /**
+   * Live reply closures keyed by run nonce. A closure exists only in the
+   * isolate that accepted the webhook; an interrupted reply is recovered on
+   * wake through {@link handleFiberRecovery} from its persisted snapshot.
+   */
+  private readonly liveReplies = new Map<
+    string,
+    {
+      definition: NormalizedMessengerDefinition;
+      event: MessengerEvent;
+      thread: ChatThread;
+      snapshotEvent: ReturnType<typeof serializableMessengerEvent>;
+      snapshotThread: ReturnType<ChatThread["toJSON"]>;
+    }
+  >();
   private readonly definitionsByAdapterName = new Map<
     string,
     NormalizedMessengerDefinition
@@ -243,7 +268,21 @@ export class ThinkMessengerRuntime {
     return chat.webhooks[definition.adapterName](request);
   }
 
-  async handleFiberRecovery(ctx: FiberRecoveryContext): Promise<boolean> {
+  async handleFiberRecovery(
+    ctx: FiberRecoveryContext,
+    options?: {
+      /**
+       * Capability-run recovery: persist re-entry checkpoints here instead
+       * of the legacy managed-fiber ledger, whose row does not exist for
+       * runs on the Fibers capability. Terminal settlement is implied by the
+       * caller's recovery decision, so the legacy `resolveFiber` completion
+       * calls are skipped when this hook is present.
+       */
+      persistRecoverySnapshot?: (
+        snapshot: ReturnType<typeof messengerReplySnapshot>
+      ) => Promise<void> | void;
+    }
+  ): Promise<boolean> {
     if (ctx.name !== MESSENGER_REPLY_FIBER_NAME) {
       return false;
     }
@@ -271,6 +310,10 @@ export class ThinkMessengerRuntime {
         undefined,
         snapshot.event,
         async (nextSnapshot) => {
+          if (options?.persistRecoverySnapshot) {
+            await options.persistRecoverySnapshot(nextSnapshot);
+            return;
+          }
           await this.host.resolveFiber(ctx.id, {
             snapshot: nextSnapshot,
             status:
@@ -286,11 +329,15 @@ export class ThinkMessengerRuntime {
         definition.delivery?.interruptedResponseText ??
           "Sorry, my reply was interrupted. Please send your message again if you'd like me to retry."
       );
-      await this.host.resolveFiber(ctx.id, { status: "completed" });
+      if (!options?.persistRecoverySnapshot) {
+        await this.host.resolveFiber(ctx.id, { status: "completed" });
+      }
       return true;
     }
 
-    await this.host.resolveFiber(ctx.id, { status: "completed" });
+    if (!options?.persistRecoverySnapshot) {
+      await this.host.resolveFiber(ctx.id, { status: "completed" });
+    }
     return true;
   }
 
@@ -389,6 +436,30 @@ export class ThinkMessengerRuntime {
     return chat.registerSingleton();
   }
 
+  /** Execute one live (same-isolate) reply under the given fiber context. */
+  async executeLiveReply(nonce: string, fiber: FiberContext): Promise<void> {
+    const entry = this.liveReplies.get(nonce);
+    if (!entry) {
+      throw new Error(
+        "Messenger reply closure is no longer available in this isolate"
+      );
+    }
+    fiber.stash(
+      messengerReplySnapshot(
+        "accepted",
+        entry.snapshotEvent,
+        entry.snapshotThread
+      )
+    );
+    await this.answer(
+      entry.definition,
+      entry.event,
+      entry.thread,
+      fiber,
+      entry.snapshotEvent
+    );
+  }
+
   private async enqueueReply(
     definition: NormalizedMessengerDefinition,
     event: MessengerEvent,
@@ -396,62 +467,32 @@ export class ThinkMessengerRuntime {
   ): Promise<void> {
     const snapshotEvent = serializableMessengerEvent(event);
     const snapshotThread = thread.toJSON();
-    const result = await this.host.startFiber(
-      MESSENGER_REPLY_FIBER_NAME,
-      async (fiber) => {
-        fiber.stash(
-          messengerReplySnapshot("accepted", snapshotEvent, snapshotThread)
-        );
-        await this.answer(definition, event, thread, fiber, snapshotEvent);
-      },
-      {
+    const nonce = crypto.randomUUID();
+    this.liveReplies.set(nonce, {
+      definition,
+      event,
+      thread,
+      snapshotEvent,
+      snapshotThread
+    });
+    try {
+      // Durable acceptance plus inline execution on the host's Fibers
+      // capability. A duplicate webhook joins the existing run
+      // (`accepted: false`) and returns; an interrupted run is recovered on
+      // wake by the reply definition's `recover` callback, which replaces
+      // the legacy join-time recovery branch.
+      await this.host._runMessengerReplyFiber({
+        nonce,
         idempotencyKey: idempotencyKeyForEvent(event),
         metadata: {
           messengerId: event.messengerId,
           messageId: event.message?.id,
           provider: event.provider,
           threadId: event.thread.id
-        },
-        waitForCompletion: true
-      }
-    );
-
-    if (result.accepted || result.status !== "interrupted") {
-      return;
-    }
-
-    const snapshot = parseMessengerReplySnapshot(result.snapshot);
-    if (!snapshot) {
-      return;
-    }
-
-    const mode = messengerReplyRecoveryMode(snapshot);
-    if (mode === "answer") {
-      await this.answer(
-        definition,
-        snapshot.event,
-        thread,
-        undefined,
-        snapshot.event,
-        async (nextSnapshot) => {
-          await this.host.resolveFiber(result.fiberId, {
-            snapshot: nextSnapshot,
-            status:
-              nextSnapshot.stage === "completed" ? "completed" : "interrupted"
-          });
         }
-      );
-      return;
-    }
-
-    if (mode === "apologize") {
-      await thread
-        .post(
-          definition.delivery?.interruptedResponseText ??
-            "Sorry, my reply was interrupted. Please send your message again if you'd like me to retry."
-        )
-        .catch(() => undefined);
-      await this.host.resolveFiber(result.fiberId, { status: "completed" });
+      });
+    } finally {
+      this.liveReplies.delete(nonce);
     }
   }
 

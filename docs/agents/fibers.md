@@ -65,6 +65,31 @@ the right moment and no lock to trip over. Handlers are ordinary arrows that
 capture `this`. Version the name (`"build-report@v2"`) instead of changing an
 in-flight definition's step layout.
 
+## On an Agent
+
+`Agent` installs the capability automatically as `this.fibers` (experimental).
+Declare definitions on the overridable `fiberDefinitions` field — the same
+every-wake rebuild guarantee, resolved lazily so field order never matters:
+
+```ts
+import { Agent } from "agents";
+import type { FiberHandlers, FiberStep } from "agents/fibers";
+
+export class ReportAgent extends Agent<Env> {
+  override readonly fiberDefinitions = {
+    "build-report@v1": async (input: ReportInput, step: FiberStep) => {
+      // ...same step API; handlers run in the Agent's invocation context,
+      // so getCurrentAgent() works throughout.
+    }
+  } satisfies FiberHandlers;
+}
+```
+
+Fiber deadlines share the Agent's physical alarm with schedules, keep-alive,
+and the rest of the Agent's durable work through the Lifecycle contribution
+model. Internally, Agent's own chat frameworks (Think, AIChatAgent, and
+Think's messenger replies) run their turns on this same capability.
+
 ## Starting runs
 
 ```ts
@@ -226,6 +251,8 @@ simpler, safer default.
 ## Current limits
 
 The first release is deliberately narrow: no `waitForCompletion` mode on
-`run()`, no automatic `this.fibers` on `Agent`, and no runs on routed
-sub-agents. The design and its planned phases are recorded in
+`run()`, and no runs on routed sub-agents (facet-hosted work stays on the
+legacy fiber engine for now). The legacy `runFiber()`/`startFiber()` APIs are
+unchanged and still recovered by their own scan; deprecation waits for
+migration evidence per the RFC. The design and its phases are recorded in
 [`design/rfc-fibers.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-fibers.md).

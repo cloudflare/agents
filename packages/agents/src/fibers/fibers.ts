@@ -284,6 +284,47 @@ export class Fibers<
 
   /** Claim and execute due runs during the Lifecycle alarm phase. */
   async onAlarm(): Promise<void> {
+    await this.#dispatchDueRuns();
+  }
+
+  /**
+   * @internal Host boot-recovery aperture: claim and execute due runs now,
+   * outside the alarm phase. Agent calls this at its startup recovery point
+   * so interrupted runs recover before the user's `onStart`, matching the
+   * legacy fiber scan's ordering. Idempotent and safe to race with alarms.
+   */
+  async __DO_NOT_USE_WILL_BREAK__dispatchDueRuns(): Promise<void> {
+    await this.#dispatchDueRuns();
+  }
+
+  /**
+   * @internal Framework aperture: durably accept one run — reserved
+   * (`__cf`-prefixed) definition names included, which the public `run()`
+   * refuses so users cannot start framework runs — and execute it to its
+   * next durable boundary before returning. The receipt's run may already be
+   * terminal when this resolves; callers that need the outcome read it from
+   * their own channel (the run handler settles it) or from the snapshot.
+   */
+  async __DO_NOT_USE_WILL_BREAK__runAttached(
+    definition: string,
+    input: unknown,
+    options?: FiberRunOptions
+  ): Promise<FiberReceipt> {
+    if (!this.#hasDefinition(definition)) {
+      throw new Error(
+        `Unknown Fiber definition "${definition}": not declared on this Fibers`
+      );
+    }
+    const receipt = await this.#accept(definition, input, options);
+    if (receipt.accepted) await this.#executeRun(receipt.runId);
+    return receipt;
+  }
+
+  async #dispatchDueRuns(): Promise<void> {
+    // Explicit host teardown (destroy) can run inside this same alarm phase
+    // from an earlier capability's callback; its storage — tables included —
+    // is already gone.
+    if (this.lifecycle.alarms.disabled()) return;
     const now = Date.now();
     const due = this.#sql<{ run_id: string }>`
       SELECT run_id FROM cf_fiber_runs
