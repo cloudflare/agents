@@ -1,0 +1,83 @@
+packages/agents/src/lifecycle/current-agent.ts
+  s_b3be5a835f928d::t_d8bae203f2cc8b 5-6
+packages/agents/src/react-tests/websockets-callables-client.test.ts
+  s_b3be5a835f928d::t_747e02eb6405cd 1-59
+examples/next/lifecycle/README.md
+  s_b3be5a835f928d::t_80c46ec8733ed6 11-22,69-74
+examples/next/lifecycle/src/index.ts
+  s_b3be5a835f928d::t_956eb50e73139e 6,8,60-74,79-104
+  s_b3be5a835f928d::t_e21f44cbfbf6a1 1
+packages/agents/src/lifecycle/capability.ts
+  s_b3be5a835f928d::t_6e4a3afc9b92d1 5,53-76,84,93-94,96-99
+packages/agents/src/index.ts
+  s_b3be5a835f928d::t_3c3dad1c281dbb 2241-2243,2247-2248
+  s_b3be5a835f928d::t_48c1e310675b26 10176,10197
+  s_b3be5a835f928d::t_0e2abdaf6c1b5f 66,387-397,1539-1541,2323-2350,2500,3534-3536,5948,5969,5982,5997,6144,6157,6171,6183,6194
+.changeset/websockets-capability.md
+  s_b3be5a835f928d::t_2d652ca0f35f92 1-36
+  s_b3be5a835f928d::t_1a2dc75f265d06 37-45
+packages/agents/scripts/build.ts
+  s_b3be5a835f928d::t_a540480777df27 26
+  s_b3be5a835f928d::t_8be2a53b9a67f3 27
+packages/agents/src/websockets/websockets.ts
+  s_b3be5a835f928d::t_12b1950319090b 1-2
+  s_b3be5a835f928d::t_537586015f475e 3-311
+packages/agents/src/websockets/index.ts
+  s_b3be5a835f928d::t_5e0367de1e8ec2 1-13
+  s_b3be5a835f928d::t_7289ecc0e7c9e4 14-20
+packages/agents/src/lifecycle/capability-runner.ts
+  s_b3be5a835f928d::t_ab99816a8bc7d0 44-49,56-77,94-130,216-281
+packages/agents/src/websockets/protocol.ts
+  s_b3be5a835f928d::t_ea8c7224d7cdd6 1-31
+packages/agents/src/websockets/decorated.ts
+  s_b3be5a835f928d::t_4469c7e1459a5a 1-140
+packages/agents/src/websockets/types.ts
+  s_b3be5a835f928d::t_7c657bd9be3c42 1-28
+pnpm-lock.yaml
+  s_b3be5a835f928d::t_630d168b81861a 4050-4052,8116-8118,16190-16191
+docs/agents/lifecycle.md
+  s_b3be5a835f928d::t_0b0f102b3fdf73 68-71,271-274,280,282-285,288,290-301,305-318
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_b3be5a835f928d::t_4b2d9c7702fee2 10,12,212,222
+  s_b3be5a835f928d::t_c678fd6bdd07db 1,159-193
+  s_b3be5a835f928d::t_e116f6d050feb6 207-211,213-221
+  s_b3be5a835f928d::t_145e30ac9396cb 238
+packages/agents/src/websockets/options.ts
+  s_b3be5a835f928d::t_74a604d1ac64a8 1-66
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_b3be5a835f928d::t_97bf384ffc801f 15,29,36,116-117,119-122,281-285,292-295,328-331,335-343,474-478,480,482-485,512-518,528,537-540,555,562-563
+packages/agents/src/tests-d/lifecycle-export.test-d.ts
+  s_b3be5a835f928d::t_1cfccd2964963a 23,55-61,64,68,77
+packages/agents/src/lifecycle/types.ts
+  s_b3be5a835f928d::t_455d41777adeeb 17-21
+packages/agents/package.json
+  s_b3be5a835f928d::t_560106336e0edc 171-180
+  s_b3be5a835f928d::t_9bfaaec8371803 27
+packages/agents/src/tests/lifecycle/websockets-capability.test.ts
+  s_b3be5a835f928d::t_bd6f6f58a3c7e9 1-225
+packages/agents/src/lifecycle/index.ts
+  s_b3be5a835f928d::t_797fe9c9083a87 12,14-15,32
+packages/agents/src/websockets/connection.ts
+  s_b3be5a835f928d::t_add4052f6a0dfd 8-9,186,188,198,251,255,276
+  s_b3be5a835f928d::t_8007057a898fe2 10
+packages/agents/src/websockets/client.ts
+  s_b3be5a835f928d::t_d8a5401100bb9e 1-121
+packages/agents/src/tests/agents/callable.ts
+  s_b3be5a835f928d::t_0354bba33f74db 11-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "543ea34d6f3cbd6dbe20c37d324b113b6c97e42b",
+  "prompts": {},
+  "sessions": {
+    "s_b3be5a835f928d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e60c15-51cf-4a50-b840-9e77737af7be",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
