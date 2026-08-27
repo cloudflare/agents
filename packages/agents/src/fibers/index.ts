@@ -18,10 +18,13 @@ export {
 export { MAX_SERIALIZED_BYTES } from "./serialization";
 export type {
   Fiber,
+  FiberCallbacks,
   FiberError,
+  FiberHandlers,
+  FiberInput,
   FiberJson,
+  FiberOutput,
   FiberReceipt,
-  FiberRunHandler,
   FiberRunOptions,
   FiberRunSnapshot,
   FiberRunState,

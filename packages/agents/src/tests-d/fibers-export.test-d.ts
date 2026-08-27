@@ -11,44 +11,60 @@ import {
 } from "../fibers";
 
 class ReportObject extends DurableObject {
-  readonly fibers = new Fibers(this);
-
-  readonly report = this.fibers.create<{ topic: string }, { key: string }>(
-    "report",
-    async (input, step) => {
-      // Input and step are typed at the definition site.
-      input.topic satisfies string;
-      const size = await step.do("measure", () => input.topic.length);
-      size satisfies number;
-      await step.sleep("cool-off", "10 seconds");
-      return { key: `report-${size}` };
+  readonly fibers = new Fibers({
+    definitions: {
+      report: async (input: { topic: string }, step: FiberStep) => {
+        // Input and step are typed at the definition site.
+        input.topic satisfies string;
+        const size = await step.do("measure", () => input.topic.length);
+        size satisfies number;
+        await step.sleep("cool-off", "10 seconds");
+        return { key: `report-${size}` };
+      }
     }
-  );
+  });
 
   readonly lifecycle = Lifecycle.install(this).use(this.fibers);
 }
 
 declare const object: ReportObject;
 object.fibers satisfies DurableObjectCapability;
-object.report satisfies Fiber<{ topic: string }, { key: string }>;
 
-// The handle types run input and snapshot output.
-object.report.run({ topic: "chips" }) satisfies Promise<FiberReceipt>;
-object.report.run(
+// Declared definitions type both the name and the input where runs start.
+object.fibers.run("report", { topic: "chips" }) satisfies Promise<FiberReceipt>;
+object.fibers.run(
+  "report",
   { topic: "chips" },
   { idempotencyKey: "report:1", retain: false }
 ) satisfies Promise<FiberReceipt>;
-object.report.get("fiber_x") satisfies Promise<FiberRunSnapshot<{
+// @ts-expect-error the input shape is checked against the declared handler.
+object.fibers.run("report", { subject: "chips" });
+// @ts-expect-error missingDefinition is not a declared definition.
+object.fibers.run("missingDefinition", {});
+
+// A handle is a typed lens scoped to one declared definition.
+const report = object.fibers.handle("report");
+report satisfies Fiber<{ topic: string }, { key: string }>;
+report.run({ topic: "chips" }) satisfies Promise<FiberReceipt>;
+report.get("fiber_x") satisfies Promise<FiberRunSnapshot<{
   key: string;
 }> | null>;
-// @ts-expect-error the input shape is checked at the handle.
-object.report.run({ subject: "chips" });
+// @ts-expect-error unknownDefinition is not a declared definition.
+object.fibers.handle("unknownDefinition");
 
 // Manager-level reads span definitions and widen the output.
 object.fibers.get(
   "fiber_x"
 ) satisfies Promise<FiberRunSnapshot<FiberValue> | null>;
 object.fibers.cancel("fiber_x", "done") satisfies Promise<boolean>;
+
+// A Fibers constructed without definitions is string-typed: any name
+// compiles, and names resolve at runtime against the declared map or a
+// composition-root resolver.
+const untypedFibers = new Fibers();
+untypedFibers.run("anyDefinitionName", {
+  free: true
+}) satisfies Promise<FiberReceipt>;
 
 // Step typing stands alone.
 declare const step: FiberStep;

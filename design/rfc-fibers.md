@@ -5,8 +5,14 @@ Status: accepted (amended)
 > Amended on acceptance: Fibers integrates through the shipped Lifecycle
 > alarm-contribution model (`getNextAlarm()` / `onAlarm()` / `alarms.rearm()`)
 > instead of the originally proposed central `cf_lifecycle_work` dispatcher,
-> now recorded under Alternatives considered. Code samples are aligned with
-> the Lifecycle API as landed in the schedules-capability extraction.
+> and definitions are declared in the `Fibers` constructor — a
+> Scheduler-style `definitions` map — instead of imperative `fibers.create()`
+> handles. Both are recorded under Alternatives considered. A typed
+> `fibers.handle(name)` lens replaces per-definition handle fields, runs
+> start with `fibers.run(name, input, options)`, and `create(name, run,
+recover?)`'s recovery slot becomes a `{ run, recover }` map value when
+> Phase 2 lands. Code samples are aligned with the Lifecycle API as landed in
+> the schedules-capability extraction.
 
 ## Summary
 
@@ -2669,6 +2675,16 @@ The original version of this RFC proposed a Lifecycle-owned `cf_lifecycle_work` 
 
 Worth revisiting only if a future capability without domain deadline tables needs durable payload-carrying triggers.
 
+### `create()` handles instead of a constructor definitions map
+
+The original proposal registered definitions imperatively — `readonly report = this.fibers.create(name, run, recover?)` — returning typed handle fields, with the registry locked once Lifecycle startup began. Rejected in favor of a constructor `definitions` map:
+
+- the every-wake registry guarantee relied on an enforcement rule users could trip over — `create()` after the lock threw, and the lock landed before even the host's own `onStart`, which runs after capability startup;
+- a constructor map makes the guarantee structural: the definitions are the constructor options, rebuilt by construction on every wake, with nothing to register at the right moment;
+- it matches the Scheduler's `callbacks` idiom, so the two capabilities read identically at the composition root;
+- typed per-definition handles survive as pure `fibers.handle(name)` lenses, creatable at any time because they hold no registration state;
+- framework-internal definitions (the Think chat turn, messenger replies, the legacy Fiber adapter) attach through an internal composition-root resolver aperture — mirroring the Scheduler's callback-name resolver — instead of occupying the host's map.
+
 ### Use Agent schedules for every Fiber wake
 
 This can bootstrap a prototype, but it couples plain Lifecycle Fibers to Agent scheduling, stores internal run wakes as user schedules, and cannot give Lifecycle one final alarm authority. Rejected as the final architecture. The Scheduler already contributes its own deadlines; Fibers contributes alongside it rather than storing run wakes as user schedules.
@@ -2722,7 +2738,7 @@ This preserves current Fibers but leaves application authors manually implementi
 Accepted with one amendment. The architectural direction:
 
 - one `Fibers` lifecycle capability per host;
-- many named definitions created with `fibers.create(name, run, recover?)`;
+- many named definitions declared in the constructor `definitions` map (amended from `fibers.create()` handles); custom recovery attaches as a `{ run, recover }` map value when Phase 2 lands;
 - replay from the beginning for every execution attempt;
 - memoized named steps and durable sleeps;
 - optional Fiber-level recovery callback beside the main callback;

@@ -23,17 +23,57 @@ export type FiberJson =
 export type FiberValue = FiberJson | undefined | void;
 
 /**
- * The main callback of a Fiber definition. Invoked with the owning host as
- * `this`, from the beginning, on every execution attempt; completed steps
- * return journaled results instead of running again.
+ * Constraint for a Fibers definitions map: named handlers invoked from the
+ * beginning on every execution attempt, with completed steps returning
+ * journaled results instead of running again.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberRunHandler<Host, Input, Output extends FiberValue> = (
-  this: Host,
-  input: Readonly<Input>,
-  step: FiberStep
-) => Output | Promise<Output>;
+export type FiberHandlers = Record<
+  string,
+  // The input parameter is `never` so any concretely-typed handler satisfies
+  // the constraint under contravariance; each handler's real input type is
+  // recovered with `FiberInput`.
+  (input: never, step: FiberStep) => FiberValue | Promise<FiberValue>
+>;
+
+/**
+ * Default definitions surface for a Fibers constructed without a typed map:
+ * any name compiles with an untyped input. At runtime a name must be
+ * declared in the constructor map or supplied by a composition-root
+ * resolver; a bare Fibers rejects it otherwise.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export type FiberCallbacks = Record<
+  string,
+  (input: unknown, step: FiberStep) => FiberValue | Promise<FiberValue>
+>;
+
+/**
+ * The input type a registered Fiber definition accepts.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export type FiberInput<Handler> = Handler extends (
+  input: infer Input,
+  ...rest: never[]
+) => unknown
+  ? Input
+  : never;
+
+/**
+ * The settled output type a registered Fiber definition produces.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export type FiberOutput<Handler> = Handler extends (
+  ...args: never[]
+) => infer Output
+  ? Awaited<Output> extends FiberValue
+    ? Awaited<Output>
+    : never
+  : never;
 
 /**
  * Per-attempt context passed to a `step.do()` callback.

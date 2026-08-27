@@ -8,7 +8,8 @@ lands.
 | Example                      | Status    | Demonstrates                                                                |
 | ---------------------------- | --------- | --------------------------------------------------------------------------- |
 | [`lifecycle`](./lifecycle)   | Available | A plain `DurableObject` composed with `Lifecycle` and a reusable capability |
-| [`schedules`](./schedules)   | This PR   | `Scheduler` installed as a reusable lifecycle capability                    |
+| [`schedules`](./schedules)   | Available | `Scheduler` installed as a reusable lifecycle capability                    |
+| [`fibers`](./fibers)         | This PR   | Durable replayable `Fibers` installed as a reusable lifecycle capability    |
 | [`mcp-client`](./mcp-client) | Available | `MCPClientManager` installed as a reusable lifecycle capability             |
 
 Each example is an independent workspace package and should stay focused on one

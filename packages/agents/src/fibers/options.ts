@@ -1,5 +1,5 @@
 import type { FiberDurationString } from "./duration";
-import type { FiberStepConfig } from "./types";
+import type { FiberCallbacks, FiberHandlers, FiberStepConfig } from "./types";
 
 /** Events emitted while Fibers accepts, executes, retries, or settles runs. */
 export type FiberEventType =
@@ -16,13 +16,23 @@ export type FiberEventType =
   | "fiber:deleted";
 
 /**
- * Policy for a Fibers capability. All fields are defaults an individual
- * `step.do()` config can override.
+ * Definitions and policy for a Fibers capability.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface FibersOptions {
-  /** Default step retry policy. */
+export interface FibersOptions<
+  Handlers extends FiberHandlers = FiberCallbacks
+> {
+  /**
+   * Named Fiber definitions this capability can run. Each run row persists a
+   * definition name; declaring the map in the constructor re-registers the
+   * names on every Durable Object wake, so recovery of in-flight runs is
+   * correct by construction. Names outside this map are rejected unless a
+   * composition-root resolver supplies them.
+   */
+  readonly definitions?: Handlers;
+
+  /** Default step retry policy, overridable per `step.do()`. */
   readonly retries?: FiberStepConfig["retries"];
 
   /** Default timeout of one step callback attempt. Default: 5 minutes. */

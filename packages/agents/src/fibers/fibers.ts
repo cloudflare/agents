@@ -1,6 +1,6 @@
 /**
  * Durable replayable execution for Lifecycle Objects. `Fibers` owns the
- * `cf_fiber_runs` and `cf_fiber_steps` tables, the definition registry, run
+ * `cf_fiber_runs` and `cf_fiber_steps` tables, the definitions registry, run
  * acceptance, generation-fenced claiming, and due-run processing.
  *
  * Fibers consumes only the standard capability services: storage, alarm
@@ -28,9 +28,12 @@ import {
 import { deserializeFiberValue, serializeFiberValue } from "./serialization";
 import type {
   Fiber,
+  FiberCallbacks,
+  FiberHandlers,
+  FiberInput,
   FiberJson,
+  FiberOutput,
   FiberReceipt,
-  FiberRunHandler,
   FiberRunOptions,
   FiberRunRow,
   FiberRunSnapshot,
@@ -39,6 +42,29 @@ import type {
   FiberStepRow,
   FiberValue
 } from "./types";
+
+/** A resolved handler for a definition name outside the declared map. */
+type ResolvedFiberHandler = (input: unknown, step: FiberStep) => unknown;
+
+const fiberDefinitionResolvers = new WeakMap<
+  object,
+  (name: string) => ResolvedFiberHandler | undefined
+>();
+
+/**
+ * @internal Supply a composition-root fallback for definition names outside
+ * the declared map. Frameworks use this to attach internal definitions (for
+ * example a future Agent compatibility layer) without occupying the host's
+ * constructor map; resolved handlers still run inside the Lifecycle host
+ * boundary. The resolver must return the same handler for a name on every
+ * Durable Object wake, or that name's in-flight runs cannot resume.
+ */
+export function setFiberDefinitionResolver(
+  fibers: Fibers<never>,
+  resolver: (name: string) => ResolvedFiberHandler | undefined
+): void {
+  fiberDefinitionResolvers.set(fibers, resolver);
+}
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:fibers_schema_version";
 const CURRENT_FIBER_SCHEMA_VERSION = 1;
@@ -67,12 +93,6 @@ const TERMINAL_STATES: ReadonlySet<FiberRunState> = new Set([
   "cancelled"
 ]);
 
-/** One registered definition: a stable name bound to host callbacks. */
-type FiberDefinition<Host> = {
-  readonly name: string;
-  readonly run: (this: Host, input: unknown, step: FiberStep) => unknown;
-};
-
 /** One live execution attempt in this isolate. */
 type ActiveAttempt = {
   readonly generation: string;
@@ -97,34 +117,37 @@ export type FiberDeleteOptions = {
 /**
  * Durable replayable execution for a Lifecycle Object.
  *
- * Construct with the owning host, register named definitions with
- * {@link create} in field initializers, and install the instance with
- * `Lifecycle.use()`. Each definition's handler replays from the beginning on
- * every execution attempt; completed steps return journaled results, sleeps
- * consult persisted deadlines, and interrupted work continues from the first
- * unfinished step after process loss.
+ * Declare named definitions in the constructor and install the instance with
+ * `Lifecycle.use()`. The constructor map is the registry: it is rebuilt on
+ * every Durable Object wake, so in-flight runs always resolve their
+ * persisted definition names. Each definition's handler replays from the
+ * beginning on every execution attempt; completed steps return journaled
+ * results, sleeps consult persisted deadlines, and interrupted work
+ * continues from the first unfinished step after process loss.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class Fibers<Host extends object = object> extends LifecycleCapability {
-  readonly #host: Host;
-  readonly #definitions = new Map<string, FiberDefinition<Host>>();
+export class Fibers<
+  Handlers extends FiberHandlers = FiberCallbacks
+> extends LifecycleCapability {
+  readonly #definitions: FiberHandlers;
   readonly #active = new Map<string, ActiveAttempt>();
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #maxRunsPerAlarm: number;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
-  #registryLocked = false;
 
   /**
-   * Create a Fibers capability bound to its host.
+   * Create a Fibers capability.
    *
-   * @param host - The Durable Object whose methods and state definition
-   * handlers run against; handlers are invoked with it as `this`.
-   * @param options - Default step retry/timeout policy and alarm batching.
+   * @param options - Named definitions plus default step retry/timeout
+   * policy and alarm batching. Declaring `definitions` types {@link run} and
+   * {@link handle} against the map — names and inputs are checked where the
+   * handlers are declared and where runs start. Names outside the map are
+   * rejected unless a composition-root resolver supplies them.
    */
-  constructor(host: Host, options: FibersOptions = {}) {
+  constructor(options: FibersOptions<Handlers> = {}) {
     super("fibers");
-    this.#host = host;
+    this.#definitions = options.definitions ?? {};
     this.#stepDefaults = {
       retryLimit: options.retries?.limit ?? DEFAULT_STEP_POLICY.retryLimit,
       retryDelayMs:
@@ -146,29 +169,27 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
     return this.#stepDefaults.timeoutMs + CLAIM_SLACK_MS;
   }
 
-  // ── Definition registry ──────────────────────────────────────────────────
+  // ── Definitions ──────────────────────────────────────────────────────────
 
-  /**
-   * Register a named Fiber definition and return its typed handle.
-   *
-   * Call synchronously during host construction (a field initializer is the
-   * natural place) so the registry is rebuilt before any request or alarm
-   * runs. The definition itself is never persisted — storage holds the name.
-   *
-   * @param name - Stable durable name. Version it (`"report@v2"`) instead of
-   * changing an in-flight definition's step layout.
-   * @param run - Main callback, invoked with the host as `this`.
-   */
-  create<Input, Output extends FiberValue>(
-    name: string,
-    run: FiberRunHandler<Host, Input, Output>
-  ): Fiber<Input, Output> {
-    if (this.#registryLocked) {
-      throw new Error(
-        `Cannot create Fiber definition "${name}" after startup: declare ` +
-          `definitions in field initializers so every wake rebuilds them`
-      );
+  /** Resolve a name to its declared or composition-root-supplied handler. */
+  #resolveDefinition(name: string): ResolvedFiberHandler | undefined {
+    const handler = this.#definitions[name];
+    if (handler) {
+      // SAFETY: declared handlers are constrained with a `never` input so
+      // concrete handler types satisfy the map under contravariance; the
+      // input passed at dispatch was parsed from the row this handler's name
+      // was persisted with.
+      return handler as ResolvedFiberHandler;
     }
+    return fiberDefinitionResolvers.get(this)?.(name);
+  }
+
+  /** True when a name resolves to a runnable definition. */
+  #hasDefinition(name: string): boolean {
+    return this.#resolveDefinition(name) !== undefined;
+  }
+
+  #validateDefinitionName(name: string): void {
     if (typeof name !== "string" || name.length === 0) {
       throw new Error("Fiber definition names must be non-empty strings");
     }
@@ -182,26 +203,45 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
         `Fiber definition names must not use the reserved "__cf" prefix`
       );
     }
-    if (this.#definitions.has(name)) {
-      throw new Error(`Fiber definition "${name}" is already registered`);
+    if (!this.#hasDefinition(name)) {
+      throw new Error(
+        `Unknown Fiber definition "${name}": not declared on this Fibers`
+      );
     }
-    if (typeof run !== "function") {
-      throw new Error(`Fiber definition "${name}" requires a run callback`);
-    }
+  }
 
-    this.#definitions.set(name, {
-      name,
-      // SAFETY: the handle's typed run() serializes exactly the Input this
-      // handler declared; storage round-trips it as unknown.
-      run: run as FiberDefinition<Host>["run"]
-    });
+  // ── Starting runs ────────────────────────────────────────────────────────
 
+  /**
+   * Durably accept one run of a declared definition and return a receipt
+   * without waiting for terminal state. The same `idempotencyKey` or `runId`
+   * joins the existing run (`accepted: false`) instead of creating a second.
+   */
+  async run<Name extends keyof Handlers & string>(
+    definition: Name,
+    input?: FiberInput<Handlers[Name]>,
+    options?: FiberRunOptions
+  ): Promise<FiberReceipt> {
+    this.#validateDefinitionName(definition);
+    return this.#accept(definition, input, options);
+  }
+
+  /**
+   * A typed handle scoped to one declared definition: its `run`, `get`,
+   * `getByIdempotencyKey`, and `cancel` see only that definition's runs. The
+   * handle is a pure lens over this capability — it holds no state and may
+   * be created at any time.
+   */
+  handle<Name extends keyof Handlers & string>(
+    definition: Name
+  ): Fiber<FiberInput<Handlers[Name]>, FiberOutput<Handlers[Name]>> {
+    this.#validateDefinitionName(definition);
     return {
-      name,
-      run: (input, options) => this.#accept(name, input, options),
-      get: (runId) => this.#snapshot<Output>(runId, name),
+      name: definition,
+      run: (input, options) => this.run(definition, input, options),
+      get: (runId) => this.#snapshot(runId, definition),
       getByIdempotencyKey: (idempotencyKey) =>
-        this.#snapshotByKey<Output>(idempotencyKey, name),
+        this.#snapshotByKey(idempotencyKey, definition),
       cancel: (runId, reason) => this.cancel(runId, reason)
     };
   }
@@ -210,7 +250,6 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
 
   /** Migrate storage and reconcile run deadlines during Lifecycle startup. */
   async onStart(): Promise<void> {
-    this.#registryLocked = true;
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
@@ -262,14 +301,14 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
 
   /** Read one run by ID across all definitions. */
   async get(runId: string): Promise<FiberRunSnapshot<FiberValue> | null> {
-    return this.#snapshot<FiberValue>(runId);
+    return this.#snapshot(runId);
   }
 
   /** Read one run by idempotency key across all definitions. */
   async getByIdempotencyKey(
     idempotencyKey: string
   ): Promise<FiberRunSnapshot<FiberValue> | null> {
-    return this.#snapshotByKey<FiberValue>(idempotencyKey);
+    return this.#snapshotByKey(idempotencyKey);
   }
 
   /** List runs, newest first. */
@@ -472,8 +511,8 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
     }
     if (row.next_at !== null && row.next_at > now) return;
 
-    const definition = this.#definitions.get(row.definition);
-    if (!definition) {
+    const handler = this.#resolveDefinition(row.definition);
+    if (!handler) {
       const error = new MissingFiberDefinitionError(row.definition);
       console.error(error.message);
       this.#settleFailed(runId, null, toErrorSummary(error));
@@ -512,7 +551,7 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
     });
     const promise = this.#runAttempt(
       row,
-      definition,
+      handler,
       generation,
       attempt,
       controller
@@ -528,7 +567,7 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
   /** Run one claimed attempt and persist its outcome, generation-fenced. */
   async #runAttempt(
     row: FiberRunRow,
-    definition: FiberDefinition<Host>,
+    handler: ResolvedFiberHandler,
     generation: string,
     attempt: number,
     controller: AbortController
@@ -545,7 +584,7 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
 
     try {
       const output = await this.lifecycle.runInHostContext(() =>
-        definition.run.call(this.#host, input, step)
+        handler(input, step)
       );
       const resultJson = serializeFiberValue(
         output,
@@ -852,14 +891,14 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
         [reason ?? null, now, now]
       );
     } else {
-      const cursor = this.#sqlWrite(
+      const written = this.#sqlWrite(
         `UPDATE cf_fiber_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND state IN ('pending', 'waiting', 'running')`,
         [reason ?? null, now, now, runId]
       );
-      settled = cursor > 0;
+      settled = written > 0;
     }
     if (settled) {
       const row = this.#getRun(runId);
@@ -890,14 +929,14 @@ export class Fibers<Host extends object = object> extends LifecycleCapability {
         [error.name, error.message, now, now]
       );
     } else {
-      const cursor = this.#sqlWrite(
+      const written = this.#sqlWrite(
         `UPDATE cf_fiber_runs
          SET state = 'failed', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND state IN ('pending', 'waiting', 'running')`,
         [error.name, error.message, now, now, runId]
       );
-      settled = cursor > 0;
+      settled = written > 0;
     }
     if (settled) {
       const row = this.#getRun(runId);

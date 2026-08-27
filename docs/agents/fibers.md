@@ -16,12 +16,12 @@ the same object.
 
 ## Install and define
 
-Construct the capability with the host, register definitions in field
-initializers, and install it with the lifecycle:
+Declare definitions in the constructor — like `Scheduler` callbacks — and
+install the capability with the lifecycle:
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
-import { Fibers } from "agents/fibers";
+import { Fibers, type FiberStep } from "agents/fibers";
 import { Lifecycle } from "agents/lifecycle";
 
 interface ReportInput {
@@ -29,51 +29,46 @@ interface ReportInput {
   topic: string;
 }
 
-interface ReportResult {
-  reportId: string;
-  objectKey: string;
-}
-
 export class ReportObject extends DurableObject<Env> {
-  readonly fibers = new Fibers(this);
+  readonly fibers = new Fibers({
+    definitions: {
+      "build-report@v1": async (input: ReportInput, step: FiberStep) => {
+        await step.status("Researching");
 
-  readonly buildReport = this.fibers.create<ReportInput, ReportResult>(
-    "build-report@v1",
-    async (input, step) => {
-      await step.status("Researching");
+        const research = await step.do(
+          "research",
+          { retries: { limit: 4, delay: "2 seconds", backoff: "exponential" } },
+          ({ signal }) => this.research(input.topic, { signal })
+        );
 
-      const research = await step.do(
-        "research",
-        { retries: { limit: 4, delay: "2 seconds", backoff: "exponential" } },
-        ({ signal }) => this.research(input.topic, { signal })
-      );
+        await step.sleep("editorial-delay", "30 seconds");
+        await step.status("Publishing");
 
-      await step.sleep("editorial-delay", "30 seconds");
-      await step.status("Publishing");
+        const objectKey = `reports/${input.reportId}.json`;
+        await step.do("publish", ({ idempotencyKey }) =>
+          this.publish(objectKey, research, { idempotencyKey })
+        );
 
-      const objectKey = `reports/${input.reportId}.json`;
-      await step.do("publish", ({ idempotencyKey }) =>
-        this.publish(objectKey, research, { idempotencyKey })
-      );
-
-      return { reportId: input.reportId, objectKey };
+        return { reportId: input.reportId, objectKey };
+      }
     }
-  );
+  });
 
   readonly lifecycle = Lifecycle.install(this).use(this.fibers);
 }
 ```
 
-Definitions are registered in memory on every Durable Object wake; storage
-persists only the definition name. Register definitions synchronously during
-construction — `create()` throws once the lifecycle has started. Version the
-name (`"build-report@v2"`) instead of changing an in-flight definition's step
-layout.
+The constructor map is the registry. Storage persists only the definition
+name, and the map is rebuilt on every Durable Object wake, so recovery of
+in-flight runs is correct by construction — there is nothing to register at
+the right moment and no lock to trip over. Handlers are ordinary arrows that
+capture `this`. Version the name (`"build-report@v2"`) instead of changing an
+in-flight definition's step layout.
 
 ## Starting runs
 
 ```ts
-const receipt = await this.buildReport.run(input, {
+const receipt = await this.fibers.run("build-report@v1", input, {
   idempotencyKey: `report:${input.reportId}`
 });
 ```
@@ -83,6 +78,16 @@ completion. The same `idempotencyKey` (or a caller-selected `runId`) joins
 the existing run instead of creating a second one; `accepted: false` on the
 receipt marks that join. Pass `metadata` to retain JSON alongside the run and
 `retain: false` to remove the record after successful completion.
+
+`run()` and `handle()` type the definition name and its input against the
+declared map. A handle is a typed lens scoped to one definition — its `run`,
+`get`, `getByIdempotencyKey`, and `cancel` see only that definition's runs,
+and it can be created at any time:
+
+```ts
+const buildReport = this.fibers.handle("build-report@v1");
+const run = await buildReport.get(receipt.runId); // result typed by the map
+```
 
 Inputs, step results, metadata, and final results must be JSON-serializable
 and at most 1 MiB serialized.
@@ -128,8 +133,8 @@ against a different handler.
 ## Inspection and control
 
 ```ts
-const snapshot = await this.buildReport.get(receipt.runId);
-const joined = await this.buildReport.getByIdempotencyKey("report:42");
+const snapshot = await this.fibers.get(receipt.runId);
+const joined = await this.fibers.getByIdempotencyKey("report:42");
 const recent = await this.fibers.list({ definition: "build-report@v1" });
 await this.fibers.cancel(receipt.runId, "superseded");
 await this.fibers.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
@@ -161,8 +166,9 @@ external effect already accepted cannot be undone.
 
 ## Current limits
 
-The first release is deliberately narrow: no custom recovery callback beside
-the run handler, no `waitForCompletion` mode on `run()`, no automatic
-`this.fibers` on `Agent`, and no runs on routed sub-agents. The design and
-its planned phases are recorded in
+The first release is deliberately narrow: no custom recovery yet (a
+definition will later accept `{ run, recover }` in the map), no
+`waitForCompletion` mode on `run()`, no automatic `this.fibers` on `Agent`,
+and no runs on routed sub-agents. The design and its planned phases are
+recorded in
 [`design/rfc-fibers.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-fibers.md).

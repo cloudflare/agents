@@ -9,7 +9,7 @@ import {
   type FiberHarnessObject
 } from "../capabilities/fibers";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
-import type { FiberRunSnapshot, FiberValue } from "../../fibers";
+import type { Fibers, FiberRunSnapshot, FiberValue } from "../../fibers";
 
 /**
  * Capability-level Fibers tests: the capability installed on a minimal real
@@ -64,7 +64,8 @@ describe("Fibers capability", () => {
   it("accepts runs durably and deduplicates acceptance", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const first = await instance.pipeline.run(
+      const first = await instance.fibers.run(
+        "pipeline",
         { label: "a" },
         { idempotencyKey: "K" }
       );
@@ -72,7 +73,8 @@ describe("Fibers capability", () => {
       expect(first.definition).toBe("pipeline");
 
       // The same idempotency key joins the existing run.
-      const joined = await instance.pipeline.run(
+      const joined = await instance.fibers.run(
+        "pipeline",
         { label: "a" },
         { idempotencyKey: "K" }
       );
@@ -80,12 +82,14 @@ describe("Fibers capability", () => {
       expect(joined.runId).toBe(first.runId);
 
       // A caller-selected run ID deduplicates the same way.
-      const chosen = await instance.pipeline.run(
+      const chosen = await instance.fibers.run(
+        "pipeline",
         { label: "b" },
         { runId: "custom-run" }
       );
       expect(chosen.runId).toBe("custom-run");
-      const again = await instance.pipeline.run(
+      const again = await instance.fibers.run(
+        "pipeline",
         { label: "b" },
         { runId: "custom-run" }
       );
@@ -93,14 +97,15 @@ describe("Fibers capability", () => {
 
       // Reusing the key under a different definition is an error, not a join.
       await expect(
-        instance.flaky.run({ label: "x" }, { idempotencyKey: "K" })
+        instance.fibers.run("flaky", { label: "x" }, { idempotencyKey: "K" })
       ).rejects.toThrow(/already belongs to definition "pipeline"/);
 
       // Handles only see runs of their own definition.
-      expect(await instance.flaky.get(first.runId)).toBeNull();
-      expect((await instance.pipeline.getByIdempotencyKey("K"))?.runId).toBe(
-        first.runId
-      );
+      expect(await instance.fibers.handle("flaky").get(first.runId)).toBeNull();
+      expect(
+        (await instance.fibers.handle("pipeline").getByIdempotencyKey("K"))
+          ?.runId
+      ).toBe(first.runId);
 
       const listed = await instance.fibers.list({ definition: "pipeline" });
       expect(listed.map((run) => run.runId)).toContain(first.runId);
@@ -114,7 +119,9 @@ describe("Fibers capability", () => {
 
     try {
       await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-        const receipt = await instance.pipeline.run({ label: "warm" });
+        const receipt = await instance.fibers.run("pipeline", {
+          label: "warm"
+        });
         const snapshot = await waitForState(instance.fibers, receipt.runId, [
           "completed"
         ]);
@@ -150,7 +157,7 @@ describe("Fibers capability", () => {
       stub,
       async (instance: FiberHarnessObject) => {
         instance.failuresBeforeSuccess = 1;
-        const receipt = await instance.flaky.run({ label: "r" });
+        const receipt = await instance.fibers.run("flaky", { label: "r" });
         const parked = await waitForState(instance.fibers, receipt.runId, [
           "waiting"
         ]);
@@ -250,7 +257,7 @@ describe("Fibers capability", () => {
     const { runId, firstWake } = await runInDurableObject(
       stub,
       async (instance: FiberHarnessObject, state) => {
-        const receipt = await instance.sleeper.run({ ms: 60_000 });
+        const receipt = await instance.fibers.run("sleeper", { ms: 60_000 });
         const parked = await waitForState(instance.fibers, receipt.runId, [
           "waiting"
         ]);
@@ -311,7 +318,7 @@ describe("Fibers capability", () => {
   it("fails immediately on NonRetryableError and reports through onError", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.doomed.run(undefined);
+      const receipt = await instance.fibers.run("doomed");
       const snapshot = await waitForState(instance.fibers, receipt.runId, [
         "failed"
       ]);
@@ -333,7 +340,7 @@ describe("Fibers capability", () => {
       stub,
       async (instance: FiberHarnessObject, state) => {
         instance.failuresBeforeSuccess = 1;
-        const receipt = await instance.gated.run(undefined);
+        const receipt = await instance.fibers.run("gated");
         await waitForState(instance.fibers, receipt.runId, ["waiting"]);
         const [row] = state.storage.sql
           .exec(
@@ -378,7 +385,7 @@ describe("Fibers capability", () => {
   it("cancels a parked run immediately", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.sleeper.run({ ms: 60_000 });
+      const receipt = await instance.fibers.run("sleeper", { ms: 60_000 });
       await waitForState(instance.fibers, receipt.runId, ["waiting"]);
 
       expect(
@@ -398,7 +405,7 @@ describe("Fibers capability", () => {
   it("cancels a live attempt cooperatively through its abort signal", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.blocked.run(undefined);
+      const receipt = await instance.fibers.run("blocked");
       await waitFor(() => instance.stepRuns.includes("blocked:hang"));
 
       expect(await instance.fibers.cancel(receipt.runId, "stop it")).toBe(true);
@@ -413,7 +420,7 @@ describe("Fibers capability", () => {
   it("times out a step that ignores its abort signal", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.slowpoke.run(undefined);
+      const receipt = await instance.fibers.run("slowpoke");
       const snapshot = await waitForState(instance.fibers, receipt.runId, [
         "failed"
       ]);
@@ -425,7 +432,7 @@ describe("Fibers capability", () => {
   it("rejects duplicate step names before executing user code", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.clash.run(undefined);
+      const receipt = await instance.fibers.run("clash");
       const snapshot = await waitForState(instance.fibers, receipt.runId, [
         "failed"
       ]);
@@ -508,7 +515,7 @@ describe("Fibers capability", () => {
         expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
 
         // A sooner fiber deadline wins the shared alarm.
-        const receipt = await instance.sleeper.run({ ms: 60_000 });
+        const receipt = await instance.fibers.run("sleeper", { ms: 60_000 });
         const parked = await waitForState(instance.fibers, receipt.runId, [
           "waiting"
         ]);
@@ -566,7 +573,8 @@ describe("Fibers capability", () => {
   it("removes non-retained records after completion", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.pipeline.run(
+      const receipt = await instance.fibers.run(
+        "pipeline",
         { label: "gone" },
         { retain: false }
       );
@@ -587,7 +595,7 @@ describe("Fibers capability", () => {
   it("deletes retained terminal runs on request", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.pipeline.run({ label: "keep" });
+      const receipt = await instance.fibers.run("pipeline", { label: "keep" });
       await waitForState(instance.fibers, receipt.runId, ["completed"]);
 
       expect(await instance.fibers.delete({ status: ["failed"] })).toBe(0);
@@ -600,33 +608,33 @@ describe("Fibers capability", () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
       await expect(
-        instance.pipeline.run({ label: "x".repeat(1_100_000) })
+        instance.fibers.run("pipeline", { label: "x".repeat(1_100_000) })
       ).rejects.toThrow(/exceeds the 1048576-byte limit/);
       expect(await instance.fibers.list()).toEqual([]);
     });
   });
 
-  it("validates and locks the definition registry", async () => {
+  it("rejects names outside the declared definitions map", async () => {
     const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      // Before startup, new definitions register freely.
-      const fresh = instance.fibers.create("fresh", async () => undefined);
-      expect(fresh.name).toBe("fresh");
-
-      expect(() =>
-        instance.fibers.create("fresh", async () => undefined)
-      ).toThrow(/already registered/);
-      expect(() =>
-        instance.fibers.create("__cf_internal_x", async () => undefined)
-      ).toThrow(/reserved/);
-      expect(() => instance.fibers.create("", async () => undefined)).toThrow(
-        /non-empty/
+      // Unknown names are a compile error on the typed map; erase the typing
+      // to exercise the runtime rejection. The double cast is required: the
+      // conditional output type in handle() makes the Handlers generic
+      // invariant, so a typed map does not widen to the default surface.
+      const untyped = instance.fibers as unknown as Fibers;
+      await expect(untyped.run("nope")).rejects.toThrow(
+        'Unknown Fiber definition "nope"'
       );
+      expect(() => untyped.handle("nope")).toThrow(
+        'Unknown Fiber definition "nope"'
+      );
+      await expect(untyped.run("__cf_internal_x")).rejects.toThrow(/reserved/);
+      await expect(untyped.run("")).rejects.toThrow(/non-empty/);
 
+      // A handle is a pure lens over the declared map, so it can be created
+      // at any time — including after Lifecycle startup.
       await instance.lifecycle.start();
-      expect(() =>
-        instance.fibers.create("late", async () => undefined)
-      ).toThrow(/after startup/);
+      expect(instance.fibers.handle("pipeline").name).toBe("pipeline");
     });
   });
 });
