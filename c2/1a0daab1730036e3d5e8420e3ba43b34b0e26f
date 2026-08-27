@@ -1,0 +1,27 @@
+packages/agents/package.json
+  s_b3be5a835f928d::t_23bc25041ce021 27
+packages/agents/src/capnweb-agent-client.ts
+  s_b3be5a835f928d::t_7b34a9c445d703 1-288
+packages/agents/src/react.tsx
+  s_b3be5a835f928d::t_1e0ab4d41ecdaa 22,40-59,155-305,328-335,520,523,580,589,597,849-882,885-886,888-889,891-906,908,910-916,918,920-921,923-947,950-955,959-961,965-967,969-973,975,977-999,1001,1003-1009,1011-1014,1017-1019,1022-1027,1029-1065,1088,1240-1247
+packages/agents/src/tests/capnweb-transport.test.ts
+  s_b3be5a835f928d::t_cadd5cdbe8284e 1-312
+pnpm-lock.yaml
+  s_b3be5a835f928d::t_1c49271294d654 4050-4052,8116-8118,16190-16191
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c21a0daab1730036e3d5e8420e3ba43b34b0e26f",
+  "prompts": {},
+  "sessions": {
+    "s_b3be5a835f928d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e60c15-51cf-4a50-b840-9e77737af7be",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
