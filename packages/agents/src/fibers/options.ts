@@ -6,6 +6,8 @@ export type FiberEventType =
   | "fiber:accepted"
   | "fiber:attempt:started"
   | "fiber:attempt:interrupted"
+  | "fiber:recovery:started"
+  | "fiber:recovery:decided"
   | "fiber:step:started"
   | "fiber:step:retry"
   | "fiber:step:completed"

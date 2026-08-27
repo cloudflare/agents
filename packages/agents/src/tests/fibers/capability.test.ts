@@ -637,4 +637,332 @@ describe("Fibers capability", () => {
       expect(instance.fibers.handle("pipeline").name).toBe("pipeline");
     });
   });
+
+  it("invokes recovery on unclean interruption and applies a complete decision", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.FiberHarnessObject.getByName(name);
+    const capture = captureFiberEvents(name);
+
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: FiberHarnessObject, state) => {
+          instance.recoveryMode = "complete";
+          await instance.lifecycle.start();
+          seedFiberRun(state.storage, {
+            runId: "guarded-run",
+            definition: "guarded",
+            input: { label: "ctx" },
+            state: "running",
+            generation: "dead-generation",
+            attempt: 1,
+            nextAt: Date.now() - 1000
+          });
+          seedFiberStep(state.storage, {
+            runId: "guarded-run",
+            name: "g-first",
+            kind: "do",
+            state: "completed",
+            result: "g:JOURNAL"
+          });
+          seedFiberStep(state.storage, {
+            runId: "guarded-run",
+            name: "g-second",
+            kind: "do",
+            state: "running",
+            attempt: 1,
+            checkpoint: { phase: "submitted" }
+          });
+          await instance.lifecycle.rearmAlarm();
+        }
+      );
+
+      await runDurableObjectAlarm(stub);
+
+      await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+        const snapshot = await waitForState(instance.fibers, "guarded-run", [
+          "completed"
+        ]);
+        if (snapshot.state !== "completed") throw new Error("unreachable");
+        // The recovery decision settled the run; nothing was replayed.
+        expect(snapshot.result).toBe("recovered");
+        expect(instance.stepRuns).toEqual([]);
+        // The callback saw the input, the interrupted step, and its checkpoint.
+        expect(instance.recoveryCalls).toEqual([
+          'guarded:ctx:g-second:{"phase":"submitted"}'
+        ]);
+      });
+      const types = capture.events.map((event) => event.type);
+      expect(types).toContain("fiber:recovery:started");
+      expect(types).toContain("fiber:recovery:decided");
+    } finally {
+      capture.stop();
+    }
+  });
+
+  it("recovery replay resumes from the journal", async () => {
+    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject, state) => {
+        instance.recoveryMode = "replay";
+        await instance.lifecycle.start();
+        seedFiberRun(state.storage, {
+          runId: "guarded-replay",
+          definition: "guarded",
+          input: { label: "rp" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          nextAt: Date.now() - 1000
+        });
+        seedFiberStep(state.storage, {
+          runId: "guarded-replay",
+          name: "g-first",
+          kind: "do",
+          state: "completed",
+          result: "g:JOURNAL"
+        });
+        seedFiberStep(state.storage, {
+          runId: "guarded-replay",
+          name: "g-second",
+          kind: "do",
+          state: "running",
+          attempt: 1
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+      const snapshot = await waitForState(instance.fibers, "guarded-replay", [
+        "completed"
+      ]);
+      if (snapshot.state !== "completed") throw new Error("unreachable");
+      // Replay used the journaled first step and re-executed the second.
+      expect(snapshot.result).toBe("run-done:g:JOURNAL");
+      expect(instance.stepRuns).toEqual(["guarded:second"]);
+      expect(instance.recoveryCalls).toHaveLength(1);
+    });
+  });
+
+  it("recovery decisions can fail or cancel the run", async () => {
+    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject, state) => {
+        instance.recoveryMode = "fail";
+        await instance.lifecycle.start();
+        seedFiberRun(state.storage, {
+          runId: "guarded-fail",
+          definition: "guarded",
+          input: { label: "f" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject, state) => {
+        const failed = await waitForState(instance.fibers, "guarded-fail", [
+          "failed"
+        ]);
+        if (failed.state !== "failed") throw new Error("unreachable");
+        expect(failed.error.message).toBe("recover says fail");
+
+        instance.recoveryMode = "cancel";
+        seedFiberRun(state.storage, {
+          runId: "guarded-cancel",
+          definition: "guarded",
+          input: { label: "c" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+      const cancelled = await waitForState(instance.fibers, "guarded-cancel", [
+        "cancelled"
+      ]);
+      if (cancelled.state !== "cancelled") throw new Error("unreachable");
+      expect(cancelled.reason).toBe("recover says cancel");
+    });
+  });
+
+  it("clean step failures retry without invoking recovery", async () => {
+    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const runId = await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject) => {
+        instance.failuresBeforeSuccess = 1;
+        const receipt = await instance.fibers.run("guarded", { label: "r" });
+        const parked = await waitForState(instance.fibers, receipt.runId, [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("retry");
+        expect(instance.recoveryCalls).toEqual([]);
+        return receipt.runId;
+      }
+    );
+
+    await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject, state) => {
+        backdateFiberWake(state.storage, runId, "g-second");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+      const snapshot = await waitForState(instance.fibers, runId, [
+        "completed"
+      ]);
+      if (snapshot.state !== "completed") throw new Error("unreachable");
+      expect(snapshot.result).toBe("run-done:g:r");
+      // The retry policy owned both attempts; recovery never ran.
+      expect(instance.recoveryCalls).toEqual([]);
+    });
+  });
+
+  it("retries a throwing recovery with backoff and exhausts its budget", async () => {
+    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject, state) => {
+        instance.recoveryMode = "explode";
+        await instance.lifecycle.start();
+        seedFiberRun(state.storage, {
+          runId: "guarded-explode",
+          definition: "guarded",
+          input: { label: "x" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          nextAt: Date.now() - 1000
+        });
+        seedFiberStep(state.storage, {
+          runId: "guarded-explode",
+          name: "g-second",
+          kind: "do",
+          state: "running",
+          attempt: 1
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+      // The first failure parks the run in a visible recovering state with a
+      // future backoff deadline.
+      const parked = await waitForState(instance.fibers, "guarded-explode", [
+        "recovering"
+      ]);
+      if (parked.state !== "recovering") throw new Error("unreachable");
+      expect(parked.interruptedStep).toBe("g-second");
+      expect(instance.recoveryCalls).toHaveLength(1);
+    });
+
+    // Each backdated wake retries recovery until the budget (5) exhausts.
+    for (let round = 2; round <= 5; round++) {
+      await runInDurableObject(
+        stub,
+        async (instance: FiberHarnessObject, state) => {
+          backdateFiberWake(state.storage, "guarded-explode");
+          await instance.lifecycle.rearmAlarm();
+        }
+      );
+      await runDurableObjectAlarm(stub);
+    }
+
+    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+      const snapshot = await waitForState(instance.fibers, "guarded-explode", [
+        "failed"
+      ]);
+      if (snapshot.state !== "failed") throw new Error("unreachable");
+      expect(snapshot.error.message).toBe("recover exploded");
+      expect(instance.recoveryCalls).toHaveLength(5);
+    });
+  });
+
+  it("replay decisions can defer to a future time", async () => {
+    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject, state) => {
+        instance.recoveryMode = "replay-later";
+        await instance.lifecycle.start();
+        seedFiberRun(state.storage, {
+          runId: "guarded-later",
+          definition: "guarded",
+          input: { label: "l" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject, state) => {
+        const parked = await waitForState(instance.fibers, "guarded-later", [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("recovery");
+        expect(parked.wakeAt).toBeGreaterThan(Date.now() + 30_000);
+
+        backdateFiberWake(state.storage, "guarded-later");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+      const snapshot = await waitForState(instance.fibers, "guarded-later", [
+        "completed"
+      ]);
+      if (snapshot.state !== "completed") throw new Error("unreachable");
+      // The deferred replay ran the whole handler (no journal was seeded).
+      expect(snapshot.result).toBe("run-done:g:l");
+      expect(instance.stepRuns).toEqual(["guarded:first", "guarded:second"]);
+    });
+  });
+
+  it("persists step checkpoints for later recovery", async () => {
+    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: FiberHarnessObject, state) => {
+        const receipt = await instance.fibers.run("checkpointing");
+        await waitForState(instance.fibers, receipt.runId, ["completed"]);
+        const [row] = state.storage.sql
+          .exec(
+            "SELECT checkpoint FROM cf_fiber_steps WHERE run_id = ? AND step_name = 'mark'",
+            receipt.runId
+          )
+          .toArray();
+        expect(row?.checkpoint).toBe('{"phase":"submitted"}');
+      }
+    );
+  });
 });

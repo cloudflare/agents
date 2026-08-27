@@ -125,6 +125,9 @@ export interface FiberStepEngine {
   /** Move a step into its retry wait. */
   waitStep(name: string, wakeAt: number): void;
 
+  /** Replace a running step's recovery checkpoint. Synchronous. */
+  writeCheckpoint(name: string, value: unknown): void;
+
   /** Extend the run's claim deadline while a step attempt executes. */
   refreshClaim(): void;
 
@@ -395,7 +398,8 @@ export class ReplayStep implements FiberStep {
           callback({
             attempt,
             idempotencyKey: this.#engine.stepIdempotencyKey(name),
-            signal: timeout.signal
+            signal: timeout.signal,
+            checkpoint: (value) => this.#engine.writeCheckpoint(name, value)
           })
         ),
         timeout.signal

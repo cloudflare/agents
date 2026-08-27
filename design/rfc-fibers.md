@@ -10,9 +10,9 @@ Status: accepted (amended)
 > handles. Both are recorded under Alternatives considered. A typed
 > `fibers.handle(name)` lens replaces per-definition handle fields, runs
 > start with `fibers.run(name, input, options)`, and `create(name, run,
-recover?)`'s recovery slot becomes a `{ run, recover }` map value when
-> Phase 2 lands. Code samples are aligned with the Lifecycle API as landed in
-> the schedules-capability extraction.
+recover?)`'s recovery slot is a `{ run, recover }` map value. Code samples
+> are aligned with the Lifecycle API as landed in the schedules-capability
+> extraction.
 
 ## Summary
 
@@ -2738,7 +2738,7 @@ This preserves current Fibers but leaves application authors manually implementi
 Accepted with one amendment. The architectural direction:
 
 - one `Fibers` lifecycle capability per host;
-- many named definitions declared in the constructor `definitions` map (amended from `fibers.create()` handles); custom recovery attaches as a `{ run, recover }` map value when Phase 2 lands;
+- many named definitions declared in the constructor `definitions` map (amended from `fibers.create()` handles); custom recovery attaches as a `{ run, recover }` map value;
 - replay from the beginning for every execution attempt;
 - memoized named steps and durable sleeps;
 - optional Fiber-level recovery callback beside the main callback;
@@ -2751,5 +2751,6 @@ Accepted with one amendment. The architectural direction:
 - compatibility migration before deprecation;
 - Think retains specialized chat recovery policy through a named internal Fiber definition.
 
-The first implementation PR is a Phase 1 subset — replay Fibers only, without
-custom recovery or legacy adapters — so the change stays reviewable.
+The first implementation PR ships Phases 1 and 2 — replay Fibers plus the
+optional `{ run, recover }` recovery callback — without the legacy adapters,
+so the change stays reviewable.

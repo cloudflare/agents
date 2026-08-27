@@ -25,16 +25,30 @@ export type FiberValue = FiberJson | undefined | void;
 /**
  * Constraint for a Fibers definitions map: named handlers invoked from the
  * beginning on every execution attempt, with completed steps returning
- * journaled results instead of running again.
+ * journaled results instead of running again. A definition is either a bare
+ * run handler (unclean interruption replays it automatically) or a
+ * `{ run, recover }` pair whose recovery callback owns the interruption
+ * decision instead.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export type FiberHandlers = Record<
   string,
-  // The input parameter is `never` so any concretely-typed handler satisfies
-  // the constraint under contravariance; each handler's real input type is
-  // recovered with `FiberInput`.
-  (input: never, step: FiberStep) => FiberValue | Promise<FiberValue>
+  // Input and interruption parameters are `never` so any concretely-typed
+  // definition satisfies the constraint under contravariance; each
+  // definition's real input type is recovered with `FiberInput`.
+  | ((input: never, step: FiberStep) => FiberValue | Promise<FiberValue>)
+  | {
+      readonly run: (
+        input: never,
+        step: FiberStep
+      ) => FiberValue | Promise<FiberValue>;
+      readonly recover: (
+        interruption: never
+      ) =>
+        | FiberRecoveryDecision<FiberValue>
+        | Promise<FiberRecoveryDecision<FiberValue>>;
+    }
 >;
 
 /**
@@ -47,7 +61,18 @@ export type FiberHandlers = Record<
  */
 export type FiberCallbacks = Record<
   string,
-  (input: unknown, step: FiberStep) => FiberValue | Promise<FiberValue>
+  | ((input: unknown, step: FiberStep) => FiberValue | Promise<FiberValue>)
+  | {
+      readonly run: (
+        input: unknown,
+        step: FiberStep
+      ) => FiberValue | Promise<FiberValue>;
+      readonly recover: (
+        interruption: FiberInterruption<unknown>
+      ) =>
+        | FiberRecoveryDecision<FiberValue>
+        | Promise<FiberRecoveryDecision<FiberValue>>;
+    }
 >;
 
 /**
@@ -55,25 +80,99 @@ export type FiberCallbacks = Record<
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberInput<Handler> = Handler extends (
-  input: infer Input,
-  ...rest: never[]
-) => unknown
+export type FiberInput<Handler> = Handler extends {
+  run: (input: infer Input, ...rest: never[]) => unknown;
+}
   ? Input
-  : never;
+  : Handler extends (input: infer Input, ...rest: never[]) => unknown
+    ? Input
+    : never;
 
 /**
  * The settled output type a registered Fiber definition produces.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberOutput<Handler> = Handler extends (
-  ...args: never[]
-) => infer Output
+export type FiberOutput<Handler> = Handler extends {
+  run: (...args: never[]) => infer Output;
+}
   ? Awaited<Output> extends FiberValue
     ? Awaited<Output>
     : never
-  : never;
+  : Handler extends (...args: never[]) => infer Output
+    ? Awaited<Output> extends FiberValue
+      ? Awaited<Output>
+      : never
+    : never;
+
+/**
+ * The interrupted step a recovery callback may reconcile against: the `do`
+ * step a lost attempt left mid-execution, or `null` when interruption
+ * happened between named steps.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export interface FiberInterruptedStep {
+  readonly name: string;
+  readonly kind: "do";
+  /** One-based attempt number the lost execution had claimed. */
+  readonly attempt: number;
+  /** Stable external deduplication key, identical across attempts. */
+  readonly idempotencyKey: string;
+  /** Last checkpoint the lost attempt wrote, or `undefined` if none. */
+  readonly checkpoint: FiberValue;
+  readonly startedAt: number;
+}
+
+/**
+ * Context passed to a definition's `recover` callback after an unclean
+ * interruption — an execution attempt that was claimed but never settled.
+ * Clean step failures never reach recovery; the retry policy handles them.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export interface FiberInterruption<Input> {
+  readonly runId: string;
+  readonly definition: string;
+  readonly input: Readonly<Input>;
+  /** Attempts the run had made when it was interrupted. */
+  readonly attempt: number;
+  readonly createdAt: number;
+  /** When the lost attempt last persisted durable progress. */
+  readonly interruptedAt: number;
+  readonly metadata: Readonly<Record<string, FiberJson>> | null;
+  readonly interruptedStep: FiberInterruptedStep | null;
+  /** Aborted when the run is cancelled while recovery executes. */
+  readonly signal: AbortSignal;
+}
+
+/**
+ * What a recovery callback decided about an interrupted run. Recovery
+ * callbacks must be idempotent: recovery itself can be interrupted and is
+ * invoked again on the next wake.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export type FiberRecoveryDecision<Output extends FiberValue = FiberValue> =
+  | {
+      /** Replay the run handler. Completed steps stay memoized. */
+      action: "replay";
+      /** Optional future replay time. Omit for immediate replay. */
+      at?: number | Date;
+    }
+  | {
+      /** Settle the run without replaying its handler. */
+      action: "complete";
+      result: Output;
+    }
+  | {
+      action: "fail";
+      error: unknown;
+    }
+  | {
+      action: "cancel";
+      reason?: string;
+    };
 
 /**
  * Per-attempt context passed to a `step.do()` callback.
@@ -92,6 +191,13 @@ export interface FiberStepAttempt {
 
   /** Aborted on cancellation or when this attempt's timeout elapses. */
   readonly signal: AbortSignal;
+
+  /**
+   * Replace this step's recovery checkpoint. The write is synchronous
+   * against the owning Durable Object's SQLite database; a later `recover`
+   * callback reads it from `interruptedStep.checkpoint`.
+   */
+  checkpoint(value: FiberValue): void;
 }
 
 /**
@@ -161,12 +267,13 @@ export type FiberRunState =
   | "pending"
   | "running"
   | "waiting"
+  | "recovering"
   | "completed"
   | "failed"
   | "cancelled";
 
 /** Why a waiting run is waiting. */
-export type FiberWaitReason = "sleep" | "retry";
+export type FiberWaitReason = "sleep" | "retry" | "recovery";
 
 /** Safe projection of an error retained with a failed run. */
 export interface FiberError {
@@ -244,6 +351,16 @@ export type FiberRunSnapshot<Output extends FiberValue> =
   | {
       runId: string;
       definition: string;
+      state: "recovering";
+      /** The step the lost attempt left mid-execution, if any. */
+      interruptedStep: string | null;
+      attempt: number;
+      createdAt: number;
+      metadata?: Record<string, FiberJson>;
+    }
+  | {
+      runId: string;
+      definition: string;
       state: "completed";
       result: Output;
       createdAt: number;
@@ -308,6 +425,7 @@ export type FiberRunRow = {
   idempotency_key: string | null;
   retain: number;
   attempt: number;
+  recovery_attempt: number;
   generation: string | null;
   next_at: number | null;
   wait_reason: FiberWaitReason | null;
@@ -329,6 +447,7 @@ export type FiberStepRow = {
   error_name: string | null;
   error_message: string | null;
   attempt: number;
+  checkpoint: string | null;
   next_at: number | null;
   created_at: number;
   started_at: number | null;

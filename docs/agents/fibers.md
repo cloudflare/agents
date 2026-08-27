@@ -142,18 +142,77 @@ await this.fibers.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
 
 A snapshot is discriminated by `state`:
 
-| State       | Meaning                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `pending`   | Accepted, first attempt not yet claimed.                           |
-| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`). |
-| `waiting`   | Parked on a durable deadline (`reason` is `sleep` or `retry`).     |
-| `completed` | Settled with `result`.                                             |
-| `failed`    | Settled with a safe `error` projection.                            |
-| `cancelled` | Settled by cancellation, with its optional `reason`.               |
+| State        | Meaning                                                                |
+| ------------ | ---------------------------------------------------------------------- |
+| `pending`    | Accepted, first attempt not yet claimed.                               |
+| `running`    | An attempt is executing (`attempt`, `startedAt`, `statusMessage`).     |
+| `waiting`    | Parked on a durable deadline (`reason`: `sleep`, `retry`, `recovery`). |
+| `recovering` | An interruption is being reconciled by the definition's `recover`.     |
+| `completed`  | Settled with `result`.                                                 |
+| `failed`     | Settled with a safe `error` projection.                                |
+| `cancelled`  | Settled by cancellation, with its optional `reason`.                   |
 
 Cancellation is cooperative: a parked run settles immediately, a live attempt
 is aborted through its signal and settles at its next step boundary. An
 external effect already accepted cannot be undone.
+
+## Custom recovery
+
+Automatic replay is right when every side effect sits in a step and repeats
+safely under its idempotency key. When replaying immediately could duplicate
+an irreversible effect — a payment, a model stream — a definition pairs its
+handler with a `recover` callback that owns the interruption decision:
+
+```ts
+readonly fibers = new Fibers({
+  definitions: {
+    "capture-payment@v1": {
+      run: async (input: PaymentInput, step: FiberStep) => {
+        return step.do("capture", ({ idempotencyKey, checkpoint }) => {
+          checkpoint({ phase: "submitted" });
+          return this.payments.capture(input, { idempotencyKey });
+        });
+      },
+      recover: async (interruption: FiberInterruption<PaymentInput>) => {
+        const submitted = interruption.interruptedStep;
+        if (submitted === null) return { action: "replay" as const };
+
+        const outcome = await this.payments.lookup(submitted.idempotencyKey);
+        if (outcome?.state === "captured") {
+          return { action: "complete" as const, result: outcome };
+        }
+        if (outcome?.state === "declined") {
+          return {
+            action: "fail" as const,
+            error: new Error("Payment was declined")
+          };
+        }
+        return { action: "replay" as const };
+      }
+    }
+  }
+});
+```
+
+`recover` runs only after an unclean interruption — an attempt that was
+claimed but never settled. A step callback that throws is not an
+interruption; the retry policy owns it. The callback receives the run's
+input, metadata, and the interrupted step (name, attempt, stable
+`idempotencyKey`, and the last `checkpoint` the lost attempt wrote via its
+step attempt context), and decides:
+
+| Decision                         | Effect                                       |
+| -------------------------------- | -------------------------------------------- |
+| `{ action: "replay", at? }`      | Replay the handler, now or at a future time. |
+| `{ action: "complete", result }` | Settle the run without replaying.            |
+| `{ action: "fail", error }`      | Fail the run.                                |
+| `{ action: "cancel", reason? }`  | Cancel the run.                              |
+
+Recovery itself can be interrupted, so callbacks must be idempotent: the
+next wake invokes recovery again. A throwing `recover` retries on an
+exponential backoff (5 attempts) before the run fails. Most definitions
+should stay bare handlers — replay plus downstream idempotency is the
+simpler, safer default.
 
 ## Choosing an API
 
@@ -166,9 +225,7 @@ external effect already accepted cannot be undone.
 
 ## Current limits
 
-The first release is deliberately narrow: no custom recovery yet (a
-definition will later accept `{ run, recover }` in the map), no
-`waitForCompletion` mode on `run()`, no automatic `this.fibers` on `Agent`,
-and no runs on routed sub-agents. The design and its planned phases are
-recorded in
+The first release is deliberately narrow: no `waitForCompletion` mode on
+`run()`, no automatic `this.fibers` on `Agent`, and no runs on routed
+sub-agents. The design and its planned phases are recorded in
 [`design/rfc-fibers.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-fibers.md).

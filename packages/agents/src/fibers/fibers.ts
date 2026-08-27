@@ -31,9 +31,11 @@ import type {
   FiberCallbacks,
   FiberHandlers,
   FiberInput,
+  FiberInterruption,
   FiberJson,
   FiberOutput,
   FiberReceipt,
+  FiberRecoveryDecision,
   FiberRunOptions,
   FiberRunRow,
   FiberRunSnapshot,
@@ -43,12 +45,20 @@ import type {
   FiberValue
 } from "./types";
 
-/** A resolved handler for a definition name outside the declared map. */
+/** A resolved run handler for a definition name. */
 type ResolvedFiberHandler = (input: unknown, step: FiberStep) => unknown;
+
+/** A resolved definition: its run handler plus optional recovery callback. */
+type ResolvedFiberEntry = {
+  readonly run: ResolvedFiberHandler;
+  readonly recover?: (
+    interruption: FiberInterruption<unknown>
+  ) => FiberRecoveryDecision | Promise<FiberRecoveryDecision>;
+};
 
 const fiberDefinitionResolvers = new WeakMap<
   object,
-  (name: string) => ResolvedFiberHandler | undefined
+  (name: string) => ResolvedFiberHandler | ResolvedFiberEntry | undefined
 >();
 
 /**
@@ -56,12 +66,15 @@ const fiberDefinitionResolvers = new WeakMap<
  * the declared map. Frameworks use this to attach internal definitions (for
  * example a future Agent compatibility layer) without occupying the host's
  * constructor map; resolved handlers still run inside the Lifecycle host
- * boundary. The resolver must return the same handler for a name on every
- * Durable Object wake, or that name's in-flight runs cannot resume.
+ * boundary, and an entry may pair its handler with a recovery callback. The
+ * resolver must return the same definition for a name on every Durable
+ * Object wake, or that name's in-flight runs cannot resume.
  */
 export function setFiberDefinitionResolver(
   fibers: Fibers<never>,
-  resolver: (name: string) => ResolvedFiberHandler | undefined
+  resolver: (
+    name: string
+  ) => ResolvedFiberHandler | ResolvedFiberEntry | undefined
 ): void {
   fiberDefinitionResolvers.set(fibers, resolver);
 }
@@ -84,6 +97,14 @@ const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
 const CLAIM_SLACK_MS = 30_000;
 
 const DEFAULT_MAX_RUNS_PER_ALARM = 10;
+
+/** Recovery-callback failures tolerated per run before it fails. */
+const RECOVERY_MAX_ATTEMPTS = 5;
+
+/** Backoff before retrying a throwing recovery callback, capped at 5 min. */
+function recoveryBackoffMs(failedAttempt: number): number {
+  return Math.min(5000 * 2 ** (failedAttempt - 1), 5 * 60 * 1000);
+}
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_DEFINITION_NAME_LENGTH = 256;
 
@@ -171,17 +192,19 @@ export class Fibers<
 
   // ── Definitions ──────────────────────────────────────────────────────────
 
-  /** Resolve a name to its declared or composition-root-supplied handler. */
-  #resolveDefinition(name: string): ResolvedFiberHandler | undefined {
-    const handler = this.#definitions[name];
-    if (handler) {
-      // SAFETY: declared handlers are constrained with a `never` input so
-      // concrete handler types satisfy the map under contravariance; the
-      // input passed at dispatch was parsed from the row this handler's name
-      // was persisted with.
-      return handler as ResolvedFiberHandler;
-    }
-    return fiberDefinitionResolvers.get(this)?.(name);
+  /** Resolve a name to its declared or composition-root-supplied entry. */
+  #resolveDefinition(name: string): ResolvedFiberEntry | undefined {
+    // SAFETY: declared definitions are constrained with `never` parameters
+    // so concrete definition types satisfy the map under contravariance; the
+    // values passed at dispatch were parsed from rows this definition's name
+    // was persisted with.
+    const supplied = (this.#definitions[name] ??
+      fiberDefinitionResolvers.get(this)?.(name)) as
+      | ResolvedFiberHandler
+      | ResolvedFiberEntry
+      | undefined;
+    if (!supplied) return undefined;
+    return typeof supplied === "function" ? { run: supplied } : supplied;
   }
 
   /** True when a name resolves to a runnable definition. */
@@ -264,7 +287,8 @@ export class Fibers<
     const now = Date.now();
     const due = this.#sql<{ run_id: string }>`
       SELECT run_id FROM cf_fiber_runs
-      WHERE state IN ('pending', 'waiting', 'running') AND next_at <= ${now}
+      WHERE state IN ('pending', 'waiting', 'running', 'recovering')
+        AND next_at <= ${now}
       ORDER BY next_at ASC
       LIMIT ${this.#maxRunsPerAlarm}
     `;
@@ -276,7 +300,7 @@ export class Fibers<
         this.#sql`
           UPDATE cf_fiber_runs
           SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
-          WHERE run_id = ${run_id} AND state = 'running'
+          WHERE run_id = ${run_id} AND state IN ('running', 'recovering')
         `;
         continue;
       }
@@ -290,7 +314,8 @@ export class Fibers<
   getNextAlarm(): number | null {
     const rows = this.#sql<{ next: number | null }>`
       SELECT MIN(next_at) AS next FROM cf_fiber_runs
-      WHERE state IN ('pending', 'waiting', 'running') AND next_at IS NOT NULL
+      WHERE state IN ('pending', 'waiting', 'running', 'recovering')
+        AND next_at IS NOT NULL
     `;
     const next = rows[0]?.next;
     if (next === null || next === undefined) return null;
@@ -511,8 +536,8 @@ export class Fibers<
     }
     if (row.next_at !== null && row.next_at > now) return;
 
-    const handler = this.#resolveDefinition(row.definition);
-    if (!handler) {
+    const entry = this.#resolveDefinition(row.definition);
+    if (!entry) {
       const error = new MissingFiberDefinitionError(row.definition);
       console.error(error.message);
       this.#settleFailed(runId, null, toErrorSummary(error));
@@ -530,6 +555,18 @@ export class Fibers<
       });
     }
 
+    // Unclean interruption with a recovery callback: the definition decides
+    // what a lost attempt means. Without one, the claim below replays. A
+    // 'recovering' row without a recovery callback (removed by a deploy)
+    // also falls through to replay.
+    if (
+      (row.state === "running" || row.state === "recovering") &&
+      entry.recover
+    ) {
+      await this.#runRecovery(row, entry.recover);
+      return;
+    }
+
     const generation = nanoid();
     const attempt = row.attempt + 1;
     this.#sql`
@@ -538,7 +575,8 @@ export class Fibers<
           started_at = coalesce(started_at, ${now}),
           next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
           updated_at = ${now}
-      WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
+      WHERE run_id = ${runId}
+        AND state IN ('pending', 'waiting', 'running', 'recovering')
     `;
 
     const controller = new AbortController();
@@ -551,7 +589,7 @@ export class Fibers<
     });
     const promise = this.#runAttempt(
       row,
-      handler,
+      entry.run,
       generation,
       attempt,
       controller
@@ -562,6 +600,241 @@ export class Fibers<
     } finally {
       this.#active.delete(runId);
     }
+  }
+
+  /** Claim an interrupted run for its definition's recovery callback. */
+  async #runRecovery(
+    row: FiberRunRow,
+    recover: NonNullable<ResolvedFiberEntry["recover"]>
+  ): Promise<void> {
+    const runId = row.run_id;
+    const generation = nanoid();
+    const now = Date.now();
+    this.#sql`
+      UPDATE cf_fiber_runs
+      SET state = 'recovering', generation = ${generation},
+          next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
+          updated_at = ${now}
+      WHERE run_id = ${runId} AND state IN ('running', 'recovering')
+    `;
+    this.#emit("fiber:recovery:started", {
+      runId,
+      definition: row.definition,
+      attempt: row.attempt
+    });
+
+    const controller = new AbortController();
+    let replayNow = false;
+    const promise = this.#recoverAttempt(
+      row,
+      recover,
+      generation,
+      controller
+    ).then((outcome) => {
+      replayNow = outcome === "replay-now";
+    });
+    this.#active.set(runId, { generation, controller, promise });
+    try {
+      await promise;
+    } finally {
+      this.#active.delete(runId);
+    }
+    if (replayNow) await this.#executeRun(runId);
+  }
+
+  /** Invoke one recovery attempt and persist its decision, fenced. */
+  async #recoverAttempt(
+    row: FiberRunRow,
+    recover: NonNullable<ResolvedFiberEntry["recover"]>,
+    generation: string,
+    controller: AbortController
+  ): Promise<"replay-now" | undefined> {
+    const runId = row.run_id;
+    try {
+      const interruption = this.#buildInterruption(row, controller.signal);
+      const decision = (await this.lifecycle.runInHostContext(() =>
+        recover(interruption)
+      )) as FiberRecoveryDecision;
+      const action = decision?.action;
+      if (
+        action !== "replay" &&
+        action !== "complete" &&
+        action !== "fail" &&
+        action !== "cancel"
+      ) {
+        throw new Error(
+          `Recovery for Fiber run "${runId}" returned an unknown decision; ` +
+            `expected an action of replay, complete, fail, or cancel`
+        );
+      }
+      this.#emit("fiber:recovery:decided", {
+        runId,
+        definition: row.definition,
+        action
+      });
+      return await this.#applyRecoveryDecision(row, generation, decision);
+    } catch (thrown) {
+      if (thrown instanceof AttemptSupersededError) return undefined;
+      if (isFiberCancellation(thrown)) {
+        this.#settleCancelled(runId, generation, thrown.reason);
+        await this.lifecycle.alarms.rearm();
+        return undefined;
+      }
+      await this.#recoveryFailure(row, generation, thrown);
+      return undefined;
+    }
+  }
+
+  /** Apply one recovery decision under the recovery claim's fence. */
+  async #applyRecoveryDecision(
+    row: FiberRunRow,
+    generation: string,
+    decision: FiberRecoveryDecision
+  ): Promise<"replay-now" | undefined> {
+    const runId = row.run_id;
+    switch (decision.action) {
+      case "replay": {
+        const at =
+          decision.at instanceof Date ? decision.at.getTime() : decision.at;
+        const later = at !== undefined && at > Date.now();
+        const wakeAt = later ? (at as number) : Date.now();
+        const parked = this.#fencedWrite(
+          runId,
+          generation,
+          `UPDATE cf_fiber_runs
+           SET state = 'waiting', wait_reason = 'recovery', next_at = ?,
+               generation = NULL, updated_at = ?
+           WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
+          [wakeAt, Date.now()]
+        );
+        if (parked && later) {
+          this.#emit("fiber:waiting", {
+            runId,
+            definition: row.definition,
+            reason: "recovery",
+            wakeAt
+          });
+        }
+        await this.lifecycle.alarms.rearm();
+        return parked && !later ? "replay-now" : undefined;
+      }
+      case "complete": {
+        const resultJson = serializeFiberValue(
+          decision.result,
+          `recovery result for Fiber definition "${row.definition}"`
+        );
+        const settled = this.#fencedWrite(
+          runId,
+          generation,
+          `UPDATE cf_fiber_runs
+           SET state = 'completed', result = ?, generation = NULL,
+               next_at = NULL, settled_at = ?, updated_at = ?
+           WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
+          [resultJson, Date.now(), Date.now()]
+        );
+        if (settled) {
+          this.#emit("fiber:completed", { runId, definition: row.definition });
+          if (row.retain === 0) this.#deleteRun(runId);
+        }
+        await this.lifecycle.alarms.rearm();
+        return undefined;
+      }
+      case "fail": {
+        const summary = toErrorSummary(decision.error);
+        const failed = this.#settleFailed(runId, generation, summary);
+        if (failed) {
+          console.error(
+            `Fiber run "${runId}" (definition "${row.definition}") failed by ` +
+              `recovery decision: ${summary.name}: ${summary.message}`
+          );
+        }
+        await this.lifecycle.alarms.rearm();
+        await this.#observeError(decision.error);
+        return undefined;
+      }
+      case "cancel": {
+        this.#settleCancelled(runId, generation, decision.reason);
+        await this.lifecycle.alarms.rearm();
+        return undefined;
+      }
+    }
+  }
+
+  /** Park a throwing recovery callback with backoff, or exhaust its budget. */
+  async #recoveryFailure(
+    row: FiberRunRow,
+    generation: string,
+    thrown: unknown
+  ): Promise<void> {
+    const runId = row.run_id;
+    const recoveryAttempt = row.recovery_attempt + 1;
+    const summary = toErrorSummary(thrown);
+    if (recoveryAttempt >= RECOVERY_MAX_ATTEMPTS) {
+      const failed = this.#settleFailed(runId, generation, summary);
+      if (failed) {
+        console.error(
+          `Fiber run "${runId}" (definition "${row.definition}") failed ` +
+            `after ${recoveryAttempt} recovery attempts: ${summary.name}: ${summary.message}`
+        );
+      }
+      await this.lifecycle.alarms.rearm();
+      await this.#observeError(thrown);
+      return;
+    }
+    const wakeAt = Date.now() + recoveryBackoffMs(recoveryAttempt);
+    const parked = this.#fencedWrite(
+      runId,
+      generation,
+      `UPDATE cf_fiber_runs
+       SET recovery_attempt = ?, next_at = ?, generation = NULL, updated_at = ?
+       WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
+      [recoveryAttempt, wakeAt, Date.now()]
+    );
+    if (parked) {
+      console.warn(
+        `Recovery for Fiber run "${runId}" (definition "${row.definition}") ` +
+          `threw (${summary.name}: ${summary.message}); retrying recovery at ` +
+          `${new Date(wakeAt).toISOString()}`
+      );
+    }
+    await this.lifecycle.alarms.rearm();
+  }
+
+  /** Assemble the recovery context from the pre-claim run row. */
+  #buildInterruption(
+    row: FiberRunRow,
+    signal: AbortSignal
+  ): FiberInterruption<unknown> {
+    const stepRows = this.#sql<FiberStepRow>`
+      SELECT * FROM cf_fiber_steps
+      WHERE run_id = ${row.run_id} AND state = 'running' AND kind = 'do'
+      ORDER BY started_at DESC
+      LIMIT 1
+    `;
+    const stepRow = stepRows[0];
+    return {
+      runId: row.run_id,
+      definition: row.definition,
+      input: deserializeFiberValue(row.input) as Readonly<unknown>,
+      attempt: row.attempt,
+      createdAt: row.created_at,
+      interruptedAt: row.updated_at,
+      metadata:
+        row.metadata !== null
+          ? (JSON.parse(row.metadata) as Record<string, FiberJson>)
+          : null,
+      interruptedStep: stepRow
+        ? {
+            name: stepRow.step_name,
+            kind: "do",
+            attempt: stepRow.attempt,
+            idempotencyKey: `${row.run_id}:${stepRow.step_name}`,
+            checkpoint: deserializeFiberValue(stepRow.checkpoint) as FiberValue,
+            startedAt: stepRow.started_at ?? stepRow.created_at
+          }
+        : null,
+      signal
+    };
   }
 
   /** Run one claimed attempt and persist its outcome, generation-fenced. */
@@ -774,6 +1047,18 @@ export class Fibers<
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
       },
+      writeCheckpoint: (name, value) => {
+        assertCurrent();
+        const checkpointJson = serializeFiberValue(
+          value,
+          `checkpoint for step "${name}" in run "${runId}"`
+        );
+        this.#sql`
+          UPDATE cf_fiber_steps
+          SET checkpoint = ${checkpointJson}, updated_at = ${Date.now()}
+          WHERE run_id = ${runId} AND step_name = ${name}
+        `;
+      },
       refreshClaim: () => {
         this.#fencedWrite(
           runId,
@@ -887,7 +1172,8 @@ export class Fibers<
         `UPDATE cf_fiber_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND generation = ? AND state = 'running'`,
+         WHERE run_id = ? AND generation = ?
+           AND state IN ('running', 'recovering')`,
         [reason ?? null, now, now]
       );
     } else {
@@ -895,7 +1181,8 @@ export class Fibers<
         `UPDATE cf_fiber_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND state IN ('pending', 'waiting', 'running')`,
+         WHERE run_id = ?
+           AND state IN ('pending', 'waiting', 'running', 'recovering')`,
         [reason ?? null, now, now, runId]
       );
       settled = written > 0;
@@ -925,7 +1212,8 @@ export class Fibers<
         `UPDATE cf_fiber_runs
          SET state = 'failed', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND generation = ? AND state = 'running'`,
+         WHERE run_id = ? AND generation = ?
+           AND state IN ('running', 'recovering')`,
         [error.name, error.message, now, now]
       );
     } else {
@@ -933,7 +1221,8 @@ export class Fibers<
         `UPDATE cf_fiber_runs
          SET state = 'failed', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND state IN ('pending', 'waiting', 'running')`,
+         WHERE run_id = ?
+           AND state IN ('pending', 'waiting', 'running', 'recovering')`,
         [error.name, error.message, now, now, runId]
       );
       settled = written > 0;
@@ -976,7 +1265,8 @@ export class Fibers<
         definition TEXT NOT NULL,
         input TEXT,
         state TEXT NOT NULL CHECK (state IN (
-          'pending', 'running', 'waiting', 'completed', 'failed', 'cancelled'
+          'pending', 'running', 'waiting', 'recovering',
+          'completed', 'failed', 'cancelled'
         )),
         result TEXT,
         error_name TEXT,
@@ -986,6 +1276,7 @@ export class Fibers<
         idempotency_key TEXT UNIQUE,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
+        recovery_attempt INTEGER NOT NULL DEFAULT 0,
         generation TEXT,
         next_at INTEGER,
         wait_reason TEXT,
@@ -1017,6 +1308,7 @@ export class Fibers<
         error_name TEXT,
         error_message TEXT,
         attempt INTEGER NOT NULL DEFAULT 0,
+        checkpoint TEXT,
         next_at INTEGER,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
@@ -1030,11 +1322,13 @@ export class Fibers<
   /** Make deadlines sane after a fresh isolate: interrupted work wakes now. */
   #reconcile(): void {
     const now = Date.now();
-    // A fresh isolate has no live attempts, so every persisted 'running' row
-    // is an interrupted attempt: make it due immediately for reclaim.
+    // A fresh isolate has no live attempts, so every claimed row is an
+    // interrupted attempt (or interrupted recovery): make it due immediately
+    // for reclaim. Parked 'recovering' rows (generation NULL) keep their
+    // recovery backoff deadlines.
     this.#sql`
       UPDATE cf_fiber_runs SET next_at = ${now}, updated_at = ${now}
-      WHERE state = 'running'
+      WHERE state IN ('running', 'recovering') AND generation IS NOT NULL
     `;
     // Non-terminal rows must always carry a deadline; repair any without one.
     this.#sql`
@@ -1102,6 +1396,13 @@ export class Fibers<
           ...(row.status_message !== null
             ? { statusMessage: row.status_message }
             : {})
+        };
+      case "recovering":
+        return {
+          ...base,
+          state: "recovering",
+          interruptedStep: this.#interruptedStepName(row.run_id),
+          attempt: row.attempt
         };
       case "completed":
         return {

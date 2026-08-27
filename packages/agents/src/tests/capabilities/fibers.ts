@@ -1,6 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
-import { Fibers, NonRetryableError, type FiberStep } from "../../fibers";
+import {
+  Fibers,
+  NonRetryableError,
+  type FiberInterruption,
+  type FiberStep
+} from "../../fibers";
 import { Scheduler } from "../../schedules";
 
 /**
@@ -22,6 +27,16 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
   failuresBeforeSuccess = 0;
   /** Monotonic counter proving handlers re-ran from the top on replay. */
   statusCounter = 0;
+  /** Recovery invocations, recorded as definition:input:step:checkpoint. */
+  readonly recoveryCalls: string[] = [];
+  /** What the guarded definition's recover callback decides. */
+  recoveryMode:
+    | "complete"
+    | "replay"
+    | "replay-later"
+    | "fail"
+    | "cancel"
+    | "explode" = "complete";
 
   readonly fibers = new Fibers({
     definitions: {
@@ -138,6 +153,70 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
       clash: async (_input: undefined, step: FiberStep) => {
         await step.do("same", () => 1);
         await step.do("same", () => 2);
+      },
+
+      /**
+       * A definition with a recovery callback: unclean interruption invokes
+       * `recover` (behavior selected by `recoveryMode`) instead of replaying;
+       * clean step failures follow the ordinary retry policy.
+       */
+      guarded: {
+        run: async (input: { label: string }, step: FiberStep) => {
+          const first = await step.do("g-first", () => {
+            this.stepRuns.push("guarded:first");
+            return `g:${input.label}`;
+          });
+          await step.do(
+            "g-second",
+            { retries: { limit: 2, delay: "1 minute" } },
+            () => {
+              this.stepRuns.push("guarded:second");
+              if (this.failuresBeforeSuccess > 0) {
+                this.failuresBeforeSuccess -= 1;
+                throw new Error("second failed cleanly");
+              }
+              return "s";
+            }
+          );
+          return `run-done:${first}`;
+        },
+        recover: async (interruption: FiberInterruption<{ label: string }>) => {
+          this.recoveryCalls.push(
+            `${interruption.definition}:${interruption.input.label}:` +
+              `${interruption.interruptedStep?.name ?? "none"}:` +
+              `${JSON.stringify(interruption.interruptedStep?.checkpoint ?? null)}`
+          );
+          switch (this.recoveryMode) {
+            case "complete":
+              return { action: "complete" as const, result: "recovered" };
+            case "replay":
+              return { action: "replay" as const };
+            case "replay-later":
+              return { action: "replay" as const, at: Date.now() + 60_000 };
+            case "fail":
+              return {
+                action: "fail" as const,
+                error: new Error("recover says fail")
+              };
+            case "cancel":
+              return {
+                action: "cancel" as const,
+                reason: "recover says cancel"
+              };
+            case "explode":
+              throw new Error("recover exploded");
+          }
+        }
+      },
+
+      /** Writes a step checkpoint for later recovery inspection. */
+      checkpointing: async (_input: undefined, step: FiberStep) => {
+        await step.do("mark", ({ checkpoint }) => {
+          checkpoint({ phase: "submitted" });
+          this.stepRuns.push("checkpointing:mark");
+          return "ok";
+        });
+        return "fin";
       }
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },
@@ -224,20 +303,24 @@ export function seedFiberStep(
     readonly result?: unknown;
     readonly attempt?: number;
     readonly nextAt?: number;
+    readonly checkpoint?: unknown;
   }
 ): void {
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_fiber_steps
-       (run_id, step_name, kind, state, result, attempt, next_at, created_at,
-        started_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (run_id, step_name, kind, state, result, attempt, checkpoint, next_at,
+        created_at, started_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     options.runId,
     options.name,
     options.kind,
     options.state,
     options.result === undefined ? null : JSON.stringify(options.result),
     options.attempt ?? (options.state === "waiting" ? 1 : 0),
+    options.checkpoint === undefined
+      ? null
+      : JSON.stringify(options.checkpoint),
     options.nextAt ?? null,
     now,
     now,
