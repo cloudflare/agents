@@ -1,0 +1,41 @@
+.changeset/callables-capability.md
+  s_3b8425a62d2c32::t_968b93bf63562f 1-18
+packages/agents/package.json
+  s_b3be5a835f928d::t_560106336e0edc 171-180
+packages/agents/scripts/build.ts
+  s_b3be5a835f928d::t_a540480777df27 26-27
+packages/agents/src/callables/client.ts
+  s_b3be5a835f928d::t_4bf674dac4a619 1-123
+packages/agents/src/callables/index.ts
+  s_b3be5a835f928d::t_1718c0dbd41f63 1-15
+packages/agents/src/tests/agents/callable.ts
+  s_b3be5a835f928d::t_d9f5da4da58eee 1,3,12-30
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_b3be5a835f928d::t_e116f6d050feb6 14,174-191,207
+packages/agents/src/tests/lifecycle/callables.test.ts
+  s_3b8425a62d2c32::t_54f69afed8e2b3 1-154
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b6abe03f5dcfa7109ef512de88ad5af554d4ea21",
+  "prompts": {},
+  "sessions": {
+    "s_3b8425a62d2c32": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "313e3adf-0e3f-41c8-9338-93416f019f0c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_b3be5a835f928d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e60c15-51cf-4a50-b840-9e77737af7be",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
