@@ -229,7 +229,6 @@ transports and listeners. It does not delete capability tables. An explicit
 Lifecycle Object destruction disposes live resources once, then calls
 `storage.deleteAll()` once for all shared durable state. Eviction calls neither.
 
-
 ## Lifecycle Object context
 
 `agents/lifecycle` exports the `LifecycleObject` interface for a
