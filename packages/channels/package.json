@@ -54,7 +54,8 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "test:live": "vitest --run -c vitest.live.config.ts"
   },
   "dependencies": {
     "@cloudflare/voice": "workspace:*",
@@ -75,6 +76,7 @@
   "devDependencies": {
     "@tanstack/ai": "0.38.0",
     "ai": "^7.0.0",
+    "teleproto": "^1.228.5",
     "vitest": "4.1.10"
   },
   "publishConfig": {
