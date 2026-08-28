@@ -47,10 +47,12 @@ import {
   exports as workerExports
 } from "cloudflare:workers";
 import {
-  type AlarmContribution,
+  type LifecycleJobContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
+  type LifecycleJobOutcome,
+  setLifecycleAlarmMemoryLimitStrikes,
   setLifecycleEventSink,
   setLifecycleHostInvoker,
   setLifecycleRouteTransport,
@@ -123,11 +125,7 @@ import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
-import {
-  ensureScheduleTable,
-  Scheduler,
-  setSchedulerCallbackResolver
-} from "./schedules/scheduler";
+import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
@@ -2063,11 +2061,6 @@ export class Agent<
         STATE_WAS_CHANGED
       );
 
-      // The Scheduler capability owns this table, but a brand-new Agent must
-      // expose it synchronously from construction (pre-Scheduler behavior);
-      // Scheduler.onStart applies the same idempotent migration later.
-      ensureScheduleTable(this.ctx.storage);
-
       // v3: durable fibers table for runFiber
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_runs (
@@ -2276,6 +2269,11 @@ export class Agent<
         },
         run
       )
+    );
+
+    setLifecycleAlarmMemoryLimitStrikes(
+      this.lifecycle,
+      this._resolvedOptions.maxAlarmMemoryLimitStrikes
     );
 
     this.scheduler = new Scheduler({
@@ -5642,29 +5640,55 @@ export class Agent<
     return (ledgerOnly[0]?.count ?? 0) > 0;
   }
 
+  /**
+   * Synchronize Agent-owned host work items with current durable state.
+   *
+   * Replaces the old pull-based `getNextAlarm()` contribution: keep-alive
+   * refs hold a `cf:keep-alive` item, and fiber-recovery / facet-run state
+   * holds a `cf:housekeeping` item. Every state change that used to trigger
+   * an alarm recalculation now re-pushes or cancels these items; queue
+   * mutations re-arm the physical alarm automatically.
+   * @internal
+   */
   private async _rearmAlarm(): Promise<void> {
     await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, () =>
-      this.lifecycle.rearmAlarm()
+      this._syncHostJobs()
     );
   }
 
-  /**
-   * Contribute Agent-owned alarm work that has not yet been extracted into its
-   * own capability. Scheduler contributes independently.
-   * @internal
-   */
-  async getNextAlarm(): Promise<AlarmContribution> {
-    const pendingDestroy = await this._pendingDestroyAlarm();
-    if (pendingDestroy !== null) {
-      return { time: pendingDestroy, exclusive: true };
-    }
-
+  private async _syncHostJobs(): Promise<void> {
+    if (this._destroyed) return;
+    const work = this.lifecycle.jobs;
     const nowMs = Date.now();
-    let nextTimeMs: number | null = null;
 
     if (this._keepAliveRefs > 0) {
-      nextTimeMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
+      await work.push({
+        id: HOST_JOB_KEEP_ALIVE_ID,
+        time: nowMs + this._resolvedOptions.keepAliveIntervalMs,
+        payload: { kind: "keepAlive" }
+      });
+    } else if (work.get(HOST_JOB_KEEP_ALIVE_ID)) {
+      await work.cancel(HOST_JOB_KEEP_ALIVE_ID);
     }
+
+    const housekeepingAt = this._nextHousekeepingWakeMs(nowMs);
+    if (housekeepingAt !== null) {
+      await work.push({
+        id: HOST_JOB_HOUSEKEEPING_ID,
+        time: housekeepingAt,
+        payload: { kind: "housekeeping" }
+      });
+    } else if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
+      await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
+    }
+  }
+
+  /**
+   * The next wake fiber-recovery or facet-run housekeeping needs, or `null`
+   * when neither has pending durable state.
+   */
+  private _nextHousekeepingWakeMs(nowMs: number): number | null {
+    let nextTimeMs: number | null = null;
 
     if (this._hasPendingFiberRecovery()) {
       const base = this._resolvedOptions.keepAliveIntervalMs;
@@ -5676,9 +5700,7 @@ export class Agent<
         FIBER_RECOVERY_MAX_BACKOFF_MS,
         base * 2 ** exp
       );
-      const recoveryMs = nowMs + recoveryDelayMs;
-      nextTimeMs =
-        nextTimeMs === null ? recoveryMs : Math.min(nextTimeMs, recoveryMs);
+      nextTimeMs = nowMs + recoveryDelayMs;
     }
 
     const facetRuns = this.sql<{ count: number }>`
@@ -5692,23 +5714,86 @@ export class Agent<
           : Math.min(nextTimeMs, facetRecoveryMs);
     }
 
-    const extensionAlarm = await this._getExtensionAlarm();
-    if (extensionAlarm !== null) {
-      nextTimeMs =
-        nextTimeMs === null
-          ? extensionAlarm
-          : Math.min(nextTimeMs, extensionAlarm);
-    }
     return nextTimeMs;
-  }
-
-  /** @internal Transitional alarm contribution for Agent subclasses. */
-  protected _getExtensionAlarm(): number | null | Promise<number | null> {
-    return null;
   }
 
   /** Lifecycle alarm callback; Agent housekeeping runs after user alarm work. */
   onAlarm(): void {}
+
+  /**
+   * Execute one Agent-owned host work item from the Lifecycle queue.
+   * @internal Dispatched by Lifecycle's alarm event loop; extensions add
+   * kinds through {@link _onHostJob}.
+   */
+  onJob(
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    const payload = context.item.payload as { kind?: string } | undefined;
+    return this._onHostJob(payload?.kind, context);
+  }
+
+  /**
+   * @internal Dispatch one host work kind. Agent extensions (Think) override
+   * this to add kinds and delegate unknown ones to `super`.
+   */
+  protected _onHostJob(
+    kind: string | undefined,
+    _context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    switch (kind) {
+      case "keepAlive":
+        // The item's only job is guaranteeing wakes while refs are held;
+        // housekeeping itself runs on every alarm via the onAlarm wrapper.
+        return this._keepAliveRefs > 0
+          ? {
+              rescheduleAt:
+                Date.now() + this._resolvedOptions.keepAliveIntervalMs
+            }
+          : undefined;
+      case "housekeeping": {
+        const next = this._nextHousekeepingWakeMs(Date.now());
+        return next === null ? undefined : { rescheduleAt: next };
+      }
+      case "destroy":
+        // The alarm preamble consumes pending destroys before the event
+        // loop runs; a surviving item is stale.
+        return undefined;
+      default:
+        console.warn(`Unknown Agent host work kind ${JSON.stringify(kind)}`);
+        return undefined;
+    }
+  }
+
+  /**
+   * Apply Agent's domain policy when the Lifecycle alarm memory-limit
+   * circuit breaker records a strike (#1825). Lifecycle already handled the
+   * item that was executing; this backs off or purges the recovery-loop
+   * schedules named by {@link _cf_recoveryAlarmCallbacks} and, at the strike
+   * budget, seals in-flight recovery via {@link _cf_sealMemoryLimitedRecovery}.
+   * @internal
+   */
+  async onAlarmMemoryLimit(context: {
+    readonly sealed: boolean;
+    readonly nextTime?: number;
+  }): Promise<void> {
+    const callbacks = this._cf_recoveryAlarmCallbacks();
+    try {
+      await this.scheduler.applyMemoryLimitPolicy({
+        callbacks,
+        sealed: context.sealed,
+        nextTime: context.nextTime
+      });
+    } catch {
+      // best-effort at a host failure boundary
+    }
+    if (context.sealed) {
+      try {
+        await this._cf_sealMemoryLimitedRecovery();
+      } catch {
+        // best-effort terminalization; the purge above already broke the loop
+      }
+    }
+  }
 
   /**
    * Run Lifecycle's alarm phase inside Agent's memory-limit circuit breaker.
