@@ -71,18 +71,27 @@ override `onStart`, `onRequest`, `onConnect`, `onMessage`, `onClose`, and
 
 ## Request call path
 
+The lifecycle-installed `fetch` is the request handler. It offloads each
+request to the installed capabilities, which act as middleware: the first
+capability registered that matches the request handles it by returning a
+`Response`. A capability that returns `undefined` passes the request on to
+the next capability, and a request no capability claims falls through to the
+host's `onRequest`.
+
 ```text
 routeAgentRequest(request)
 └─ named Durable Object stub.fetch(request)
    └─ lifecycle-installed fetch
       ├─ lifecycle startup capabilities
       ├─ host onStart
-      ├─ lifecycle request capabilities
-      │  └─ first Response wins
+      ├─ capability middleware, in registration order
+      │  └─ first Response handles the request
       └─ host onRequest
 ```
 
-A warm object skips startup but still offers every request to its capabilities.
+A warm object skips startup but still offers every request to its middleware.
+There is no `next()` today: a capability either handles a request or declines
+it, and cannot wrap or observe a downstream response.
 
 ## Reusable capabilities
 
@@ -128,7 +137,8 @@ export class MyObject extends DurableObject<Env> {
 ```
 
 Capabilities run in registration order. Startup and alarms run every hook
-sequentially. Request handling stops at the first returned `Response`. A phase
+sequentially. Request handling is middleware dispatch: it stops at the first
+returned `Response`, and returning `undefined` passes the request on. A phase
 failure propagates, and failed startup can be retried.
 
 Capabilities extending `LifecycleCapability` receive one standard service

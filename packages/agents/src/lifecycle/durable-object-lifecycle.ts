@@ -495,6 +495,9 @@ export class Lifecycle<
 
   /**
    * Handle an incoming request for the owning Durable Object.
+   *
+   * Non-upgrade requests run through the capability middleware chain first,
+   * then fall through to the host's `onRequest`.
    */
   async fetch(request: Request): Promise<Response> {
     try {
