@@ -921,9 +921,7 @@ export class Lifecycle<
   /** Resolve a job owner to its dispatch hooks. */
   async #resolveJobDispatch(owner: string): Promise<
     | {
-        onJob: (
-          context: LifecycleJobContext
-        ) => unknown | Promise<unknown>;
+        onJob: (context: LifecycleJobContext) => unknown | Promise<unknown>;
         onJobError?: (
           context: LifecycleJobContext,
           error: unknown

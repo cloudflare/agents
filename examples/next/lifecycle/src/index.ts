@@ -2,8 +2,9 @@ import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import {
   Lifecycle,
+  LifecycleCapability,
   type CapabilityRequestContext,
-  type DurableObjectCapability
+  type LifecycleJobOutcome
 } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 
@@ -17,11 +18,13 @@ type Wake = {
   startedAt: string;
 };
 
-class ActivityCapability implements DurableObjectCapability {
-  constructor(private readonly storage: DurableObjectStorage) {}
+class ActivityCapability extends LifecycleCapability {
+  constructor() {
+    super("activity");
+  }
 
   onStart(): void {
-    this.storage.sql.exec(`
+    this.lifecycle.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS activity (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         requests INTEGER NOT NULL,
@@ -36,20 +39,31 @@ class ActivityCapability implements DurableObjectCapability {
       return Response.json(this.getActivity());
     }
 
-    this.storage.sql.exec(`
+    this.lifecycle.storage.sql.exec(`
       UPDATE activity SET requests = requests + 1 WHERE id = 1
     `);
   }
 
-  onAlarm(): void {
-    this.storage.sql.exec(`
+  /** Push a job into the Lifecycle queue; onJob runs when it comes due. */
+  async recordActivitySoon(): Promise<void> {
+    await this.lifecycle.jobs.push({
+      id: "activity-tick",
+      fn: "tick",
+      time: Date.now() + 5_000
+    });
+  }
+
+  onJob(): LifecycleJobOutcome {
+    this.lifecycle.storage.sql.exec(`
       UPDATE activity SET alarms = alarms + 1 WHERE id = 1
     `);
+    // Returning nothing would complete the job; this one-shot completes.
+    return undefined;
   }
 
   getActivity(): Activity {
     const rows = [
-      ...this.storage.sql.exec<Activity>(
+      ...this.lifecycle.storage.sql.exec<Activity>(
         "SELECT requests, alarms FROM activity WHERE id = 1"
       )
     ];
@@ -74,7 +88,7 @@ class ActivityCallables extends RpcTarget {
 
 /** A plain Durable Object composed with the Agents lifecycle. */
 export class DoAgent extends DurableObject<Env> {
-  private readonly activity = new ActivityCapability(this.ctx.storage);
+  private readonly activity = new ActivityCapability();
   private wake: Wake | undefined;
 
   // WebSockets are opt-in: Lifecycle itself does not model connections.
@@ -112,7 +126,7 @@ export class DoAgent extends DurableObject<Env> {
   }
 
   async onRequest(): Promise<Response> {
-    await this.ctx.storage.setAlarm(Date.now() + 5_000);
+    await this.activity.recordActivitySoon();
     return Response.json({
       name: this.lifecycle.name,
       message: "Hello from a plain Durable Object",

@@ -603,7 +603,11 @@ export class TestScheduleAgent extends Agent {
   @callable()
   async insertStaleDelayedRows(count: number, cb: string): Promise<void> {
     const past = Date.now() - 60_000;
-    const payload = JSON.stringify({ payload: null, type: "delayed", delayInSeconds: 60 });
+    const payload = JSON.stringify({
+      payload: null,
+      type: "delayed",
+      delayInSeconds: 60
+    });
     for (let i = 0; i < count; i++) {
       this.sql`
         INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)

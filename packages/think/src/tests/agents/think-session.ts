@@ -1409,14 +1409,14 @@ export class ThinkTestAgent extends Think {
     try {
       const first = await this.testChat("trigger stall then recover");
       const scheduled = this.sql<{ payload: string }>`
-        SELECT payload FROM cf_agents_schedules
-        WHERE callback = '_chatRecoveryContinue'
+        SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+        WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         ORDER BY time ASC LIMIT 1
       `;
       const scheduledContinues =
         this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         `[0]?.count ?? 0;
       // Drive the scheduled continuation — this inference streams normally (the
       // stall budget is exhausted), so the turn completes.
@@ -1473,14 +1473,14 @@ export class ThinkTestAgent extends Think {
     try {
       const first = await this.testChat("per-turn stall override");
       const scheduled = this.sql<{ payload: string }>`
-        SELECT payload FROM cf_agents_schedules
-        WHERE callback = '_chatRecoveryContinue'
+        SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+        WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         ORDER BY time ASC LIMIT 1
       `;
       const scheduledContinues =
         this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         `[0]?.count ?? 0;
       if (scheduled[0]) {
         await (
@@ -1575,8 +1575,8 @@ export class ThinkTestAgent extends Think {
       const streamingAssistantCleared = internal._streamingAssistant === null;
       const scheduledContinues =
         this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         `[0]?.count ?? 0;
       return {
         firstError: first.error,
@@ -4817,15 +4817,15 @@ export class ThinkToolsTestAgent extends Think {
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE callback = ${callback}
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler' AND fn = ${callback}
     `;
     return rows[0]?.count ?? 0;
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -4867,8 +4867,8 @@ export class ThinkToolsTestAgent extends Think {
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -7620,8 +7620,8 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -7636,8 +7636,8 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -7716,8 +7716,8 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<number> {
     const rows = this.sql<{ count: number }>`
       SELECT COUNT(*) as count
-      FROM cf_agents_schedules
-      WHERE callback = ${callback}
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
     `;
     return rows[0]?.count ?? 0;
   }
@@ -7796,9 +7796,9 @@ export class ThinkRecoveryTestAgent extends Think {
    */
   async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
     const rows = this.sql<{ delayInSeconds: number | null }>`
-      SELECT delayInSeconds
-      FROM cf_agents_schedules
-      WHERE callback = '_cleanupStreamBuffers'
+      SELECT json_extract(payload, '$.delayInSeconds') AS delayInSeconds
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
       LIMIT 1
     `;
     return rows[0]?.delayInSeconds ?? null;
@@ -7812,9 +7812,9 @@ export class ThinkRecoveryTestAgent extends Think {
    */
   async fireDueCleanupAlarmForTest(): Promise<void> {
     this.sql`
-      UPDATE cf_agents_schedules
-      SET time = ${Math.floor(Date.now() / 1000) - 1}
-      WHERE callback = '_cleanupStreamBuffers'
+      UPDATE cf_agents_jobs
+      SET time = ${Date.now() - 1_000}
+      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
     `;
     await this.alarm();
   }
@@ -8068,8 +8068,8 @@ export class ThinkRecoveryTestAgent extends Think {
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = ${callback}
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
       ORDER BY time ASC
       LIMIT 1
     `;

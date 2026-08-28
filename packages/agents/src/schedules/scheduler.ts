@@ -790,8 +790,7 @@ export class Scheduler<
 
   /** Every schedule job this Scheduler owns, with its parsed vocabulary. */
   #ownedJobs(): Array<{ job: LifecycleJob; timing: SchedulerJobPayload }> {
-    const owned: Array<{ job: LifecycleJob; timing: SchedulerJobPayload }> =
-      [];
+    const owned: Array<{ job: LifecycleJob; timing: SchedulerJobPayload }> = [];
     for (const job of this.lifecycle.jobs.list()) {
       if (isSchedulerJobPayload(job.payload)) {
         owned.push({ job, timing: job.payload });
@@ -967,8 +966,7 @@ export class Scheduler<
       : null;
     const endSeconds = criteria.timeRange
       ? Math.floor(
-          (criteria.timeRange.end ?? new Date(999999999999999)).getTime() /
-            1000
+          (criteria.timeRange.end ?? new Date(999999999999999)).getTime() / 1000
         )
       : null;
 

@@ -73,5 +73,6 @@ it remains connected while the Durable Object can leave memory. Lifecycle itself
 does not model WebSockets — without the capability installed, upgrades are
 declined.
 
-Each normal HTTP request schedules an alarm five seconds later. The capability
-records the alarm before the object's `onAlarm` callback runs.
+Each normal HTTP request pushes a job into the Lifecycle queue due five
+seconds later. The capability's `onJob` records it before the object's
+`onAlarm` callback runs.

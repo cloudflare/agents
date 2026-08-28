@@ -3,10 +3,7 @@ import type { DurableObject } from "cloudflare:workers";
 
 import type { Lifecycle } from "./durable-object-lifecycle";
 import type { Connection } from "./types";
-import type {
-  LifecycleJobContext,
-  LifecycleJobOutcome
-} from "./job-queue";
+import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 
 /**
  * A Durable Object that has installed the Agents SDK Lifecycle.

@@ -1,78 +1,65 @@
 # Alarm coordination
 
-A Durable Object has one physical alarm timestamp. Lifecycle owns that platform
-resource so capabilities do not overwrite one another's wake-ups.
+A Durable Object has one physical alarm timestamp. Lifecycle owns that
+platform resource and derives it entirely from the state of the job queue it
+also owns. See `lifecycle-work-queue.md` for the queue specification; this
+document records the alarm-side model.
+
+This replaces the earlier pull-based contribution model, in which each
+capability implemented `getNextAlarm()` and `onAlarm()` and Scheduler was
+"one alarm contributor, not the general alarm service". That decision was
+deliberately reversed: Lifecycle is now the general work service, and
+capabilities push jobs instead of contributing wake times.
 
 ## Domain model
 
-- **Physical alarm** — the single timestamp stored by the Durable Object runtime.
-  Only Lifecycle reads or writes it.
-- **Alarm contribution** — a capability's requested next wake time. It is a
-  projection of capability-owned durable state, not the work itself.
-- **Alarm work** — durable records and processing owned by one capability. Each
-  capability keeps its own schema, retry policy, and recovery semantics.
-- **Scheduler** — the capability for persistent named callbacks. It is one alarm
-  contributor, not the general alarm service.
-- **Host contribution** — temporary support for host work that has not yet been
-  extracted into a capability.
+- **Physical alarm** — the single timestamp stored by the Durable Object
+  runtime. Only Lifecycle reads or writes it, always derived from queue
+  state; queue mutations re-arm it automatically.
+- **Job** — one durable row in the Lifecycle queue: a serialisable callback
+  address (owning capability + fn), a due time, a payload, and queue policy.
+- **Drive result** — what a job's owner returns after it runs: complete,
+  `{ rescheduleAt }`, or `"yield"` (due again immediately).
+- **Exclusive job** — suppresses ordinary alarm candidates while pending;
+  used for wakes that must not be delayed by other work (deferred destroy).
+- **Deadman pre-alarm** — armed before the event loop drives any due job, so
+  an isolate death mid-drive still wakes the object to resume its queue.
 
-## How it works
+## How the alarm is derived
 
-A capability that needs future work implements `getNextAlarm()` and `onAlarm()`.
-When it changes durable state, it calls `this.lifecycle.alarms.rearm()` through
-the standard service surface supplied by `LifecycleCapability`.
+The next physical alarm is a pure SQL computation over the queue:
 
-Lifecycle serializes recalculation, reads every capability contribution plus the
-host contribution, and sets the physical alarm to the earliest requested time.
-An exclusive contribution replaces ordinary wake-time candidates while it
-exists; it does not change hook order.
+1. If any exclusive job exists, the earliest exclusive time wins outright.
+2. Otherwise the earliest ready job, clamped to the future (overdue rows
+   survive restarts and must re-fire immediately), merged with the earliest
+   hung-timeout recheck for in-flight single-flight jobs.
+3. An empty queue deletes the physical alarm; the object hibernates.
 
-When the platform alarm fires, Lifecycle:
+Re-arm requests are serialized so a later durable-state change cannot be
+overwritten by an earlier calculation, and requests made during startup are
+coalesced and applied after startup completes.
 
-1. starts capabilities and the host if necessary;
-2. runs capability `onAlarm()` hooks in registration order;
-3. runs host `onAlarm()`;
-4. recalculates and rearms the physical alarm.
+## When the alarm fires
 
-A failed alarm hook stops the phase and leaves platform retry semantics intact.
-Rearm requests made during startup are coalesced and applied after startup, so a
-capability can create work in `onStart()` without deadlocking initialization.
+`Lifecycle.alarm()` runs the event loop: arm the deadman, drive due jobs in
+due order (single-flight skip/hung-recovery, per-job retry, platform-failure
+deferral, `onJobError` for terminal application failures), run host
+`onAlarm()`, clear the memory-limit strike counter, re-arm from queue state.
+The loop stops if teardown disabled alarms mid-phase.
 
-## Capability independence
-
-Alarm coordination does not create capability dependencies. Scheduler stores
-named callback rows in `cf_agents_schedules`. A future Fiber capability should
-store resumable jobs in its own tables and contribute the next recovery wake. An
-MCP capability can do the same for reconnect state. Neither needs to insert a
-Scheduler row or call Scheduler APIs.
-
-A direct capability dependency remains valid when the domain itself requires
-one. Sharing the physical alarm is not such a dependency.
+The alarm memory-limit circuit breaker (#1825) lives at this boundary: a
+memory-limit reset is intercepted (everything else re-throws so platform
+alarm-retry semantics hold), a durable strike counter backs off the executing
+job, and at the strike budget the executing job is purged and the host's
+`onAlarmMemoryLimit()` hook applies domain policy (chat recovery sealing).
 
 ## Agent integration
 
-Agent installs the public Scheduler primitive with policy options only —
-retry defaults, hung-interval timeout, and an error observer — plus a
-composition-root callback resolver for its historical name-based scheduling
-methods. Everything else Scheduler needs (storage, rearm, teardown state,
-startup state, the host invocation boundary) arrives through the standard
-capability services, so there is no Agent-specific Scheduler adapter. Lifecycle's generic routing surface carries
-owner-scoped Scheduler messages to the root and dispatches due callbacks to
-facets through one internal Agent transport aperture. Existing facet schedule
-rows remain in the root Scheduler table; no data migration or
-Scheduler-specific Agent RPC methods are required.
-
-Scheduler publishes telemetry through Lifecycle's event bus. Plain Lifecycle
-Objects use the existing diagnostics-channel sink; Agent adapts the same bus to
-its existing observability implementation at its composition root.
-
-Agent's host contribution currently covers deferred destruction, keep-alive,
-fiber recovery, facet-run checks, and Think's transitional workflow-notification
-wake. Those concerns can become capabilities independently without changing the
-alarm contract or Scheduler.
-
-## Tradeoffs
-
-Every recalculation queries each contributor, so `getNextAlarm()` should be a
-small indexed read with no network I/O. In return, capabilities retain clear
-storage ownership and cannot silently clobber each other's alarms.
+Agent installs Scheduler with policy options only, plus a composition-root
+callback resolver for its historical name-based scheduling methods.
+Agent's own alarm work is pushed as host jobs — `cf:keep-alive`,
+`cf:housekeeping`, and the exclusive `cf:destroy` derived from the durable
+destroy marker — synchronized with durable state by `_syncHostJobs()` on
+startup, on state changes, and after each alarm's housekeeping. Think adds
+`think:workflow-notifications` the same way. The host `getNextAlarm()`
+contribution and Agent-owned breaker no longer exist.

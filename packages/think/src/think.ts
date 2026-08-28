@@ -10625,24 +10625,16 @@ export class Think<
   }
 
   private _hasScheduledRecoveredContinuation(requestId: string): boolean {
-    const rows = this.sql<{ payload: string | null }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
-    `;
-    return rows.some((row) => {
-      if (!row.payload) return false;
-      try {
-        const payload = JSON.parse(row.payload) as unknown;
-        return (
-          payload !== null &&
-          typeof payload === "object" &&
-          "recoveredRequestId" in payload &&
-          (payload as { recoveredRequestId?: unknown }).recoveredRequestId ===
-            requestId
-        );
-      } catch {
-        return false;
-      }
+    return this.getSchedules().some((schedule) => {
+      if (schedule.callback !== "_chatRecoveryContinue") return false;
+      const payload: unknown = schedule.payload;
+      return (
+        payload !== null &&
+        typeof payload === "object" &&
+        "recoveredRequestId" in payload &&
+        (payload as { recoveredRequestId?: unknown }).recoveredRequestId ===
+          requestId
+      );
     });
   }
 

@@ -1,10 +1,7 @@
 import { lifecycleCapabilityId } from "./capability";
 import type { LifecycleRouteContext } from "./capability";
 import type { WSMessage } from "./types";
-import type {
-  LifecycleJobContext,
-  LifecycleJobOutcome
-} from "./job-queue";
+import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 
 type MaybePromise<T> = T | Promise<T>;
 

@@ -79,7 +79,6 @@ import { SqlError } from "./sql-error";
 import {
   type RetryOptions,
   tryN,
-  isDurableObjectMemoryLimitReset,
   isErrorRetryable,
   validateRetryOptions
 } from "./retries";

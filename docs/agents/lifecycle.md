@@ -26,7 +26,7 @@ export class MyObject extends DurableObject<Env> {
   }
 
   onAlarm(): void {
-    // Runs after lifecycle capabilities process the alarm.
+    // Runs once per alarm invocation, after due jobs are driven.
   }
 }
 ```
@@ -108,10 +108,6 @@ class AuditLog implements DurableObjectCapability {
       return new Response("ok");
     }
   }
-
-  onAlarm(): void {
-    this.storage.sql.exec("DELETE FROM audit_log");
-  }
 }
 ```
 
@@ -128,12 +124,12 @@ export class MyObject extends DurableObject<Env> {
 }
 ```
 
-Capabilities run in registration order. Startup and alarms run every hook
+Capabilities run in registration order. Startup runs every hook
 sequentially. Request handling stops at the first returned `Response`. A phase
 failure propagates, and failed startup can be retried.
 
 Capabilities extending `LifecycleCapability` receive one standard service
-surface: storage, readiness, startup state, alarm coordination, a host
+surface: storage, readiness, startup state, the job queue, a host
 invocation boundary, best-effort events, and capability routing.
 Host-specific bindings, authentication, and protocol adapters remain explicit
 constructor dependencies. Lifecycle never grants a capability the complete
@@ -144,46 +140,57 @@ Capability hooks run outside host context, but user callbacks run through
 Scheduler dispatches its registered callbacks through this boundary, and a
 future capability that calls user code should do the same.
 
-## Shared alarm ownership
+## The job queue
 
-Lifecycle owns the Durable Object's single physical alarm. A capability that
-needs a future wake-up keeps its work in its own durable storage and implements
-`getNextAlarm()`:
+Lifecycle owns the Durable Object's queue of durable work and its single
+physical alarm. A job is a serialisable callback address — the owning
+capability plus a function name — with a due time and a payload. A capability
+that needs future work pushes a job and implements `onJob()`:
 
 ```ts
-import { LifecycleCapability, type AlarmContribution } from "agents/lifecycle";
+import {
+  LifecycleCapability,
+  type LifecycleJobContext
+} from "agents/lifecycle";
 
 class Cleanup extends LifecycleCapability {
   constructor() {
     super("cleanup");
   }
 
-  async getNextAlarm(): Promise<AlarmContribution> {
-    return (await this.lifecycle.storage.get<number>("cleanup:next")) ?? null;
-  }
-
-  async onAlarm(): Promise<void> {
-    const next = await this.lifecycle.storage.get<number>("cleanup:next");
-    if (next === undefined || next > Date.now()) return;
-    await this.lifecycle.storage.delete("cleanup:next");
-  }
-
   async scheduleCleanup(time: number): Promise<void> {
-    await this.lifecycle.storage.put("cleanup:next", time);
-    await this.lifecycle.alarms.rearm();
+    await this.lifecycle.jobs.push({ id: "cleanup", fn: "sweep", time });
+  }
+
+  async onJob({ job }: LifecycleJobContext): Promise<void> {
+    // job.fn === "sweep"; returning nothing completes the job.
+    await this.lifecycle.storage.delete("cleanup:marker");
   }
 }
 ```
 
-Lifecycle selects the earliest contribution from every capability and the
-host. It runs all capability `onAlarm()` hooks, then host `onAlarm()`, then
-recalculates the physical alarm. Capabilities do not depend on Scheduler or on
-each other merely to receive alarm wakes.
-A contribution can be `{ time, exclusive: true }` when its wake time must
-replace ordinary wake candidates, such as a pending teardown. This changes only
-which physical alarm is armed; when that alarm fires, normal capability and host
-hook order still applies. Hosts can implement `getNextAlarm()` for alarm work
-that has not yet been extracted into a capability.
+The queue is ordered by timestamp, and every queue mutation re-arms the
+physical alarm automatically — there is no explicit rearm call. When the
+alarm fires, Lifecycle drives due jobs in due order as an event loop, then
+runs host `onAlarm()`, then re-arms from queue state. Before driving any job
+it arms a deadman pre-alarm so an isolate death mid-drive still wakes the
+object to resume.
+
+A job's drive result decides what happens next: returning nothing completes
+and deletes it, `{ rescheduleAt }` suspends it until a future time, and
+`"yield"` leaves it due so the object wakes again immediately. Lifecycle also
+owns dispatch retries: a job's `retry` options bound in-process attempts,
+platform-class failures (a superseded isolate after a deploy, a memory-limit
+reset) preserve the job for a fresh invocation, and a terminal application
+failure reaches the owner's `onJobError()`, whose result decides advancement.
+
+A job pushed with `exclusive: true` suppresses ordinary alarm candidates
+while it is pending — Agent's deferred destroy uses this so a condemned
+object cannot be kept alive by other work. A `singleflight` job is skipped
+while a previous run is still in flight, until it crosses its hung timeout.
+The host pushes jobs through `lifecycle.jobs` and implements the same
+`onJob()`/`onJobError()` hooks. Capabilities do not depend on Scheduler or
+on each other merely to receive wakes.
 
 ## Capability events
 
@@ -218,7 +225,7 @@ dispatch. A host with child objects supplies the transport internally.
 
 Agent uses this for facet schedules: Scheduler sends owner-scoped CRUD to the
 root Scheduler and routes due callbacks back to the matching facet Scheduler.
-Existing rows remain in the root `cf_agents_schedules` table. Scheduler does not
+Facet schedules live as jobs in the root's queue. Scheduler does not
 implement facet traversal, and Agent exposes only one internal generic Lifecycle
 route aperture.
 

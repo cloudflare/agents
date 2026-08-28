@@ -82,7 +82,7 @@ export class MyDurableObject extends DurableObject {
 
 `Lifecycle` owns the Agent's physical Durable Object alarm because schedules, keep-alive, fibers, sub-agents, and other capabilities share the same alarm slot. Do not override `alarm()` or call `this.ctx.storage.setAlarm()` from an Agent feature; one caller could overwrite another feature's wake-up.
 
-Use `this.schedule()` for named Agent callbacks. A reusable capability with its own durable work implements `getNextAlarm()` and `onAlarm()`, then calls `this.lifecycle.alarms.rearm()` after its durable state changes. See [Durable Object lifecycle](./lifecycle.md#shared-alarm-ownership) and [Scheduling](./scheduling.md).
+Use `this.schedule()` for named Agent callbacks. A reusable capability with its own durable work pushes jobs through `this.lifecycle.jobs` and implements `onJob()`; Lifecycle drives due jobs and re-arms the alarm from queue state. See [Durable Object lifecycle](./lifecycle.md#the-job-queue) and [Scheduling](./scheduling.md).
 
 ### `this.ctx`
 
@@ -278,7 +278,7 @@ class MyAgent extends Agent {
 }
 ```
 
-Schedules are stored in the `cf_agents_schedules` SQL table. Cron schedules automatically reschedule themselves after execution, while one-time schedules are deleted.
+Schedules are stored as jobs in the `cf_agents_jobs` SQL table, the Lifecycle-owned job queue. Cron schedules automatically reschedule themselves after execution, while one-time schedules are deleted.
 
 ### `this.mcp` and friends
 
