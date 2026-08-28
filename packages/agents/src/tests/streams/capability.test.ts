@@ -72,6 +72,61 @@ describe("Streams capability", () => {
     });
   });
 
+  it("readBatches slices replay by batchSize from a cursor", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      const stream = await instance.streams.open("batched");
+      for (let i = 0; i < 5; i++) stream.append({ i });
+      stream.close();
+
+      const batches: number[][] = [];
+      for await (const batch of instance.streams.readBatches("batched", {
+        batchSize: 2
+      })) {
+        batches.push(batch.map((c) => c.seq));
+      }
+      expect(batches).toEqual([[0, 1], [2, 3], [4]]);
+
+      const fromOne: number[][] = [];
+      for await (const batch of instance.streams.readBatches("batched", {
+        from: 1,
+        batchSize: 2
+      })) {
+        fromOne.push(batch.map((c) => c.seq));
+      }
+      expect(fromOne).toEqual([
+        [1, 2],
+        [3, 4]
+      ]);
+    });
+  });
+
+  it("readBatches coalesces a live tail into one batch per wakeup", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      const stream = await instance.streams.open("coalesce");
+      stream.append({ i: 0 });
+
+      const batches: number[][] = [];
+      const reading = (async () => {
+        for await (const batch of instance.streams.readBatches("coalesce")) {
+          batches.push(batch.map((c) => c.seq));
+        }
+      })();
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      // Three appends and the close land in one synchronous block, so the
+      // tailing reader wakes once and drains the backlog as one array.
+      stream.append({ i: 1 });
+      stream.append({ i: 2 });
+      stream.append({ i: 3 });
+      stream.close();
+
+      await reading;
+      expect(batches).toEqual([[0], [1, 2, 3]]);
+    });
+  });
+
   it("tails a live stream and ends when the producer settles", async () => {
     const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {

@@ -84,6 +84,12 @@ export interface StreamReadOptions {
   signal?: AbortSignal;
 }
 
+/** Options accepted by `Streams.readBatches()`. */
+export interface StreamReadBatchesOptions extends StreamReadOptions {
+  /** Maximum chunks per yielded batch. Defaults to 100. */
+  batchSize?: number;
+}
+
 /** Filters accepted by `Streams.list()`. */
 export interface StreamListOptions {
   state?: StreamState | StreamState[];

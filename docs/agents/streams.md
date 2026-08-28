@@ -68,6 +68,23 @@ Reads are independent of producer liveness. `list()` filters by state, and
 `delete()` removes a settled stream and its chunk log (a live stream must be
 settled first).
 
+When the consumer pays per write — an SSE flush, an RPC hop, a history
+append — read in batches instead of chunk by chunk:
+
+```ts
+for await (const batch of this.streams.readBatches("reply:123", {
+  from,
+  batchSize: 50 // per-array ceiling during replay; default 100
+})) {
+  flush(batch); // StreamChunk[] — one write per backlog, not per chunk
+}
+```
+
+`readBatches()` has the same lifecycle as `read()` (replay, then tail, end
+on settlement); the difference is granularity: replay yields up to
+`batchSize` chunks per array, and a live tail yields everything that
+accumulated since the last wakeup as one array.
+
 ## Composing with Tasks
 
 The contract [Tasks](./tasks.md) recovery was designed around: the task step

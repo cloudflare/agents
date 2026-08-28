@@ -26,6 +26,7 @@ import type {
   StreamJson,
   StreamListOptions,
   StreamOpenOptions,
+  StreamReadBatchesOptions,
   StreamReadOptions,
   StreamRow,
   StreamState,
@@ -144,8 +145,35 @@ export class Streams extends LifecycleCapability {
     streamId: string,
     options: StreamReadOptions = {}
   ): AsyncGenerator<StreamChunk, void, undefined> {
+    const signal = options.signal;
+    for await (const batch of this.readBatches(streamId, options)) {
+      for (const item of batch) {
+        if (signal?.aborted) throw signal.reason ?? new Error("Read aborted");
+        yield item;
+      }
+    }
+  }
+
+  /**
+   * Batched form of {@link read}: yields non-empty arrays of consecutive
+   * chunks instead of one chunk at a time. Replay yields up to
+   * `options.batchSize` chunks per array; a live tail yields everything
+   * that accumulated since the last wakeup as one array — so a consumer
+   * paying per write (an SSE flush, an RPC hop, a history append) pays
+   * once per backlog, not once per chunk. Same lifecycle as {@link read}:
+   * ends when the stream settles and every durable chunk has been
+   * yielded; aborting `options.signal` throws its reason.
+   */
+  async *readBatches(
+    streamId: string,
+    options: StreamReadBatchesOptions = {}
+  ): AsyncGenerator<StreamChunk[], void, undefined> {
     await this.lifecycle.ready();
     const signal = options.signal;
+    const batchSize = Math.max(
+      1,
+      Math.floor(options.batchSize ?? READ_BATCH_SIZE)
+    );
     let next = Math.max(0, options.from ?? 0);
 
     if (!this.#getStream(streamId)) {
@@ -159,14 +187,16 @@ export class Streams extends LifecycleCapability {
         SELECT stream_id, seq, chunk, created_at FROM cf_agents_stream_chunks
         WHERE stream_id = ${streamId} AND seq >= ${next}
         ORDER BY seq ASC
-        LIMIT ${READ_BATCH_SIZE}
+        LIMIT ${batchSize}
       `;
-      for (const row of rows) {
-        if (signal?.aborted) throw signal.reason ?? new Error("Read aborted");
-        yield { seq: row.seq, chunk: JSON.parse(row.chunk) as StreamJson };
-        next = row.seq + 1;
+      if (rows.length > 0) {
+        next = rows[rows.length - 1].seq + 1;
+        yield rows.map((row) => ({
+          seq: row.seq,
+          chunk: JSON.parse(row.chunk) as StreamJson
+        }));
       }
-      if (rows.length === READ_BATCH_SIZE) continue;
+      if (rows.length === batchSize) continue;
 
       const stream = this.#getStream(streamId);
       if (!stream) return; // deleted mid-read: nothing further to yield

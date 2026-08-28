@@ -39,4 +39,15 @@ async function consume(): Promise<void> {
 }
 void consume;
 
+// readBatches() yields arrays of consecutive chunks.
+async function consumeBatched(): Promise<void> {
+  for await (const batch of object.streams.readBatches("reply:1", {
+    from: 2,
+    batchSize: 25
+  })) {
+    batch satisfies StreamChunk[];
+  }
+}
+void consumeBatched;
+
 new StreamClosedError("reply:1", "settled") satisfies Error;

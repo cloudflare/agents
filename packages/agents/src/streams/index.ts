@@ -19,6 +19,7 @@ export type {
   StreamJson,
   StreamListOptions,
   StreamOpenOptions,
+  StreamReadBatchesOptions,
   StreamReadOptions,
   StreamState,
   StreamStatus,
