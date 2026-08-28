@@ -1,0 +1,59 @@
+packages/agents/src/tests/agents/migration.ts
+  s_f510ad52b05c4e::t_8e02334fd31b93 6-7,11-13,17-19,35,41-43,45,47-49,56,62,64-66,71,74-75,78-79,82-86,89-90,92,95-97,100-108,111-112,114-119,123-133,137-152,155,160
+packages/agents/src/tests/agents/schedule.ts
+  s_f510ad52b05c4e::t_cea5c929e11f96 97,99,139,173,266-267,331,333,356,437,448-451,487-488,499,580-581,592,599,605-606,609-610
+packages/agents/src/tests/alarms.test.ts
+  s_f510ad52b05c4e::t_c956eeee737a09 80,82,112,114
+packages/agents/src/tests/deferred-destroy.test.ts
+  s_f510ad52b05c4e::t_7dc2419b04284f 85
+packages/agents/src/tests/migration.test.ts
+  s_f510ad52b05c4e::t_5f7546a1fa2eb9 6-7,10,17,20-36,39,42,45,49-70,73,76,85-86
+packages/agents/src/tests/retry-integration.test.ts
+  s_f510ad52b05c4e::t_0f258d2178e7be 149-150
+packages/agents/src/tests/schedule.test.ts
+  s_f510ad52b05c4e::t_89f27169ee1d2d 196-197,212,256-258,305-306,312,367,405-406,747-749,852-854,885-887,939-941,982-983,1017-1019
+packages/agents/src/index.ts
+  s_f510ad52b05c4e::t_f7a0ae61190bf9 972-976,2421-2424,2817-2821,3970-3972,5679-5697,5701-5702,5712-5713,5758,5760,5765,5769-5770,5773,5776,5778-5780,5793,5796,5833-5837,5840,5859,5863,10136-10143
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_f510ad52b05c4e::t_6f0f17a305137e 710-711,861,882-883,890,893
+packages/agents/src/lifecycle/job-queue.ts
+  s_f510ad52b05c4e::t_96eb002d95a971 99-104
+packages/agents/src/schedules/scheduler.ts
+  s_f510ad52b05c4e::t_60065cbedb5583 831-833
+packages/agents/src/tests-d/lifecycle-export.test-d.ts
+  s_f510ad52b05c4e::t_19d2b3859823b0 14-17,55-59,108-115,138-141
+packages/agents/src/tests/agents/keep-alive.ts
+  s_f510ad52b05c4e::t_f4f949fd1ea49e 43
+packages/agents/src/tests/agents/sub-agent.ts
+  s_f510ad52b05c4e::t_086187db5c218d 1449-1450,1478-1485
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_f510ad52b05c4e::t_d5a55c44c63d11 10-12,46-69,72-84,254-257,277,309-310,313,338,344-356,361-362,366-374,376-397
+packages/agents/src/tests/capabilities/scheduler.ts
+  s_f510ad52b05c4e::t_a741c56c3b37a5 113,119-120,188-189
+packages/agents/src/tests/lifecycle/alarm-arbitration.test.ts
+  s_f510ad52b05c4e::t_d9b19952158822 2,4-5,9-38,41,46-49,52-55,57,59-62,64-65,68
+packages/agents/src/tests/lifecycle/host-context.test.ts
+  s_f510ad52b05c4e::t_f6ce4c5a17c975 33-34,37
+packages/agents/src/tests/schedules/capability.test.ts
+  s_f510ad52b05c4e::t_e3e255b98011bb 157,163,169,172-173,323,326-328,331,340,342,347-348
+packages/agents/src/tests/schema-and-state-optimization.test.ts
+  s_f510ad52b05c4e::t_274b33dd2ee463 50-63,141
+packages/think/src/think.ts
+  s_f510ad52b05c4e::t_373e565a5bc76e 168-171,1911,10001-10014,10017-10033
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "62c7fcf115fe8eb423566a438936b8e419669dc3",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
