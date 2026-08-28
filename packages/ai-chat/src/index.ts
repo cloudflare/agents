@@ -62,8 +62,10 @@ import {
 import {
   ResumableStream,
   cleanupStreamBuffers,
+  createChatStreams,
   STREAM_CLEANUP_DELAY_SECONDS
 } from "agents/chat";
+import type { Streams } from "agents/streams";
 import { MAX_BOUND_PARAMS, buildInClauseStrings } from "agents/chat";
 import {
   ContinuationState,
@@ -317,12 +319,6 @@ type AIChatAgentToolRunRow = {
   progress_json?: string | null;
   last_signal_at?: number | null;
 };
-type AIChatStreamMetadataRow = {
-  id: string;
-  status: string;
-  request_id: string;
-};
-
 /**
  * Options passed to the onChatMessage handler.
  */
@@ -395,6 +391,13 @@ export class AIChatAgent<
    * Used to propagate cancellation signals for any external calls made by the agent.
    */
   private _abortRegistry: AbortRegistry;
+
+  /**
+   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * output lives in the shared durable chunk log, readable by any
+   * `streams.read()` consumer on this Durable Object.
+   */
+  readonly streams: Streams = createChatStreams();
 
   /**
    * Resumable stream manager -- handles chunk buffering, persistence, and replay.
@@ -918,6 +921,7 @@ export class AIChatAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
+    this.lifecycle.use(this.streams);
     this._registerChatTurnFiberDefinition();
     withAgentSpan(
       this,
@@ -964,7 +968,7 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this._resumableStream = new ResumableStream(this.sql.bind(this));
+            this._resumableStream = new ResumableStream(this.streams);
           }
         );
 
@@ -4121,14 +4125,7 @@ export class AIChatAgent<
   }
 
   private _getAgentToolStreamId(requestId: string): string | undefined {
-    const rows = this.sql<AIChatStreamMetadataRow>`
-      select id, status, request_id
-      from cf_ai_chat_stream_metadata
-      where request_id = ${requestId}
-      order by rowid desc
-      limit 1
-    `;
-    return rows[0]?.id;
+    return this._resumableStream.latestStreamInfoForRequest(requestId)?.id;
   }
 
   private _getAgentToolStoredChunks(
@@ -4804,14 +4801,8 @@ export class AIChatAgent<
   ): ResolvedRecoveryStream {
     let streamId = "";
     if (requestId) {
-      const rows = this.sql<{ id: string }>`
-        SELECT id FROM cf_ai_chat_stream_metadata
-        WHERE request_id = ${requestId}
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (rows.length > 0) {
-        streamId = rows[0].id;
-      }
+      streamId =
+        this._resumableStream.latestStreamInfoForRequest(requestId)?.id ?? "";
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {
       streamId = this._resumableStream.activeStreamId ?? "";

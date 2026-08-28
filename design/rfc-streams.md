@@ -171,5 +171,19 @@ Approved: one `Streams` capability owning the durable chunk log, cursor,
 replay-then-tail reads, and terminal status; composed with Tasks through
 checkpointed cursors and `status()` evidence. The first PR ships the
 capability, its standalone and Tasks-composed real-DO tests (including a
-process-kill e2e), and a composition example; the chat resumable-stream
-extraction follows with the chat suites as the parity ratchet.
+process-kill e2e), and a composition example.
+
+**Amendment (chat replatform, same PR):** the chat resumable-stream
+extraction landed alongside the capability rather than as a follow-up.
+`ResumableStream` became chat's producer-side coalescing and wire-protocol
+adapter over Streams (through an internal sync aperture — its surface is
+synchronous and constructed pre-start): chat's packed segments are stored as
+Streams chunks, settlement maps onto `close()`/`error()`, restore and
+recovery-evidence lookups read the capability's rows, retention sweeps key
+off the stream row's `updated_at` (no chunk-table scans), and legacy
+`cf_ai_chat_stream_*` tables migrate wholesale on first construction. The
+chat suites passed unchanged (think 887, ai-chat 737, agents 1953) and a
+storage-ops benchmark pins the cost model: packed writes stay within 2× the
+legacy pattern (the fence per segment), ~9× under naive per-chunk appends,
+with sweep reads down ~6× and no longer proportional to stored chunks. The
+resume protocol (handshake, wire format) stayed in chat as designed.

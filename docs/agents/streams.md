@@ -129,12 +129,25 @@ handler and pass the request's signal so a disconnecting client aborts the
 tail. `examples/next/streams` serves a stream over SSE with cursor-based
 reconnects.
 
+## Chat runs on this
+
+`AIChatAgent` and `Think` store their in-flight turn output here:
+`ResumableStream` (from `agents/chat`) is a thin adapter over Streams that
+packs ~10 wire chunks into one stored segment for write economy, maps
+completion/error onto stream settlement, and reads `updated_at` as the
+retention signal. Existing `cf_ai_chat_stream_*` tables migrate onto the
+capability automatically. The packing pattern is worth copying for any
+high-frequency producer: buffer what you already hold synchronously, append
+one packed chunk, and unpack on read — durability is unchanged (nothing is
+held across an await at settlement) and rows written drop by ~an order of
+magnitude versus per-token appends.
+
 ## Current limits
 
 Live fanout is in-isolate (sufficient: a Durable Object executes in one
 isolate at a time; reconnecting readers replay from their cursor). Retention
-is explicit `delete()`; age-based sweeping, producer-generation fencing on
-`open()`, and transport helpers extracted from chat's resume protocol are
-future work, as is migrating chat's resumable-stream store onto this
-capability. The design record is
+is explicit `delete()` (chat sweeps its own rows on an alarm); age-based
+sweeping in the capability itself, producer-generation fencing on `open()`,
+and transport helpers extracted from chat's resume protocol are future work.
+The design record is
 [`design/rfc-streams.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-streams.md).

@@ -1,5 +1,5 @@
 import { Agent } from "../../index";
-import { ResumableStream } from "../../chat";
+import { ResumableStream, createChatStreams } from "../../chat";
 import {
   Session,
   AgentSessionProvider,
@@ -14,6 +14,13 @@ import {
  * Test Agent — full Session API
  */
 export class TestSessionAgent extends Agent {
+  readonly streams = createChatStreams();
+
+  constructor(...args: ConstructorParameters<typeof Agent>) {
+    super(...args);
+    this.lifecycle.use(this.streams);
+  }
+
   /**
    * Counts how many times the latest-leaf anti-join (`latestLeafRow`) hits
    * the database. The active-leaf cache should keep this at zero across
@@ -235,6 +242,21 @@ export class TestSessionAgent extends Agent {
     this
       .sql`insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
       values ('legacy-stream', 'legacy-req', 'streaming', ${Date.now()})`;
+    this.sql`create table cf_ai_chat_stream_chunks (
+      id text primary key,
+      stream_id text not null,
+      body text not null,
+      chunk_index integer not null,
+      created_at integer not null
+    )`;
+    // One plain body row and one packed segment row, so the migration must
+    // preserve both stored formats.
+    this
+      .sql`insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+      values ('c0', 'legacy-stream', ${'{"type":"text-delta","delta":"a"}'}, 0, ${Date.now()})`;
+    this
+      .sql`insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+      values ('c1', 'legacy-stream', ${JSON.stringify(['{"type":"text-delta","delta":"b"}', '{"type":"text-delta","delta":"c"}'])}, 1, ${Date.now()})`;
   }
 
   private streamMetadataColumnsForTest(): string[] {
@@ -244,30 +266,40 @@ export class TestSessionAgent extends Agent {
   }
 
   /**
-   * Drive a `ResumableStream` over a legacy metadata table and report what
-   * happened, so the test can assert the lazy migration recovered instead of
-   * throwing. Construction itself exercises `restore()` (a `SELECT *` that
-   * must tolerate the missing columns).
+   * Drive a `ResumableStream` over seeded legacy `cf_ai_chat_stream_*` tables
+   * and report what happened, so the test can assert construction migrated
+   * the rows into the Streams capability's tables (preserving both stored
+   * chunk formats and the in-flight active stream) and dropped the legacy
+   * tables.
    */
   async resumableLegacyMigrationForTest(): Promise<{
     columnsBefore: string[];
+    remainingLegacyTables: string[];
+    migratedStatus: { status: string; request_id: string } | null;
+    migratedChunkBodies: string[];
     legacyMessageId: string | null;
+    restoredActiveStreamId: string | null;
     startThrew: boolean;
-    columnsAfter: string[];
     newStreamMessageId: string | null;
   }> {
-    const stream = new ResumableStream(
-      <T = Record<string, unknown>>(
-        strings: TemplateStringsArray,
-        ...values: (string | number | boolean | null)[]
-      ): T[] => this.sql<T>(strings, ...values)
-    );
-
     const columnsBefore = this.streamMetadataColumnsForTest();
-    // SELECT of the new column on a legacy row: guarded → null, no throw.
-    const legacyMessageId = stream.getStreamMessageId("legacy-stream");
 
-    // INSERT naming the new columns on a legacy table: must migrate + retry.
+    const stream = new ResumableStream(this.streams);
+
+    const remainingLegacyTables = this.sql<{ name: string }>`
+      select name from sqlite_master where type = 'table'
+      and name in ('cf_ai_chat_stream_metadata', 'cf_ai_chat_stream_chunks')
+    `.map((row) => row.name);
+
+    const migratedStatus = stream.getStreamMetadata("legacy-stream");
+    const migratedChunkBodies = stream
+      .getStreamChunks("legacy-stream")
+      .map((chunk) => chunk.body);
+    // The legacy schema predates message-id tracking: guarded → null.
+    const legacyMessageId = stream.getStreamMessageId("legacy-stream");
+    // Construction ran restore(), which must adopt the migrated in-flight row.
+    const restoredActiveStreamId = stream.activeStreamId;
+
     let startThrew = false;
     let newStreamId = "";
     try {
@@ -279,16 +311,18 @@ export class TestSessionAgent extends Agent {
       startThrew = true;
     }
 
-    const columnsAfter = this.streamMetadataColumnsForTest();
     const newStreamMessageId = newStreamId
       ? stream.getStreamMessageId(newStreamId)
       : null;
 
     return {
       columnsBefore,
+      remainingLegacyTables,
+      migratedStatus,
+      migratedChunkBodies,
       legacyMessageId,
+      restoredActiveStreamId,
       startThrew,
-      columnsAfter,
       newStreamMessageId
     };
   }

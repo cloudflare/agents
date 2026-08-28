@@ -173,6 +173,7 @@ import {
   TurnQueue,
   ResumableStream,
   cleanupStreamBuffers,
+  createChatStreams,
   STREAM_CLEANUP_DELAY_SECONDS,
   ContinuationState,
   PreStreamTurns,
@@ -235,6 +236,7 @@ import {
   type ChatRecoveryIncident,
   type ChatRecoveryKind
 } from "agents/chat";
+import type { Streams } from "agents/streams";
 import type {
   StreamChunkData,
   ClientToolSchema,
@@ -2943,6 +2945,7 @@ export class Think<
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
+    this.lifecycle.use(this.streams);
     this._registerChatTurnFiberDefinition();
     this._registerMessengerReplyFiberDefinition();
 
@@ -3052,7 +3055,7 @@ export class Think<
         "startup",
         { "cloudflare.agents.component": "think" },
         async () => {
-          this._resumableStream = new ResumableStream(this.sql.bind(this));
+          this._resumableStream = new ResumableStream(this.streams);
           this._restoreClientTools();
           this._restoreBody();
           this._setupProtocolHandlers();
@@ -3692,6 +3695,13 @@ export class Think<
 
   private _aborts = new AbortRegistry();
   private _turnQueue = new TurnQueue();
+  /**
+   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * output lives in the shared durable chunk log, readable by any
+   * `streams.read()` consumer on this Durable Object.
+   */
+  readonly streams: Streams = createChatStreams();
+
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   /** Lazily-built shared resume-handshake driver (Tier-2). */
@@ -10799,13 +10809,9 @@ export class Think<
       return true;
     }
 
-    const streamRows = this.sql<{ id: string }>`
-      SELECT id FROM cf_ai_chat_stream_metadata
-      WHERE request_id = ${requestId}
-        AND status = 'streaming'
-      LIMIT 1
-    `;
-    return streamRows.length > 0;
+    return (
+      this._resumableStream.latestActiveStreamInfoForRequest(requestId) !== null
+    );
   }
 
   private _hasFreshRecoverableSubmissionEvidence(row: ThinkSubmissionRow) {
@@ -10827,14 +10833,10 @@ export class Think<
       return true;
     }
 
-    const streamRows = this.sql<{ created_at: number }>`
-      SELECT created_at FROM cf_ai_chat_stream_metadata
-      WHERE request_id = ${row.request_id}
-        AND status = 'streaming'
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    return streamRows[0] ? streamRows[0].created_at >= cutoff : false;
+    const streamInfo = this._resumableStream.latestActiveStreamInfoForRequest(
+      row.request_id
+    );
+    return streamInfo ? streamInfo.createdAt >= cutoff : false;
   }
 
   private _hasScheduledRecoveredContinuation(requestId: string): boolean {
@@ -14500,17 +14502,10 @@ export class Think<
     let streamId = "";
     let streamStatus: "streaming" | "completed" | "error" | undefined;
     if (requestId) {
-      const rows = this.sql<{
-        id: string;
-        status: "streaming" | "completed" | "error";
-      }>`
-        SELECT id, status FROM cf_ai_chat_stream_metadata
-        WHERE request_id = ${requestId}
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (rows.length > 0) {
-        streamId = rows[0].id;
-        streamStatus = rows[0].status;
+      const info = this._resumableStream.latestStreamInfoForRequest(requestId);
+      if (info) {
+        streamId = info.id;
+        streamStatus = info.status;
       }
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {

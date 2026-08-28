@@ -1,0 +1,174 @@
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "../../lifecycle";
+import { ResumableStream, createChatStreams } from "../../chat";
+
+/**
+ * Storage-ops benchmark harness for the chat-on-Streams replatform: measures
+ * SQLite rows written (via `total_changes()`) and wall time for one simulated
+ * chat-turn workload under three write paths, plus the read amplification of
+ * the two retention-sweep shapes. Counts are deterministic — the assertions
+ * pin the storage-op *model*, and the logged numbers feed the PR accounting.
+ */
+export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
+  readonly streams = createChatStreams();
+  readonly lifecycle = Lifecycle.install(this).use(this.streams);
+
+  #totalChanges(): number {
+    const cursor = this.ctx.storage.sql.exec(
+      "SELECT total_changes() AS changes"
+    );
+    return Number([...cursor][0].changes);
+  }
+
+  #body(index: number, chunkBytes: number): string {
+    const filler = "x".repeat(Math.max(0, chunkBytes - 40));
+    return JSON.stringify({ type: "text-delta", delta: `${index}:${filler}` });
+  }
+
+  /**
+   * The replatformed path: real `ResumableStream` over the real Streams
+   * capability — packed segments through the fenced append.
+   */
+  async benchAdapterPath(
+    turns: number,
+    chunksPerTurn: number,
+    chunkBytes: number
+  ): Promise<{ rowsWritten: number; ms: number }> {
+    await this.lifecycle.start();
+    const adapter = new ResumableStream(this.streams);
+    const before = this.#totalChanges();
+    const start = performance.now();
+    for (let turn = 0; turn < turns; turn++) {
+      const streamId = adapter.start(`bench-req-${turn}`);
+      for (let i = 0; i < chunksPerTurn; i++) {
+        adapter.storeChunk(streamId, this.#body(i, chunkBytes));
+      }
+      adapter.complete(streamId);
+    }
+    const ms = performance.now() - start;
+    return { rowsWritten: this.#totalChanges() - before, ms };
+  }
+
+  /**
+   * The pre-replatform write pattern, simulated exactly: own metadata +
+   * chunk tables, 10-chunk packed segment rows, one metadata INSERT and one
+   * completion UPDATE per turn. (The old in-memory buffer's flush cadence,
+   * without its durability hole being exercised.)
+   */
+  async benchLegacySimulation(
+    turns: number,
+    chunksPerTurn: number,
+    chunkBytes: number
+  ): Promise<{ rowsWritten: number; ms: number }> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    sql.exec(`CREATE TABLE IF NOT EXISTS bench_legacy_metadata (
+      id TEXT PRIMARY KEY, request_id TEXT NOT NULL, status TEXT NOT NULL,
+      created_at INTEGER NOT NULL, completed_at INTEGER)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS bench_legacy_chunks (
+      id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, body TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
+    // The index the legacy ResumableStream shipped, so sweep reads are
+    // measured against the real pre-replatform access path.
+    sql.exec(`CREATE INDEX IF NOT EXISTS bench_legacy_chunks_stream_id
+      ON bench_legacy_chunks(stream_id, chunk_index)`);
+    const before = this.#totalChanges();
+    const start = performance.now();
+    for (let turn = 0; turn < turns; turn++) {
+      const streamId = `legacy-${turn}`;
+      sql.exec(
+        `INSERT INTO bench_legacy_metadata (id, request_id, status, created_at)
+         VALUES (?, ?, 'streaming', ?)`,
+        streamId,
+        `bench-req-${turn}`,
+        Date.now()
+      );
+      let buffer: string[] = [];
+      let segmentIndex = 0;
+      const flush = () => {
+        if (buffer.length === 0) return;
+        const body = buffer.length === 1 ? buffer[0] : JSON.stringify(buffer);
+        sql.exec(
+          `INSERT INTO bench_legacy_chunks (id, stream_id, body, chunk_index, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          `${streamId}-${segmentIndex}`,
+          streamId,
+          body,
+          segmentIndex,
+          Date.now()
+        );
+        segmentIndex++;
+        buffer = [];
+      };
+      for (let i = 0; i < chunksPerTurn; i++) {
+        buffer.push(this.#body(i, chunkBytes));
+        if (buffer.length >= 10) flush();
+      }
+      flush();
+      sql.exec(
+        `UPDATE bench_legacy_metadata SET status = 'completed', completed_at = ?
+         WHERE id = ?`,
+        Date.now(),
+        streamId
+      );
+    }
+    const ms = performance.now() - start;
+    return { rowsWritten: this.#totalChanges() - before, ms };
+  }
+
+  /** The naive contrast: one fenced Streams append per chunk, no packing. */
+  async benchPerChunkPath(
+    turns: number,
+    chunksPerTurn: number,
+    chunkBytes: number
+  ): Promise<{ rowsWritten: number; ms: number }> {
+    await this.lifecycle.start();
+    const before = this.#totalChanges();
+    const start = performance.now();
+    for (let turn = 0; turn < turns; turn++) {
+      const writer = await this.streams.open(`perchunk-${turn}`);
+      for (let i = 0; i < chunksPerTurn; i++) {
+        writer.append(this.#body(i, chunkBytes));
+      }
+      writer.close();
+    }
+    const ms = performance.now() - start;
+    return { rowsWritten: this.#totalChanges() - before, ms };
+  }
+
+  /**
+   * Sweep read amplification: rows read to decide abandonment for `streamCount`
+   * in-flight streams of `chunksPerStream` stored segments each.
+   *
+   * Legacy shape: correlated `max(created_at)` subquery over the chunk table.
+   * New shape: the stream row's own `updated_at`. Both run against data seeded
+   * by the paths above (bench_legacy_* vs cf_agents_streams).
+   */
+  async benchSweepReads(): Promise<{
+    legacyRowsRead: number;
+    newRowsRead: number;
+  }> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    const cutoff = Date.now() + 60_000; // classify every seeded stream
+    const legacyCursor = sql.exec(
+      `SELECT m.id FROM bench_legacy_metadata m
+       WHERE coalesce(
+         (SELECT max(c.created_at) FROM bench_legacy_chunks c
+          WHERE c.stream_id = m.id),
+         m.created_at
+       ) < ?`,
+      cutoff
+    );
+    [...legacyCursor];
+    const newCursor = sql.exec(
+      `SELECT stream_id FROM cf_agents_streams WHERE updated_at < ?`,
+      cutoff
+    );
+    [...newCursor];
+    return {
+      legacyRowsRead: Number(legacyCursor.rowsRead),
+      newRowsRead: Number(newCursor.rowsRead)
+    };
+  }
+}

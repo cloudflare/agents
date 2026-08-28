@@ -57,6 +57,40 @@ export interface StreamsOptions {
 }
 
 /**
+ * @internal Synchronous operations returned by
+ * {@link Streams.__DO_NOT_USE_WILL_BREAK__sync}. For same-isolate first-party
+ * machinery only (the chat `ResumableStream` adapter); every method bypasses
+ * `lifecycle.ready()`, so the caller owns startup ordering.
+ */
+export interface StreamsSyncInternal {
+  /** Idempotent DDL — safe to call before the Lifecycle starts. */
+  ensureTables(): void;
+  getStream(streamId: string): StreamRow | undefined;
+  /** Insert a live stream row (no idempotency — caller checks first). */
+  insertStream(
+    streamId: string,
+    metadata: Record<string, StreamJson> | undefined
+  ): void;
+  /** The fenced append: count bump, chunk insert, reader wakeup. */
+  append(streamId: string, chunk: StreamJson): number;
+  /** Idempotent settlement with events and reader wakeup. */
+  settle(
+    streamId: string,
+    state: "completed" | "errored",
+    reason: string | null
+  ): void;
+  /** Delete a stream and its chunks regardless of state. */
+  deleteUnchecked(streamId: string): void;
+  readAll(streamId: string): StreamChunkRow[];
+  listRows(): StreamRow[];
+  /** Raw escape hatch for adapter-internal queries (migration, seeding). */
+  exec(
+    query: string,
+    params: (string | number | null)[]
+  ): Record<string, string | number | null>[];
+}
+
+/**
  * Durable incremental output for a Lifecycle Object.
  *
  * `open()` a stream, `append()` chunks (synchronous durable writes that wake
@@ -265,6 +299,70 @@ export class Streams extends LifecycleCapability {
     return true;
   }
 
+  // ── Internal sync aperture ───────────────────────────────────────────────
+
+  /**
+   * @internal Synchronous storage operations for same-isolate first-party
+   * machinery — today the chat `ResumableStream` adapter, whose whole public
+   * surface is synchronous and constructed before the Lifecycle starts.
+   * Bypasses `lifecycle.ready()`: the caller owns startup ordering. The
+   * invariant-bearing writes (append fence, settlement, wakeups, events) go
+   * through the same private methods as the public API, so live readers and
+   * diagnostics observe aperture writes exactly like capability writes. Will
+   * break without notice; never use from application code.
+   */
+  __DO_NOT_USE_WILL_BREAK__sync(): StreamsSyncInternal {
+    return {
+      ensureTables: () => this.#ensureTables(),
+      getStream: (streamId) => this.#getStream(streamId),
+      insertStream: (streamId, metadata) => {
+        this.#validateStreamId(streamId);
+        const metadataJson = this.#serialize(
+          metadata,
+          `metadata for stream "${streamId}"`
+        );
+        const now = Date.now();
+        this.#sql`
+          INSERT INTO cf_agents_streams
+            (stream_id, state, metadata, chunk_count, created_at, updated_at)
+          VALUES
+            (${streamId}, 'streaming', ${metadataJson}, 0, ${now}, ${now})
+        `;
+        this.#emit("stream:opened", { streamId });
+      },
+      append: (streamId, chunk) => this.#append(streamId, chunk),
+      settle: (streamId, state, reason) =>
+        this.#settle(streamId, state, reason),
+      deleteUnchecked: (streamId) => {
+        this.#sql`
+          DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}
+        `;
+        const removed = this.#sqlWrite(
+          "DELETE FROM cf_agents_streams WHERE stream_id = ?",
+          [streamId]
+        );
+        if (removed > 0) this.#emit("stream:deleted", { streamId });
+      },
+      readAll: (streamId) => this.#sql<StreamChunkRow>`
+        SELECT stream_id, seq, chunk, created_at FROM cf_agents_stream_chunks
+        WHERE stream_id = ${streamId}
+        ORDER BY seq ASC
+      `,
+      listRows: () => this.#sql<StreamRow>`
+        SELECT * FROM cf_agents_streams ORDER BY created_at DESC
+      `,
+      exec: (query, params) => {
+        try {
+          return [
+            ...this.lifecycle.storage.sql.exec(query, ...params)
+          ] as Record<string, string | number | null>[];
+        } catch (cause) {
+          throw new SqlError(query, cause);
+        }
+      }
+    };
+  }
+
   // ── Writer ───────────────────────────────────────────────────────────────
 
   #writer(streamId: string): StreamWriter {
@@ -446,6 +544,7 @@ export class Streams extends LifecycleCapability {
         : {}),
       ...(row.error_message !== null ? { error: row.error_message } : {}),
       createdAt: row.created_at,
+      updatedAt: row.updated_at,
       ...(row.closed_at !== null ? { closedAt: row.closed_at } : {})
     };
   }

@@ -501,13 +501,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   getLatestStreamStatusForTest(): string | null {
-    const rows = this.sql<{ status: string }>`
-      select status
-      from cf_ai_chat_stream_metadata
-      order by created_at desc
-      limit 1
-    `;
-    return rows[0]?.status ?? null;
+    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   getPersistedMessages(): ChatMessage[] {
@@ -751,7 +745,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   /** Raw count of stored rows for a stream (packed segments count as 1 each). */
   getStreamChunkRowCount(streamId: string): number {
     const result = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_ai_chat_stream_chunks
+      select count(*) as cnt from cf_agents_stream_chunks
       where stream_id = ${streamId}
     `;
     return result?.[0]?.cnt ?? 0;
@@ -768,13 +762,15 @@ export class TestChatAgent extends AIChatAgent<Env> {
   ): void {
     const now = Date.now();
     this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      values (${streamId}, ${requestId}, 'completed', ${now})
+      insert into cf_agents_streams
+        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
+      values (${streamId}, 'completed', ${JSON.stringify({ cfChat: 1, requestId })},
+              ${bodies.length}, ${now}, ${now}, ${now})
     `;
     bodies.forEach((body, index) => {
       this.sql`
-        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
-        values (${`${streamId}-${index}`}, ${streamId}, ${body}, ${index}, ${now})
+        insert into cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        values (${streamId}, ${index}, ${JSON.stringify(body)}, ${now})
       `;
     });
   }
@@ -782,11 +778,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
-    const result = this.sql<{ status: string; request_id: string }>`
-      select status, request_id from cf_ai_chat_stream_metadata 
-      where id = ${streamId}
-    `;
-    return result && result.length > 0 ? result[0] : null;
+    return this._resumableStream.getStreamMetadata(streamId);
   }
 
   getAllStreamMetadata(): Array<{
@@ -796,16 +788,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     created_at: number;
     message_id: string | null;
   }> {
-    return (
-      this.sql<{
-        id: string;
-        status: string;
-        request_id: string;
-        created_at: number;
-        message_id: string | null;
-      }>`select id, status, request_id, created_at, message_id from cf_ai_chat_stream_metadata` ||
-      []
-    );
+    return this._resumableStream.getAllStreamMetadata();
   }
 
   testInsertStaleStream(
@@ -813,11 +796,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     requestId: string,
     ageMs: number
   ): void {
-    const createdAt = Date.now() - ageMs;
-    this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      values (${streamId}, ${requestId}, 'streaming', ${createdAt})
-    `;
+    this._resumableStream.insertStaleStream(streamId, requestId, ageMs);
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
@@ -833,8 +812,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
     const createdAt = Date.now() - ageMs;
     const completedAt = createdAt + 1000;
     this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
-      values (${streamId}, ${requestId}, 'error', ${createdAt}, ${completedAt})
+      insert into cf_agents_streams
+        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
+      values (${streamId}, 'errored', ${JSON.stringify({ cfChat: 1, requestId })},
+              0, ${createdAt}, ${completedAt}, ${completedAt})
     `;
   }
 
@@ -901,7 +882,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * This mimics the DO constructor running after eviction.
    */
   testSimulateHibernationWake(): void {
-    this._resumableStream = new ResumableStream(this.sql.bind(this));
+    this._resumableStream = new ResumableStream(this.streams);
   }
 
   /**
@@ -2797,7 +2778,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const partial = this.getPartialText(streamId);
 
     const metadataRows = this.sql<{ created_at: number }>`
-      select created_at from cf_ai_chat_stream_metadata where id = ${streamId}
+      select created_at from cf_agents_streams where stream_id = ${streamId}
     `;
     const createdAt = metadataRows[0]?.created_at ?? Date.now();
 
@@ -2864,18 +2845,20 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     metadata?: { messageId?: string }
   ): void {
     const createdAt = Date.now() - ageMs;
-    // Omitting `metadata.messageId` inserts NULL message_id, simulating a legacy
-    // stream row written before the #1691 metadata column existed.
-    const messageId = metadata?.messageId ?? null;
+    // Omitting `metadata.messageId` leaves the field out of the stream
+    // metadata, simulating a stream row written before message-id tracking.
+    const streamMetadata: Record<string, unknown> = { cfChat: 1, requestId };
+    if (metadata?.messageId) streamMetadata.messageId = metadata.messageId;
     this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id)
-      values (${streamId}, ${requestId}, 'streaming', ${createdAt}, ${messageId})
+      insert into cf_agents_streams
+        (stream_id, state, metadata, chunk_count, created_at, updated_at)
+      values (${streamId}, 'streaming', ${JSON.stringify(streamMetadata)},
+              ${chunks.length}, ${createdAt}, ${createdAt})
     `;
     for (const chunk of chunks) {
-      const id = `chunk-${streamId}-${chunk.index}`;
       this.sql`
-        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
-        values (${id}, ${streamId}, ${chunk.body}, ${chunk.index}, ${createdAt})
+        insert into cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        values (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${createdAt})
       `;
     }
     this._resumableStream.restore();

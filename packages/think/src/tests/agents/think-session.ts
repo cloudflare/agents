@@ -1159,13 +1159,7 @@ export class ThinkTestAgent extends Think {
   }
 
   async getLatestStreamStatusForTest(): Promise<string | null> {
-    const streams = this.sql<{ status: string }>`
-      SELECT status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    return streams[0]?.status ?? null;
+    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -4852,15 +4846,18 @@ export class ThinkToolsTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${JSON.stringify({ cfChat: 1, requestId })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
       `;
     }
   }
@@ -6806,7 +6803,7 @@ export class ThinkRecoveryTestAgent extends Think {
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+        SELECT COUNT(*) as count FROM cf_agents_stream_chunks
         WHERE stream_id = ${streamId}
       `;
       return rows[0]?.count ?? 0;
@@ -7540,17 +7537,7 @@ export class ThinkRecoveryTestAgent extends Think {
     chunkCount: number;
     text: string;
   } | null> {
-    const streams = this.sql<{
-      id: string;
-      request_id: string;
-      status: "streaming" | "completed" | "error";
-    }>`
-      SELECT id, request_id, status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    const stream = streams[0];
+    const stream = this._resumableStream.getAllStreamMetadata()[0] ?? null;
     if (!stream) return null;
 
     // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
@@ -7579,7 +7566,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     return {
       requestId: stream.request_id,
-      status: stream.status,
+      status: stream.status as "streaming" | "completed" | "error",
       chunkCount: chunks.length,
       text
     };
@@ -7698,15 +7685,18 @@ export class ThinkRecoveryTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${JSON.stringify({ cfChat: 1, requestId })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
       `;
     }
   }
@@ -7731,18 +7721,18 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<void> {
     const createdAt = Date.now() - ageMs;
     const completedAt = status === "streaming" ? null : createdAt + 1000;
+    const state = status === "error" ? "errored" : status;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${createdAt}, ${completedAt})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${JSON.stringify({ cfChat: 1, requestId })},
+              0, ${createdAt}, ${completedAt ?? createdAt}, ${completedAt})
     `;
   }
 
-  /** Status of a single stream-metadata row, or null if absent. */
+  /** Status of a single stream row, or null if absent. */
   async getStreamStatusForTest(streamId: string): Promise<string | null> {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_ai_chat_stream_metadata WHERE id = ${streamId}
-    `;
-    return rows[0]?.status ?? null;
+    return this._resumableStream.getStreamMetadata(streamId)?.status ?? null;
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */

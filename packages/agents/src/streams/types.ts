@@ -45,6 +45,12 @@ export interface StreamStatus {
   /** Reason recorded by `error()`, when the state is `errored`. */
   error?: string;
   createdAt: number;
+  /**
+   * Last write activity: bumped by every append and by settlement. The
+   * liveness signal retention policies key off — a `streaming` row whose
+   * `updatedAt` is old has a producer that stopped appending.
+   */
+  updatedAt: number;
   closedAt?: number;
 }
 

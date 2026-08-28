@@ -1,30 +1,43 @@
 /**
- * ResumableStream: Standalone class for buffering, persisting, and replaying
- * stream chunks in SQLite. Extracted from AIChatAgent to separate concerns.
+ * ResumableStream: chat's producer-side coalescing and wire-protocol replay
+ * adapter over the `agents/streams` capability. Extracted from AIChatAgent to
+ * separate concerns; replatformed onto Streams so chat's in-flight output
+ * lives in the same durable chunk log (`cf_agents_streams` /
+ * `cf_agents_stream_chunks`) any capability consumer can read.
  *
  * Handles:
- * - Chunk buffering (batched writes to SQLite for performance)
- * - Stream lifecycle (start, complete, error)
+ * - Chunk buffering (packed segments — batched writes for storage-op economy)
+ * - Stream lifecycle (start, complete, error) mapped onto Streams settlement
  * - Chunk replay for reconnecting clients
- * - Stale stream cleanup
+ * - Stale stream cleanup (row-level retention, no chunk-table scans)
  * - Active stream restoration after agent restart
+ * - One-time migration of legacy `cf_ai_chat_stream_*` tables
+ *
+ * The adapter's public surface is synchronous and may be constructed before
+ * the Lifecycle starts, so it runs on the Streams internal sync aperture; the
+ * invariant-bearing writes (append fence, settlement, wakeups, events) go
+ * through the capability, so live `streams.read()` consumers and diagnostics
+ * observe chat streams like any other stream.
  */
 
 import { nanoid } from "nanoid";
 import type { Connection } from "agents";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { sendIfOpen } from "./connection";
+import { Streams, type StreamsSyncInternal } from "../streams/streams";
+import type { StreamJson, StreamRow } from "../streams/types";
 
-/** Number of chunks to pack into a single SQLite row before flushing */
+/** Number of chunks to pack into a single stored segment before flushing */
 const CHUNK_BUFFER_SIZE = 10;
 /** Maximum buffer size to prevent memory issues on rapid reconnections */
 const CHUNK_BUFFER_MAX_SIZE = 100;
 /**
- * Max accumulated raw chunk bytes packed into one row before forcing a flush.
- * The SQLite row limit is 2 MB; packing serializes bodies into a JSON array,
- * which re-escapes their contents (quotes/backslashes), so we keep the raw
- * total well under the limit to leave generous headroom for escaping overhead.
- * A chunk larger than this is flushed as its own (unwrapped) row.
+ * Max accumulated raw chunk bytes packed into one segment before forcing a
+ * flush. The SQLite row limit is 2 MB; packing serializes bodies into a JSON
+ * array, which re-escapes their contents (quotes/backslashes), so we keep the
+ * raw total well under the limit to leave generous headroom for escaping
+ * overhead. A chunk larger than this is flushed as its own (unwrapped)
+ * segment.
  */
 const SEGMENT_MAX_BYTES = 512_000;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
@@ -47,8 +60,9 @@ const COMPLETED_RETENTION_MS = 10 * 60 * 1000;
  * Generous relative to {@link COMPLETED_RETENTION_MS}: an interrupted turn must
  * have ample time to be resumed by a reconnecting client or healed by fiber
  * recovery before its buffer is reaped. Only a stream that has produced no
- * chunk for this long is treated as truly dead. Keyed off last activity (not
- * start time) so a long but still-active stream is never swept mid-flight.
+ * chunk for this long is treated as truly dead. Keyed off last activity (the
+ * stream row's `updated_at`, bumped by every append) so a long but still-active
+ * stream is never swept mid-flight.
  */
 const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
@@ -68,77 +82,83 @@ const textEncoder = new TextEncoder();
 export const STREAM_CLEANUP_DELAY_SECONDS = 10 * 60;
 
 /**
- * A stored row body is either a single chunk body (a JSON object string —
- * legacy per-chunk rows and single-chunk segments) or a packed segment (a JSON
- * array of chunk body strings). Unpack to the individual chunk bodies in order.
- *
- * Stored chunk bodies are always serialized JSON *objects*, never arrays, so
- * `Array.isArray` reliably distinguishes a packed segment from a single body.
+ * Ceiling for one stored chat segment after JSON serialization, and the
+ * `maxChunkBytes` the backing Streams capability must be constructed with.
+ * Kept under the 2 MB SQLite row limit with headroom for escaping.
  */
-function unpackSegmentBody(rowBody: string): string[] {
-  try {
-    const parsed = JSON.parse(rowBody);
-    if (Array.isArray(parsed)) {
-      return parsed as string[];
-    }
-  } catch {
-    // Not valid JSON — treat as a single opaque body.
-  }
-  return [rowBody];
-}
+const CHAT_STREAM_MAX_CHUNK_BYTES = 1_900_000;
 
-function isMissingMetadataColumnError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return (
-    (message.includes("message_id") || message.includes("is_continuation")) &&
-    (message.toLowerCase().includes("no such column") ||
-      message.toLowerCase().includes("has no column named"))
-  );
+/** Maximum serialized chunk body size before skipping storage (bytes). */
+const CHUNK_MAX_BYTES = 1_800_000;
+
+/**
+ * Construct the Streams capability instance a chat host must install to back
+ * its `ResumableStream`: identical to `new Streams()` except for the raised
+ * per-chunk ceiling that chat's packed segments require.
+ */
+export function createChatStreams(): Streams {
+  return new Streams({ maxChunkBytes: CHAT_STREAM_MAX_CHUNK_BYTES });
 }
 
 /**
- * Stored stream chunk for resumable streaming
+ * Chat's stream metadata, stored as the Streams row's metadata JSON. `cfChat`
+ * marks rows this adapter owns — restore, replay-by-request, retention, and
+ * clearAll never touch a stream some other producer opened on the same
+ * Durable Object.
  */
-type StreamChunk = {
-  id: string;
-  stream_id: string;
-  body: string;
-  chunk_index: number;
-  created_at: number;
-};
-
-/**
- * Stream metadata for tracking active streams
- */
-type StreamMetadata = {
-  id: string;
-  request_id: string;
-  status: "streaming" | "completed" | "error";
-  created_at: number;
-  completed_at: number | null;
+type ChatStreamMetadata = {
+  cfChat: 1;
+  requestId: string;
   /**
    * The assistant message id this stream is producing, captured when the
    * stream starts. This is the SAME id the live path persists under, so orphan
    * recovery (#1691) can re-associate reconstructed chunks with the correct
-   * message even when the provider stream carries no `start.messageId`. Null on
-   * legacy rows written before this column existed.
+   * message even when the provider stream carries no `start.messageId`.
    */
-  message_id: string | null;
+  messageId?: string;
   /**
    * Whether this stream is a continuation (appends to the last assistant
    * message rather than starting a new one). Live broadcast frames carry
    * `continuation: true`, and replay frames must too (#1733): without it a
    * reconnecting client treats a replayed continuation as a fresh message
-   * and drops the parts streamed before the continuation. SQLite has no
-   * boolean type — 1/0/null (legacy rows predating the column).
+   * and drops the parts streamed before the continuation.
    */
-  is_continuation: number | null;
+  isContinuation?: 1;
 };
 
+/** Public status vocabulary predates the Streams state names. */
+type PublicStreamStatus = "streaming" | "completed" | "error";
+
+function toPublicStatus(state: StreamRow["state"]): PublicStreamStatus {
+  return state === "errored" ? "error" : state;
+}
+
+function parseChatMetadata(row: StreamRow): ChatStreamMetadata | null {
+  if (row.metadata === null) return null;
+  try {
+    const parsed = JSON.parse(row.metadata) as Partial<ChatStreamMetadata>;
+    if (parsed && parsed.cfChat === 1) return parsed as ChatStreamMetadata;
+  } catch {
+    // Not chat metadata.
+  }
+  return null;
+}
+
 /**
- * Minimal SQL interface matching Agent's this.sql tagged template.
- * Allows ResumableStream to work with the Agent's SQLite without
- * depending on the full Agent class.
+ * A stored segment is either a single chunk body (a JSON string value) or a
+ * packed segment (a JSON array of chunk body strings). Unpack to the
+ * individual chunk bodies in order.
+ */
+function unpackSegment(rawChunkJson: string): string[] {
+  const parsed = JSON.parse(rawChunkJson) as StreamJson;
+  if (Array.isArray(parsed)) return parsed as string[];
+  return [parsed as string];
+}
+
+/**
+ * Minimal SQL interface matching Agent's this.sql tagged template. Retained
+ * for API compatibility with pre-replatform callers; the adapter itself now
+ * runs on the Streams capability.
  */
 export type SqlTaggedTemplate = {
   <T = Record<string, unknown>>(
@@ -150,7 +170,7 @@ export type SqlTaggedTemplate = {
 export class ResumableStream {
   private _activeStreamId: string | null = null;
   private _activeRequestId: string | null = null;
-  /** Monotonic row-ordering index; one increment per flushed segment row. */
+  /** Monotonic segment ordering index — the backing stream's cursor. */
   private _segmentIndex = 0;
 
   /**
@@ -163,8 +183,8 @@ export class ResumableStream {
 
   /**
    * Whether the active stream is a continuation. Mirrors the durable
-   * `is_continuation` column so replay frames can carry the flag without a
-   * per-replay query; restored from SQLite after hibernation in restore().
+   * metadata so replay frames can carry the flag without a per-replay query;
+   * restored from SQLite after hibernation in restore().
    */
   private _activeIsContinuation = false;
 
@@ -173,57 +193,128 @@ export class ResumableStream {
   private _isFlushingChunks = false;
   private _lastCleanupTime = 0;
 
-  constructor(private sql: SqlTaggedTemplate) {
-    // Create tables for stream chunks and metadata
-    this.sql`create table if not exists cf_ai_chat_stream_chunks (
-      id text primary key,
-      stream_id text not null,
-      body text not null,
-      chunk_index integer not null,
-      created_at integer not null
-    )`;
+  private readonly ops: StreamsSyncInternal;
 
-    this.sql`create table if not exists cf_ai_chat_stream_metadata (
-      id text primary key,
-      request_id text not null,
-      status text not null,
-      created_at integer not null,
-      completed_at integer,
-      message_id text,
-      is_continuation integer
-    )`;
-
-    this.sql`create index if not exists idx_stream_chunks_stream_id 
-      on cf_ai_chat_stream_chunks(stream_id, chunk_index)`;
-
+  constructor(streams: Streams) {
+    this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
+    this.ops.ensureTables();
+    this._migrateLegacyTables();
     // Restore any active stream from a previous session
     this.restore();
   }
 
   /**
-   * Add metadata columns for rows created before they existed. Constructors
-   * intentionally do not run this: most wakes never start a stream, so paying a
-   * schema-introspection read every time is wasteful. New tables include these
-   * columns in CREATE TABLE; legacy tables migrate lazily only if a write/read
-   * discovers the columns are missing.
+   * One-time migration of the pre-capability `cf_ai_chat_stream_*` tables
+   * into the Streams tables, preserving in-flight resumability across the
+   * upgrade (an active stream keeps its id, chunks, and last-activity), then
+   * dropping the legacy tables. Tolerates the pre-#1691/#1733 metadata
+   * schema (no `message_id` / `is_continuation` columns).
    */
-  private _migrateMetadataColumns() {
-    const columns =
-      this.sql<{ name: string }>`
-        select name from pragma_table_info('cf_ai_chat_stream_metadata')
-      ` ?? [];
-    const hasMessageId = columns.some((column) => column.name === "message_id");
-    if (!hasMessageId) {
-      this
-        .sql`alter table cf_ai_chat_stream_metadata add column message_id text`;
+  private _migrateLegacyTables(): void {
+    const legacyTables = this.ops
+      .exec(
+        `SELECT name FROM sqlite_master WHERE type = 'table'
+         AND name IN ('cf_ai_chat_stream_metadata', 'cf_ai_chat_stream_chunks')`,
+        []
+      )
+      .map((row) => String(row.name));
+    if (legacyTables.length === 0) return;
+
+    if (legacyTables.includes("cf_ai_chat_stream_metadata")) {
+      const columns = this.ops
+        .exec(
+          `SELECT name FROM pragma_table_info('cf_ai_chat_stream_metadata')`,
+          []
+        )
+        .map((row) => String(row.name));
+      const hasMessageId = columns.includes("message_id");
+      const hasContinuation = columns.includes("is_continuation");
+      const hasChunks = legacyTables.includes("cf_ai_chat_stream_chunks");
+
+      const rows = this.ops.exec(
+        `SELECT * FROM cf_ai_chat_stream_metadata`,
+        []
+      );
+      for (const row of rows) {
+        const streamId = String(row.id);
+        if (this.ops.getStream(streamId)) continue;
+
+        const metadata: ChatStreamMetadata = {
+          cfChat: 1,
+          requestId: String(row.request_id)
+        };
+        if (hasMessageId && row.message_id != null) {
+          metadata.messageId = String(row.message_id);
+        }
+        if (hasContinuation && row.is_continuation === 1) {
+          metadata.isContinuation = 1;
+        }
+
+        const chunkRows = hasChunks
+          ? this.ops.exec(
+              `SELECT body, created_at FROM cf_ai_chat_stream_chunks
+               WHERE stream_id = ? ORDER BY chunk_index ASC`,
+              [streamId]
+            )
+          : [];
+
+        const status = String(row.status);
+        const state =
+          status === "error"
+            ? "errored"
+            : status === "completed"
+              ? "completed"
+              : "streaming";
+        const createdAt = Number(row.created_at);
+        const closedAt =
+          row.completed_at != null ? Number(row.completed_at) : null;
+        // Preserve last-activity semantics: the legacy sweep keyed off the
+        // newest chunk write, falling back to the stream's start time.
+        const lastChunkAt = chunkRows.reduce(
+          (max, chunk) => Math.max(max, Number(chunk.created_at)),
+          createdAt
+        );
+
+        this.ops.exec(
+          `INSERT INTO cf_agents_streams
+             (stream_id, state, metadata, error_message, chunk_count,
+              created_at, updated_at, closed_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+          [
+            streamId,
+            state,
+            JSON.stringify(metadata),
+            chunkRows.length,
+            createdAt,
+            closedAt ?? lastChunkAt,
+            closedAt
+          ]
+        );
+        for (let seq = 0; seq < chunkRows.length; seq++) {
+          const body = String(chunkRows[seq].body);
+          // A legacy row body is either a packed JSON array of chunk bodies
+          // (stored verbatim — it is already the chunk's JSON encoding) or a
+          // single opaque body string (encoded as a JSON string value).
+          let chunkJson: string;
+          try {
+            chunkJson = Array.isArray(JSON.parse(body))
+              ? body
+              : JSON.stringify(body);
+          } catch {
+            chunkJson = JSON.stringify(body);
+          }
+          this.ops.exec(
+            `INSERT INTO cf_agents_stream_chunks
+               (stream_id, seq, chunk, created_at)
+             VALUES (?, ?, ?, ?)`,
+            [streamId, seq, chunkJson, Number(chunkRows[seq].created_at)]
+          );
+        }
+      }
     }
-    const hasIsContinuation = columns.some(
-      (column) => column.name === "is_continuation"
-    );
-    if (!hasIsContinuation) {
-      this
-        .sql`alter table cf_ai_chat_stream_metadata add column is_continuation integer`;
-    }
+
+    this.ops.exec(`DROP TABLE IF EXISTS cf_ai_chat_stream_chunks`, []);
+    this.ops.exec(`DROP TABLE IF EXISTS cf_ai_chat_stream_metadata`, []);
   }
 
   // ── State accessors ────────────────────────────────────────────────
@@ -252,7 +343,7 @@ export class ResumableStream {
 
   /**
    * Start tracking a new stream for resumable streaming.
-   * Creates metadata entry in SQLite and sets up tracking state.
+   * Creates the backing stream row and sets up tracking state.
    * @param requestId - The unique ID of the chat request
    * @returns The generated stream ID
    */
@@ -270,21 +361,10 @@ export class ResumableStream {
     this._isLive = true;
     this._activeIsContinuation = options.continuation ?? false;
 
-    const messageId = options.messageId ?? null;
-
-    try {
-      this.sql`
-        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
-        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
-      `;
-    } catch (error) {
-      if (!isMissingMetadataColumnError(error)) throw error;
-      this._migrateMetadataColumns();
-      this.sql`
-        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
-        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
-      `;
-    }
+    const metadata: ChatStreamMetadata = { cfChat: 1, requestId };
+    if (options.messageId != null) metadata.messageId = options.messageId;
+    if (this._activeIsContinuation) metadata.isContinuation = 1;
+    this.ops.insertStream(streamId, metadata);
 
     return streamId;
   }
@@ -293,21 +373,12 @@ export class ResumableStream {
    * The assistant message id an orphaned stream was producing — the same id the
    * live path persists under, so recovery re-associates reconstructed chunks
    * with the correct message (#1691). Returns null when the row is missing or
-   * is a legacy row written before the `message_id` column existed.
+   * predates message-id tracking.
    */
   getStreamMessageId(streamId: string): string | null {
-    let rows: Array<{ message_id: string | null }>;
-    try {
-      rows = this.sql<{ message_id: string | null }>`
-        select message_id from cf_ai_chat_stream_metadata
-        where id = ${streamId}
-      `;
-    } catch (error) {
-      if (!isMissingMetadataColumnError(error)) throw error;
-      return null;
-    }
-    if (!rows || rows.length === 0) return null;
-    return rows[0].message_id ?? null;
+    const row = this.ops.getStream(streamId);
+    if (!row) return null;
+    return parseChatMetadata(row)?.messageId ?? null;
   }
 
   /**
@@ -317,11 +388,7 @@ export class ResumableStream {
   complete(streamId: string) {
     this.flushBuffer();
 
-    this.sql`
-      update cf_ai_chat_stream_metadata 
-      set status = 'completed', completed_at = ${Date.now()} 
-      where id = ${streamId}
-    `;
+    this.ops.settle(streamId, "completed", null);
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._segmentIndex = 0;
@@ -339,11 +406,7 @@ export class ResumableStream {
   markError(streamId: string) {
     this.flushBuffer();
 
-    this.sql`
-      update cf_ai_chat_stream_metadata 
-      set status = 'error', completed_at = ${Date.now()} 
-      where id = ${streamId}
-    `;
+    this.ops.settle(streamId, "errored", null);
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._segmentIndex = 0;
@@ -353,11 +416,8 @@ export class ResumableStream {
 
   // ── Chunk storage ──────────────────────────────────────────────────
 
-  /** Maximum chunk body size before skipping storage (bytes). Prevents SQLite row limit crash. */
-  private static CHUNK_MAX_BYTES = 1_800_000;
-
   /**
-   * Buffer a stream chunk for batch write to SQLite.
+   * Buffer a stream chunk for batch write to storage.
    * Chunks exceeding the row size limit are skipped to prevent crashes.
    * The chunk is still broadcast to live clients (caller handles that),
    * but will be missing from replay on reconnection.
@@ -365,10 +425,11 @@ export class ResumableStream {
    * @param body - The serialized chunk body
    */
   storeChunk(streamId: string, body: string) {
-    // Guard against chunks that would exceed SQLite row limit.
-    // The chunk is still broadcast to live clients; only replay storage is skipped.
-    const bodyBytes = textEncoder.encode(body).byteLength;
-    if (bodyBytes > ResumableStream.CHUNK_MAX_BYTES) {
+    // Guard against chunks that would exceed the SQLite row limit, measured
+    // on the stored (JSON-escaped) encoding. The chunk is still broadcast to
+    // live clients; only replay storage is skipped.
+    const bodyBytes = textEncoder.encode(JSON.stringify(body)).byteLength;
+    if (bodyBytes > CHUNK_MAX_BYTES) {
       console.warn(
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
           `to prevent SQLite row limit crash. Live clients still receive it.`
@@ -403,13 +464,14 @@ export class ResumableStream {
   }
 
   /**
-   * Flush the buffered chunks to SQLite as a single packed row.
+   * Flush the buffered chunks to storage as a single packed segment.
    * Uses a lock to prevent concurrent flush operations.
    *
-   * The whole buffer becomes one row: a single-chunk segment is stored
-   * unwrapped (legacy object format) so a large chunk avoids array-escaping
-   * inflation, while a multi-chunk segment stores a JSON array of bodies. This
-   * collapses N chunk rows into one, cutting rows written / stored / scanned.
+   * The whole buffer becomes one stored chunk on the backing stream: a
+   * single-chunk segment is stored unwrapped so a large chunk avoids
+   * array-escaping inflation, while a multi-chunk segment stores a JSON
+   * array of bodies. This collapses N chunk writes into one fenced append,
+   * cutting rows written / stored / scanned.
    */
   flushBuffer() {
     if (this._isFlushingChunks || this._chunkBuffer.length === 0) {
@@ -425,16 +487,18 @@ export class ResumableStream {
       // All chunks in a buffer belong to the same stream: start() flushes
       // before switching streams, so the buffer is never cross-stream.
       const streamId = chunks[0].streamId;
-      const segmentBody =
+      const segment: StreamJson =
         chunks.length === 1
           ? chunks[0].body
-          : JSON.stringify(chunks.map((chunk) => chunk.body));
+          : chunks.map((chunk) => chunk.body);
 
-      this.sql`
-        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
-        values (${nanoid()}, ${streamId}, ${segmentBody}, ${this._segmentIndex}, ${Date.now()})
-      `;
-      this._segmentIndex++;
+      try {
+        this._segmentIndex = this.ops.append(streamId, segment) + 1;
+      } catch {
+        // The stream settled or was deleted while chunks were buffered (a
+        // late writer after markError/cleanup). Pre-replatform these chunks
+        // landed as unreachable rows and were swept; now they are dropped.
+      }
     } finally {
       this._isFlushingChunks = false;
     }
@@ -475,14 +539,8 @@ export class ResumableStream {
     // parts streamed before the continuation.
     const continuation = this._activeIsContinuation;
 
-    const chunks = this.sql<StreamChunk>`
-      select * from cf_ai_chat_stream_chunks 
-      where stream_id = ${streamId} 
-      order by chunk_index asc
-    `;
-
-    for (const chunk of chunks || []) {
-      for (const body of unpackSegmentBody(chunk.body)) {
+    for (const row of this.ops.readAll(streamId)) {
+      for (const body of unpackSegment(row.chunk)) {
         if (
           !sendIfOpen(
             connection,
@@ -569,7 +627,7 @@ export class ResumableStream {
     const stream = this._latestStreamForRequest(requestId, "completed");
     if (!stream) return false;
 
-    const continuation = stream.is_continuation === 1;
+    const continuation = stream.isContinuation;
     if (
       !this._replayStoredChunks(connection, stream.id, requestId, continuation)
     ) {
@@ -616,25 +674,79 @@ export class ResumableStream {
       connection,
       stream.id,
       requestId,
-      stream.is_continuation === 1
+      stream.isContinuation
     );
   }
 
-  /** Latest stream row for a request with the given terminal status. */
+  /** Latest chat stream for a request with the given terminal status. */
   private _latestStreamForRequest(
     requestId: string,
     status: "completed" | "error"
-  ): StreamMetadata | undefined {
+  ): { id: string; isContinuation: boolean } | undefined {
     this.flushBuffer();
 
-    const streams = this.sql<StreamMetadata>`
-      select * from cf_ai_chat_stream_metadata
-      where request_id = ${requestId}
-      and status = ${status}
-      order by created_at desc
-      limit 1
-    `;
-    return streams[0];
+    const state = status === "error" ? "errored" : "completed";
+    const rows = this.ops.exec(
+      `SELECT stream_id, metadata FROM cf_agents_streams
+       WHERE json_extract(metadata, '$.cfChat') = 1
+         AND json_extract(metadata, '$.requestId') = ?
+         AND state = ?
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`,
+      [requestId, state]
+    );
+    if (rows.length === 0) return undefined;
+    const metadata = JSON.parse(String(rows[0].metadata)) as ChatStreamMetadata;
+    return {
+      id: String(rows[0].stream_id),
+      isContinuation: metadata.isContinuation === 1
+    };
+  }
+
+  /**
+   * Latest chat stream row for a request regardless of status — the recovery
+   * engines' stream-evidence lookup (previously raw SQL in the hosts).
+   */
+  latestStreamInfoForRequest(
+    requestId: string
+  ): { id: string; status: PublicStreamStatus; createdAt: number } | null {
+    const rows = this.ops.exec(
+      `SELECT stream_id, state, created_at FROM cf_agents_streams
+       WHERE json_extract(metadata, '$.cfChat') = 1
+         AND json_extract(metadata, '$.requestId') = ?
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`,
+      [requestId]
+    );
+    if (rows.length === 0) return null;
+    return {
+      id: String(rows[0].stream_id),
+      status: toPublicStatus(rows[0].state as StreamRow["state"]),
+      createdAt: Number(rows[0].created_at)
+    };
+  }
+
+  /**
+   * Latest in-flight chat stream for a request — recoverable-turn evidence
+   * (previously raw SQL in the hosts).
+   */
+  latestActiveStreamInfoForRequest(
+    requestId: string
+  ): { id: string; createdAt: number } | null {
+    const rows = this.ops.exec(
+      `SELECT stream_id, created_at FROM cf_agents_streams
+       WHERE json_extract(metadata, '$.cfChat') = 1
+         AND json_extract(metadata, '$.requestId') = ?
+         AND state = 'streaming'
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`,
+      [requestId]
+    );
+    if (rows.length === 0) return null;
+    return {
+      id: String(rows[0].stream_id),
+      createdAt: Number(rows[0].created_at)
+    };
   }
 
   /**
@@ -647,14 +759,8 @@ export class ResumableStream {
     requestId: string,
     continuation = false
   ): boolean {
-    const chunks = this.sql<StreamChunk>`
-      select * from cf_ai_chat_stream_chunks
-      where stream_id = ${streamId}
-      order by chunk_index asc
-    `;
-
-    for (const chunk of chunks || []) {
-      for (const body of unpackSegmentBody(chunk.body)) {
+    for (const row of this.ops.readAll(streamId)) {
+      for (const body of unpackSegment(row.chunk)) {
         if (
           !sendIfOpen(
             connection,
@@ -684,43 +790,48 @@ export class ResumableStream {
    * lazily in _maybeCleanupOldStreams after recovery has had its chance.
    */
   restore() {
-    const activeStreams = this.sql<StreamMetadata>`
-      select * from cf_ai_chat_stream_metadata 
-      where status = 'streaming' 
-      order by created_at desc 
-      limit 1
-    `;
+    const rows = this.ops.exec(
+      `SELECT stream_id, metadata, chunk_count FROM cf_agents_streams
+       WHERE state = 'streaming' AND json_extract(metadata, '$.cfChat') = 1
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`,
+      []
+    );
 
-    if (activeStreams && activeStreams.length > 0) {
-      const stream = activeStreams[0];
-      this._activeStreamId = stream.id;
-      this._activeRequestId = stream.request_id;
+    if (rows.length > 0) {
+      const metadata = JSON.parse(
+        String(rows[0].metadata)
+      ) as ChatStreamMetadata;
+      this._activeStreamId = String(rows[0].stream_id);
+      this._activeRequestId = metadata.requestId;
       // Rehydrate the continuation flag so an orphaned continuation stream
       // replayed after hibernation still carries `continuation: true` on
-      // its frames (#1733). Legacy rows predate the column → null → false.
-      this._activeIsContinuation = stream.is_continuation === 1;
-
-      // Resume the segment row-ordering index past the highest stored value.
-      const lastChunk = this.sql<{ max_index: number }>`
-        select max(chunk_index) as max_index 
-        from cf_ai_chat_stream_chunks 
-        where stream_id = ${this._activeStreamId}
-      `;
-      this._segmentIndex =
-        lastChunk && lastChunk[0]?.max_index != null
-          ? lastChunk[0].max_index + 1
-          : 0;
+      // its frames (#1733).
+      this._activeIsContinuation = metadata.isContinuation === 1;
+      // Resume the segment ordering index past the stored cursor.
+      this._segmentIndex = Number(rows[0].chunk_count);
     }
   }
 
   /**
-   * Clear all stream data (called on chat history clear).
+   * Clear all chat stream data (called on chat history clear). Streams other
+   * producers opened on the same Durable Object are untouched.
    */
   clearAll() {
     this._chunkBuffer = [];
     this._chunkBufferBytes = 0;
-    this.sql`delete from cf_ai_chat_stream_chunks`;
-    this.sql`delete from cf_ai_chat_stream_metadata`;
+    this.ops.exec(
+      `DELETE FROM cf_agents_stream_chunks WHERE stream_id IN (
+         SELECT stream_id FROM cf_agents_streams
+         WHERE json_extract(metadata, '$.cfChat') = 1
+       )`,
+      []
+    );
+    this.ops.exec(
+      `DELETE FROM cf_agents_streams
+       WHERE json_extract(metadata, '$.cfChat') = 1`,
+      []
+    );
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._segmentIndex = 0;
@@ -728,15 +839,13 @@ export class ResumableStream {
   }
 
   /**
-   * Drop all stream tables (called on destroy).
+   * Remove all chat stream data (called on destroy). The backing tables
+   * belong to the Streams capability and are shared with other producers,
+   * so this deletes chat's rows rather than dropping tables.
    */
   destroy() {
     this.flushBuffer();
-    this.sql`drop table if exists cf_ai_chat_stream_chunks`;
-    this.sql`drop table if exists cf_ai_chat_stream_metadata`;
-    this._activeStreamId = null;
-    this._activeRequestId = null;
-    this._activeIsContinuation = false;
+    this.clearAll();
   }
 
   /**
@@ -751,15 +860,17 @@ export class ResumableStream {
   }
 
   /**
-   * True if any stream rows remain at all. Used by alarm-driven cleanup to
-   * decide whether to re-arm: once no rows remain there is nothing left to
+   * True if any chat stream rows remain at all. Used by alarm-driven cleanup
+   * to decide whether to re-arm: once no rows remain there is nothing left to
    * sweep, so the DO can stop waking itself.
    */
   hasReclaimableStreams(): boolean {
-    const rows = this.sql<{ n: number }>`
-      select count(*) as n from cf_ai_chat_stream_metadata
-    `;
-    return (rows?.[0]?.n ?? 0) > 0;
+    const rows = this.ops.exec(
+      `SELECT count(*) AS n FROM cf_agents_streams
+       WHERE json_extract(metadata, '$.cfChat') = 1`,
+      []
+    );
+    return Number(rows[0]?.n ?? 0) > 0;
   }
 
   // ── Internal ───────────────────────────────────────────────────────
@@ -777,81 +888,68 @@ export class ResumableStream {
    *  abandoned "streaming" rows past the stale-in-flight window. The two use
    *  different retentions: a completed buffer is redundant with the persisted
    *  message and needs only a brief replay grace, whereas an in-flight buffer
-   *  must outlive resume/recovery before it is presumed dead. */
+   *  must outlive resume/recovery before it is presumed dead. Abandonment is
+   *  keyed off the stream row's `updated_at` (bumped by every append), so the
+   *  sweep never scans the chunk table. */
   private _sweepOldStreams(now: number) {
     const completedCutoff = now - COMPLETED_RETENTION_MS;
-    this.sql`
-      delete from cf_ai_chat_stream_chunks 
-      where stream_id in (
-        select id from cf_ai_chat_stream_metadata 
-        where status in ('completed', 'error') and completed_at < ${completedCutoff}
-      )
-    `;
-    this.sql`
-      delete from cf_ai_chat_stream_metadata 
-      where status in ('completed', 'error') and completed_at < ${completedCutoff}
-    `;
+    this.ops.exec(
+      `DELETE FROM cf_agents_stream_chunks WHERE stream_id IN (
+         SELECT stream_id FROM cf_agents_streams
+         WHERE json_extract(metadata, '$.cfChat') = 1
+           AND state IN ('completed', 'errored')
+           AND closed_at < ?
+       )`,
+      [completedCutoff]
+    );
+    this.ops.exec(
+      `DELETE FROM cf_agents_streams
+       WHERE json_extract(metadata, '$.cfChat') = 1
+         AND state IN ('completed', 'errored')
+         AND closed_at < ?`,
+      [completedCutoff]
+    );
 
     // Clean up abandoned "streaming" rows. These are orphaned streams that
     // were never completed or recovered (e.g. non-durable agents that never
     // reconnected). By this point, fiber recovery has already had its chance
-    // to claim them — safe to delete.
-    //
-    // "Abandoned" is keyed off LAST ACTIVITY (the most recent chunk write),
-    // not the stream's start time: a long-running stream that is still
-    // actively emitting chunks must never be swept mid-flight just because it
-    // started long ago. A row with no chunks falls back to its start time.
-    // Note `created_at <= max(chunk.created_at)` always (the row is inserted
-    // before any chunk), so this set is stable across the two deletes even
-    // though the first removes the chunks the second's subquery reads.
+    // to claim them — safe to delete. A long-running stream that is still
+    // actively appending keeps a fresh `updated_at` and is never swept
+    // mid-flight just because it started long ago.
     const abandonedCutoff = now - ABANDONED_STREAM_RETENTION_MS;
-    this.sql`
-      delete from cf_ai_chat_stream_chunks
-      where stream_id in (
-        select m.id from cf_ai_chat_stream_metadata m
-        where m.status = 'streaming'
-          and coalesce(
-            (select max(c.created_at) from cf_ai_chat_stream_chunks c
-             where c.stream_id = m.id),
-            m.created_at
-          ) < ${abandonedCutoff}
-      )
-    `;
-    this.sql`
-      delete from cf_ai_chat_stream_metadata
-      where id in (
-        select m.id from cf_ai_chat_stream_metadata m
-        where m.status = 'streaming'
-          and coalesce(
-            (select max(c.created_at) from cf_ai_chat_stream_chunks c
-             where c.stream_id = m.id),
-            m.created_at
-          ) < ${abandonedCutoff}
-      )
-    `;
+    this.ops.exec(
+      `DELETE FROM cf_agents_stream_chunks WHERE stream_id IN (
+         SELECT stream_id FROM cf_agents_streams
+         WHERE json_extract(metadata, '$.cfChat') = 1
+           AND state = 'streaming'
+           AND updated_at < ?
+       )`,
+      [abandonedCutoff]
+    );
+    this.ops.exec(
+      `DELETE FROM cf_agents_streams
+       WHERE json_extract(metadata, '$.cfChat') = 1
+         AND state = 'streaming'
+         AND updated_at < ?`,
+      [abandonedCutoff]
+    );
   }
 
   // ── Test helpers (matching old AIChatAgent test API) ────────────────
 
   /**
    * Return the stored chunks for a stream as individual chunk bodies in order,
-   * unpacking packed segment rows. The returned `chunk_index` is a running
-   * per-chunk sequence (0, 1, 2, …) — stable across calls because rows are
-   * append-only — so callers can use it as a monotonic chunk sequence.
+   * unpacking packed segments. The returned `chunk_index` is a running
+   * per-chunk sequence (0, 1, 2, …) — stable across calls because segments
+   * are append-only — so callers can use it as a monotonic chunk sequence.
    */
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    const rows =
-      this.sql<{ body: string }>`
-        select body from cf_ai_chat_stream_chunks 
-        where stream_id = ${streamId} 
-        order by chunk_index asc
-      ` || [];
     const out: Array<{ body: string; chunk_index: number }> = [];
     let index = 0;
-    for (const row of rows) {
-      for (const body of unpackSegmentBody(row.body)) {
+    for (const row of this.ops.readAll(streamId)) {
+      for (const body of unpackSegment(row.chunk)) {
         out.push({ body, chunk_index: index });
         index++;
       }
@@ -863,11 +961,14 @@ export class ResumableStream {
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
-    const result = this.sql<{ status: string; request_id: string }>`
-      select status, request_id from cf_ai_chat_stream_metadata 
-      where id = ${streamId}
-    `;
-    return result && result.length > 0 ? result[0] : null;
+    const row = this.ops.getStream(streamId);
+    if (!row) return null;
+    const metadata = parseChatMetadata(row);
+    if (!metadata) return null;
+    return {
+      status: toPublicStatus(row.state),
+      request_id: metadata.requestId
+    };
   }
 
   /** @internal For testing only */
@@ -876,25 +977,38 @@ export class ResumableStream {
     status: string;
     request_id: string;
     created_at: number;
+    message_id: string | null;
   }> {
-    return (
-      this.sql<{
-        id: string;
-        status: string;
-        request_id: string;
-        created_at: number;
-      }>`select id, status, request_id, created_at from cf_ai_chat_stream_metadata` ||
-      []
-    );
+    const out: Array<{
+      id: string;
+      status: string;
+      request_id: string;
+      created_at: number;
+      message_id: string | null;
+    }> = [];
+    for (const row of this.ops.listRows()) {
+      const metadata = parseChatMetadata(row);
+      if (!metadata) continue;
+      out.push({
+        id: row.stream_id,
+        status: toPublicStatus(row.state),
+        request_id: metadata.requestId,
+        created_at: row.created_at,
+        message_id: metadata.messageId ?? null
+      });
+    }
+    return out;
   }
 
   /** @internal For testing only */
   insertStaleStream(streamId: string, requestId: string, ageMs: number): void {
     const createdAt = Date.now() - ageMs;
-    this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      values (${streamId}, ${requestId}, 'streaming', ${createdAt})
-    `;
+    this.ops.exec(
+      `INSERT INTO cf_agents_streams
+         (stream_id, state, metadata, chunk_count, created_at, updated_at)
+       VALUES (?, 'streaming', ?, 0, ?, ?)`,
+      [streamId, JSON.stringify({ cfChat: 1, requestId }), createdAt, createdAt]
+    );
   }
 
   /**
@@ -905,10 +1019,21 @@ export class ResumableStream {
    */
   insertChunkAt(streamId: string, body: string, ageMs: number): void {
     const createdAt = Date.now() - ageMs;
-    this.sql`
-      insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
-      values (${nanoid()}, ${streamId}, ${body}, 0, ${createdAt})
-    `;
+    const row = this.ops.getStream(streamId);
+    const seq = row?.chunk_count ?? 0;
+    this.ops.exec(
+      `INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+       VALUES (?, ?, ?, ?)`,
+      [streamId, seq, JSON.stringify(body), createdAt]
+    );
+    // Mirror a real append's bookkeeping at the backdated activity time so
+    // the sweep observes the chunk as this stream's last activity.
+    this.ops.exec(
+      `UPDATE cf_agents_streams
+       SET chunk_count = chunk_count + 1, updated_at = ?
+       WHERE stream_id = ?`,
+      [createdAt, streamId]
+    );
   }
 }
 

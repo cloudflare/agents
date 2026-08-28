@@ -36,10 +36,12 @@ export {
   StreamHarnessObject,
   TaskStreamComposeObject
 } from "./capabilities/streams.ts";
+export { StreamBenchObject } from "./capabilities/streams-bench.ts";
 import type {
   StreamHarnessObject,
   TaskStreamComposeObject
 } from "./capabilities/streams.ts";
+import type { StreamBenchObject } from "./capabilities/streams-bench.ts";
 import type {
   TaskBatchHarnessObject,
   TaskHarnessObject,
@@ -207,6 +209,7 @@ export type Env = {
   TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
   StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;
   TaskStreamComposeObject: DurableObjectNamespace<TaskStreamComposeObject>;
+  StreamBenchObject: DurableObjectNamespace<StreamBenchObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
