@@ -37,7 +37,12 @@ The alarm memory-limit circuit breaker (#1825) moves from `Agent.alarm()`
 into the Lifecycle event loop, targeting the exact executing job; Agent
 contributes domain policy through the new `onAlarmMemoryLimit()` host
 hook, and Scheduler's `__DO_NOT_USE_WILL_BREAK__handleAlarmMemoryLimit`
-escape hatch is gone.
+escape hatch is gone. After recording a strike the breaker now finishes by
+resetting the isolate with `ctx.abort(reason, { retryAlarm: false })`
+(retry of the handled alarm suppressed; the backoff alarm owns the next
+wake), and `Agent.destroy()` uses the same no-retry abort so a completed
+teardown's alarm cannot be retried into a fresh constructor that recreates
+the deleted schema.
 
 Scheduler keeps its entire public API and loses its storage and due-row
 loop: a schedule is one job whose `fn` is the callback name, and interval

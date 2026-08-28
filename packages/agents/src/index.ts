@@ -59,6 +59,7 @@ import {
   type LifecycleRouteEnvelope,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
+import { abortWithoutAlarmRetry } from "./lifecycle/abort";
 import type { LifecycleRouteAddress } from "./lifecycle/capability";
 import {
   getCurrentAgent as getCurrentLifecycleAgent,
@@ -10081,9 +10082,12 @@ export class Agent<
     this._destroyed = true;
 
     // `ctx.abort` throws an uncatchable error, so we yield to the event loop
-    // to avoid capturing it and let handlers finish cleaning up
+    // to avoid capturing it and let handlers finish cleaning up. When this
+    // destroy landed via the alarm preamble, suppressing the alarm retry
+    // stops the platform re-running the alarm on a fresh instance whose
+    // constructor would recreate the just-deleted schema.
     setTimeout(() => {
-      this.ctx.abort("destroyed");
+      abortWithoutAlarmRetry(this.ctx, "destroyed");
     }, 0);
 
     this._emit("destroy");

@@ -120,8 +120,14 @@ Steps 3–4 run inside the alarm memory-limit circuit breaker, moved here from
 `Agent.alarm()`: the durable strike counter (`cf_agents:oom_alarm_strikes`)
 tolerates `maxAlarmMemoryLimitStrikes` consecutive resets (composition-root
 aperture; default 3), backs off the executing job, then seals — purging the
-executing job and invoking the host's `onAlarmMemoryLimit()` hook. Agent
-keeps only the pending-destroy preamble in its own `alarm()`.
+executing job and invoking the host's `onAlarmMemoryLimit()` hook. After a
+strike is fully recorded (writes synced), the breaker schedules an isolate
+reset via `ctx.abort(reason, { retryAlarm: false })` so the next attempt
+runs with a reclaimed memory footprint and the platform does not retry the
+handled alarm — the backoff alarm owns the next wake. Agent keeps only the
+pending-destroy preamble in its own `alarm()`, and its `destroy()` uses the
+same no-retry abort so a completed teardown's alarm is never re-run against
+a constructor that would recreate the deleted schema.
 
 ## Scheduler on the queue
 

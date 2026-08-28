@@ -7,6 +7,7 @@ import {
   type LifecycleEvent,
   type LifecycleEventSink
 } from "./capability-runner";
+import { abortWithoutAlarmRetry } from "./abort";
 import { JobDriver, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
@@ -223,7 +224,13 @@ export class Lifecycle<
         ),
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
-      rearm: () => this.rearmAlarm()
+      rearm: () => this.rearmAlarm(),
+      // Deferred a tick so the current invocation settles (its RPC/alarm
+      // completes and its writes confirm) before the instance resets —
+      // `abort()` throws an uncatchable error, mirroring Agent.destroy().
+      reset: (reason) => {
+        setTimeout(() => abortWithoutAlarmRetry(this.#ctx, reason), 0);
+      }
     });
   }
 

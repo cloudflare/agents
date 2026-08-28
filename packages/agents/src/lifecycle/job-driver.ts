@@ -77,6 +77,13 @@ export type JobDriverOptions = {
   readonly emit: (type: string, payload: unknown) => void;
   /** Recompute the physical alarm from queue state. */
   readonly rearm: () => Promise<void>;
+  /**
+   * Schedule an isolate reset after a memory-limit strike is fully
+   * recorded, suppressing any retry of the current alarm. Returns
+   * immediately; the reset lands after the invocation settles, and the next
+   * wake is the backoff alarm the strike armed.
+   */
+  readonly reset: (reason: string) => void;
 };
 
 /** @internal Drives the job queue when the Durable Object alarm fires. */
@@ -336,6 +343,21 @@ export class JobDriver {
     // if it does, the next external wake re-arms.
     try {
       await this.#options.rearm();
+    } catch {
+      // best-effort
+    }
+
+    // Finish on a fresh isolate: the strike is durable and the backoff alarm
+    // owns the next wake, so schedule a reset to reclaim the memory
+    // footprint instead of limping on in the pressured isolate. Sync first —
+    // a reset cancels unconfirmed writes, and the strike/backoff writes must
+    // land. If any of this fails, fall through to the swallow-and-return
+    // exit, which still halts the platform's alarm auto-retry.
+    try {
+      await this.#options.storage.sync();
+      this.#options.reset(
+        `Alarm memory-limit strike ${strikes}/${limit}${sealed ? " (sealed)" : ""}; resetting isolate (#1825)`
+      );
     } catch {
       // best-effort
     }
