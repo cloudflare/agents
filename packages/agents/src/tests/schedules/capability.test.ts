@@ -282,6 +282,32 @@ describe("Scheduler capability", () => {
     }
   });
 
+  it("applies the Scheduler's configured retry defaults to local dispatch", async () => {
+    const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
+
+    await runInDurableObject(
+      stub,
+      async (instance: SchedulerHarnessObject, state) => {
+        // Harness default is maxAttempts: 2; a callback that needs a third
+        // attempt must exhaust. Under the Lifecycle driver's own fallback
+        // (3 attempts) it would wrongly succeed.
+        instance.failuresBeforeSuccess = 2;
+        const schedule = await instance.scheduler.set(60, "flaky", "payload");
+        backdateScheduleRow(state.storage, schedule.id);
+        // The configured default is not surfaced as a per-schedule override.
+        expect(schedule.retry).toBeUndefined();
+      }
+    );
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+    await runInDurableObject(stub, async (instance: SchedulerHarnessObject) => {
+      expect(instance.invocations).toEqual([]);
+      expect(instance.callbackErrors).toEqual(["flaky failure"]);
+      expect(await instance.scheduler.list()).toEqual([]);
+    });
+  });
+
   it("reports terminal callback errors and consumes the one-shot row", async () => {
     const name = crypto.randomUUID();
     const stub = env.SchedulerHarnessObject.getByName(name);

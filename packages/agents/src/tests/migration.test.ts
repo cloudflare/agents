@@ -64,7 +64,13 @@ describe("schema migration: legacy schedules into the job queue", () => {
 
     const interval = await agent.getJobRow("row-interval");
     expect(interval?.singleflight).toBe(1);
-    expect(interval?.retry_options).toBe('{"maxAttempts":5}');
+    // Jobs carry retry options resolved against the Scheduler defaults so
+    // the Lifecycle driver applies the configured policy.
+    expect(JSON.parse(interval?.retry_options ?? "null")).toEqual({
+      maxAttempts: 5,
+      baseDelayMs: 100,
+      maxDelayMs: 3000
+    });
 
     // Keep-alive heartbeat orphans are dropped, not migrated.
     expect(await agent.getJobRow("row-keepalive")).toBeNull();

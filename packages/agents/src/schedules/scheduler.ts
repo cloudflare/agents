@@ -87,6 +87,11 @@ const DEFAULT_RETRY: Required<RetryOptions> = {
 type SchedulerJobPayload = {
   readonly payload: unknown;
   readonly type: "scheduled" | "delayed" | "cron" | "interval";
+  /** The caller-supplied retry override, unresolved, for public projection.
+      The job's own retry options are fully resolved against the Scheduler
+      defaults at push so the Lifecycle driver applies the configured
+      policy. */
+  readonly retry?: RetryOptions;
   readonly delayInSeconds?: number;
   readonly cron?: string;
   readonly intervalSeconds?: number;
@@ -253,6 +258,7 @@ export class Scheduler<
         time: row.time * 1000,
         payload: {
           payload,
+          retry,
           type: row.type,
           delayInSeconds: row.delayInSeconds ?? undefined,
           cron: row.cron ?? undefined,
@@ -260,7 +266,7 @@ export class Scheduler<
           owner_path: row.owner_path ?? null,
           owner_path_key: row.owner_path_key ?? null
         } satisfies SchedulerJobPayload,
-        retry,
+        retry: resolveRetryConfig(retry, this.#retryDefaults),
         singleflight: row.type === "interval",
         hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds
       });
@@ -451,7 +457,7 @@ export class Scheduler<
       this.#retryDefaults
     );
     const isOneShot = timing.type === "delayed" || timing.type === "scheduled";
-    const schedule = this.#payloadToSchedule<unknown>(id, fn, timing, retry);
+    const schedule = this.#payloadToSchedule<unknown>(id, fn, timing);
     try {
       await tryN(
         maxAttempts,
@@ -829,6 +835,7 @@ export class Scheduler<
 
     const jobPayload: SchedulerJobPayload = {
       payload,
+      retry: options?.retry,
       type: timing.type,
       delayInSeconds:
         timing.type === "delayed" ? timing.delayInSeconds : undefined,
@@ -842,7 +849,7 @@ export class Scheduler<
       fn: callback,
       time: timing.time * 1000,
       payload: jobPayload,
-      retry: options?.retry,
+      retry: resolveRetryConfig(options?.retry, this.#retryDefaults),
       singleflight: timing.type === "interval",
       hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds
     });
@@ -894,7 +901,6 @@ export class Scheduler<
       job.id,
       job.fn,
       timing,
-      job.retry,
       Math.floor(job.time / 1000)
     );
   }
@@ -903,14 +909,13 @@ export class Scheduler<
     id: string,
     fn: string,
     timing: SchedulerJobPayload,
-    retry: RetryOptions | undefined,
     timeSeconds?: number
   ): Schedule<T> {
     const base = {
       callback: fn,
       id,
       payload: timing.payload as T,
-      retry
+      retry: timing.retry
     };
     const time = timeSeconds ?? 0;
     switch (timing.type) {
