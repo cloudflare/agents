@@ -1,0 +1,25 @@
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_f510ad52b05c4e::t_1b5782d5aaa7d8 757-762
+packages/agents/src/lifecycle/job-driver.ts
+  s_f510ad52b05c4e::t_8cfc7ec6af79d8 99-108,110-113,115
+packages/agents/src/tests/agents/schedule.ts
+  s_f510ad52b05c4e::t_f0722210a4a37d 207-222
+packages/agents/src/tests/schedule.test.ts
+  s_f510ad52b05c4e::t_965cb52669c7ff 2-6,1159-1178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e2dcae20980fd25aa09fd6bd6b45583fd3d0487a",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
