@@ -134,9 +134,15 @@ export class TestMigrationAgent extends Agent {
     return rows[0] ?? null;
   }
 
-  /** Migrated schedules through the public Scheduler read API. */
+  /**
+   * Migrated schedules through the public Scheduler read API. The payload is
+   * typed as its concrete string shape: an `unknown` field collapses the
+   * whole element type to `never` across the Durable Object RPC stub
+   * boundary (Workers RPC drops non-serializable-typed values), and every
+   * payload this harness seeds is a string.
+   */
   async listMigratedSchedules(): Promise<
-    Array<{ id: string; callback: string; type: string; payload: unknown }>
+    Array<{ id: string; callback: string; type: string; payload: string }>
   > {
     const schedules = await this.scheduler.list();
     return schedules
@@ -144,7 +150,7 @@ export class TestMigrationAgent extends Agent {
         id: schedule.id,
         callback: schedule.callback,
         type: schedule.type,
-        payload: schedule.payload
+        payload: schedule.payload as string
       }))
       .sort((a, b) => a.id.localeCompare(b.id));
   }
