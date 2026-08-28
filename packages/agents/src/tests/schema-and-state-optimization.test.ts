@@ -47,6 +47,20 @@ const EXPECTED_SCHEMA_DDL = [
           started_at INTEGER,
           completed_at INTEGER
         )`,
+  `CREATE TABLE cf_agents_jobs (
+        id TEXT PRIMARY KEY NOT NULL,
+        capability TEXT NOT NULL,
+        fn TEXT NOT NULL,
+        time INTEGER NOT NULL,
+        payload TEXT,
+        retry_options TEXT,
+        singleflight INTEGER NOT NULL DEFAULT 0,
+        hung_timeout_seconds INTEGER,
+        exclusive INTEGER NOT NULL DEFAULT 0,
+        running INTEGER NOT NULL DEFAULT 0,
+        execution_started_at INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`,
   `CREATE TABLE cf_agents_mcp_servers (
       id TEXT PRIMARY KEY NOT NULL,
       name TEXT NOT NULL,
@@ -67,22 +81,6 @@ const EXPECTED_SCHEMA_DDL = [
           name TEXT NOT NULL,
           snapshot TEXT,
           created_at INTEGER NOT NULL
-        )`,
-  `CREATE TABLE cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          intervalSeconds INTEGER,
-          running INTEGER DEFAULT 0,
-          created_at INTEGER DEFAULT (unixepoch()),
-          execution_started_at INTEGER,
-          retry_options TEXT,
-          owner_path TEXT,
-          owner_path_key TEXT
         )`,
   `CREATE TABLE cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
@@ -189,7 +187,7 @@ describe("schema version gating", () => {
 
     expect(await agent.tableExists("cf_agents_state")).toBe(true);
     expect(await agent.tableExists("cf_agents_queues")).toBe(true);
-    expect(await agent.tableExists("cf_agents_schedules")).toBe(true);
+    expect(await agent.tableExists("cf_agents_jobs")).toBe(true);
     expect(await agent.tableExists("cf_agents_workflows")).toBe(true);
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);
     expect(await agent.tableExists("cf_agents_runs")).toBe(true);

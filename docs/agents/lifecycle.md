@@ -26,7 +26,7 @@ export class MyObject extends DurableObject<Env> {
   }
 
   onAlarm(): void {
-    // Runs after lifecycle capabilities process the alarm.
+    // Runs once per alarm invocation, after due jobs are driven.
   }
 }
 ```
@@ -65,11 +65,19 @@ export default {
 The default URL shape is `/agents/:binding/:name`. Direct
 `env.MY_OBJECT.getByName(name).fetch(request)` calls work as well.
 
-`Agent` already constructs this lifecycle. Existing Agent classes continue to
-override `onStart`, `onRequest`, `onConnect`, `onMessage`, `onClose`, and
-`onError` normally.
+`Agent` already constructs this lifecycle (and installs the `WebSockets`
+capability for its connections). Existing Agent classes continue to override
+`onStart`, `onRequest`, `onConnect`, `onMessage`, `onClose`, and `onError`
+normally.
 
 ## Request call path
+
+The lifecycle-installed `fetch` is the request handler. It offloads each
+request to the installed capabilities, which act as middleware: the first
+capability registered that matches the request handles it by returning a
+`Response`. A capability that returns `undefined` passes the request on to
+the next capability, and a request no capability claims falls through to the
+host's `onRequest`.
 
 ```text
 routeAgentRequest(request)
@@ -77,12 +85,14 @@ routeAgentRequest(request)
    └─ lifecycle-installed fetch
       ├─ lifecycle startup capabilities
       ├─ host onStart
-      ├─ lifecycle request capabilities
-      │  └─ first Response wins
+      ├─ capability middleware, in registration order
+      │  └─ first Response handles the request
       └─ host onRequest
 ```
 
-A warm object skips startup but still offers every request to its capabilities.
+A warm object skips startup but still offers every request to its middleware.
+There is no `next()` today: a capability either handles a request or declines
+it, and cannot wrap or observe a downstream response.
 
 ## Reusable capabilities
 
@@ -107,10 +117,6 @@ class AuditLog implements DurableObjectCapability {
       return new Response("ok");
     }
   }
-
-  onAlarm(): void {
-    this.storage.sql.exec("DELETE FROM audit_log");
-  }
 }
 ```
 
@@ -127,12 +133,13 @@ export class MyObject extends DurableObject<Env> {
 }
 ```
 
-Capabilities run in registration order. Startup and alarms run every hook
-sequentially. Request handling stops at the first returned `Response`. A phase
+Capabilities run in registration order. Startup runs every hook
+sequentially. Request handling is middleware dispatch: it stops at the first
+returned `Response`, and returning `undefined` passes the request on. A phase
 failure propagates, and failed startup can be retried.
 
 Capabilities extending `LifecycleCapability` receive one standard service
-surface: storage, readiness, startup state, alarm coordination, a host
+surface: storage, readiness, startup state, the job queue, a host
 invocation boundary, best-effort events, and capability routing.
 Host-specific bindings, authentication, and protocol adapters remain explicit
 constructor dependencies. Lifecycle never grants a capability the complete
@@ -143,46 +150,59 @@ Capability hooks run outside host context, but user callbacks run through
 Scheduler dispatches its registered callbacks through this boundary, and a
 future capability that calls user code should do the same.
 
-## Shared alarm ownership
+## The job queue
 
-Lifecycle owns the Durable Object's single physical alarm. A capability that
-needs a future wake-up keeps its work in its own durable storage and implements
-`getNextAlarm()`:
+Lifecycle owns the Durable Object's queue of durable work and its single
+physical alarm. A job is a serialisable callback address — the owning
+capability plus a function name — with a due time and a payload. A capability
+that needs future work pushes a job and implements `onJob()`:
 
 ```ts
-import { LifecycleCapability, type AlarmContribution } from "agents/lifecycle";
+import {
+  LifecycleCapability,
+  type LifecycleJobContext
+} from "agents/lifecycle";
 
 class Cleanup extends LifecycleCapability {
   constructor() {
     super("cleanup");
   }
 
-  async getNextAlarm(): Promise<AlarmContribution> {
-    return (await this.lifecycle.storage.get<number>("cleanup:next")) ?? null;
-  }
-
-  async onAlarm(): Promise<void> {
-    const next = await this.lifecycle.storage.get<number>("cleanup:next");
-    if (next === undefined || next > Date.now()) return;
-    await this.lifecycle.storage.delete("cleanup:next");
-  }
-
   async scheduleCleanup(time: number): Promise<void> {
-    await this.lifecycle.storage.put("cleanup:next", time);
-    await this.lifecycle.alarms.rearm();
+    await this.lifecycle.jobs.push({ id: "cleanup", fn: "sweep", time });
+  }
+
+  async onJob({ job }: LifecycleJobContext): Promise<void> {
+    // job.fn === "sweep"; returning nothing completes the job.
+    await this.lifecycle.storage.delete("cleanup:marker");
   }
 }
 ```
 
-Lifecycle selects the earliest contribution from every capability and the
-host. It runs all capability `onAlarm()` hooks, then host `onAlarm()`, then
-recalculates the physical alarm. Capabilities do not depend on Scheduler or on
-each other merely to receive alarm wakes.
-A contribution can be `{ time, exclusive: true }` when its wake time must
-replace ordinary wake candidates, such as a pending teardown. This changes only
-which physical alarm is armed; when that alarm fires, normal capability and host
-hook order still applies. Hosts can implement `getNextAlarm()` for alarm work
-that has not yet been extracted into a capability.
+The queue is ordered by timestamp, and every queue mutation re-arms the
+physical alarm automatically — there is no explicit rearm call. When the
+alarm fires, Lifecycle drives due jobs in due order as an event loop, then
+runs host `onAlarm()`, then re-arms from queue state. Before driving any job
+it arms a deadman pre-alarm so an isolate death mid-drive still wakes the
+object to resume.
+
+A job's drive result decides what happens next: returning nothing completes
+and deletes it, `{ rescheduleAt }` suspends it until a future time, and
+`"yield"` leaves it due so the object wakes again immediately. Lifecycle also
+owns dispatch retries: a job's `retry` options bound in-process attempts,
+platform-class failures (a superseded isolate after a deploy, a memory-limit
+reset) preserve the job for a fresh invocation, and a terminal application
+failure reaches the owner's `onJobError()`, whose result decides advancement.
+
+A job pushed with `exclusive: true` suppresses ordinary alarm candidates
+while it is pending — Agent's deferred destroy uses this so a condemned
+object cannot be kept alive by other work. A `singleflight` job is skipped
+while a previous run is still in flight, until it crosses its hung timeout.
+The host pushes jobs through `lifecycle.jobs` and implements the same
+`onJob()` hook (a host job's terminal failure completes it; the host
+re-derives its jobs from durable state). Capabilities do not depend on
+Scheduler or
+on each other merely to receive wakes.
 
 ## Capability events
 
@@ -217,7 +237,7 @@ dispatch. A host with child objects supplies the transport internally.
 
 Agent uses this for facet schedules: Scheduler sends owner-scoped CRUD to the
 root Scheduler and routes due callbacks back to the matching facet Scheduler.
-Existing rows remain in the root `cf_agents_schedules` table. Scheduler does not
+Facet schedules live as jobs in the root's queue. Scheduler does not
 implement facet traversal, and Agent exposes only one internal generic Lifecycle
 route aperture.
 
@@ -267,33 +287,54 @@ Host context values follow the invocation:
 
 - `onStart` and `onAlarm`: object;
 - `onRequest`: object and request;
-- `onConnect`: object, connection, and upgrade request;
-- `onMessage`, `onClose`, and `onError`: object and connection.
+- `WebSockets` capability handlers `onConnect`: object, connection, and
+  upgrade request;
+- `WebSockets` capability handlers `onMessage`, `onClose`, and `onError`:
+  object and connection.
 
 `getConnectionTags(connection, { request })` remains argument-driven because it
 already receives both values explicitly. The root `agents` package continues
 to export `getCurrentAgent()` for the `Agent` class as a compatibility alias.
 
-## WebSockets always hibernate
+## WebSockets are an opt-in capability
 
-The lifecycle always uses Cloudflare's WebSocket Hibernation API. Idle clients
-remain connected while the Durable Object can leave memory. When a message
-wakes the object, its constructor and lifecycle startup run again before
-`onMessage`.
-
-State needed after a wake must be stored durably or through connection state:
+Lifecycle itself does not model WebSockets. Hosts that want connections
+install the `WebSockets` capability, which owns the subsystem end to end —
+it claims upgrades, accepts hibernating sockets, dispatches handlers inside
+the host invocation boundary, and answers `getConnections()`:
 
 ```ts
-onConnect(connection: Connection): void {
-  connection.setState({ authenticated: true });
-}
+import { WebSockets } from "agents/websockets";
 
-onMessage(connection: Connection<{ authenticated: boolean }>): void {
-  console.log(connection.state?.authenticated);
+export class MyObject extends DurableObject<Env> {
+  readonly webSockets = new WebSockets({
+    handlers: {
+      onConnect: (connection) => {
+        connection.setState({ authenticated: true });
+      },
+      onMessage: (connection, message) => {
+        connection.send(`echo:${message}`);
+      }
+    }
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.webSockets);
 }
 ```
 
-There is no non-hibernating mode.
+Without the capability installed, WebSocket upgrades are declined.
+
+The capability can also serve remote methods: pass an `RpcTarget` as
+`callables` and its prototype methods become the complete remote interface,
+served over a Cap'n Web session (`?__agents_rpc=capnweb`). An `Agent` adds
+no new surface for this — its `@callable()`-decorated methods are its
+interface, served on every wire: natively over the legacy JSON RPC protocol
+and, through the decorator-derived target, over the Cap'n Web endpoint.
+
+Connections use Cloudflare's WebSocket Hibernation API. Idle clients remain
+connected while the Durable Object can leave memory; when a message wakes the
+object, its constructor and lifecycle startup run again before `onMessage`.
+State needed after a wake must be stored durably or through
+`connection.setState()`. There is no non-hibernating mode.
 
 ## Native RPC
 

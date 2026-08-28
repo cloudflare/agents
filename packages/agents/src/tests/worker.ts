@@ -28,7 +28,6 @@ import type {
   SchedulerStartupWarnObject
 } from "./capabilities/scheduler.ts";
 export {
-  TaskBatchHarnessObject,
   TaskHarnessObject,
   TaskSchedulerCoexistObject
 } from "./capabilities/tasks.ts";
@@ -43,7 +42,6 @@ import type {
 } from "./capabilities/streams.ts";
 import type { StreamBenchObject } from "./capabilities/streams-bench.ts";
 import type {
-  TaskBatchHarnessObject,
   TaskHarnessObject,
   TaskSchedulerCoexistObject
 } from "./capabilities/tasks.ts";
@@ -205,7 +203,6 @@ export type Env = {
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
   SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
   TaskHarnessObject: DurableObjectNamespace<TaskHarnessObject>;
-  TaskBatchHarnessObject: DurableObjectNamespace<TaskBatchHarnessObject>;
   TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
   StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;
   TaskStreamComposeObject: DurableObjectNamespace<TaskStreamComposeObject>;

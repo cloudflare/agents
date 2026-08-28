@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DurableObject } from "cloudflare:workers";
 
-import type { AlarmContribution } from "./capability-runner";
-import type { Lifecycle, WSMessage } from "./durable-object-lifecycle";
-import type { Connection, ConnectionContext } from "./types";
+import type { Lifecycle } from "./durable-object-lifecycle";
+import type { Connection } from "./types";
+import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 
 /**
  * A Durable Object that has installed the Agents SDK Lifecycle.
@@ -21,23 +21,13 @@ export interface LifecycleObject<
   onStart?(props?: Props): void | Promise<void>;
   onRequest?(request: Request): Response | Promise<Response>;
   onAlarm?(): void | Promise<void>;
-  getNextAlarm?(): AlarmContribution | Promise<AlarmContribution>;
-  onConnect?(
-    connection: Connection,
-    context: ConnectionContext
-  ): void | Promise<void>;
-  onMessage?(connection: Connection, message: WSMessage): void | Promise<void>;
-  onClose?(
-    connection: Connection,
-    code: number,
-    reason: string,
-    wasClean: boolean
-  ): void | Promise<void>;
-  onError?(connection: Connection, error: unknown): void | Promise<void>;
-  getConnectionTags?(
-    connection: Connection,
-    context: ConnectionContext
-  ): string[] | Promise<string[]>;
+  onJob?(
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void>;
+  onAlarmMemoryLimit?(context: {
+    readonly sealed: boolean;
+    readonly nextTime?: number;
+  }): void | Promise<void>;
 }
 
 /** Values associated with the currently executing Lifecycle host. */

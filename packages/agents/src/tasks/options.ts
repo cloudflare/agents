@@ -38,13 +38,6 @@ export interface TasksOptions<Handlers extends TaskHandlers = TaskCallbacks> {
   /** Default timeout of one step callback attempt. Default: 5 minutes. */
   readonly stepTimeout?: number | TaskDurationString;
 
-  /**
-   * Maximum due runs claimed in one alarm invocation. Remaining due runs
-   * keep their deadlines and continue on an immediate follow-up alarm.
-   * Default: 10.
-   */
-  readonly maxRunsPerAlarm?: number;
-
   /** Observe terminal run failures. Runs as capability code without host context. */
   readonly onError?: (error: unknown) => void | Promise<void>;
 }

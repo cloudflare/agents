@@ -77,9 +77,9 @@ describe("alarm initialization", () => {
     await runInDurableObject(
       agentStub,
       async (instance: TestAlarmInitAgent) => {
-        const past = Math.floor(Date.now() / 1000) - 1;
+        const past = Date.now() - 1_000;
         instance.sql`
-          UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}
+          UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${scheduleId}
         `;
       }
     );
@@ -109,9 +109,9 @@ describe("alarm initialization", () => {
     await runInDurableObject(
       agentStub,
       async (instance: TestAlarmInitAgent) => {
-        const past = Math.floor(Date.now() / 1000) - 1;
+        const past = Date.now() - 1_000;
         instance.sql`
-          UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}
+          UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${scheduleId}
         `;
       }
     );

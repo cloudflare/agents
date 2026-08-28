@@ -271,28 +271,6 @@ export class TaskSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
     .use(this.scheduler);
 }
 
-/**
- * Proves the alarm batch bound: at most `maxRunsPerAlarm` due runs execute
- * per alarm invocation, and the remaining due runs stay armed.
- */
-export class TaskBatchHarnessObject extends DurableObject<Cloudflare.Env> {
-  readonly ticks: string[] = [];
-
-  readonly tasks = new Tasks({
-    definitions: {
-      tick: async (input: { n: number }, step: TaskStep) => {
-        await step.do("mark", () => {
-          this.ticks.push(`tick:${input.n}`);
-          return input.n;
-        });
-        return input.n;
-      }
-    },
-    maxRunsPerAlarm: 1
-  });
-  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
-}
-
 /** Insert one task run row directly, bypassing acceptance. */
 export function seedTaskRun(
   storage: DurableObjectStorage,
@@ -321,6 +299,32 @@ export function seedTaskRun(
     options.nextAt,
     now,
     now
+  );
+  // Mirror the deadline as the run's Lifecycle queue job, exactly as the
+  // capability does on acceptance — the physical alarm derives from the
+  // queue, so a seeded run without its mirror job would never wake. The
+  // queue table is created lazily by Lifecycle, so ensure it first.
+  storage.sql.exec(
+    `CREATE TABLE IF NOT EXISTS cf_agents_jobs (
+      id TEXT PRIMARY KEY NOT NULL,
+      capability TEXT NOT NULL,
+      fn TEXT NOT NULL,
+      time INTEGER NOT NULL,
+      payload TEXT,
+      retry_options TEXT,
+      singleflight INTEGER NOT NULL DEFAULT 0,
+      hung_timeout_seconds INTEGER,
+      exclusive INTEGER NOT NULL DEFAULT 0,
+      running INTEGER NOT NULL DEFAULT 0,
+      execution_started_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`
+  );
+  storage.sql.exec(
+    `INSERT OR REPLACE INTO cf_agents_jobs (id, capability, fn, time)
+     VALUES (?, 'tasks', 'wake', ?)`,
+    options.runId,
+    options.nextAt
   );
 }
 
@@ -369,6 +373,11 @@ export function backdateTaskWake(
   const past = Date.now() - 1000;
   storage.sql.exec(
     "UPDATE cf_agents_task_runs SET next_at = ? WHERE run_id = ?",
+    past,
+    runId
+  );
+  storage.sql.exec(
+    "UPDATE cf_agents_jobs SET time = ? WHERE id = ? AND capability = 'tasks'",
     past,
     runId
   );

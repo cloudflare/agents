@@ -2,6 +2,8 @@ import type {
   CapabilityStartContext,
   DurableObjectCapability
 } from "./capability-runner";
+import type { Connection } from "./types";
+import type { LifecycleJobs } from "./job-queue";
 
 /** Opaque address understood by a Lifecycle routing transport. */
 export type LifecycleRouteAddress = {
@@ -17,17 +19,6 @@ export type LifecycleRouteContext = {
   readonly source: LifecycleRouteAddress | undefined;
   /** Capability-owned message payload. */
   readonly payload: unknown;
-};
-
-/** Alarm coordination available to every Lifecycle capability. */
-export type LifecycleAlarms = {
-  /** Recompute the physical alarm from installed capability state. */
-  readonly rearm: () => Promise<void>;
-  /**
-   * True once explicit host teardown permanently disabled alarm arming.
-   * Capabilities stop dispatching durable work when this reports true.
-   */
-  readonly disabled: () => boolean;
 };
 
 /** Best-effort telemetry available to every Lifecycle capability. */
@@ -50,23 +41,57 @@ export type LifecycleRoutes = {
 };
 
 /**
+ * Ambient scope a capability supplies when entering host context on
+ * behalf of a live connection or request.
+ */
+export type LifecycleHostContextScope = {
+  /** The connection the callback runs on behalf of, when there is one. */
+  readonly connection?: Connection;
+  /** The request the callback runs on behalf of, when there is one. */
+  readonly request?: Request;
+};
+
+/**
+ * The platform's hibernatable-socket surface, exposed narrowly so a
+ * capability that owns connections (e.g. WebSockets) can accept and
+ * enumerate them without holding the whole `DurableObjectState`.
+ * These are workerd API names, not Lifecycle modeling sockets.
+ */
+export type LifecycleSockets = {
+  /** Accept a socket into hibernation under the given tags. */
+  readonly accept: (ws: WebSocket, tags: string[]) => void;
+  /** Every hibernated socket on the object, optionally by tag. */
+  readonly get: (tag?: string) => WebSocket[];
+};
+
+/**
  * Standard services granted to every installed Lifecycle capability.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export type LifecycleServices = {
   readonly storage: DurableObjectStorage;
+  readonly sockets: LifecycleSockets;
   readonly ready: () => Promise<void>;
   /** True while capability and host startup hooks are still running. */
   readonly starting: () => boolean;
-  readonly alarms: LifecycleAlarms;
+  /**
+   * This capability's scoped access to the Lifecycle-owned work queue.
+   * Pushed items are dispatched to `onJob` when due; every queue mutation
+   * re-arms the physical alarm automatically.
+   */
+  readonly jobs: LifecycleJobs;
   /**
    * Run a capability-held user callback inside the host invocation context.
    * Capability hooks run outside host context; this is the one boundary for
    * entering it, and a host composition root may substitute its own wrapper
-   * (Agent adds tracing span scope).
+   * (Agent adds tracing span scope). Pass `scope` to make a live
+   * connection or request ambient for the callback.
    */
-  readonly runInHostContext: (fn: () => unknown) => Promise<unknown>;
+  readonly runInHostContext: (
+    fn: () => unknown,
+    scope?: LifecycleHostContextScope
+  ) => Promise<unknown>;
   readonly events: LifecycleEvents;
   readonly routes: LifecycleRoutes;
 };

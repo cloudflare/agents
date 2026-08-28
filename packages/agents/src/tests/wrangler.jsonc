@@ -41,10 +41,6 @@
         "name": "TaskHarnessObject"
       },
       {
-        "class_name": "TaskBatchHarnessObject",
-        "name": "TaskBatchHarnessObject"
-      },
-      {
         "class_name": "TaskSchedulerCoexistObject",
         "name": "TaskSchedulerCoexistObject"
       },
@@ -398,7 +394,6 @@
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
         "TaskHarnessObject",
-        "TaskBatchHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
         "TaskStreamComposeObject",

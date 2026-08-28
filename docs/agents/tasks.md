@@ -9,10 +9,12 @@ Task definitions. A run of a definition survives process loss, deployments,
 and hibernation: completed steps return journaled results, sleeps consult
 persisted deadlines, and execution continues from the first unfinished step.
 
-The capability never touches the Durable Object's physical alarm. The capability
-contributes its earliest deadline and `Lifecycle` arms one shared alarm, so
-Tasks, the [Scheduler](./scheduling.md), and other capabilities coexist on
-the same object.
+The capability never touches the Durable Object's physical alarm. Every
+non-terminal run's deadline is mirrored as one job in the Lifecycle work
+queue (a retime is a same-id replace), and Lifecycle derives the single
+physical alarm from queue state — so Tasks, the
+[Scheduler](./scheduling.md), and other capabilities coexist on the same
+object.
 
 ## Install and define
 
@@ -86,8 +88,7 @@ export class ReportAgent extends Agent<Env> {
 ```
 
 Task deadlines share the Agent's physical alarm with schedules, keep-alive,
-and the rest of the Agent's durable work through the Lifecycle contribution
-model. Internally, Agent's own chat frameworks (Think, AIChatAgent, and
+and the rest of the Agent's durable work through the Lifecycle job queue. Internally, Agent's own chat frameworks (Think, AIChatAgent, and
 Think's messenger replies) run their turns on this same capability.
 
 ## Starting runs

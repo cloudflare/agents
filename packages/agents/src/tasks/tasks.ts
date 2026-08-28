@@ -11,6 +11,10 @@
 
 import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
+import type {
+  LifecycleJobContext,
+  LifecycleJobOutcome
+} from "../lifecycle/job-queue";
 import { SqlError } from "../sql-error";
 import { parseTaskDuration } from "./duration";
 import { MissingTaskDefinitionError } from "./errors";
@@ -96,8 +100,6 @@ const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
  */
 const CLAIM_SLACK_MS = 30_000;
 
-const DEFAULT_MAX_RUNS_PER_ALARM = 10;
-
 /** Recovery-callback failures tolerated per run before it fails. */
 const RECOVERY_MAX_ATTEMPTS = 5;
 
@@ -154,7 +156,6 @@ export class Tasks<
   readonly #definitions: TaskHandlers;
   readonly #active = new Map<string, ActiveAttempt>();
   readonly #stepDefaults: ResolvedStepPolicy;
-  readonly #maxRunsPerAlarm: number;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
 
   /**
@@ -181,8 +182,6 @@ export class Tasks<
           ? parseTaskDuration(options.stepTimeout, "stepTimeout")
           : DEFAULT_STEP_POLICY.timeoutMs
     };
-    this.#maxRunsPerAlarm =
-      options.maxRunsPerAlarm ?? DEFAULT_MAX_RUNS_PER_ALARM;
     this.#onError = options.onError;
   }
 
@@ -280,21 +279,26 @@ export class Tasks<
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
     this.#reconcile();
+    await this.#syncAllWakes();
   }
 
-  /** Claim and execute due runs during the Lifecycle alarm phase. */
-  async onAlarm(): Promise<void> {
-    await this.#dispatchDueRuns();
-  }
-
-  /**
-   * @internal Host boot-recovery aperture: claim and execute due runs now,
-   * outside the alarm phase. Agent calls this at its startup recovery point
-   * so interrupted runs recover before the user's `onStart`, matching the
-   * legacy fiber scan's ordering. Idempotent and safe to race with alarms.
-   */
-  async __DO_NOT_USE_WILL_BREAK__dispatchDueRuns(): Promise<void> {
-    await this.#dispatchDueRuns();
+  /** Drive one due run's wake dispatched by the Lifecycle event loop. */
+  async onJob(
+    context: LifecycleJobContext
+  ): Promise<LifecycleJobOutcome | void> {
+    const runId = context.job.id;
+    if (this.#active.has(runId)) {
+      // A live attempt in this isolate; push the claim backstop forward so
+      // the due job does not hot-loop the alarm while it works.
+      this.#sql`
+        UPDATE cf_agents_task_runs
+        SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
+        WHERE run_id = ${runId} AND state IN ('running', 'recovering')
+      `;
+      return this.#wakeOutcome(runId);
+    }
+    await this.#executeRun(runId);
+    return this.#wakeOutcome(runId);
   }
 
   /**
@@ -320,47 +324,53 @@ export class Tasks<
     return receipt;
   }
 
-  async #dispatchDueRuns(): Promise<void> {
-    // Explicit host teardown (destroy) can run inside this same alarm phase
-    // from an earlier capability's callback; its storage — tables included —
-    // is already gone.
-    if (this.lifecycle.alarms.disabled()) return;
-    const now = Date.now();
-    const due = this.#sql<{ run_id: string }>`
-      SELECT run_id FROM cf_agents_task_runs
-      WHERE state IN ('pending', 'waiting', 'running', 'recovering')
-        AND next_at <= ${now}
-      ORDER BY next_at ASC
-      LIMIT ${this.#maxRunsPerAlarm}
+  /**
+   * The queue outcome for one run's wake job, derived from the run row's
+   * authoritative `next_at` after dispatch. This return supersedes any
+   * same-id push made mid-drive (completing a job deletes its row), so the
+   * row is the single source of truth for whether — and when — the run
+   * wakes again.
+   */
+  #wakeOutcome(runId: string): LifecycleJobOutcome {
+    const rows = this.#sql<{ next_at: number | null }>`
+      SELECT next_at FROM cf_agents_task_runs
+      WHERE run_id = ${runId}
+        AND state IN ('pending', 'waiting', 'running', 'recovering')
     `;
-    for (const { run_id } of due) {
-      if (this.lifecycle.alarms.disabled()) return;
-      if (this.#active.has(run_id)) {
-        // A live attempt in this isolate; push the claim backstop forward so
-        // the due row does not hot-loop the alarm while it works.
-        this.#sql`
-          UPDATE cf_agents_task_runs
-          SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
-          WHERE run_id = ${run_id} AND state IN ('running', 'recovering')
-        `;
-        continue;
-      }
-      await this.#executeRun(run_id);
-    }
-    // Rows beyond the batch limit keep past-due deadlines; Lifecycle's
-    // post-alarm rearm clamps them to now + 1 for an immediate continuation.
+    const next = rows[0]?.next_at;
+    return typeof next === "number" ? { rescheduleAt: next } : undefined;
   }
 
-  /** Contribute the earliest run deadline to Lifecycle alarm selection. */
-  getNextAlarm(): number | null {
-    const rows = this.#sql<{ next: number | null }>`
-      SELECT MIN(next_at) AS next FROM cf_agents_task_runs
+  /**
+   * Mirror one run's authoritative deadline into the Lifecycle job queue:
+   * a non-terminal run with a `next_at` gets one job (id = run id, so a
+   * retime is a same-id replace); anything else cancels the mirror. Every
+   * durable mutation of a run's deadline or state funnels through here.
+   */
+  async #syncWake(runId: string): Promise<void> {
+    const rows = this.#sql<{ next_at: number | null }>`
+      SELECT next_at FROM cf_agents_task_runs
+      WHERE run_id = ${runId}
+        AND state IN ('pending', 'waiting', 'running', 'recovering')
+    `;
+    const next = rows[0]?.next_at;
+    if (typeof next === "number") {
+      await this.lifecycle.jobs.push({ id: runId, fn: "wake", time: next });
+    } else {
+      await this.lifecycle.jobs.cancel(runId);
+    }
+  }
+
+  /** Mirror every non-terminal run into the queue (startup reconcile). */
+  async #syncAllWakes(): Promise<void> {
+    const rows = this.#sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
       WHERE state IN ('pending', 'waiting', 'running', 'recovering')
         AND next_at IS NOT NULL
     `;
-    const next = rows[0]?.next;
-    if (next === null || next === undefined) return null;
-    return Math.max(next, Date.now() + 1);
+    for (const { run_id } of rows) {
+      await this.#syncWake(run_id);
+    }
   }
 
   // ── Inspection and control ───────────────────────────────────────────────
@@ -432,11 +442,11 @@ export class Tasks<
     const active = this.#active.get(runId);
     if (active) {
       active.controller.abort(new TaskCancellation(reason));
-      await this.lifecycle.alarms.rearm();
+      await this.#syncWake(runId);
       return true;
     }
     this.#settleCancelled(runId, null, reason);
-    await this.lifecycle.alarms.rearm();
+    await this.#syncWake(runId);
     return true;
   }
 
@@ -542,7 +552,7 @@ export class Tasks<
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
          0, ${now}, 0, ${now}, ${now})
     `;
-    await this.lifecycle.alarms.rearm();
+    await this.#syncWake(runId);
     this.#emit("task:accepted", { runId, definition, accepted: true });
 
     // Warm path: begin the first attempt immediately when the host is past
@@ -565,14 +575,13 @@ export class Tasks<
   /** Claim and drive one due run to its next durable boundary. */
   async #executeRun(runId: string): Promise<void> {
     if (this.#active.has(runId)) return;
-    if (this.lifecycle.alarms.disabled()) return;
     const row = this.#getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return;
 
     const now = Date.now();
     if (row.cancel_requested === 1) {
       this.#settleCancelled(runId, null, row.cancel_reason ?? undefined);
-      await this.lifecycle.alarms.rearm();
+      await this.#syncWake(runId);
       return;
     }
     if (row.next_at !== null && row.next_at > now) return;
@@ -582,7 +591,7 @@ export class Tasks<
       const error = new MissingTaskDefinitionError(row.definition);
       console.error(error.message);
       this.#settleFailed(runId, null, toErrorSummary(error));
-      await this.lifecycle.alarms.rearm();
+      await this.#syncWake(runId);
       await this.#observeError(error);
       return;
     }
@@ -718,7 +727,7 @@ export class Tasks<
       if (thrown instanceof AttemptSupersededError) return undefined;
       if (isTaskCancellation(thrown)) {
         this.#settleCancelled(runId, generation, thrown.reason);
-        await this.lifecycle.alarms.rearm();
+        await this.#syncWake(runId);
         return undefined;
       }
       await this.#recoveryFailure(row, generation, thrown);
@@ -756,7 +765,7 @@ export class Tasks<
             wakeAt
           });
         }
-        await this.lifecycle.alarms.rearm();
+        await this.#syncWake(runId);
         return parked && !later ? "replay-now" : undefined;
       }
       case "complete": {
@@ -777,7 +786,7 @@ export class Tasks<
           this.#emit("task:completed", { runId, definition: row.definition });
           if (row.retain === 0) this.#deleteRun(runId);
         }
-        await this.lifecycle.alarms.rearm();
+        await this.#syncWake(runId);
         return undefined;
       }
       case "fail": {
@@ -789,13 +798,13 @@ export class Tasks<
               `recovery decision: ${summary.name}: ${summary.message}`
           );
         }
-        await this.lifecycle.alarms.rearm();
+        await this.#syncWake(runId);
         await this.#observeError(decision.error);
         return undefined;
       }
       case "cancel": {
         this.#settleCancelled(runId, generation, decision.reason);
-        await this.lifecycle.alarms.rearm();
+        await this.#syncWake(runId);
         return undefined;
       }
     }
@@ -818,7 +827,7 @@ export class Tasks<
             `after ${recoveryAttempt} recovery attempts: ${summary.name}: ${summary.message}`
         );
       }
-      await this.lifecycle.alarms.rearm();
+      await this.#syncWake(runId);
       await this.#observeError(thrown);
       return;
     }
@@ -838,7 +847,7 @@ export class Tasks<
           `${new Date(wakeAt).toISOString()}`
       );
     }
-    await this.lifecycle.alarms.rearm();
+    await this.#syncWake(runId);
   }
 
   /** Assemble the recovery context from the pre-claim run row. */
@@ -917,7 +926,7 @@ export class Tasks<
         this.#emit("task:completed", { runId, definition: row.definition });
         if (row.retain === 0) this.#deleteRun(runId);
       }
-      await this.lifecycle.alarms.rearm();
+      await this.#syncWake(runId);
     } catch (thrown) {
       await this.#settleThrown(row, generation, thrown);
     }
@@ -938,7 +947,7 @@ export class Tasks<
 
     if (isTaskCancellation(thrown)) {
       this.#settleCancelled(runId, generation, thrown.reason);
-      await this.lifecycle.alarms.rearm();
+      await this.#syncWake(runId);
       return;
     }
 
@@ -951,7 +960,7 @@ export class Tasks<
           generation,
           current.cancel_reason ?? undefined
         );
-        await this.lifecycle.alarms.rearm();
+        await this.#syncWake(runId);
         return;
       }
       const suspended = this.#fencedWrite(
@@ -971,7 +980,7 @@ export class Tasks<
           wakeAt: thrown.wakeAt
         });
       }
-      await this.lifecycle.alarms.rearm();
+      await this.#syncWake(runId);
       return;
     }
 
@@ -982,7 +991,7 @@ export class Tasks<
         `Task run "${runId}" (definition "${row.definition}") failed: ${summary.name}: ${summary.message}`
       );
     }
-    await this.lifecycle.alarms.rearm();
+    await this.#syncWake(runId);
     await this.#observeError(thrown);
   }
 

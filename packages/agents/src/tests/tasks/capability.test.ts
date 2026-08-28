@@ -5,7 +5,6 @@ import {
   backdateTaskWake,
   seedTaskRun,
   seedTaskStep,
-  type TaskBatchHarnessObject,
   type TaskHarnessObject,
   type TaskSchedulerCoexistObject
 } from "../capabilities/tasks";
@@ -526,40 +525,6 @@ describe("Tasks capability", () => {
         expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
       }
     );
-  });
-
-  it("bounds each alarm batch and continues on follow-up alarms", async () => {
-    const stub = env.TaskBatchHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(
-      stub,
-      async (instance: TaskBatchHarnessObject, state) => {
-        await instance.lifecycle.start();
-        const base = Date.now() - 10_000;
-        for (const n of [1, 2, 3]) {
-          seedTaskRun(state.storage, {
-            runId: `tick-${n}`,
-            definition: "tick",
-            input: { n },
-            state: "pending",
-            nextAt: base + n
-          });
-        }
-        await instance.lifecycle.rearmAlarm();
-      }
-    );
-
-    // With maxRunsPerAlarm: 1, each alarm invocation claims one run and the
-    // post-alarm rearm chains a continuation for the rest.
-    await runDurableObjectAlarm(stub);
-    await runInDurableObject(stub, async (instance: TaskBatchHarnessObject) => {
-      await waitFor(() => instance.ticks.length === 3);
-      // Deadline order was preserved across the chained batches.
-      expect(instance.ticks).toEqual(["tick:1", "tick:2", "tick:3"]);
-      for (const n of [1, 2, 3]) {
-        const snapshot = await instance.tasks.get(`tick-${n}`);
-        expect(snapshot?.state).toBe("completed");
-      }
-    });
   });
 
   it("removes non-retained records after completion", async () => {
