@@ -84,9 +84,10 @@ export interface DurableObjectCapability<Props extends object = object> {
   onStart?(context: CapabilityStartContext<Props>): MaybePromise<void>;
 
   /**
-   * Inspect an HTTP request before the host's request handler.
+   * Act as middleware over HTTP requests, ahead of the host's request handler.
    *
-   * Return a response to handle the request, or `undefined` to continue.
+   * Return a response to handle the request, or `undefined` to pass it to the
+   * next capability and finally the host.
    */
   onRequest?(
     context: CapabilityRequestContext
@@ -146,8 +147,9 @@ export interface DurableObjectCapability<Props extends object = object> {
  * Runs ordered lifecycle phases for capabilities installed in a Durable Object.
  *
  * Capabilities are resolved lazily on the first phase and retained for the
- * lifetime of this runner. Startup and alarms run in declaration order, and
- * requests stop at the first response.
+ * lifetime of this runner. Startup and alarms run in declaration order.
+ * Requests dispatch as a middleware chain: the first capability to return a
+ * response handles the request.
  */
 export class CapabilityRunner<Props extends object = object> {
   readonly #resolveCapabilities: () => Iterable<DurableObjectCapability<Props>>;
@@ -198,10 +200,11 @@ export class CapabilityRunner<Props extends object = object> {
   }
 
   /**
-   * Offer a request to each capability in declaration order.
+   * Offer a request to each capability middleware in registration order.
    *
    * @param context - The request entering the Durable Object.
-   * @returns The first capability response, or `undefined` when unhandled.
+   * @returns The first capability response, or `undefined` when no
+   * capability claimed the request.
    */
   async request(
     context: CapabilityRequestContext
