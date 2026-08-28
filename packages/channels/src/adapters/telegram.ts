@@ -1,10 +1,13 @@
 import type {
   Channel,
   ChannelApprovalRequest,
+  ChannelChunk,
   ChannelMessage,
   ChannelRoute,
+  ChannelStreamOptions,
   DeliveryResult
 } from "../channel";
+import { consumeChunks, createPacer } from "../stream";
 import type { ChannelIdentity } from "../identity";
 import {
   isChannelMessageSurface,
@@ -89,6 +92,11 @@ export type TelegramChannelOptions = {
   toText?: (message: ChannelMessage) => string;
   /** Parse mode for caller-formatted delivery text. */
   parseMode?: "HTML" | "MarkdownV2";
+  /**
+   * Smallest gap between `sendMessageDraft` previews. Snapshots produced
+   * inside one interval are replaced rather than sent. @default 500
+   */
+  streamIntervalMs?: number;
   /** Select an application route from the event, raw update, and Host context. */
   route?: ChannelRoute<TelegramUpdate>;
   /** Add secret-verified Telegram webhook ingress to the returned Channel. */
@@ -109,6 +117,7 @@ type TelegramApiResponse = {
 };
 
 const TELEGRAM_MESSAGE_LIMIT = 4096;
+const DEFAULT_STREAM_INTERVAL_MS = 500;
 const DEFAULT_TELEGRAM_WEBHOOK_PATH = "/webhooks/telegram";
 const APPROVAL_INSTRUCTIONS = "Reply YES to approve or NO to reject.";
 const INTERACTION_FOOTER =
@@ -498,6 +507,31 @@ function telegramSurface(
   return surface as TelegramMessageSurface;
 }
 
+/**
+ * Whether a chat can show an animated draft.
+ *
+ * `sendMessageDraft` is private chats only, and Telegram gives private chats
+ * positive ids. Anywhere else the answer is simply sent once at the end.
+ */
+function supportsDraft(chatId: string): boolean {
+  const numeric = Number(chatId);
+  return Number.isSafeInteger(numeric) && numeric > 0;
+}
+
+/** A non-zero draft identifier; reusing one animates between snapshots. */
+function newDraftId(): number {
+  const [random] = crypto.getRandomValues(new Uint32Array(1));
+  return ((random ?? 1) % 2_147_483_647) + 1;
+}
+
+function splitText(text: string, limit: number): string[] {
+  const pieces: string[] = [];
+  for (let index = 0; index < text.length; index += limit) {
+    pieces.push(text.slice(index, index + limit));
+  }
+  return pieces;
+}
+
 /** Create a configured Telegram Bot API Channel. */
 export function telegram(
   options: TelegramChannelOptions
@@ -521,6 +555,11 @@ export function telegram(
     );
   }
   const toText = options.toText ?? defaultText;
+  const streamIntervalMs =
+    options.streamIntervalMs ?? DEFAULT_STREAM_INTERVAL_MS;
+  if (!Number.isInteger(streamIntervalMs) || streamIntervalMs < 0) {
+    throw new Error("streamIntervalMs must be a non-negative integer");
+  }
   const botUserId = telegramBotUserId(options.botToken);
   const ingress = options.webhook
     ? telegramWebhook({ ...options.webhook, botUserId })
@@ -606,6 +645,138 @@ export function telegram(
         );
   }
 
+  /**
+   * Show one ephemeral preview. Failures are swallowed on purpose: a draft is
+   * a 30-second animation, and losing one must never cost the real message.
+   *
+   * The configured parse mode is deliberately not applied. A partial answer
+   * routinely holds unbalanced markup, which Telegram rejects outright.
+   */
+  async function sendDraft(
+    destination: TelegramMessageSurface,
+    draftId: number,
+    text: string
+  ): Promise<boolean> {
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/bot${options.botToken}/sendMessageDraft`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            chat_id: Number(destination.address.chatId),
+            draft_id: draftId,
+            text,
+            ...(destination.address.messageThreadId !== undefined && {
+              message_thread_id: destination.address.messageThreadId
+            })
+          })
+        }
+      );
+      return asApiResponse(await response.json())?.ok === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Persist the answer, splitting it when it outgrows one Telegram message. */
+  async function sendComplete(
+    destination: ChannelMessageSurface,
+    text: string
+  ): Promise<DeliveryResult> {
+    const [head, ...tail] = splitText(text, maxLength);
+    const first = await send(destination, head!, options.parseMode);
+    if (first.status !== "delivered") return first;
+
+    for (const piece of tail) {
+      const result = await send(destination, piece, options.parseMode);
+      // A later piece failing still leaves earlier ones in the chat.
+      if (result.status !== "delivered") {
+        return uncertain(
+          "TELEGRAM_STREAM_PARTIAL",
+          "Telegram accepted only part of a split answer",
+          first.reference
+        );
+      }
+    }
+    return first;
+  }
+
+  async function streamMessage(
+    destinationValue: ChannelMessageSurface,
+    chunks: ReadableStream<ChannelChunk>,
+    streamOptions: ChannelStreamOptions
+  ): Promise<DeliveryResult> {
+    const destination = telegramSurface(destinationValue);
+    if (
+      !destination ||
+      (botUserId !== undefined &&
+        destination.address.botUserId !== undefined &&
+        destination.address.botUserId !== botUserId)
+    ) {
+      await chunks.cancel().catch(() => {});
+      return {
+        status: "failed",
+        retryable: false,
+        error: {
+          code: "TELEGRAM_SURFACE_INVALID",
+          message: `Telegram cannot parse the address for Channel "${destinationValue.channelKey}"`
+        }
+      };
+    }
+
+    const draftId = supportsDraft(destination.address.chatId)
+      ? newDraftId()
+      : undefined;
+    const prefix = streamOptions.title ? `${streamOptions.title}\n\n` : "";
+    const shouldPreview = createPacer(streamIntervalMs);
+    let answer = "";
+    let draftsStopped = draftId === undefined;
+
+    return consumeChunks(chunks, {
+      async onChunk(chunk) {
+        if (chunk.type !== "text" || chunk.text.length === 0) return;
+        answer += chunk.text;
+        if (draftsStopped || !shouldPreview()) return;
+        const shown = await sendDraft(
+          destination,
+          draftId!,
+          `${prefix}${answer}`.slice(0, maxLength)
+        );
+        if (!shown) draftsStopped = true;
+      },
+      async onFinish(outcome) {
+        // The draft is not the message. Without this send the reader's screen
+        // goes blank in thirty seconds and nothing is kept.
+        if (answer.length === 0) {
+          return {
+            status: "failed",
+            retryable: false,
+            error: outcome.interrupted
+              ? {
+                  code: "TELEGRAM_STREAM_INTERRUPTED",
+                  message: "The answer ended before producing any text to send"
+                }
+              : {
+                  code: "TELEGRAM_STREAM_EMPTY",
+                  message: "The stream carried no text to send"
+                }
+          };
+        }
+
+        const result = await sendComplete(destination, `${prefix}${answer}`);
+        if (!outcome.interrupted || result.status !== "delivered") {
+          return result;
+        }
+        return uncertain(
+          "TELEGRAM_STREAM_INTERRUPTED",
+          "An incomplete answer was sent because the stream ended early",
+          result.reference
+        );
+      }
+    });
+  }
+
   return {
     ...(options.route && { route: options.route }),
     ...(ingress && { ingress }),
@@ -624,6 +795,9 @@ export function telegram(
     },
     deliver(destination, message) {
       return send(destination, toText(message), options.parseMode);
+    },
+    stream(destination, chunks, streamOptions) {
+      return streamMessage(destination, chunks, streamOptions);
     },
     requestApproval(destination, { interactionId, request }) {
       if (interactionId.length === 0) {

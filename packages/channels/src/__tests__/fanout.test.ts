@@ -5,9 +5,28 @@ import {
   fanout,
   fanoutChannel,
   type Channel,
+  type ChannelChunk,
   type DeliveryResult,
   type OutboundResolver
 } from "..";
+
+function streamOf<T>(values: readonly T[]): ReadableStream<T> {
+  let index = 0;
+  return new ReadableStream<T>({
+    pull(controller) {
+      if (index < values.length) {
+        controller.enqueue(values[index]!);
+        index += 1;
+      } else {
+        controller.close();
+      }
+    }
+  });
+}
+
+function text(...parts: string[]): ChannelChunk[] {
+  return parts.map((part) => ({ type: "text", text: part }));
+}
 
 function surface(channelKey: string) {
   return {
@@ -55,19 +74,19 @@ describe("fanout surfaces", () => {
     const second = channel({ status: "delivered", reference: "email-1" });
     const channelHost = host({ first, second });
     const message = { title: "Update", markdown: "Hello" };
-    const context = { deliveryId: "notice-1" };
+    const options = { delivery: { deliveryId: "notice-1" } };
 
     const delivery = channelHost.deliver(
       fanout([surface("first"), surface("second")]),
       message,
-      context
+      options
     );
     await vi.waitFor(() => {
       expect(started).toEqual(["first"]);
       expect(second.deliver).toHaveBeenCalledWith(
         surface("second"),
         message,
-        context
+        options
       );
     });
     release?.();
@@ -202,5 +221,113 @@ describe("fanout surfaces", () => {
     ).resolves.toEqual({ status: "delivered", reference: "final" });
     expect(first.deliver).not.toHaveBeenCalled();
     expect(unavailable.deliver).not.toHaveBeenCalled();
+  });
+});
+
+describe("fanout streaming", () => {
+  it("gives every destination its own branch of the stream", async () => {
+    const seen: Record<string, ChannelChunk[]> = { first: [], second: [] };
+    const streaming = (key: string): Channel => ({
+      async stream(_surface, chunks) {
+        for await (const chunk of chunks) seen[key]!.push(chunk);
+        return { status: "delivered" };
+      }
+    });
+    const channelHost = host({
+      first: streaming("first"),
+      second: streaming("second")
+    });
+
+    await expect(
+      channelHost.stream(
+        fanout([surface("first"), surface("second")]),
+        streamOf(text("Hello ", "world"))
+      )
+    ).resolves.toEqual({ status: "delivered" });
+    expect(seen.first).toEqual(seen.second);
+    expect(seen.first).toEqual([
+      { type: "text", text: "Hello " },
+      { type: "text", text: "world" }
+    ]);
+  });
+
+  it("lets a fast destination finish while a slow one is still reading", async () => {
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const order: string[] = [];
+    const channelHost = host({
+      slow: {
+        async stream(_surface, chunks) {
+          await blocked;
+          for await (const _chunk of chunks) order.push("slow");
+          return { status: "delivered" };
+        }
+      },
+      fast: {
+        async stream(_surface, chunks) {
+          for await (const _chunk of chunks) order.push("fast");
+          return { status: "delivered" };
+        }
+      }
+    });
+
+    const delivery = channelHost.stream(
+      fanout([surface("slow"), surface("fast")]),
+      streamOf(text("one", "two"))
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(["fast", "fast"]);
+
+    release?.();
+    await expect(delivery).resolves.toEqual({ status: "delivered" });
+    expect(order).toEqual(["fast", "fast", "slow", "slow"]);
+  });
+
+  it("reports a partial streaming outcome as uncertain", async () => {
+    const channelHost = host({
+      first: { stream: async () => ({ status: "delivered" as const }) },
+      second: {
+        stream: async () => ({
+          status: "failed" as const,
+          retryable: false,
+          error: { code: "NOPE", message: "Rejected" }
+        })
+      }
+    });
+
+    await expect(
+      channelHost.stream(
+        fanout([surface("first"), surface("second")]),
+        streamOf(text("Hello"))
+      )
+    ).resolves.toMatchObject({
+      status: "uncertain",
+      error: { code: "FANOUT_DELIVERY_UNCERTAIN" }
+    });
+  });
+
+  it("collects for a destination that cannot stream and streams to one that can", async () => {
+    const deliver = vi.fn(async () => ({ status: "delivered" as const }));
+    const channelHost = host({
+      plain: { deliver },
+      streaming: {
+        stream: async () => ({ status: "delivered" as const })
+      }
+    });
+
+    await expect(
+      channelHost.stream(
+        fanout([surface("plain"), surface("streaming")]),
+        streamOf(text("Hello ", "world")),
+        { title: "Update" }
+      )
+    ).resolves.toEqual({ status: "delivered" });
+    expect(deliver).toHaveBeenCalledWith(
+      surface("plain"),
+      { title: "Update", markdown: "Hello world" },
+      undefined
+    );
   });
 });

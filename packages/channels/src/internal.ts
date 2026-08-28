@@ -31,9 +31,14 @@ export function renderInput(input: unknown): string {
   }
 }
 
-export function uncertain(code: string, message: string): DeliveryResult {
+export function uncertain(
+  code: string,
+  message: string,
+  reference?: string
+): Extract<DeliveryResult, { status: "uncertain" }> {
   return {
     status: "uncertain",
+    ...(reference !== undefined && { reference }),
     error: { code, message }
   };
 }
