@@ -7,7 +7,7 @@ import type {
 } from "../capabilities/streams";
 import { seedTaskRun, seedTaskStep } from "../capabilities/tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
-import type { StreamChunk } from "../../streams";
+import { sseResponse, type StreamChunk } from "../../streams";
 
 /**
  * Capability-level Streams tests: the capability installed on a minimal real
@@ -257,6 +257,121 @@ describe("Streams capability", () => {
         "list-done",
         "list-live"
       ]);
+    });
+  });
+
+  it("tags streams at open and finds them via list", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      const first = await instance.streams.open("t1", { tag: "req-9" });
+      first.close();
+      (await instance.streams.open("t2", { tag: "req-9" })).append({ i: 0 });
+      await instance.streams.open("t3", { tag: "req-other" });
+      await instance.streams.open("untagged");
+
+      expect((await instance.streams.status("t2"))?.tag).toBe("req-9");
+      expect((await instance.streams.status("untagged"))?.tag).toBeUndefined();
+
+      // Non-unique by design: successive streams of one operation share the
+      // tag, newest first — and the filter composes with state.
+      const tagged = await instance.streams.list({ tag: "req-9" });
+      expect(tagged.map((s) => s.streamId)).toEqual(["t2", "t1"]);
+      const live = await instance.streams.list({
+        tag: "req-9",
+        state: "streaming"
+      });
+      expect(live.map((s) => s.streamId)).toEqual(["t2"]);
+
+      // The tag is part of the stream's identity: reopening with the same
+      // (or no) tag resumes, a different tag is a config conflict.
+      await instance.streams.open("t2", { tag: "req-9" });
+      await instance.streams.open("t2");
+      await expect(
+        instance.streams.open("t2", { tag: "req-else" })
+      ).rejects.toThrow(/refusing reopen/);
+    });
+  });
+
+  it("signals up-to-date once when a reader reaches the tail", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      const stream = await instance.streams.open("utd");
+      stream.append({ i: 0 });
+      stream.append({ i: 1 });
+
+      const order: string[] = [];
+      const reading = (async () => {
+        for await (const batch of instance.streams.readBatches("utd", {
+          batchSize: 1,
+          onUpToDate: () => order.push("up-to-date")
+        })) {
+          order.push(`batch:${batch.map((c) => c.seq).join(",")}`);
+        }
+      })();
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      stream.append({ i: 2 });
+      stream.close();
+      await reading;
+
+      // Fires after the stored backlog drained, before live-tail chunks —
+      // and only once, even though the tail catches up again later.
+      expect(order).toEqual(["batch:0", "batch:1", "up-to-date", "batch:2"]);
+    });
+  });
+
+  it("serves a stream over SSE with Last-Event-ID resume and terminal events", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      const stream = await instance.streams.open("sse");
+      for (let i = 0; i < 4; i++) stream.append({ i });
+      stream.close();
+
+      const readAll = async (response: Response): Promise<string> => {
+        expect(response.headers.get("content-type")).toContain(
+          "text/event-stream"
+        );
+        return new Response(response.body).text();
+      };
+
+      const full = await readAll(
+        await sseResponse(instance.streams, "sse", { heartbeatMs: 0 })
+      );
+      expect(full).toContain('id: 0\ndata: {"i":0}');
+      expect(full).toContain('id: 3\ndata: {"i":3}');
+      // Control events: caught-up marker before the terminal `done`.
+      expect(full.indexOf("event: up-to-date")).toBeGreaterThan(-1);
+      expect(full.indexOf("event: done")).toBeGreaterThan(
+        full.indexOf("id: 3")
+      );
+
+      // A reconnecting EventSource sends Last-Event-ID = last received id;
+      // the helper resumes from the next chunk.
+      const resumed = await readAll(
+        await sseResponse(instance.streams, "sse", {
+          heartbeatMs: 0,
+          request: new Request("https://example.com/sse", {
+            headers: { "Last-Event-ID": "2" }
+          })
+        })
+      );
+      expect(resumed).not.toContain("id: 2\n");
+      expect(resumed).toContain('id: 3\ndata: {"i":3}');
+
+      const broken = await instance.streams.open("sse-broken");
+      broken.append({ i: 0 });
+      broken.error("provider hung up");
+      const errored = await readAll(
+        await sseResponse(instance.streams, "sse-broken", { heartbeatMs: 0 })
+      );
+      expect(errored).toContain(
+        'event: error\ndata: {"reason":"provider hung up"}'
+      );
+
+      const missing = await sseResponse(instance.streams, "ghost", {
+        heartbeatMs: 0
+      });
+      expect(missing.status).toBe(404);
     });
   });
 

@@ -148,6 +148,16 @@ export class Streams extends LifecycleCapability {
           `already settled as ${existing.state}`
         );
       }
+      // The tag is part of the stream's identity, fixed at creation: a
+      // reopen naming a different tag is a config conflict, not a resume.
+      if (
+        options.tag !== undefined &&
+        options.tag !== (existing.tag ?? undefined)
+      ) {
+        throw new Error(
+          `Stream "${streamId}" is already open with tag ${JSON.stringify(existing.tag)}; refusing reopen with tag ${JSON.stringify(options.tag)}`
+        );
+      }
       return this.#writer(streamId);
     }
 
@@ -158,9 +168,9 @@ export class Streams extends LifecycleCapability {
     const now = Date.now();
     this.#sql`
       INSERT INTO cf_agents_streams
-        (stream_id, state, metadata, chunk_count, created_at, updated_at)
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
       VALUES
-        (${streamId}, 'streaming', ${metadataJson}, 0, ${now}, ${now})
+        (${streamId}, 'streaming', ${options.tag ?? null}, ${metadataJson}, 0, ${now}, ${now})
     `;
     this.#emit("stream:opened", { streamId });
     return this.#writer(streamId);
@@ -209,6 +219,7 @@ export class Streams extends LifecycleCapability {
       Math.floor(options.batchSize ?? READ_BATCH_SIZE)
     );
     let next = Math.max(0, options.from ?? 0);
+    let signaledUpToDate = false;
 
     if (!this.#getStream(streamId)) {
       throw new StreamNotFoundError(streamId);
@@ -231,6 +242,14 @@ export class Streams extends LifecycleCapability {
         }));
       }
       if (rows.length === batchSize) continue;
+
+      // A short batch means every durable chunk up to this instant has been
+      // yielded — the reader has reached the tail (caught up ≠ ended: a live
+      // stream keeps tailing from here).
+      if (!signaledUpToDate) {
+        signaledUpToDate = true;
+        options.onUpToDate?.();
+      }
 
       const stream = this.#getStream(streamId);
       if (!stream) return; // deleted mid-read: nothing further to yield
@@ -263,6 +282,10 @@ export class Streams extends LifecycleCapability {
     if (states.length > 0) {
       query += ` AND state IN (${states.map(() => "?").join(", ")})`;
       params.push(...states);
+    }
+    if (options.tag !== undefined) {
+      query += " AND tag = ?";
+      params.push(options.tag);
     }
     query += " ORDER BY created_at DESC, stream_id DESC LIMIT ?";
     params.push(options.limit ?? DEFAULT_LIST_LIMIT);
@@ -537,6 +560,7 @@ export class Streams extends LifecycleCapability {
       streamId: row.stream_id,
       state: row.state,
       cursor: row.chunk_count,
+      ...(row.tag !== null ? { tag: row.tag } : {}),
       ...(row.metadata !== null
         ? {
             metadata: JSON.parse(row.metadata) as Record<string, StreamJson>
@@ -563,6 +587,7 @@ export class Streams extends LifecycleCapability {
         state TEXT NOT NULL CHECK (state IN (
           'streaming', 'completed', 'errored'
         )),
+        tag TEXT,
         metadata TEXT,
         error_message TEXT,
         chunk_count INTEGER NOT NULL DEFAULT 0,
@@ -570,6 +595,10 @@ export class Streams extends LifecycleCapability {
         updated_at INTEGER NOT NULL,
         closed_at INTEGER
       )
+    `);
+    rawSql(`
+      CREATE INDEX IF NOT EXISTS idx_cf_agents_streams_tag
+      ON cf_agents_streams(tag, created_at)
     `);
     rawSql(`
       CREATE TABLE IF NOT EXISTS cf_agents_stream_chunks (

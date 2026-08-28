@@ -3,6 +3,7 @@ import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
   Streams,
   StreamClosedError,
+  sseResponse,
   type StreamChunk,
   type StreamStatus,
   type StreamWriter
@@ -17,8 +18,16 @@ declare const object: ReportObject;
 object.streams satisfies DurableObjectCapability;
 
 object.streams.open("reply:1", {
+  tag: "req-1",
   metadata: { topic: "demo" }
 }) satisfies Promise<StreamWriter>;
+object.streams.list({ tag: "req-1", state: "streaming" }) satisfies Promise<
+  StreamStatus[]
+>;
+sseResponse(object.streams, "reply:1", {
+  request: new Request("https://example.com"),
+  heartbeatMs: 0
+}) satisfies Promise<Response>;
 object.streams.status("reply:1") satisfies Promise<StreamStatus | null>;
 object.streams.delete("reply:1") satisfies Promise<boolean>;
 

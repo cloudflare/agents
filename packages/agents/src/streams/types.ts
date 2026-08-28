@@ -41,6 +41,8 @@ export interface StreamStatus {
   state: StreamState;
   /** The next sequence number to be assigned == durable chunk count. */
   cursor: number;
+  /** Application lookup key assigned at `open()`, when one was. */
+  tag?: string;
   metadata?: Record<string, StreamJson>;
   /** Reason recorded by `error()`, when the state is `errored`. */
   error?: string;
@@ -80,6 +82,14 @@ export interface StreamWriter {
 export interface StreamOpenOptions {
   /** JSON metadata retained with the stream. */
   metadata?: Record<string, StreamJson>;
+  /**
+   * Indexed application lookup key, set once at creation. Deliberately not
+   * unique: an operation that produces successive streams (a retried turn, a
+   * regenerated reply) stamps each with the same tag, and
+   * `list({ tag, limit: 1 })` finds the latest. Reopening a live stream with
+   * a *different* tag throws — a config conflict, not a new stream.
+   */
+  tag?: string;
 }
 
 /** Options accepted by `Streams.read()`. */
@@ -94,11 +104,20 @@ export interface StreamReadOptions {
 export interface StreamReadBatchesOptions extends StreamReadOptions {
   /** Maximum chunks per yielded batch. Defaults to 100. */
   batchSize?: number;
+  /**
+   * Invoked once, the first time the reader reaches the durable tail —
+   * i.e. every chunk stored so far has been yielded. Distinct from the
+   * stream ending: a live stream is "up to date" while tailing. Useful as a
+   * transition signal (flush replayed UI, show a live indicator).
+   */
+  onUpToDate?: () => void;
 }
 
 /** Filters accepted by `Streams.list()`. */
 export interface StreamListOptions {
   state?: StreamState | StreamState[];
+  /** Only streams opened with this exact tag (indexed). */
+  tag?: string;
   limit?: number;
 }
 
@@ -106,6 +125,7 @@ export interface StreamListOptions {
 export type StreamRow = {
   stream_id: string;
   state: StreamState;
+  tag: string | null;
   metadata: string | null;
   error_message: string | null;
   chunk_count: number;

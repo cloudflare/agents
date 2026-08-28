@@ -14,6 +14,7 @@ export {
   StreamNotFoundError,
   StreamSerializationError
 } from "./errors";
+export { sseResponse, type SSEResponseOptions } from "./sse";
 export type {
   StreamChunk,
   StreamJson,

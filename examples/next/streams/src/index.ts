@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
-import { Streams } from "agents/streams";
+import { Streams, sseResponse } from "agents/streams";
 import { Tasks, type TaskInterruption, type TaskStep } from "agents/tasks";
 
 type GenerateInput = {
@@ -83,45 +83,11 @@ export class GenerateObject extends DurableObject<Env> {
     const streamMatch = url.pathname.match(/\/streams\/([^/]+)$/);
     if (request.method === "GET" && streamMatch) {
       const streamId = decodeURIComponent(streamMatch[1]);
-      const from = Number(url.searchParams.get("from") ?? "0");
-      if ((await this.streams.status(streamId)) === null) {
-        return new Response("Stream not found", { status: 404 });
-      }
-
-      // Serve the durable stream over SSE: replay from the requested
-      // cursor, then tail live appends until the producer settles. The
-      // request's own signal aborts a tail when the client disconnects.
-      const streams = this.streams;
-      const encoder = new TextEncoder();
-      const body = new ReadableStream<Uint8Array>({
-        async start(controller) {
-          try {
-            for await (const chunk of streams.read(streamId, {
-              from,
-              signal: request.signal
-            })) {
-              controller.enqueue(
-                encoder.encode(
-                  `id: ${chunk.seq}\ndata: ${JSON.stringify(chunk.chunk)}\n\n`
-                )
-              );
-            }
-            const status = await streams.status(streamId);
-            controller.enqueue(
-              encoder.encode(`event: end\ndata: ${status?.state}\n\n`)
-            );
-            controller.close();
-          } catch (error) {
-            controller.error(error);
-          }
-        }
-      });
-      return new Response(body, {
-        headers: {
-          "content-type": "text/event-stream",
-          "cache-control": "no-cache"
-        }
-      });
+      // Serve the durable stream over SSE: replay, `up-to-date`, live tail,
+      // then `done`/`error`. Each chunk's seq rides the SSE `id:` field, so
+      // a reconnecting EventSource resumes via Last-Event-ID automatically;
+      // the request's signal aborts the tail when the client disconnects.
+      return sseResponse(this.streams, streamId, { request });
     }
 
     return Response.json({

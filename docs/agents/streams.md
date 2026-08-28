@@ -64,9 +64,23 @@ const status = await this.streams.status("reply:123");
 // { state: "streaming" | "completed" | "errored", cursor, ... } | null
 ```
 
-Reads are independent of producer liveness. `list()` filters by state, and
-`delete()` removes a settled stream and its chunk log (a live stream must be
-settled first).
+Reads are independent of producer liveness. `list()` filters by state and
+by `tag`, and `delete()` removes a settled stream and its chunk log (a live
+stream must be settled first).
+
+**Tags** are the lookup side of the id: `open(id, { tag })` stamps a stream
+with an indexed application key — a request id, a session — that is
+deliberately *not* unique. An operation that produces successive streams (a
+retried turn, a regenerated reply) tags each one, and
+`list({ tag, limit: 1 })` finds the latest (results are newest-first). The
+tag is fixed at creation; reopening a live stream with a different tag
+throws. Use the id alone until one operation can own more than one stream —
+that's the moment tags exist for.
+
+`readBatches` also accepts `onUpToDate`, invoked once when the reader first
+reaches the durable tail. Caught-up is distinct from ended: a live stream is
+up to date while tailing — use it to flush replayed UI or flip on a "live"
+indicator.
 
 When the consumer pays per write — an SSE flush, an RPC hop, a history
 append — read in batches instead of chunk by chunk:
@@ -124,10 +138,24 @@ reports afterward (proven by the SIGKILL e2e suite).
 
 ## Serving
 
-`read()` is an async iterable; pipe it into your own SSE or WebSocket
-handler and pass the request's signal so a disconnecting client aborts the
-tail. `examples/next/streams` serves a stream over SSE with cursor-based
-reconnects.
+For SSE, one call serves the whole lifecycle:
+
+```ts
+async onRequest(request: Request) {
+  return sseResponse(this.streams, "reply:123", { request });
+}
+```
+
+Each chunk's sequence number rides the SSE `id:` field, so resume is native
+to the protocol: a reconnecting `EventSource` sends `Last-Event-ID`
+automatically and the helper continues from the next chunk — cursor
+persistence with zero client code (`?from=` works too). The response
+replays, emits an `up-to-date` control event at the tail, tails live
+appends (with periodic heartbeat comments to survive idle proxies), and
+finishes with `done` or `error` (carrying the recorded reason). The
+request's signal aborts the tail when the client disconnects.
+`examples/next/streams` is the end-to-end demo. For other transports,
+`read()`/`readBatches()` remain the raw async iterables to pipe yourself.
 
 ## Chat runs on this
 
