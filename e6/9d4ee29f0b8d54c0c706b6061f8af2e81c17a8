@@ -1,0 +1,43 @@
+design/lifecycle-work-queue.md
+  s_b3be5a835f928d::t_82afd4373a4f7e 1-160
+packages/agents/src/index.ts
+  s_f510ad52b05c4e::t_fe025233d1fbc0 50,54-55,127,2276-2280,5642-5651,5654,5658-5660,5664-5670,5673-5691,5702,5722-5796
+packages/agents/src/lifecycle/capability-runner.ts
+  s_f510ad52b05c4e::t_1dda2797d20f9e 3-6,60-77,158-165
+packages/agents/src/lifecycle/capability.ts
+  s_f510ad52b05c4e::t_605d8c24a70d38 5,52-57
+packages/agents/src/lifecycle/current-agent.ts
+  s_f510ad52b05c4e::t_de893905eb8a11 6-9,27-37
+packages/agents/src/lifecycle/index.ts
+  s_f510ad52b05c4e::t_9ad554e84b4b12 21-25
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_f510ad52b05c4e::t_54ec254eb79d68 6-11,17-27,60-66,135-155,239-252,274-275,313,389,829-856,859-860,874,897-908,911-921,924-1229
+packages/agents/src/lifecycle/job-queue.ts
+  s_f510ad52b05c4e::t_3964cd3e42fed4 1-375
+packages/agents/src/schedules/scheduler.ts
+  s_f510ad52b05c4e::t_38238753765eab 2-7,15-19,75-76,84-97,115-121,139-143,151-154,193,201,208-393,424-429,436-507,655-667,670-677,681-696,778,789,791-798,800,804,824,828,831-834,838-856,860,872-873,878-892,894,897-916,918-921,923-924,926,930-931,935,939-940,950-954,961-970,972-980,982,989-996,1000
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e69d4ee29f0b8d54c0c706b6061f8af2e81c17a8",
+  "prompts": {},
+  "sessions": {
+    "s_b3be5a835f928d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e60c15-51cf-4a50-b840-9e77737af7be",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
