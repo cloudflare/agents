@@ -1,25 +1,9 @@
 import { parse } from "acorn";
 import type { RunHostFunctionManifestEntry } from "./dynamic-worker-protocol";
 import dynamicWorkerRuntimeSource from "./dynamic-worker-runtime?dynamic-worker-source";
-import runDataSource from "./run-data?dynamic-worker-source";
-
-const RUN_DATA_SOURCE_EXPORT = "export { parseRunData };";
-
-function isolateRunDataSource(source: string): string {
-  const exportOffset = source.lastIndexOf(RUN_DATA_SOURCE_EXPORT);
-  if (
-    exportOffset < 0 ||
-    source.slice(exportOffset + RUN_DATA_SOURCE_EXPORT.length).trim() !== ""
-  ) {
-    throw new Error("Run data source has an unexpected export shape.");
-  }
-  return `const parseRunData = (() => {\n${source.slice(0, exportOffset)}return parseRunData;\n})();\n`;
-}
 
 const RUN_DYNAMIC_WORKER_EXECUTOR_SOURCE =
-  'import __runUser__ from "./run.js";\n' +
-  isolateRunDataSource(runDataSource) +
-  dynamicWorkerRuntimeSource;
+  'import __runUser__ from "./run.js";\n' + dynamicWorkerRuntimeSource;
 
 function createRunSourceModule(source: string, parameters: string): string {
   const prefix = `export default async function __runUser__(${parameters}) {`;

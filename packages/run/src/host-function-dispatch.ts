@@ -7,7 +7,7 @@ import type {
 } from "./dynamic-worker-protocol";
 import { runWithHostFunctionContext } from "./host-function-context";
 import { RunError } from "./run-error";
-import { parseRunData } from "./run-data";
+import { hasEnumerableInheritedProperty, parseRunData } from "./run-data";
 import type { HostFunction, HostFunctions } from "./run-types";
 
 const RUN_FORBIDDEN_HOST_NAMES = new Set([
@@ -40,20 +40,6 @@ function throwInvalidHostFunctions(path: RunHostFunctionsInputPath): never {
   });
 }
 
-function hasEnumerableInheritedProperty(prototype: object): boolean {
-  for (
-    let current: object | null = prototype;
-    current !== null;
-    current = Reflect.getPrototypeOf(current)
-  ) {
-    for (const property of Reflect.ownKeys(current)) {
-      const descriptor = Reflect.getOwnPropertyDescriptor(current, property);
-      if (descriptor?.enumerable) return true;
-    }
-  }
-  return false;
-}
-
 function parseRunHostContainer(
   value: unknown,
   path: RunHostFunctionsInputPath
@@ -65,7 +51,7 @@ function parseRunHostContainer(
     const prototype = Reflect.getPrototypeOf(value);
     if (
       (prototype !== null && prototype !== Object.prototype) ||
-      (prototype !== null && hasEnumerableInheritedProperty(prototype))
+      hasEnumerableInheritedProperty(prototype)
     ) {
       return throwInvalidHostFunctions(path);
     }
@@ -114,19 +100,28 @@ function isRunHostIdentifier(name: string): boolean {
   }
 }
 
-/** Parent RPC target for one invocation's validated host functions. */
+/**
+ * Parent RPC target for one invocation's validated host functions.
+ *
+ * This is the complete RPC surface exposed to the generated Worker; trusted
+ * failure causes stay in a parent-owned store that never crosses RPC.
+ */
 export class RunHostFunctionDispatcher
   extends RpcTarget
   implements RunHostFunctionDispatcherContract
 {
   readonly #hostFunctions: RunHostFunctionLookup;
-  readonly #hostFunctionFailures = new Map<number, RunHostFunctionFailure>();
+  readonly #hostFunctionFailures: Map<number, RunHostFunctionFailure>;
   #nextCallId = 1;
 
-  /** Construct a dispatcher from an immutable snapshot of validated functions. */
-  constructor(hostFunctions: RunHostFunctionLookup) {
+  /** Construct a dispatcher over validated functions and a parent failure store. */
+  constructor(
+    hostFunctions: RunHostFunctionLookup,
+    hostFunctionFailures: Map<number, RunHostFunctionFailure>
+  ) {
     super();
     this.#hostFunctions = hostFunctions;
+    this.#hostFunctionFailures = hostFunctionFailures;
   }
 
   /** Invoke one sequenced host call without exposing trusted failures over RPC. */
@@ -165,24 +160,21 @@ export class RunHostFunctionDispatcher
       ? { status: "completed", value: parsed.value }
       : { status: "serializationFailed" };
   }
-
-  /** Remove and return the trusted cause for one escaped sanitized failure. */
-  takeHostFunctionFailure(
-    failureId: number
-  ):
-    | ({ readonly status: "found" } & RunHostFunctionFailure)
-    | { readonly status: "missing" } {
-    const failure = this.#hostFunctionFailures.get(failureId);
-    if (failure === undefined) return { status: "missing" };
-    this.#hostFunctionFailures.delete(failureId);
-    return { status: "found", ...failure };
-  }
 }
+
+/** Parent-side handle that removes one escaped sanitized failure's cause. */
+export type TakeRunHostFunctionFailure = (
+  failureId: number
+) =>
+  | ({ readonly status: "found" } & RunHostFunctionFailure)
+  | { readonly status: "missing" };
 
 /** Parse and snapshot the exact host authority granted to one invocation. */
 export function createRunHostFunctionDispatch(hostFunctions: HostFunctions): {
   readonly dispatcher: RunHostFunctionDispatcher;
   readonly manifest: readonly RunHostFunctionManifestEntry[];
+  /** Remove and return the trusted cause for one escaped sanitized failure. */
+  readonly takeHostFunctionFailure: TakeRunHostFunctionFailure;
 } {
   const hostFunctionLookup = new Map<
     string,
@@ -219,8 +211,18 @@ export function createRunHostFunctionDispatch(hostFunctions: HostFunctions): {
     manifest.push({ namespace, functions: functionNames });
   }
 
+  const hostFunctionFailures = new Map<number, RunHostFunctionFailure>();
   return {
-    dispatcher: new RunHostFunctionDispatcher(hostFunctionLookup),
-    manifest
+    dispatcher: new RunHostFunctionDispatcher(
+      hostFunctionLookup,
+      hostFunctionFailures
+    ),
+    manifest,
+    takeHostFunctionFailure: (failureId) => {
+      const failure = hostFunctionFailures.get(failureId);
+      if (failure === undefined) return { status: "missing" };
+      hostFunctionFailures.delete(failureId);
+      return { status: "found", ...failure };
+    }
   };
 }

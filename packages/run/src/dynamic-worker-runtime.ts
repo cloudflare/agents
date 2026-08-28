@@ -3,96 +3,34 @@ import type {
   RunHostFunctionDispatcherContract,
   RunHostFunctionManifestEntry,
   RunHostFunctionResponse,
+  RunWorkerErrorClassification,
   RunWorkerErrorRecord,
   RunWorkerResponse
 } from "./dynamic-worker-protocol";
-import type { RunDataParseResult, RunDataPath } from "./run-data";
+import { parseRunData, type RunDataPath } from "./run-data";
+import { truncateRunUtf8 } from "./run-utf8";
 import type { RunLog } from "./run-types";
 
 type RunInternalErrorMetadata = {
   readonly name: string;
   readonly message: string;
-} & (
-  | {
-      readonly code: "RUN_HOST_FUNCTION_ERROR";
-      readonly hostFailureId: number;
-    }
-  | ({ readonly code: "RUN_SERIALIZATION_ERROR" } & (
-      | { readonly path: "result"; readonly hostFunction?: never }
-      | {
-          readonly path: "hostFunction.arguments" | "hostFunction.result";
-          readonly hostFunction: string;
-        }
-    ))
-  | {
-      readonly code: "RUN_WORKER_ERROR";
-      readonly hostFunction: string;
-    }
-);
+} & Exclude<
+  RunWorkerErrorClassification,
+  { readonly code?: undefined } | { readonly code: "RUN_INVALID_INPUT" }
+>;
 
 const runArrayIsArray = Array.isArray;
 const runArrayJoin = Array.prototype.join;
 const runArrayPush = Array.prototype.push;
-const runMathCeil = Math.ceil;
 const runNumberIsSafeInteger = Number.isSafeInteger;
 const runObjectIs = Object.is;
 const runReflectApply = Reflect.apply;
 const runReflectGet = Reflect.get;
-const runReflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
-const runReflectGetPrototypeOf = Reflect.getPrototypeOf;
 const runReflectHas = Reflect.has;
 const runString = String;
-const runStringCharCodeAt = String.prototype.charCodeAt;
-const runStringSlice = String.prototype.slice;
-const runErrorTextEncoder = new TextEncoder();
-const runTextEncoderEncode = TextEncoder.prototype.encode;
 const runWeakMapGet = WeakMap.prototype.get;
 const runWeakMapSet = WeakMap.prototype.set;
 const runInternalErrors = new WeakMap<object, RunInternalErrorMetadata>();
-
-function getRunTypedArrayByteLengthGetter(): (this: object) => number {
-  const prototype = runReflectGetPrototypeOf(Uint8Array.prototype);
-  const getter =
-    prototype === null
-      ? undefined
-      : runReflectGetOwnPropertyDescriptor(prototype, "byteLength")?.get;
-  if (getter === undefined) {
-    throw new Error("Run UTF-8 byte measurement is unavailable.");
-  }
-  return getter;
-}
-
-const runTypedArrayByteLengthGetter = getRunTypedArrayByteLengthGetter();
-
-function getRunUtf8ByteLength(value: string): number {
-  const encoded = runReflectApply(runTextEncoderEncode, runErrorTextEncoder, [
-    value
-  ]);
-  return runReflectApply(runTypedArrayByteLengthGetter, encoded, []);
-}
-
-function truncateRunUtf8(value: string, maximumBytes: number): string {
-  if (getRunUtf8ByteLength(value) <= maximumBytes) return value;
-
-  const suffix = "…";
-  const contentBytes = maximumBytes - getRunUtf8ByteLength(suffix);
-  let low = 0;
-  let high = value.length;
-  while (low < high) {
-    const middle = runMathCeil((low + high) / 2);
-    const candidate = runReflectApply(runStringSlice, value, [0, middle]);
-    if (getRunUtf8ByteLength(candidate) <= contentBytes) low = middle;
-    else high = middle - 1;
-  }
-  if (
-    low > 0 &&
-    runReflectApply(runStringCharCodeAt, value, [low - 1]) >= 0xd800 &&
-    runReflectApply(runStringCharCodeAt, value, [low - 1]) <= 0xdbff
-  ) {
-    low--;
-  }
-  return `${runReflectApply(runStringSlice, value, [0, low])}${suffix}`;
-}
 
 function brandRunInternalError(
   error: object,
@@ -226,7 +164,9 @@ function createRunErrorRecord(error: unknown): RunWorkerErrorRecord {
           return {
             ...diagnostic,
             code: metadata.code,
-            hostFunction: truncateRunUtf8(metadata.hostFunction, 256)
+            ...(metadata.hostFunction === undefined
+              ? {}
+              : { hostFunction: truncateRunUtf8(metadata.hostFunction, 256) })
           };
       }
     }
@@ -271,6 +211,58 @@ function formatRunLogValue(value: unknown): string {
     default:
       return runString(value);
   }
+}
+
+/**
+ * Create the promise-returning stub generated code calls for one host
+ * function. Every dispatcher interaction is contained here so raw transport
+ * failures never escape into guest-visible errors.
+ */
+function createRunHostFunctionStub(
+  dispatcher: RunHostFunctionDispatcherContract,
+  namespace: string,
+  functionName: string,
+  allocateCallId: () => number
+): (...args: unknown[]) => Promise<unknown> {
+  return async (...args: unknown[]): Promise<unknown> => {
+    const hostFunction = `${namespace}.${functionName}`;
+    const parsedArguments = parseRunData(args, "hostFunction.arguments");
+    if (parsedArguments.status === "rejected") {
+      throw new RunSerializationError(parsedArguments.path, hostFunction);
+    }
+
+    const callId = allocateCallId();
+    let responsePromise: Promise<RunHostFunctionResponse>;
+    try {
+      responsePromise = dispatcher.callHostFunction(
+        callId,
+        namespace,
+        functionName,
+        parsedArguments.value
+      );
+    } catch {
+      throw new RunSerializationError("hostFunction.arguments", hostFunction);
+    }
+
+    let response: RunHostFunctionResponse;
+    try {
+      response = await responsePromise;
+    } catch {
+      throw new RunSerializationError("hostFunction.result", hostFunction);
+    }
+    if (response.status === "completed") return response.value;
+    if (response.status === "serializationFailed") {
+      throw new RunSerializationError("hostFunction.result", hostFunction);
+    }
+    if (
+      response.status === "failed" &&
+      runNumberIsSafeInteger(response.failureId) &&
+      response.failureId === callId
+    ) {
+      throw new RunHostFunctionError(response.failureId);
+    }
+    throw new RunWorkerProtocolError(hostFunction);
+  };
 }
 
 /** Generated Worker entrypoint that contains guest execution and host RPC. */
@@ -324,65 +316,18 @@ export default class RunExecutor extends WorkerEntrypoint {
     });
 
     let nextHostFunctionCallId = 1;
+    const allocateCallId = (): number => nextHostFunctionCallId++;
     const hostNamespaces = manifest.map(({ namespace, functions }) =>
       Object.freeze(
         Object.fromEntries(
           functions.map((functionName) => [
             functionName,
-            async (...args: unknown[]): Promise<unknown> => {
-              const hostFunction = `${namespace}.${functionName}`;
-              const parsedArguments = parseRunData(
-                args,
-                "hostFunction.arguments"
-              );
-              if (parsedArguments.status === "rejected") {
-                throw new RunSerializationError(
-                  parsedArguments.path,
-                  hostFunction
-                );
-              }
-
-              const callId = nextHostFunctionCallId++;
-              let responsePromise: Promise<RunHostFunctionResponse>;
-              try {
-                responsePromise = dispatcher.callHostFunction(
-                  callId,
-                  namespace,
-                  functionName,
-                  parsedArguments.value
-                );
-              } catch {
-                throw new RunSerializationError(
-                  "hostFunction.arguments",
-                  hostFunction
-                );
-              }
-
-              let response: RunHostFunctionResponse;
-              try {
-                response = await responsePromise;
-              } catch {
-                throw new RunSerializationError(
-                  "hostFunction.result",
-                  hostFunction
-                );
-              }
-              if (response.status === "completed") return response.value;
-              if (response.status === "serializationFailed") {
-                throw new RunSerializationError(
-                  "hostFunction.result",
-                  hostFunction
-                );
-              }
-              if (
-                response.status === "failed" &&
-                runNumberIsSafeInteger(response.failureId) &&
-                response.failureId === callId
-              ) {
-                throw new RunHostFunctionError(response.failureId);
-              }
-              throw new RunWorkerProtocolError(hostFunction);
-            }
+            createRunHostFunctionStub(
+              dispatcher,
+              namespace,
+              functionName,
+              allocateCallId
+            )
           ])
         )
       )
@@ -407,9 +352,3 @@ export default class RunExecutor extends WorkerEntrypoint {
 
 /** Imported by the executor prefix after this checked module is emitted. */
 declare function __runUser__(...hostNamespaces: object[]): Promise<unknown>;
-
-/** Defined by the checked run-data prefix embedded before this module. */
-declare function parseRunData<Value, Path extends RunDataPath>(
-  value: Value,
-  path: Path
-): RunDataParseResult<Value, Path>;

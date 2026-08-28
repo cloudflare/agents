@@ -1,24 +1,7 @@
+import { truncateRunUtf8 } from "./run-utf8";
 import type { RunErrorCode, RunErrorDetails, RunLog } from "./run-types";
 
 const RUN_ERROR_DETAIL_MAX_BYTES = 256;
-const runErrorTextEncoder = new TextEncoder();
-const runErrorTextDecoder = new TextDecoder("utf-8", { fatal: true });
-
-function boundRunErrorDetail(value: string): string {
-  const bytes = runErrorTextEncoder.encode(value);
-  if (bytes.length <= RUN_ERROR_DETAIL_MAX_BYTES) return value;
-
-  const suffix = "…";
-  const suffixBytes = runErrorTextEncoder.encode(suffix).length;
-  for (let end = RUN_ERROR_DETAIL_MAX_BYTES - suffixBytes; end >= 0; end--) {
-    try {
-      return runErrorTextDecoder.decode(bytes.subarray(0, end)) + suffix;
-    } catch {
-      // Continue to the preceding complete UTF-8 boundary.
-    }
-  }
-  return suffix;
-}
 
 function createBoundedRunErrorDetails(
   details: RunErrorDetails
@@ -26,10 +9,15 @@ function createBoundedRunErrorDetails(
   return Object.freeze({
     ...(details.path === undefined
       ? {}
-      : { path: boundRunErrorDetail(details.path) }),
+      : { path: truncateRunUtf8(details.path, RUN_ERROR_DETAIL_MAX_BYTES) }),
     ...(details.hostFunction === undefined
       ? {}
-      : { hostFunction: boundRunErrorDetail(details.hostFunction) }),
+      : {
+          hostFunction: truncateRunUtf8(
+            details.hostFunction,
+            RUN_ERROR_DETAIL_MAX_BYTES
+          )
+        }),
     ...(details.limit === undefined ? {} : { limit: details.limit }),
     ...(details.observed === undefined ? {} : { observed: details.observed }),
     ...(details.allowed === undefined ? {} : { allowed: details.allowed })

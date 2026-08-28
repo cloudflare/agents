@@ -30,47 +30,49 @@ interface RunWorkerErrorDiagnostic {
   readonly stack?: string;
 }
 
+/** Valid machine-readable field combinations for one generated Worker error. */
+export type RunWorkerErrorClassification =
+  | {
+      readonly code?: undefined;
+      readonly path?: never;
+      readonly hostFunction?: never;
+      readonly hostFailureId?: never;
+    }
+  | {
+      readonly code: "RUN_HOST_FUNCTION_ERROR";
+      readonly hostFailureId: number;
+      readonly path?: never;
+      readonly hostFunction?: never;
+    }
+  | {
+      readonly code: "RUN_INVALID_INPUT";
+      readonly path: "hostFunctions.namespace";
+      readonly hostFunction?: never;
+      readonly hostFailureId?: never;
+    }
+  | ({
+      readonly code: "RUN_SERIALIZATION_ERROR";
+      readonly hostFailureId?: never;
+    } & (
+      | {
+          readonly path: "result";
+          readonly hostFunction?: never;
+        }
+      | {
+          readonly path: "hostFunction.arguments" | "hostFunction.result";
+          readonly hostFunction: string;
+        }
+    ))
+  | {
+      readonly code: "RUN_WORKER_ERROR";
+      readonly hostFunction?: string;
+      readonly path?: never;
+      readonly hostFailureId?: never;
+    };
+
 /** Diagnostic returned by the generated Worker with valid fields for its code. */
 export type RunWorkerErrorRecord = RunWorkerErrorDiagnostic &
-  (
-    | {
-        readonly code?: undefined;
-        readonly path?: never;
-        readonly hostFunction?: never;
-        readonly hostFailureId?: never;
-      }
-    | {
-        readonly code: "RUN_HOST_FUNCTION_ERROR";
-        readonly hostFailureId: number;
-        readonly path?: never;
-        readonly hostFunction?: never;
-      }
-    | {
-        readonly code: "RUN_INVALID_INPUT";
-        readonly path: "hostFunctions.namespace";
-        readonly hostFunction?: never;
-        readonly hostFailureId?: never;
-      }
-    | ({
-        readonly code: "RUN_SERIALIZATION_ERROR";
-        readonly hostFailureId?: never;
-      } & (
-        | {
-            readonly path: "result";
-            readonly hostFunction?: never;
-          }
-        | {
-            readonly path: "hostFunction.arguments" | "hostFunction.result";
-            readonly hostFunction: string;
-          }
-      ))
-    | {
-        readonly code: "RUN_WORKER_ERROR";
-        readonly hostFunction?: string;
-        readonly path?: never;
-        readonly hostFailureId?: never;
-      }
-  );
+  RunWorkerErrorClassification;
 
 /** Terminal data-only response from the generated Worker. */
 export type RunWorkerResponse =

@@ -5,7 +5,10 @@ import type {
   RunWorkerResponse
 } from "./dynamic-worker-protocol";
 import { createRunHostFunctionDispatch } from "./host-function-dispatch";
-import type { RunHostFunctionDispatcher } from "./host-function-dispatch";
+import type {
+  RunHostFunctionDispatcher,
+  TakeRunHostFunctionFailure
+} from "./host-function-dispatch";
 import { RunError } from "./run-error";
 import type { RunLog, RunOptions, RunResult } from "./run-types";
 
@@ -192,13 +195,11 @@ function createRunWorkerError(cause: unknown): RunError {
 
 function createRunExecutionError(
   response: Extract<RunWorkerResponse, { status: "failed" }>,
-  dispatcher: RunHostFunctionDispatcher
+  takeHostFunctionFailure: TakeRunHostFunctionFailure
 ): RunError {
   let error: RunError;
   if (response.error.code === "RUN_HOST_FUNCTION_ERROR") {
-    const failure = dispatcher.takeHostFunctionFailure(
-      response.error.hostFailureId
-    );
+    const failure = takeHostFunctionFailure(response.error.hostFailureId);
     if (failure.status === "missing") {
       return new RunError("Dynamic Worker returned an unknown host failure.", {
         code: "RUN_WORKER_ERROR",
@@ -252,9 +253,11 @@ export async function run<Output = unknown>(
 ): Promise<RunResult<Output>> {
   const configuredHostFunctions =
     options.hostFunctions === undefined ? {} : options.hostFunctions;
-  const { dispatcher, manifest: hostManifest } = createRunHostFunctionDispatch(
-    configuredHostFunctions
-  );
+  const {
+    dispatcher,
+    manifest: hostManifest,
+    takeHostFunctionFailure
+  } = createRunHostFunctionDispatch(configuredHostFunctions);
 
   let worker: WorkerStub;
   try {
@@ -306,7 +309,7 @@ export async function run<Output = unknown>(
         });
       }
       if (response.status === "failed") {
-        throw createRunExecutionError(response, dispatcher);
+        throw createRunExecutionError(response, takeHostFunctionFailure);
       }
 
       // SAFETY: Output is explicitly a caller assertion; Workers RPC supplied the runtime value.

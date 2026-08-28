@@ -12,9 +12,9 @@ export type RunDataParseResult<
   | { readonly status: "accepted"; readonly value: Value }
   | { readonly status: "rejected"; readonly path: Path };
 
-const runDataArrayIsArray = Array.isArray;
+const runArrayIsArray = Array.isArray;
 const runArrayPop = Array.prototype.pop;
-const runDataArrayPush = Array.prototype.push;
+const runArrayPush = Array.prototype.push;
 const runArrayPrototype = Array.prototype;
 const runArrayBufferPrototype = ArrayBuffer.prototype;
 const runDataViewPrototype = DataView.prototype;
@@ -26,7 +26,7 @@ const runNumber = Number;
 const runNumberIsInteger = Number.isInteger;
 const runObjectHasOwn = Object.hasOwn;
 const runObjectPrototype = Object.prototype;
-const runDataReflectApply = Reflect.apply;
+const runReflectApply = Reflect.apply;
 const runReflectGet = Reflect.get;
 const runReflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
 const runReflectGetPrototypeOf = Reflect.getPrototypeOf;
@@ -36,8 +36,8 @@ const runSetAdd = Set.prototype.add;
 const runSetForEach = Set.prototype.forEach;
 const runSetHas = Set.prototype.has;
 const runSetPrototype = Set.prototype;
-const runDataString = String;
-const RunDataWeakSet = WeakSet;
+const runString = String;
+const RunWeakSet = WeakSet;
 const runStructuredClone = structuredClone;
 const runWeakSetAdd = WeakSet.prototype.add;
 const runWeakSetHas = WeakSet.prototype.has;
@@ -55,22 +55,20 @@ const runTypedArrayPrototypes = new Set<object>([
   BigInt64Array.prototype,
   BigUint64Array.prototype
 ]);
-const runFloat16ArrayConstructor = runDataReflectApply(
-  runReflectGet,
-  undefined,
-  [globalThis, "Float16Array"]
-);
+const runFloat16ArrayConstructor = runReflectApply(runReflectGet, undefined, [
+  globalThis,
+  "Float16Array"
+]);
 if (typeof runFloat16ArrayConstructor === "function") {
-  const runFloat16ArrayPrototype = runDataReflectApply(
-    runReflectGet,
-    undefined,
-    [runFloat16ArrayConstructor, "prototype"]
-  );
+  const runFloat16ArrayPrototype = runReflectApply(runReflectGet, undefined, [
+    runFloat16ArrayConstructor,
+    "prototype"
+  ]);
   if (
     typeof runFloat16ArrayPrototype === "object" &&
     runFloat16ArrayPrototype !== null
   ) {
-    runDataReflectApply(runSetAdd, runTypedArrayPrototypes, [
+    runReflectApply(runSetAdd, runTypedArrayPrototypes, [
       runFloat16ArrayPrototype
     ]);
   }
@@ -115,24 +113,23 @@ const runTypedArrayLengthGetter = getRunIntrinsicGetter(
 );
 
 function pushRunDataValue(values: unknown[], value: unknown): void {
-  runDataReflectApply(runDataArrayPush, values, [value]);
+  runReflectApply(runArrayPush, values, [value]);
 }
 
 function popRunDataValue(values: unknown[]): unknown {
-  return runDataReflectApply(runArrayPop, values, []);
+  return runReflectApply(runArrayPop, values, []);
 }
 
 function hasSeenRunDataValue(seen: WeakSet<object>, value: object): boolean {
-  return runDataReflectApply(runWeakSetHas, seen, [value]);
+  return runReflectApply(runWeakSetHas, seen, [value]);
 }
 
 function markRunDataValueSeen(seen: WeakSet<object>, value: object): void {
-  runDataReflectApply(runWeakSetAdd, seen, [value]);
+  runReflectApply(runWeakSetAdd, seen, [value]);
 }
 
-function hasEnumerableInheritedRunDataProperty(
-  prototype: object | null
-): boolean {
+/** Report whether any prototype in the chain exposes an enumerable property. */
+function hasEnumerableInheritedProperty(prototype: object | null): boolean {
   for (
     let current = prototype;
     current !== null;
@@ -173,7 +170,7 @@ function isRunArrayIndex(property: string, length: number): boolean {
     runNumberIsInteger(index) &&
     index >= 0 &&
     index < length &&
-    runDataString(index) === property
+    runString(index) === property
   );
 }
 
@@ -226,7 +223,7 @@ function hasOnlyRunRegExpState(value: object): boolean {
 }
 
 function appendRunTypedArrayValues(value: object, values: unknown[]): boolean {
-  const length = runDataReflectApply(runTypedArrayLengthGetter, value, []);
+  const length = runReflectApply(runTypedArrayLengthGetter, value, []);
   if (typeof length !== "number") return false;
 
   for (const property of runReflectOwnKeys(value)) {
@@ -245,7 +242,7 @@ function appendRunTypedArrayValues(value: object, values: unknown[]): boolean {
   }
   pushRunDataValue(
     values,
-    runDataReflectApply(runTypedArrayBufferGetter, value, [])
+    runReflectApply(runTypedArrayBufferGetter, value, [])
   );
   return true;
 }
@@ -256,7 +253,7 @@ function parseRunData<Value, Path extends RunDataPath>(
   path: Path
 ): RunDataParseResult<Value, Path> {
   const values = [value];
-  const seen = new RunDataWeakSet<object>();
+  const seen = new RunWeakSet<object>();
   let requiresNullPrototypeClone = false;
 
   try {
@@ -277,7 +274,7 @@ function parseRunData<Value, Path extends RunDataPath>(
       markRunDataValueSeen(seen, current);
 
       const prototype = runReflectGetPrototypeOf(current);
-      if (hasEnumerableInheritedRunDataProperty(prototype)) {
+      if (hasEnumerableInheritedProperty(prototype)) {
         return { status: "rejected", path };
       }
       if (prototype === null || prototype === runObjectPrototype) {
@@ -287,7 +284,7 @@ function parseRunData<Value, Path extends RunDataPath>(
         requiresNullPrototypeClone ||= prototype === null;
         continue;
       }
-      if (runDataArrayIsArray(current)) {
+      if (runArrayIsArray(current)) {
         if (
           prototype !== runArrayPrototype ||
           !appendRunArrayValues(current, values)
@@ -300,21 +297,21 @@ function parseRunData<Value, Path extends RunDataPath>(
         if (!hasNoRunDataOwnProperties(current)) {
           return { status: "rejected", path };
         }
-        runDataReflectApply(runDateGetTime, current, []);
+        runReflectApply(runDateGetTime, current, []);
         continue;
       }
       if (prototype === runRegExpPrototype) {
         if (!hasOnlyRunRegExpState(current)) {
           return { status: "rejected", path };
         }
-        runDataReflectApply(runRegExpSourceGetter, current, []);
+        runReflectApply(runRegExpSourceGetter, current, []);
         continue;
       }
       if (prototype === runMapPrototype) {
         if (!hasNoRunDataOwnProperties(current)) {
           return { status: "rejected", path };
         }
-        runDataReflectApply(runMapForEach, current, [
+        runReflectApply(runMapForEach, current, [
           (entryValue: unknown, entryKey: unknown) => {
             pushRunDataValue(values, entryKey);
             pushRunDataValue(values, entryValue);
@@ -326,7 +323,7 @@ function parseRunData<Value, Path extends RunDataPath>(
         if (!hasNoRunDataOwnProperties(current)) {
           return { status: "rejected", path };
         }
-        runDataReflectApply(runSetForEach, current, [
+        runReflectApply(runSetForEach, current, [
           (entryValue: unknown) => pushRunDataValue(values, entryValue)
         ]);
         continue;
@@ -335,7 +332,7 @@ function parseRunData<Value, Path extends RunDataPath>(
         if (!hasNoRunDataOwnProperties(current)) {
           return { status: "rejected", path };
         }
-        runDataReflectApply(runArrayBufferByteLengthGetter, current, []);
+        runReflectApply(runArrayBufferByteLengthGetter, current, []);
         continue;
       }
       if (prototype === runDataViewPrototype) {
@@ -344,13 +341,11 @@ function parseRunData<Value, Path extends RunDataPath>(
         }
         pushRunDataValue(
           values,
-          runDataReflectApply(runDataViewBufferGetter, current, [])
+          runReflectApply(runDataViewBufferGetter, current, [])
         );
         continue;
       }
-      if (
-        runDataReflectApply(runSetHas, runTypedArrayPrototypes, [prototype])
-      ) {
+      if (runReflectApply(runSetHas, runTypedArrayPrototypes, [prototype])) {
         if (!appendRunTypedArrayValues(current, values)) {
           return { status: "rejected", path };
         }
@@ -364,9 +359,7 @@ function parseRunData<Value, Path extends RunDataPath>(
       return {
         status: "accepted",
         // SAFETY: Native structured clone preserves the accepted graph's value types.
-        value: runDataReflectApply(runStructuredClone, undefined, [
-          value
-        ]) as Value
+        value: runReflectApply(runStructuredClone, undefined, [value]) as Value
       };
     }
     return { status: "accepted", value };
@@ -375,4 +368,4 @@ function parseRunData<Value, Path extends RunDataPath>(
   }
 }
 
-export { parseRunData };
+export { hasEnumerableInheritedProperty, parseRunData };
