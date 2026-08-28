@@ -4116,7 +4116,7 @@ importers:
         version: 13.0.6
       just-bash:
         specifier: ^3.0.2
-        version: 3.0.2(supports-color@7.2.0)
+        version: 3.0.2
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4213,9 +4213,15 @@ importers:
 
   packages/run:
     dependencies:
+      '@cloudflare/worker-bundler':
+        specifier: workspace:*
+        version: link:../worker-bundler
       acorn:
         specifier: ^8.17.0
         version: 8.17.0
+      es-module-lexer:
+        specifier: ^2.2.0
+        version: 2.2.0
 
   packages/shell:
     dependencies:
@@ -4252,7 +4258,7 @@ importers:
         version: 4.31.0(ai@7.0.18(zod@4.4.3))(zod@4.4.3)
       just-bash:
         specifier: ^3.0.2
-        version: 3.0.2(supports-color@7.2.0)
+        version: 3.0.2
       workers-ai-provider:
         specifier: ^4.0.0
         version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
@@ -13511,7 +13517,7 @@ snapshots:
       cjs-module-lexer: 1.2.3
       esbuild: 0.28.1
       miniflare: 4.20260730.0
-      vitest: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.2.0)(@vitest/browser-playwright@4.1.10)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.2.0)(typescript@6.0.3))(vite@8.1.0(@types/node@26.2.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      vitest: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.0.1)(@vitest/browser-playwright@4.1.10)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.0.1)(typescript@6.0.3))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       wrangler: 4.116.0(@cloudflare/workers-types@5.20260812.1)
       zod: 3.25.76
     transitivePeerDependencies:
@@ -13573,7 +13579,7 @@ snapshots:
   '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@98b74eb(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)':
     dependencies:
       capnweb: 0.8.0
-      just-bash: 3.0.2(supports-color@7.2.0)
+      just-bash: 3.0.2
     optionalDependencies:
       '@platformatic/vfs': 0.4.0
       diff: 9.0.0
@@ -15453,7 +15459,7 @@ snapshots:
       '@types/react': 19.2.17
       '@types/react-dom': 19.2.3(@types/react@19.2.17)
 
-  '@tokenizer/inflate@0.4.1(supports-color@7.2.0)':
+  '@tokenizer/inflate@0.4.1':
     dependencies:
       debug: 4.4.3(supports-color@7.2.0)
       token-types: 6.1.2
@@ -17261,9 +17267,9 @@ snapshots:
       token-types: 6.1.2
       uint8array-extras: 1.5.0
 
-  file-type@21.3.4(supports-color@7.2.0):
+  file-type@21.3.4:
     dependencies:
-      '@tokenizer/inflate': 0.4.1(supports-color@7.2.0)
+      '@tokenizer/inflate': 0.4.1
       strtok3: 10.3.5
       token-types: 6.1.2
       uint8array-extras: 1.5.0
@@ -17910,11 +17916,11 @@ snapshots:
     optionalDependencies:
       graceful-fs: 4.2.11
 
-  just-bash@3.0.2(supports-color@7.2.0):
+  just-bash@3.0.2:
     dependencies:
       diff: 8.0.4
       fast-xml-parser: 5.9.3
-      file-type: 21.3.4(supports-color@7.2.0)
+      file-type: 21.3.4
       ini: 6.0.0
       minimatch: 10.2.5
       modern-tar: 0.7.6

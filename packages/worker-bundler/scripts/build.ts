@@ -29,6 +29,23 @@ async function main() {
       platform: "browser"
     });
 
+    // The transform subpath builds alone so its artifact stays self-contained
+    // and tree-shaken: no resolver, installer, esbuild, or language-service
+    // code may reach consumers that import only the transform.
+    await build({
+      clean: false,
+      dts: true,
+      entry: ["src/transform.ts"],
+      deps: {
+        skipNodeModulesBundle: true,
+        neverBundle: ["cloudflare:workers", "./esbuild.wasm"]
+      },
+      format: "esm",
+      sourcemap: true,
+      fixedExtension: false,
+      platform: "browser"
+    });
+
     // Copy esbuild.wasm from esbuild-wasm package into dist/
     const possiblePaths = [
       join(packageRoot, "node_modules/esbuild-wasm/esbuild.wasm"),

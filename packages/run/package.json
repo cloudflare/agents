@@ -11,7 +11,9 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "acorn": "^8.17.0"
+    "@cloudflare/worker-bundler": "workspace:*",
+    "acorn": "^8.17.0",
+    "es-module-lexer": "^2.2.0"
   },
   "types": "dist/index.d.ts",
   "exports": {

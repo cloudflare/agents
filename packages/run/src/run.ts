@@ -13,6 +13,7 @@ import type {
 import { RunError } from "./run-error";
 import { parseRunLimits } from "./run-limits";
 import type { RunResolvedLimits } from "./run-limits";
+import { rewriteRunStack } from "./run-source";
 import type { RunLog, RunOptions, RunResult } from "./run-types";
 
 const RUN_CHILD_COMPATIBILITY_DATE = "2026-08-27";
@@ -303,7 +304,9 @@ function createRunExecutionError(
     );
   }
 
-  if (response.error.stack !== undefined) error.stack = response.error.stack;
+  if (response.error.stack !== undefined) {
+    error.stack = rewriteRunStack(response.error.stack);
+  }
   return error;
 }
 
@@ -436,6 +439,8 @@ export async function run<Output = unknown>(
   try {
     modules = createDynamicWorkerModules(source, hostManifest);
   } catch (cause: unknown) {
+    // Compile failures arrive pre-classified; anything else is unexpected.
+    if (cause instanceof RunError) throw cause;
     throw createRunWorkerError(cause);
   }
 

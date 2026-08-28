@@ -19,6 +19,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./transform": {
+      "types": "./dist/transform.d.ts",
+      "import": "./dist/transform.js"
+    },
     "./typescript": {
       "types": "./dist/typescript.d.ts",
       "import": "./dist/typescript.js"
