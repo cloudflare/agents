@@ -19,8 +19,7 @@ import type {
 } from "../lifecycle/job-queue";
 import {
   isDurableObjectCodeUpdateReset,
-  isDurableObjectMemoryLimitReset,
-  isPlatformTransientError,
+  isPlatformFailure,
   tryN,
   validateRetryOptions
 } from "../retries";
@@ -310,11 +309,7 @@ export class Scheduler<
           } satisfies SchedulerRouteMessage
         );
       } catch (error) {
-        if (
-          isDurableObjectCodeUpdateReset(error) ||
-          isDurableObjectMemoryLimitReset(error) ||
-          isPlatformTransientError(error)
-        ) {
+        if (isPlatformFailure(error)) {
           // Preserve the job; Lifecycle defers platform-class failures to a
           // fresh invocation or the memory-limit breaker.
           throw error;
@@ -481,12 +476,7 @@ export class Scheduler<
         }
       );
     } catch (error) {
-      if (
-        isOneShot &&
-        (isDurableObjectCodeUpdateReset(error) ||
-          isPlatformTransientError(error) ||
-          isDurableObjectMemoryLimitReset(error))
-      ) {
+      if (isOneShot && isPlatformFailure(error)) {
         throw error;
       }
       console.error(

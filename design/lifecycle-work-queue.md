@@ -90,6 +90,11 @@ due jobs are driven. Host `getNextAlarm()` is removed.
 
 ## The event loop
 
+The loop lives in its own module: `lifecycle/job-queue.ts` holds the pure
+SQL queue, `lifecycle/job-driver.ts` holds the drive policy (`JobDriver`),
+and `Lifecycle` wires them to the host and capabilities through the narrow
+`JobDriverOptions` contract while keeping only the alarm entry point.
+
 `Lifecycle.alarm()`:
 
 1. Ensure startup.

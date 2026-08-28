@@ -120,7 +120,8 @@ export type JobStorageRow = {
   created_at: number;
 };
 
-function rowToJob(row: JobStorageRow): LifecycleJob {
+/** @internal Convert one raw queue row into its public job shape. */
+export function jobFromRow(row: JobStorageRow): LifecycleJob {
   return {
     id: row.id,
     capability: row.capability,
@@ -262,14 +263,14 @@ export class JobQueue {
       id,
       capability
     );
-    return rows[0] ? rowToJob(rows[0]) : undefined;
+    return rows[0] ? jobFromRow(rows[0]) : undefined;
   }
 
   list(capability: string): LifecycleJob[] {
     return this.#sql(
       "SELECT * FROM cf_agents_jobs WHERE capability = ? ORDER BY time ASC",
       capability
-    ).map(rowToJob);
+    ).map(jobFromRow);
   }
 
   /** Raw due rows at `nowMs`, ordered by due time. */
