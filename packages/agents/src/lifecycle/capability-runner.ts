@@ -1,19 +1,9 @@
 import { lifecycleCapabilityId } from "./capability";
 import type { LifecycleRouteContext } from "./capability";
 import type { WSMessage } from "./types";
+import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 
 type MaybePromise<T> = T | Promise<T>;
-
-/** One capability's requested physical alarm. */
-export type AlarmContribution =
-  | number
-  | {
-      /** Epoch time in milliseconds. */
-      readonly time: number;
-      /** Ignore ordinary wake-time candidates while this request exists. */
-      readonly exclusive: true;
-    }
-  | null;
 
 /** One best-effort event published by a Lifecycle capability. */
 export type LifecycleEvent = {
@@ -73,9 +63,9 @@ export type CapabilityWebSocketUpgradeContext = {
  *   consume one. Socket ownership is the capability's to determine —
  *   keep a private hibernation-attachment namespace and recognize your
  *   own sockets by it.
- * - `onRoute` is addressed to one capability by its id; `getNextAlarm`
- *   contributions are merged, with Lifecycle owning the one physical
- *   alarm.
+ * - `onRoute` is addressed to one capability by its id; `onJob` is
+ *   addressed by the due job's owning capability, with Lifecycle owning
+ *   the queue and the one physical alarm.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -130,14 +120,27 @@ export interface DurableObjectCapability<Props extends object = object> {
     error: unknown
   ): MaybePromise<boolean | void>;
 
-  /** Run work assigned to the capability when the host's alarm fires. */
-  onAlarm?(): MaybePromise<void>;
+  /**
+   * Drive one due job this capability pushed into the Lifecycle queue.
+   * Return an outcome to reschedule or retain the job; returning nothing
+   * completes it.
+   */
+  onJob?(
+    context: LifecycleJobContext
+  ): MaybePromise<LifecycleJobOutcome | void>;
+
+  /**
+   * Observe one job's terminal application failure after retry exhaustion.
+   * The returned outcome decides advancement; returning nothing completes
+   * the job.
+   */
+  onJobError?(
+    context: LifecycleJobContext,
+    error: unknown
+  ): MaybePromise<LifecycleJobOutcome | void>;
 
   /** Handle one message routed to this capability identity. */
   onRoute?(context: LifecycleRouteContext): MaybePromise<unknown>;
-
-  /** Return this capability's next requested physical alarm. */
-  getNextAlarm?(): MaybePromise<AlarmContribution>;
 
   /** Release live or in-memory resources during explicit host destruction. */
   dispose?(): MaybePromise<void>;
@@ -147,7 +150,7 @@ export interface DurableObjectCapability<Props extends object = object> {
  * Runs ordered lifecycle phases for capabilities installed in a Durable Object.
  *
  * Capabilities are resolved lazily on the first phase and retained for the
- * lifetime of this runner. Startup and alarms run in declaration order.
+ * lifetime of this runner. Startup runs in declaration order.
  * Requests dispatch as a middleware chain: the first capability to return a
  * response handles the request.
  */
@@ -280,15 +283,14 @@ export class CapabilityRunner<Props extends object = object> {
     return false;
   }
 
-  /** Return alarm requests from every installed capability. */
-  async getAlarmContributions(): Promise<AlarmContribution[]> {
-    await this.#ensureReady("contribute an alarm");
-    const contributions: AlarmContribution[] = [];
-    for (const capability of this.#getCapabilities()) {
-      const contribution = await capability.getNextAlarm?.();
-      if (contribution !== undefined) contributions.push(contribution);
-    }
-    return contributions;
+  /** Find one installed capability by its stable id. */
+  async findById(
+    capabilityId: string
+  ): Promise<DurableObjectCapability<Props> | undefined> {
+    await this.#ensureReady("dispatch capability work");
+    return this.#getCapabilities().find(
+      (candidate) => lifecycleCapabilityId(candidate) === capabilityId
+    );
   }
 
   /** Route one message to an installed named capability. */
@@ -316,14 +318,6 @@ export class CapabilityRunner<Props extends object = object> {
       } catch (error) {
         console.error("Lifecycle capability disposal failed", error);
       }
-    }
-  }
-
-  /** Run every capability's alarm hook in declaration order. */
-  async alarm(): Promise<void> {
-    await this.#ensureReady("handle an alarm");
-    for (const capability of this.#getCapabilities()) {
-      await capability.onAlarm?.();
     }
   }
 

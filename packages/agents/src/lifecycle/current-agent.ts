@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DurableObject } from "cloudflare:workers";
 
-import type { AlarmContribution } from "./capability-runner";
 import type { Lifecycle } from "./durable-object-lifecycle";
 import type { Connection } from "./types";
+import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 
 /**
  * A Durable Object that has installed the Agents SDK Lifecycle.
@@ -21,7 +21,13 @@ export interface LifecycleObject<
   onStart?(props?: Props): void | Promise<void>;
   onRequest?(request: Request): Response | Promise<Response>;
   onAlarm?(): void | Promise<void>;
-  getNextAlarm?(): AlarmContribution | Promise<AlarmContribution>;
+  onJob?(
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void>;
+  onAlarmMemoryLimit?(context: {
+    readonly sealed: boolean;
+    readonly nextTime?: number;
+  }): void | Promise<void>;
 }
 
 /** Values associated with the currently executing Lifecycle host. */

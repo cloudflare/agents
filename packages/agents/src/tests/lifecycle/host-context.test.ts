@@ -30,10 +30,11 @@ describe("Lifecycle host context", () => {
       { hostName: name, phase: "alarm", requestUrl: null }
     ];
     expect(await stub.getHostContextEvents()).toEqual(alarmContexts);
+    // Capability job context (outside ambient host context) is proven by
+    // ../lifecycle/alarm-arbitration.test.ts through getJobContexts().
     expect(await stub.getCapabilityContextEvents()).toEqual([
       { hasCurrentHost: false, phase: "start" },
-      { hasCurrentHost: false, phase: "request" },
-      { hasCurrentHost: false, phase: "alarm" }
+      { hasCurrentHost: false, phase: "request" }
     ]);
   });
 

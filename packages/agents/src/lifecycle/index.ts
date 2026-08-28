@@ -5,7 +5,6 @@
  */
 export {
   LifecycleCapability,
-  type LifecycleAlarms,
   type LifecycleEvents,
   type LifecycleRouteAddress,
   type LifecycleRouteContext,
@@ -21,7 +20,11 @@ export {
 } from "./current-agent";
 export {
   Lifecycle,
-  type AlarmContribution,
+  type LifecycleJobContext,
+  type LifecycleJobs,
+  type LifecycleJob,
+  type LifecycleJobOutcome,
+  type LifecycleJobPushOptions,
   type Connection,
   type ConnectionContext,
   type ConnectionSetStateFn,

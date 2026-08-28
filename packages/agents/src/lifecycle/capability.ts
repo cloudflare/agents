@@ -3,6 +3,7 @@ import type {
   DurableObjectCapability
 } from "./capability-runner";
 import type { Connection } from "./types";
+import type { LifecycleJobs } from "./job-queue";
 
 /** Opaque address understood by a Lifecycle routing transport. */
 export type LifecycleRouteAddress = {
@@ -18,17 +19,6 @@ export type LifecycleRouteContext = {
   readonly source: LifecycleRouteAddress | undefined;
   /** Capability-owned message payload. */
   readonly payload: unknown;
-};
-
-/** Alarm coordination available to every Lifecycle capability. */
-export type LifecycleAlarms = {
-  /** Recompute the physical alarm from installed capability state. */
-  readonly rearm: () => Promise<void>;
-  /**
-   * True once explicit host teardown permanently disabled alarm arming.
-   * Capabilities stop dispatching durable work when this reports true.
-   */
-  readonly disabled: () => boolean;
 };
 
 /** Best-effort telemetry available to every Lifecycle capability. */
@@ -85,7 +75,12 @@ export type LifecycleServices = {
   readonly ready: () => Promise<void>;
   /** True while capability and host startup hooks are still running. */
   readonly starting: () => boolean;
-  readonly alarms: LifecycleAlarms;
+  /**
+   * This capability's scoped access to the Lifecycle-owned work queue.
+   * Pushed items are dispatched to `onJob` when due; every queue mutation
+   * re-arms the physical alarm automatically.
+   */
+  readonly jobs: LifecycleJobs;
   /**
    * Run a capability-held user callback inside the host invocation context.
    * Capability hooks run outside host context; this is the one boundary for

@@ -887,9 +887,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
    */
   async testFireDueCleanupAlarm(): Promise<void> {
     this.sql`
-      update cf_agents_schedules
-      set time = ${Math.floor(Date.now() / 1000) - 1}
-      where callback = '_cleanupStreamBuffers'
+      update cf_agents_jobs
+      set time = ${Date.now() - 1_000}
+      where capability = 'scheduler' and fn = '_cleanupStreamBuffers'
     `;
     await this.alarm();
   }
@@ -2685,8 +2685,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -2702,8 +2702,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -2752,8 +2752,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   getScheduleCountForCallback(callback: string): number {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules
-      WHERE callback = ${callback}
+      SELECT COUNT(*) as count FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
     `;
     return rows[0]?.count ?? 0;
   }

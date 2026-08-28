@@ -47,16 +47,19 @@ import {
   exports as workerExports
 } from "cloudflare:workers";
 import {
-  type AlarmContribution,
+  type LifecycleJobContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
+  type LifecycleJobOutcome,
+  setLifecycleAlarmMemoryLimitStrikes,
   setLifecycleEventSink,
   setLifecycleHostInvoker,
   setLifecycleRouteTransport,
   type LifecycleRouteEnvelope,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
+import { abortWithoutAlarmRetry } from "./lifecycle/abort";
 import type { LifecycleRouteAddress } from "./lifecycle/capability";
 import {
   getCurrentAgent as getCurrentLifecycleAgent,
@@ -77,7 +80,6 @@ import { SqlError } from "./sql-error";
 import {
   type RetryOptions,
   tryN,
-  isDurableObjectMemoryLimitReset,
   isErrorRetryable,
   validateRetryOptions
 } from "./retries";
@@ -123,11 +125,7 @@ import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
-import {
-  ensureScheduleTable,
-  Scheduler,
-  setSchedulerCallbackResolver
-} from "./schedules/scheduler";
+import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
@@ -964,13 +962,18 @@ const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 // next wake must complete instead of resuming normal work.
 //
 // Scope: the marker is only consulted on alarm-driven paths (`alarm()` and
-// `_rearmAlarm()`). It deliberately does NOT gate request entrypoints
+// `_syncHostJobs()`). It deliberately does NOT gate request entrypoints
 // (`onRequest`/`onMessage`/RPC) — a request that lands between scheduling and
 // the teardown alarm runs normally and `_ensureSchema()` recreates tables. For
 // the MCP session-DELETE use case this is benign: the session id is unique and
 // is never addressed again after DELETE, so no further request reaches a
 // condemned session DO before its teardown alarm fires.
 const DESTROY_PENDING_KEY = "cf_agents_destroy_pending";
+
+// Stable ids for Agent-owned host jobs in the Lifecycle job queue.
+const HOST_JOB_KEEP_ALIVE_ID = "cf:keep-alive";
+const HOST_JOB_HOUSEKEEPING_ID = "cf:housekeeping";
+const HOST_JOB_DESTROY_ID = "cf:destroy";
 // Delay before the deferred-teardown alarm fires (#1625). `_cf_scheduleDestroy`
 // is awaited by an HTTP handler (the MCP session-DELETE) that then returns its
 // response. The teardown alarm runs `destroy()`, which ends in
@@ -1667,7 +1670,7 @@ export class Agent<
   private _warnedChatRecoveryInOnStart = false;
 
   /**
-   * Number of active keepAlive() callers. When > 0, `_rearmAlarm()`
+   * Number of active keepAlive() callers. When > 0, `_syncHostJobs()`
    * caps the next alarm at `keepAliveIntervalMs` so the DO stays alive.
    * Purely in-memory — lost on eviction, which is correct because the
    * in-memory work keepAlive was protecting is also lost.
@@ -2063,11 +2066,6 @@ export class Agent<
         STATE_WAS_CHANGED
       );
 
-      // The Scheduler capability owns this table, but a brand-new Agent must
-      // expose it synchronously from construction (pre-Scheduler behavior);
-      // Scheduler.onStart applies the same idempotent migration later.
-      ensureScheduleTable(this.ctx.storage);
-
       // v3: durable fibers table for runFiber
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_runs (
@@ -2278,6 +2276,11 @@ export class Agent<
       )
     );
 
+    setLifecycleAlarmMemoryLimitStrikes(
+      this.lifecycle,
+      this._resolvedOptions.maxAlarmMemoryLimitStrikes
+    );
+
     this.scheduler = new Scheduler({
       retry: this._resolvedOptions.retry,
       hungScheduleTimeoutSeconds:
@@ -2415,6 +2418,10 @@ export class Agent<
       await _onAlarm();
       if (this._destroyed) return;
       await this._onAlarmHousekeeping();
+      // Housekeeping scans change fiber/facet/keep-alive state; refresh the
+      // host jobs that guarantee their wakes before Lifecycle re-arms.
+      if (this._destroyed) return;
+      await this._syncHostJobs();
     };
 
     const _onRequest = this.onRequest.bind(this);
@@ -2807,6 +2814,11 @@ export class Agent<
             this._scheduleAgentToolRunRecovery({
               runIds: startupAgentToolRunIds
             });
+
+            // Push-based host jobs replace the pull-based alarm contribution:
+            // re-sync them on every wake so orphaned fiber/facet recovery
+            // state left by a dead process re-arms its housekeeping wake.
+            await this._syncHostJobs();
             return result;
           });
         }
@@ -3955,10 +3967,11 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     const prefix = agentPathKey(ownerPath);
-    if (prefix)
-      this.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix);
+    if (prefix) {
+      await this.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix);
+    }
     this._deleteFacetRunRowsForPrefix(ownerPath);
-    await this._rearmAlarm();
+    await this._syncHostJobs();
   }
 
   /**
@@ -3975,7 +3988,7 @@ export class Agent<
     this._facetKeepAliveTokens.add(token);
     this._keepAliveRefs++;
     if (this._keepAliveRefs === 1) {
-      await this._rearmAlarm();
+      await this._syncHostJobs();
     }
     return token;
   }
@@ -3988,7 +4001,7 @@ export class Agent<
   async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
     if (!this._facetKeepAliveTokens.delete(token)) return;
     this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-    await this._rearmAlarm();
+    await this._syncHostJobs();
   }
 
   /**
@@ -4012,7 +4025,7 @@ export class Agent<
       VALUES
         (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
     `;
-    await this._rearmAlarm();
+    await this._syncHostJobs();
   }
 
   /**
@@ -4029,7 +4042,7 @@ export class Agent<
       WHERE owner_path_key IS ${ownerPathKey}
         AND run_id = ${runId}
     `;
-    await this._rearmAlarm();
+    await this._syncHostJobs();
   }
 
   /**
@@ -4219,7 +4232,7 @@ export class Agent<
     this._keepAliveRefs++;
 
     if (this._keepAliveRefs === 1) {
-      await this._rearmAlarm();
+      await this._syncHostJobs();
     }
 
     let disposed = false;
@@ -4234,7 +4247,7 @@ export class Agent<
       // (mirrors `_cf_releaseFacetKeepAlive`).
       if (this._keepAliveRefs === 0) {
         this.ctx.waitUntil(
-          this._rearmAlarm().catch((e) => {
+          this._syncHostJobs().catch((e) => {
             console.error(
               "[Agent] Failed to reschedule alarm after keepAlive dispose:",
               e
@@ -5186,7 +5199,7 @@ export class Agent<
     const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
     // Forward progress this scan = at least one fiber was resolved (orphan row
     // deleted via recovery/age-out/managed-terminal, or a ledger-only managed
-    // fiber finalized). Drives the recovery-alarm backoff in `_rearmAlarm`.
+    // fiber finalized). Drives the recovery-alarm backoff in `_syncHostJobs`.
     let madeProgress = false;
 
     try {
@@ -5346,7 +5359,7 @@ export class Agent<
       this._runFiberRecoveryInProgress = false;
       // Update the recovery-alarm backoff streak: reset on any forward progress,
       // otherwise grow it only while work is still pending (a repeatedly-failing
-      // poison hook). `_rearmAlarm` reads this to space out retries.
+      // poison hook). `_syncHostJobs` reads this to space out retries.
       if (madeProgress) {
         this._recoveryNoProgressScans = 0;
       } else {
@@ -5619,7 +5632,7 @@ export class Agent<
    * executing in memory, which already hold a keepAlive ref) or managed
    * ledger fibers stuck in a non-terminal state with no live run row.
    *
-   * Used by `_rearmAlarm` to arm a follow-up alarm so multi-pass
+   * Used by `_syncHostJobs` to arm a follow-up alarm so multi-pass
    * recovery (e.g. after a scan-deadline yield, or while retrying a throwing
    * recovery hook) resumes instead of starving.
    * @internal
@@ -5642,29 +5655,70 @@ export class Agent<
     return (ledgerOnly[0]?.count ?? 0) > 0;
   }
 
-  private async _rearmAlarm(): Promise<void> {
-    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, () =>
-      this.lifecycle.rearmAlarm()
-    );
+  /**
+   * Synchronize Agent-owned host jobs with current durable state.
+   *
+   * Replaces the old pull-based `getNextAlarm()` contribution: keep-alive
+   * refs hold a `cf:keep-alive` job, and fiber-recovery / facet-run state
+   * holds a `cf:housekeeping` job. Every state change that used to trigger
+   * an alarm recalculation now re-pushes or cancels these jobs; queue
+   * mutations re-arm the physical alarm automatically.
+   * @internal
+   */
+  private async _syncHostJobs(): Promise<void> {
+    if (this._destroyed) return;
+    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, async () => {
+      const work = this.lifecycle.jobs;
+      const nowMs = Date.now();
+
+      // A pending destroy (#1625) must keep its wake armed and exclusive
+      // through any re-sync — including markers written by a pre-job-queue
+      // release — so a keepAlive-holding agent cannot delay its own
+      // condemnation. The durable marker stays authoritative; the job is
+      // re-derived from it.
+      const pendingDestroy = await this._pendingDestroyAlarm();
+      if (pendingDestroy !== null) {
+        await work.push({
+          id: HOST_JOB_DESTROY_ID,
+          fn: "destroy",
+          time: pendingDestroy,
+          exclusive: true
+        });
+        return;
+      }
+      if (work.get(HOST_JOB_DESTROY_ID)) {
+        await work.cancel(HOST_JOB_DESTROY_ID);
+      }
+
+      if (this._keepAliveRefs > 0) {
+        await work.push({
+          id: HOST_JOB_KEEP_ALIVE_ID,
+          fn: "keepAlive",
+          time: nowMs + this._resolvedOptions.keepAliveIntervalMs
+        });
+      } else if (work.get(HOST_JOB_KEEP_ALIVE_ID)) {
+        await work.cancel(HOST_JOB_KEEP_ALIVE_ID);
+      }
+
+      const housekeepingAt = this._nextHousekeepingWakeMs(nowMs);
+      if (housekeepingAt !== null) {
+        await work.push({
+          id: HOST_JOB_HOUSEKEEPING_ID,
+          fn: "housekeeping",
+          time: housekeepingAt
+        });
+      } else if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
+        await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
+      }
+    });
   }
 
   /**
-   * Contribute Agent-owned alarm work that has not yet been extracted into its
-   * own capability. Scheduler contributes independently.
-   * @internal
+   * The next wake fiber-recovery or facet-run housekeeping needs, or `null`
+   * when neither has pending durable state.
    */
-  async getNextAlarm(): Promise<AlarmContribution> {
-    const pendingDestroy = await this._pendingDestroyAlarm();
-    if (pendingDestroy !== null) {
-      return { time: pendingDestroy, exclusive: true };
-    }
-
-    const nowMs = Date.now();
+  private _nextHousekeepingWakeMs(nowMs: number): number | null {
     let nextTimeMs: number | null = null;
-
-    if (this._keepAliveRefs > 0) {
-      nextTimeMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
-    }
 
     if (this._hasPendingFiberRecovery()) {
       const base = this._resolvedOptions.keepAliveIntervalMs;
@@ -5676,9 +5730,7 @@ export class Agent<
         FIBER_RECOVERY_MAX_BACKOFF_MS,
         base * 2 ** exp
       );
-      const recoveryMs = nowMs + recoveryDelayMs;
-      nextTimeMs =
-        nextTimeMs === null ? recoveryMs : Math.min(nextTimeMs, recoveryMs);
+      nextTimeMs = nowMs + recoveryDelayMs;
     }
 
     const facetRuns = this.sql<{ count: number }>`
@@ -5692,29 +5744,96 @@ export class Agent<
           : Math.min(nextTimeMs, facetRecoveryMs);
     }
 
-    const extensionAlarm = await this._getExtensionAlarm();
-    if (extensionAlarm !== null) {
-      nextTimeMs =
-        nextTimeMs === null
-          ? extensionAlarm
-          : Math.min(nextTimeMs, extensionAlarm);
-    }
     return nextTimeMs;
-  }
-
-  /** @internal Transitional alarm contribution for Agent subclasses. */
-  protected _getExtensionAlarm(): number | null | Promise<number | null> {
-    return null;
   }
 
   /** Lifecycle alarm callback; Agent housekeeping runs after user alarm work. */
   onAlarm(): void {}
 
   /**
-   * Run Lifecycle's alarm phase inside Agent's memory-limit circuit breaker.
+   * Drive one Agent-owned host job from the Lifecycle queue.
+   * @internal Dispatched by Lifecycle's alarm event loop; extensions add
+   * job fns through {@link _onHostJob}.
+   */
+  onJob(
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    return this._onHostJob(context.job.fn, context);
+  }
+
+  /**
+   * @internal Dispatch one host job fn. Agent extensions (Think) override
+   * this to add fns and delegate unknown ones to `super`.
+   */
+  protected _onHostJob(
+    fn: string,
+    _context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    switch (fn) {
+      case "keepAlive":
+        // This job's only purpose is guaranteeing wakes while refs are
+        // held; housekeeping itself runs on every alarm via the onAlarm
+        // wrapper.
+        return this._keepAliveRefs > 0
+          ? {
+              rescheduleAt:
+                Date.now() + this._resolvedOptions.keepAliveIntervalMs
+            }
+          : undefined;
+      case "housekeeping": {
+        const next = this._nextHousekeepingWakeMs(Date.now());
+        return next === null ? undefined : { rescheduleAt: next };
+      }
+      case "destroy":
+        // The alarm preamble consumes pending destroys before the event
+        // loop runs; a surviving job is stale.
+        return undefined;
+      default:
+        console.warn(`Unknown Agent host job fn ${JSON.stringify(fn)}`);
+        return undefined;
+    }
+  }
+
+  /**
+   * Apply Agent's domain policy when the Lifecycle alarm memory-limit
+   * circuit breaker records a strike (#1825). Lifecycle already handled the
+   * item that was executing; this backs off or purges the recovery-loop
+   * schedules named by {@link _cf_recoveryAlarmCallbacks} and, at the strike
+   * budget, seals in-flight recovery via {@link _cf_sealMemoryLimitedRecovery}.
+   * @internal
+   */
+  async onAlarmMemoryLimit(context: {
+    readonly sealed: boolean;
+    readonly nextTime?: number;
+  }): Promise<void> {
+    const callbacks = this._cf_recoveryAlarmCallbacks();
+    try {
+      await this.scheduler.applyMemoryLimitPolicy({
+        callbacks,
+        sealed: context.sealed,
+        nextTime: context.nextTime
+      });
+    } catch {
+      // best-effort at a host failure boundary
+    }
+    if (context.sealed) {
+      try {
+        await this._cf_sealMemoryLimitedRecovery();
+      } catch {
+        // best-effort terminalization; the purge above already broke the loop
+      }
+    }
+  }
+
+  /**
+   * Run Lifecycle's alarm event loop after the pending-destroy preamble.
+   *
+   * The alarm memory-limit circuit breaker (#1825) lives inside
+   * `Lifecycle.alarm()`; Agent contributes domain policy through
+   * {@link onAlarmMemoryLimit}.
    *
    * @remarks Use `this.schedule()` for named Agent callbacks. Reusable durable
-   * work belongs in a capability with `getNextAlarm()` and `onAlarm()`.
+   * work belongs in a capability that pushes jobs and implements `onJob()`.
    */
   async alarm() {
     // A pending destroy (#1625) pre-empts everything — including lifecycle
@@ -5729,43 +5848,15 @@ export class Agent<
       return;
     }
 
-    // Outermost alarm frame: a Durable Object memory-limit reset (#1825) that
-    // propagates here would otherwise be re-thrown to the platform, which
-    // auto-retries the alarm forever — the OOM crash loop. Intercept ONLY that
-    // class (everything else re-throws, unchanged) and break the loop from the
-    // boundary, where the heavy turn has unwound and GC has reclaimed its
-    // footprint, so the seal/purge writes can land where mid-turn ones OOMed.
-    try {
-      await this._cf_runAlarmBody();
-      // A clean alarm clears the strike counter so the breaker bounds
-      // CONSECUTIVE memory-limit resets, not lifetime ones (#1825). Without
-      // this a Durable Object that hits rare, non-consecutive transient
-      // spikes (e.g. one a month) would eventually reach the strike budget
-      // and wrongly seal healthy recovery work.
-      await this._cf_clearAlarmMemoryLimitStrikes();
-    } catch (error) {
-      if (!isDurableObjectMemoryLimitReset(error)) throw error;
-      await this._cf_handleAlarmMemoryLimitReset(error);
-    }
-  }
-
-  /** Run the Lifecycle alarm phase inside Agent's OOM circuit breaker. */
-  private async _cf_runAlarmBody() {
     await this.lifecycle.alarm();
   }
 
   /**
-   * Durable storage key for the alarm memory-limit strike counter (#1825).
-   */
-  private static readonly _CF_OOM_ALARM_STRIKES_KEY =
-    "cf_agents:oom_alarm_strikes";
-
-  /**
-   * The schedule-callback names whose alarm rows drive a recovery loop that can
+   * The schedule-callback names whose jobs drive a recovery loop that can
    * deterministically OOM. The base agent has none; chat hosts (`Think`,
    * `AIChatAgent`) override this to return their recovery continuation callbacks
    * so the circuit breaker can surgically back them off / purge them WITHOUT
-   * disturbing unrelated scheduled tasks. See {@link _cf_handleAlarmMemoryLimitReset}.
+   * disturbing unrelated scheduled tasks. See {@link onAlarmMemoryLimit}.
    */
   protected _cf_recoveryAlarmCallbacks(): string[] {
     return [];
@@ -5779,117 +5870,6 @@ export class Agent<
    * terminal banner and persist the sealed incident.
    */
   protected async _cf_sealMemoryLimitedRecovery(): Promise<void> {}
-
-  /**
-   * Clear the durable memory-limit strike counter after a clean alarm so the
-   * circuit breaker counts CONSECUTIVE resets rather than lifetime ones
-   * (#1825). Reads first (cheap, usually cached) and only writes when a strike
-   * is actually recorded, so the common no-strike path costs no write.
-   * Best-effort: a stale strike only costs one extra tolerated spike later.
-   */
-  private async _cf_clearAlarmMemoryLimitStrikes(): Promise<void> {
-    try {
-      const prior = await this.ctx.storage.get<number>(
-        Agent._CF_OOM_ALARM_STRIKES_KEY
-      );
-      if (typeof prior === "number" && prior > 0) {
-        await this.ctx.storage.delete(Agent._CF_OOM_ALARM_STRIKES_KEY);
-      }
-    } catch {
-      // best-effort: a leftover strike is harmless beyond one extra tolerated spike
-    }
-  }
-
-  /**
-   * Alarm-boundary circuit breaker for Durable Object memory-limit resets
-   * (#1825). The in-DO recovery budgets (`chatRecovery.maxOomRetries` /
-   * `maxRecoveryWork`) only engage if their code runs AND its writes land; a
-   * severe OOM can defeat both — thrown before the budget runs (boot hydration),
-   * or its own small writes also OOM under memory pressure. In that case the
-   * error reaches {@link alarm} and, unhandled, the platform auto-retries the
-   * alarm indefinitely (re-running the doomed, billable turn each cycle).
-   *
-   * This runs at the OUTERMOST frame: the heavy turn has unwound and GC has
-   * reclaimed its footprint, so the small writes here can land where mid-turn
-   * ones (e.g. give-up's incident read) OOMed. A durable strike counter tolerates
-   * a few resets (a transient spike may clear), backing off the recovery rows so
-   * the retry is not a hot loop. At the `maxAlarmMemoryLimitStrikes` budget it
-   * seals the recovery work and purges the looping rows so the loop — and the
-   * bill — stops. Each step is best-effort: even these tiny writes can OOM, but
-   * swallowing (not re-throwing) still halts the platform's auto-retry, and a
-   * later wake re-arms legitimate schedules.
-   */
-  private async _cf_handleAlarmMemoryLimitReset(error: unknown): Promise<void> {
-    const key = Agent._CF_OOM_ALARM_STRIKES_KEY;
-    let strikes = 1;
-    try {
-      const prior = await this.ctx.storage.get<number>(key);
-      strikes = (typeof prior === "number" ? prior : 0) + 1;
-      await this.ctx.storage.put(key, strikes);
-    } catch {
-      // Even the strike write OOMed; proceed treating this as a strike so the
-      // breaker still progresses toward sealing rather than deadlocking.
-    }
-
-    const limit = this._resolvedOptions.maxAlarmMemoryLimitStrikes;
-    const sealed = strikes >= limit;
-    const recoveryCallbacks = this._cf_recoveryAlarmCallbacks();
-    console.error(
-      `Alarm hit a Durable Object memory-limit reset (strike ${strikes}/${limit}` +
-        `${sealed ? ", sealing recovery" : ", will retry with backoff"}). ` +
-        "Breaking the platform alarm-retry loop (#1825).",
-      error instanceof Error ? error.message : String(error)
-    );
-
-    if (sealed) {
-      // Surgical purge: remove ONLY the looping rows (the recovery callbacks
-      // and the exact row that was executing) so unrelated schedules survive.
-      this.scheduler.__DO_NOT_USE_WILL_BREAK__handleAlarmMemoryLimit({
-        callbacks: recoveryCallbacks,
-        sealed: true
-      });
-      try {
-        await this._cf_sealMemoryLimitedRecovery();
-      } catch {
-        // best-effort terminalization; the purge above already broke the loop.
-      }
-      try {
-        await this.ctx.storage.delete(key);
-      } catch {
-        // best-effort counter reset
-      }
-    } else {
-      // Under budget: delay the looping rows so the next attempt runs on a fresh
-      // isolate after a backoff rather than immediately re-OOMing in a hot loop.
-      // A genuinely transient spike can clear in the meantime.
-      const backoffSeconds = Math.min(300, 30 * strikes);
-      const nextTime = Math.floor(Date.now() / 1000) + backoffSeconds;
-      this.scheduler.__DO_NOT_USE_WILL_BREAK__handleAlarmMemoryLimit({
-        callbacks: recoveryCallbacks,
-        sealed: false,
-        nextTime
-      });
-    }
-
-    try {
-      this._emit("alarm:memory_limit_reset", {
-        strikes,
-        limit,
-        sealed,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    } catch {
-      // event emission is non-critical
-    }
-
-    // Re-arm so non-recovery schedules continue. Wrapped because it can itself
-    // OOM; if it does, the next external wake re-arms.
-    try {
-      await this._rearmAlarm();
-    } catch {
-      // best-effort
-    }
-  }
 
   // ── Sub-agent routing (external addressability for facets) ──────────────
 
@@ -10098,9 +10078,12 @@ export class Agent<
     this._destroyed = true;
 
     // `ctx.abort` throws an uncatchable error, so we yield to the event loop
-    // to avoid capturing it and let handlers finish cleaning up
+    // to avoid capturing it and let handlers finish cleaning up. When this
+    // destroy landed via the alarm preamble, suppressing the alarm retry
+    // stops the platform re-running the alarm on a fresh instance whose
+    // constructor would recreate the just-deleted schema.
     setTimeout(() => {
-      this.ctx.abort("destroyed");
+      abortWithoutAlarmRetry(this.ctx, "destroyed");
     }, 0);
 
     this._emit("destroy");
@@ -10131,7 +10114,7 @@ export class Agent<
     // /facet bootstrap, and `destroy()` below branches on the in-memory
     // `_isFacet`. Without this, an RPC landing before init would see it as
     // `false`, fall through to `destroy()`'s top-level path, and write the
-    // destroy marker on a facet — which the `alarm()`/`_rearmAlarm()`
+    // destroy marker on a facet — which the `alarm()`/`_syncHostJobs()`
     // guards forbid (only top-level agents write it; facet teardown is
     // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
     // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`
@@ -10149,7 +10132,14 @@ export class Agent<
     // DELETE handler, turning the intended 204 into a 500.
     const destroyAt = Date.now() + DESTROY_ALARM_DELAY_MS;
     await this.ctx.storage.put(DESTROY_PENDING_KEY, destroyAt);
-    await this.lifecycle.rearmAlarm();
+    // The exclusive job arms the wake; the durable marker above remains the
+    // authority the alarm preamble consumes before Lifecycle startup.
+    await this.lifecycle.jobs.push({
+      id: HOST_JOB_DESTROY_ID,
+      fn: "destroy",
+      time: destroyAt,
+      exclusive: true
+    });
   }
 
   /**
