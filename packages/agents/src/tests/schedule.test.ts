@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
 import type { TestScheduleAgent } from "./agents/schedule";
@@ -1150,6 +1154,26 @@ describe("schedule operations", () => {
       });
       const fresh = await getAgentByName(env.TestScheduleAgent, name);
       expect(await fresh.getAlarmStrikesForTest()).toBe(0);
+    });
+
+    it("a memory-limit reset during startup hydration is broken by the breaker", async () => {
+      // The exact #1825 boot-hydration case: the reset is thrown before any
+      // job runs. Initialization runs inside the breaker, so the alarm must
+      // resolve (no platform auto-retry) and record a durable strike.
+      const name = "oom-breaker-startup";
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      await stub.createSchedule(60);
+      await runInDurableObject(stub, async (_instance, ctx) => {
+        await ctx.storage.put("oomOnStartRemaining", 1);
+        await ctx.storage.setAlarm(Date.now() + 1000);
+      });
+      await evictDurableObject(stub);
+
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getAlarmStrikesForTest()).toBe(1);
     });
 
     it("a clean alarm resets the strike counter (consecutive, not lifetime)", async () => {

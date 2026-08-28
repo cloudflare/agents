@@ -754,11 +754,12 @@ export class Lifecycle<
    * the host invocation boundary.
    */
   async alarm(): Promise<void> {
-    await this.#ensureInitialized();
-    await this.#jobDriver.runAlarm(() =>
-      runInLifecycleHostContext({ host: this.#host }, async () => {
-        await this.#host.onAlarm?.();
-      })
+    await this.#jobDriver.runAlarm(
+      () => this.#ensureInitialized(),
+      () =>
+        runInLifecycleHostContext({ host: this.#host }, async () => {
+          await this.#host.onAlarm?.();
+        })
     );
   }
 

@@ -117,7 +117,9 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
 4. Run host `onAlarm()`.
 5. Re-arm the physical alarm from queue state.
 
-Steps 3–4 run inside the alarm memory-limit circuit breaker, moved here from
+Startup and steps 3–4 run inside the alarm memory-limit circuit breaker
+(initialization included because a severe reset can be thrown during boot
+hydration, before any job runs — the original #1825 case), moved here from
 `Agent.alarm()`: the durable strike counter (`cf_agents:oom_alarm_strikes`)
 tolerates `maxAlarmMemoryLimitStrikes` consecutive resets (composition-root
 aperture; default 3), backs off the executing job, then seals — purging the

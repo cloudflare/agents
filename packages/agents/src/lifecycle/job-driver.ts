@@ -96,15 +96,23 @@ export class JobDriver {
   }
 
   /**
-   * Run one alarm invocation: drive due jobs, run the host's alarm callback,
-   * and re-arm the physical alarm from queue state — all inside the alarm
-   * memory-limit circuit breaker (#1825). A memory-limit reset that
-   * propagates here is intercepted — every other error re-throws unchanged
-   * so platform alarm-retry semantics hold — and broken from this outermost
-   * frame, where the heavy turn has unwound and small writes can land.
+   * Run one alarm invocation: initialize the lifecycle, drive due jobs, run
+   * the host's alarm callback, and re-arm the physical alarm from queue
+   * state — all inside the alarm memory-limit circuit breaker (#1825). A
+   * memory-limit reset that propagates here is intercepted — every other
+   * error re-throws unchanged so platform alarm-retry semantics hold — and
+   * broken from this outermost frame, where the heavy turn has unwound and
+   * small writes can land. Initialization runs inside the breaker because a
+   * severe reset can be thrown before any job runs (boot hydration, #1825);
+   * left unhandled it would re-throw to the platform, which auto-retries
+   * the alarm forever.
    */
-  async runAlarm(runHostAlarm: () => Promise<void>): Promise<void> {
+  async runAlarm(
+    initialize: () => Promise<void>,
+    runHostAlarm: () => Promise<void>
+  ): Promise<void> {
     try {
+      await initialize();
       await this.#driveDueJobs();
       await runHostAlarm();
       await this.#clearMemoryLimitStrikes();

@@ -204,6 +204,22 @@ export class TestOnStartScheduleExplicitFalseAgent extends Agent {
 }
 
 export class TestScheduleAgent extends Agent {
+  /**
+   * Simulate a memory-limit reset thrown during startup hydration (#1825):
+   * while the durable countdown is set, every cold start throws the
+   * platform's memory-limit error before any job can run.
+   */
+  async onStart() {
+    const remaining =
+      (await this.ctx.storage.get<number>("oomOnStartRemaining")) ?? 0;
+    if (remaining > 0) {
+      await this.ctx.storage.put("oomOnStartRemaining", remaining - 1);
+      throw new Error(
+        "Durable Object's isolate exceeded its memory limit and was reset."
+      );
+    }
+  }
+
   // A no-op callback method for testing schedules
   testCallback() {
     // Intentionally empty - used for testing schedule creation
