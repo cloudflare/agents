@@ -173,6 +173,7 @@ export type {
   ScheduleCriteria,
   ScheduleOptions
 } from "./schedules/types";
+import { StateManager } from "./state";
 export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
@@ -756,12 +757,17 @@ type AgentToolRecoveryInspection =
  */
 const CURRENT_SCHEMA_VERSION = 11;
 
-const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
-const STATE_ROW_ID = "cf_state_row_id";
+const SCHEMA_VERSION_ROW_ID = "cf_schema_version"; // Agent global version row (stays)
+// STATE_ROW_ID moved to state/index.ts (StateManager owns the state row).
 // Legacy key — no longer written, but read for backward compatibility with
-// DOs that were created before the single-row state optimization.
+// DOs that were created before the single-row state optimization. The
+// _ensureSchema cleanup that deletes this row from the shared cf_agents_state
+// table stays here until StateManager owns that migration.
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
+// Sentinel for "no initial state provided" on the Agent's overridable
+// `initialState` field. The StateManager capability owns state storage; this
+// only distinguishes an unset initialState when resolving it for the capability.
 const DEFAULT_STATE = {} as unknown;
 
 /**
@@ -1189,6 +1195,44 @@ export class Agent<
       this.getConnectionTags(connection, ctx)
   });
 
+  /**
+   * Durable state subsystem. Owns the `cf_agents_state` state row, lazy load,
+   * and validated persistence. `initialState` and `validateStateChange` are
+   * resolved lazily against `this` so subclass field overrides — initialized
+   * after this base field — are read at their final values. The `onChanged`
+   * hook broadcasts the change and runs Agent's notification hook.
+   *
+   * Typed as `StateManager<unknown>`, not `StateManager<State>`, on purpose.
+   * `StateManager<State>` uses `State` both covariantly (`get(): State`) and
+   * contravariantly (`set(next: State)`, `onChanged`), so the parameter
+   * is invariant. Holding it as a `StateManager<State>` field would propagate
+   * that invariance to `Agent`'s own `State` parameter and break
+   * `Subclass -> Agent<Env, unknown>` assignability for every consumer
+   * (sub-agents, `DurableObjectNamespace<Subclass>`, etc.). Erasing to
+   * `unknown` keeps the field's runtime typing intact while leaving
+   * `Agent<State>` as variance-compatible as it was before this capability
+   * existed; the typed `State` boundary is re-established at the delegating
+   * call sites below.
+   */
+  readonly _state: StateManager<unknown> = ((host: this) =>
+    new StateManager<State>({
+      get initialState() {
+        return host.initialState !== (DEFAULT_STATE as State)
+          ? host.initialState
+          : undefined;
+      },
+      validateStateChange: (nextState, source) =>
+        host.validateStateChange(
+          nextState as State,
+          source as Connection | "server"
+        ),
+      onChanged: (nextState, source) =>
+        host._handleStateChanged(
+          nextState as State,
+          source as Connection | "server"
+        )
+    }))(this) as StateManager<unknown>;
+
   /** Run user initialization after lifecycle components have started. */
   onStart(_props?: Props): void | Promise<void> {}
 
@@ -1230,7 +1274,6 @@ export class Agent<
     await this.lifecycle.start(props);
   }
 
-  private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
 
@@ -1430,55 +1473,15 @@ export class Agent<
   }
 
   /**
-   * Current state of the Agent
+   * Current state of the Agent.
+   *
+   * Delegates to the StateManager capability, which owns lazy load, the
+   * in-memory cache, and initial-state seeding.
    */
   get state(): State {
-    if (this._state !== DEFAULT_STATE) {
-      // state was previously set, and populated internal state
-      return this._state;
-    }
-    // looks like this is the first time the state is being accessed
-    // check if the state was set in a previous life
-    const result = this.sql<{ state: State | undefined }>`
-      SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
-    `;
-
-    // Row existence is the signal that state was previously set.
-    // This handles all values including falsy ones (null, 0, false, "").
-    if (result.length > 0) {
-      const state = result[0].state as string;
-
-      try {
-        this._state = JSON.parse(state);
-      } catch (e) {
-        console.error(
-          "Failed to parse stored state, falling back to initialState:",
-          e
-        );
-        if (this.initialState !== DEFAULT_STATE) {
-          this._state = this.initialState;
-          // Persist the fixed state to prevent future parse errors
-          this._setStateInternal(this.initialState);
-        } else {
-          // No initialState defined - clear corrupted data to prevent infinite retry loop
-          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
-          return undefined as State;
-        }
-      }
-      return this._state;
-    }
-
-    // ok, this is the first time the state is being accessed
-    // and the state was not set in a previous life
-    // so we need to set the initial state (if provided)
-    if (this.initialState === DEFAULT_STATE) {
-      // no initial state provided, so we return undefined
-      return undefined as State;
-    }
-    // initial state provided, so we set the state,
-    // update db and return the initial state
-    this._setStateInternal(this.initialState);
-    return this.initialState;
+    // Field is erased to StateManager<unknown> for variance (see field docs);
+    // re-establish the typed State boundary here.
+    return this._state.get() as State;
   }
 
   /**
@@ -1664,6 +1667,11 @@ export class Agent<
    * local dev and the constructor only runs once per DO instance).
    */
   protected _ensureSchema(): void {
+    // The `cf_agents_state` table is shared: StateManager owns the state row
+    // (migrated to state/index.ts), but the Agent still stores its global
+    // schema-version row here. StateManager.onStart also ensures this table
+    // idempotently — the same pattern as Scheduler's ensureScheduleTable
+    // below — so this CREATE TABLE stays.
     // Schema version gating: skip all DDL on established DOs whose schema
     // is already up-to-date. We always create cf_agents_state first (cheap
     // idempotent DDL) and store the version as a row inside it.
@@ -2059,6 +2067,7 @@ export class Agent<
     this.lifecycle
       .use(this.scheduler)
       .use(this.mcp)
+      .use(this._state)
       .use(this._webSockets, { fallback: true })
       .use(this.tasks)
       // Registered for capability identity/services; its hot paths are
@@ -2175,6 +2184,7 @@ export class Agent<
             return this._tryCatch(() => _onMessage(connection, message));
           }
 
+          // ============================================================
           if (isStateUpdateMessage(parsed)) {
             // Check if connection is readonly
             if (this.isConnectionReadonly(connection)) {
@@ -2188,7 +2198,7 @@ export class Agent<
               return;
             }
             try {
-              this._setStateInternal(parsed.state as State, connection);
+              this._state.set(parsed.state as State, connection);
             } catch (e) {
               // validateStateChange (or another sync error) rejected the update.
               // Log the full error server-side, send a generic message to the client.
@@ -2616,21 +2626,17 @@ export class Agent<
     this.broadcast(msg, exclude);
   }
 
-  private _setStateInternal(
+  /**
+   * React to a persisted state change from the StateManager capability.
+   *
+   * Reproduces the pre-migration steps 3-4: broadcast the new state to
+   * protocol-enabled connections (excluding the originating connection) and
+   * run the notification hook off the invocation tail.
+   */
+  private _handleStateChanged(
     nextState: State,
-    source: Connection | "server" = "server"
+    source: Connection | "server"
   ): void {
-    // Validation/gating hook (sync only)
-    this.validateStateChange(nextState, source);
-
-    // Persist state — row existence in cf_agents_state is the signal that
-    // state was set (no separate wasChanged flag needed).
-    this._state = nextState;
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_state (id, state)
-      VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
-    `;
-
     // Broadcast state to protocol-enabled connections, excluding the source
     this._broadcastProtocol(
       JSON.stringify({
@@ -2679,7 +2685,7 @@ export class Agent<
     if (store?.connection && this.isConnectionReadonly(store.connection)) {
       throw new Error("Connection is readonly");
     }
-    this._setStateInternal(state, "server");
+    this._state.set(state, "server");
   }
 
   /**

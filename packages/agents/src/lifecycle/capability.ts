@@ -71,6 +71,10 @@ export type LifecycleSockets = {
  */
 export type LifecycleServices = {
   readonly storage: DurableObjectStorage;
+  readonly sql: <T = Record<string, string | number | boolean | null>>(
+    strings: TemplateStringsArray,
+    ...values: (string | number | boolean | null)[]
+  ) => T[];
   readonly sockets: LifecycleSockets;
   readonly ready: () => Promise<void>;
   /** True while capability and host startup hooks are still running. */

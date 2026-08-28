@@ -9,11 +9,6 @@ export type TestState = {
 };
 
 export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
-  // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
-  // Child field initializers run after super(), at which point _state is DEFAULT_STATE.
-  // @ts-expect-error - accessing private field for testing
-  private _stateSentinel: TestState = this._state;
-
   initialState: TestState = {
     count: 0,
     items: [],
@@ -88,8 +83,7 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
   // Access state and check if it recovered to initialState
   getStateAfterCorruption(): TestState {
     // Reset the in-memory cache so the getter re-reads from DB
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._state.__resetCacheForTesting();
     // This should trigger the try-catch and fallback to initialState
     return this.state;
   }
@@ -183,8 +177,7 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
       value
     );
     // Reset in-memory cache to sentinel so getter re-reads from DB
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._state.__resetCacheForTesting();
   }
 
   // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
@@ -196,17 +189,12 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
     );
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._state.__resetCacheForTesting();
   }
 }
 
 // Test Agent without initialState to test undefined behavior
 export class TestStateAgentNoInitial extends Agent {
-  // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
-  // @ts-expect-error - accessing private field for testing
-  private _stateSentinel: unknown = this._state;
-
   // No initialState defined - should return undefined
 
   getState() {
@@ -253,8 +241,7 @@ export class TestStateAgentNoInitial extends Agent {
 
   // Reset in-memory cache and read from DB
   getStateAfterCorruption() {
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._state.__resetCacheForTesting();
     return this.state;
   }
 
@@ -265,8 +252,7 @@ export class TestStateAgentNoInitial extends Agent {
       value
     );
     // Reset in-memory cache to sentinel so getter re-reads from DB
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._state.__resetCacheForTesting();
   }
 
   // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
@@ -278,8 +264,7 @@ export class TestStateAgentNoInitial extends Agent {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
     );
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._state.__resetCacheForTesting();
   }
 
   // Simulate legacy state row without wasChanged: old SDK version that only wrote
@@ -292,8 +277,7 @@ export class TestStateAgentNoInitial extends Agent {
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
       value
     );
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._state.__resetCacheForTesting();
   }
 
   // Reset schema version to 0 (simulates a pre-versioning DO)
