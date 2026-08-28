@@ -763,8 +763,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
     const now = Date.now();
     this.sql`
       insert into cf_agents_streams
-        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
-      values (${streamId}, 'completed', ${JSON.stringify({ cfChat: 1, requestId })},
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      values (${streamId}, 'completed', ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${bodies.length}, ${now}, ${now}, ${now})
     `;
     bodies.forEach((body, index) => {
@@ -813,8 +813,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
     const completedAt = createdAt + 1000;
     this.sql`
       insert into cf_agents_streams
-        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
-      values (${streamId}, 'errored', ${JSON.stringify({ cfChat: 1, requestId })},
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      values (${streamId}, 'errored', ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               0, ${createdAt}, ${completedAt}, ${completedAt})
     `;
   }
@@ -882,7 +882,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * This mimics the DO constructor running after eviction.
    */
   testSimulateHibernationWake(): void {
-    this._resumableStream = new ResumableStream(this.streams);
+    this._resumableStream = new ResumableStream(
+      this.streams,
+      this.sql.bind(this)
+    );
   }
 
   /**
@@ -2847,12 +2850,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const createdAt = Date.now() - ageMs;
     // Omitting `metadata.messageId` leaves the field out of the stream
     // metadata, simulating a stream row written before message-id tracking.
-    const streamMetadata: Record<string, unknown> = { cfChat: 1, requestId };
+    const streamMetadata: Record<string, unknown> = { cfChat: 1 };
     if (metadata?.messageId) streamMetadata.messageId = metadata.messageId;
     this.sql`
       insert into cf_agents_streams
-        (stream_id, state, metadata, chunk_count, created_at, updated_at)
-      values (${streamId}, 'streaming', ${JSON.stringify(streamMetadata)},
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
+      values (${streamId}, 'streaming', ${requestId}, ${JSON.stringify(streamMetadata)},
               ${chunks.length}, ${createdAt}, ${createdAt})
     `;
     for (const chunk of chunks) {

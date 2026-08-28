@@ -4850,8 +4850,8 @@ export class ThinkToolsTestAgent extends Think {
     const closedAt = state === "streaming" ? null : now;
     this.sql`
       INSERT INTO cf_agents_streams
-        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
-      VALUES (${streamId}, ${state}, ${JSON.stringify({ cfChat: 1, requestId })},
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
@@ -7689,8 +7689,8 @@ export class ThinkRecoveryTestAgent extends Think {
     const closedAt = state === "streaming" ? null : now;
     this.sql`
       INSERT INTO cf_agents_streams
-        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
-      VALUES (${streamId}, ${state}, ${JSON.stringify({ cfChat: 1, requestId })},
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
@@ -7724,8 +7724,8 @@ export class ThinkRecoveryTestAgent extends Think {
     const state = status === "error" ? "errored" : status;
     this.sql`
       INSERT INTO cf_agents_streams
-        (stream_id, state, metadata, chunk_count, created_at, updated_at, closed_at)
-      VALUES (${streamId}, ${state}, ${JSON.stringify({ cfChat: 1, requestId })},
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               0, ${createdAt}, ${completedAt ?? createdAt}, ${completedAt})
     `;
   }

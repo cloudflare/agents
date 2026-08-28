@@ -27,17 +27,6 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   /** Guarded handler entries, recorded as entry:input:interrupted-step. */
   readonly guardedEntries: string[] = [];
 
-  /** The step a lost attempt left 'running', read at handler entry. */
-  interruptedStepProbe(): string {
-    const rows = [
-      ...this.ctx.storage.sql.exec(
-        `SELECT step_name FROM cf_agents_task_steps
-         WHERE state = 'running' ORDER BY started_at DESC LIMIT 1`
-      )
-    ] as Array<{ step_name: string }>;
-    return rows[0]?.step_name ?? "none";
-  }
-
   readonly tasks = new Tasks({
     definitions: {
       /** Two journaled steps, then a host-context probe in the return value. */
@@ -162,7 +151,7 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
        */
       guarded: async (input: { label: string }, step: TaskStep) => {
         this.guardedEntries.push(
-          `entry:${input.label}:${this.interruptedStepProbe()}`
+          `entry:${input.label}:${step.interrupted?.name ?? "none"}`
         );
         const first = await step.do("g-first", () => {
           this.stepRuns.push("guarded:first");

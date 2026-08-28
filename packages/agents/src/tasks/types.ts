@@ -126,6 +126,17 @@ export interface TaskStepConfig {
  * @experimental The API surface may change before stabilizing.
  */
 export interface TaskStep {
+  /**
+   * The step an unclean interruption left mid-execution, or `null` on a
+   * clean attempt — the durable evidence a replayed handler branches on
+   * before re-entering irreversible work. Populated when a lost attempt's
+   * claim is taken over; a retry park or first attempt sees `null`.
+   */
+  readonly interrupted: {
+    readonly name: string;
+    readonly attempt: number;
+  } | null;
+
   /** Run a named step once, replaying its journaled result thereafter. */
   do<T extends TaskValue>(
     name: string,

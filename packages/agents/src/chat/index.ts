@@ -53,6 +53,11 @@ export {
   STREAM_CLEANUP_DELAY_SECONDS,
   type SqlTaggedTemplate
 } from "./resumable-stream";
+export {
+  createChatTurnTaskDefinition,
+  type ChatTurnClosureEntry,
+  type ChatTurnTaskHooks
+} from "./turn-task";
 
 export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
 

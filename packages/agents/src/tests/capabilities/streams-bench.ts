@@ -35,7 +35,22 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     chunkBytes: number
   ): Promise<{ rowsWritten: number; ms: number }> {
     await this.lifecycle.start();
-    const adapter = new ResumableStream(this.streams);
+    const adapter = new ResumableStream(
+      this.streams,
+      <T = Record<string, unknown>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] =>
+        [
+          ...this.ctx.storage.sql.exec(
+            strings.reduce(
+              (q, part, i) => q + part + (i < values.length ? "?" : ""),
+              ""
+            ),
+            ...values
+          )
+        ] as T[]
+    );
     const before = this.#totalChanges();
     const start = performance.now();
     for (let turn = 0; turn < turns; turn++) {

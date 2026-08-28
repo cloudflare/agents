@@ -86,6 +86,7 @@ untypedTasks.run("anyDefinitionName", {
 
 // Step typing stands alone.
 declare const step: TaskStep;
+step.interrupted satisfies { name: string; attempt: number } | null;
 step.do("typed", () => ({ a: 1 })) satisfies Promise<{ a: number }>;
 step.do(
   "configured",

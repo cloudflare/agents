@@ -96,12 +96,18 @@ export async function sseResponse(
     once: true
   });
 
+  let open = true;
   const body = new ReadableStream<Uint8Array>({
     start: (controller) => {
-      let open = true;
       const write = (text: string) => {
         if (!open) return;
-        controller.enqueue(encoder.encode(text));
+        try {
+          controller.enqueue(encoder.encode(text));
+        } catch {
+          // The stream was cancelled between the check and the write (a
+          // heartbeat tick racing a client disconnect): stop writing.
+          open = false;
+        }
       };
       const heartbeat =
         heartbeatMs > 0
@@ -113,7 +119,11 @@ export async function sseResponse(
         options.request?.signal.removeEventListener("abort", onUpstreamAbort);
         if (open) {
           open = false;
-          controller.close();
+          try {
+            controller.close();
+          } catch {
+            // Already cancelled by the consumer.
+          }
         }
       };
 
@@ -142,6 +152,7 @@ export async function sseResponse(
       })();
     },
     cancel: () => {
+      open = false;
       abort.abort();
     }
   });

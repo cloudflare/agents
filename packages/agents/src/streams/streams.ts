@@ -69,6 +69,7 @@ export interface StreamsSyncInternal {
   /** Insert a live stream row (no idempotency — caller checks first). */
   insertStream(
     streamId: string,
+    tag: string | null,
     metadata: Record<string, StreamJson> | undefined
   ): void;
   /** The fenced append: count bump, chunk insert, reader wakeup. */
@@ -81,13 +82,32 @@ export interface StreamsSyncInternal {
   ): void;
   /** Delete a stream and its chunks regardless of state. */
   deleteUnchecked(streamId: string): void;
+  /** Delete many streams and their chunks regardless of state, silently. */
+  deleteMany(streamIds: string[]): void;
   readAll(streamId: string): StreamChunkRow[];
+  /** Every stream row, newest first (created_at, then insertion order). */
   listRows(): StreamRow[];
-  /** Raw escape hatch for adapter-internal queries (migration, seeding). */
-  exec(
-    query: string,
-    params: (string | number | null)[]
-  ): Record<string, string | number | null>[];
+  /** Latest row carrying a tag, optionally narrowed to one state. */
+  latestRowByTag(tag: string, state?: StreamState): StreamRow | undefined;
+  /**
+   * Import one historical stream row verbatim (migrations, test seeding):
+   * explicit timestamps and count, no events, no wakeups.
+   */
+  importStream(row: {
+    streamId: string;
+    state: StreamState;
+    tag: string | null;
+    metadata: Record<string, StreamJson> | undefined;
+    chunkCount: number;
+    createdAt: number;
+    updatedAt: number;
+    closedAt: number | null;
+  }): void;
+  /**
+   * Import one historical chunk at the stream's current cursor, bumping the
+   * count and setting `updated_at` to the chunk's own timestamp.
+   */
+  importChunk(streamId: string, chunk: StreamJson, createdAt: number): void;
 }
 
 /**
@@ -338,7 +358,7 @@ export class Streams extends LifecycleCapability {
     return {
       ensureTables: () => this.#ensureTables(),
       getStream: (streamId) => this.#getStream(streamId),
-      insertStream: (streamId, metadata) => {
+      insertStream: (streamId, tag, metadata) => {
         this.#validateStreamId(streamId);
         const metadataJson = this.#serialize(
           metadata,
@@ -347,9 +367,9 @@ export class Streams extends LifecycleCapability {
         const now = Date.now();
         this.#sql`
           INSERT INTO cf_agents_streams
-            (stream_id, state, metadata, chunk_count, created_at, updated_at)
+            (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
           VALUES
-            (${streamId}, 'streaming', ${metadataJson}, 0, ${now}, ${now})
+            (${streamId}, 'streaming', ${tag}, ${metadataJson}, 0, ${now}, ${now})
         `;
         this.#emit("stream:opened", { streamId });
       },
@@ -366,22 +386,67 @@ export class Streams extends LifecycleCapability {
         );
         if (removed > 0) this.#emit("stream:deleted", { streamId });
       },
+      deleteMany: (streamIds) => {
+        for (const streamId of streamIds) {
+          this.#sql`
+            DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}
+          `;
+          this.#sql`DELETE FROM cf_agents_streams WHERE stream_id = ${streamId}`;
+        }
+      },
       readAll: (streamId) => this.#sql<StreamChunkRow>`
         SELECT stream_id, seq, chunk, created_at FROM cf_agents_stream_chunks
         WHERE stream_id = ${streamId}
         ORDER BY seq ASC
       `,
       listRows: () => this.#sql<StreamRow>`
-        SELECT * FROM cf_agents_streams ORDER BY created_at DESC
+        SELECT * FROM cf_agents_streams ORDER BY created_at DESC, rowid DESC
       `,
-      exec: (query, params) => {
-        try {
-          return [
-            ...this.lifecycle.storage.sql.exec(query, ...params)
-          ] as Record<string, string | number | null>[];
-        } catch (cause) {
-          throw new SqlError(query, cause);
-        }
+      latestRowByTag: (tag, state) => {
+        const rows = state
+          ? this.#sql<StreamRow>`
+              SELECT * FROM cf_agents_streams
+              WHERE tag = ${tag} AND state = ${state}
+              ORDER BY created_at DESC, rowid DESC LIMIT 1
+            `
+          : this.#sql<StreamRow>`
+              SELECT * FROM cf_agents_streams
+              WHERE tag = ${tag}
+              ORDER BY created_at DESC, rowid DESC LIMIT 1
+            `;
+        return rows[0];
+      },
+      importStream: (row) => {
+        this.#validateStreamId(row.streamId);
+        const metadataJson = this.#serialize(
+          row.metadata,
+          `metadata for stream "${row.streamId}"`
+        );
+        this.#sql`
+          INSERT INTO cf_agents_streams
+            (stream_id, state, tag, metadata, chunk_count,
+             created_at, updated_at, closed_at)
+          VALUES
+            (${row.streamId}, ${row.state}, ${row.tag}, ${metadataJson},
+             ${row.chunkCount}, ${row.createdAt}, ${row.updatedAt},
+             ${row.closedAt})
+        `;
+      },
+      importChunk: (streamId, chunk, createdAt) => {
+        const chunkJson = this.#serialize(
+          chunk,
+          `chunk for stream "${streamId}"`
+        );
+        const seq = this.#getStream(streamId)?.chunk_count ?? 0;
+        this.#sql`
+          INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+          VALUES (${streamId}, ${seq}, ${chunkJson}, ${createdAt})
+        `;
+        this.#sql`
+          UPDATE cf_agents_streams
+          SET chunk_count = chunk_count + 1, updated_at = ${createdAt}
+          WHERE stream_id = ${streamId}
+        `;
       }
     };
   }

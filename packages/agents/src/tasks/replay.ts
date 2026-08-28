@@ -203,10 +203,21 @@ export class ReplayStep implements TaskStep {
   readonly #engine: TaskStepEngine;
   readonly #usedNames = new Set<string>();
   #live: boolean;
+  readonly interrupted: {
+    readonly name: string;
+    readonly attempt: number;
+  } | null;
 
-  constructor(engine: TaskStepEngine, options: { startsLive: boolean }) {
+  constructor(
+    engine: TaskStepEngine,
+    options: {
+      startsLive: boolean;
+      interrupted?: { name: string; attempt: number } | null;
+    }
+  ) {
     this.#engine = engine;
     this.#live = options.startsLive;
+    this.interrupted = options.interrupted ?? null;
   }
 
   do<T extends TaskValue>(

@@ -18,6 +18,8 @@ import type {
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
 import { SqlError } from "../sql-error";
+import { TaskStore } from "./store";
+import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
 import { MissingTaskDefinitionError } from "./errors";
 import type { TaskEventType, TasksOptions } from "./options";
@@ -37,7 +39,6 @@ import type {
   TaskCallbacks,
   TaskHandlers,
   TaskInput,
-  TaskJson,
   TaskOutput,
   TaskReceipt,
   TaskRunOptions,
@@ -45,7 +46,6 @@ import type {
   TaskRunSnapshot,
   TaskRunState,
   TaskStep,
-  TaskStepRow,
   TaskValue
 } from "./types";
 
@@ -137,6 +137,7 @@ export class Tasks<
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
   readonly #active = new Map<string, ActiveAttempt>();
+  #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
 
@@ -169,6 +170,12 @@ export class Tasks<
 
   #claimTimeoutMs(): number {
     return this.#stepDefaults.timeoutMs + CLAIM_SLACK_MS;
+  }
+
+  /** The SQL store over this Lifecycle's storage (see `store.ts`). */
+  get #store(): TaskStore {
+    this.#storeInstance ??= new TaskStore(this.lifecycle.storage);
+    return this.#storeInstance;
   }
 
   // ── Definitions ──────────────────────────────────────────────────────────
@@ -254,7 +261,7 @@ export class Tasks<
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
-      this.#ensureTables();
+      this.#store.ensureTables();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
     this.#reconcile();
@@ -269,7 +276,7 @@ export class Tasks<
     if (this.#active.has(runId)) {
       // A live attempt in this isolate; push the claim backstop forward so
       // the due job does not hot-loop the alarm while it works.
-      this.#sql`
+      this.#store.sql`
         UPDATE cf_agents_task_runs
         SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
         WHERE run_id = ${runId} AND state = 'running'
@@ -311,7 +318,7 @@ export class Tasks<
    * wakes again.
    */
   #wakeOutcome(runId: string): LifecycleJobOutcome {
-    const rows = this.#sql<{ next_at: number | null }>`
+    const rows = this.#store.sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
@@ -327,7 +334,7 @@ export class Tasks<
    * durable mutation of a run's deadline or state funnels through here.
    */
   async #syncWake(runId: string): Promise<void> {
-    const rows = this.#sql<{ next_at: number | null }>`
+    const rows = this.#store.sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
@@ -342,7 +349,7 @@ export class Tasks<
 
   /** Mirror every non-terminal run into the queue (startup reconcile). */
   async #syncAllWakes(): Promise<void> {
-    const rows = this.#sql<{ run_id: string }>`
+    const rows = this.#store.sql<{ run_id: string }>`
       SELECT run_id FROM cf_agents_task_runs
       WHERE state IN ('pending', 'waiting', 'running')
         AND next_at IS NOT NULL
@@ -395,7 +402,7 @@ export class Tasks<
       throw new SqlError(query, cause);
     }
     // SAFETY: the query selects * from Tasks' own schema.
-    return (rows as TaskRunRow[]).map((row) => this.#rowToSnapshot(row));
+    return (rows as TaskRunRow[]).map((row) => this.#store.rowToSnapshot(row));
   }
 
   /**
@@ -408,11 +415,11 @@ export class Tasks<
    */
   async cancel(runId: string, reason?: string): Promise<boolean> {
     await this.lifecycle.ready();
-    const row = this.#getRun(runId);
+    const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return false;
 
     const now = Date.now();
-    this.#sql`
+    this.#store.sql`
       UPDATE cf_agents_task_runs
       SET cancel_requested = 1, cancel_reason = ${reason ?? null},
           next_at = ${now}, updated_at = ${now}
@@ -424,8 +431,7 @@ export class Tasks<
       await this.#syncWake(runId);
       return true;
     }
-    this.#settleCancelled(runId, null, reason);
-    await this.#syncWake(runId);
+    await this.#settleCancelled(runId, null, reason);
     return true;
   }
 
@@ -453,7 +459,7 @@ export class Tasks<
       throw new SqlError(query, cause);
     }
     for (const row of rows as Array<{ run_id: string; definition: string }>) {
-      this.#deleteRun(row.run_id);
+      this.#store.deleteRun(row.run_id);
       this.#emit("task:deleted", {
         runId: row.run_id,
         definition: row.definition
@@ -498,9 +504,11 @@ export class Tasks<
     );
 
     const existing =
-      (options.runId !== undefined ? this.#getRun(options.runId) : undefined) ??
+      (options.runId !== undefined
+        ? this.#store.getRun(options.runId)
+        : undefined) ??
       (options.idempotencyKey !== undefined
-        ? this.#getRunByKey(options.idempotencyKey)
+        ? this.#store.getRunByKey(options.idempotencyKey)
         : undefined);
     if (existing) {
       if (existing.definition !== definition) {
@@ -522,7 +530,7 @@ export class Tasks<
 
     const runId = options.runId ?? `task_${nanoid()}`;
     const now = Date.now();
-    this.#sql`
+    this.#store.sql`
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, state, metadata, idempotency_key, retain,
          attempt, next_at, cancel_requested, created_at, updated_at)
@@ -554,13 +562,12 @@ export class Tasks<
   /** Claim and drive one due run to its next durable boundary. */
   async #executeRun(runId: string): Promise<void> {
     if (this.#active.has(runId)) return;
-    const row = this.#getRun(runId);
+    const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return;
 
     const now = Date.now();
     if (row.cancel_requested === 1) {
-      this.#settleCancelled(runId, null, row.cancel_reason ?? undefined);
-      await this.#syncWake(runId);
+      await this.#settleCancelled(runId, null, row.cancel_reason ?? undefined);
       return;
     }
     if (row.next_at !== null && row.next_at > now) return;
@@ -569,28 +576,29 @@ export class Tasks<
     if (!handler) {
       const error = new MissingTaskDefinitionError(row.definition);
       console.error(error.message);
-      this.#settleFailed(runId, null, toErrorSummary(error));
-      await this.#syncWake(runId);
+      await this.#settleFailed(runId, null, toErrorSummary(error));
       await this.#observeError(error);
       return;
     }
 
+    // Unclean interruption: the previous attempt's isolate is gone. The
+    // claim below replays the handler; completed steps return journaled
+    // results, and the interrupted step rides `step.interrupted` as the
+    // durable evidence the handler branches on.
+    const interrupted =
+      row.state === "running" ? this.#interruptedStep(runId) : null;
     if (row.state === "running") {
-      // Unclean interruption: the previous attempt's isolate is gone. The
-      // claim below replays the handler; completed steps return journaled
-      // results and durable state (a stream's cursor, an idempotent write)
-      // carries whatever the lost attempt got done.
       this.#emit("task:attempt:interrupted", {
         runId,
         definition: row.definition,
         attempt: row.attempt,
-        step: this.#interruptedStepName(runId)
+        step: interrupted?.name ?? null
       });
     }
 
     const generation = nanoid();
     const attempt = row.attempt + 1;
-    this.#sql`
+    this.#store.sql`
       UPDATE cf_agents_task_runs
       SET state = 'running', attempt = ${attempt}, generation = ${generation},
           started_at = coalesce(started_at, ${now}),
@@ -613,7 +621,8 @@ export class Tasks<
       handler,
       generation,
       attempt,
-      controller
+      controller,
+      interrupted
     );
     this.#active.set(runId, { generation, controller, promise });
     try {
@@ -629,7 +638,8 @@ export class Tasks<
     handler: ResolvedTaskHandler,
     generation: string,
     attempt: number,
-    controller: AbortController
+    controller: AbortController,
+    interrupted: { name: string; attempt: number } | null
   ): Promise<void> {
     const runId = row.run_id;
     const input = deserializeTaskValue(row.input);
@@ -639,7 +649,10 @@ export class Tasks<
       generation,
       controller
     );
-    const step = new ReplayStep(engine, { startsLive: attempt === 1 });
+    const step = new ReplayStep(engine, {
+      startsLive: attempt === 1,
+      interrupted
+    });
 
     try {
       const output = await this.lifecycle.runInHostContext(() =>
@@ -649,7 +662,7 @@ export class Tasks<
         output,
         `result of Task definition "${row.definition}"`
       );
-      const settled = this.#fencedWrite(
+      const settled = this.#store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs
@@ -660,7 +673,7 @@ export class Tasks<
       );
       if (settled) {
         this.#emit("task:completed", { runId, definition: row.definition });
-        if (row.retain === 0) this.#deleteRun(runId);
+        if (row.retain === 0) this.#store.deleteRun(runId);
       }
       await this.#syncWake(runId);
     } catch (thrown) {
@@ -682,24 +695,22 @@ export class Tasks<
     }
 
     if (isTaskCancellation(thrown)) {
-      this.#settleCancelled(runId, generation, thrown.reason);
-      await this.#syncWake(runId);
+      await this.#settleCancelled(runId, generation, thrown.reason);
       return;
     }
 
     if (isTaskSuspension(thrown)) {
       // A cancel requested mid-attempt wins over parking the run.
-      const current = this.#getRun(runId);
+      const current = this.#store.getRun(runId);
       if (current?.cancel_requested === 1) {
-        this.#settleCancelled(
+        await this.#settleCancelled(
           runId,
           generation,
           current.cancel_reason ?? undefined
         );
-        await this.#syncWake(runId);
         return;
       }
-      const suspended = this.#fencedWrite(
+      const suspended = this.#store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs
@@ -721,13 +732,12 @@ export class Tasks<
     }
 
     const summary = toErrorSummary(thrown);
-    const failed = this.#settleFailed(runId, generation, summary);
+    const failed = await this.#settleFailed(runId, generation, summary);
     if (failed) {
       console.error(
         `Task run "${runId}" (definition "${row.definition}") failed: ${summary.name}: ${summary.message}`
       );
     }
-    await this.#syncWake(runId);
     await this.#observeError(thrown);
   }
 
@@ -747,200 +757,44 @@ export class Tasks<
     generation: string,
     controller: AbortController
   ): TaskStepEngine {
-    const assertCurrent = (): void => {
-      const row = this.#getRun(runId);
-      if (!row || row.generation !== generation) {
-        throw new AttemptSupersededError(runId);
-      }
-    };
-    const emit = (type: string, payload: Record<string, unknown>): void => {
-      this.#emit(type as TaskEventType, { runId, definition, ...payload });
-    };
-
-    return {
-      readStep: (name) => {
-        const rows = this.#sql<TaskStepRow>`
-          SELECT * FROM cf_agents_task_steps
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
-        return rows[0];
-      },
-      countSteps: () => {
-        const rows = this.#sql<{ count: number }>`
-          SELECT COUNT(*) AS count FROM cf_agents_task_steps WHERE run_id = ${runId}
-        `;
-        return rows[0]?.count ?? 0;
-      },
-      insertStep: (name, kind, wakeAt) => {
-        assertCurrent();
-        const now = Date.now();
-        this.#sql`
-          INSERT INTO cf_agents_task_steps
-            (run_id, step_name, kind, state, attempt, next_at, created_at,
-             started_at, updated_at)
-          VALUES
-            (${runId}, ${name}, ${kind},
-             ${kind === "do" ? "running" : wakeAt === null ? "running" : "waiting"},
-             ${kind === "do" ? 1 : 0}, ${wakeAt},
-             ${now}, ${kind === "do" ? now : null}, ${now})
-        `;
-      },
-      claimStepAttempt: (name) => {
-        assertCurrent();
-        const now = Date.now();
-        this.#sql`
-          UPDATE cf_agents_task_steps
-          SET state = 'running', attempt = attempt + 1, next_at = NULL,
-              started_at = ${now}, updated_at = ${now}
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
-        const rows = this.#sql<{ attempt: number }>`
-          SELECT attempt FROM cf_agents_task_steps
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
-        return rows[0]?.attempt ?? 1;
-      },
-      completeStep: (name, result) => {
-        assertCurrent();
-        const resultJson = serializeTaskValue(
-          result,
-          `result of step "${name}" in run "${runId}"`
-        );
-        const now = Date.now();
-        this.#sql`
-          UPDATE cf_agents_task_steps
-          SET state = 'completed', result = ${resultJson}, next_at = NULL,
-              completed_at = ${now}, updated_at = ${now}
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
-      },
-      failStep: (name, error) => {
-        assertCurrent();
-        const now = Date.now();
-        this.#sql`
-          UPDATE cf_agents_task_steps
-          SET state = 'failed', error_name = ${error.name},
-              error_message = ${error.message}, next_at = NULL, updated_at = ${now}
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
-      },
-      waitStep: (name, wakeAt) => {
-        assertCurrent();
-        const now = Date.now();
-        this.#sql`
-          UPDATE cf_agents_task_steps
-          SET state = 'waiting', next_at = ${wakeAt}, updated_at = ${now}
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
-      },
-      refreshClaim: () => {
-        this.#fencedWrite(
-          runId,
-          generation,
-          `UPDATE cf_agents_task_runs SET next_at = ?, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'running'`,
-          [Date.now() + this.#claimTimeoutMs(), Date.now()]
-        );
-      },
-      writeStatus: (message) => {
-        this.#fencedWrite(
-          runId,
-          generation,
-          `UPDATE cf_agents_task_runs SET status_message = ?, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'running'`,
-          [message, Date.now()]
-        );
-      },
-      cancellationRequested: () => {
-        const row = this.#getRun(runId);
-        if (!row || row.cancel_requested !== 1) return null;
-        return { reason: row.cancel_reason ?? undefined };
-      },
-      attemptSignal: controller.signal,
-      emit,
-      stepIdempotencyKey: (name) => `${runId}:${name}`,
-      defaults: this.#stepDefaults
-    };
+    return createTaskStepEngine({
+      store: this.#store,
+      runId,
+      generation,
+      signal: controller.signal,
+      claimTimeoutMs: () => this.#claimTimeoutMs(),
+      defaults: this.#stepDefaults,
+      emit: (type, payload) =>
+        this.#emit(type as TaskEventType, { runId, definition, ...payload })
+    });
   }
 
-  // ── Storage ──────────────────────────────────────────────────────────────
-
-  #sql<T = Record<string, string | number | boolean | null>>(
-    strings: TemplateStringsArray,
-    ...values: (string | number | boolean | null)[]
-  ): T[] {
-    const query = strings.reduce(
-      (result, part, index) =>
-        result + part + (index < values.length ? "?" : ""),
-      ""
-    );
-    try {
-      // SAFETY: Tasks queries select from its own schema; T describes the
-      // projected columns of the accompanying query text.
-      return [...this.lifecycle.storage.sql.exec(query, ...values)] as T[];
-    } catch (cause) {
-      throw new SqlError(query, cause);
-    }
-  }
-
-  /**
-   * Run one generation-fenced run mutation. Returns false when the fence
-   * rejected it because another attempt superseded this one.
-   */
-  #fencedWrite(
-    runId: string,
-    generation: string,
-    query: string,
-    leadingParams: (string | number | null)[]
-  ): boolean {
-    try {
-      const cursor = this.lifecycle.storage.sql.exec(
-        query,
-        ...leadingParams,
-        runId,
-        generation
-      );
-      return cursor.rowsWritten > 0;
-    } catch (cause) {
-      throw new SqlError(query, cause);
-    }
-  }
-
-  #getRun(runId: string): TaskRunRow | undefined {
-    const rows = this.#sql<TaskRunRow>`
-      SELECT * FROM cf_agents_task_runs WHERE run_id = ${runId}
-    `;
-    return rows[0];
-  }
-
-  #getRunByKey(idempotencyKey: string): TaskRunRow | undefined {
-    const rows = this.#sql<TaskRunRow>`
-      SELECT * FROM cf_agents_task_runs WHERE idempotency_key = ${idempotencyKey}
-    `;
-    return rows[0];
-  }
-
-  /** The step a lost attempt left mid-execution, for interruption events. */
-  #interruptedStepName(runId: string): string | null {
-    const rows = this.#sql<{ step_name: string }>`
-      SELECT step_name FROM cf_agents_task_steps
+  /** The step a lost attempt left mid-execution — replay-entry evidence. */
+  #interruptedStep(runId: string): { name: string; attempt: number } | null {
+    const rows = this.#store.sql<{ step_name: string; attempt: number }>`
+      SELECT step_name, attempt FROM cf_agents_task_steps
       WHERE run_id = ${runId} AND state = 'running'
       ORDER BY started_at DESC
       LIMIT 1
     `;
-    return rows[0]?.step_name ?? null;
+    return rows[0]
+      ? { name: rows[0].step_name, attempt: rows[0].attempt }
+      : null;
   }
 
-  /** Settle one run as cancelled. Fenced when a generation is supplied. */
-  #settleCancelled(
+  /**
+   * Settle one run as cancelled and sync its queue mirror. Fenced when a
+   * generation is supplied.
+   */
+  async #settleCancelled(
     runId: string,
     generation: string | null,
     reason: string | undefined
-  ): void {
+  ): Promise<void> {
     const now = Date.now();
     let settled: boolean;
     if (generation !== null) {
-      settled = this.#fencedWrite(
+      settled = this.#store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs
@@ -951,7 +805,7 @@ export class Tasks<
         [reason ?? null, now, now]
       );
     } else {
-      const written = this.#sqlWrite(
+      const written = this.#store.write(
         `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
@@ -962,25 +816,29 @@ export class Tasks<
       settled = written > 0;
     }
     if (settled) {
-      const row = this.#getRun(runId);
+      const row = this.#store.getRun(runId);
       this.#emit("task:cancelled", {
         runId,
         definition: row?.definition ?? null,
         reason: reason ?? null
       });
     }
+    await this.#syncWake(runId);
   }
 
-  /** Settle one run as failed. Fenced when a generation is supplied. */
-  #settleFailed(
+  /**
+   * Settle one run as failed and sync its queue mirror. Fenced when a
+   * generation is supplied.
+   */
+  async #settleFailed(
     runId: string,
     generation: string | null,
     error: { name: string; message: string }
-  ): boolean {
+  ): Promise<boolean> {
     const now = Date.now();
     let settled: boolean;
     if (generation !== null) {
-      settled = this.#fencedWrite(
+      settled = this.#store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs
@@ -991,7 +849,7 @@ export class Tasks<
         [error.name, error.message, now, now]
       );
     } else {
-      const written = this.#sqlWrite(
+      const written = this.#store.write(
         `UPDATE cf_agents_task_runs
          SET state = 'failed', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
@@ -1002,93 +860,15 @@ export class Tasks<
       settled = written > 0;
     }
     if (settled) {
-      const row = this.#getRun(runId);
+      const row = this.#store.getRun(runId);
       this.#emit("task:failed", {
         runId,
         definition: row?.definition ?? null,
         error: error.name
       });
     }
+    await this.#syncWake(runId);
     return settled;
-  }
-
-  #sqlWrite(query: string, params: (string | number | null)[]): number {
-    try {
-      return this.lifecycle.storage.sql.exec(query, ...params).rowsWritten;
-    } catch (cause) {
-      throw new SqlError(query, cause);
-    }
-  }
-
-  #deleteRun(runId: string): void {
-    this.#sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${runId}`;
-    this.#sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${runId}`;
-  }
-
-  #ensureTables(): void {
-    const rawSql = (query: string) => {
-      try {
-        this.lifecycle.storage.sql.exec(query);
-      } catch (cause) {
-        throw new SqlError(query, cause);
-      }
-    };
-    rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_task_runs (
-        run_id TEXT PRIMARY KEY,
-        definition TEXT NOT NULL,
-        input TEXT,
-        state TEXT NOT NULL CHECK (state IN (
-          'pending', 'running', 'waiting',
-          'completed', 'failed', 'cancelled'
-        )),
-        result TEXT,
-        error_name TEXT,
-        error_message TEXT,
-        status_message TEXT,
-        metadata TEXT,
-        idempotency_key TEXT UNIQUE,
-        retain INTEGER NOT NULL DEFAULT 1,
-        attempt INTEGER NOT NULL DEFAULT 0,
-        generation TEXT,
-        next_at INTEGER,
-        wait_reason TEXT,
-        cancel_requested INTEGER NOT NULL DEFAULT 0,
-        cancel_reason TEXT,
-        created_at INTEGER NOT NULL,
-        started_at INTEGER,
-        updated_at INTEGER NOT NULL,
-        settled_at INTEGER
-      )
-    `);
-    rawSql(`
-      CREATE INDEX IF NOT EXISTS cf_agents_task_runs_due
-      ON cf_agents_task_runs (state, next_at)
-    `);
-    rawSql(`
-      CREATE INDEX IF NOT EXISTS cf_agents_task_runs_definition
-      ON cf_agents_task_runs (definition, created_at)
-    `);
-    rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_task_steps (
-        run_id TEXT NOT NULL,
-        step_name TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
-        state TEXT NOT NULL CHECK (state IN (
-          'running', 'waiting', 'completed', 'failed'
-        )),
-        result TEXT,
-        error_name TEXT,
-        error_message TEXT,
-        attempt INTEGER NOT NULL DEFAULT 0,
-        next_at INTEGER,
-        created_at INTEGER NOT NULL,
-        started_at INTEGER,
-        updated_at INTEGER NOT NULL,
-        completed_at INTEGER,
-        PRIMARY KEY (run_id, step_name)
-      )
-    `);
   }
 
   /** Make deadlines sane after a fresh isolate: interrupted work wakes now. */
@@ -1096,12 +876,12 @@ export class Tasks<
     const now = Date.now();
     // A fresh isolate has no live attempts, so every claimed row is an
     // interrupted attempt: make it due immediately for reclaim and replay.
-    this.#sql`
+    this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE state = 'running' AND generation IS NOT NULL
     `;
     // Non-terminal rows must always carry a deadline; repair any without one.
-    this.#sql`
+    this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE state IN ('pending', 'waiting') AND next_at IS NULL
     `;
@@ -1114,10 +894,10 @@ export class Tasks<
     definition?: string
   ): Promise<TaskRunSnapshot<Output> | null> {
     await this.lifecycle.ready();
-    const row = this.#getRun(runId);
+    const row = this.#store.getRun(runId);
     if (!row) return null;
     if (definition !== undefined && row.definition !== definition) return null;
-    return this.#rowToSnapshot<Output>(row);
+    return this.#store.rowToSnapshot<Output>(row);
   }
 
   async #snapshotByKey<Output extends TaskValue>(
@@ -1125,73 +905,10 @@ export class Tasks<
     definition?: string
   ): Promise<TaskRunSnapshot<Output> | null> {
     await this.lifecycle.ready();
-    const row = this.#getRunByKey(idempotencyKey);
+    const row = this.#store.getRunByKey(idempotencyKey);
     if (!row) return null;
     if (definition !== undefined && row.definition !== definition) return null;
-    return this.#rowToSnapshot<Output>(row);
-  }
-
-  #rowToSnapshot<Output extends TaskValue>(
-    row: TaskRunRow
-  ): TaskRunSnapshot<Output> {
-    const metadata =
-      row.metadata !== null
-        ? (JSON.parse(row.metadata) as Record<string, TaskJson>)
-        : undefined;
-    const base = {
-      runId: row.run_id,
-      definition: row.definition,
-      createdAt: row.created_at,
-      ...(metadata !== undefined ? { metadata } : {})
-    };
-    switch (row.state) {
-      case "pending":
-        return { ...base, state: "pending" };
-      case "running":
-        return {
-          ...base,
-          state: "running",
-          attempt: row.attempt,
-          startedAt: row.started_at ?? row.created_at,
-          ...(row.status_message !== null
-            ? { statusMessage: row.status_message }
-            : {})
-        };
-      case "waiting":
-        return {
-          ...base,
-          state: "waiting",
-          reason: row.wait_reason ?? "sleep",
-          wakeAt: row.next_at ?? row.updated_at,
-          ...(row.status_message !== null
-            ? { statusMessage: row.status_message }
-            : {})
-        };
-      case "completed":
-        return {
-          ...base,
-          state: "completed",
-          result: deserializeTaskValue(row.result) as Output,
-          settledAt: row.settled_at ?? row.updated_at
-        };
-      case "failed":
-        return {
-          ...base,
-          state: "failed",
-          error: {
-            name: row.error_name ?? "Error",
-            message: row.error_message ?? "Task run failed"
-          },
-          settledAt: row.settled_at ?? row.updated_at
-        };
-      case "cancelled":
-        return {
-          ...base,
-          state: "cancelled",
-          ...(row.cancel_reason !== null ? { reason: row.cancel_reason } : {}),
-          settledAt: row.settled_at ?? row.updated_at
-        };
-    }
+    return this.#store.rowToSnapshot<Output>(row);
   }
 
   #emit(type: TaskEventType | string, payload: Record<string, unknown>): void {

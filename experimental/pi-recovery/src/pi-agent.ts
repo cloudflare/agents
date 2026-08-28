@@ -174,7 +174,10 @@ export class PiAgent extends Agent<Env> {
       )
     `;
 
-    this._resumableStream = new ResumableStream(this.streams);
+    this._resumableStream = new ResumableStream(
+      this.streams,
+      this.sql.bind(this)
+    );
     this._faux = createFauxPiModel({
       tokensPerSecond: STREAM_TOKENS_PER_SECOND
     });

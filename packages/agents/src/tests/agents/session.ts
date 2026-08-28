@@ -284,7 +284,13 @@ export class TestSessionAgent extends Agent {
   }> {
     const columnsBefore = this.streamMetadataColumnsForTest();
 
-    const stream = new ResumableStream(this.streams);
+    const stream = new ResumableStream(
+      this.streams,
+      <T = Record<string, unknown>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] => this.sql<T>(strings, ...values)
+    );
 
     const remainingLegacyTables = this.sql<{ name: string }>`
       select name from sqlite_master where type = 'table'

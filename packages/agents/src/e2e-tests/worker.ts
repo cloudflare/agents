@@ -811,16 +811,11 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
 
     guardedSteps: async (input: { totalSteps: number }, step: TaskStep) => {
       // Replay-entry evidence: the step a lost attempt left mid-execution,
-      // read from the journal before any step re-executes.
-      const interrupted = this.sql<{ step_name: string }>`
-        SELECT step_name FROM cf_agents_task_steps
-        WHERE run_id = 'e2e-guarded' AND state = 'running'
-        ORDER BY started_at DESC LIMIT 1
-      `[0]?.step_name;
-      if (interrupted !== undefined) {
+      // surfaced by the engine before any step re-executes.
+      if (step.interrupted !== null) {
         this.sql`
           INSERT INTO e2e_task_recoveries (run_id, interrupted_step, recovered_at)
-          VALUES ('e2e-guarded', ${interrupted}, ${Date.now()})
+          VALUES ('e2e-guarded', ${step.interrupted.name}, ${Date.now()})
         `;
       }
       for (let i = 0; i < input.totalSteps; i++) {

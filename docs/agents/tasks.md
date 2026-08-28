@@ -207,10 +207,23 @@ patterns make replay safe for irreversible effects:
   `stream.cursor` never duplicates a chunk, no matter how many times it
   replays.
 
+The interrupted step itself is first-class evidence: `step.interrupted`
+is `{ name, attempt }` when the previous attempt's isolate died
+mid-execution (and `null` on a clean attempt), so a handler can branch
+before re-entering irreversible work:
+
+```ts
+"send-report@v1": async (input: ReportInput, step: TaskStep) => {
+  if (step.interrupted?.name === "deliver") {
+    // the delivery may or may not have left the building — check first
+  }
+  ...
+}
+```
+
 A step callback that throws is not an interruption; the retry policy owns
-it, with the run parked `waiting` between attempts. Interruptions emit a
-`task:attempt:interrupted` event carrying the step the lost attempt left
-mid-execution.
+it, with the run parked `waiting` between attempts. Interruptions also emit
+a `task:attempt:interrupted` event carrying the same step name.
 
 ## Choosing an API
 
