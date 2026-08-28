@@ -11,7 +11,10 @@ import {
   getCurrentAgent,
   Lifecycle,
   LifecycleCapability,
-  type AlarmContribution,
+  type LifecycleJob,
+  type LifecycleJobContext,
+  type LifecycleJobOutcome,
+  type LifecycleJobs,
   type LifecycleEvent,
   type LifecycleServices,
   type LifecycleObject,
@@ -49,8 +52,11 @@ expectTypeOf<ProbeLifecycleObject["onRequest"]>().toEqualTypeOf<
 expectTypeOf<ProbeLifecycleObject["onAlarm"]>().toEqualTypeOf<
   (() => void | Promise<void>) | undefined
 >();
-expectTypeOf<ProbeLifecycleObject["getNextAlarm"]>().toEqualTypeOf<
-  (() => AlarmContribution | Promise<AlarmContribution>) | undefined
+expectTypeOf<ProbeLifecycleObject["onJob"]>().toEqualTypeOf<
+  | ((
+      context: LifecycleJobContext
+    ) => LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void>)
+  | undefined
 >();
 // WebSocket hooks are no longer part of the Lifecycle host contract —
 // connection handlers live in the opt-in WebSockets capability.
@@ -99,8 +105,14 @@ class ServiceCapability extends LifecycleCapability {
     expectTypeOf(this.lifecycle).toEqualTypeOf<LifecycleServices>();
     expectTypeOf(this.lifecycle.storage).toEqualTypeOf<DurableObjectStorage>();
     expectTypeOf(this.lifecycle.starting()).toEqualTypeOf<boolean>();
-    expectTypeOf(this.lifecycle.alarms.rearm()).toEqualTypeOf<Promise<void>>();
-    expectTypeOf(this.lifecycle.alarms.disabled()).toEqualTypeOf<boolean>();
+    expectTypeOf(this.lifecycle.jobs).toEqualTypeOf<LifecycleJobs>();
+    expectTypeOf(
+      this.lifecycle.jobs.push({ fn: "tick", time: Date.now() })
+    ).toEqualTypeOf<Promise<LifecycleJob>>();
+    expectTypeOf(this.lifecycle.jobs.cancel("id")).toEqualTypeOf<
+      Promise<boolean>
+    >();
+    expectTypeOf(this.lifecycle.jobs.list()).toEqualTypeOf<LifecycleJob[]>();
     expectTypeOf(this.lifecycle.runInHostContext(() => 1)).toEqualTypeOf<
       Promise<unknown>
     >();
@@ -123,7 +135,10 @@ const capability: DurableObjectCapability = {
     expectTypeOf(props).toEqualTypeOf<object | undefined>();
   },
   onRequest: ({ request }) => new Response(request.url),
-  getNextAlarm: () => ({ time: Date.now(), exclusive: true })
+  onJob: ({ job }) => {
+    expectTypeOf(job).toEqualTypeOf<LifecycleJob>();
+    return { rescheduleAt: Date.now() + 1000 };
+  }
 };
 
 expectTypeOf(capability).toMatchTypeOf<DurableObjectCapability>();

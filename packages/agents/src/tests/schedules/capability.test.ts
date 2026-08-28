@@ -154,24 +154,23 @@ describe("Scheduler capability", () => {
     });
   });
 
-  it("contributes the earliest pending schedule to alarm selection", async () => {
+  it("arms the physical alarm from the earliest pending schedule job", async () => {
     const stub = env.SchedulerHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
       async (instance: SchedulerHarnessObject, state) => {
         await instance.lifecycle.start();
-        expect(instance.scheduler.getNextAlarm()).toBeNull();
+        expect(await state.storage.getAlarm()).toBeNull();
 
         await instance.scheduler.set(120, "remind", "later");
         const sooner = await instance.scheduler.set(60, "remind", "sooner");
-        // The contribution and the armed physical alarm agree.
-        expect(instance.scheduler.getNextAlarm()).toBe(sooner.time * 1000);
         expect(await state.storage.getAlarm()).toBe(sooner.time * 1000);
 
-        // An overdue row (a restart lost the alarm) is clamped to the future.
+        // An overdue job (a restart lost the alarm) is clamped to the future.
         backdateScheduleRow(state.storage, sooner.id);
         const before = Date.now();
-        const overdue = instance.scheduler.getNextAlarm();
+        await instance.lifecycle.rearmAlarm();
+        const overdue = await state.storage.getAlarm();
         expect(overdue as number).toBeGreaterThan(before);
         expect(overdue as number).toBeLessThanOrEqual(before + 1_000);
       }
@@ -321,15 +320,15 @@ describe("Scheduler capability", () => {
       stub,
       async (instance: SchedulerHarnessObject, state) => {
         const interval = await instance.scheduler.every(600, "remind", "tick");
-        const nowSeconds = Math.floor(Date.now() / 1000);
+        const nowMs = Date.now();
         // In flight and not yet hung (harness hung timeout: 60s).
         state.storage.sql.exec(
-          "UPDATE cf_agents_schedules SET time = ?, running = 1, execution_started_at = ? WHERE id = ?",
-          nowSeconds - 5,
-          nowSeconds,
+          "UPDATE cf_agents_jobs SET time = ?, running = 1, execution_started_at = ? WHERE id = ?",
+          nowMs - 5_000,
+          nowMs,
           interval.id
         );
-        return { id: interval.id, startedAt: nowSeconds };
+        return { id: interval.id, startedAt: nowMs };
       }
     );
 
@@ -338,16 +337,15 @@ describe("Scheduler capability", () => {
     await runInDurableObject(
       stub,
       async (instance: SchedulerHarnessObject, state) => {
-        // Skipped, but a hung-interval recheck was contributed and armed.
+        // Skipped, but a hung-interval recheck was derived and armed.
         expect(instance.invocations).toEqual([]);
-        const recheck = (marks.startedAt + 60) * 1000;
-        expect(instance.scheduler.getNextAlarm()).toBe(recheck);
+        const recheck = marks.startedAt + 60_000;
         expect(await state.storage.getAlarm()).toBe(recheck);
 
         // Past the hung timeout: the next alarm cycle force-resets and runs.
         state.storage.sql.exec(
-          "UPDATE cf_agents_schedules SET execution_started_at = ? WHERE id = ?",
-          marks.startedAt - 120,
+          "UPDATE cf_agents_jobs SET execution_started_at = ? WHERE id = ?",
+          marks.startedAt - 120_000,
           marks.id
         );
       }

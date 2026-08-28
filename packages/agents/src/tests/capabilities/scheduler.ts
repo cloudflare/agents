@@ -110,14 +110,14 @@ export class SchedulerStartupWarnObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
-/** Backdate one schedule row so the next alarm phase treats it as due. */
+/** Backdate one schedule job so the next alarm phase treats it as due. */
 export function backdateScheduleRow(
   storage: DurableObjectStorage,
   id: string
 ): void {
   storage.sql.exec(
-    "UPDATE cf_agents_schedules SET time = ? WHERE id = ?",
-    Math.floor(Date.now() / 1000) - 5,
+    "UPDATE cf_agents_jobs SET time = ? WHERE id = ?",
+    Date.now() - 5_000,
     id
   );
 }
@@ -184,10 +184,9 @@ export class ScheduledLifecycleObject extends DurableObject<Cloudflare.Env> {
     const schedule = await this.scheduler.set(86_400, "reminder", {
       message
     });
-    const past = Math.floor(Date.now() / 1000) - 1;
     this.ctx.storage.sql.exec(
-      "UPDATE cf_agents_schedules SET time = ? WHERE id = ?",
-      past,
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = ?",
+      Date.now() - 1_000,
       schedule.id
     );
     await this.ctx.storage.setAlarm(Date.now() + 1000);

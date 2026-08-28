@@ -96,6 +96,12 @@ export type LifecycleJobs = {
   readonly get: (id: string) => LifecycleJob | undefined;
   /** List every owned job, ordered by due time. */
   readonly list: () => LifecycleJob[];
+  /**
+   * Recompute the physical alarm from queue state without mutating it.
+   * Mutations re-arm automatically; use this only to recover a lost alarm
+   * for existing jobs (e.g. an idempotent push that deduplicated).
+   */
+  readonly rearm: () => Promise<void>;
 };
 
 /** @internal Raw `cf_agents_jobs` SQLite row. */

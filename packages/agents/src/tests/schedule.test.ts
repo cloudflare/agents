@@ -193,8 +193,8 @@ describe("schedule operations", () => {
       await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
-          const past = Math.floor(Date.now() / 1000) - 1;
-          instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
+          const past = Date.now() - 1_000;
+          instance.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${scheduleId}`;
         }
       );
 
@@ -209,7 +209,7 @@ describe("schedule operations", () => {
             running: number;
             execution_started_at: number | null;
           }>`
-          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+          SELECT running, execution_started_at FROM cf_agents_jobs WHERE id = ${scheduleId}
         `;
           return result[0] ?? null;
         }
@@ -253,9 +253,9 @@ describe("schedule operations", () => {
       await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
-          const recentStart = Math.floor(Date.now() / 1000) - 5;
-          const past = Math.floor(Date.now() / 1000) - 1;
-          instance.sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${recentStart}, time = ${past} WHERE id = ${scheduleId}`;
+          const recentStart = Date.now() - 5_000;
+          const past = Date.now() - 1_000;
+          instance.sql`UPDATE cf_agents_jobs SET running = 1, execution_started_at = ${recentStart}, time = ${past} WHERE id = ${scheduleId}`;
         }
       );
 
@@ -302,14 +302,14 @@ describe("schedule operations", () => {
       const beforeState = await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
-          const past = Math.floor(Date.now() / 1000) - 1;
-          instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
+          const past = Date.now() - 1_000;
+          instance.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${scheduleId}`;
 
           const result = instance.sql<{
             running: number;
             execution_started_at: number | null;
           }>`
-          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+          SELECT running, execution_started_at FROM cf_agents_jobs WHERE id = ${scheduleId}
         `;
           return result[0] ?? null;
         }
@@ -364,7 +364,7 @@ describe("schedule operations", () => {
             running: number;
             execution_started_at: number | null;
           }>`
-          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+          SELECT running, execution_started_at FROM cf_agents_jobs WHERE id = ${scheduleId}
         `;
           return result[0] ?? null;
         }
@@ -402,9 +402,8 @@ describe("schedule operations", () => {
   describe("fresh-agent schema availability", () => {
     it("exposes the schedules table synchronously before first startup", async () => {
       const stub = env.TestScheduleAgent.getByName(crypto.randomUUID());
-      // Construct only — no lifecycle start. The constructor-time schema
-      // initialization must create cf_agents_schedules exactly as it did
-      // before the Scheduler capability was extracted.
+      // Construct only — no lifecycle start. The deprecated synchronous
+      // reads must work against the job queue before first startup.
       await runInDurableObject(stub, (instance: TestScheduleAgent) => {
         expect(instance.getSchedules()).toEqual([]);
         expect(instance.getSchedule("missing")).toBeUndefined();
@@ -745,8 +744,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -849,8 +849,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -881,8 +882,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -934,8 +936,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -976,7 +979,8 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules WHERE type = 'interval'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
         `;
           return result[0].count;
         }
@@ -1010,8 +1014,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }

@@ -7,7 +7,9 @@ import {
   getCurrentAgent,
   Lifecycle,
   LifecycleCapability,
-  type DurableObjectCapability
+  type DurableObjectCapability,
+  type LifecycleJobContext,
+  type LifecycleJobPushOptions
 } from "../../lifecycle";
 import { WebSockets } from "../../websockets";
 
@@ -35,20 +37,51 @@ export type WebSocketContextEvent = {
 };
 
 class StartupAlarmProbe extends LifecycleCapability<StartupProps> {
-  #nextAlarm: number | null = null;
-
   constructor() {
     super("startup-alarm-probe");
   }
 
   async onStart({ props }: { props: StartupProps | undefined }): Promise<void> {
     if (props?.label !== "startup-alarm") return;
-    this.#nextAlarm = Date.now() + 60_000;
-    await this.lifecycle.alarms.rearm();
+    // Pushing during startup defers the physical re-arm until startup
+    // completes; the alarm-coalescing test asserts it was applied.
+    await this.lifecycle.jobs.push({
+      id: "startup-tick",
+      fn: "tick",
+      time: Date.now() + 60_000
+    });
   }
 
-  getNextAlarm(): number | null {
-    return this.#nextAlarm;
+  onJob(): void {}
+}
+
+/**
+ * Job-queue probe: pushes jobs on behalf of tests, records the ambient
+ * context its `onJob` observed, and reports executions through a callback so
+ * the host can interleave them with its own events.
+ */
+class JobProbe extends LifecycleCapability {
+  readonly ambientContexts: boolean[] = [];
+  readonly #onExecute: (fn: string) => void;
+
+  constructor(onExecute: (fn: string) => void) {
+    super("job-probe");
+    this.#onExecute = onExecute;
+  }
+
+  onJob({ job }: LifecycleJobContext): void {
+    this.ambientContexts.push(getCurrentAgent().agent !== undefined);
+    this.#onExecute(job.fn);
+  }
+
+  push(options: LifecycleJobPushOptions) {
+    return this.lifecycle.jobs.push(options);
+  }
+
+  async clear(): Promise<void> {
+    for (const job of this.lifecycle.jobs.list()) {
+      await this.lifecycle.jobs.cancel(job.id);
+    }
   }
 }
 
@@ -115,10 +148,6 @@ class CapabilityContextProbe implements DurableObjectCapability<StartupProps> {
 
   onRequest(): void {
     this.#capture("request");
-  }
-
-  onAlarm(): void {
-    this.#capture("alarm");
   }
 
   #capture(phase: CapabilityContextEvent["phase"]): void {
@@ -222,12 +251,10 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   });
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
-  #firstAlarm: number | null = null;
-  #secondAlarm: number | null = null;
-  #exclusiveAlarm: number | null = null;
-  #hostAlarm: number | null = null;
-  readonly #capabilityAlarmContexts: boolean[] = [];
-  readonly #hostAlarmContexts: boolean[] = [];
+  readonly #jobProbe = new JobProbe((fn) => {
+    this.#events.push(`capability:job:${fn}`);
+  });
+  readonly #hostJobContexts: boolean[] = [];
 
   readonly lifecycle = Lifecycle.install<Cloudflare.Env, StartupProps>(this)
     .use(this.#capabilityContexts)
@@ -245,28 +272,9 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
         if (new URL(request.url).searchParams.has("capability")) {
           return Response.json(this.#events);
         }
-      },
-      onAlarm: () => {
-        this.#events.push("capability:alarm");
       }
     } satisfies DurableObjectCapability<StartupProps>)
-    .use({
-      getNextAlarm: () => {
-        this.#capabilityAlarmContexts.push(
-          getCurrentAgent().agent !== undefined
-        );
-        return this.#firstAlarm;
-      }
-    })
-    .use({
-      getNextAlarm: () => this.#secondAlarm
-    })
-    .use({
-      getNextAlarm: () =>
-        this.#exclusiveAlarm === null
-          ? null
-          : { time: this.#exclusiveAlarm, exclusive: true }
-    })
+    .use(this.#jobProbe)
     .use({
       dispose: () => {
         this.#events.push("dispose:first");
@@ -298,11 +306,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
     this.#events.push("host:alarm");
   }
 
-  getNextAlarm(): number | null {
-    this.#hostAlarmContexts.push(
+  onJob({ job }: LifecycleJobContext): void {
+    this.#hostJobContexts.push(
       getCurrentAgent<PlainLifecycleObject>().agent === this
     );
-    return this.#hostAlarm;
+    this.#events.push(`host:job:${job.fn}`);
   }
 
   installHandlersAgainForTest(): string {
@@ -327,33 +335,66 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
     await this.ctx.storage.put("__ps_name", name);
   }
 
+  /** Arm a raw platform alarm with no due jobs (a bare alarm wake). */
   async scheduleAlarm(): Promise<void> {
     await this.lifecycle.start();
     await this.ctx.storage.setAlarm(Date.now() + 60_000);
   }
 
-  getAlarmContributionContexts(): {
+  /** Push one backdated capability job so the alarm event loop drives it. */
+  async pushDueProbeJob(fn: string): Promise<void> {
+    await this.lifecycle.start();
+    await this.#jobProbe.push({ fn, time: Date.now() - 1 });
+  }
+
+  /** Push one backdated host job so the alarm event loop drives it. */
+  async pushDueHostJob(fn: string): Promise<void> {
+    await this.lifecycle.start();
+    await this.lifecycle.jobs.push({ fn, time: Date.now() - 1 });
+  }
+
+  getJobContexts(): {
     readonly capability: readonly boolean[];
     readonly host: readonly boolean[];
   } {
     return {
-      capability: this.#capabilityAlarmContexts,
-      host: this.#hostAlarmContexts
+      capability: this.#jobProbe.ambientContexts,
+      host: this.#hostJobContexts
     };
   }
 
-  async setAlarmContributions(
-    first: number | null,
-    second: number | null,
-    host: number | null,
-    exclusive: number | null = null
-  ): Promise<number | null> {
+  /**
+   * Replace every probe- and host-owned job with the given future wake
+   * times, then report the physical alarm derived from the queue.
+   */
+  async setQueueJobs(options: {
+    capabilityTimes?: number[];
+    hostTime?: number;
+    exclusiveTime?: number;
+  }): Promise<number | null> {
     await this.lifecycle.start();
-    this.#firstAlarm = first;
-    this.#secondAlarm = second;
-    this.#hostAlarm = host;
-    this.#exclusiveAlarm = exclusive;
-    await this.lifecycle.rearmAlarm();
+    await this.#jobProbe.clear();
+    for (const job of this.lifecycle.jobs.list()) {
+      await this.lifecycle.jobs.cancel(job.id);
+    }
+    for (const [index, time] of (options.capabilityTimes ?? []).entries()) {
+      await this.#jobProbe.push({ id: `probe-${index}`, fn: "tick", time });
+    }
+    if (options.hostTime !== undefined) {
+      await this.lifecycle.jobs.push({
+        id: "host-tick",
+        fn: "tick",
+        time: options.hostTime
+      });
+    }
+    if (options.exclusiveTime !== undefined) {
+      await this.#jobProbe.push({
+        id: "probe-exclusive",
+        fn: "tick",
+        time: options.exclusiveTime,
+        exclusive: true
+      });
+    }
     return this.ctx.storage.getAlarm();
   }
 

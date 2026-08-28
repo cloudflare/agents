@@ -707,7 +707,8 @@ export class Lifecycle<
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
       get: (id: string) => this.#jobQueue.get(owner, id),
-      list: () => this.#jobQueue.list(owner)
+      list: () => this.#jobQueue.list(owner),
+      rearm: () => this.rearmAlarm()
     });
   }
 
@@ -857,6 +858,7 @@ export class Lifecycle<
       );
       if (this.#alarmsDisabled) return;
       this.#jobQueue.applyOutcome(row.id, outcome ?? undefined);
+      this.#executingJobRow = undefined;
     } catch (error) {
       if (this.#alarmsDisabled) return;
       if (
@@ -877,22 +879,23 @@ export class Lifecycle<
           `Deferring job ${row.id} to a fresh invocation after a ` +
             `platform failure; the job is preserved.`
         );
+        // Leave #executingJobRow set: the memory-limit breaker at the alarm
+        // boundary targets the exact job that was executing.
         throw error;
       }
       // Application failure after retry exhaustion: the owner observes it
       // and decides advancement; default is completion.
       let outcome: LifecycleJobOutcome | void;
       try {
-        outcome = await dispatch.onJobError?.(
+        outcome = (await dispatch.onJobError?.(
           { job, attempt: maxAttempts },
           error
-        );
+        )) as LifecycleJobOutcome | void;
       } catch (hookError) {
         console.error(`Job failure hook threw for ${row.id}`, hookError);
       }
       if (this.#alarmsDisabled) return;
       this.#jobQueue.applyOutcome(row.id, outcome ?? undefined);
-    } finally {
       this.#executingJobRow = undefined;
     }
   }

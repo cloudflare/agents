@@ -828,6 +828,9 @@ export class Scheduler<
         JSON.stringify(payload)
       );
       if (existing) {
+        // A dedup hit still re-arms so a lost physical alarm recovers, as
+        // idempotent re-scheduling on startup historically guaranteed.
+        await this.lifecycle.jobs.rearm();
         return {
           schedule: this.#jobToSchedule<T>(existing.job, existing.timing),
           created: false

@@ -165,6 +165,10 @@ import type {
   RetryOptions,
   WSMessage
 } from "agents";
+import type {
+  LifecycleJobContext,
+  LifecycleJobOutcome
+} from "agents/lifecycle";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -1904,6 +1908,7 @@ type ThinkWorkflowPromptContext = {
 };
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
+const THINK_WORKFLOW_NOTIFICATIONS_JOB_ID = "think:workflow-notifications";
 
 /**
  * Message-metadata keys that are server-written turn context (stamped by
@@ -9993,12 +9998,39 @@ export class Think<
     return Math.max(pending[0].updated_at + delayMs, Date.now() + 1);
   }
 
-  protected override _getExtensionAlarm(): number | null {
-    return this._nextWorkflowNotificationAlarm();
+  /**
+   * Drive the Think-owned workflow-notification host job. Unknown fns
+   * delegate to Agent's dispatch.
+   */
+  protected override _onHostJob(
+    fn: string,
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    if (fn === "thinkWorkflowNotifications") {
+      this._startWorkflowNotificationDrain();
+      const next = this._nextWorkflowNotificationAlarm();
+      return next === null ? undefined : { rescheduleAt: next };
+    }
+    return super._onHostJob(fn, context);
   }
 
-  private _rearmWorkflowNotificationAlarm(): Promise<void> {
-    return this.lifecycle.rearmAlarm();
+  /**
+   * Sync the workflow-notification wake job with pending-notification state.
+   * Replaces the pull-based `_getExtensionAlarm()` contribution.
+   */
+  private async _rearmWorkflowNotificationAlarm(): Promise<void> {
+    const next = this._nextWorkflowNotificationAlarm();
+    if (next === null) {
+      if (this.lifecycle.jobs.get(THINK_WORKFLOW_NOTIFICATIONS_JOB_ID)) {
+        await this.lifecycle.jobs.cancel(THINK_WORKFLOW_NOTIFICATIONS_JOB_ID);
+      }
+      return;
+    }
+    await this.lifecycle.jobs.push({
+      id: THINK_WORKFLOW_NOTIFICATIONS_JOB_ID,
+      fn: "thinkWorkflowNotifications",
+      time: next
+    });
   }
 
   async inspectSubmission(
