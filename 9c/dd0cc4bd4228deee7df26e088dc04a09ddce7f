@@ -1,0 +1,25 @@
+design/lifecycle-work-queue.md
+  s_f510ad52b05c4e::t_3249cd6858b87e 86-89
+docs/agents/lifecycle.md
+  s_f510ad52b05c4e::t_831660d8f26421 202-204
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_f510ad52b05c4e::t_0242fd047f3d4e 774-775,778
+packages/agents/src/lifecycle/job-queue.ts
+  s_f510ad52b05c4e::t_133abf1a61fa14 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9cdd0cc4bd4228deee7df26e088dc04a09ddce7f",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
