@@ -70,7 +70,7 @@ stream must be settled first).
 
 **Tags** are the lookup side of the id: `open(id, { tag })` stamps a stream
 with an indexed application key — a request id, a session — that is
-deliberately *not* unique. An operation that produces successive streams (a
+deliberately _not_ unique. An operation that produces successive streams (a
 retried turn, a regenerated reply) tags each one, and
 `list({ tag, limit: 1 })` finds the latest (results are newest-first). The
 tag is fixed at creation; reopening a live stream with a different tag

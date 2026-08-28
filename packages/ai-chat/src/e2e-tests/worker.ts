@@ -89,6 +89,38 @@ abstract class ExhaustionBaseAgent extends AIChatAgent<Env> {
     );
   }
 
+  /** Diagnostic dump for exhaustion debugging: incidents, runs, schedules. */
+  @callable()
+  async debugRecoveryState(): Promise<{
+    incidents: Array<{ key: string; value: unknown }>;
+    taskRuns: Array<{ run_id: string; definition: string; state: string }>;
+    legacyRuns: number;
+    jobs: Array<{ id: string; capability: string; fn: string; time: number }>;
+  }> {
+    const incidentMap = await this.ctx.storage.list({
+      prefix: "cf:chat-recovery:"
+    });
+    const incidents = [...incidentMap.entries()].map(([key, value]) => ({
+      key,
+      value
+    }));
+    const taskRuns = this.sql<{
+      run_id: string;
+      definition: string;
+      state: string;
+    }>`SELECT run_id, definition, state FROM cf_agents_task_runs`;
+    const legacyRuns =
+      this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM cf_agents_runs`[0]
+        ?.n ?? 0;
+    const jobs = this.sql<{
+      id: string;
+      capability: string;
+      fn: string;
+      time: number;
+    }>`SELECT id, capability, fn, time FROM cf_agents_jobs`;
+    return { incidents, taskRuns, legacyRuns, jobs };
+  }
+
   @callable()
   hasFiberRows(): boolean {
     // Chat turns run on the Tasks capability (cf_agents_task_runs); facet

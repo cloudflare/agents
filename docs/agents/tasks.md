@@ -168,14 +168,14 @@ await this.tasks.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
 
 A snapshot is discriminated by `state`:
 
-| State        | Meaning                                                                |
-| ------------ | ---------------------------------------------------------------------- |
-| `pending`    | Accepted, first attempt not yet claimed.                               |
-| `running`    | An attempt is executing (`attempt`, `startedAt`, `statusMessage`).     |
-| `waiting`    | Parked on a durable deadline (`reason`: `sleep` or `retry`).           |
-| `completed`  | Settled with `result`.                                                 |
-| `failed`     | Settled with a safe `error` projection.                                |
-| `cancelled`  | Settled by cancellation, with its optional `reason`.                   |
+| State       | Meaning                                                            |
+| ----------- | ------------------------------------------------------------------ |
+| `pending`   | Accepted, first attempt not yet claimed.                           |
+| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`). |
+| `waiting`   | Parked on a durable deadline (`reason`: `sleep` or `retry`).       |
+| `completed` | Settled with `result`.                                             |
+| `failed`    | Settled with a safe `error` projection.                            |
+| `cancelled` | Settled by cancellation, with its optional `reason`.               |
 
 Cancellation is cooperative: a parked run settles immediately, a live attempt
 is aborted through its signal and settles at its next step boundary. An
