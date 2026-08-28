@@ -962,7 +962,7 @@ const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 // next wake must complete instead of resuming normal work.
 //
 // Scope: the marker is only consulted on alarm-driven paths (`alarm()` and
-// `_rearmAlarm()`). It deliberately does NOT gate request entrypoints
+// `_syncHostJobs()`). It deliberately does NOT gate request entrypoints
 // (`onRequest`/`onMessage`/RPC) — a request that lands between scheduling and
 // the teardown alarm runs normally and `_ensureSchema()` recreates tables. For
 // the MCP session-DELETE use case this is benign: the session id is unique and
@@ -1670,7 +1670,7 @@ export class Agent<
   private _warnedChatRecoveryInOnStart = false;
 
   /**
-   * Number of active keepAlive() callers. When > 0, `_rearmAlarm()`
+   * Number of active keepAlive() callers. When > 0, `_syncHostJobs()`
    * caps the next alarm at `keepAliveIntervalMs` so the DO stays alive.
    * Purely in-memory — lost on eviction, which is correct because the
    * in-memory work keepAlive was protecting is also lost.
@@ -3971,7 +3971,7 @@ export class Agent<
       await this.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix);
     }
     this._deleteFacetRunRowsForPrefix(ownerPath);
-    await this._rearmAlarm();
+    await this._syncHostJobs();
   }
 
   /**
@@ -3988,7 +3988,7 @@ export class Agent<
     this._facetKeepAliveTokens.add(token);
     this._keepAliveRefs++;
     if (this._keepAliveRefs === 1) {
-      await this._rearmAlarm();
+      await this._syncHostJobs();
     }
     return token;
   }
@@ -4001,7 +4001,7 @@ export class Agent<
   async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
     if (!this._facetKeepAliveTokens.delete(token)) return;
     this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-    await this._rearmAlarm();
+    await this._syncHostJobs();
   }
 
   /**
@@ -4025,7 +4025,7 @@ export class Agent<
       VALUES
         (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
     `;
-    await this._rearmAlarm();
+    await this._syncHostJobs();
   }
 
   /**
@@ -4042,7 +4042,7 @@ export class Agent<
       WHERE owner_path_key IS ${ownerPathKey}
         AND run_id = ${runId}
     `;
-    await this._rearmAlarm();
+    await this._syncHostJobs();
   }
 
   /**
@@ -4232,7 +4232,7 @@ export class Agent<
     this._keepAliveRefs++;
 
     if (this._keepAliveRefs === 1) {
-      await this._rearmAlarm();
+      await this._syncHostJobs();
     }
 
     let disposed = false;
@@ -4247,7 +4247,7 @@ export class Agent<
       // (mirrors `_cf_releaseFacetKeepAlive`).
       if (this._keepAliveRefs === 0) {
         this.ctx.waitUntil(
-          this._rearmAlarm().catch((e) => {
+          this._syncHostJobs().catch((e) => {
             console.error(
               "[Agent] Failed to reschedule alarm after keepAlive dispose:",
               e
@@ -5199,7 +5199,7 @@ export class Agent<
     const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
     // Forward progress this scan = at least one fiber was resolved (orphan row
     // deleted via recovery/age-out/managed-terminal, or a ledger-only managed
-    // fiber finalized). Drives the recovery-alarm backoff in `_rearmAlarm`.
+    // fiber finalized). Drives the recovery-alarm backoff in `_syncHostJobs`.
     let madeProgress = false;
 
     try {
@@ -5359,7 +5359,7 @@ export class Agent<
       this._runFiberRecoveryInProgress = false;
       // Update the recovery-alarm backoff streak: reset on any forward progress,
       // otherwise grow it only while work is still pending (a repeatedly-failing
-      // poison hook). `_rearmAlarm` reads this to space out retries.
+      // poison hook). `_syncHostJobs` reads this to space out retries.
       if (madeProgress) {
         this._recoveryNoProgressScans = 0;
       } else {
@@ -5632,7 +5632,7 @@ export class Agent<
    * executing in memory, which already hold a keepAlive ref) or managed
    * ledger fibers stuck in a non-terminal state with no live run row.
    *
-   * Used by `_rearmAlarm` to arm a follow-up alarm so multi-pass
+   * Used by `_syncHostJobs` to arm a follow-up alarm so multi-pass
    * recovery (e.g. after a scan-deadline yield, or while retrying a throwing
    * recovery hook) resumes instead of starving.
    * @internal
@@ -5656,65 +5656,61 @@ export class Agent<
   }
 
   /**
-   * Synchronize Agent-owned host work items with current durable state.
+   * Synchronize Agent-owned host jobs with current durable state.
    *
    * Replaces the old pull-based `getNextAlarm()` contribution: keep-alive
-   * refs hold a `cf:keep-alive` item, and fiber-recovery / facet-run state
-   * holds a `cf:housekeeping` item. Every state change that used to trigger
-   * an alarm recalculation now re-pushes or cancels these items; queue
+   * refs hold a `cf:keep-alive` job, and fiber-recovery / facet-run state
+   * holds a `cf:housekeeping` job. Every state change that used to trigger
+   * an alarm recalculation now re-pushes or cancels these jobs; queue
    * mutations re-arm the physical alarm automatically.
    * @internal
    */
-  private async _rearmAlarm(): Promise<void> {
-    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, () =>
-      this._syncHostJobs()
-    );
-  }
-
   private async _syncHostJobs(): Promise<void> {
     if (this._destroyed) return;
-    const work = this.lifecycle.jobs;
-    const nowMs = Date.now();
+    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, async () => {
+      const work = this.lifecycle.jobs;
+      const nowMs = Date.now();
 
-    // A pending destroy (#1625) must keep its wake armed and exclusive
-    // through any re-sync — including markers written by a pre-job-queue
-    // release — so a keepAlive-holding agent cannot delay its own
-    // condemnation. The durable marker stays authoritative; the job is
-    // re-derived from it.
-    const pendingDestroy = await this._pendingDestroyAlarm();
-    if (pendingDestroy !== null) {
-      await work.push({
-        id: HOST_JOB_DESTROY_ID,
-        fn: "destroy",
-        time: pendingDestroy,
-        exclusive: true
-      });
-      return;
-    }
-    if (work.get(HOST_JOB_DESTROY_ID)) {
-      await work.cancel(HOST_JOB_DESTROY_ID);
-    }
+      // A pending destroy (#1625) must keep its wake armed and exclusive
+      // through any re-sync — including markers written by a pre-job-queue
+      // release — so a keepAlive-holding agent cannot delay its own
+      // condemnation. The durable marker stays authoritative; the job is
+      // re-derived from it.
+      const pendingDestroy = await this._pendingDestroyAlarm();
+      if (pendingDestroy !== null) {
+        await work.push({
+          id: HOST_JOB_DESTROY_ID,
+          fn: "destroy",
+          time: pendingDestroy,
+          exclusive: true
+        });
+        return;
+      }
+      if (work.get(HOST_JOB_DESTROY_ID)) {
+        await work.cancel(HOST_JOB_DESTROY_ID);
+      }
 
-    if (this._keepAliveRefs > 0) {
-      await work.push({
-        id: HOST_JOB_KEEP_ALIVE_ID,
-        fn: "keepAlive",
-        time: nowMs + this._resolvedOptions.keepAliveIntervalMs
-      });
-    } else if (work.get(HOST_JOB_KEEP_ALIVE_ID)) {
-      await work.cancel(HOST_JOB_KEEP_ALIVE_ID);
-    }
+      if (this._keepAliveRefs > 0) {
+        await work.push({
+          id: HOST_JOB_KEEP_ALIVE_ID,
+          fn: "keepAlive",
+          time: nowMs + this._resolvedOptions.keepAliveIntervalMs
+        });
+      } else if (work.get(HOST_JOB_KEEP_ALIVE_ID)) {
+        await work.cancel(HOST_JOB_KEEP_ALIVE_ID);
+      }
 
-    const housekeepingAt = this._nextHousekeepingWakeMs(nowMs);
-    if (housekeepingAt !== null) {
-      await work.push({
-        id: HOST_JOB_HOUSEKEEPING_ID,
-        fn: "housekeeping",
-        time: housekeepingAt
-      });
-    } else if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
-      await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
-    }
+      const housekeepingAt = this._nextHousekeepingWakeMs(nowMs);
+      if (housekeepingAt !== null) {
+        await work.push({
+          id: HOST_JOB_HOUSEKEEPING_ID,
+          fn: "housekeeping",
+          time: housekeepingAt
+        });
+      } else if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
+        await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
+      }
+    });
   }
 
   /**
@@ -10118,7 +10114,7 @@ export class Agent<
     // /facet bootstrap, and `destroy()` below branches on the in-memory
     // `_isFacet`. Without this, an RPC landing before init would see it as
     // `false`, fall through to `destroy()`'s top-level path, and write the
-    // destroy marker on a facet — which the `alarm()`/`_rearmAlarm()`
+    // destroy marker on a facet — which the `alarm()`/`_syncHostJobs()`
     // guards forbid (only top-level agents write it; facet teardown is
     // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
     // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`

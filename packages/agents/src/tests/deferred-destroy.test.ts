@@ -101,20 +101,20 @@ describe("deferred destroy (#1625)", () => {
     expect(await fresh.getSchedules()).toHaveLength(0);
   });
 
-  it("_rearmAlarm keeps the destroy alarm armed instead of deleting it as no-work", async () => {
+  it("_syncHostJobs keeps the destroy alarm armed instead of deleting it as no-work", async () => {
     const stub = await getAgentByName(
       env.TestScheduleAgent,
       crypto.randomUUID()
     );
     // No schedules, no keepAlive leases — without the pending-destroy guard,
-    // _rearmAlarm's "no work pending" branch would delete the alarm
+    // _syncHostJobs's "no work pending" branch would delete the alarm
     // armed by _cf_scheduleDestroy and the teardown would never land.
     await runInDurableObject(stub, async (instance, ctx) => {
       await ctx.storage.put(DESTROY_PENDING_KEY, true);
       await ctx.storage.setAlarm(Date.now() + 86_400_000);
       await (
-        instance as unknown as { _rearmAlarm(): Promise<void> }
-      )._rearmAlarm();
+        instance as unknown as { _syncHostJobs(): Promise<void> }
+      )._syncHostJobs();
       expect(await ctx.storage.getAlarm()).not.toBeNull();
       // Leave no pending destroy behind for this DO (the test asserts the
       // guard only): clear the marker and alarm.
@@ -123,12 +123,12 @@ describe("deferred destroy (#1625)", () => {
     });
   });
 
-  it("_rearmAlarm keeps the destroy alarm immediate even while a keepAlive lease is held", async () => {
+  it("_syncHostJobs keeps the destroy alarm immediate even while a keepAlive lease is held", async () => {
     const stub = await getAgentByName(
       env.TestScheduleAgent,
       crypto.randomUUID()
     );
-    // With an active keepAlive ref (and no pending destroy), _rearmAlarm
+    // With an active keepAlive ref (and no pending destroy), _syncHostJobs
     // would push the alarm out to now + keepAliveIntervalMs. The pending-destroy
     // guard must win so teardown still lands immediately instead of waiting a
     // full heartbeat — otherwise a keepAlive-holding agent delays its own
@@ -136,14 +136,14 @@ describe("deferred destroy (#1625)", () => {
     await runInDurableObject(stub, async (instance, ctx) => {
       const agent = instance as unknown as {
         _keepAliveRefs: number;
-        _rearmAlarm(): Promise<void>;
+        _syncHostJobs(): Promise<void>;
       };
       agent._keepAliveRefs = 1;
       await ctx.storage.put(DESTROY_PENDING_KEY, true);
       await ctx.storage.setAlarm(Date.now() + 86_400_000);
 
       const before = Date.now();
-      await agent._rearmAlarm();
+      await agent._syncHostJobs();
       const alarm = await ctx.storage.getAlarm();
       expect(alarm).not.toBeNull();
       // Immediate (within a small window of `before`), NOT pushed out to the
