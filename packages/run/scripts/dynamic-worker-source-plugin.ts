@@ -17,7 +17,11 @@ async function transpileDynamicWorkerModule(filePath: string): Promise<string> {
     reportDiagnostics: true,
     compilerOptions: {
       module: ts.ModuleKind.ES2022,
-      target: ts.ScriptTarget.ES2021
+      // ES2022 emits native class fields with define semantics. Lowering them
+      // would route field initialization through the mutable global
+      // Object.defineProperty, which guest code can replace.
+      target: ts.ScriptTarget.ES2022,
+      useDefineForClassFields: true
     }
   });
   const diagnostic = transformed.diagnostics?.find(

@@ -8,6 +8,7 @@ import type {
 import { runWithHostFunctionContext } from "./host-function-context";
 import { RunError } from "./run-error";
 import { hasEnumerableInheritedProperty, parseRunData } from "./run-data";
+import type { RunHostCallLimits } from "./run-limits";
 import type { HostFunction, HostFunctions } from "./run-types";
 
 const RUN_FORBIDDEN_HOST_NAMES = new Set([
@@ -112,16 +113,23 @@ export class RunHostFunctionDispatcher
 {
   readonly #hostFunctions: RunHostFunctionLookup;
   readonly #hostFunctionFailures: Map<number, RunHostFunctionFailure>;
+  readonly #signal: AbortSignal;
+  readonly #limits: RunHostCallLimits;
   #nextCallId = 1;
+  #activeInvocations = 0;
 
   /** Construct a dispatcher over validated functions and a parent failure store. */
   constructor(
     hostFunctions: RunHostFunctionLookup,
-    hostFunctionFailures: Map<number, RunHostFunctionFailure>
+    hostFunctionFailures: Map<number, RunHostFunctionFailure>,
+    signal: AbortSignal,
+    limits: RunHostCallLimits
   ) {
     super();
     this.#hostFunctions = hostFunctions;
     this.#hostFunctionFailures = hostFunctionFailures;
+    this.#signal = signal;
+    this.#limits = limits;
   }
 
   /** Invoke one sequenced host call without exposing trusted failures over RPC. */
@@ -134,6 +142,15 @@ export class RunHostFunctionDispatcher
     if (callId !== this.#nextCallId) {
       return { status: "protocolFailed" };
     }
+    // A correct child enforces both call limits before dispatching, so a
+    // violation observed here is a protocol-integrity failure, not a
+    // guest-visible limit rejection.
+    if (
+      callId > this.#limits.maxHostFunctionCalls ||
+      this.#activeInvocations >= this.#limits.maxConcurrentHostFunctionCalls
+    ) {
+      return { status: "protocolFailed" };
+    }
     this.#nextCallId++;
 
     const hostFunction = this.#hostFunctions.get(namespace)?.get(functionName);
@@ -142,9 +159,9 @@ export class RunHostFunctionDispatcher
     }
 
     let value: unknown;
+    this.#activeInvocations++;
     try {
-      const controller = new AbortController();
-      value = await runWithHostFunctionContext(controller.signal, () =>
+      value = await runWithHostFunctionContext(this.#signal, () =>
         Reflect.apply(hostFunction, undefined, args)
       );
     } catch (cause: unknown) {
@@ -153,6 +170,8 @@ export class RunHostFunctionDispatcher
         hostFunction: `${namespace}.${functionName}`
       });
       return { status: "failed", failureId: callId };
+    } finally {
+      this.#activeInvocations--;
     }
 
     const parsed = parseRunData(value, "hostFunction.result");
@@ -170,7 +189,11 @@ export type TakeRunHostFunctionFailure = (
   | { readonly status: "missing" };
 
 /** Parse and snapshot the exact host authority granted to one invocation. */
-export function createRunHostFunctionDispatch(hostFunctions: HostFunctions): {
+export function createRunHostFunctionDispatch(
+  hostFunctions: HostFunctions,
+  signal: AbortSignal,
+  limits: RunHostCallLimits
+): {
   readonly dispatcher: RunHostFunctionDispatcher;
   readonly manifest: readonly RunHostFunctionManifestEntry[];
   /** Remove and return the trusted cause for one escaped sanitized failure. */
@@ -215,7 +238,9 @@ export function createRunHostFunctionDispatch(hostFunctions: HostFunctions): {
   return {
     dispatcher: new RunHostFunctionDispatcher(
       hostFunctionLookup,
-      hostFunctionFailures
+      hostFunctionFailures,
+      signal,
+      limits
     ),
     manifest,
     takeHostFunctionFailure: (failureId) => {

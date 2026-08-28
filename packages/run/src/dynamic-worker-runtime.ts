@@ -1,14 +1,16 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type {
   RunHostFunctionDispatcherContract,
+  RunHostFunctionLimitName,
   RunHostFunctionManifestEntry,
   RunHostFunctionResponse,
   RunWorkerErrorClassification,
   RunWorkerErrorRecord,
+  RunWorkerLimits,
   RunWorkerResponse
 } from "./dynamic-worker-protocol";
 import { parseRunData, type RunDataPath } from "./run-data";
-import { truncateRunUtf8 } from "./run-utf8";
+import { getRunUtf8ByteLength, truncateRunUtf8 } from "./run-utf8";
 import type { RunLog } from "./run-types";
 
 type RunInternalErrorMetadata = {
@@ -16,21 +18,48 @@ type RunInternalErrorMetadata = {
   readonly message: string;
 } & Exclude<
   RunWorkerErrorClassification,
-  { readonly code?: undefined } | { readonly code: "RUN_INVALID_INPUT" }
+  | { readonly code?: undefined }
+  | { readonly code: "RUN_INVALID_INPUT" }
+  | { readonly code: "RUN_DETACHED_HOST_FUNCTION" }
 >;
+
+const RUN_LOG_TRUNCATION_WARNING = "Console output truncated.";
 
 const runArrayIsArray = Array.isArray;
 const runArrayJoin = Array.prototype.join;
 const runArrayPush = Array.prototype.push;
 const runNumberIsSafeInteger = Number.isSafeInteger;
 const runObjectIs = Object.is;
+const runObjectKeys = Object.keys;
+const runPromiseThen = Promise.prototype.then;
+const runPromiseFinally = Promise.prototype.finally;
 const runReflectApply = Reflect.apply;
 const runReflectGet = Reflect.get;
 const runReflectHas = Reflect.has;
+const runReflectSetPrototypeOf = Reflect.setPrototypeOf;
+const runArrayPrototype = Array.prototype;
 const runString = String;
 const runWeakMapGet = WeakMap.prototype.get;
 const runWeakMapSet = WeakMap.prototype.set;
 const runInternalErrors = new WeakMap<object, RunInternalErrorMetadata>();
+const RUN_LOG_TRUNCATION_WARNING_BYTES = getRunUtf8ByteLength(
+  RUN_LOG_TRUNCATION_WARNING
+);
+
+function runNoop(): void {
+  // Retained terminal handler for containment of unobserved settlements.
+}
+
+/**
+ * Create an array whose writes cannot reach guest-installed numeric setters
+ * on Array.prototype. Native push assigns through the prototype chain, so
+ * package-owned arrays written during or after guest execution stay detached.
+ */
+function createRunShieldedArray<Value>(): Value[] {
+  const values: Value[] = [];
+  runReflectSetPrototypeOf(values, null);
+  return values;
+}
 
 function brandRunInternalError(
   error: object,
@@ -40,11 +69,13 @@ function brandRunInternalError(
 }
 
 class RunHostFunctionError extends Error {
+  // Class fields use define semantics, so a guest-installed prototype `name`
+  // setter cannot intercept construction of package-owned errors.
+  override readonly name = "RunHostFunctionError";
   readonly code = "RUN_HOST_FUNCTION_ERROR";
 
   constructor(hostFailureId: number) {
     super("Host function failed.");
-    this.name = "RunHostFunctionError";
     brandRunInternalError(this, {
       name: "RunHostFunctionError",
       message: "Host function failed.",
@@ -54,12 +85,28 @@ class RunHostFunctionError extends Error {
   }
 }
 
+class RunHostFunctionLimitError extends Error {
+  override readonly name = "RunHostFunctionLimitError";
+  readonly code = "RUN_HOST_FUNCTION_LIMIT";
+
+  constructor(limit: RunHostFunctionLimitName, hostFunction: string) {
+    super("Host function call limit exceeded.");
+    brandRunInternalError(this, {
+      name: "RunHostFunctionLimitError",
+      message: "Host function call limit exceeded.",
+      code: "RUN_HOST_FUNCTION_LIMIT",
+      limit,
+      hostFunction
+    });
+  }
+}
+
 class RunWorkerProtocolError extends Error {
+  override readonly name = "RunWorkerProtocolError";
   readonly code = "RUN_WORKER_ERROR";
 
   constructor(hostFunction: string) {
     super("Run host function protocol failed.");
-    this.name = "RunWorkerProtocolError";
     brandRunInternalError(this, {
       name: "RunWorkerProtocolError",
       message: "Run host function protocol failed.",
@@ -70,6 +117,7 @@ class RunWorkerProtocolError extends Error {
 }
 
 class RunSerializationError extends Error {
+  override readonly name = "RunSerializationError";
   readonly code = "RUN_SERIALIZATION_ERROR";
 
   constructor(path: "result");
@@ -79,7 +127,6 @@ class RunSerializationError extends Error {
   );
   constructor(path: RunDataPath, hostFunction?: string) {
     super("Run data could not be serialized.");
-    this.name = "RunSerializationError";
     const diagnostic = {
       name: "RunSerializationError",
       message: "Run data could not be serialized.",
@@ -151,6 +198,13 @@ function createRunErrorRecord(error: unknown): RunWorkerErrorRecord {
             code: metadata.code,
             hostFailureId: metadata.hostFailureId
           };
+        case "RUN_HOST_FUNCTION_LIMIT":
+          return {
+            ...diagnostic,
+            code: metadata.code,
+            limit: metadata.limit,
+            hostFunction: truncateRunUtf8(metadata.hostFunction, 256)
+          };
         case "RUN_SERIALIZATION_ERROR":
           return metadata.path === "result"
             ? { ...diagnostic, code: metadata.code, path: metadata.path }
@@ -214,55 +268,127 @@ function formatRunLogValue(value: unknown): string {
 }
 
 /**
- * Create the promise-returning stub generated code calls for one host
- * function. Every dispatcher interaction is contained here so raw transport
- * failures never escape into guest-visible errors.
+ * Mutable per-run host-call accounting shared by every generated stub. The
+ * started-call total is always `nextCallId - 1`, so it carries no separate
+ * counter that could disagree.
+ */
+interface RunHostCallState {
+  readonly limits: RunWorkerLimits;
+  pendingCount: number;
+  readonly pendingHostFunctions: Record<string, string>;
+  nextCallId: number;
+}
+
+/** The internal lazy promise-like returned by every generated host call. */
+type RunLazyHostCall = {
+  then: (onFulfilled?: unknown, onRejected?: unknown) => unknown;
+  catch: (onRejected?: unknown) => unknown;
+  finally: (onFinally?: unknown) => unknown;
+};
+
+/**
+ * Wrap one dispatch so it starts exactly once on first promise observation
+ * and never starts for a completely ignored call. The dispatched promise
+ * keeps terminal handlers so an unobserved settlement stays contained.
+ */
+function createRunLazyHostCall(start: () => Promise<unknown>): RunLazyHostCall {
+  let dispatched: Promise<unknown> | undefined;
+  const ensure = (): Promise<unknown> => {
+    if (dispatched === undefined) {
+      dispatched = start();
+      runReflectApply(runPromiseThen, dispatched, [runNoop, runNoop]);
+    }
+    return dispatched;
+  };
+  return {
+    then: (onFulfilled?: unknown, onRejected?: unknown) =>
+      runReflectApply(runPromiseThen, ensure(), [onFulfilled, onRejected]),
+    catch: (onRejected?: unknown) =>
+      runReflectApply(runPromiseThen, ensure(), [undefined, onRejected]),
+    finally: (onFinally?: unknown) =>
+      runReflectApply(runPromiseFinally, ensure(), [onFinally])
+  };
+}
+
+/** Read one pending host-function name for the detached-call diagnostic. */
+function readFirstPendingHostFunction(
+  pendingHostFunctions: Record<string, string>
+): string {
+  // Index access avoids the guest-replaceable array iterator protocol.
+  const firstCallId = runObjectKeys(pendingHostFunctions)[0];
+  const hostFunction =
+    firstCallId === undefined ? undefined : pendingHostFunctions[firstCallId];
+  return hostFunction === undefined ? "unknown" : hostFunction;
+}
+
+/**
+ * Create the lazy call stub generated code invokes for one host function.
+ * Every dispatcher interaction is contained here so raw transport failures
+ * never escape into guest-visible errors.
  */
 function createRunHostFunctionStub(
   dispatcher: RunHostFunctionDispatcherContract,
   namespace: string,
   functionName: string,
-  allocateCallId: () => number
-): (...args: unknown[]) => Promise<unknown> {
-  return async (...args: unknown[]): Promise<unknown> => {
+  state: RunHostCallState
+): (...args: unknown[]) => RunLazyHostCall {
+  const dispatch = async (args: unknown[]): Promise<unknown> => {
     const hostFunction = `${namespace}.${functionName}`;
+    if (state.nextCallId > state.limits.maxHostFunctionCalls) {
+      throw new RunHostFunctionLimitError("maxHostFunctionCalls", hostFunction);
+    }
+    if (state.pendingCount >= state.limits.maxConcurrentHostFunctionCalls) {
+      throw new RunHostFunctionLimitError(
+        "maxConcurrentHostFunctionCalls",
+        hostFunction
+      );
+    }
     const parsedArguments = parseRunData(args, "hostFunction.arguments");
     if (parsedArguments.status === "rejected") {
       throw new RunSerializationError(parsedArguments.path, hostFunction);
     }
 
-    const callId = allocateCallId();
-    let responsePromise: Promise<RunHostFunctionResponse>;
+    state.pendingCount++;
+    const callId = state.nextCallId++;
+    state.pendingHostFunctions[callId] = hostFunction;
     try {
-      responsePromise = dispatcher.callHostFunction(
-        callId,
-        namespace,
-        functionName,
-        parsedArguments.value
-      );
-    } catch {
-      throw new RunSerializationError("hostFunction.arguments", hostFunction);
-    }
+      let responsePromise: Promise<RunHostFunctionResponse>;
+      try {
+        responsePromise = dispatcher.callHostFunction(
+          callId,
+          namespace,
+          functionName,
+          parsedArguments.value
+        );
+      } catch {
+        throw new RunSerializationError("hostFunction.arguments", hostFunction);
+      }
 
-    let response: RunHostFunctionResponse;
-    try {
-      response = await responsePromise;
-    } catch {
-      throw new RunSerializationError("hostFunction.result", hostFunction);
+      let response: RunHostFunctionResponse;
+      try {
+        response = await responsePromise;
+      } catch {
+        throw new RunSerializationError("hostFunction.result", hostFunction);
+      }
+      if (response.status === "completed") return response.value;
+      if (response.status === "serializationFailed") {
+        throw new RunSerializationError("hostFunction.result", hostFunction);
+      }
+      if (
+        response.status === "failed" &&
+        runNumberIsSafeInteger(response.failureId) &&
+        response.failureId === callId
+      ) {
+        throw new RunHostFunctionError(response.failureId);
+      }
+      throw new RunWorkerProtocolError(hostFunction);
+    } finally {
+      state.pendingCount--;
+      delete state.pendingHostFunctions[callId];
     }
-    if (response.status === "completed") return response.value;
-    if (response.status === "serializationFailed") {
-      throw new RunSerializationError("hostFunction.result", hostFunction);
-    }
-    if (
-      response.status === "failed" &&
-      runNumberIsSafeInteger(response.failureId) &&
-      response.failureId === callId
-    ) {
-      throw new RunHostFunctionError(response.failureId);
-    }
-    throw new RunWorkerProtocolError(hostFunction);
   };
+  return (...args: unknown[]): RunLazyHostCall =>
+    createRunLazyHostCall(() => dispatch(args));
 }
 
 /** Generated Worker entrypoint that contains guest execution and host RPC. */
@@ -270,9 +396,15 @@ export default class RunExecutor extends WorkerEntrypoint {
   /** Execute the wrapped caller source with its validated host-function manifest. */
   async evaluate(
     dispatcher: RunHostFunctionDispatcherContract,
-    manifest: readonly RunHostFunctionManifestEntry[]
+    manifest: readonly RunHostFunctionManifestEntry[],
+    limits: RunWorkerLimits
   ): Promise<RunWorkerResponse> {
-    const logs: RunLog[] = [];
+    const logs = createRunShieldedArray<RunLog>();
+    // Serialization must see an ordinary array once guest code has finished.
+    const finalizeRunLogs = (): RunLog[] => {
+      runReflectSetPrototypeOf(logs, runArrayPrototype);
+      return logs;
+    };
     for (const { namespace } of manifest) {
       if (runReflectHas(globalThis, namespace)) {
         return {
@@ -283,26 +415,51 @@ export default class RunExecutor extends WorkerEntrypoint {
             code: "RUN_INVALID_INPUT",
             path: "hostFunctions.namespace"
           },
-          logs
+          logs: finalizeRunLogs()
         };
       }
     }
 
+    const retainedLogBytes = createRunShieldedArray<number>();
+    let retainedBytes = 0;
+    let logsTruncated = false;
     const capture =
       (level: RunLog["level"]) =>
       (...args: unknown[]): void => {
-        const messages: string[] = [];
+        if (logsTruncated) return;
+        const messages = createRunShieldedArray<string>();
         for (let index = 0; index < args.length; index++) {
           runReflectApply(runArrayPush, messages, [
             formatRunLogValue(args[index])
           ]);
         }
-        runReflectApply(runArrayPush, logs, [
-          {
-            level,
-            message: runReflectApply(runArrayJoin, messages, [" "])
+        const message: string = runReflectApply(runArrayJoin, messages, [" "]);
+        // Every retained entry charges at least one byte so empty messages
+        // cannot grow the retained buffer without bound.
+        const messageBytes = getRunUtf8ByteLength(message) || 1;
+        if (retainedBytes + messageBytes > limits.maxLogBytes) {
+          // First overflow: stop capture, drop trailing complete entries as
+          // needed, and append exactly one in-budget truncation warning.
+          logsTruncated = true;
+          while (
+            logs.length > 0 &&
+            retainedBytes + RUN_LOG_TRUNCATION_WARNING_BYTES >
+              limits.maxLogBytes
+          ) {
+            const removedBytes = retainedLogBytes[logs.length - 1];
+            retainedBytes -= removedBytes === undefined ? 0 : removedBytes;
+            logs.length -= 1;
+            retainedLogBytes.length -= 1;
           }
-        ]);
+          runReflectApply(runArrayPush, logs, [
+            { level: "warn", message: RUN_LOG_TRUNCATION_WARNING }
+          ]);
+          retainedBytes += RUN_LOG_TRUNCATION_WARNING_BYTES;
+          return;
+        }
+        runReflectApply(runArrayPush, logs, [{ level, message }]);
+        runReflectApply(runArrayPush, retainedLogBytes, [messageBytes]);
+        retainedBytes += messageBytes;
       };
     Object.defineProperty(globalThis, "console", {
       configurable: true,
@@ -315,8 +472,16 @@ export default class RunExecutor extends WorkerEntrypoint {
       })
     });
 
-    let nextHostFunctionCallId = 1;
-    const allocateCallId = (): number => nextHostFunctionCallId++;
+    // SAFETY: A null-prototype record keeps guest mutations of
+    // Object.prototype (for example a numeric-index setter) away from
+    // pending-call accounting writes.
+    const pendingHostFunctions = Object.create(null) as Record<string, string>;
+    const hostCallState: RunHostCallState = {
+      limits,
+      pendingCount: 0,
+      pendingHostFunctions,
+      nextCallId: 1
+    };
     const hostNamespaces = manifest.map(({ namespace, functions }) =>
       Object.freeze(
         Object.fromEntries(
@@ -326,7 +491,7 @@ export default class RunExecutor extends WorkerEntrypoint {
               dispatcher,
               namespace,
               functionName,
-              allocateCallId
+              hostCallState
             )
           ])
         )
@@ -335,6 +500,22 @@ export default class RunExecutor extends WorkerEntrypoint {
 
     try {
       const value = await __runUser__(...hostNamespaces);
+      if (hostCallState.pendingCount > 0) {
+        return {
+          status: "failed",
+          error: {
+            name: "RunDetachedHostFunctionError",
+            message:
+              "Generated code returned while a host function call was unsettled.",
+            code: "RUN_DETACHED_HOST_FUNCTION",
+            hostFunction: truncateRunUtf8(
+              readFirstPendingHostFunction(hostCallState.pendingHostFunctions),
+              256
+            )
+          },
+          logs: finalizeRunLogs()
+        };
+      }
       const parsedResult = parseRunData(value, "result");
       if (parsedResult.status === "rejected") {
         throw new RunSerializationError(parsedResult.path);
@@ -342,10 +523,14 @@ export default class RunExecutor extends WorkerEntrypoint {
       return {
         status: "completed",
         value: parsedResult.value,
-        logs
+        logs: finalizeRunLogs()
       };
     } catch (cause: unknown) {
-      return { status: "failed", error: createRunErrorRecord(cause), logs };
+      return {
+        status: "failed",
+        error: createRunErrorRecord(cause),
+        logs: finalizeRunLogs()
+      };
     }
   }
 }

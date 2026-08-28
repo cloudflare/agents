@@ -119,7 +119,7 @@ it("provides host-function context before and after awaited work", async () => {
   expect(result.value).toEqual({ sameSignal: true, aborted: false });
 });
 
-it("isolates context signals across concurrent host calls", async () => {
+it("shares one run-controlled context signal across concurrent host calls", async () => {
   const signals: AbortSignal[] = [];
   let releaseCalls: (() => void) | undefined;
   const callsStarted = new Promise<void>((resolve) => {
@@ -144,7 +144,8 @@ it("isolates context signals across concurrent host calls", async () => {
 
   expect(result.value).toEqual([true, true]);
   expect(signals).toHaveLength(2);
-  expect(signals[0]).not.toBe(signals[1]);
+  expect(signals[0]).toBe(signals[1]);
+  expect(signals[0]?.aborted).toBe(false);
 });
 
 it("throws when host-function context is read outside an active invocation", () => {
@@ -324,4 +325,322 @@ it("bounds the exact host name placed in error details", async () => {
   if (hostFunction === undefined) throw new Error("Expected host function.");
   expect(new TextEncoder().encode(hostFunction)).toHaveLength(256);
   expect(hostFunction.endsWith("…")).toBe(true);
+});
+
+it("never dispatches a completely ignored host call", async () => {
+  let invocations = 0;
+
+  const result = await run<string>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: 'tools.ping(); return "done";',
+    hostFunctions: {
+      tools: {
+        ping() {
+          invocations++;
+          return 1;
+        }
+      }
+    }
+  });
+
+  expect(result.value).toBe("done");
+  expect(invocations).toBe(0);
+});
+
+it("dispatches an observed host call exactly once across repeated observation", async () => {
+  let invocations = 0;
+
+  const result = await run<number[]>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+const call = tools.ping();
+call.finally(() => {});
+const first = await call;
+const second = await call;
+const third = await Promise.resolve(call);
+return [first, second, third];
+`,
+    hostFunctions: {
+      tools: {
+        ping() {
+          invocations++;
+          return invocations;
+        }
+      }
+    }
+  });
+
+  expect(result.value).toEqual([1, 1, 1]);
+  expect(invocations).toBe(1);
+});
+
+it("lets generated code catch the sanitized total host-call limit error", async () => {
+  let invocations = 0;
+
+  const result = await run<unknown[]>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+const a = await tools.ping();
+const b = await tools.ping();
+const c = await tools.ping().catch((error) => ({
+  name: error.name,
+  code: error.code,
+  message: error.message
+}));
+return [a, b, c];
+`,
+    limits: { maxHostFunctionCalls: 2 },
+    hostFunctions: {
+      tools: {
+        ping() {
+          invocations++;
+          return invocations;
+        }
+      }
+    }
+  });
+
+  expect(result.value).toEqual([
+    1,
+    2,
+    {
+      name: "RunHostFunctionLimitError",
+      code: "RUN_HOST_FUNCTION_LIMIT",
+      message: "Host function call limit exceeded."
+    }
+  ]);
+  expect(invocations).toBe(2);
+});
+
+it("rejects with RUN_HOST_FUNCTION_LIMIT when the uncaught total limit escapes", async () => {
+  let invocations = 0;
+
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source:
+      "await tools.ping(); await tools.ping(); return await tools.ping();",
+    limits: { maxHostFunctionCalls: 2 },
+    hostFunctions: {
+      tools: {
+        ping() {
+          invocations++;
+          return invocations;
+        }
+      }
+    }
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_HOST_FUNCTION_LIMIT",
+    details: {
+      hostFunction: "tools.ping",
+      limit: "maxHostFunctionCalls",
+      observed: 3,
+      allowed: 2
+    }
+  });
+  expect(invocations).toBe(2);
+});
+
+it("rejects the call exceeding maxConcurrentHostFunctionCalls without invoking it", async () => {
+  let invocations = 0;
+
+  const result = await run<unknown[]>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+const first = tools.work(1);
+const firstObserved = first.then((value) => value);
+const secondCode = await tools.work(2).catch((error) => error.code);
+const firstValue = await firstObserved;
+return [firstValue, secondCode];
+`,
+    limits: { maxConcurrentHostFunctionCalls: 1 },
+    hostFunctions: {
+      tools: {
+        async work(value: number) {
+          invocations++;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return value;
+        }
+      }
+    }
+  });
+
+  expect(result.value).toEqual([1, "RUN_HOST_FUNCTION_LIMIT"]);
+  expect(invocations).toBe(1);
+});
+
+it("rejects with RUN_DETACHED_HOST_FUNCTION when an observed call stays unsettled", async () => {
+  let hostSignal: AbortSignal | undefined;
+  let releaseConfirm: (() => void) | undefined;
+  const slowStarted = new Promise<void>((resolve) => {
+    releaseConfirm = resolve;
+  });
+
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: "tools.slow().catch(() => {}); await tools.confirm(); return 1;",
+    hostFunctions: {
+      tools: {
+        slow() {
+          hostSignal = getHostFunctionContext().signal;
+          releaseConfirm?.();
+          return new Promise(() => {});
+        },
+        async confirm() {
+          await slowStarted;
+          return true;
+        }
+      }
+    }
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_DETACHED_HOST_FUNCTION",
+    details: { hostFunction: "tools.slow" }
+  });
+  expect(hostSignal?.aborted).toBe(true);
+  expect(hostSignal?.reason).toBe(failure);
+});
+
+it("keeps host-call accounting working under hostile Object.prototype setters", async () => {
+  const result = await run<number>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+for (let index = 1; index <= 4; index++) {
+  Object.defineProperty(Object.prototype, String(index), {
+    configurable: true,
+    set() { throw new Error("prototype poison"); }
+  });
+}
+const first = await tools.ping();
+const second = await tools.ping();
+return first + second;
+`,
+    hostFunctions: {
+      tools: {
+        ping() {
+          return 21;
+        }
+      }
+    }
+  });
+
+  expect(result.value).toBe(42);
+});
+
+it("releases a concurrency slot after a host failure", async () => {
+  const result = await run<number>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+await tools.fail().catch(() => {});
+return await tools.ping();
+`,
+    limits: { maxConcurrentHostFunctionCalls: 1 },
+    hostFunctions: {
+      tools: {
+        fail() {
+          throw new Error("host failed");
+        },
+        ping() {
+          return 7;
+        }
+      }
+    }
+  });
+
+  expect(result.value).toBe(7);
+});
+
+it("enforces the call limit despite a hostile Error.prototype name setter", async () => {
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+Object.defineProperty(Error.prototype, "name", {
+  configurable: true,
+  set() { throw new Error("name poison"); }
+});
+await tools.ping();
+return await tools.ping();
+`,
+    limits: { maxHostFunctionCalls: 1 },
+    hostFunctions: {
+      tools: {
+        ping() {
+          return 1;
+        }
+      }
+    }
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_HOST_FUNCTION_LIMIT",
+    details: { limit: "maxHostFunctionCalls", observed: 2, allowed: 1 }
+  });
+});
+
+it("enforces the call limit despite a replaced global Object.defineProperty", async () => {
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+Object.defineProperty = () => { throw new Error("defineProperty poison"); };
+Reflect.defineProperty = () => { throw new Error("defineProperty poison"); };
+await tools.ping();
+return await tools.ping();
+`,
+    limits: { maxHostFunctionCalls: 1 },
+    hostFunctions: {
+      tools: {
+        ping() {
+          return 1;
+        }
+      }
+    }
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_HOST_FUNCTION_LIMIT",
+    details: { limit: "maxHostFunctionCalls", observed: 2, allowed: 1 }
+  });
+});
+
+it("detects detached calls despite a replaced array iterator", async () => {
+  let releaseConfirm: (() => void) | undefined;
+  const slowStarted = new Promise<void>((resolve) => {
+    releaseConfirm = resolve;
+  });
+
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+tools.slow().catch(() => {});
+await tools.confirm();
+Array.prototype[Symbol.iterator] = () => {
+  throw new Error("iterator poison");
+};
+return 1;
+`,
+    hostFunctions: {
+      tools: {
+        slow() {
+          releaseConfirm?.();
+          return new Promise(() => {});
+        },
+        async confirm() {
+          await slowStarted;
+          return true;
+        }
+      }
+    }
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_DETACHED_HOST_FUNCTION",
+    details: { hostFunction: "tools.slow" }
+  });
 });

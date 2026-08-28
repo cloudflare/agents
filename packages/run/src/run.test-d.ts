@@ -44,3 +44,16 @@ expectTypeOf<HostFunctionContext["signal"]>().toEqualTypeOf<AbortSignal>();
 expectTypeOf(
   getHostFunctionContext
 ).returns.toEqualTypeOf<HostFunctionContext>();
+
+expectTypeOf<RunLimits>().toEqualTypeOf<{
+  timeoutMs?: number;
+  cpuMs?: number;
+  subRequests?: number;
+  maxSourceBytes?: number;
+  maxLogBytes?: number;
+  maxHostFunctionCalls?: number;
+  maxConcurrentHostFunctionCalls?: number;
+}>();
+expectTypeOf<RunErrorDetails["limit"]>().toEqualTypeOf<
+  keyof RunLimits | undefined
+>();

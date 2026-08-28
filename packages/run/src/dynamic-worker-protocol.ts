@@ -6,6 +6,18 @@ export interface RunHostFunctionManifestEntry {
   readonly functions: readonly string[];
 }
 
+/** Host-call limit kinds enforced when a lazy call first dispatches. */
+export type RunHostFunctionLimitName =
+  | "maxHostFunctionCalls"
+  | "maxConcurrentHostFunctionCalls";
+
+/** Parent-validated limit values enforced inside the generated Worker. */
+export interface RunWorkerLimits {
+  readonly maxLogBytes: number;
+  readonly maxHostFunctionCalls: number;
+  readonly maxConcurrentHostFunctionCalls: number;
+}
+
 /** Data-only response from one parent-side host-function dispatch. */
 export type RunHostFunctionResponse =
   | { readonly status: "completed"; readonly value: unknown }
@@ -37,22 +49,40 @@ export type RunWorkerErrorClassification =
       readonly path?: never;
       readonly hostFunction?: never;
       readonly hostFailureId?: never;
+      readonly limit?: never;
     }
   | {
       readonly code: "RUN_HOST_FUNCTION_ERROR";
       readonly hostFailureId: number;
       readonly path?: never;
       readonly hostFunction?: never;
+      readonly limit?: never;
+    }
+  | {
+      readonly code: "RUN_HOST_FUNCTION_LIMIT";
+      readonly hostFunction: string;
+      readonly limit: RunHostFunctionLimitName;
+      readonly path?: never;
+      readonly hostFailureId?: never;
+    }
+  | {
+      readonly code: "RUN_DETACHED_HOST_FUNCTION";
+      readonly hostFunction: string;
+      readonly path?: never;
+      readonly hostFailureId?: never;
+      readonly limit?: never;
     }
   | {
       readonly code: "RUN_INVALID_INPUT";
       readonly path: "hostFunctions.namespace";
       readonly hostFunction?: never;
       readonly hostFailureId?: never;
+      readonly limit?: never;
     }
   | ({
       readonly code: "RUN_SERIALIZATION_ERROR";
       readonly hostFailureId?: never;
+      readonly limit?: never;
     } & (
       | {
           readonly path: "result";
@@ -68,6 +98,7 @@ export type RunWorkerErrorClassification =
       readonly hostFunction?: string;
       readonly path?: never;
       readonly hostFailureId?: never;
+      readonly limit?: never;
     };
 
 /** Diagnostic returned by the generated Worker with valid fields for its code. */

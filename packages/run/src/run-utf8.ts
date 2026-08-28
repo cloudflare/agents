@@ -24,6 +24,7 @@ function getRunUtf8ByteLengthGetter(): (this: object) => number {
 
 const runUtf8ByteLengthGetter = getRunUtf8ByteLengthGetter();
 
+/** Measure a string in UTF-8 bytes through captured intrinsics. */
 function getRunUtf8ByteLength(value: string): number {
   const encoded = runUtf8ReflectApply(
     runUtf8TextEncoderEncode,
@@ -65,4 +66,4 @@ function truncateRunUtf8(value: string, maximumBytes: number): string {
   return `${runUtf8ReflectApply(runUtf8StringSlice, value, [0, low])}${suffix}`;
 }
 
-export { truncateRunUtf8 };
+export { getRunUtf8ByteLength, truncateRunUtf8 };

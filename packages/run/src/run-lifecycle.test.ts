@@ -1,86 +1,6 @@
 import { expect, it } from "vitest";
 import { run } from "./index";
-
-type RecordingLoaderBehavior = {
-  readonly response?: unknown;
-  readonly loadError?: unknown;
-  readonly entrypointError?: Error;
-  readonly evaluateError?: Error;
-  readonly entrypointDisposeError?: Error;
-  readonly workerDisposeError?: Error;
-  readonly disposeInspection?: "presence" | "lookup";
-};
-
-function createRecordingLoader(behavior: RecordingLoaderBehavior = {}) {
-  const events: string[] = [];
-  const loadedCode: WorkerLoaderWorkerCode[] = [];
-  const failDisposeInspection = <Resource extends object>(
-    resource: Resource
-  ): Resource =>
-    behavior.disposeInspection
-      ? new Proxy(resource, {
-          get(target, property, receiver) {
-            if (
-              behavior.disposeInspection === "lookup" &&
-              property === Symbol.dispose
-            ) {
-              throw new Error("Disposal lookup failed.");
-            }
-            return Reflect.get(target, property, receiver);
-          },
-          has(target, property) {
-            if (
-              behavior.disposeInspection === "presence" &&
-              property === Symbol.dispose
-            ) {
-              throw new Error("Disposal presence check failed.");
-            }
-            return Reflect.has(target, property);
-          }
-        })
-      : resource;
-  const entrypoint = failDisposeInspection({
-    async evaluate(): Promise<unknown> {
-      if (behavior.evaluateError) throw behavior.evaluateError;
-      return (
-        behavior.response ?? {
-          status: "completed",
-          value: 42,
-          logs: []
-        }
-      );
-    },
-    [Symbol.dispose](): void {
-      events.push("entrypoint");
-      if (behavior.entrypointDisposeError) {
-        throw behavior.entrypointDisposeError;
-      }
-    }
-  });
-  const worker = failDisposeInspection({
-    getEntrypoint(): typeof entrypoint {
-      if (behavior.entrypointError) throw behavior.entrypointError;
-      return entrypoint;
-    },
-    [Symbol.dispose](): void {
-      events.push("worker");
-      if (behavior.workerDisposeError) throw behavior.workerDisposeError;
-    }
-  });
-  const loader: WorkerLoader = {
-    get(): WorkerStub {
-      throw new Error("Recording Loader does not implement get().");
-    },
-    load(code): WorkerStub {
-      if (behavior.loadError !== undefined) throw behavior.loadError;
-      loadedCode.push(code);
-      // SAFETY: This recording Worker implements every WorkerStub operation Run uses plus its native disposal contract.
-      return worker as unknown as WorkerStub;
-    }
-  };
-
-  return { loader, events, loadedCode };
-}
+import { createRecordingLoader } from "./run-test-recording-loader";
 
 it("loads exactly the package-owned child configuration", async () => {
   const recording = createRecordingLoader();
@@ -129,6 +49,22 @@ it.each([
           name: "RunHostFunctionError",
           message: "Host function failed.",
           code: "RUN_HOST_FUNCTION_ERROR"
+        },
+        logs: []
+      }
+    },
+    ["entrypoint", "worker"]
+  ],
+  [
+    "serialization failure",
+    {
+      response: {
+        status: "failed",
+        error: {
+          name: "RunSerializationError",
+          message: "Run data could not be serialized.",
+          code: "RUN_SERIALIZATION_ERROR",
+          path: "result"
         },
         logs: []
       }
@@ -355,5 +291,130 @@ it.each([
       run<number>({ loader: recording.loader, source: "return 42;" })
     ).resolves.toMatchObject({ status: "completed", value: 42 });
     expect(recording.events).toEqual(expectedEvents);
+  }
+);
+
+it("maps a detached-call child record to RUN_DETACHED_HOST_FUNCTION after disposal", async () => {
+  const recording = createRecordingLoader({
+    response: {
+      status: "failed",
+      error: {
+        name: "RunDetachedHostFunctionError",
+        message: "private child detail",
+        code: "RUN_DETACHED_HOST_FUNCTION",
+        hostFunction: "tools.slow"
+      },
+      logs: []
+    }
+  });
+
+  await expect(
+    run({ loader: recording.loader, source: "return 42;" })
+  ).rejects.toMatchObject({
+    name: "RunError",
+    code: "RUN_DETACHED_HOST_FUNCTION",
+    message: "Generated code returned before a host function call settled.",
+    details: { hostFunction: "tools.slow" }
+  });
+  expect(recording.events).toEqual(["entrypoint", "worker"]);
+});
+
+it("computes host-call limit details from parent-validated limits only", async () => {
+  const recording = createRecordingLoader({
+    response: {
+      status: "failed",
+      error: {
+        name: "RunHostFunctionLimitError",
+        message: "private child detail",
+        code: "RUN_HOST_FUNCTION_LIMIT",
+        hostFunction: "tools.ping",
+        limit: "maxHostFunctionCalls"
+      },
+      logs: []
+    }
+  });
+
+  await expect(
+    run({
+      loader: recording.loader,
+      source: "return 42;",
+      limits: { maxHostFunctionCalls: 5 }
+    })
+  ).rejects.toMatchObject({
+    name: "RunError",
+    code: "RUN_HOST_FUNCTION_LIMIT",
+    message: "Host function call limit exceeded.",
+    details: {
+      hostFunction: "tools.ping",
+      limit: "maxHostFunctionCalls",
+      observed: 6,
+      allowed: 5
+    }
+  });
+  expect(recording.events).toEqual(["entrypoint", "worker"]);
+});
+
+it("rejects a child limit record with an unrecognized limit name", async () => {
+  const recording = createRecordingLoader({
+    response: {
+      status: "failed",
+      error: {
+        name: "RunHostFunctionLimitError",
+        message: "private child detail",
+        code: "RUN_HOST_FUNCTION_LIMIT",
+        hostFunction: "tools.ping",
+        limit: "maxSourceBytes"
+      },
+      logs: []
+    }
+  });
+
+  await expect(
+    run({ loader: recording.loader, source: "return 42;" })
+  ).rejects.toMatchObject({
+    code: "RUN_WORKER_ERROR",
+    message: "Dynamic Worker returned an invalid response."
+  });
+});
+
+it("rejects a plain child diagnostic carrying an unexpected limit field", async () => {
+  const recording = createRecordingLoader({
+    response: {
+      status: "failed",
+      error: {
+        name: "Error",
+        message: "boom",
+        limit: "maxHostFunctionCalls"
+      },
+      logs: []
+    }
+  });
+
+  await expect(
+    run({ loader: recording.loader, source: "return 42;" })
+  ).rejects.toMatchObject({
+    code: "RUN_WORKER_ERROR",
+    message: "Dynamic Worker returned an invalid response."
+  });
+});
+
+it.each([
+  ["Worker exceeded CPU time limit.", "cpuMs"],
+  ["Too many subrequests.", "subRequests"]
+] as const)(
+  "maps the platform failure %j to RUN_RESOURCE_LIMIT",
+  async (message, limit) => {
+    const cause = new Error(message);
+    const recording = createRecordingLoader({ evaluateError: cause });
+
+    await expect(
+      run({ loader: recording.loader, source: "return 42;" })
+    ).rejects.toMatchObject({
+      name: "RunError",
+      code: "RUN_RESOURCE_LIMIT",
+      cause,
+      details: { limit }
+    });
+    expect(recording.events).toEqual(["entrypoint", "worker"]);
   }
 );

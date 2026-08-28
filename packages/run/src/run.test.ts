@@ -258,9 +258,8 @@ throw new Error(message);
     code: "RUN_EXECUTION_ERROR"
   });
   if (!(failure instanceof RunError)) throw failure;
-  expect(
-    new TextEncoder().encode(failure.message).byteLength
-  ).toBeLessThanOrEqual(16 * 1024);
+  // Four-byte emoji content truncates to 16380 bytes plus the 3-byte suffix.
+  expect(new TextEncoder().encode(failure.message).byteLength).toBe(16_383);
   expect(failure.message).toMatch(/…$/u);
 });
 
@@ -401,4 +400,214 @@ return "done";
   } finally {
     for (const parentMethod of parentConsole) parentMethod.mockRestore();
   }
+});
+
+it("retains every log at an exact byte-budget fit without a warning", async () => {
+  const result = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+console.log("${"a".repeat(20)}");
+console.warn("${"b".repeat(5)}");
+return 1;
+`,
+    limits: { maxLogBytes: 25 }
+  });
+
+  expect(result.logs).toEqual([
+    { level: "log", message: "a".repeat(20) },
+    { level: "warn", message: "b".repeat(5) }
+  ]);
+});
+
+it("appends exactly one truncation warning and continues execution on overflow", async () => {
+  const result = await run<number>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+console.log("aa");
+console.log("bb");
+console.log("${"c".repeat(30)}");
+console.log("ignored after overflow");
+console.error("also ignored");
+return 42;
+`,
+    limits: { maxLogBytes: 30 }
+  });
+
+  expect(result.value).toBe(42);
+  expect(result.logs).toEqual([
+    { level: "log", message: "aa" },
+    { level: "log", message: "bb" },
+    { level: "warn", message: "Console output truncated." }
+  ]);
+});
+
+it("removes trailing retained entries so the truncation warning fits", async () => {
+  const result = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+console.log("aaaa");
+console.log("bbbbbb");
+console.log("${"c".repeat(25)}");
+return 1;
+`,
+    limits: { maxLogBytes: 30 }
+  });
+
+  expect(result.logs).toEqual([
+    { level: "log", message: "aaaa" },
+    { level: "warn", message: "Console output truncated." }
+  ]);
+});
+
+it("retains only the warning at the 25-byte minimum log budget", async () => {
+  const result = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+console.log("hello");
+console.log("${"x".repeat(26)}");
+return 1;
+`,
+    limits: { maxLogBytes: 25 }
+  });
+
+  expect(result.logs).toEqual([
+    { level: "warn", message: "Console output truncated." }
+  ]);
+});
+
+it("counts the log budget in UTF-8 bytes rather than characters", async () => {
+  // Each fire emoji is four UTF-8 bytes, so seven emoji exceed 25 bytes.
+  const result = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+console.log("${"🔥".repeat(7)}");
+return 1;
+`,
+    limits: { maxLogBytes: 25 }
+  });
+
+  expect(result.logs).toEqual([
+    { level: "warn", message: "Console output truncated." }
+  ]);
+});
+
+it("returns retained logs on an ordinary terminal failure", async () => {
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: 'console.log("kept entry"); throw new Error("after logging");'
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_EXECUTION_ERROR",
+    logs: [{ level: "log", message: "kept entry" }]
+  });
+});
+
+it("maps an oversized final transfer through the platform to RUN_SERIALIZATION_ERROR", async () => {
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: "return new ArrayBuffer(33 * 1024 * 1024);"
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_SERIALIZATION_ERROR"
+  });
+});
+
+it("maps an oversized host argument transfer to RUN_SERIALIZATION_ERROR", async () => {
+  let invocations = 0;
+
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: "return await tools.store(new ArrayBuffer(33 * 1024 * 1024));",
+    hostFunctions: {
+      tools: {
+        store() {
+          invocations++;
+          return true;
+        }
+      }
+    }
+  }).catch((cause: unknown) => cause);
+
+  // The platform rejects the awaited RPC exchange without attributing which
+  // leg exceeded the ceiling, so only the fixed host-call category is stable.
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_SERIALIZATION_ERROR",
+    details: { hostFunction: "tools.store" }
+  });
+  expect(failure).toBeInstanceOf(RunError);
+  expect(["hostFunction.arguments", "hostFunction.result"]).toContain(
+    failure instanceof RunError ? failure.details?.path : undefined
+  );
+  expect(invocations).toBe(0);
+});
+
+it("accepts configured cpu and subrequest overrides through the real Loader", async () => {
+  const result = await run<number>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: "return 7;",
+    limits: { cpuMs: 1_000, subRequests: 10 }
+  });
+
+  expect(result).toMatchObject({ status: "completed", value: 7 });
+});
+
+it("bounds a guest-authored stack to 32 KiB of UTF-8", async () => {
+  const failure = await run({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+const error = new Error("bounded");
+error.stack = "s".repeat(40 * 1024);
+throw error;
+`
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toBeInstanceOf(RunError);
+  expect(failure).toMatchObject({
+    name: "RunError",
+    code: "RUN_EXECUTION_ERROR"
+  });
+  const stack = failure instanceof RunError ? (failure.stack ?? "") : "";
+  // Single-byte content truncates to exactly the 32 KiB boundary.
+  expect(new TextEncoder().encode(stack).byteLength).toBe(32 * 1024);
+  expect(stack.endsWith("…")).toBe(true);
+});
+
+it("captures logs under hostile Array.prototype numeric setters", async () => {
+  const result = await run<number>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+for (let index = 0; index <= 4; index++) {
+  Object.defineProperty(Array.prototype, String(index), {
+    configurable: true,
+    set() { throw new Error("array prototype poison"); }
+  });
+}
+console.log("still", "captured");
+return 42;
+`
+  });
+
+  expect(result.value).toBe(42);
+  expect(result.logs).toEqual([{ level: "log", message: "still captured" }]);
+});
+
+it("bounds a flood of empty console messages to one truncation warning", async () => {
+  const result = await run<number>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+for (let index = 0; index < 40; index++) console.log("");
+return 42;
+`,
+    limits: { maxLogBytes: 25 }
+  });
+
+  expect(result.value).toBe(42);
+  expect(result.logs).toEqual([
+    { level: "warn", message: "Console output truncated." }
+  ]);
 });
