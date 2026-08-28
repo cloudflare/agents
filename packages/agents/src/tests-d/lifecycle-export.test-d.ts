@@ -20,6 +20,7 @@ import {
   type DurableObjectCapability,
   type WSMessage
 } from "../lifecycle";
+import type { WebSocketHandlers, WebSocketMessage } from "../websockets";
 
 expectTypeOf<AgentConnection>().toEqualTypeOf<Connection>();
 expectTypeOf<AgentConnectionContext>().toEqualTypeOf<ConnectionContext>();
@@ -51,18 +52,20 @@ expectTypeOf<ProbeLifecycleObject["onAlarm"]>().toEqualTypeOf<
 expectTypeOf<ProbeLifecycleObject["getNextAlarm"]>().toEqualTypeOf<
   (() => AlarmContribution | Promise<AlarmContribution>) | undefined
 >();
-expectTypeOf<ProbeLifecycleObject["onConnect"]>().toEqualTypeOf<
+// WebSocket hooks are no longer part of the Lifecycle host contract —
+// connection handlers live in the opt-in WebSockets capability.
+expectTypeOf<WebSocketHandlers["onConnect"]>().toEqualTypeOf<
+  | ((connection: Connection, ctx: ConnectionContext) => void | Promise<void>)
+  | undefined
+>();
+expectTypeOf<WebSocketHandlers["onMessage"]>().toEqualTypeOf<
   | ((
       connection: Connection,
-      context: ConnectionContext
+      message: WebSocketMessage
     ) => void | Promise<void>)
   | undefined
 >();
-expectTypeOf<ProbeLifecycleObject["onMessage"]>().toEqualTypeOf<
-  | ((connection: Connection, message: WSMessage) => void | Promise<void>)
-  | undefined
->();
-expectTypeOf<ProbeLifecycleObject["onClose"]>().toEqualTypeOf<
+expectTypeOf<WebSocketHandlers["onClose"]>().toEqualTypeOf<
   | ((
       connection: Connection,
       code: number,
@@ -71,15 +74,8 @@ expectTypeOf<ProbeLifecycleObject["onClose"]>().toEqualTypeOf<
     ) => void | Promise<void>)
   | undefined
 >();
-expectTypeOf<ProbeLifecycleObject["onError"]>().toEqualTypeOf<
+expectTypeOf<WebSocketHandlers["onError"]>().toEqualTypeOf<
   ((connection: Connection, error: unknown) => void | Promise<void>) | undefined
->();
-expectTypeOf<ProbeLifecycleObject["getConnectionTags"]>().toEqualTypeOf<
-  | ((
-      connection: Connection,
-      context: ConnectionContext
-    ) => string[] | Promise<string[]>)
-  | undefined
 >();
 expectTypeOf(getCurrentAgent().agent).toEqualTypeOf<
   LifecycleObject | undefined

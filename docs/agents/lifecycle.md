@@ -65,9 +65,10 @@ export default {
 The default URL shape is `/agents/:binding/:name`. Direct
 `env.MY_OBJECT.getByName(name).fetch(request)` calls work as well.
 
-`Agent` already constructs this lifecycle. Existing Agent classes continue to
-override `onStart`, `onRequest`, `onConnect`, `onMessage`, `onClose`, and
-`onError` normally.
+`Agent` already constructs this lifecycle (and installs the `WebSockets`
+capability for its connections). Existing Agent classes continue to override
+`onStart`, `onRequest`, `onConnect`, `onMessage`, `onClose`, and `onError`
+normally.
 
 ## Request call path
 
@@ -277,33 +278,54 @@ Host context values follow the invocation:
 
 - `onStart` and `onAlarm`: object;
 - `onRequest`: object and request;
-- `onConnect`: object, connection, and upgrade request;
-- `onMessage`, `onClose`, and `onError`: object and connection.
+- `WebSockets` capability handlers `onConnect`: object, connection, and
+  upgrade request;
+- `WebSockets` capability handlers `onMessage`, `onClose`, and `onError`:
+  object and connection.
 
 `getConnectionTags(connection, { request })` remains argument-driven because it
 already receives both values explicitly. The root `agents` package continues
 to export `getCurrentAgent()` for the `Agent` class as a compatibility alias.
 
-## WebSockets always hibernate
+## WebSockets are an opt-in capability
 
-The lifecycle always uses Cloudflare's WebSocket Hibernation API. Idle clients
-remain connected while the Durable Object can leave memory. When a message
-wakes the object, its constructor and lifecycle startup run again before
-`onMessage`.
-
-State needed after a wake must be stored durably or through connection state:
+Lifecycle itself does not model WebSockets. Hosts that want connections
+install the `WebSockets` capability, which owns the subsystem end to end —
+it claims upgrades, accepts hibernating sockets, dispatches handlers inside
+the host invocation boundary, and answers `getConnections()`:
 
 ```ts
-onConnect(connection: Connection): void {
-  connection.setState({ authenticated: true });
-}
+import { WebSockets } from "agents/websockets";
 
-onMessage(connection: Connection<{ authenticated: boolean }>): void {
-  console.log(connection.state?.authenticated);
+export class MyObject extends DurableObject<Env> {
+  readonly webSockets = new WebSockets({
+    handlers: {
+      onConnect: (connection) => {
+        connection.setState({ authenticated: true });
+      },
+      onMessage: (connection, message) => {
+        connection.send(`echo:${message}`);
+      }
+    }
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.webSockets);
 }
 ```
 
-There is no non-hibernating mode.
+Without the capability installed, WebSocket upgrades are declined.
+
+The capability can also serve remote methods: pass an `RpcTarget` as
+`callables` and its prototype methods become the complete remote interface,
+served over a Cap'n Web session (`?__agents_rpc=capnweb`). An `Agent` adds
+no new surface for this — its `@callable()`-decorated methods are its
+interface, served on every wire: natively over the legacy JSON RPC protocol
+and, through the decorator-derived target, over the Cap'n Web endpoint.
+
+Connections use Cloudflare's WebSocket Hibernation API. Idle clients remain
+connected while the Durable Object can leave memory; when a message wakes the
+object, its constructor and lifecycle startup run again before `onMessage`.
+State needed after a wake must be stored durably or through
+`connection.setState()`. There is no non-hibernating mode.
 
 ## Native RPC
 

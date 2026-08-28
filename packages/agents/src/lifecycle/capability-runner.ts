@@ -1,5 +1,6 @@
 import { lifecycleCapabilityId } from "./capability";
 import type { LifecycleRouteContext } from "./capability";
+import type { WSMessage } from "./types";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -41,13 +42,40 @@ export type CapabilityRequestContext = {
   readonly request: Request;
 };
 
+/** Context supplied when a capability inspects a WebSocket upgrade. */
+export type CapabilityWebSocketUpgradeContext = {
+  /** The WebSocket upgrade request entering the Durable Object. */
+  readonly request: Request;
+};
+
 /**
  * A capability installed into a Durable Object lifecycle.
  *
  * Capabilities extending `LifecycleCapability` receive the standard storage,
  * readiness, alarm, event, and routing surface. Host-specific bindings and
  * protocol adapters remain explicit constructor dependencies. Hook parameters
- * carry only phase data; hooks do not run in ambient host context.
+ * carry only phase data; hooks do not run in ambient host context — a
+ * capability-held user callback re-enters host context exactly once,
+ * through `LifecycleServices.runInHostContext(fn, scope)`.
+ *
+ * A capability interacts with Lifecycle through exactly three channels:
+ * these declared hooks, the `LifecycleServices` surface, and
+ * composition-root `set*()` apertures. Any other direct reach in either
+ * direction is a design smell.
+ *
+ * Dispatch contract, hook by hook:
+ * - `onRequest` and `onWebSocketUpgrade` are offered in declaration
+ *   order; the first capability to return a `Response` claims the
+ *   request, and a claimed upgrade's socket belongs to that capability
+ *   for its whole lifetime.
+ * - `onWebSocketMessage`/`onWebSocketClose`/`onWebSocketError` are
+ *   platform wakes, offered in declaration order; return `true` to
+ *   consume one. Socket ownership is the capability's to determine —
+ *   keep a private hibernation-attachment namespace and recognize your
+ *   own sockets by it.
+ * - `onRoute` is addressed to one capability by its id; `getNextAlarm`
+ *   contributions are merged, with Lifecycle owning the one physical
+ *   alarm.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -64,6 +92,43 @@ export interface DurableObjectCapability<Props extends object = object> {
   onRequest?(
     context: CapabilityRequestContext
   ): MaybePromise<Response | undefined | void>;
+
+  /**
+   * Claim a WebSocket upgrade before the host's legacy connection path.
+   *
+   * A capability that returns a response owns that socket and its lifetime,
+   * including any hibernation attachment it needs to recognize the socket
+   * later. Return `undefined` to decline.
+   */
+  onWebSocketUpgrade?(
+    context: CapabilityWebSocketUpgradeContext
+  ): MaybePromise<Response | undefined | void>;
+
+  /**
+   * Handle a platform `webSocketMessage` wake for a socket this capability
+   * owns. Return `true` to consume the event; anything else offers it to
+   * the next capability and finally the host's legacy path. Ownership is
+   * the capability's to determine — typically via its own hibernation
+   * attachment namespace.
+   */
+  onWebSocketMessage?(
+    ws: WebSocket,
+    message: WSMessage
+  ): MaybePromise<boolean | void>;
+
+  /** Handle a platform `webSocketClose` wake for an owned socket. */
+  onWebSocketClose?(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): MaybePromise<boolean | void>;
+
+  /** Handle a platform `webSocketError` wake for an owned socket. */
+  onWebSocketError?(
+    ws: WebSocket,
+    error: unknown
+  ): MaybePromise<boolean | void>;
 
   /** Run work assigned to the capability when the host's alarm fires. */
   onAlarm?(): MaybePromise<void>;
@@ -150,6 +215,69 @@ export class CapabilityRunner<Props extends object = object> {
       if (response !== undefined) return response;
     }
     return undefined;
+  }
+
+  /**
+   * Offer a WebSocket upgrade to each capability in declaration order.
+   *
+   * @param context - The upgrade request entering the Durable Object.
+   * @returns The first capability response, or `undefined` when unclaimed.
+   */
+  async webSocketUpgrade(
+    context: CapabilityWebSocketUpgradeContext
+  ): Promise<Response | undefined> {
+    await this.#ensureReady("handle a WebSocket upgrade");
+    for (const capability of this.#getCapabilities()) {
+      const response = await capability.onWebSocketUpgrade?.(context);
+      if (response !== undefined) return response;
+    }
+    return undefined;
+  }
+
+  /**
+   * Offer a platform `webSocketMessage` wake to each capability in
+   * declaration order.
+   *
+   * @returns Whether a capability consumed the event.
+   */
+  async webSocketMessage(ws: WebSocket, message: WSMessage): Promise<boolean> {
+    await this.#ensureReady("handle a WebSocket message");
+    for (const capability of this.#getCapabilities()) {
+      if ((await capability.onWebSocketMessage?.(ws, message)) === true) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Offer a platform `webSocketClose` wake to each capability. */
+  async webSocketClose(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<boolean> {
+    await this.#ensureReady("handle a WebSocket close");
+    for (const capability of this.#getCapabilities()) {
+      if (
+        (await capability.onWebSocketClose?.(ws, code, reason, wasClean)) ===
+        true
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Offer a platform `webSocketError` wake to each capability. */
+  async webSocketError(ws: WebSocket, error: unknown): Promise<boolean> {
+    await this.#ensureReady("handle a WebSocket error");
+    for (const capability of this.#getCapabilities()) {
+      if ((await capability.onWebSocketError?.(ws, error)) === true) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Return alarm requests from every installed capability. */
