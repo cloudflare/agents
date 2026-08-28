@@ -9,8 +9,10 @@ export {
   type LifecycleEvents,
   type LifecycleRouteAddress,
   type LifecycleRouteContext,
+  type LifecycleHostContextScope,
   type LifecycleRoutes,
-  type LifecycleServices
+  type LifecycleServices,
+  type LifecycleSockets
 } from "./capability";
 export {
   getCurrentAgent,
@@ -27,6 +29,7 @@ export {
   type DurableObjectCapability,
   type CapabilityRequestContext,
   type CapabilityStartContext,
+  type CapabilityWebSocketUpgradeContext,
   type LifecycleEvent,
   type WSMessage
 } from "./durable-object-lifecycle";
