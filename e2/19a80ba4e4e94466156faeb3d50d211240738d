@@ -1,0 +1,31 @@
+.changeset/lifecycle-job-queue.md
+  s_f510ad52b05c4e::t_399854fc538f7c 40-45
+design/lifecycle-work-queue.md
+  s_f510ad52b05c4e::t_0499d54a0cec70 123-130
+packages/agents/src/tests/schedule.test.ts
+  s_f510ad52b05c4e::t_323eeb212d0f42 1089-1107,1111-1120,1124-1125,1128,1132,1137-1152,1156,1160,1164-1165,1167-1168,1171,1175-1176
+packages/agents/src/index.ts
+  s_f510ad52b05c4e::t_bcc88d869a7573 62,10085-10088,10090
+packages/agents/src/lifecycle/abort.ts
+  s_f510ad52b05c4e::t_b14d13f148db40 1-25
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_f510ad52b05c4e::t_4c57436a05461b 10,227-233
+packages/agents/src/lifecycle/job-driver.ts
+  s_f510ad52b05c4e::t_940b1b2c6426c0 80-86,349-363
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e219a80ba4e4e94466156faeb3d50d211240738d",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
