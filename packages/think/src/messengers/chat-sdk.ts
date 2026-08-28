@@ -153,11 +153,11 @@ export interface MessengerThinkHost extends MessengerThinkTarget {
   ): Promise<MessengerFiberStartResult>;
   resolveFiber(id: string, result: FiberRecoveryResult): Promise<boolean>;
   /**
-   * Durably accept one messenger reply run on the host's Fibers capability
+   * Durably accept one messenger reply run on the host's Tasks capability
    * and execute it inline while this isolate lives. The same idempotency key
    * joins the existing run (`accepted: false`).
    */
-  _runMessengerReplyFiber(input: {
+  _runMessengerReplyTask(input: {
     nonce: string;
     idempotencyKey: string;
     metadata: Record<string, unknown>;
@@ -274,7 +274,7 @@ export class ThinkMessengerRuntime {
       /**
        * Capability-run recovery: persist re-entry checkpoints here instead
        * of the legacy managed-fiber ledger, whose row does not exist for
-       * runs on the Fibers capability. Terminal settlement is implied by the
+       * runs on the Tasks capability. Terminal settlement is implied by the
        * caller's recovery decision, so the legacy `resolveFiber` completion
        * calls are skipped when this hook is present.
        */
@@ -481,7 +481,7 @@ export class ThinkMessengerRuntime {
       // (`accepted: false`) and returns; an interrupted run is recovered on
       // wake by the reply definition's `recover` callback, which replaces
       // the legacy join-time recovery branch.
-      await this.host._runMessengerReplyFiber({
+      await this.host._runMessengerReplyTask({
         nonce,
         idempotencyKey: idempotencyKeyForEvent(event),
         metadata: {

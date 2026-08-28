@@ -1,9 +1,9 @@
 /**
- * Durable replayable execution for Lifecycle Objects. `Fibers` owns the
- * `cf_fiber_runs` and `cf_fiber_steps` tables, the definitions registry, run
+ * Durable replayable execution for Lifecycle Objects. `Tasks` owns the
+ * `cf_agents_task_runs` and `cf_agents_task_steps` tables, the definitions registry, run
  * acceptance, generation-fenced claiming, and due-run processing.
  *
- * Fibers consumes only the standard capability services: storage, alarm
+ * Tasks consumes only the standard capability services: storage, alarm
  * coordination, the host invocation boundary, and events. It contributes its
  * earliest run deadline while Lifecycle owns the physical alarm, and it runs
  * definition handlers through Lifecycle's host invocation boundary.
@@ -12,53 +12,53 @@
 import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
 import { SqlError } from "../sql-error";
-import { parseFiberDuration } from "./duration";
-import { MissingFiberDefinitionError } from "./errors";
-import type { FiberEventType, FibersOptions } from "./options";
+import { parseTaskDuration } from "./duration";
+import { MissingTaskDefinitionError } from "./errors";
+import type { TaskEventType, TasksOptions } from "./options";
 import {
   AttemptSupersededError,
-  FiberCancellation,
-  isFiberCancellation,
-  isFiberSuspension,
+  TaskCancellation,
+  isTaskCancellation,
+  isTaskSuspension,
   ReplayStep,
   toErrorSummary,
-  type FiberStepEngine,
+  type TaskStepEngine,
   type ResolvedStepPolicy
 } from "./replay";
-import { deserializeFiberValue, serializeFiberValue } from "./serialization";
+import { deserializeTaskValue, serializeTaskValue } from "./serialization";
 import type {
-  Fiber,
-  FiberCallbacks,
-  FiberHandlers,
-  FiberInput,
-  FiberInterruption,
-  FiberJson,
-  FiberOutput,
-  FiberReceipt,
-  FiberRecoveryDecision,
-  FiberRunOptions,
-  FiberRunRow,
-  FiberRunSnapshot,
-  FiberRunState,
-  FiberStep,
-  FiberStepRow,
-  FiberValue
+  Task,
+  TaskCallbacks,
+  TaskHandlers,
+  TaskInput,
+  TaskInterruption,
+  TaskJson,
+  TaskOutput,
+  TaskReceipt,
+  TaskRecoveryDecision,
+  TaskRunOptions,
+  TaskRunRow,
+  TaskRunSnapshot,
+  TaskRunState,
+  TaskStep,
+  TaskStepRow,
+  TaskValue
 } from "./types";
 
 /** A resolved run handler for a definition name. */
-type ResolvedFiberHandler = (input: unknown, step: FiberStep) => unknown;
+type ResolvedTaskHandler = (input: unknown, step: TaskStep) => unknown;
 
 /** A resolved definition: its run handler plus optional recovery callback. */
-type ResolvedFiberEntry = {
-  readonly run: ResolvedFiberHandler;
+type ResolvedTaskEntry = {
+  readonly run: ResolvedTaskHandler;
   readonly recover?: (
-    interruption: FiberInterruption<unknown>
-  ) => FiberRecoveryDecision | Promise<FiberRecoveryDecision>;
+    interruption: TaskInterruption<unknown>
+  ) => TaskRecoveryDecision | Promise<TaskRecoveryDecision>;
 };
 
-const fiberDefinitionResolvers = new WeakMap<
+const taskDefinitionResolvers = new WeakMap<
   object,
-  (name: string) => ResolvedFiberHandler | ResolvedFiberEntry | undefined
+  (name: string) => ResolvedTaskHandler | ResolvedTaskEntry | undefined
 >();
 
 /**
@@ -70,16 +70,16 @@ const fiberDefinitionResolvers = new WeakMap<
  * resolver must return the same definition for a name on every Durable
  * Object wake, or that name's in-flight runs cannot resume.
  */
-export function setFiberDefinitionResolver(
-  fibers: Fibers<never>,
+export function setTaskDefinitionResolver(
+  tasks: Tasks<never>,
   resolver: (
     name: string
-  ) => ResolvedFiberHandler | ResolvedFiberEntry | undefined
+  ) => ResolvedTaskHandler | ResolvedTaskEntry | undefined
 ): void {
-  fiberDefinitionResolvers.set(fibers, resolver);
+  taskDefinitionResolvers.set(tasks, resolver);
 }
 
-const FIBER_SCHEMA_VERSION_KEY = "cf_agents:fibers_schema_version";
+const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
 const CURRENT_FIBER_SCHEMA_VERSION = 1;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
@@ -108,7 +108,7 @@ function recoveryBackoffMs(failedAttempt: number): number {
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_DEFINITION_NAME_LENGTH = 256;
 
-const TERMINAL_STATES: ReadonlySet<FiberRunState> = new Set([
+const TERMINAL_STATES: ReadonlySet<TaskRunState> = new Set([
   "completed",
   "failed",
   "cancelled"
@@ -121,15 +121,15 @@ type ActiveAttempt = {
   readonly promise: Promise<void>;
 };
 
-/** Filters accepted by {@link Fibers.list}. */
-export type FiberListOptions = {
+/** Filters accepted by {@link Tasks.list}. */
+export type TaskListOptions = {
   definition?: string;
-  status?: FiberRunState | FiberRunState[];
+  status?: TaskRunState | TaskRunState[];
   limit?: number;
 };
 
-/** Filters accepted by {@link Fibers.delete}. */
-export type FiberDeleteOptions = {
+/** Filters accepted by {@link Tasks.delete}. */
+export type TaskDeleteOptions = {
   status?: Array<"completed" | "failed" | "cancelled">;
   settledBefore?: Date;
   limit?: number;
@@ -148,17 +148,17 @@ export type FiberDeleteOptions = {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class Fibers<
-  Handlers extends FiberHandlers = FiberCallbacks
+export class Tasks<
+  Handlers extends TaskHandlers = TaskCallbacks
 > extends LifecycleCapability {
-  readonly #definitions: FiberHandlers;
+  readonly #definitions: TaskHandlers;
   readonly #active = new Map<string, ActiveAttempt>();
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #maxRunsPerAlarm: number;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
 
   /**
-   * Create a Fibers capability.
+   * Create a Tasks capability.
    *
    * @param options - Named definitions plus default step retry/timeout
    * policy and alarm batching. Declaring `definitions` types {@link run} and
@@ -166,19 +166,19 @@ export class Fibers<
    * handlers are declared and where runs start. Names outside the map are
    * rejected unless a composition-root resolver supplies them.
    */
-  constructor(options: FibersOptions<Handlers> = {}) {
-    super("fibers");
+  constructor(options: TasksOptions<Handlers> = {}) {
+    super("tasks");
     this.#definitions = options.definitions ?? {};
     this.#stepDefaults = {
       retryLimit: options.retries?.limit ?? DEFAULT_STEP_POLICY.retryLimit,
       retryDelayMs:
         options.retries?.delay !== undefined
-          ? parseFiberDuration(options.retries.delay, "retries.delay")
+          ? parseTaskDuration(options.retries.delay, "retries.delay")
           : DEFAULT_STEP_POLICY.retryDelayMs,
       backoff: options.retries?.backoff ?? DEFAULT_STEP_POLICY.backoff,
       timeoutMs:
         options.stepTimeout !== undefined
-          ? parseFiberDuration(options.stepTimeout, "stepTimeout")
+          ? parseTaskDuration(options.stepTimeout, "stepTimeout")
           : DEFAULT_STEP_POLICY.timeoutMs
     };
     this.#maxRunsPerAlarm =
@@ -193,15 +193,15 @@ export class Fibers<
   // ── Definitions ──────────────────────────────────────────────────────────
 
   /** Resolve a name to its declared or composition-root-supplied entry. */
-  #resolveDefinition(name: string): ResolvedFiberEntry | undefined {
+  #resolveDefinition(name: string): ResolvedTaskEntry | undefined {
     // SAFETY: declared definitions are constrained with `never` parameters
     // so concrete definition types satisfy the map under contravariance; the
     // values passed at dispatch were parsed from rows this definition's name
     // was persisted with.
     const supplied = (this.#definitions[name] ??
-      fiberDefinitionResolvers.get(this)?.(name)) as
-      | ResolvedFiberHandler
-      | ResolvedFiberEntry
+      taskDefinitionResolvers.get(this)?.(name)) as
+      | ResolvedTaskHandler
+      | ResolvedTaskEntry
       | undefined;
     if (!supplied) return undefined;
     return typeof supplied === "function" ? { run: supplied } : supplied;
@@ -214,21 +214,21 @@ export class Fibers<
 
   #validateDefinitionName(name: string): void {
     if (typeof name !== "string" || name.length === 0) {
-      throw new Error("Fiber definition names must be non-empty strings");
+      throw new Error("Task definition names must be non-empty strings");
     }
     if (name.length > MAX_DEFINITION_NAME_LENGTH) {
       throw new Error(
-        `Fiber definition name exceeds ${MAX_DEFINITION_NAME_LENGTH} characters`
+        `Task definition name exceeds ${MAX_DEFINITION_NAME_LENGTH} characters`
       );
     }
     if (name.startsWith("__cf")) {
       throw new Error(
-        `Fiber definition names must not use the reserved "__cf" prefix`
+        `Task definition names must not use the reserved "__cf" prefix`
       );
     }
     if (!this.#hasDefinition(name)) {
       throw new Error(
-        `Unknown Fiber definition "${name}": not declared on this Fibers`
+        `Unknown Task definition "${name}": not declared on this Tasks`
       );
     }
   }
@@ -242,9 +242,9 @@ export class Fibers<
    */
   async run<Name extends keyof Handlers & string>(
     definition: Name,
-    input?: FiberInput<Handlers[Name]>,
-    options?: FiberRunOptions
-  ): Promise<FiberReceipt> {
+    input?: TaskInput<Handlers[Name]>,
+    options?: TaskRunOptions
+  ): Promise<TaskReceipt> {
     this.#validateDefinitionName(definition);
     return this.#accept(definition, input, options);
   }
@@ -257,7 +257,7 @@ export class Fibers<
    */
   handle<Name extends keyof Handlers & string>(
     definition: Name
-  ): Fiber<FiberInput<Handlers[Name]>, FiberOutput<Handlers[Name]>> {
+  ): Task<TaskInput<Handlers[Name]>, TaskOutput<Handlers[Name]>> {
     this.#validateDefinitionName(definition);
     return {
       name: definition,
@@ -308,11 +308,11 @@ export class Fibers<
   async __DO_NOT_USE_WILL_BREAK__runAttached(
     definition: string,
     input: unknown,
-    options?: FiberRunOptions
-  ): Promise<FiberReceipt> {
+    options?: TaskRunOptions
+  ): Promise<TaskReceipt> {
     if (!this.#hasDefinition(definition)) {
       throw new Error(
-        `Unknown Fiber definition "${definition}": not declared on this Fibers`
+        `Unknown Task definition "${definition}": not declared on this Tasks`
       );
     }
     const receipt = await this.#accept(definition, input, options);
@@ -327,7 +327,7 @@ export class Fibers<
     if (this.lifecycle.alarms.disabled()) return;
     const now = Date.now();
     const due = this.#sql<{ run_id: string }>`
-      SELECT run_id FROM cf_fiber_runs
+      SELECT run_id FROM cf_agents_task_runs
       WHERE state IN ('pending', 'waiting', 'running', 'recovering')
         AND next_at <= ${now}
       ORDER BY next_at ASC
@@ -339,7 +339,7 @@ export class Fibers<
         // A live attempt in this isolate; push the claim backstop forward so
         // the due row does not hot-loop the alarm while it works.
         this.#sql`
-          UPDATE cf_fiber_runs
+          UPDATE cf_agents_task_runs
           SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
           WHERE run_id = ${run_id} AND state IN ('running', 'recovering')
         `;
@@ -354,7 +354,7 @@ export class Fibers<
   /** Contribute the earliest run deadline to Lifecycle alarm selection. */
   getNextAlarm(): number | null {
     const rows = this.#sql<{ next: number | null }>`
-      SELECT MIN(next_at) AS next FROM cf_fiber_runs
+      SELECT MIN(next_at) AS next FROM cf_agents_task_runs
       WHERE state IN ('pending', 'waiting', 'running', 'recovering')
         AND next_at IS NOT NULL
     `;
@@ -366,23 +366,23 @@ export class Fibers<
   // ── Inspection and control ───────────────────────────────────────────────
 
   /** Read one run by ID across all definitions. */
-  async get(runId: string): Promise<FiberRunSnapshot<FiberValue> | null> {
+  async get(runId: string): Promise<TaskRunSnapshot<TaskValue> | null> {
     return this.#snapshot(runId);
   }
 
   /** Read one run by idempotency key across all definitions. */
   async getByIdempotencyKey(
     idempotencyKey: string
-  ): Promise<FiberRunSnapshot<FiberValue> | null> {
+  ): Promise<TaskRunSnapshot<TaskValue> | null> {
     return this.#snapshotByKey(idempotencyKey);
   }
 
   /** List runs, newest first. */
   async list(
-    options: FiberListOptions = {}
-  ): Promise<FiberRunSnapshot<FiberValue>[]> {
+    options: TaskListOptions = {}
+  ): Promise<TaskRunSnapshot<TaskValue>[]> {
     await this.lifecycle.ready();
-    let query = "SELECT * FROM cf_fiber_runs WHERE 1 = 1";
+    let query = "SELECT * FROM cf_agents_task_runs WHERE 1 = 1";
     const params: (string | number)[] = [];
     if (options.definition !== undefined) {
       query += " AND definition = ?";
@@ -405,8 +405,8 @@ export class Fibers<
     } catch (cause) {
       throw new SqlError(query, cause);
     }
-    // SAFETY: the query selects * from Fibers' own schema.
-    return (rows as FiberRunRow[]).map((row) => this.#rowToSnapshot(row));
+    // SAFETY: the query selects * from Tasks' own schema.
+    return (rows as TaskRunRow[]).map((row) => this.#rowToSnapshot(row));
   }
 
   /**
@@ -424,14 +424,14 @@ export class Fibers<
 
     const now = Date.now();
     this.#sql`
-      UPDATE cf_fiber_runs
+      UPDATE cf_agents_task_runs
       SET cancel_requested = 1, cancel_reason = ${reason ?? null},
           next_at = ${now}, updated_at = ${now}
       WHERE run_id = ${runId}
     `;
     const active = this.#active.get(runId);
     if (active) {
-      active.controller.abort(new FiberCancellation(reason));
+      active.controller.abort(new TaskCancellation(reason));
       await this.lifecycle.alarms.rearm();
       return true;
     }
@@ -445,11 +445,11 @@ export class Fibers<
    *
    * @returns The number of runs deleted.
    */
-  async delete(options: FiberDeleteOptions = {}): Promise<number> {
+  async delete(options: TaskDeleteOptions = {}): Promise<number> {
     await this.lifecycle.ready();
     const states = options.status ?? ["completed", "failed", "cancelled"];
     if (states.length === 0) return 0;
-    let query = `SELECT run_id, definition FROM cf_fiber_runs WHERE state IN (${states.map(() => "?").join(", ")})`;
+    let query = `SELECT run_id, definition FROM cf_agents_task_runs WHERE state IN (${states.map(() => "?").join(", ")})`;
     const params: (string | number)[] = [...states];
     if (options.settledBefore) {
       query += " AND settled_at < ?";
@@ -465,7 +465,7 @@ export class Fibers<
     }
     for (const row of rows as Array<{ run_id: string; definition: string }>) {
       this.#deleteRun(row.run_id);
-      this.#emit("fiber:deleted", {
+      this.#emit("task:deleted", {
         runId: row.run_id,
         definition: row.definition
       });
@@ -478,12 +478,12 @@ export class Fibers<
   async #accept(
     definition: string,
     input: unknown,
-    options: FiberRunOptions = {}
-  ): Promise<FiberReceipt> {
+    options: TaskRunOptions = {}
+  ): Promise<TaskReceipt> {
     await this.lifecycle.ready();
     if (this.lifecycle.routes.source) {
       throw new Error(
-        "Fibers is not yet supported on routed sub-agents: runs must be " +
+        "Tasks is not yet supported on routed sub-agents: runs must be " +
           "accepted by the Lifecycle that owns the physical alarm"
       );
     }
@@ -499,13 +499,13 @@ export class Fibers<
       );
     }
 
-    const inputJson = serializeFiberValue(
+    const inputJson = serializeTaskValue(
       input,
-      `input for Fiber definition "${definition}"`
+      `input for Task definition "${definition}"`
     );
-    const metadataJson = serializeFiberValue(
+    const metadataJson = serializeTaskValue(
       options.metadata,
-      `metadata for Fiber definition "${definition}"`
+      `metadata for Task definition "${definition}"`
     );
 
     const existing =
@@ -516,7 +516,7 @@ export class Fibers<
     if (existing) {
       if (existing.definition !== definition) {
         throw new Error(
-          `Fiber run "${existing.run_id}" already belongs to definition ` +
+          `Task run "${existing.run_id}" already belongs to definition ` +
             `"${existing.definition}"; refusing to reuse its ` +
             `${options.runId !== undefined ? "run ID" : "idempotency key"} for ` +
             `"${definition}"`
@@ -531,10 +531,10 @@ export class Fibers<
       };
     }
 
-    const runId = options.runId ?? `fiber_${nanoid()}`;
+    const runId = options.runId ?? `task_${nanoid()}`;
     const now = Date.now();
     this.#sql`
-      INSERT INTO cf_fiber_runs
+      INSERT INTO cf_agents_task_runs
         (run_id, definition, input, state, metadata, idempotency_key, retain,
          attempt, next_at, cancel_requested, created_at, updated_at)
       VALUES
@@ -543,7 +543,7 @@ export class Fibers<
          0, ${now}, 0, ${now}, ${now})
     `;
     await this.lifecycle.alarms.rearm();
-    this.#emit("fiber:accepted", { runId, definition, accepted: true });
+    this.#emit("task:accepted", { runId, definition, accepted: true });
 
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
@@ -579,7 +579,7 @@ export class Fibers<
 
     const entry = this.#resolveDefinition(row.definition);
     if (!entry) {
-      const error = new MissingFiberDefinitionError(row.definition);
+      const error = new MissingTaskDefinitionError(row.definition);
       console.error(error.message);
       this.#settleFailed(runId, null, toErrorSummary(error));
       await this.lifecycle.alarms.rearm();
@@ -588,7 +588,7 @@ export class Fibers<
     }
 
     if (row.state === "running") {
-      this.#emit("fiber:attempt:interrupted", {
+      this.#emit("task:attempt:interrupted", {
         runId,
         definition: row.definition,
         attempt: row.attempt,
@@ -611,7 +611,7 @@ export class Fibers<
     const generation = nanoid();
     const attempt = row.attempt + 1;
     this.#sql`
-      UPDATE cf_fiber_runs
+      UPDATE cf_agents_task_runs
       SET state = 'running', attempt = ${attempt}, generation = ${generation},
           started_at = coalesce(started_at, ${now}),
           next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
@@ -623,7 +623,7 @@ export class Fibers<
     const controller = new AbortController();
     // Emitted before the handler starts: invocation is synchronous up to the
     // first await, so the first step event would otherwise precede this one.
-    this.#emit("fiber:attempt:started", {
+    this.#emit("task:attempt:started", {
       runId,
       definition: row.definition,
       attempt
@@ -645,20 +645,20 @@ export class Fibers<
 
   /** Claim an interrupted run for its definition's recovery callback. */
   async #runRecovery(
-    row: FiberRunRow,
-    recover: NonNullable<ResolvedFiberEntry["recover"]>
+    row: TaskRunRow,
+    recover: NonNullable<ResolvedTaskEntry["recover"]>
   ): Promise<void> {
     const runId = row.run_id;
     const generation = nanoid();
     const now = Date.now();
     this.#sql`
-      UPDATE cf_fiber_runs
+      UPDATE cf_agents_task_runs
       SET state = 'recovering', generation = ${generation},
           next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
           updated_at = ${now}
       WHERE run_id = ${runId} AND state IN ('running', 'recovering')
     `;
-    this.#emit("fiber:recovery:started", {
+    this.#emit("task:recovery:started", {
       runId,
       definition: row.definition,
       attempt: row.attempt
@@ -685,8 +685,8 @@ export class Fibers<
 
   /** Invoke one recovery attempt and persist its decision, fenced. */
   async #recoverAttempt(
-    row: FiberRunRow,
-    recover: NonNullable<ResolvedFiberEntry["recover"]>,
+    row: TaskRunRow,
+    recover: NonNullable<ResolvedTaskEntry["recover"]>,
     generation: string,
     controller: AbortController
   ): Promise<"replay-now" | undefined> {
@@ -695,7 +695,7 @@ export class Fibers<
       const interruption = this.#buildInterruption(row, controller.signal);
       const decision = (await this.lifecycle.runInHostContext(() =>
         recover(interruption)
-      )) as FiberRecoveryDecision;
+      )) as TaskRecoveryDecision;
       const action = decision?.action;
       if (
         action !== "replay" &&
@@ -704,11 +704,11 @@ export class Fibers<
         action !== "cancel"
       ) {
         throw new Error(
-          `Recovery for Fiber run "${runId}" returned an unknown decision; ` +
+          `Recovery for Task run "${runId}" returned an unknown decision; ` +
             `expected an action of replay, complete, fail, or cancel`
         );
       }
-      this.#emit("fiber:recovery:decided", {
+      this.#emit("task:recovery:decided", {
         runId,
         definition: row.definition,
         action
@@ -716,7 +716,7 @@ export class Fibers<
       return await this.#applyRecoveryDecision(row, generation, decision);
     } catch (thrown) {
       if (thrown instanceof AttemptSupersededError) return undefined;
-      if (isFiberCancellation(thrown)) {
+      if (isTaskCancellation(thrown)) {
         this.#settleCancelled(runId, generation, thrown.reason);
         await this.lifecycle.alarms.rearm();
         return undefined;
@@ -728,9 +728,9 @@ export class Fibers<
 
   /** Apply one recovery decision under the recovery claim's fence. */
   async #applyRecoveryDecision(
-    row: FiberRunRow,
+    row: TaskRunRow,
     generation: string,
-    decision: FiberRecoveryDecision
+    decision: TaskRecoveryDecision
   ): Promise<"replay-now" | undefined> {
     const runId = row.run_id;
     switch (decision.action) {
@@ -742,14 +742,14 @@ export class Fibers<
         const parked = this.#fencedWrite(
           runId,
           generation,
-          `UPDATE cf_fiber_runs
+          `UPDATE cf_agents_task_runs
            SET state = 'waiting', wait_reason = 'recovery', next_at = ?,
                generation = NULL, updated_at = ?
            WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
           [wakeAt, Date.now()]
         );
         if (parked && later) {
-          this.#emit("fiber:waiting", {
+          this.#emit("task:waiting", {
             runId,
             definition: row.definition,
             reason: "recovery",
@@ -760,21 +760,21 @@ export class Fibers<
         return parked && !later ? "replay-now" : undefined;
       }
       case "complete": {
-        const resultJson = serializeFiberValue(
+        const resultJson = serializeTaskValue(
           decision.result,
-          `recovery result for Fiber definition "${row.definition}"`
+          `recovery result for Task definition "${row.definition}"`
         );
         const settled = this.#fencedWrite(
           runId,
           generation,
-          `UPDATE cf_fiber_runs
+          `UPDATE cf_agents_task_runs
            SET state = 'completed', result = ?, generation = NULL,
                next_at = NULL, settled_at = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
           [resultJson, Date.now(), Date.now()]
         );
         if (settled) {
-          this.#emit("fiber:completed", { runId, definition: row.definition });
+          this.#emit("task:completed", { runId, definition: row.definition });
           if (row.retain === 0) this.#deleteRun(runId);
         }
         await this.lifecycle.alarms.rearm();
@@ -785,7 +785,7 @@ export class Fibers<
         const failed = this.#settleFailed(runId, generation, summary);
         if (failed) {
           console.error(
-            `Fiber run "${runId}" (definition "${row.definition}") failed by ` +
+            `Task run "${runId}" (definition "${row.definition}") failed by ` +
               `recovery decision: ${summary.name}: ${summary.message}`
           );
         }
@@ -803,7 +803,7 @@ export class Fibers<
 
   /** Park a throwing recovery callback with backoff, or exhaust its budget. */
   async #recoveryFailure(
-    row: FiberRunRow,
+    row: TaskRunRow,
     generation: string,
     thrown: unknown
   ): Promise<void> {
@@ -814,7 +814,7 @@ export class Fibers<
       const failed = this.#settleFailed(runId, generation, summary);
       if (failed) {
         console.error(
-          `Fiber run "${runId}" (definition "${row.definition}") failed ` +
+          `Task run "${runId}" (definition "${row.definition}") failed ` +
             `after ${recoveryAttempt} recovery attempts: ${summary.name}: ${summary.message}`
         );
       }
@@ -826,14 +826,14 @@ export class Fibers<
     const parked = this.#fencedWrite(
       runId,
       generation,
-      `UPDATE cf_fiber_runs
+      `UPDATE cf_agents_task_runs
        SET recovery_attempt = ?, next_at = ?, generation = NULL, updated_at = ?
        WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
       [recoveryAttempt, wakeAt, Date.now()]
     );
     if (parked) {
       console.warn(
-        `Recovery for Fiber run "${runId}" (definition "${row.definition}") ` +
+        `Recovery for Task run "${runId}" (definition "${row.definition}") ` +
           `threw (${summary.name}: ${summary.message}); retrying recovery at ` +
           `${new Date(wakeAt).toISOString()}`
       );
@@ -843,11 +843,11 @@ export class Fibers<
 
   /** Assemble the recovery context from the pre-claim run row. */
   #buildInterruption(
-    row: FiberRunRow,
+    row: TaskRunRow,
     signal: AbortSignal
-  ): FiberInterruption<unknown> {
-    const stepRows = this.#sql<FiberStepRow>`
-      SELECT * FROM cf_fiber_steps
+  ): TaskInterruption<unknown> {
+    const stepRows = this.#sql<TaskStepRow>`
+      SELECT * FROM cf_agents_task_steps
       WHERE run_id = ${row.run_id} AND state = 'running' AND kind = 'do'
       ORDER BY started_at DESC
       LIMIT 1
@@ -856,13 +856,13 @@ export class Fibers<
     return {
       runId: row.run_id,
       definition: row.definition,
-      input: deserializeFiberValue(row.input) as Readonly<unknown>,
+      input: deserializeTaskValue(row.input) as Readonly<unknown>,
       attempt: row.attempt,
       createdAt: row.created_at,
       interruptedAt: row.updated_at,
       metadata:
         row.metadata !== null
-          ? (JSON.parse(row.metadata) as Record<string, FiberJson>)
+          ? (JSON.parse(row.metadata) as Record<string, TaskJson>)
           : null,
       interruptedStep: stepRow
         ? {
@@ -870,7 +870,7 @@ export class Fibers<
             kind: "do",
             attempt: stepRow.attempt,
             idempotencyKey: `${row.run_id}:${stepRow.step_name}`,
-            checkpoint: deserializeFiberValue(stepRow.checkpoint) as FiberValue,
+            checkpoint: deserializeTaskValue(stepRow.checkpoint) as TaskValue,
             startedAt: stepRow.started_at ?? stepRow.created_at
           }
         : null,
@@ -880,14 +880,14 @@ export class Fibers<
 
   /** Run one claimed attempt and persist its outcome, generation-fenced. */
   async #runAttempt(
-    row: FiberRunRow,
-    handler: ResolvedFiberHandler,
+    row: TaskRunRow,
+    handler: ResolvedTaskHandler,
     generation: string,
     attempt: number,
     controller: AbortController
   ): Promise<void> {
     const runId = row.run_id;
-    const input = deserializeFiberValue(row.input);
+    const input = deserializeTaskValue(row.input);
     const engine = this.#createEngine(
       runId,
       row.definition,
@@ -900,21 +900,21 @@ export class Fibers<
       const output = await this.lifecycle.runInHostContext(() =>
         handler(input, step)
       );
-      const resultJson = serializeFiberValue(
+      const resultJson = serializeTaskValue(
         output,
-        `result of Fiber definition "${row.definition}"`
+        `result of Task definition "${row.definition}"`
       );
       const settled = this.#fencedWrite(
         runId,
         generation,
-        `UPDATE cf_fiber_runs
+        `UPDATE cf_agents_task_runs
          SET state = 'completed', result = ?, generation = NULL, next_at = NULL,
              settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ? AND state = 'running'`,
         [resultJson, Date.now(), Date.now()]
       );
       if (settled) {
-        this.#emit("fiber:completed", { runId, definition: row.definition });
+        this.#emit("task:completed", { runId, definition: row.definition });
         if (row.retain === 0) this.#deleteRun(runId);
       }
       await this.lifecycle.alarms.rearm();
@@ -925,7 +925,7 @@ export class Fibers<
 
   /** Persist a non-completed attempt outcome. */
   async #settleThrown(
-    row: FiberRunRow,
+    row: TaskRunRow,
     generation: string,
     thrown: unknown
   ): Promise<void> {
@@ -936,13 +936,13 @@ export class Fibers<
       return;
     }
 
-    if (isFiberCancellation(thrown)) {
+    if (isTaskCancellation(thrown)) {
       this.#settleCancelled(runId, generation, thrown.reason);
       await this.lifecycle.alarms.rearm();
       return;
     }
 
-    if (isFiberSuspension(thrown)) {
+    if (isTaskSuspension(thrown)) {
       // A cancel requested mid-attempt wins over parking the run.
       const current = this.#getRun(runId);
       if (current?.cancel_requested === 1) {
@@ -957,14 +957,14 @@ export class Fibers<
       const suspended = this.#fencedWrite(
         runId,
         generation,
-        `UPDATE cf_fiber_runs
+        `UPDATE cf_agents_task_runs
          SET state = 'waiting', wait_reason = ?, next_at = ?, generation = NULL,
              updated_at = ?
          WHERE run_id = ? AND generation = ? AND state = 'running'`,
         [thrown.reason, thrown.wakeAt, Date.now()]
       );
       if (suspended) {
-        this.#emit("fiber:waiting", {
+        this.#emit("task:waiting", {
           runId,
           definition: row.definition,
           reason: thrown.reason,
@@ -979,7 +979,7 @@ export class Fibers<
     const failed = this.#settleFailed(runId, generation, summary);
     if (failed) {
       console.error(
-        `Fiber run "${runId}" (definition "${row.definition}") failed: ${summary.name}: ${summary.message}`
+        `Task run "${runId}" (definition "${row.definition}") failed: ${summary.name}: ${summary.message}`
       );
     }
     await this.lifecycle.alarms.rearm();
@@ -1001,7 +1001,7 @@ export class Fibers<
     definition: string,
     generation: string,
     controller: AbortController
-  ): FiberStepEngine {
+  ): TaskStepEngine {
     const assertCurrent = (): void => {
       const row = this.#getRun(runId);
       if (!row || row.generation !== generation) {
@@ -1009,20 +1009,20 @@ export class Fibers<
       }
     };
     const emit = (type: string, payload: Record<string, unknown>): void => {
-      this.#emit(type as FiberEventType, { runId, definition, ...payload });
+      this.#emit(type as TaskEventType, { runId, definition, ...payload });
     };
 
     return {
       readStep: (name) => {
-        const rows = this.#sql<FiberStepRow>`
-          SELECT * FROM cf_fiber_steps
+        const rows = this.#sql<TaskStepRow>`
+          SELECT * FROM cf_agents_task_steps
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
         return rows[0];
       },
       countSteps: () => {
         const rows = this.#sql<{ count: number }>`
-          SELECT COUNT(*) AS count FROM cf_fiber_steps WHERE run_id = ${runId}
+          SELECT COUNT(*) AS count FROM cf_agents_task_steps WHERE run_id = ${runId}
         `;
         return rows[0]?.count ?? 0;
       },
@@ -1030,7 +1030,7 @@ export class Fibers<
         assertCurrent();
         const now = Date.now();
         this.#sql`
-          INSERT INTO cf_fiber_steps
+          INSERT INTO cf_agents_task_steps
             (run_id, step_name, kind, state, attempt, next_at, created_at,
              started_at, updated_at)
           VALUES
@@ -1044,26 +1044,26 @@ export class Fibers<
         assertCurrent();
         const now = Date.now();
         this.#sql`
-          UPDATE cf_fiber_steps
+          UPDATE cf_agents_task_steps
           SET state = 'running', attempt = attempt + 1, next_at = NULL,
               started_at = ${now}, updated_at = ${now}
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
         const rows = this.#sql<{ attempt: number }>`
-          SELECT attempt FROM cf_fiber_steps
+          SELECT attempt FROM cf_agents_task_steps
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
         return rows[0]?.attempt ?? 1;
       },
       completeStep: (name, result) => {
         assertCurrent();
-        const resultJson = serializeFiberValue(
+        const resultJson = serializeTaskValue(
           result,
           `result of step "${name}" in run "${runId}"`
         );
         const now = Date.now();
         this.#sql`
-          UPDATE cf_fiber_steps
+          UPDATE cf_agents_task_steps
           SET state = 'completed', result = ${resultJson}, next_at = NULL,
               completed_at = ${now}, updated_at = ${now}
           WHERE run_id = ${runId} AND step_name = ${name}
@@ -1073,7 +1073,7 @@ export class Fibers<
         assertCurrent();
         const now = Date.now();
         this.#sql`
-          UPDATE cf_fiber_steps
+          UPDATE cf_agents_task_steps
           SET state = 'failed', error_name = ${error.name},
               error_message = ${error.message}, next_at = NULL, updated_at = ${now}
           WHERE run_id = ${runId} AND step_name = ${name}
@@ -1083,19 +1083,19 @@ export class Fibers<
         assertCurrent();
         const now = Date.now();
         this.#sql`
-          UPDATE cf_fiber_steps
+          UPDATE cf_agents_task_steps
           SET state = 'waiting', next_at = ${wakeAt}, updated_at = ${now}
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
       },
       writeCheckpoint: (name, value) => {
         assertCurrent();
-        const checkpointJson = serializeFiberValue(
+        const checkpointJson = serializeTaskValue(
           value,
           `checkpoint for step "${name}" in run "${runId}"`
         );
         this.#sql`
-          UPDATE cf_fiber_steps
+          UPDATE cf_agents_task_steps
           SET checkpoint = ${checkpointJson}, updated_at = ${Date.now()}
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
@@ -1104,7 +1104,7 @@ export class Fibers<
         this.#fencedWrite(
           runId,
           generation,
-          `UPDATE cf_fiber_runs SET next_at = ?, updated_at = ?
+          `UPDATE cf_agents_task_runs SET next_at = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND state = 'running'`,
           [Date.now() + this.#claimTimeoutMs(), Date.now()]
         );
@@ -1113,7 +1113,7 @@ export class Fibers<
         this.#fencedWrite(
           runId,
           generation,
-          `UPDATE cf_fiber_runs SET status_message = ?, updated_at = ?
+          `UPDATE cf_agents_task_runs SET status_message = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND state = 'running'`,
           [message, Date.now()]
         );
@@ -1142,7 +1142,7 @@ export class Fibers<
       ""
     );
     try {
-      // SAFETY: Fibers queries select from its own schema; T describes the
+      // SAFETY: Tasks queries select from its own schema; T describes the
       // projected columns of the accompanying query text.
       return [...this.lifecycle.storage.sql.exec(query, ...values)] as T[];
     } catch (cause) {
@@ -1173,16 +1173,16 @@ export class Fibers<
     }
   }
 
-  #getRun(runId: string): FiberRunRow | undefined {
-    const rows = this.#sql<FiberRunRow>`
-      SELECT * FROM cf_fiber_runs WHERE run_id = ${runId}
+  #getRun(runId: string): TaskRunRow | undefined {
+    const rows = this.#sql<TaskRunRow>`
+      SELECT * FROM cf_agents_task_runs WHERE run_id = ${runId}
     `;
     return rows[0];
   }
 
-  #getRunByKey(idempotencyKey: string): FiberRunRow | undefined {
-    const rows = this.#sql<FiberRunRow>`
-      SELECT * FROM cf_fiber_runs WHERE idempotency_key = ${idempotencyKey}
+  #getRunByKey(idempotencyKey: string): TaskRunRow | undefined {
+    const rows = this.#sql<TaskRunRow>`
+      SELECT * FROM cf_agents_task_runs WHERE idempotency_key = ${idempotencyKey}
     `;
     return rows[0];
   }
@@ -1190,7 +1190,7 @@ export class Fibers<
   /** The step a lost attempt left mid-execution, for interruption events. */
   #interruptedStepName(runId: string): string | null {
     const rows = this.#sql<{ step_name: string }>`
-      SELECT step_name FROM cf_fiber_steps
+      SELECT step_name FROM cf_agents_task_steps
       WHERE run_id = ${runId} AND state = 'running'
       ORDER BY started_at DESC
       LIMIT 1
@@ -1210,7 +1210,7 @@ export class Fibers<
       settled = this.#fencedWrite(
         runId,
         generation,
-        `UPDATE cf_fiber_runs
+        `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
@@ -1219,7 +1219,7 @@ export class Fibers<
       );
     } else {
       const written = this.#sqlWrite(
-        `UPDATE cf_fiber_runs
+        `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
@@ -1230,7 +1230,7 @@ export class Fibers<
     }
     if (settled) {
       const row = this.#getRun(runId);
-      this.#emit("fiber:cancelled", {
+      this.#emit("task:cancelled", {
         runId,
         definition: row?.definition ?? null,
         reason: reason ?? null
@@ -1250,7 +1250,7 @@ export class Fibers<
       settled = this.#fencedWrite(
         runId,
         generation,
-        `UPDATE cf_fiber_runs
+        `UPDATE cf_agents_task_runs
          SET state = 'failed', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
@@ -1259,7 +1259,7 @@ export class Fibers<
       );
     } else {
       const written = this.#sqlWrite(
-        `UPDATE cf_fiber_runs
+        `UPDATE cf_agents_task_runs
          SET state = 'failed', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
@@ -1270,7 +1270,7 @@ export class Fibers<
     }
     if (settled) {
       const row = this.#getRun(runId);
-      this.#emit("fiber:failed", {
+      this.#emit("task:failed", {
         runId,
         definition: row?.definition ?? null,
         error: error.name
@@ -1288,8 +1288,8 @@ export class Fibers<
   }
 
   #deleteRun(runId: string): void {
-    this.#sql`DELETE FROM cf_fiber_steps WHERE run_id = ${runId}`;
-    this.#sql`DELETE FROM cf_fiber_runs WHERE run_id = ${runId}`;
+    this.#sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${runId}`;
+    this.#sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${runId}`;
   }
 
   #ensureTables(): void {
@@ -1301,7 +1301,7 @@ export class Fibers<
       }
     };
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_fiber_runs (
+      CREATE TABLE IF NOT EXISTS cf_agents_task_runs (
         run_id TEXT PRIMARY KEY,
         definition TEXT NOT NULL,
         input TEXT,
@@ -1330,15 +1330,15 @@ export class Fibers<
       )
     `);
     rawSql(`
-      CREATE INDEX IF NOT EXISTS cf_fiber_runs_due
-      ON cf_fiber_runs (state, next_at)
+      CREATE INDEX IF NOT EXISTS cf_agents_task_runs_due
+      ON cf_agents_task_runs (state, next_at)
     `);
     rawSql(`
-      CREATE INDEX IF NOT EXISTS cf_fiber_runs_definition
-      ON cf_fiber_runs (definition, created_at)
+      CREATE INDEX IF NOT EXISTS cf_agents_task_runs_definition
+      ON cf_agents_task_runs (definition, created_at)
     `);
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_fiber_steps (
+      CREATE TABLE IF NOT EXISTS cf_agents_task_steps (
         run_id TEXT NOT NULL,
         step_name TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
@@ -1368,22 +1368,22 @@ export class Fibers<
     // for reclaim. Parked 'recovering' rows (generation NULL) keep their
     // recovery backoff deadlines.
     this.#sql`
-      UPDATE cf_fiber_runs SET next_at = ${now}, updated_at = ${now}
+      UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE state IN ('running', 'recovering') AND generation IS NOT NULL
     `;
     // Non-terminal rows must always carry a deadline; repair any without one.
     this.#sql`
-      UPDATE cf_fiber_runs SET next_at = ${now}, updated_at = ${now}
+      UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE state IN ('pending', 'waiting') AND next_at IS NULL
     `;
   }
 
   // ── Snapshots ────────────────────────────────────────────────────────────
 
-  async #snapshot<Output extends FiberValue>(
+  async #snapshot<Output extends TaskValue>(
     runId: string,
     definition?: string
-  ): Promise<FiberRunSnapshot<Output> | null> {
+  ): Promise<TaskRunSnapshot<Output> | null> {
     await this.lifecycle.ready();
     const row = this.#getRun(runId);
     if (!row) return null;
@@ -1391,10 +1391,10 @@ export class Fibers<
     return this.#rowToSnapshot<Output>(row);
   }
 
-  async #snapshotByKey<Output extends FiberValue>(
+  async #snapshotByKey<Output extends TaskValue>(
     idempotencyKey: string,
     definition?: string
-  ): Promise<FiberRunSnapshot<Output> | null> {
+  ): Promise<TaskRunSnapshot<Output> | null> {
     await this.lifecycle.ready();
     const row = this.#getRunByKey(idempotencyKey);
     if (!row) return null;
@@ -1402,12 +1402,12 @@ export class Fibers<
     return this.#rowToSnapshot<Output>(row);
   }
 
-  #rowToSnapshot<Output extends FiberValue>(
-    row: FiberRunRow
-  ): FiberRunSnapshot<Output> {
+  #rowToSnapshot<Output extends TaskValue>(
+    row: TaskRunRow
+  ): TaskRunSnapshot<Output> {
     const metadata =
       row.metadata !== null
-        ? (JSON.parse(row.metadata) as Record<string, FiberJson>)
+        ? (JSON.parse(row.metadata) as Record<string, TaskJson>)
         : undefined;
     const base = {
       runId: row.run_id,
@@ -1449,7 +1449,7 @@ export class Fibers<
         return {
           ...base,
           state: "completed",
-          result: deserializeFiberValue(row.result) as Output,
+          result: deserializeTaskValue(row.result) as Output,
           settledAt: row.settled_at ?? row.updated_at
         };
       case "failed":
@@ -1458,7 +1458,7 @@ export class Fibers<
           state: "failed",
           error: {
             name: row.error_name ?? "Error",
-            message: row.error_message ?? "Fiber run failed"
+            message: row.error_message ?? "Task run failed"
           },
           settledAt: row.settled_at ?? row.updated_at
         };
@@ -1472,7 +1472,7 @@ export class Fibers<
     }
   }
 
-  #emit(type: FiberEventType | string, payload: Record<string, unknown>): void {
+  #emit(type: TaskEventType | string, payload: Record<string, unknown>): void {
     this.lifecycle.events.emit(type, payload);
   }
 }

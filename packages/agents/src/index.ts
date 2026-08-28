@@ -127,8 +127,8 @@ import {
   Scheduler,
   setSchedulerCallbackResolver
 } from "./schedules/scheduler";
-import { Fibers, setFiberDefinitionResolver } from "./fibers/fibers";
-import type { FiberCallbacks, FiberHandlers } from "./fibers/types";
+import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
+import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
@@ -1728,39 +1728,39 @@ export class Agent<
   /**
    * Durable replayable execution capability installed into this Agent's
    * Lifecycle. Declare definitions on the overridable
-   * {@link fiberDefinitions} property and start runs with
-   * `this.fibers.run(name, input, options)`.
+   * {@link taskDefinitions} property and start runs with
+   * `this.tasks.run(name, input, options)`.
    *
    * @experimental The API surface may change before stabilizing.
    */
-  readonly fibers: Fibers;
+  readonly tasks: Tasks;
 
   /**
-   * Named Fiber definitions for this Agent, resolved lazily on every
+   * Named Task definitions for this Agent, resolved lazily on every
    * dispatch. Declare as a field so the map is rebuilt on every Durable
    * Object wake — that is what lets in-flight runs resolve their persisted
    * definition names after a restart:
    *
    * ```ts
-   * readonly fiberDefinitions = {
-   *   "build-report@v1": async (input: ReportInput, step: FiberStep) => {
+   * readonly taskDefinitions = {
+   *   "build-report@v1": async (input: ReportInput, step: TaskStep) => {
    *     // ...
    *   }
-   * } satisfies FiberHandlers;
+   * } satisfies TaskHandlers;
    * ```
    *
    * @experimental The API surface may change before stabilizing.
    */
-  declare readonly fiberDefinitions?: FiberHandlers;
+  declare readonly taskDefinitions?: TaskHandlers;
 
   /**
-   * Framework-internal Fiber definitions (chat turns, messenger replies),
-   * consulted before {@link fiberDefinitions}. Their `__cf`-prefixed names
-   * cannot be started through the public `fibers.run()`.
+   * Framework-internal Task definitions (chat turns, messenger replies),
+   * consulted before {@link taskDefinitions}. Their `__cf`-prefixed names
+   * cannot be started through the public `tasks.run()`.
    */
-  private readonly _internalFiberDefinitions = new Map<
+  private readonly _internalTaskDefinitions = new Map<
     string,
-    FiberCallbacks[string]
+    TaskCallbacks[string]
   >();
 
   readonly mcp: MCPClientManager;
@@ -2349,7 +2349,7 @@ export class Agent<
         ).call(this, payload, schedule);
     });
 
-    this.fibers = new Fibers({
+    this.tasks = new Tasks({
       onError: (error: unknown) =>
         runInInvocation(
           {
@@ -2364,16 +2364,16 @@ export class Agent<
 
     // Agent's definitions live on the class, not in the capability
     // constructor: framework-internal definitions first (registered by
-    // subclasses like Think through `_registerInternalFiberDefinition`),
-    // then the subclass's overridable `fiberDefinitions` field. Both are
+    // subclasses like Think through `_registerInternalTaskDefinition`),
+    // then the subclass's overridable `taskDefinitions` field. Both are
     // resolved lazily, so field initialization order never matters.
-    setFiberDefinitionResolver(this.fibers, (name) => {
+    setTaskDefinitionResolver(this.tasks, (name) => {
       // SAFETY: declared definitions are constrained with `never` parameters
       // so concrete definition types satisfy the map under contravariance —
-      // the same erasure the Fibers constructor map performs.
-      return (this._internalFiberDefinitions.get(name) ??
-        this.fiberDefinitions?.[name]) as ReturnType<
-        Parameters<typeof setFiberDefinitionResolver>[1]
+      // the same erasure the Tasks constructor map performs.
+      return (this._internalTaskDefinitions.get(name) ??
+        this.taskDefinitions?.[name]) as ReturnType<
+        Parameters<typeof setTaskDefinitionResolver>[1]
       >;
     });
 
@@ -2416,7 +2416,7 @@ export class Agent<
       }
     );
 
-    this.lifecycle.use(this.scheduler).use(this.mcp).use(this.fibers);
+    this.lifecycle.use(this.scheduler).use(this.mcp).use(this.tasks);
 
     // MCP starts before Agent restores facet routing state. Defer its initial
     // publication until broadcasts can be routed to the correct owner.
@@ -2821,9 +2821,9 @@ export class Agent<
                 this._checkOrphanedWorkflows();
                 await this._checkRunFibers();
                 // New-engine runs recover at the same startup point as the
-                // legacy fiber scan: interrupted Fibers runs (including chat
+                // legacy fiber scan: interrupted Task runs (including chat
                 // turns) settle or reschedule before the user's onStart.
-                await this.fibers.__DO_NOT_USE_WILL_BREAK__dispatchDueRuns();
+                await this.tasks.__DO_NOT_USE_WILL_BREAK__dispatchDueRuns();
                 return this._agentToolRunRecoveryRunIds();
               }
             );
@@ -4885,7 +4885,7 @@ export class Agent<
     `;
   }
 
-  // ── Fibers: durable execution ───────────────────────────────────────
+  // ── Legacy fibers: durable execution (see agents/tasks for the new engine) ──
 
   /**
    * Run a function as a durable fiber. The fiber is registered in SQLite
@@ -5218,23 +5218,23 @@ export class Agent<
   }
 
   /**
-   * Register one framework-internal Fiber definition on this Agent's
-   * `fibers` capability. Subclasses (Think, AIChatAgent) call this from
+   * Register one framework-internal Task definition on this Agent's
+   * `tasks` capability. Subclasses (Think, AIChatAgent) call this from
    * their constructors so the definition is rebuilt on every wake; names use
    * the reserved `__cf` prefix so users cannot start them through the public
-   * `fibers.run()`.
+   * `tasks.run()`.
    * @internal
    */
-  protected _registerInternalFiberDefinition(
+  protected _registerInternalTaskDefinition(
     name: string,
-    definition: FiberCallbacks[string]
+    definition: TaskCallbacks[string]
   ): void {
-    this._internalFiberDefinitions.set(name, definition);
+    this._internalTaskDefinitions.set(name, definition);
   }
 
   /**
    * Run `fn` inside the fiber stash context so `this.stash()` keeps working
-   * for turns executing on the `fibers` capability exactly as it does inside
+   * for turns executing on the `tasks` capability exactly as it does inside
    * legacy `runFiber()` closures.
    * @internal
    */

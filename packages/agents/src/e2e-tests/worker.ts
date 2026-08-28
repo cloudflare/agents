@@ -6,11 +6,7 @@
  * happens quickly in tests instead of waiting the default 30s.
  */
 import { Agent, callable, routeAgentRequest } from "agents";
-import type {
-  FiberHandlers,
-  FiberInterruption,
-  FiberStep
-} from "agents/fibers";
+import type { TaskHandlers, TaskInterruption, TaskStep } from "agents/tasks";
 import type {
   FiberInspection,
   FiberRecoveryContext as RunFiberRecoveryContext,
@@ -22,7 +18,7 @@ import type { Observability } from "agents/observability";
 
 type Env = {
   RunFiberTestAgent: DurableObjectNamespace<RunFiberTestAgent>;
-  FiberKillTestAgent: DurableObjectNamespace<FiberKillTestAgent>;
+  TaskKillTestAgent: DurableObjectNamespace<TaskKillTestAgent>;
   SubAgentFiberParent: DurableObjectNamespace<SubAgentFiberParent>;
   SubAgentFiberChild: DurableObjectNamespace<SubAgentFiberChild>;
   PoisonRowAgent: DurableObjectNamespace<PoisonRowAgent>;
@@ -784,25 +780,25 @@ export class FacetRecoveryParent extends Agent<Record<string, unknown>> {
   }
 }
 
-// ── FiberKillTestAgent (the Fibers capability under real SIGKILL) ─────
+// ── TaskKillTestAgent (the Tasks capability under real SIGKILL) ─────
 
 /**
- * Drives the `fibers` capability through a real process kill: journaled step
+ * Drives the `tasks` capability through a real process kill: journaled step
  * executions are recorded in the host's own SQLite (instance memory dies
  * with the process), so the restart can prove which steps re-ran and which
  * replayed from the journal. Only Fibers is exercised — no legacy fiber
  * APIs.
  */
-export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
+export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
   static options = { keepAliveIntervalMs: 2_000 };
 
-  override readonly fiberDefinitions = {
-    slowSteps: async (input: { totalSteps: number }, step: FiberStep) => {
+  override readonly taskDefinitions = {
+    slowSteps: async (input: { totalSteps: number }, step: TaskStep) => {
       for (let i = 0; i < input.totalSteps; i++) {
         await step.do(`step:${i}`, async () => {
           await fiberSleep(1000);
           this.sql`
-            INSERT INTO e2e_fiber_step_executions (step_index, executed_at)
+            INSERT INTO e2e_task_step_executions (step_index, executed_at)
             VALUES (${i}, ${Date.now()})
           `;
           return i;
@@ -812,7 +808,7 @@ export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
     },
 
     guardedSteps: {
-      run: async (input: { totalSteps: number }, step: FiberStep) => {
+      run: async (input: { totalSteps: number }, step: TaskStep) => {
         for (let i = 0; i < input.totalSteps; i++) {
           await step.do(`step:${i}`, async ({ checkpoint }) => {
             checkpoint({ lastStarted: i });
@@ -823,10 +819,10 @@ export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
         return "ran-to-completion";
       },
       recover: async (
-        interruption: FiberInterruption<{ totalSteps: number }>
+        interruption: TaskInterruption<{ totalSteps: number }>
       ) => {
         this.sql`
-          INSERT INTO e2e_fiber_recoveries
+          INSERT INTO e2e_task_recoveries
             (run_id, interrupted_step, checkpoint_json, recovered_at)
           VALUES
             (${interruption.runId},
@@ -837,17 +833,17 @@ export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
         return { action: "complete" as const, result: "recovered-e2e" };
       }
     }
-  } satisfies FiberHandlers;
+  } satisfies TaskHandlers;
 
   onStart(): void {
     this.sql`
-      CREATE TABLE IF NOT EXISTS e2e_fiber_step_executions (
+      CREATE TABLE IF NOT EXISTS e2e_task_step_executions (
         step_index INTEGER NOT NULL,
         executed_at INTEGER NOT NULL
       )
     `;
     this.sql`
-      CREATE TABLE IF NOT EXISTS e2e_fiber_recoveries (
+      CREATE TABLE IF NOT EXISTS e2e_task_recoveries (
         run_id TEXT NOT NULL,
         interrupted_step TEXT,
         checkpoint_json TEXT,
@@ -858,7 +854,7 @@ export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
 
   @callable()
   async startSlowStepsRun(totalSteps: number): Promise<string> {
-    const receipt = await this.fibers.run(
+    const receipt = await this.tasks.run(
       "slowSteps",
       { totalSteps },
       { runId: "e2e-slow-steps" }
@@ -868,7 +864,7 @@ export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
 
   @callable()
   async startGuardedRun(totalSteps: number): Promise<string> {
-    const receipt = await this.fibers.run(
+    const receipt = await this.tasks.run(
       "guardedSteps",
       { totalSteps },
       { runId: "e2e-guarded" }
@@ -880,7 +876,7 @@ export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
   async getRunState(
     runId: string
   ): Promise<{ state: string; result: unknown } | null> {
-    const snapshot = await this.fibers.get(runId);
+    const snapshot = await this.tasks.get(runId);
     if (!snapshot) return null;
     return {
       state: snapshot.state,
@@ -891,7 +887,7 @@ export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
   @callable()
   getStepExecutions(): Array<{ step_index: number }> {
     return this.sql<{ step_index: number }>`
-      SELECT step_index FROM e2e_fiber_step_executions
+      SELECT step_index FROM e2e_task_step_executions
       ORDER BY executed_at ASC, step_index ASC
     `;
   }
@@ -908,7 +904,7 @@ export class FiberKillTestAgent extends Agent<Record<string, unknown>> {
       checkpoint_json: string | null;
     }>`
       SELECT run_id, interrupted_step, checkpoint_json
-      FROM e2e_fiber_recoveries
+      FROM e2e_task_recoveries
       ORDER BY recovered_at ASC
     `;
   }

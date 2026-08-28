@@ -2669,12 +2669,12 @@ export type ThinkModelId =
 export type ThinkModel = LanguageModel | ThinkModelId;
 
 /**
- * Definition name for messenger reply runs on the Fibers capability. The
+ * Definition name for messenger reply runs on the Tasks capability. The
  * reserved prefix keeps it outside the public `fibers.run()` surface; the
  * recovery context still carries the historical `MESSENGER_REPLY_FIBER_NAME`
  * so the messenger runtime's recovery gate is unchanged.
  */
-const MESSENGER_REPLY_FIBER_DEFINITION = "__cf_internal_messenger_reply";
+const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
 
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
@@ -4500,7 +4500,7 @@ export class Think<
    */
   private _registerChatTurnFiberDefinition(): void {
     const chatFiberName = (this.constructor as typeof Think).CHAT_FIBER_NAME;
-    this._registerInternalFiberDefinition(chatFiberName, {
+    this._registerInternalTaskDefinition(chatFiberName, {
       run: async (input, step) => {
         const { nonce } = input as { requestId: string; nonce: string };
         await step.do(
@@ -4567,7 +4567,7 @@ export class Think<
    * have no legacy ledger row to resolve.
    */
   private _registerMessengerReplyFiberDefinition(): void {
-    this._registerInternalFiberDefinition(MESSENGER_REPLY_FIBER_DEFINITION, {
+    this._registerInternalTaskDefinition(MESSENGER_REPLY_TASK_DEFINITION, {
       run: async (input, step) => {
         const { nonce } = input as { nonce: string };
         await step.do(
@@ -4624,23 +4624,23 @@ export class Think<
 
   /**
    * Host seam for {@link ThinkMessengerRuntime}: durably accept one reply
-   * run on the Fibers capability and execute it inline while this isolate
+   * run on the Tasks capability and execute it inline while this isolate
    * lives.
    * @internal
    */
-  async _runMessengerReplyFiber(input: {
+  async _runMessengerReplyTask(input: {
     nonce: string;
     idempotencyKey: string;
     metadata: Record<string, unknown>;
   }): Promise<{ accepted: boolean }> {
-    const receipt = await this.fibers.__DO_NOT_USE_WILL_BREAK__runAttached(
-      MESSENGER_REPLY_FIBER_DEFINITION,
+    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      MESSENGER_REPLY_TASK_DEFINITION,
       { nonce: input.nonce },
       {
         idempotencyKey: input.idempotencyKey,
         metadata: input.metadata as Record<
           string,
-          import("agents/fibers").FiberJson
+          import("agents/tasks").TaskJson
         >
       }
     );
@@ -4697,7 +4697,7 @@ export class Think<
       settle: { resolve: resolveOutcome, reject: rejectOutcome }
     });
     try {
-      await this.fibers.__DO_NOT_USE_WILL_BREAK__runAttached(
+      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
         (this.constructor as typeof Think).CHAT_FIBER_NAME,
         { requestId, continuation, nonce },
         { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
@@ -10773,13 +10773,13 @@ export class Think<
   }
 
   /**
-   * Wall-clock creation time of a non-terminal chat-turn run on the Fibers
+   * Wall-clock creation time of a non-terminal chat-turn run on the Tasks
    * capability, or null. The metadata column holds the exact JSON the chat
    * wrapper wrote, so string equality matches the requestId.
    */
-  private _recoverableChatTurnFiberCreatedAt(requestId: string): number | null {
+  private _recoverableChatTurnTaskCreatedAt(requestId: string): number | null {
     const rows = this.sql<{ created_at: number }>`
-      SELECT created_at FROM cf_fiber_runs
+      SELECT created_at FROM cf_agents_task_runs
       WHERE definition = ${(this.constructor as typeof Think).CHAT_FIBER_NAME}
         AND state IN ('pending', 'running', 'waiting', 'recovering')
         AND metadata = ${JSON.stringify({ requestId })}
@@ -10795,7 +10795,7 @@ export class Think<
       LIMIT 1
     `;
     if (fiberRows.length > 0) return true;
-    if (this._recoverableChatTurnFiberCreatedAt(requestId) !== null) {
+    if (this._recoverableChatTurnTaskCreatedAt(requestId) !== null) {
       return true;
     }
 
@@ -10820,7 +10820,7 @@ export class Think<
     `;
     if (fiberRows[0] && fiberRows[0].created_at >= cutoff) return true;
 
-    const capabilityCreatedAt = this._recoverableChatTurnFiberCreatedAt(
+    const capabilityCreatedAt = this._recoverableChatTurnTaskCreatedAt(
       row.request_id
     );
     if (capabilityCreatedAt !== null && capabilityCreatedAt >= cutoff) {

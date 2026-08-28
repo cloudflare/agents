@@ -18,6 +18,7 @@ export const channels = {
   chat: channel("agents:chat"),
   transcript: channel("agents:transcript"),
   fiber: channel("agents:fiber"),
+  task: channel("agents:task"),
   agentTool: channel("agents:agent_tool"),
   schedule: channel("agents:schedule"),
   lifecycle: channel("agents:lifecycle"),
@@ -31,6 +32,7 @@ function getChannel(type: string): Channel {
   if (type.startsWith("mcp:")) return channels.mcp;
   if (type.startsWith("workflow:")) return channels.workflow;
   if (type.startsWith("fiber:")) return channels.fiber;
+  if (type.startsWith("task:")) return channels.task;
   if (type.startsWith("transcript:") || type.startsWith("chat:transcript:"))
     return channels.transcript;
   if (type.startsWith("chat:")) return channels.chat;

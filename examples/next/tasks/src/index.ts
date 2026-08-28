@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
-import { Fibers, type FiberStep } from "agents/fibers";
+import { Tasks, type TaskStep } from "agents/tasks";
 import { getCurrentAgent, Lifecycle } from "agents/lifecycle";
 
 type ReportInput = {
@@ -20,7 +20,7 @@ type PublishedReport = {
   publishedBy: string | null;
 };
 
-/** A plain Durable Object with the Fibers capability installed. */
+/** A plain Durable Object with the Tasks capability installed. */
 export class ReportObject extends DurableObject<Env> {
   /**
    * The constructor map is the definitions registry, like Scheduler
@@ -32,11 +32,11 @@ export class ReportObject extends DurableObject<Env> {
    * a fresh instance resumes an interrupted run from the first unfinished
    * step.
    */
-  readonly fibers = new Fibers({
+  readonly tasks = new Tasks({
     definitions: {
       "publish-report@v1": async (
         input: ReportInput,
-        step: FiberStep
+        step: TaskStep
       ): Promise<ReportResult> => {
         await step.status("Drafting");
 
@@ -69,7 +69,7 @@ export class ReportObject extends DurableObject<Env> {
       }
     }
   });
-  readonly lifecycle = Lifecycle.install(this).use(this.fibers);
+  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 
   draftSummary(topic: string): string {
     return `${topic} in three lines: what it is, why it matters, and what to watch next.`;
@@ -77,7 +77,7 @@ export class ReportObject extends DurableObject<Env> {
 
   onStart(): void {
     // Published reports live in the host's own table; the run bookkeeping
-    // (cf_fiber_runs, cf_fiber_steps) is owned by the capability.
+    // (cf_agents_task_runs, cf_agents_task_steps) is owned by the capability.
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS published_reports (
         topic TEXT PRIMARY KEY,
@@ -100,7 +100,7 @@ export class ReportObject extends DurableObject<Env> {
       // The receipt means the run and its wake-up deadline are durable, not
       // that the run has finished. Repeating the same idempotency key joins
       // the existing run (`accepted: false`) instead of starting a second.
-      const receipt = await this.fibers.run(
+      const receipt = await this.tasks.run(
         "publish-report@v1",
         { topic, holdSeconds: body.holdSeconds ?? 10 },
         { idempotencyKey: `report:${topic}` }
@@ -113,13 +113,13 @@ export class ReportObject extends DurableObject<Env> {
 
     if (request.method === "DELETE") {
       const runId = url.pathname.split("/").at(-1) ?? "";
-      const cancelled = await this.fibers.cancel(runId, "cancelled via API");
+      const cancelled = await this.tasks.cancel(runId, "cancelled via API");
       return Response.json({ cancelled }, { status: cancelled ? 200 : 404 });
     }
 
     if (request.method === "GET" && url.pathname.includes("/reports/")) {
       const runId = url.pathname.split("/").at(-1) ?? "";
-      const run = await this.fibers.handle("publish-report@v1").get(runId);
+      const run = await this.tasks.handle("publish-report@v1").get(runId);
       return run
         ? Response.json({ run })
         : Response.json({ error: "not found" }, { status: 404 });
@@ -127,7 +127,7 @@ export class ReportObject extends DurableObject<Env> {
 
     return Response.json({
       name: this.lifecycle.name,
-      runs: await this.fibers.list(),
+      runs: await this.tasks.list(),
       published: [
         ...this.ctx.storage.sql.exec<PublishedReport>(
           `SELECT topic, summary, published_at AS publishedAt,

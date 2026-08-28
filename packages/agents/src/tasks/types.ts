@@ -1,29 +1,29 @@
-import type { FiberDurationString } from "./duration";
+import type { TaskDurationString } from "./duration";
 
 /**
- * JSON-serializable data accepted as Fiber input, step results, metadata,
+ * JSON-serializable data accepted as Task input, step results, metadata,
  * and final results.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberJson =
+export type TaskJson =
   | string
   | number
   | boolean
   | null
-  | FiberJson[]
-  | { [key: string]: FiberJson };
+  | TaskJson[]
+  | { [key: string]: TaskJson };
 
 /**
- * A value a Fiber handler or step callback may produce. `undefined` and
+ * A value a Task handler or step callback may produce. `undefined` and
  * `void` persist as SQL `NULL` and restore as `undefined`.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberValue = FiberJson | undefined | void;
+export type TaskValue = TaskJson | undefined | void;
 
 /**
- * Constraint for a Fibers definitions map: named handlers invoked from the
+ * Constraint for a Tasks definitions map: named handlers invoked from the
  * beginning on every execution attempt, with completed steps returning
  * journaled results instead of running again. A definition is either a bare
  * run handler (unclean interruption replays it automatically) or a
@@ -32,55 +32,55 @@ export type FiberValue = FiberJson | undefined | void;
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberHandlers = Record<
+export type TaskHandlers = Record<
   string,
   // Input and interruption parameters are `never` so any concretely-typed
   // definition satisfies the constraint under contravariance; each
-  // definition's real input type is recovered with `FiberInput`.
-  | ((input: never, step: FiberStep) => FiberValue | Promise<FiberValue>)
+  // definition's real input type is recovered with `TaskInput`.
+  | ((input: never, step: TaskStep) => TaskValue | Promise<TaskValue>)
   | {
       readonly run: (
         input: never,
-        step: FiberStep
-      ) => FiberValue | Promise<FiberValue>;
+        step: TaskStep
+      ) => TaskValue | Promise<TaskValue>;
       readonly recover: (
         interruption: never
       ) =>
-        | FiberRecoveryDecision<FiberValue>
-        | Promise<FiberRecoveryDecision<FiberValue>>;
+        | TaskRecoveryDecision<TaskValue>
+        | Promise<TaskRecoveryDecision<TaskValue>>;
     }
 >;
 
 /**
- * Default definitions surface for a Fibers constructed without a typed map:
+ * Default definitions surface for a Tasks constructed without a typed map:
  * any name compiles with an untyped input. At runtime a name must be
  * declared in the constructor map or supplied by a composition-root
- * resolver; a bare Fibers rejects it otherwise.
+ * resolver; a bare Tasks rejects it otherwise.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberCallbacks = Record<
+export type TaskCallbacks = Record<
   string,
-  | ((input: unknown, step: FiberStep) => FiberValue | Promise<FiberValue>)
+  | ((input: unknown, step: TaskStep) => TaskValue | Promise<TaskValue>)
   | {
       readonly run: (
         input: unknown,
-        step: FiberStep
-      ) => FiberValue | Promise<FiberValue>;
+        step: TaskStep
+      ) => TaskValue | Promise<TaskValue>;
       readonly recover: (
-        interruption: FiberInterruption<unknown>
+        interruption: TaskInterruption<unknown>
       ) =>
-        | FiberRecoveryDecision<FiberValue>
-        | Promise<FiberRecoveryDecision<FiberValue>>;
+        | TaskRecoveryDecision<TaskValue>
+        | Promise<TaskRecoveryDecision<TaskValue>>;
     }
 >;
 
 /**
- * The input type a registered Fiber definition accepts.
+ * The input type a registered Task definition accepts.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberInput<Handler> = Handler extends {
+export type TaskInput<Handler> = Handler extends {
   run: (input: infer Input, ...rest: never[]) => unknown;
 }
   ? Input
@@ -89,18 +89,18 @@ export type FiberInput<Handler> = Handler extends {
     : never;
 
 /**
- * The settled output type a registered Fiber definition produces.
+ * The settled output type a registered Task definition produces.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberOutput<Handler> = Handler extends {
+export type TaskOutput<Handler> = Handler extends {
   run: (...args: never[]) => infer Output;
 }
-  ? Awaited<Output> extends FiberValue
+  ? Awaited<Output> extends TaskValue
     ? Awaited<Output>
     : never
   : Handler extends (...args: never[]) => infer Output
-    ? Awaited<Output> extends FiberValue
+    ? Awaited<Output> extends TaskValue
       ? Awaited<Output>
       : never
     : never;
@@ -112,7 +112,7 @@ export type FiberOutput<Handler> = Handler extends {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface FiberInterruptedStep {
+export interface TaskInterruptedStep {
   readonly name: string;
   readonly kind: "do";
   /** One-based attempt number the lost execution had claimed. */
@@ -120,7 +120,7 @@ export interface FiberInterruptedStep {
   /** Stable external deduplication key, identical across attempts. */
   readonly idempotencyKey: string;
   /** Last checkpoint the lost attempt wrote, or `undefined` if none. */
-  readonly checkpoint: FiberValue;
+  readonly checkpoint: TaskValue;
   readonly startedAt: number;
 }
 
@@ -131,7 +131,7 @@ export interface FiberInterruptedStep {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface FiberInterruption<Input> {
+export interface TaskInterruption<Input> {
   readonly runId: string;
   readonly definition: string;
   readonly input: Readonly<Input>;
@@ -140,8 +140,8 @@ export interface FiberInterruption<Input> {
   readonly createdAt: number;
   /** When the lost attempt last persisted durable progress. */
   readonly interruptedAt: number;
-  readonly metadata: Readonly<Record<string, FiberJson>> | null;
-  readonly interruptedStep: FiberInterruptedStep | null;
+  readonly metadata: Readonly<Record<string, TaskJson>> | null;
+  readonly interruptedStep: TaskInterruptedStep | null;
   /** Aborted when the run is cancelled while recovery executes. */
   readonly signal: AbortSignal;
 }
@@ -153,7 +153,7 @@ export interface FiberInterruption<Input> {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberRecoveryDecision<Output extends FiberValue = FiberValue> =
+export type TaskRecoveryDecision<Output extends TaskValue = TaskValue> =
   | {
       /** Replay the run handler. Completed steps stay memoized. */
       action: "replay";
@@ -179,7 +179,7 @@ export type FiberRecoveryDecision<Output extends FiberValue = FiberValue> =
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface FiberStepAttempt {
+export interface TaskStepAttempt {
   /** One-based attempt number for this named step. */
   readonly attempt: number;
 
@@ -197,7 +197,7 @@ export interface FiberStepAttempt {
    * against the owning Durable Object's SQLite database; a later `recover`
    * callback reads it from `interruptedStep.checkpoint`.
    */
-  checkpoint(value: FiberValue): void;
+  checkpoint(value: TaskValue): void;
 }
 
 /**
@@ -205,45 +205,45 @@ export interface FiberStepAttempt {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface FiberStepConfig {
+export interface TaskStepConfig {
   retries?: {
     /** Total attempts, including the first. */
     limit?: number;
     /** Delay before the first retry. */
-    delay?: number | FiberDurationString;
+    delay?: number | TaskDurationString;
     /** Delay growth across retries. Defaults to exponential. */
     backoff?: "constant" | "linear" | "exponential";
   };
 
   /** Timeout of one callback attempt. */
-  timeout?: number | FiberDurationString;
+  timeout?: number | TaskDurationString;
 }
 
 /**
- * The step API a Fiber handler receives. Named steps are the run's durable
+ * The step API a Task handler receives. Named steps are the run's durable
  * journal: `do` memoizes completed results, sleeps persist their first
  * deadline, and both suspend the execution attempt rather than holding the
  * invocation open.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface FiberStep {
+export interface TaskStep {
   /** Run a named step once, replaying its journaled result thereafter. */
-  do<T extends FiberValue>(
+  do<T extends TaskValue>(
     name: string,
-    callback: (attempt: FiberStepAttempt) => T | Promise<T>
+    callback: (attempt: TaskStepAttempt) => T | Promise<T>
   ): Promise<T>;
-  do<T extends FiberValue>(
+  do<T extends TaskValue>(
     name: string,
-    config: FiberStepConfig,
-    callback: (attempt: FiberStepAttempt) => T | Promise<T>
+    config: TaskStepConfig,
+    callback: (attempt: TaskStepAttempt) => T | Promise<T>
   ): Promise<T>;
 
   /**
    * Sleep durably. The first recorded deadline is authoritative; replays
    * before it suspend again, replays after it continue.
    */
-  sleep(name: string, duration: number | FiberDurationString): Promise<void>;
+  sleep(name: string, duration: number | TaskDurationString): Promise<void>;
 
   /** Sleep durably until a wall-clock time. */
   sleepUntil(name: string, when: number | Date): Promise<void>;
@@ -259,11 +259,11 @@ export interface FiberStep {
 }
 
 /**
- * States a Fiber run moves through.
+ * States a Task run moves through.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberRunState =
+export type TaskRunState =
   | "pending"
   | "running"
   | "waiting"
@@ -273,20 +273,20 @@ export type FiberRunState =
   | "cancelled";
 
 /** Why a waiting run is waiting. */
-export type FiberWaitReason = "sleep" | "retry" | "recovery";
+export type TaskWaitReason = "sleep" | "retry" | "recovery";
 
 /** Safe projection of an error retained with a failed run. */
-export interface FiberError {
+export interface TaskError {
   name: string;
   message: string;
 }
 
 /**
- * Options accepted when starting one Fiber run.
+ * Options accepted when starting one Task run.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface FiberRunOptions {
+export interface TaskRunOptions {
   /** Stable key deduplicating repeated acceptance attempts onto one run. */
   idempotencyKey?: string;
 
@@ -294,39 +294,39 @@ export interface FiberRunOptions {
   runId?: string;
 
   /** JSON metadata retained with the run. */
-  metadata?: Record<string, FiberJson>;
+  metadata?: Record<string, TaskJson>;
 
   /** Keep terminal state for inspection. Defaults to `true`. */
   retain?: boolean;
 }
 
 /**
- * Durable acceptance receipt returned by `Fiber.run()`. `accepted: false`
+ * Durable acceptance receipt returned by `Task.run()`. `accepted: false`
  * means an existing run matched `runId` or `idempotencyKey`; it is not an
  * error.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface FiberReceipt {
+export interface TaskReceipt {
   runId: string;
   definition: string;
   accepted: boolean;
-  state: FiberRunState;
+  state: TaskRunState;
   createdAt: number;
 }
 
 /**
- * Read-only snapshot of one Fiber run, discriminated by state.
+ * Read-only snapshot of one Task run, discriminated by state.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type FiberRunSnapshot<Output extends FiberValue> =
+export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
       state: "pending";
       createdAt: number;
-      metadata?: Record<string, FiberJson>;
+      metadata?: Record<string, TaskJson>;
     }
   | {
       runId: string;
@@ -336,17 +336,17 @@ export type FiberRunSnapshot<Output extends FiberValue> =
       startedAt: number;
       createdAt: number;
       statusMessage?: string;
-      metadata?: Record<string, FiberJson>;
+      metadata?: Record<string, TaskJson>;
     }
   | {
       runId: string;
       definition: string;
       state: "waiting";
-      reason: FiberWaitReason;
+      reason: TaskWaitReason;
       wakeAt: number;
       createdAt: number;
       statusMessage?: string;
-      metadata?: Record<string, FiberJson>;
+      metadata?: Record<string, TaskJson>;
     }
   | {
       runId: string;
@@ -356,7 +356,7 @@ export type FiberRunSnapshot<Output extends FiberValue> =
       interruptedStep: string | null;
       attempt: number;
       createdAt: number;
-      metadata?: Record<string, FiberJson>;
+      metadata?: Record<string, TaskJson>;
     }
   | {
       runId: string;
@@ -365,16 +365,16 @@ export type FiberRunSnapshot<Output extends FiberValue> =
       result: Output;
       createdAt: number;
       settledAt: number;
-      metadata?: Record<string, FiberJson>;
+      metadata?: Record<string, TaskJson>;
     }
   | {
       runId: string;
       definition: string;
       state: "failed";
-      error: FiberError;
+      error: TaskError;
       createdAt: number;
       settledAt: number;
-      metadata?: Record<string, FiberJson>;
+      metadata?: Record<string, TaskJson>;
     }
   | {
       runId: string;
@@ -383,40 +383,40 @@ export type FiberRunSnapshot<Output extends FiberValue> =
       reason?: string;
       createdAt: number;
       settledAt: number;
-      metadata?: Record<string, FiberJson>;
+      metadata?: Record<string, TaskJson>;
     };
 
 /**
- * Typed handle for one named Fiber definition, returned by
- * `fibers.create()`. The handle holds no state of its own; it addresses runs
+ * Typed handle for one named Task definition, returned by
+ * `tasks.create()`. The handle holds no state of its own; it addresses runs
  * of its definition through the owning capability.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface Fiber<Input, Output extends FiberValue> {
+export interface Task<Input, Output extends TaskValue> {
   readonly name: string;
 
   /** Durably accept a run and return without waiting for terminal state. */
-  run(input: Input, options?: FiberRunOptions): Promise<FiberReceipt>;
+  run(input: Input, options?: TaskRunOptions): Promise<TaskReceipt>;
 
   /** Read one run of this definition. */
-  get(runId: string): Promise<FiberRunSnapshot<Output> | null>;
+  get(runId: string): Promise<TaskRunSnapshot<Output> | null>;
 
   /** Read one run of this definition by its idempotency key. */
   getByIdempotencyKey(
     idempotencyKey: string
-  ): Promise<FiberRunSnapshot<Output> | null>;
+  ): Promise<TaskRunSnapshot<Output> | null>;
 
   /** Request cooperative cancellation. True when a live run was cancelled. */
   cancel(runId: string, reason?: string): Promise<boolean>;
 }
 
-/** @internal Raw `cf_fiber_runs` SQLite row. */
-export type FiberRunRow = {
+/** @internal Raw `cf_agents_task_runs` SQLite row. */
+export type TaskRunRow = {
   run_id: string;
   definition: string;
   input: string | null;
-  state: FiberRunState;
+  state: TaskRunState;
   result: string | null;
   error_name: string | null;
   error_message: string | null;
@@ -428,7 +428,7 @@ export type FiberRunRow = {
   recovery_attempt: number;
   generation: string | null;
   next_at: number | null;
-  wait_reason: FiberWaitReason | null;
+  wait_reason: TaskWaitReason | null;
   cancel_requested: number;
   cancel_reason: string | null;
   created_at: number;
@@ -437,8 +437,8 @@ export type FiberRunRow = {
   settled_at: number | null;
 };
 
-/** @internal Raw `cf_fiber_steps` SQLite row. */
-export type FiberStepRow = {
+/** @internal Raw `cf_agents_task_steps` SQLite row. */
+export type TaskStepRow = {
   run_id: string;
   step_name: string;
   kind: "do" | "sleep";

@@ -1,28 +1,28 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { TestFiberAgent } from "../agents/fibers";
-import { seedFiberRun, seedFiberStep } from "../capabilities/fibers";
-import type { FiberRunSnapshot, FiberValue } from "../../fibers";
+import type { TestTaskAgent } from "../agents/tasks";
+import { seedTaskRun, seedTaskStep } from "../capabilities/tasks";
+import type { TaskRunSnapshot, TaskValue } from "../../tasks";
 
 /**
- * Agent-level Fibers tests: the capability installed by Agent's composition
+ * Agent-level Tasks tests: the capability installed by Agent's composition
  * root, with subclass definitions declared on the overridable
- * `fiberDefinitions` field. The capability contract itself is covered by
+ * `taskDefinitions` field. The capability contract itself is covered by
  * ./capability.test.ts on a plain Lifecycle Object; these prove the Agent
  * integration — host-context invocation, shared-alarm coexistence with
  * schedules, and recovery dispatch on a real Agent.
  */
 
 async function waitForState(
-  fibers: { get(runId: string): Promise<FiberRunSnapshot<FiberValue> | null> },
+  tasks: { get(runId: string): Promise<TaskRunSnapshot<TaskValue> | null> },
   runId: string,
-  states: ReadonlyArray<FiberRunSnapshot<FiberValue>["state"]>,
+  states: ReadonlyArray<TaskRunSnapshot<TaskValue>["state"]>,
   timeoutMs = 5_000
-): Promise<FiberRunSnapshot<FiberValue>> {
+): Promise<TaskRunSnapshot<TaskValue>> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const snapshot = await fibers.get(runId);
+    const snapshot = await tasks.get(runId);
     if (snapshot && states.includes(snapshot.state)) return snapshot;
     if (Date.now() > deadline) {
       throw new Error(
@@ -33,12 +33,12 @@ async function waitForState(
   }
 }
 
-describe("Agent fibers integration", () => {
-  it("runs subclass fiberDefinitions with journaled steps and host context", async () => {
-    const stub = env.TestFiberAgent.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: TestFiberAgent) => {
-      const receipt = await instance.fibers.run("greet", { name: "matt" });
-      const snapshot = await waitForState(instance.fibers, receipt.runId, [
+describe("Agent tasks integration", () => {
+  it("runs subclass taskDefinitions with journaled steps and host context", async () => {
+    const stub = env.TestTaskAgent.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TestTaskAgent) => {
+      const receipt = await instance.tasks.run("greet", { name: "matt" });
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
         "completed"
       ]);
       if (snapshot.state !== "completed") throw new Error("unreachable");
@@ -52,10 +52,10 @@ describe("Agent fibers integration", () => {
   });
 
   it("rejects reserved internal definition names on the public surface", async () => {
-    const stub = env.TestFiberAgent.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: TestFiberAgent) => {
+    const stub = env.TestTaskAgent.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TestTaskAgent) => {
       await expect(
-        instance.fibers.run(
+        instance.tasks.run(
           "__cf_internal_chat_turn" as "greet",
           undefined as never
         )
@@ -64,10 +64,10 @@ describe("Agent fibers integration", () => {
   });
 
   it("reclaims an interrupted run on the Agent alarm from the journal", async () => {
-    const stub = env.TestFiberAgent.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: TestFiberAgent, state) => {
+    const stub = env.TestTaskAgent.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TestTaskAgent, state) => {
       await instance.lifecycle.start();
-      seedFiberRun(state.storage, {
+      seedTaskRun(state.storage, {
         runId: "agent-interrupted",
         definition: "greet",
         input: { name: "revived" },
@@ -76,7 +76,7 @@ describe("Agent fibers integration", () => {
         attempt: 1,
         nextAt: Date.now() - 1000
       });
-      seedFiberStep(state.storage, {
+      seedTaskStep(state.storage, {
         runId: "agent-interrupted",
         name: "compose",
         kind: "do",
@@ -88,12 +88,10 @@ describe("Agent fibers integration", () => {
 
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: TestFiberAgent) => {
-      const snapshot = await waitForState(
-        instance.fibers,
-        "agent-interrupted",
-        ["completed"]
-      );
+    await runInDurableObject(stub, async (instance: TestTaskAgent) => {
+      const snapshot = await waitForState(instance.tasks, "agent-interrupted", [
+        "completed"
+      ]);
       if (snapshot.state !== "completed") throw new Error("unreachable");
       // The journaled step replayed from storage without re-executing.
       expect(snapshot.result).toEqual({
@@ -106,17 +104,17 @@ describe("Agent fibers integration", () => {
   });
 
   it("shares the physical alarm with Agent schedules", async () => {
-    const stub = env.TestFiberAgent.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: TestFiberAgent, state) => {
+    const stub = env.TestTaskAgent.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TestTaskAgent, state) => {
       const schedule = await instance.schedule(120, "noopCallback", undefined);
       expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
 
-      const receipt = await instance.fibers.run("napper", { ms: 60_000 });
-      const parked = await waitForState(instance.fibers, receipt.runId, [
+      const receipt = await instance.tasks.run("napper", { ms: 60_000 });
+      const parked = await waitForState(instance.tasks, receipt.runId, [
         "waiting"
       ]);
       if (parked.state !== "waiting") throw new Error("unreachable");
-      // The sooner fiber deadline wins the shared alarm...
+      // The sooner task deadline wins the shared alarm...
       const deadline = Date.now() + 5_000;
       for (;;) {
         if ((await state.storage.getAlarm()) === parked.wakeAt) break;
@@ -124,8 +122,8 @@ describe("Agent fibers integration", () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
 
-      // ...and settling the fiber hands the alarm back to the schedule.
-      await instance.fibers.cancel(receipt.runId);
+      // ...and settling the task hands the alarm back to the schedule.
+      await instance.tasks.cancel(receipt.runId);
       expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
       expect(instance.stepRuns).toEqual(["napper:before"]);
     });

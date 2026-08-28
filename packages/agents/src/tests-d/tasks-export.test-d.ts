@@ -1,21 +1,21 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
-  Fibers,
+  Tasks,
   NonRetryableError,
-  type Fiber,
-  type FiberInterruption,
-  type FiberReceipt,
-  type FiberRecoveryDecision,
-  type FiberRunSnapshot,
-  type FiberStep,
-  type FiberValue
-} from "../fibers";
+  type Task,
+  type TaskInterruption,
+  type TaskReceipt,
+  type TaskRecoveryDecision,
+  type TaskRunSnapshot,
+  type TaskStep,
+  type TaskValue
+} from "../tasks";
 
 class ReportObject extends DurableObject {
-  readonly fibers = new Fibers({
+  readonly tasks = new Tasks({
     definitions: {
-      report: async (input: { topic: string }, step: FiberStep) => {
+      report: async (input: { topic: string }, step: TaskStep) => {
         // Input and step are typed at the definition site.
         input.topic satisfies string;
         const size = await step.do("measure", () => input.topic.length);
@@ -26,46 +26,44 @@ class ReportObject extends DurableObject {
     }
   });
 
-  readonly lifecycle = Lifecycle.install(this).use(this.fibers);
+  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 }
 
 declare const object: ReportObject;
-object.fibers satisfies DurableObjectCapability;
+object.tasks satisfies DurableObjectCapability;
 
 // Declared definitions type both the name and the input where runs start.
-object.fibers.run("report", { topic: "chips" }) satisfies Promise<FiberReceipt>;
-object.fibers.run(
+object.tasks.run("report", { topic: "chips" }) satisfies Promise<TaskReceipt>;
+object.tasks.run(
   "report",
   { topic: "chips" },
   { idempotencyKey: "report:1", retain: false }
-) satisfies Promise<FiberReceipt>;
+) satisfies Promise<TaskReceipt>;
 // @ts-expect-error the input shape is checked against the declared handler.
-object.fibers.run("report", { subject: "chips" });
+object.tasks.run("report", { subject: "chips" });
 // @ts-expect-error missingDefinition is not a declared definition.
-object.fibers.run("missingDefinition", {});
+object.tasks.run("missingDefinition", {});
 
 // A handle is a typed lens scoped to one declared definition.
-const report = object.fibers.handle("report");
-report satisfies Fiber<{ topic: string }, { key: string }>;
-report.run({ topic: "chips" }) satisfies Promise<FiberReceipt>;
-report.get("fiber_x") satisfies Promise<FiberRunSnapshot<{
+const report = object.tasks.handle("report");
+report satisfies Task<{ topic: string }, { key: string }>;
+report.run({ topic: "chips" }) satisfies Promise<TaskReceipt>;
+report.get("task_x") satisfies Promise<TaskRunSnapshot<{
   key: string;
 }> | null>;
 // @ts-expect-error unknownDefinition is not a declared definition.
-object.fibers.handle("unknownDefinition");
+object.tasks.handle("unknownDefinition");
 
 // Manager-level reads span definitions and widen the output.
-object.fibers.get(
-  "fiber_x"
-) satisfies Promise<FiberRunSnapshot<FiberValue> | null>;
-object.fibers.cancel("fiber_x", "done") satisfies Promise<boolean>;
+object.tasks.get("task_x") satisfies Promise<TaskRunSnapshot<TaskValue> | null>;
+object.tasks.cancel("task_x", "done") satisfies Promise<boolean>;
 
 // A definition may pair its handler with a recovery callback; input and
 // output stay typed through the object form.
-const guarded = new Fibers({
+const guarded = new Tasks({
   definitions: {
     payment: {
-      run: async (input: { orderId: string }, step: FiberStep) => {
+      run: async (input: { orderId: string }, step: TaskStep) => {
         const captured = await step.do("capture", ({ checkpoint }) => {
           checkpoint({ phase: "submitted" });
           return input.orderId.length;
@@ -73,10 +71,10 @@ const guarded = new Fibers({
         return { captured };
       },
       recover: async (
-        interruption: FiberInterruption<{ orderId: string }>
-      ): Promise<FiberRecoveryDecision<{ captured: number }>> => {
+        interruption: TaskInterruption<{ orderId: string }>
+      ): Promise<TaskRecoveryDecision<{ captured: number }>> => {
         interruption.input.orderId satisfies string;
-        interruption.interruptedStep?.checkpoint satisfies FiberValue;
+        interruption.interruptedStep?.checkpoint satisfies TaskValue;
         interruption.interruptedStep?.idempotencyKey satisfies
           | string
           | undefined;
@@ -88,24 +86,24 @@ const guarded = new Fibers({
     }
   }
 });
-guarded.run("payment", { orderId: "o-1" }) satisfies Promise<FiberReceipt>;
-guarded.handle("payment") satisfies Fiber<
+guarded.run("payment", { orderId: "o-1" }) satisfies Promise<TaskReceipt>;
+guarded.handle("payment") satisfies Task<
   { orderId: string },
   { captured: number }
 >;
 // @ts-expect-error the object form checks the input shape too.
 guarded.run("payment", { orderId: 1 });
 
-// A Fibers constructed without definitions is string-typed: any name
+// A Tasks constructed without definitions is string-typed: any name
 // compiles, and names resolve at runtime against the declared map or a
 // composition-root resolver.
-const untypedFibers = new Fibers();
-untypedFibers.run("anyDefinitionName", {
+const untypedTasks = new Tasks();
+untypedTasks.run("anyDefinitionName", {
   free: true
-}) satisfies Promise<FiberReceipt>;
+}) satisfies Promise<TaskReceipt>;
 
 // Step typing stands alone.
-declare const step: FiberStep;
+declare const step: TaskStep;
 step.do("typed", () => ({ a: 1 })) satisfies Promise<{ a: number }>;
 step.do(
   "configured",

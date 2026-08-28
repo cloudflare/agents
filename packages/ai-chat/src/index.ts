@@ -691,7 +691,7 @@ export class AIChatAgent<
   private _registerChatTurnFiberDefinition(): void {
     const chatFiberName = (this.constructor as typeof AIChatAgent)
       .CHAT_FIBER_NAME;
-    this._registerInternalFiberDefinition(chatFiberName, {
+    this._registerInternalTaskDefinition(chatFiberName, {
       run: async (input, step) => {
         const { nonce } = input as { requestId: string; nonce: string };
         await step.do(
@@ -799,7 +799,7 @@ export class AIChatAgent<
       settle: { resolve: resolveOutcome, reject: rejectOutcome }
     });
     try {
-      await this.fibers.__DO_NOT_USE_WILL_BREAK__runAttached(
+      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
         (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
         { requestId, continuation, nonce },
         { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }

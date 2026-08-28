@@ -2,7 +2,10 @@
 
 Status: accepted (amended)
 
-> Amended on acceptance: Fibers integrates through the shipped Lifecycle
+> Amended on acceptance: shipped under the name **Tasks** (`agents/tasks`,
+> class `Tasks`, `taskDefinitions` on Agent) — "fiber" remains the legacy
+> engine's vocabulary (`runFiber`/`startFiber`), avoiding two meanings of one
+> word in the package. Fibers integrates through the shipped Lifecycle
 > alarm-contribution model (`getNextAlarm()` / `onAlarm()` / `alarms.rearm()`)
 > instead of the originally proposed central `cf_lifecycle_work` dispatcher,
 > and definitions are declared in the `Fibers` constructor — a
@@ -2750,6 +2753,7 @@ Accepted with one amendment. The architectural direction:
   considered);
 - compatibility migration before deprecation;
 - Think retains specialized chat recovery policy through a named internal Fiber definition.
+- Shipped as **Tasks** (`agents/tasks`): the durable-execution concept is a Task; "fiber" stays the legacy engine's vocabulary. A future Streams capability (chunk log + cursor, extracted from chat's resumable streams) composes with it rather than living inside it.
 
 The first implementation PR ships Phases 1 and 2 — replay Fibers plus the
 optional `{ run, recover }` recovery callback — and the internal-framework

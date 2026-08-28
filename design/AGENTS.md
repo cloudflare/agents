@@ -102,7 +102,8 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `mcp.md`                                | design doc | Stateless, Legacy compatibility, Legacy sessionful, client, package boundary, and conformance architecture                                                                      |
 | `durable-object-lifecycle.md`           | design doc | Lifecycle Objects, capability and host phases, Scheduler/alarm ownership, host context, identity, and always-hibernating WebSockets                                             |
 | `rfc-durable-object-lifecycle.md`       | RFC        | Constructor-composed Durable Object lifecycle with reusable components and always-hibernating WebSockets                                                                        |
-| `rfc-fibers.md`                         | RFC        | Fibers — durable replayable execution as one Lifecycle capability: named definitions, journaled steps, sleeps, optional recovery callback (accepted, amended)                   |
+| `rfc-fibers.md`                         | RFC        | Tasks (née Fibers) — durable replayable execution as one Lifecycle capability: named definitions, journaled steps, sleeps, optional recovery callback (accepted, amended)       |
+| `rfc-streams.md`                        | RFC        | Streams — durable incremental output as a Lifecycle capability: chunk log, cursor, replay-then-tail reads, composed with Tasks via checkpointed cursors (proposed)              |
 
 ## Relationship to `/docs`
 

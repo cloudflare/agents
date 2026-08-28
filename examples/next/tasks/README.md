@@ -1,14 +1,14 @@
-# Next: fibers
+# Next: tasks
 
-An early-access, server-only example showing `Fibers` from `agents/fibers`
+An early-access, server-only example showing `Tasks` from `agents/tasks`
 installed on a plain Cloudflare `DurableObject`. It does not extend `Agent` or
 another SDK base class.
 
 ```ts
 export class ReportObject extends DurableObject<Env> {
-  readonly fibers = new Fibers({
+  readonly tasks = new Tasks({
     definitions: {
-      "publish-report@v1": async (input: ReportInput, step: FiberStep) => {
+      "publish-report@v1": async (input: ReportInput, step: TaskStep) => {
         const summary = await step.do("draft", () =>
           this.draftSummary(input.topic)
         );
@@ -21,19 +21,19 @@ export class ReportObject extends DurableObject<Env> {
       }
     }
   });
-  readonly lifecycle = Lifecycle.install(this).use(this.fibers);
+  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 }
 ```
 
 The constructor map is the registry, exactly like `Scheduler` callbacks: it
 is rebuilt on every wake, so in-flight runs always resolve their persisted
 definition names — recovery is correct by construction. Runs start with
-`this.fibers.run("publish-report@v1", input, options)`, and
-`this.fibers.handle(name)` gives a typed lens scoped to one definition.
+`this.tasks.run("publish-report@v1", input, options)`, and
+`this.tasks.handle(name)` gives a typed lens scoped to one definition.
 
-The Fibers capability takes no wiring: storage, alarm coordination, the host
+The Tasks capability takes no wiring: storage, alarm coordination, the host
 invocation boundary, and events all come from the Lifecycle it is installed
-on. It owns its own `cf_fiber_runs` and `cf_fiber_steps` tables and
+on. It owns its own `cf_agents_task_runs` and `cf_agents_task_steps` tables and
 contributes its earliest run deadline to Lifecycle's shared physical alarm,
 so it composes with the Scheduler and other capabilities that also need
 wake-ups.

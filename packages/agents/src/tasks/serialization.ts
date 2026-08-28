@@ -1,13 +1,13 @@
 /**
- * Value serialization for the Fibers capability.
+ * Value serialization for the Tasks capability.
  *
- * Fiber inputs, step results, metadata, and final results persist as JSON
+ * Task inputs, step results, metadata, and final results persist as JSON
  * text in SQLite. `undefined` (and a `void` handler result) is represented
  * as SQL `NULL` rather than a JSON envelope, so the JSON column space stays
  * plain: `"null"` is JSON `null`, column `NULL` is `undefined`.
  */
 
-import { FiberSerializationError } from "./errors";
+import { TaskSerializationError } from "./errors";
 
 /** Default ceiling for one serialized value (1 MiB). */
 export const MAX_SERIALIZED_BYTES = 1_048_576;
@@ -15,16 +15,16 @@ export const MAX_SERIALIZED_BYTES = 1_048_576;
 const utf8 = new TextEncoder();
 
 /**
- * Serialize one Fiber value for storage.
+ * Serialize one Task value for storage.
  *
  * @param value - The value to persist.
  * @param context - What is being serialized, for error messages
  * (e.g. `input for definition "report"`, `result of step "fetch"`).
  * @returns JSON text, or `null` when the value is `undefined`.
- * @throws FiberSerializationError when the value is not JSON-serializable or
+ * @throws TaskSerializationError when the value is not JSON-serializable or
  * its serialized form exceeds {@link MAX_SERIALIZED_BYTES}.
  */
-export function serializeFiberValue(
+export function serializeTaskValue(
   value: unknown,
   context: string
 ): string | null {
@@ -34,13 +34,13 @@ export function serializeFiberValue(
   try {
     json = JSON.stringify(value);
   } catch (error) {
-    throw new FiberSerializationError(
+    throw new TaskSerializationError(
       context,
       error instanceof Error ? error.message : String(error)
     );
   }
   if (json === undefined) {
-    throw new FiberSerializationError(
+    throw new TaskSerializationError(
       context,
       `value of type ${typeof value} has no JSON representation`
     );
@@ -48,7 +48,7 @@ export function serializeFiberValue(
 
   const bytes = utf8.encode(json).byteLength;
   if (bytes > MAX_SERIALIZED_BYTES) {
-    throw new FiberSerializationError(
+    throw new TaskSerializationError(
       context,
       `serialized size ${bytes} bytes exceeds the ${MAX_SERIALIZED_BYTES}-byte limit`
     );
@@ -57,12 +57,12 @@ export function serializeFiberValue(
 }
 
 /**
- * Restore a value serialized by {@link serializeFiberValue}.
+ * Restore a value serialized by {@link serializeTaskValue}.
  *
  * @param stored - The stored column value.
  * @returns The original value; column `NULL` restores `undefined`.
  */
-export function deserializeFiberValue(stored: string | null): unknown {
+export function deserializeTaskValue(stored: string | null): unknown {
   if (stored === null) return undefined;
   return JSON.parse(stored);
 }

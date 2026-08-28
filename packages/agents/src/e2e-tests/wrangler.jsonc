@@ -46,8 +46,8 @@
         "class_name": "FacetRecoveryChild"
       },
       {
-        "name": "FiberKillTestAgent",
-        "class_name": "FiberKillTestAgent"
+        "name": "TaskKillTestAgent",
+        "class_name": "TaskKillTestAgent"
       }
     ]
   },
@@ -70,7 +70,7 @@
     },
     {
       "tag": "v4",
-      "new_sqlite_classes": ["FiberKillTestAgent"]
+      "new_sqlite_classes": ["TaskKillTestAgent"]
     }
   ]
 }

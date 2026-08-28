@@ -37,16 +37,16 @@
         "name": "SchedulerStartupWarnObject"
       },
       {
-        "class_name": "FiberHarnessObject",
-        "name": "FiberHarnessObject"
+        "class_name": "TaskHarnessObject",
+        "name": "TaskHarnessObject"
       },
       {
-        "class_name": "FiberBatchHarnessObject",
-        "name": "FiberBatchHarnessObject"
+        "class_name": "TaskBatchHarnessObject",
+        "name": "TaskBatchHarnessObject"
       },
       {
-        "class_name": "FiberSchedulerCoexistObject",
-        "name": "FiberSchedulerCoexistObject"
+        "class_name": "TaskSchedulerCoexistObject",
+        "name": "TaskSchedulerCoexistObject"
       },
       {
         "class_name": "PlainMcpClientObject",
@@ -106,8 +106,8 @@
         "name": "TestScheduleAgent"
       },
       {
-        "class_name": "TestFiberAgent",
-        "name": "TestFiberAgent"
+        "class_name": "TestTaskAgent",
+        "name": "TestTaskAgent"
       },
       {
         "class_name": "TestOnStartScheduleWarnAgent",
@@ -385,9 +385,9 @@
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
-        "FiberHarnessObject",
-        "FiberBatchHarnessObject",
-        "FiberSchedulerCoexistObject",
+        "TaskHarnessObject",
+        "TaskBatchHarnessObject",
+        "TaskSchedulerCoexistObject",
         "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
@@ -403,7 +403,7 @@
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",
         "TestScheduleAgent",
-        "TestFiberAgent",
+        "TestTaskAgent",
         "TestOnStartScheduleWarnAgent",
         "TestOnStartScheduleNoWarnAgent",
         "TestOnStartScheduleExplicitFalseAgent",

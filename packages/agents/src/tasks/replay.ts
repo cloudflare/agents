@@ -1,29 +1,29 @@
 /**
- * Replay step engine for the Fibers capability.
+ * Replay step engine for the Tasks capability.
  *
- * `ReplayStep` implements the `FiberStep` surface one handler attempt
+ * `ReplayStep` implements the `TaskStep` surface one handler attempt
  * receives. It owns replay semantics — journal hits, journal misses, retry
  * policy, durable sleeps, the status live gate, and duplicate/divergence
- * detection — while all SQL stays behind the narrow {@link FiberStepEngine}
- * port implemented by the `Fibers` capability, the single owner of the
+ * detection — while all SQL stays behind the narrow {@link TaskStepEngine}
+ * port implemented by the `Tasks` capability, the single owner of the
  * schema.
  */
 
-import { parseFiberDuration, type FiberDurationString } from "./duration";
+import { parseTaskDuration, type TaskDurationString } from "./duration";
 import {
-  DuplicateFiberStepError,
-  FiberReplayDivergedError,
-  FiberSerializationError,
+  DuplicateTaskStepError,
+  TaskReplayDivergedError,
+  TaskSerializationError,
   isNonRetryableError
 } from "./errors";
-import { deserializeFiberValue } from "./serialization";
+import { deserializeTaskValue } from "./serialization";
 import type {
-  FiberStep,
-  FiberStepAttempt,
-  FiberStepConfig,
-  FiberStepRow,
-  FiberValue,
-  FiberWaitReason
+  TaskStep,
+  TaskStepAttempt,
+  TaskStepConfig,
+  TaskStepRow,
+  TaskValue,
+  TaskWaitReason
 } from "./types";
 
 /** Resolved per-step retry and timeout policy. */
@@ -47,28 +47,28 @@ export const MAX_STEP_NAME_LENGTH = 256;
  * Thrown by the engine to end one execution attempt while its run waits for
  * a durable deadline (sleep or retry). Not an `Error` subclass so a step
  * callback's `catch (error)` around unrelated work is less likely to swallow
- * it; the capability re-checks with {@link isFiberSuspension}.
+ * it; the capability re-checks with {@link isTaskSuspension}.
  */
-export class FiberSuspension {
+export class TaskSuspension {
   readonly wakeAt: number;
-  readonly reason: FiberWaitReason;
+  readonly reason: TaskWaitReason;
 
-  constructor(wakeAt: number, reason: FiberWaitReason) {
+  constructor(wakeAt: number, reason: TaskWaitReason) {
     this.wakeAt = wakeAt;
     this.reason = reason;
   }
 }
 
 /** True when a thrown value is the engine's suspension signal. */
-export function isFiberSuspension(value: unknown): value is FiberSuspension {
-  return value instanceof FiberSuspension;
+export function isTaskSuspension(value: unknown): value is TaskSuspension {
+  return value instanceof TaskSuspension;
 }
 
 /**
  * Thrown by the engine when a step boundary observes the run's cancellation
  * request. The capability settles the run as cancelled.
  */
-export class FiberCancellation {
+export class TaskCancellation {
   readonly reason: string | undefined;
 
   constructor(reason: string | undefined) {
@@ -77,10 +77,8 @@ export class FiberCancellation {
 }
 
 /** True when a thrown value is the engine's cancellation signal. */
-export function isFiberCancellation(
-  value: unknown
-): value is FiberCancellation {
-  return value instanceof FiberCancellation;
+export function isTaskCancellation(value: unknown): value is TaskCancellation {
+  return value instanceof TaskCancellation;
 }
 
 /**
@@ -91,7 +89,7 @@ export function isFiberCancellation(
 export class AttemptSupersededError extends Error {
   constructor(runId: string) {
     super(
-      `Fiber attempt superseded: run "${runId}" is no longer claimed by this ` +
+      `Task attempt superseded: run "${runId}" is no longer claimed by this ` +
         `execution attempt`
     );
     this.name = "AttemptSupersededError";
@@ -99,13 +97,13 @@ export class AttemptSupersededError extends Error {
 }
 
 /**
- * Storage and policy port the `Fibers` capability supplies to one attempt's
+ * Storage and policy port the `Tasks` capability supplies to one attempt's
  * `ReplayStep`. Every mutation is fenced by the attempt's generation on the
  * capability side.
  */
-export interface FiberStepEngine {
+export interface TaskStepEngine {
   /** Read one step row of this run, or undefined for a journal miss. */
-  readStep(name: string): FiberStepRow | undefined;
+  readStep(name: string): TaskStepRow | undefined;
 
   /** Number of step rows this run has journaled. */
   countSteps(): number;
@@ -174,7 +172,7 @@ export function computeRetryDelayMs(
 /** Resolve one `step.do()` config against the capability defaults. */
 export function resolveStepPolicy(
   defaults: ResolvedStepPolicy,
-  config: FiberStepConfig | undefined
+  config: TaskStepConfig | undefined
 ): ResolvedStepPolicy {
   const limit = config?.retries?.limit ?? defaults.retryLimit;
   if (!Number.isInteger(limit) || limit < 1) {
@@ -186,49 +184,49 @@ export function resolveStepPolicy(
     retryLimit: limit,
     retryDelayMs:
       config?.retries?.delay !== undefined
-        ? parseFiberDuration(config.retries.delay, "step retries.delay")
+        ? parseTaskDuration(config.retries.delay, "step retries.delay")
         : defaults.retryDelayMs,
     backoff: config?.retries?.backoff ?? defaults.backoff,
     timeoutMs:
       config?.timeout !== undefined
-        ? parseFiberDuration(config.timeout, "step timeout")
+        ? parseTaskDuration(config.timeout, "step timeout")
         : defaults.timeoutMs
   };
 }
 
 /**
- * The `FiberStep` implementation for one execution attempt.
+ * The `TaskStep` implementation for one execution attempt.
  *
  * Attempt 1 starts live. A later attempt starts silent and becomes live at
  * the frontier of new ground — the first journal miss, or a step still
  * waiting or running — so replayed `status()` calls from completed ground
  * are suppressed instead of re-published as new progress.
  */
-export class ReplayStep implements FiberStep {
-  readonly #engine: FiberStepEngine;
+export class ReplayStep implements TaskStep {
+  readonly #engine: TaskStepEngine;
   readonly #usedNames = new Set<string>();
   #live: boolean;
 
-  constructor(engine: FiberStepEngine, options: { startsLive: boolean }) {
+  constructor(engine: TaskStepEngine, options: { startsLive: boolean }) {
     this.#engine = engine;
     this.#live = options.startsLive;
   }
 
-  do<T extends FiberValue>(
+  do<T extends TaskValue>(
     name: string,
-    callback: (attempt: FiberStepAttempt) => T | Promise<T>
+    callback: (attempt: TaskStepAttempt) => T | Promise<T>
   ): Promise<T>;
-  do<T extends FiberValue>(
+  do<T extends TaskValue>(
     name: string,
-    config: FiberStepConfig,
-    callback: (attempt: FiberStepAttempt) => T | Promise<T>
+    config: TaskStepConfig,
+    callback: (attempt: TaskStepAttempt) => T | Promise<T>
   ): Promise<T>;
-  async do<T extends FiberValue>(
+  async do<T extends TaskValue>(
     name: string,
     configOrCallback:
-      | FiberStepConfig
-      | ((attempt: FiberStepAttempt) => T | Promise<T>),
-    maybeCallback?: (attempt: FiberStepAttempt) => T | Promise<T>
+      | TaskStepConfig
+      | ((attempt: TaskStepAttempt) => T | Promise<T>),
+    maybeCallback?: (attempt: TaskStepAttempt) => T | Promise<T>
   ): Promise<T> {
     const config =
       typeof configOrCallback === "function" ? undefined : configOrCallback;
@@ -246,7 +244,7 @@ export class ReplayStep implements FiberStep {
       if (this.#engine.countSteps() >= MAX_STEPS_PER_RUN) {
         throw new Error(
           `Run exceeded ${MAX_STEPS_PER_RUN} steps; split the work across ` +
-            `multiple Fiber runs`
+            `multiple Task runs`
         );
       }
       this.#engine.insertStep(name, "do", null);
@@ -254,7 +252,7 @@ export class ReplayStep implements FiberStep {
     }
 
     if (row.kind !== "do") {
-      throw new FiberReplayDivergedError(
+      throw new TaskReplayDivergedError(
         name,
         `journaled as a ${row.kind} step but replayed as a do step`
       );
@@ -262,7 +260,7 @@ export class ReplayStep implements FiberStep {
 
     switch (row.state) {
       case "completed":
-        return deserializeFiberValue(row.result) as T;
+        return deserializeTaskValue(row.result) as T;
       case "failed":
         // Defensive: a failed step fails its run, so replay should not reach
         // it. Surface the persisted terminal error rather than re-executing.
@@ -271,9 +269,9 @@ export class ReplayStep implements FiberStep {
         // The frontier: a retry deadline from a previous attempt.
         this.#live = true;
         const wakeAt = row.next_at ?? Date.now();
-        if (Date.now() < wakeAt) throw new FiberSuspension(wakeAt, "retry");
+        if (Date.now() < wakeAt) throw new TaskSuspension(wakeAt, "retry");
         const attempt = this.#engine.claimStepAttempt(name);
-        this.#engine.emit("fiber:step:retry", { step: name, attempt });
+        this.#engine.emit("task:step:retry", { step: name, attempt });
         return this.#executeAttempt(name, attempt, policy, callback);
       }
       case "running": {
@@ -288,9 +286,9 @@ export class ReplayStep implements FiberStep {
 
   async sleep(
     name: string,
-    duration: number | FiberDurationString
+    duration: number | TaskDurationString
   ): Promise<void> {
-    const durationMs = parseFiberDuration(duration, "sleep duration");
+    const durationMs = parseTaskDuration(duration, "sleep duration");
     return this.#sleepAt(name, () => Date.now() + durationMs);
   }
 
@@ -329,12 +327,12 @@ export class ReplayStep implements FiberStep {
       throw new Error(`Step names must not use the reserved "__cf" prefix`);
     }
     if (this.#usedNames.has(name)) {
-      throw new DuplicateFiberStepError(name);
+      throw new DuplicateTaskStepError(name);
     }
     this.#usedNames.add(name);
 
     const cancellation = this.#engine.cancellationRequested();
-    if (cancellation) throw new FiberCancellation(cancellation.reason);
+    if (cancellation) throw new TaskCancellation(cancellation.reason);
   }
 
   /** First persist wins: the recorded wake time is authoritative. */
@@ -351,11 +349,11 @@ export class ReplayStep implements FiberStep {
         return;
       }
       this.#engine.insertStep(name, "sleep", wakeAt);
-      throw new FiberSuspension(wakeAt, "sleep");
+      throw new TaskSuspension(wakeAt, "sleep");
     }
 
     if (row.kind !== "sleep") {
-      throw new FiberReplayDivergedError(
+      throw new TaskReplayDivergedError(
         name,
         `journaled as a ${row.kind} step but replayed as a sleep step`
       );
@@ -365,19 +363,19 @@ export class ReplayStep implements FiberStep {
     // The frontier: an unfinished sleep is the first unfinished step.
     this.#live = true;
     const wakeAt = row.next_at ?? 0;
-    if (Date.now() < wakeAt) throw new FiberSuspension(wakeAt, "sleep");
+    if (Date.now() < wakeAt) throw new TaskSuspension(wakeAt, "sleep");
     this.#engine.completeStep(name, undefined);
   }
 
   /** Execute one claimed attempt of a `do` step under timeout and retries. */
-  async #executeAttempt<T extends FiberValue>(
+  async #executeAttempt<T extends TaskValue>(
     name: string,
     attempt: number,
     policy: ResolvedStepPolicy,
-    callback: (attempt: FiberStepAttempt) => T | Promise<T>
+    callback: (attempt: TaskStepAttempt) => T | Promise<T>
   ): Promise<T> {
     this.#engine.refreshClaim();
-    this.#engine.emit("fiber:step:started", { step: name, attempt });
+    this.#engine.emit("task:step:started", { step: name, attempt });
 
     const timeout = new AbortController();
     const onRunAbort = () => timeout.abort(this.#engine.attemptSignal.reason);
@@ -405,15 +403,15 @@ export class ReplayStep implements FiberStep {
         timeout.signal
       );
       this.#engine.completeStep(name, result);
-      this.#engine.emit("fiber:step:completed", { step: name, attempt });
+      this.#engine.emit("task:step:completed", { step: name, attempt });
       return result;
     } catch (error) {
       if (error instanceof AttemptSupersededError) throw error;
       const cancellation = this.#engine.cancellationRequested();
-      if (cancellation) throw new FiberCancellation(cancellation.reason);
+      if (cancellation) throw new TaskCancellation(cancellation.reason);
       if (
         isNonRetryableError(error) ||
-        error instanceof FiberSerializationError ||
+        error instanceof TaskSerializationError ||
         attempt >= policy.retryLimit
       ) {
         this.#engine.failStep(name, toErrorSummary(error));
@@ -421,7 +419,7 @@ export class ReplayStep implements FiberStep {
       }
       const wakeAt = Date.now() + computeRetryDelayMs(policy, attempt);
       this.#engine.waitStep(name, wakeAt);
-      throw new FiberSuspension(wakeAt, "retry");
+      throw new TaskSuspension(wakeAt, "retry");
     } finally {
       clearTimeout(timer);
       this.#engine.attemptSignal.removeEventListener("abort", onRunAbort);
@@ -453,7 +451,7 @@ export class ReplayStep implements FiberStep {
 }
 
 /** Rebuild a persisted terminal step error for rethrow. */
-function restoreStepError(row: FiberStepRow): Error {
+function restoreStepError(row: TaskStepRow): Error {
   const error = new Error(row.error_message ?? "Step failed");
   error.name = row.error_name ?? "Error";
   return error;

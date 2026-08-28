@@ -3148,17 +3148,17 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
       throw new Error("simulated runFiber failure");
     }) as RunFiberWithStashWrapper;
 
-    // Root turns now start on the fibers capability; stub its internal start
+    // Root turns now start on the tasks capability; stub its internal start
     // path the same way so the simulated failure covers the migrated engine.
     type RunAttached = (...args: unknown[]) => Promise<unknown>;
-    const fibersInternal = this.fibers as unknown as {
+    const tasksInternal = this.tasks as unknown as {
       __DO_NOT_USE_WILL_BREAK__runAttached: RunAttached;
     };
     const originalRunAttached =
-      fibersInternal.__DO_NOT_USE_WILL_BREAK__runAttached.bind(
-        this.fibers
+      tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached.bind(
+        this.tasks
       ) as RunAttached;
-    fibersInternal.__DO_NOT_USE_WILL_BREAK__runAttached = (() => {
+    tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached = (() => {
       throw new Error("simulated runFiber failure");
     }) as RunAttached;
 
@@ -3179,7 +3179,7 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
       threw = true;
     } finally {
       fiberMethods._runFiberWithStashWrapper = originalRunFiberWithStashWrapper;
-      fibersInternal.__DO_NOT_USE_WILL_BREAK__runAttached = originalRunAttached;
+      tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached = originalRunAttached;
     }
 
     return {

@@ -1,5 +1,5 @@
 /**
- * Error classes for the Fibers capability. Each carries a stable `name` so
+ * Error classes for the Tasks capability. Each carries a stable `name` so
  * hosts and tests can classify failures without depending on message text.
  */
 
@@ -33,7 +33,7 @@ export function isNonRetryableError(error: unknown): boolean {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class DuplicateFiberStepError extends Error {
+export class DuplicateTaskStepError extends Error {
   /** The step name used more than once. */
   readonly stepName: string;
 
@@ -43,7 +43,7 @@ export class DuplicateFiberStepError extends Error {
         `durable journal keys; suffix loop steps with a stable index, e.g. ` +
         `"${stepName}:0".`
     );
-    this.name = "DuplicateFiberStepError";
+    this.name = "DuplicateTaskStepError";
     this.stepName = stepName;
   }
 }
@@ -56,7 +56,7 @@ export class DuplicateFiberStepError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class FiberReplayDivergedError extends Error {
+export class TaskReplayDivergedError extends Error {
   /** The step name where replay diverged from the journal. */
   readonly stepName: string;
 
@@ -66,7 +66,7 @@ export class FiberReplayDivergedError extends Error {
         `Version the definition name (e.g. "name@v2") instead of changing ` +
         `the step layout of in-flight runs.`
     );
-    this.name = "FiberReplayDivergedError";
+    this.name = "TaskReplayDivergedError";
     this.stepName = stepName;
   }
 }
@@ -78,31 +78,31 @@ export class FiberReplayDivergedError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class MissingFiberDefinitionError extends Error {
+export class MissingTaskDefinitionError extends Error {
   /** The persisted definition name that no longer resolves. */
   readonly definition: string;
 
   constructor(definition: string) {
     super(
-      `No Fiber definition named "${definition}" is registered. A deployment ` +
+      `No Task definition named "${definition}" is registered. A deployment ` +
         `removed or renamed it while this run was active. Re-register the ` +
         `definition (or a versioned successor with the same name) to let the ` +
         `run finish.`
     );
-    this.name = "MissingFiberDefinitionError";
+    this.name = "MissingTaskDefinitionError";
     this.definition = definition;
   }
 }
 
 /**
- * Thrown when a Fiber input, step result, metadata value, or final result is
+ * Thrown when a Task input, step result, metadata value, or final result is
  * not JSON-serializable or exceeds the serialized size limit.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class FiberSerializationError extends Error {
+export class TaskSerializationError extends Error {
   constructor(context: string, detail: string) {
     super(`Cannot serialize ${context}: ${detail}`);
-    this.name = "FiberSerializationError";
+    this.name = "TaskSerializationError";
   }
 }

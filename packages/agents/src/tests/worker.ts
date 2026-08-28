@@ -28,15 +28,15 @@ import type {
   SchedulerStartupWarnObject
 } from "./capabilities/scheduler.ts";
 export {
-  FiberBatchHarnessObject,
-  FiberHarnessObject,
-  FiberSchedulerCoexistObject
-} from "./capabilities/fibers.ts";
+  TaskBatchHarnessObject,
+  TaskHarnessObject,
+  TaskSchedulerCoexistObject
+} from "./capabilities/tasks.ts";
 import type {
-  FiberBatchHarnessObject,
-  FiberHarnessObject,
-  FiberSchedulerCoexistObject
-} from "./capabilities/fibers.ts";
+  TaskBatchHarnessObject,
+  TaskHarnessObject,
+  TaskSchedulerCoexistObject
+} from "./capabilities/tasks.ts";
 export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 
@@ -64,7 +64,7 @@ export {
   TestOnStartScheduleNoWarnAgent,
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent,
-  TestFiberAgent,
+  TestTaskAgent,
   TestWorkflowAgent,
   TestWorkflowOnStartSubAgent,
   TestWorkflowSubAgent,
@@ -151,7 +151,7 @@ import type {
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestScheduleAgent,
-  TestFiberAgent,
+  TestTaskAgent,
   TestWorkflowAgent,
   TestAgentToolReplayAgent,
   TestAddMcpServerAgent,
@@ -194,9 +194,9 @@ export type Env = {
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
   SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
-  FiberHarnessObject: DurableObjectNamespace<FiberHarnessObject>;
-  FiberBatchHarnessObject: DurableObjectNamespace<FiberBatchHarnessObject>;
-  FiberSchedulerCoexistObject: DurableObjectNamespace<FiberSchedulerCoexistObject>;
+  TaskHarnessObject: DurableObjectNamespace<TaskHarnessObject>;
+  TaskBatchHarnessObject: DurableObjectNamespace<TaskBatchHarnessObject>;
+  TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
@@ -214,7 +214,7 @@ export type Env = {
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
-  TestFiberAgent: DurableObjectNamespace<TestFiberAgent>;
+  TestTaskAgent: DurableObjectNamespace<TestTaskAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
   TestAgentToolReplayAgent: DurableObjectNamespace<TestAgentToolReplayAgent>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;

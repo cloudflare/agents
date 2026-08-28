@@ -2,19 +2,19 @@ import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
-  backdateFiberWake,
-  seedFiberRun,
-  seedFiberStep,
-  type FiberBatchHarnessObject,
-  type FiberHarnessObject,
-  type FiberSchedulerCoexistObject
-} from "../capabilities/fibers";
+  backdateTaskWake,
+  seedTaskRun,
+  seedTaskStep,
+  type TaskBatchHarnessObject,
+  type TaskHarnessObject,
+  type TaskSchedulerCoexistObject
+} from "../capabilities/tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
-import type { Fibers, FiberRunSnapshot, FiberValue } from "../../fibers";
+import type { Tasks, TaskRunSnapshot, TaskValue } from "../../tasks";
 
 /**
- * Capability-level Fibers tests: the capability installed on a minimal real
- * Durable Object (`FiberHarnessObject`) through a real Lifecycle, driven by
+ * Capability-level Tasks tests: the capability installed on a minimal real
+ * Durable Object (`TaskHarnessObject`) through a real Lifecycle, driven by
  * real storage and real platform alarms — no fakes. Instance counters
  * separate real step execution from journal hits, which is how replay
  * memoization is proven.
@@ -25,20 +25,20 @@ import type { Fibers, FiberRunSnapshot, FiberValue } from "../../fibers";
  * outcomes are polled.
  */
 
-function captureFiberEvents(name: string) {
-  return captureDiagnosticsEvents("agents:fiber", name);
+function captureTaskEvents(name: string) {
+  return captureDiagnosticsEvents("agents:task", name);
 }
 
 /** Poll one run until it reaches one of the given states. */
 async function waitForState(
-  fibers: { get(runId: string): Promise<FiberRunSnapshot<FiberValue> | null> },
+  tasks: { get(runId: string): Promise<TaskRunSnapshot<TaskValue> | null> },
   runId: string,
-  states: ReadonlyArray<FiberRunSnapshot<FiberValue>["state"]>,
+  states: ReadonlyArray<TaskRunSnapshot<TaskValue>["state"]>,
   timeoutMs = 5_000
-): Promise<FiberRunSnapshot<FiberValue>> {
+): Promise<TaskRunSnapshot<TaskValue>> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const snapshot = await fibers.get(runId);
+    const snapshot = await tasks.get(runId);
     if (snapshot && states.includes(snapshot.state)) return snapshot;
     if (Date.now() > deadline) {
       throw new Error(
@@ -61,11 +61,11 @@ async function waitFor(
   }
 }
 
-describe("Fibers capability", () => {
+describe("Tasks capability", () => {
   it("accepts runs durably and deduplicates acceptance", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const first = await instance.fibers.run(
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const first = await instance.tasks.run(
         "pipeline",
         { label: "a" },
         { idempotencyKey: "K" }
@@ -74,7 +74,7 @@ describe("Fibers capability", () => {
       expect(first.definition).toBe("pipeline");
 
       // The same idempotency key joins the existing run.
-      const joined = await instance.fibers.run(
+      const joined = await instance.tasks.run(
         "pipeline",
         { label: "a" },
         { idempotencyKey: "K" }
@@ -83,13 +83,13 @@ describe("Fibers capability", () => {
       expect(joined.runId).toBe(first.runId);
 
       // A caller-selected run ID deduplicates the same way.
-      const chosen = await instance.fibers.run(
+      const chosen = await instance.tasks.run(
         "pipeline",
         { label: "b" },
         { runId: "custom-run" }
       );
       expect(chosen.runId).toBe("custom-run");
-      const again = await instance.fibers.run(
+      const again = await instance.tasks.run(
         "pipeline",
         { label: "b" },
         { runId: "custom-run" }
@@ -98,32 +98,32 @@ describe("Fibers capability", () => {
 
       // Reusing the key under a different definition is an error, not a join.
       await expect(
-        instance.fibers.run("flaky", { label: "x" }, { idempotencyKey: "K" })
+        instance.tasks.run("flaky", { label: "x" }, { idempotencyKey: "K" })
       ).rejects.toThrow(/already belongs to definition "pipeline"/);
 
       // Handles only see runs of their own definition.
-      expect(await instance.fibers.handle("flaky").get(first.runId)).toBeNull();
+      expect(await instance.tasks.handle("flaky").get(first.runId)).toBeNull();
       expect(
-        (await instance.fibers.handle("pipeline").getByIdempotencyKey("K"))
+        (await instance.tasks.handle("pipeline").getByIdempotencyKey("K"))
           ?.runId
       ).toBe(first.runId);
 
-      const listed = await instance.fibers.list({ definition: "pipeline" });
+      const listed = await instance.tasks.list({ definition: "pipeline" });
       expect(listed.map((run) => run.runId)).toContain(first.runId);
     });
   });
 
   it("completes a run through the warm path with journaled steps and host context", async () => {
     const name = crypto.randomUUID();
-    const stub = env.FiberHarnessObject.getByName(name);
-    const capture = captureFiberEvents(name);
+    const stub = env.TaskHarnessObject.getByName(name);
+    const capture = captureTaskEvents(name);
 
     try {
-      await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-        const receipt = await instance.fibers.run("pipeline", {
+      await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+        const receipt = await instance.tasks.run("pipeline", {
           label: "warm"
         });
-        const snapshot = await waitForState(instance.fibers, receipt.runId, [
+        const snapshot = await waitForState(instance.tasks, receipt.runId, [
           "completed"
         ]);
         if (snapshot.state !== "completed") throw new Error("unreachable");
@@ -138,13 +138,13 @@ describe("Fibers capability", () => {
         ]);
       });
       expect(capture.events.map((event) => event.type)).toEqual([
-        "fiber:accepted",
-        "fiber:attempt:started",
-        "fiber:step:started",
-        "fiber:step:completed",
-        "fiber:step:started",
-        "fiber:step:completed",
-        "fiber:completed"
+        "task:accepted",
+        "task:attempt:started",
+        "task:step:started",
+        "task:step:completed",
+        "task:step:started",
+        "task:step:completed",
+        "task:completed"
       ]);
     } finally {
       capture.stop();
@@ -152,14 +152,14 @@ describe("Fibers capability", () => {
   });
 
   it("parks on a step retry and replays without re-executing completed steps", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
 
     const runId = await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject) => {
+      async (instance: TaskHarnessObject) => {
         instance.failuresBeforeSuccess = 1;
-        const receipt = await instance.fibers.run("flaky", { label: "r" });
-        const parked = await waitForState(instance.fibers, receipt.runId, [
+        const receipt = await instance.tasks.run("flaky", { label: "r" });
+        const parked = await waitForState(instance.tasks, receipt.runId, [
           "waiting"
         ]);
         if (parked.state !== "waiting") throw new Error("unreachable");
@@ -171,17 +171,15 @@ describe("Fibers capability", () => {
 
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
-        backdateFiberWake(state.storage, runId, "unstable");
+      async (instance: TaskHarnessObject, state) => {
+        backdateTaskWake(state.storage, runId, "unstable");
         await instance.lifecycle.rearmAlarm();
       }
     );
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const snapshot = await waitForState(instance.fibers, runId, [
-        "completed"
-      ]);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, runId, ["completed"]);
       if (snapshot.state !== "completed") throw new Error("unreachable");
       expect(snapshot.result).toBe("r-seed-ok");
       // The seed step ran once; only the unstable step executed twice.
@@ -195,18 +193,18 @@ describe("Fibers capability", () => {
 
   it("reclaims an interrupted attempt and replays from the journal", async () => {
     const name = crypto.randomUUID();
-    const stub = env.FiberHarnessObject.getByName(name);
-    const capture = captureFiberEvents(name);
+    const stub = env.TaskHarnessObject.getByName(name);
+    const capture = captureTaskEvents(name);
 
     try {
       await runInDurableObject(
         stub,
-        async (instance: FiberHarnessObject, state) => {
+        async (instance: TaskHarnessObject, state) => {
           await instance.lifecycle.start();
           // A run claimed by an isolate that no longer exists: state running,
           // a dead generation, and one journaled step with a sentinel value a
           // live execution could never produce.
-          seedFiberRun(state.storage, {
+          seedTaskRun(state.storage, {
             runId: "interrupted-run",
             definition: "pipeline",
             input: { label: "live" },
@@ -215,7 +213,7 @@ describe("Fibers capability", () => {
             attempt: 1,
             nextAt: Date.now() - 1000
           });
-          seedFiberStep(state.storage, {
+          seedTaskStep(state.storage, {
             runId: "interrupted-run",
             name: "first",
             kind: "do",
@@ -228,12 +226,10 @@ describe("Fibers capability", () => {
 
       await runDurableObjectAlarm(stub);
 
-      await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-        const snapshot = await waitForState(
-          instance.fibers,
-          "interrupted-run",
-          ["completed"]
-        );
+      await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+        const snapshot = await waitForState(instance.tasks, "interrupted-run", [
+          "completed"
+        ]);
         if (snapshot.state !== "completed") throw new Error("unreachable");
         // The journaled sentinel flowed into the rest of the replay: the
         // completed step was not re-executed.
@@ -245,7 +241,7 @@ describe("Fibers capability", () => {
         expect(instance.stepRuns).toEqual(["pipeline:second"]);
       });
       expect(capture.events.map((event) => event.type)).toContain(
-        "fiber:attempt:interrupted"
+        "task:attempt:interrupted"
       );
     } finally {
       capture.stop();
@@ -253,13 +249,13 @@ describe("Fibers capability", () => {
   });
 
   it("sleeps durably, keeps the first recorded deadline, and resumes after it", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
 
     const { runId, firstWake } = await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
-        const receipt = await instance.fibers.run("sleeper", { ms: 60_000 });
-        const parked = await waitForState(instance.fibers, receipt.runId, [
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("sleeper", { ms: 60_000 });
+        const parked = await waitForState(instance.tasks, receipt.runId, [
           "waiting"
         ]);
         if (parked.state !== "waiting") throw new Error("unreachable");
@@ -276,8 +272,8 @@ describe("Fibers capability", () => {
     // parks again without moving the recorded deadline.
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
-        backdateFiberWake(state.storage, runId);
+      async (instance: TaskHarnessObject, state) => {
+        backdateTaskWake(state.storage, runId);
         await instance.lifecycle.rearmAlarm();
       }
     );
@@ -285,31 +281,29 @@ describe("Fibers capability", () => {
 
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: TaskHarnessObject, state) => {
         await waitFor(() => {
           const [row] = state.storage.sql
             .exec(
-              "SELECT attempt, state FROM cf_fiber_runs WHERE run_id = ?",
+              "SELECT attempt, state FROM cf_agents_task_runs WHERE run_id = ?",
               runId
             )
             .toArray();
           return row?.attempt === 2 && row?.state === "waiting";
         });
-        const parked = await instance.fibers.get(runId);
+        const parked = await instance.tasks.get(runId);
         if (parked?.state !== "waiting") throw new Error("expected waiting");
         expect(parked.wakeAt).toBe(firstWake);
         expect(instance.stepRuns).toEqual(["sleeper:before"]);
 
-        backdateFiberWake(state.storage, runId, "nap");
+        backdateTaskWake(state.storage, runId, "nap");
         await instance.lifecycle.rearmAlarm();
       }
     );
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const snapshot = await waitForState(instance.fibers, runId, [
-        "completed"
-      ]);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, runId, ["completed"]);
       if (snapshot.state !== "completed") throw new Error("unreachable");
       expect(snapshot.result).toBe("done");
       expect(instance.stepRuns).toEqual(["sleeper:before", "sleeper:after"]);
@@ -317,10 +311,10 @@ describe("Fibers capability", () => {
   });
 
   it("fails immediately on NonRetryableError and reports through onError", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.fibers.run("doomed");
-      const snapshot = await waitForState(instance.fibers, receipt.runId, [
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("doomed");
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
@@ -335,23 +329,23 @@ describe("Fibers capability", () => {
   });
 
   it("suppresses replayed progress behind the live gate", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
 
     const runId = await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: TaskHarnessObject, state) => {
         instance.failuresBeforeSuccess = 1;
-        const receipt = await instance.fibers.run("gated");
-        await waitForState(instance.fibers, receipt.runId, ["waiting"]);
+        const receipt = await instance.tasks.run("gated");
+        await waitForState(instance.tasks, receipt.runId, ["waiting"]);
         const [row] = state.storage.sql
           .exec(
-            "SELECT status_message FROM cf_fiber_runs WHERE run_id = ?",
+            "SELECT status_message FROM cf_agents_task_runs WHERE run_id = ?",
             receipt.runId
           )
           .toArray();
         expect(row?.status_message).toBe("after:2");
 
-        backdateFiberWake(state.storage, receipt.runId, "gate");
+        backdateTaskWake(state.storage, receipt.runId, "gate");
         await instance.lifecycle.rearmAlarm();
         return receipt.runId;
       }
@@ -361,15 +355,15 @@ describe("Fibers capability", () => {
 
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
-        await waitForState(instance.fibers, runId, ["completed"]);
+      async (instance: TaskHarnessObject, state) => {
+        await waitForState(instance.tasks, runId, ["completed"]);
         // The replay re-ran the handler from the top (counter reached 4) but
         // its old-ground status calls were suppressed: the persisted message
         // still carries the first attempt's counter value.
         expect(instance.statusCounter).toBe(4);
         const [row] = state.storage.sql
           .exec(
-            "SELECT status_message FROM cf_fiber_runs WHERE run_id = ?",
+            "SELECT status_message FROM cf_agents_task_runs WHERE run_id = ?",
             runId
           )
           .toArray();
@@ -384,33 +378,33 @@ describe("Fibers capability", () => {
   });
 
   it("cancels a parked run immediately", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.fibers.run("sleeper", { ms: 60_000 });
-      await waitForState(instance.fibers, receipt.runId, ["waiting"]);
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("sleeper", { ms: 60_000 });
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
 
       expect(
-        await instance.fibers.cancel(receipt.runId, "changed my mind")
+        await instance.tasks.cancel(receipt.runId, "changed my mind")
       ).toBe(true);
-      const snapshot = await instance.fibers.get(receipt.runId);
+      const snapshot = await instance.tasks.get(receipt.runId);
       expect(snapshot?.state).toBe("cancelled");
       if (snapshot?.state !== "cancelled") throw new Error("unreachable");
       expect(snapshot.reason).toBe("changed my mind");
 
       // A settled run cannot be cancelled again.
-      expect(await instance.fibers.cancel(receipt.runId)).toBe(false);
+      expect(await instance.tasks.cancel(receipt.runId)).toBe(false);
       expect(instance.stepRuns).not.toContain("sleeper:after");
     });
   });
 
   it("cancels a live attempt cooperatively through its abort signal", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.fibers.run("blocked");
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("blocked");
       await waitFor(() => instance.stepRuns.includes("blocked:hang"));
 
-      expect(await instance.fibers.cancel(receipt.runId, "stop it")).toBe(true);
-      const snapshot = await waitForState(instance.fibers, receipt.runId, [
+      expect(await instance.tasks.cancel(receipt.runId, "stop it")).toBe(true);
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
         "cancelled"
       ]);
       if (snapshot.state !== "cancelled") throw new Error("unreachable");
@@ -419,10 +413,10 @@ describe("Fibers capability", () => {
   });
 
   it("times out a step that ignores its abort signal", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.fibers.run("slowpoke");
-      const snapshot = await waitForState(instance.fibers, receipt.runId, [
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("slowpoke");
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
@@ -431,32 +425,32 @@ describe("Fibers capability", () => {
   });
 
   it("rejects duplicate step names before executing user code", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.fibers.run("clash");
-      const snapshot = await waitForState(instance.fibers, receipt.runId, [
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("clash");
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("DuplicateFiberStepError");
+      expect(snapshot.error.name).toBe("DuplicateTaskStepError");
     });
   });
 
   it("fails visibly when replay diverges from the journal", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: TaskHarnessObject, state) => {
         await instance.lifecycle.start();
         // The journal says "first" was a sleep; the handler declares a do.
-        seedFiberRun(state.storage, {
+        seedTaskRun(state.storage, {
           runId: "diverged-run",
           definition: "pipeline",
           input: { label: "x" },
           state: "pending",
           nextAt: Date.now() - 1000
         });
-        seedFiberStep(state.storage, {
+        seedTaskStep(state.storage, {
           runId: "diverged-run",
           name: "first",
           kind: "sleep",
@@ -469,23 +463,23 @@ describe("Fibers capability", () => {
 
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const snapshot = await waitForState(instance.fibers, "diverged-run", [
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, "diverged-run", [
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("FiberReplayDivergedError");
+      expect(snapshot.error.name).toBe("TaskReplayDivergedError");
       expect(instance.stepRuns).toEqual([]);
     });
   });
 
   it("fails a run whose definition is no longer registered", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: TaskHarnessObject, state) => {
         await instance.lifecycle.start();
-        seedFiberRun(state.storage, {
+        seedTaskRun(state.storage, {
           runId: "ghost-run",
           definition: "ghost",
           state: "pending",
@@ -497,27 +491,27 @@ describe("Fibers capability", () => {
 
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const snapshot = await waitForState(instance.fibers, "ghost-run", [
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, "ghost-run", [
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("MissingFiberDefinitionError");
+      expect(snapshot.error.name).toBe("MissingTaskDefinitionError");
       expect(snapshot.error.message).toContain('"ghost"');
     });
   });
 
   it("coexists with the Scheduler on the shared alarm", async () => {
-    const stub = env.FiberSchedulerCoexistObject.getByName(crypto.randomUUID());
+    const stub = env.TaskSchedulerCoexistObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberSchedulerCoexistObject, state) => {
+      async (instance: TaskSchedulerCoexistObject, state) => {
         const schedule = await instance.scheduler.set(120, "remind", "tick");
         expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
 
-        // A sooner fiber deadline wins the shared alarm.
-        const receipt = await instance.fibers.run("sleeper", { ms: 60_000 });
-        const parked = await waitForState(instance.fibers, receipt.runId, [
+        // A sooner task deadline wins the shared alarm.
+        const receipt = await instance.tasks.run("sleeper", { ms: 60_000 });
+        const parked = await waitForState(instance.tasks, receipt.runId, [
           "waiting"
         ]);
         if (parked.state !== "waiting") throw new Error("unreachable");
@@ -526,23 +520,23 @@ describe("Fibers capability", () => {
           async () => (await state.storage.getAlarm()) === parked.wakeAt
         );
 
-        // Settling every fiber run hands the alarm back to the Scheduler —
+        // Settling every task run hands the alarm back to the Scheduler —
         // it is re-armed, not deleted.
-        await instance.fibers.cancel(receipt.runId);
+        await instance.tasks.cancel(receipt.runId);
         expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
       }
     );
   });
 
   it("bounds each alarm batch and continues on follow-up alarms", async () => {
-    const stub = env.FiberBatchHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskBatchHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberBatchHarnessObject, state) => {
+      async (instance: TaskBatchHarnessObject, state) => {
         await instance.lifecycle.start();
         const base = Date.now() - 10_000;
         for (const n of [1, 2, 3]) {
-          seedFiberRun(state.storage, {
+          seedTaskRun(state.storage, {
             runId: `tick-${n}`,
             definition: "tick",
             input: { n },
@@ -557,31 +551,28 @@ describe("Fibers capability", () => {
     // With maxRunsPerAlarm: 1, each alarm invocation claims one run and the
     // post-alarm rearm chains a continuation for the rest.
     await runDurableObjectAlarm(stub);
-    await runInDurableObject(
-      stub,
-      async (instance: FiberBatchHarnessObject) => {
-        await waitFor(() => instance.ticks.length === 3);
-        // Deadline order was preserved across the chained batches.
-        expect(instance.ticks).toEqual(["tick:1", "tick:2", "tick:3"]);
-        for (const n of [1, 2, 3]) {
-          const snapshot = await instance.fibers.get(`tick-${n}`);
-          expect(snapshot?.state).toBe("completed");
-        }
+    await runInDurableObject(stub, async (instance: TaskBatchHarnessObject) => {
+      await waitFor(() => instance.ticks.length === 3);
+      // Deadline order was preserved across the chained batches.
+      expect(instance.ticks).toEqual(["tick:1", "tick:2", "tick:3"]);
+      for (const n of [1, 2, 3]) {
+        const snapshot = await instance.tasks.get(`tick-${n}`);
+        expect(snapshot?.state).toBe("completed");
       }
-    );
+    });
   });
 
   it("removes non-retained records after completion", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.fibers.run(
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
         "pipeline",
         { label: "gone" },
         { retain: false }
       );
       const deadline = Date.now() + 5_000;
       for (;;) {
-        const snapshot = await instance.fibers.get(receipt.runId);
+        const snapshot = await instance.tasks.get(receipt.runId);
         if (snapshot === null) break;
         expect(snapshot.state).not.toBe("failed");
         if (Date.now() > deadline) {
@@ -594,40 +585,40 @@ describe("Fibers capability", () => {
   });
 
   it("deletes retained terminal runs on request", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const receipt = await instance.fibers.run("pipeline", { label: "keep" });
-      await waitForState(instance.fibers, receipt.runId, ["completed"]);
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("pipeline", { label: "keep" });
+      await waitForState(instance.tasks, receipt.runId, ["completed"]);
 
-      expect(await instance.fibers.delete({ status: ["failed"] })).toBe(0);
-      expect(await instance.fibers.delete()).toBe(1);
-      expect(await instance.fibers.get(receipt.runId)).toBeNull();
+      expect(await instance.tasks.delete({ status: ["failed"] })).toBe(0);
+      expect(await instance.tasks.delete()).toBe(1);
+      expect(await instance.tasks.get(receipt.runId)).toBeNull();
     });
   });
 
   it("rejects oversized inputs at acceptance", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       await expect(
-        instance.fibers.run("pipeline", { label: "x".repeat(1_100_000) })
+        instance.tasks.run("pipeline", { label: "x".repeat(1_100_000) })
       ).rejects.toThrow(/exceeds the 1048576-byte limit/);
-      expect(await instance.fibers.list()).toEqual([]);
+      expect(await instance.tasks.list()).toEqual([]);
     });
   });
 
   it("rejects names outside the declared definitions map", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       // Unknown names are a compile error on the typed map; erase the typing
       // to exercise the runtime rejection. The double cast is required: the
       // conditional output type in handle() makes the Handlers generic
       // invariant, so a typed map does not widen to the default surface.
-      const untyped = instance.fibers as unknown as Fibers;
+      const untyped = instance.tasks as unknown as Tasks;
       await expect(untyped.run("nope")).rejects.toThrow(
-        'Unknown Fiber definition "nope"'
+        'Unknown Task definition "nope"'
       );
       expect(() => untyped.handle("nope")).toThrow(
-        'Unknown Fiber definition "nope"'
+        'Unknown Task definition "nope"'
       );
       await expect(untyped.run("__cf_internal_x")).rejects.toThrow(/reserved/);
       await expect(untyped.run("")).rejects.toThrow(/non-empty/);
@@ -635,22 +626,22 @@ describe("Fibers capability", () => {
       // A handle is a pure lens over the declared map, so it can be created
       // at any time — including after Lifecycle startup.
       await instance.lifecycle.start();
-      expect(instance.fibers.handle("pipeline").name).toBe("pipeline");
+      expect(instance.tasks.handle("pipeline").name).toBe("pipeline");
     });
   });
 
   it("invokes recovery on unclean interruption and applies a complete decision", async () => {
     const name = crypto.randomUUID();
-    const stub = env.FiberHarnessObject.getByName(name);
-    const capture = captureFiberEvents(name);
+    const stub = env.TaskHarnessObject.getByName(name);
+    const capture = captureTaskEvents(name);
 
     try {
       await runInDurableObject(
         stub,
-        async (instance: FiberHarnessObject, state) => {
+        async (instance: TaskHarnessObject, state) => {
           instance.recoveryMode = "complete";
           await instance.lifecycle.start();
-          seedFiberRun(state.storage, {
+          seedTaskRun(state.storage, {
             runId: "guarded-run",
             definition: "guarded",
             input: { label: "ctx" },
@@ -659,14 +650,14 @@ describe("Fibers capability", () => {
             attempt: 1,
             nextAt: Date.now() - 1000
           });
-          seedFiberStep(state.storage, {
+          seedTaskStep(state.storage, {
             runId: "guarded-run",
             name: "g-first",
             kind: "do",
             state: "completed",
             result: "g:JOURNAL"
           });
-          seedFiberStep(state.storage, {
+          seedTaskStep(state.storage, {
             runId: "guarded-run",
             name: "g-second",
             kind: "do",
@@ -680,8 +671,8 @@ describe("Fibers capability", () => {
 
       await runDurableObjectAlarm(stub);
 
-      await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-        const snapshot = await waitForState(instance.fibers, "guarded-run", [
+      await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+        const snapshot = await waitForState(instance.tasks, "guarded-run", [
           "completed"
         ]);
         if (snapshot.state !== "completed") throw new Error("unreachable");
@@ -694,21 +685,21 @@ describe("Fibers capability", () => {
         ]);
       });
       const types = capture.events.map((event) => event.type);
-      expect(types).toContain("fiber:recovery:started");
-      expect(types).toContain("fiber:recovery:decided");
+      expect(types).toContain("task:recovery:started");
+      expect(types).toContain("task:recovery:decided");
     } finally {
       capture.stop();
     }
   });
 
   it("recovery replay resumes from the journal", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: TaskHarnessObject, state) => {
         instance.recoveryMode = "replay";
         await instance.lifecycle.start();
-        seedFiberRun(state.storage, {
+        seedTaskRun(state.storage, {
           runId: "guarded-replay",
           definition: "guarded",
           input: { label: "rp" },
@@ -717,14 +708,14 @@ describe("Fibers capability", () => {
           attempt: 1,
           nextAt: Date.now() - 1000
         });
-        seedFiberStep(state.storage, {
+        seedTaskStep(state.storage, {
           runId: "guarded-replay",
           name: "g-first",
           kind: "do",
           state: "completed",
           result: "g:JOURNAL"
         });
-        seedFiberStep(state.storage, {
+        seedTaskStep(state.storage, {
           runId: "guarded-replay",
           name: "g-second",
           kind: "do",
@@ -737,8 +728,8 @@ describe("Fibers capability", () => {
 
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const snapshot = await waitForState(instance.fibers, "guarded-replay", [
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, "guarded-replay", [
         "completed"
       ]);
       if (snapshot.state !== "completed") throw new Error("unreachable");
@@ -750,13 +741,13 @@ describe("Fibers capability", () => {
   });
 
   it("recovery decisions can fail or cancel the run", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: TaskHarnessObject, state) => {
         instance.recoveryMode = "fail";
         await instance.lifecycle.start();
-        seedFiberRun(state.storage, {
+        seedTaskRun(state.storage, {
           runId: "guarded-fail",
           definition: "guarded",
           input: { label: "f" },
@@ -771,15 +762,15 @@ describe("Fibers capability", () => {
     await runDurableObjectAlarm(stub);
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
-        const failed = await waitForState(instance.fibers, "guarded-fail", [
+      async (instance: TaskHarnessObject, state) => {
+        const failed = await waitForState(instance.tasks, "guarded-fail", [
           "failed"
         ]);
         if (failed.state !== "failed") throw new Error("unreachable");
         expect(failed.error.message).toBe("recover says fail");
 
         instance.recoveryMode = "cancel";
-        seedFiberRun(state.storage, {
+        seedTaskRun(state.storage, {
           runId: "guarded-cancel",
           definition: "guarded",
           input: { label: "c" },
@@ -792,8 +783,8 @@ describe("Fibers capability", () => {
       }
     );
     await runDurableObjectAlarm(stub);
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const cancelled = await waitForState(instance.fibers, "guarded-cancel", [
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const cancelled = await waitForState(instance.tasks, "guarded-cancel", [
         "cancelled"
       ]);
       if (cancelled.state !== "cancelled") throw new Error("unreachable");
@@ -802,13 +793,13 @@ describe("Fibers capability", () => {
   });
 
   it("clean step failures retry without invoking recovery", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     const runId = await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject) => {
+      async (instance: TaskHarnessObject) => {
         instance.failuresBeforeSuccess = 1;
-        const receipt = await instance.fibers.run("guarded", { label: "r" });
-        const parked = await waitForState(instance.fibers, receipt.runId, [
+        const receipt = await instance.tasks.run("guarded", { label: "r" });
+        const parked = await waitForState(instance.tasks, receipt.runId, [
           "waiting"
         ]);
         if (parked.state !== "waiting") throw new Error("unreachable");
@@ -820,17 +811,15 @@ describe("Fibers capability", () => {
 
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
-        backdateFiberWake(state.storage, runId, "g-second");
+      async (instance: TaskHarnessObject, state) => {
+        backdateTaskWake(state.storage, runId, "g-second");
         await instance.lifecycle.rearmAlarm();
       }
     );
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const snapshot = await waitForState(instance.fibers, runId, [
-        "completed"
-      ]);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, runId, ["completed"]);
       if (snapshot.state !== "completed") throw new Error("unreachable");
       expect(snapshot.result).toBe("run-done:g:r");
       // The retry policy owned both attempts; recovery never ran.
@@ -839,13 +828,13 @@ describe("Fibers capability", () => {
   });
 
   it("retries a throwing recovery with backoff and exhausts its budget", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: TaskHarnessObject, state) => {
         instance.recoveryMode = "explode";
         await instance.lifecycle.start();
-        seedFiberRun(state.storage, {
+        seedTaskRun(state.storage, {
           runId: "guarded-explode",
           definition: "guarded",
           input: { label: "x" },
@@ -854,7 +843,7 @@ describe("Fibers capability", () => {
           attempt: 1,
           nextAt: Date.now() - 1000
         });
-        seedFiberStep(state.storage, {
+        seedTaskStep(state.storage, {
           runId: "guarded-explode",
           name: "g-second",
           kind: "do",
@@ -867,10 +856,10 @@ describe("Fibers capability", () => {
 
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       // The first failure parks the run in a visible recovering state with a
       // future backoff deadline.
-      const parked = await waitForState(instance.fibers, "guarded-explode", [
+      const parked = await waitForState(instance.tasks, "guarded-explode", [
         "recovering"
       ]);
       if (parked.state !== "recovering") throw new Error("unreachable");
@@ -882,16 +871,16 @@ describe("Fibers capability", () => {
     for (let round = 2; round <= 5; round++) {
       await runInDurableObject(
         stub,
-        async (instance: FiberHarnessObject, state) => {
-          backdateFiberWake(state.storage, "guarded-explode");
+        async (instance: TaskHarnessObject, state) => {
+          backdateTaskWake(state.storage, "guarded-explode");
           await instance.lifecycle.rearmAlarm();
         }
       );
       await runDurableObjectAlarm(stub);
     }
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const snapshot = await waitForState(instance.fibers, "guarded-explode", [
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, "guarded-explode", [
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
@@ -901,13 +890,13 @@ describe("Fibers capability", () => {
   });
 
   it("replay decisions can defer to a future time", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
+      async (instance: TaskHarnessObject, state) => {
         instance.recoveryMode = "replay-later";
         await instance.lifecycle.start();
-        seedFiberRun(state.storage, {
+        seedTaskRun(state.storage, {
           runId: "guarded-later",
           definition: "guarded",
           input: { label: "l" },
@@ -924,22 +913,22 @@ describe("Fibers capability", () => {
 
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
-        const parked = await waitForState(instance.fibers, "guarded-later", [
+      async (instance: TaskHarnessObject, state) => {
+        const parked = await waitForState(instance.tasks, "guarded-later", [
           "waiting"
         ]);
         if (parked.state !== "waiting") throw new Error("unreachable");
         expect(parked.reason).toBe("recovery");
         expect(parked.wakeAt).toBeGreaterThan(Date.now() + 30_000);
 
-        backdateFiberWake(state.storage, "guarded-later");
+        backdateTaskWake(state.storage, "guarded-later");
         await instance.lifecycle.rearmAlarm();
       }
     );
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: FiberHarnessObject) => {
-      const snapshot = await waitForState(instance.fibers, "guarded-later", [
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, "guarded-later", [
         "completed"
       ]);
       if (snapshot.state !== "completed") throw new Error("unreachable");
@@ -950,15 +939,15 @@ describe("Fibers capability", () => {
   });
 
   it("persists step checkpoints for later recovery", async () => {
-    const stub = env.FiberHarnessObject.getByName(crypto.randomUUID());
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
-      async (instance: FiberHarnessObject, state) => {
-        const receipt = await instance.fibers.run("checkpointing");
-        await waitForState(instance.fibers, receipt.runId, ["completed"]);
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("checkpointing");
+        await waitForState(instance.tasks, receipt.runId, ["completed"]);
         const [row] = state.storage.sql
           .exec(
-            "SELECT checkpoint FROM cf_fiber_steps WHERE run_id = ? AND step_name = 'mark'",
+            "SELECT checkpoint FROM cf_agents_task_steps WHERE run_id = ? AND step_name = 'mark'",
             receipt.runId
           )
           .toArray();

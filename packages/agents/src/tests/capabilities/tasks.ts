@@ -1,26 +1,26 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
 import {
-  Fibers,
+  Tasks,
   NonRetryableError,
-  type FiberInterruption,
-  type FiberStep
-} from "../../fibers";
+  type TaskInterruption,
+  type TaskStep
+} from "../../tasks";
 import { Scheduler } from "../../schedules";
 
 /**
- * Minimal real host for capability-level Fibers tests: a Durable Object
- * whose ONLY capability is Fibers, installed through a real Lifecycle and
+ * Minimal real host for capability-level Tasks tests: a Durable Object
+ * whose ONLY capability is Tasks, installed through a real Lifecycle and
  * driven by real storage and real platform alarms — proving the capability
  * stands alone. Coexistence with other capabilities on the shared alarm is
- * proven separately by {@link FiberSchedulerCoexistObject}. This is the
+ * proven separately by {@link TaskSchedulerCoexistObject}. This is the
  * platform-dispatch half of the capability testing pattern (see
  * `capability-harness.ts` for the isolation half).
  *
  * Instance counters record which step callbacks actually executed, so tests
  * can distinguish real execution from journal hits during replay.
  */
-export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
+export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   /** Step callbacks that actually ran (journal hits never append here). */
   readonly stepRuns: string[] = [];
   /** Terminal run errors observed through the capability's onError. */
@@ -40,10 +40,10 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
     | "cancel"
     | "explode" = "complete";
 
-  readonly fibers = new Fibers({
+  readonly tasks = new Tasks({
     definitions: {
       /** Two journaled steps, then a host-context probe in the return value. */
-      pipeline: async (input: { label: string }, step: FiberStep) => {
+      pipeline: async (input: { label: string }, step: TaskStep) => {
         const first = await step.do("first", () => {
           this.stepRuns.push("pipeline:first");
           return `first:${input.label}`;
@@ -55,12 +55,12 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
         return {
           first,
           second,
-          hadHostContext: getCurrentAgent<FiberHarnessObject>().agent === this
+          hadHostContext: getCurrentAgent<TaskHarnessObject>().agent === this
         };
       },
 
       /** A stable step, then one failing `failuresBeforeSuccess` times. */
-      flaky: async (input: { label: string }, step: FiberStep) => {
+      flaky: async (input: { label: string }, step: TaskStep) => {
         const seed = await step.do("seed", () => {
           this.stepRuns.push("flaky:seed");
           return `${input.label}-seed`;
@@ -82,7 +82,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
       },
 
       /** Durable sleep between two journaled steps. */
-      sleeper: async (input: { ms: number }, step: FiberStep) => {
+      sleeper: async (input: { ms: number }, step: TaskStep) => {
         await step.do("before", () => {
           this.stepRuns.push("sleeper:before");
           return "before";
@@ -96,7 +96,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
       },
 
       /** Fails immediately without retries. */
-      doomed: async (_input: undefined, step: FiberStep) => {
+      doomed: async (_input: undefined, step: TaskStep) => {
         await step.do("boom", () => {
           this.stepRuns.push("doomed:boom");
           throw new NonRetryableError("no retry");
@@ -108,7 +108,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
        * a replay re-published old progress: with the live gate working, the
        * persisted message keeps the first attempt's counter value.
        */
-      gated: async (_input: undefined, step: FiberStep) => {
+      gated: async (_input: undefined, step: TaskStep) => {
         await step.status(`start:${++this.statusCounter}`);
         await step.do("work", () => {
           this.stepRuns.push("gated:work");
@@ -131,7 +131,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
       },
 
       /** Hangs until its abort signal fires; used for cancellation tests. */
-      blocked: async (_input: undefined, step: FiberStep) => {
+      blocked: async (_input: undefined, step: TaskStep) => {
         await step.do("hang", ({ signal }) => {
           this.stepRuns.push("blocked:hang");
           return new Promise<never>((_resolve, reject) => {
@@ -143,7 +143,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
       },
 
       /** Ignores its signal; the engine's timeout race must still win. */
-      slowpoke: async (_input: undefined, step: FiberStep) => {
+      slowpoke: async (_input: undefined, step: TaskStep) => {
         await step.do(
           "slow",
           { timeout: 40, retries: { limit: 1 } },
@@ -152,7 +152,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
       },
 
       /** Uses the same step name twice in one replay. */
-      clash: async (_input: undefined, step: FiberStep) => {
+      clash: async (_input: undefined, step: TaskStep) => {
         await step.do("same", () => 1);
         await step.do("same", () => 2);
       },
@@ -163,7 +163,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
        * clean step failures follow the ordinary retry policy.
        */
       guarded: {
-        run: async (input: { label: string }, step: FiberStep) => {
+        run: async (input: { label: string }, step: TaskStep) => {
           const first = await step.do("g-first", () => {
             this.stepRuns.push("guarded:first");
             return `g:${input.label}`;
@@ -182,7 +182,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
           );
           return `run-done:${first}`;
         },
-        recover: async (interruption: FiberInterruption<{ label: string }>) => {
+        recover: async (interruption: TaskInterruption<{ label: string }>) => {
           this.recoveryCalls.push(
             `${interruption.definition}:${interruption.input.label}:` +
               `${interruption.interruptedStep?.name ?? "none"}:` +
@@ -212,7 +212,7 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
       },
 
       /** Writes a step checkpoint for later recovery inspection. */
-      checkpointing: async (_input: undefined, step: FiberStep) => {
+      checkpointing: async (_input: undefined, step: TaskStep) => {
         await step.do("mark", ({ checkpoint }) => {
           checkpoint({ phase: "submitted" });
           this.stepRuns.push("checkpointing:mark");
@@ -230,22 +230,22 @@ export class FiberHarnessObject extends DurableObject<Cloudflare.Env> {
     }
   });
 
-  readonly lifecycle = Lifecycle.install(this).use(this.fibers);
+  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 }
 
 /**
- * Fibers and the Scheduler installed together on one Lifecycle: proves two
+ * Tasks and the Scheduler installed together on one Lifecycle: proves two
  * independent capabilities arbitrate the single physical Durable Object
  * alarm correctly — the sooner deadline wins, and settling one capability's
  * work re-arms for the other instead of deleting its wake-up.
  */
-export class FiberSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
+export class TaskSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
   /** Step callbacks that actually ran. */
   readonly stepRuns: string[] = [];
 
-  readonly fibers = new Fibers({
+  readonly tasks = new Tasks({
     definitions: {
-      sleeper: async (input: { ms: number }, step: FiberStep) => {
+      sleeper: async (input: { ms: number }, step: TaskStep) => {
         await step.do("before", () => {
           this.stepRuns.push("sleeper:before");
           return "before";
@@ -267,7 +267,7 @@ export class FiberSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
   });
 
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.fibers)
+    .use(this.tasks)
     .use(this.scheduler);
 }
 
@@ -275,12 +275,12 @@ export class FiberSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
  * Proves the alarm batch bound: at most `maxRunsPerAlarm` due runs execute
  * per alarm invocation, and the remaining due runs stay armed.
  */
-export class FiberBatchHarnessObject extends DurableObject<Cloudflare.Env> {
+export class TaskBatchHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly ticks: string[] = [];
 
-  readonly fibers = new Fibers({
+  readonly tasks = new Tasks({
     definitions: {
-      tick: async (input: { n: number }, step: FiberStep) => {
+      tick: async (input: { n: number }, step: TaskStep) => {
         await step.do("mark", () => {
           this.ticks.push(`tick:${input.n}`);
           return input.n;
@@ -290,11 +290,11 @@ export class FiberBatchHarnessObject extends DurableObject<Cloudflare.Env> {
     },
     maxRunsPerAlarm: 1
   });
-  readonly lifecycle = Lifecycle.install(this).use(this.fibers);
+  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 }
 
-/** Insert one fiber run row directly, bypassing acceptance. */
-export function seedFiberRun(
+/** Insert one task run row directly, bypassing acceptance. */
+export function seedTaskRun(
   storage: DurableObjectStorage,
   options: {
     readonly runId: string;
@@ -308,7 +308,7 @@ export function seedFiberRun(
 ): void {
   const now = Date.now();
   storage.sql.exec(
-    `INSERT INTO cf_fiber_runs
+    `INSERT INTO cf_agents_task_runs
        (run_id, definition, input, state, generation, attempt, next_at,
         retain, cancel_requested, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
@@ -324,8 +324,8 @@ export function seedFiberRun(
   );
 }
 
-/** Insert one fiber step row directly, bypassing the engine. */
-export function seedFiberStep(
+/** Insert one task step row directly, bypassing the engine. */
+export function seedTaskStep(
   storage: DurableObjectStorage,
   options: {
     readonly runId: string;
@@ -340,7 +340,7 @@ export function seedFiberStep(
 ): void {
   const now = Date.now();
   storage.sql.exec(
-    `INSERT INTO cf_fiber_steps
+    `INSERT INTO cf_agents_task_steps
        (run_id, step_name, kind, state, result, attempt, checkpoint, next_at,
         created_at, started_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -361,20 +361,20 @@ export function seedFiberStep(
 }
 
 /** Backdate a parked run (and optionally one step) so the alarm sees it due. */
-export function backdateFiberWake(
+export function backdateTaskWake(
   storage: DurableObjectStorage,
   runId: string,
   stepName?: string
 ): void {
   const past = Date.now() - 1000;
   storage.sql.exec(
-    "UPDATE cf_fiber_runs SET next_at = ? WHERE run_id = ?",
+    "UPDATE cf_agents_task_runs SET next_at = ? WHERE run_id = ?",
     past,
     runId
   );
   if (stepName !== undefined) {
     storage.sql.exec(
-      "UPDATE cf_fiber_steps SET next_at = ? WHERE run_id = ? AND step_name = ?",
+      "UPDATE cf_agents_task_steps SET next_at = ? WHERE run_id = ? AND step_name = ?",
       past,
       runId,
       stepName

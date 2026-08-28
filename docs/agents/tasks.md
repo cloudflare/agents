@@ -1,17 +1,17 @@
-# Fibers
+# Tasks
 
-> **Experimental.** Everything exported from `agents/fibers` may change
+> **Experimental.** Everything exported from `agents/tasks` may change
 > between releases while the durable execution surface stabilizes.
 
-`agents/fibers` adds durable, replayable background work to a [Lifecycle
-Object](./lifecycle.md). One `Fibers` capability owns any number of named
-Fiber definitions. A run of a definition survives process loss, deployments,
+`agents/tasks` adds durable, replayable background work to a [Lifecycle
+Object](./lifecycle.md). One `Tasks` capability owns any number of named
+Task definitions. A run of a definition survives process loss, deployments,
 and hibernation: completed steps return journaled results, sleeps consult
 persisted deadlines, and execution continues from the first unfinished step.
 
-Fibers never touch the Durable Object's physical alarm. The capability
+The capability never touches the Durable Object's physical alarm. The capability
 contributes its earliest deadline and `Lifecycle` arms one shared alarm, so
-Fibers, the [Scheduler](./scheduling.md), and other capabilities coexist on
+Tasks, the [Scheduler](./scheduling.md), and other capabilities coexist on
 the same object.
 
 ## Install and define
@@ -21,7 +21,7 @@ install the capability with the lifecycle:
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
-import { Fibers, type FiberStep } from "agents/fibers";
+import { Tasks, type TaskStep } from "agents/tasks";
 import { Lifecycle } from "agents/lifecycle";
 
 interface ReportInput {
@@ -30,9 +30,9 @@ interface ReportInput {
 }
 
 export class ReportObject extends DurableObject<Env> {
-  readonly fibers = new Fibers({
+  readonly fibers = new Tasks({
     definitions: {
-      "build-report@v1": async (input: ReportInput, step: FiberStep) => {
+      "build-report@v1": async (input: ReportInput, step: TaskStep) => {
         await step.status("Researching");
 
         const research = await step.do(
@@ -54,7 +54,7 @@ export class ReportObject extends DurableObject<Env> {
     }
   });
 
-  readonly lifecycle = Lifecycle.install(this).use(this.fibers);
+  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 }
 ```
 
@@ -67,25 +67,25 @@ in-flight definition's step layout.
 
 ## On an Agent
 
-`Agent` installs the capability automatically as `this.fibers` (experimental).
-Declare definitions on the overridable `fiberDefinitions` field — the same
+`Agent` installs the capability automatically as `this.tasks` (experimental).
+Declare definitions on the overridable `taskDefinitions` field — the same
 every-wake rebuild guarantee, resolved lazily so field order never matters:
 
 ```ts
 import { Agent } from "agents";
-import type { FiberHandlers, FiberStep } from "agents/fibers";
+import type { TaskHandlers, TaskStep } from "agents/tasks";
 
 export class ReportAgent extends Agent<Env> {
-  override readonly fiberDefinitions = {
-    "build-report@v1": async (input: ReportInput, step: FiberStep) => {
+  override readonly taskDefinitions = {
+    "build-report@v1": async (input: ReportInput, step: TaskStep) => {
       // ...same step API; handlers run in the Agent's invocation context,
       // so getCurrentAgent() works throughout.
     }
-  } satisfies FiberHandlers;
+  } satisfies TaskHandlers;
 }
 ```
 
-Fiber deadlines share the Agent's physical alarm with schedules, keep-alive,
+Task deadlines share the Agent's physical alarm with schedules, keep-alive,
 and the rest of the Agent's durable work through the Lifecycle contribution
 model. Internally, Agent's own chat frameworks (Think, AIChatAgent, and
 Think's messenger replies) run their turns on this same capability.
@@ -93,7 +93,7 @@ Think's messenger replies) run their turns on this same capability.
 ## Starting runs
 
 ```ts
-const receipt = await this.fibers.run("build-report@v1", input, {
+const receipt = await this.tasks.run("build-report@v1", input, {
   idempotencyKey: `report:${input.reportId}`
 });
 ```
@@ -110,7 +110,7 @@ declared map. A handle is a typed lens scoped to one definition — its `run`,
 and it can be created at any time:
 
 ```ts
-const buildReport = this.fibers.handle("build-report@v1");
+const buildReport = this.tasks.handle("build-report@v1");
 const run = await buildReport.get(receipt.runId); // result typed by the map
 ```
 
@@ -150,19 +150,19 @@ Therefore:
 
 If a replay observes a journal its code cannot have written — a known step
 name under a different kind, or a name used twice — the run fails with a
-`FiberReplayDivergedError` or `DuplicateFiberStepError` rather than guessing.
+`TaskReplayDivergedError` or `DuplicateTaskStepError` rather than guessing.
 A run whose definition name is no longer registered after a deployment fails
-with a `MissingFiberDefinitionError`; it is never silently deleted or run
+with a `MissingTaskDefinitionError`; it is never silently deleted or run
 against a different handler.
 
 ## Inspection and control
 
 ```ts
-const snapshot = await this.fibers.get(receipt.runId);
-const joined = await this.fibers.getByIdempotencyKey("report:42");
-const recent = await this.fibers.list({ definition: "build-report@v1" });
-await this.fibers.cancel(receipt.runId, "superseded");
-await this.fibers.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
+const snapshot = await this.tasks.get(receipt.runId);
+const joined = await this.tasks.getByIdempotencyKey("report:42");
+const recent = await this.tasks.list({ definition: "build-report@v1" });
+await this.tasks.cancel(receipt.runId, "superseded");
+await this.tasks.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
 ```
 
 A snapshot is discriminated by `state`:
@@ -189,16 +189,16 @@ an irreversible effect — a payment, a model stream — a definition pairs its
 handler with a `recover` callback that owns the interruption decision:
 
 ```ts
-readonly fibers = new Fibers({
+readonly fibers = new Tasks({
   definitions: {
     "capture-payment@v1": {
-      run: async (input: PaymentInput, step: FiberStep) => {
+      run: async (input: PaymentInput, step: TaskStep) => {
         return step.do("capture", ({ idempotencyKey, checkpoint }) => {
           checkpoint({ phase: "submitted" });
           return this.payments.capture(input, { idempotencyKey });
         });
       },
-      recover: async (interruption: FiberInterruption<PaymentInput>) => {
+      recover: async (interruption: TaskInterruption<PaymentInput>) => {
         const submitted = interruption.interruptedStep;
         if (submitted === null) return { action: "replay" as const };
 
@@ -245,7 +245,7 @@ simpler, safer default.
 | ---------------------------------------------------------------- | -------------------------------------- |
 | Normal request handling or short async work                      | ordinary `await`                       |
 | Wake a named callback at a time or cron cadence                  | [scheduling](./scheduling.md)          |
-| Durable object-local background work with steps, retries, sleeps | a Fiber                                |
+| Durable object-local background work with steps, retries, sleeps | a Task                                 |
 | Cross-service orchestration with a managed dashboard             | [Cloudflare Workflows](./workflows.md) |
 
 ## Current limits

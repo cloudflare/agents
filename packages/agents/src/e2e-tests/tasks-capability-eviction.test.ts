@@ -1,5 +1,5 @@
 /**
- * E2E tests: the `fibers` capability under real process eviction.
+ * E2E tests: the `tasks` capability under real process eviction.
  *
  * Starts wrangler dev against a persistent state dir, begins a multi-step
  * Fiber run, SIGKILLs the whole process mid-step, restarts, and verifies:
@@ -37,18 +37,18 @@ const PORT = 18826;
 const HARNESS: Harness = {
   configPath: path.join(__dirname, "wrangler.jsonc"),
   port: PORT,
-  persistDir: path.join(__dirname, ".wrangler-fibers-capability-state")
+  persistDir: path.join(__dirname, ".wrangler-tasks-capability-state")
 };
 
-const AGENT_NAME = "fibers-capability-e2e";
+const AGENT_NAME = "tasks-capability-e2e";
 
-async function callFiberAgent(
+async function callTaskAgent(
   method: string,
   args: unknown[] = []
 ): Promise<unknown> {
   return callAgentByPath(
     HARNESS,
-    `/agents/fiber-kill-test-agent/${AGENT_NAME}`,
+    `/agents/task-kill-test-agent/${AGENT_NAME}`,
     method,
     args
   );
@@ -62,7 +62,7 @@ async function waitForRunState(
   for (let i = 0; i < maxAttempts; i++) {
     await sleep(1000);
     try {
-      const current = (await callFiberAgent("getRunState", [runId])) as {
+      const current = (await callTaskAgent("getRunState", [runId])) as {
         state: string;
         result: unknown;
       } | null;
@@ -75,7 +75,7 @@ async function waitForRunState(
   throw new Error(`Run ${runId} did not reach state ${state}`);
 }
 
-describe("fibers capability eviction e2e", () => {
+describe("tasks capability eviction e2e", () => {
   let wrangler: ChildProcess | null = null;
 
   beforeEach(() => {
@@ -121,12 +121,12 @@ describe("fibers capability eviction e2e", () => {
   it("resumes a multi-step run from its journal after SIGKILL", async () => {
     wrangler = await startAndWait();
 
-    const runId = (await callFiberAgent("startSlowStepsRun", [8])) as string;
+    const runId = (await callTaskAgent("startSlowStepsRun", [8])) as string;
     expect(runId).toBe("e2e-slow-steps");
 
     // Let a few 1s steps commit, then kill mid-step.
     await sleep(3500);
-    const before = (await callFiberAgent("getStepExecutions")) as Array<{
+    const before = (await callTaskAgent("getStepExecutions")) as Array<{
       step_index: number;
     }>;
     expect(before.length).toBeGreaterThan(0);
@@ -137,7 +137,7 @@ describe("fibers capability eviction e2e", () => {
     const completed = await waitForRunState(runId, "completed");
     expect(completed.result).toEqual({ totalSteps: 8 });
 
-    const executions = (await callFiberAgent("getStepExecutions")) as Array<{
+    const executions = (await callTaskAgent("getStepExecutions")) as Array<{
       step_index: number;
     }>;
     const seen = executions.map((row) => row.step_index);
@@ -151,7 +151,7 @@ describe("fibers capability eviction e2e", () => {
   it("routes a killed run through its recover callback with the checkpoint", async () => {
     wrangler = await startAndWait();
 
-    const runId = (await callFiberAgent("startGuardedRun", [8])) as string;
+    const runId = (await callTaskAgent("startGuardedRun", [8])) as string;
     expect(runId).toBe("e2e-guarded");
 
     await sleep(3500);
@@ -161,7 +161,7 @@ describe("fibers capability eviction e2e", () => {
     // The recovery decision settled the run; the handler never ran again.
     expect(completed.result).toBe("recovered-e2e");
 
-    const recoveries = (await callFiberAgent("getRecoveries")) as Array<{
+    const recoveries = (await callTaskAgent("getRecoveries")) as Array<{
       run_id: string;
       interrupted_step: string | null;
       checkpoint_json: string | null;

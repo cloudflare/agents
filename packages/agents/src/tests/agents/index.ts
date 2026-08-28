@@ -29,7 +29,7 @@ export {
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent
 } from "./schedule";
-export { TestFiberAgent } from "./fibers";
+export { TestTaskAgent } from "./tasks";
 export {
   TestWorkflowAgent,
   TestWorkflowOnStartSubAgent,
