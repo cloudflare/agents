@@ -419,8 +419,8 @@ export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
   @callable()
   cleanupScheduleCount(): number {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules
-      WHERE callback = '_cleanupStreamBuffers'
+      SELECT COUNT(*) as count FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
     `;
     return rows[0].count;
   }
