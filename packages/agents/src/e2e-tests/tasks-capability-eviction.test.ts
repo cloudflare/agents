@@ -148,7 +148,7 @@ describe("tasks capability eviction e2e", () => {
     expect(executions.length).toBeLessThanOrEqual(9);
   });
 
-  it("routes a killed run through its recover callback with the checkpoint", async () => {
+  it("replays a killed run with the interrupted step visible at entry", async () => {
     wrangler = await startAndWait();
 
     const runId = (await callTaskAgent("startGuardedRun", [8])) as string;
@@ -158,24 +158,18 @@ describe("tasks capability eviction e2e", () => {
     wrangler = await killAndRestart();
 
     const completed = await waitForRunState(runId, "completed");
-    // The recovery decision settled the run; the handler never ran again.
-    expect(completed.result).toBe("recovered-e2e");
+    // The replay resumed from the journal and ran the handler to its
+    // ordinary completion — no separate recovery path exists.
+    expect(completed.result).toBe("ran-to-completion");
 
     const recoveries = (await callTaskAgent("getRecoveries")) as Array<{
       run_id: string;
       interrupted_step: string | null;
-      checkpoint_json: string | null;
     }>;
+    // The replayed handler observed which step the kill caught
+    // mid-execution — the durable evidence a handler branches on.
     expect(recoveries.length).toBeGreaterThanOrEqual(1);
-    const recovery = recoveries[0];
-    expect(recovery.run_id).toBe(runId);
-    expect(recovery.interrupted_step).toMatch(/^step:\d+$/);
-    const checkpoint = JSON.parse(recovery.checkpoint_json ?? "null") as {
-      lastStarted: number;
-    };
-    expect(checkpoint.lastStarted).toBeGreaterThanOrEqual(0);
-    expect(String(checkpoint.lastStarted)).toBe(
-      (recovery.interrupted_step ?? "").slice("step:".length)
-    );
+    expect(recoveries[0].run_id).toBe(runId);
+    expect(recoveries[0].interrupted_step).toMatch(/^step:\d+$/);
   });
 });

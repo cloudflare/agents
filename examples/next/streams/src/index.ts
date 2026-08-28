@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
 import { Streams, sseResponse } from "agents/streams";
-import { Tasks, type TaskInterruption, type TaskStep } from "agents/tasks";
+import { Tasks, type TaskStep } from "agents/tasks";
 
 type GenerateInput = {
   streamId: string;
@@ -20,38 +20,19 @@ export class GenerateObject extends DurableObject<Env> {
 
   readonly tasks = new Tasks({
     definitions: {
-      "generate@v1": {
-        run: async (input: GenerateInput, step: TaskStep) => {
-          return step.do("stream", async ({ checkpoint }) => {
-            const stream = await this.streams.open(input.streamId);
-            // Resuming producers start from the stream's own cursor, so a
-            // replay never duplicates a chunk.
-            for (let i = stream.cursor; i < input.total; i++) {
-              await new Promise((resolve) => setTimeout(resolve, 500));
-              stream.append({ i, note: `chunk ${i} of ${input.total}` });
-              checkpoint({ streamId: input.streamId, cursor: stream.cursor });
-            }
-            stream.close();
-            return { streamId: input.streamId, cursor: input.total };
-          });
-        },
-        recover: async (interruption: TaskInterruption<GenerateInput>) => {
-          const checkpoint = (interruption.interruptedStep?.checkpoint ??
-            null) as { streamId: string; cursor: number } | null;
-          if (!checkpoint) return { action: "replay" as const };
-          // The stream's durable status is the recovery evidence: finalize
-          // with exactly the chunks that survived the interruption.
-          const status = await this.streams.status(checkpoint.streamId);
-          const writer = await this.streams.open(checkpoint.streamId);
-          writer.close();
-          return {
-            action: "complete" as const,
-            result: {
-              streamId: checkpoint.streamId,
-              cursor: status?.cursor ?? 0
-            }
-          };
-        }
+      "generate@v1": async (input: GenerateInput, step: TaskStep) => {
+        return step.do("stream", async () => {
+          const stream = await this.streams.open(input.streamId);
+          // Resuming producers start from the stream's own cursor, so a
+          // replay after interruption never duplicates a chunk — the
+          // stream is the recovery evidence.
+          for (let i = stream.cursor; i < input.total; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            stream.append({ i, note: `chunk ${i} of ${input.total}` });
+          }
+          stream.close();
+          return { streamId: input.streamId, cursor: input.total };
+        });
       }
     }
   });

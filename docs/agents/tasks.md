@@ -172,8 +172,7 @@ A snapshot is discriminated by `state`:
 | ------------ | ---------------------------------------------------------------------- |
 | `pending`    | Accepted, first attempt not yet claimed.                               |
 | `running`    | An attempt is executing (`attempt`, `startedAt`, `statusMessage`).     |
-| `waiting`    | Parked on a durable deadline (`reason`: `sleep`, `retry`, `recovery`). |
-| `recovering` | An interruption is being reconciled by the definition's `recover`.     |
+| `waiting`    | Parked on a durable deadline (`reason`: `sleep` or `retry`).           |
 | `completed`  | Settled with `result`.                                                 |
 | `failed`     | Settled with a safe `error` projection.                                |
 | `cancelled`  | Settled by cancellation, with its optional `reason`.                   |
@@ -182,63 +181,36 @@ Cancellation is cooperative: a parked run settles immediately, a live attempt
 is aborted through its signal and settles at its next step boundary. An
 external effect already accepted cannot be undone.
 
-## Custom recovery
+## Interruption and replay
 
-Automatic replay is right when every side effect sits in a step and repeats
-safely under its idempotency key. When replaying immediately could duplicate
-an irreversible effect — a payment, a model stream — a definition pairs its
-handler with a `recover` callback that owns the interruption decision:
+There is no separate recovery mode: an unclean interruption — an attempt
+claimed by an isolate that died — simply replays the handler on the next
+wake. Completed steps return journaled results, sleeps consult their
+persisted deadlines, and durable state carries everything else. Two
+patterns make replay safe for irreversible effects:
 
-```ts
-readonly fibers = new Tasks({
-  definitions: {
-    "capture-payment@v1": {
-      run: async (input: PaymentInput, step: TaskStep) => {
-        return step.do("capture", ({ idempotencyKey, checkpoint }) => {
-          checkpoint({ phase: "submitted" });
-          return this.payments.capture(input, { idempotencyKey });
-        });
-      },
-      recover: async (interruption: TaskInterruption<PaymentInput>) => {
-        const submitted = interruption.interruptedStep;
-        if (submitted === null) return { action: "replay" as const };
+- **Idempotency keys.** Every step attempt receives a stable
+  `idempotencyKey` (identical across attempts and replays); pass it to the
+  external service so a repeat of the same step deduplicates:
 
-        const outcome = await this.payments.lookup(submitted.idempotencyKey);
-        if (outcome?.state === "captured") {
-          return { action: "complete" as const, result: outcome };
-        }
-        if (outcome?.state === "declined") {
-          return {
-            action: "fail" as const,
-            error: new Error("Payment was declined")
-          };
-        }
-        return { action: "replay" as const };
-      }
-    }
+  ```ts
+  "capture-payment@v1": async (input: PaymentInput, step: TaskStep) => {
+    return step.do("capture", ({ idempotencyKey }) =>
+      this.payments.capture(input, { idempotencyKey })
+    );
   }
-});
-```
+  ```
 
-`recover` runs only after an unclean interruption — an attempt that was
-claimed but never settled. A step callback that throws is not an
-interruption; the retry policy owns it. The callback receives the run's
-input, metadata, and the interrupted step (name, attempt, stable
-`idempotencyKey`, and the last `checkpoint` the lost attempt wrote via its
-step attempt context), and decides:
+- **Durable evidence.** When progress lives in durable state — a
+  [stream](./streams.md)'s cursor, a rows-written count — read it at the
+  top of the work and resume from it. A producer that starts its loop at
+  `stream.cursor` never duplicates a chunk, no matter how many times it
+  replays.
 
-| Decision                         | Effect                                       |
-| -------------------------------- | -------------------------------------------- |
-| `{ action: "replay", at? }`      | Replay the handler, now or at a future time. |
-| `{ action: "complete", result }` | Settle the run without replaying.            |
-| `{ action: "fail", error }`      | Fail the run.                                |
-| `{ action: "cancel", reason? }`  | Cancel the run.                              |
-
-Recovery itself can be interrupted, so callbacks must be idempotent: the
-next wake invokes recovery again. A throwing `recover` retries on an
-exponential backoff (5 attempts) before the run fails. Most definitions
-should stay bare handlers — replay plus downstream idempotency is the
-simpler, safer default.
+A step callback that throws is not an interruption; the retry policy owns
+it, with the run parked `waiting` between attempts. Interruptions emit a
+`task:attempt:interrupted` event carrying the step the lost attempt left
+mid-execution.
 
 ## Choosing an API
 

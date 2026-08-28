@@ -3,10 +3,12 @@
  * `cf_agents_task_runs` and `cf_agents_task_steps` tables, the definitions registry, run
  * acceptance, generation-fenced claiming, and due-run processing.
  *
- * Tasks consumes only the standard capability services: storage, alarm
- * coordination, the host invocation boundary, and events. It contributes its
- * earliest run deadline while Lifecycle owns the physical alarm, and it runs
- * definition handlers through Lifecycle's host invocation boundary.
+ * Tasks consumes only the standard capability services: storage, the job
+ * queue, the host invocation boundary, and events. Every non-terminal run's
+ * deadline is mirrored as one Lifecycle queue job while Lifecycle owns the
+ * physical alarm, and definition handlers run through Lifecycle's host
+ * invocation boundary. Interrupted work replays: completed steps return
+ * journaled results and handlers resume from durable evidence.
  */
 
 import { nanoid } from "nanoid";
@@ -35,11 +37,9 @@ import type {
   TaskCallbacks,
   TaskHandlers,
   TaskInput,
-  TaskInterruption,
   TaskJson,
   TaskOutput,
   TaskReceipt,
-  TaskRecoveryDecision,
   TaskRunOptions,
   TaskRunRow,
   TaskRunSnapshot,
@@ -52,17 +52,9 @@ import type {
 /** A resolved run handler for a definition name. */
 type ResolvedTaskHandler = (input: unknown, step: TaskStep) => unknown;
 
-/** A resolved definition: its run handler plus optional recovery callback. */
-type ResolvedTaskEntry = {
-  readonly run: ResolvedTaskHandler;
-  readonly recover?: (
-    interruption: TaskInterruption<unknown>
-  ) => TaskRecoveryDecision | Promise<TaskRecoveryDecision>;
-};
-
 const taskDefinitionResolvers = new WeakMap<
   object,
-  (name: string) => ResolvedTaskHandler | ResolvedTaskEntry | undefined
+  (name: string) => ResolvedTaskHandler | undefined
 >();
 
 /**
@@ -70,15 +62,12 @@ const taskDefinitionResolvers = new WeakMap<
  * the declared map. Frameworks use this to attach internal definitions (for
  * example a future Agent compatibility layer) without occupying the host's
  * constructor map; resolved handlers still run inside the Lifecycle host
- * boundary, and an entry may pair its handler with a recovery callback. The
- * resolver must return the same definition for a name on every Durable
- * Object wake, or that name's in-flight runs cannot resume.
+ * boundary. The resolver must return the same definition for a name on
+ * every Durable Object wake, or that name's in-flight runs cannot resume.
  */
 export function setTaskDefinitionResolver(
   tasks: Tasks<never>,
-  resolver: (
-    name: string
-  ) => ResolvedTaskHandler | ResolvedTaskEntry | undefined
+  resolver: (name: string) => ResolvedTaskHandler | undefined
 ): void {
   taskDefinitionResolvers.set(tasks, resolver);
 }
@@ -100,13 +89,6 @@ const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
  */
 const CLAIM_SLACK_MS = 30_000;
 
-/** Recovery-callback failures tolerated per run before it fails. */
-const RECOVERY_MAX_ATTEMPTS = 5;
-
-/** Backoff before retrying a throwing recovery callback, capped at 5 min. */
-function recoveryBackoffMs(failedAttempt: number): number {
-  return Math.min(5000 * 2 ** (failedAttempt - 1), 5 * 60 * 1000);
-}
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_DEFINITION_NAME_LENGTH = 256;
 
@@ -191,19 +173,16 @@ export class Tasks<
 
   // ── Definitions ──────────────────────────────────────────────────────────
 
-  /** Resolve a name to its declared or composition-root-supplied entry. */
-  #resolveDefinition(name: string): ResolvedTaskEntry | undefined {
+  /** Resolve a name to its declared or composition-root-supplied handler. */
+  #resolveDefinition(name: string): ResolvedTaskHandler | undefined {
     // SAFETY: declared definitions are constrained with `never` parameters
     // so concrete definition types satisfy the map under contravariance; the
     // values passed at dispatch were parsed from rows this definition's name
     // was persisted with.
-    const supplied = (this.#definitions[name] ??
+    return (this.#definitions[name] ??
       taskDefinitionResolvers.get(this)?.(name)) as
       | ResolvedTaskHandler
-      | ResolvedTaskEntry
       | undefined;
-    if (!supplied) return undefined;
-    return typeof supplied === "function" ? { run: supplied } : supplied;
   }
 
   /** True when a name resolves to a runnable definition. */
@@ -293,7 +272,7 @@ export class Tasks<
       this.#sql`
         UPDATE cf_agents_task_runs
         SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
-        WHERE run_id = ${runId} AND state IN ('running', 'recovering')
+        WHERE run_id = ${runId} AND state = 'running'
       `;
       return this.#wakeOutcome(runId);
     }
@@ -335,7 +314,7 @@ export class Tasks<
     const rows = this.#sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
-        AND state IN ('pending', 'waiting', 'running', 'recovering')
+        AND state IN ('pending', 'waiting', 'running')
     `;
     const next = rows[0]?.next_at;
     return typeof next === "number" ? { rescheduleAt: next } : undefined;
@@ -351,7 +330,7 @@ export class Tasks<
     const rows = this.#sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
-        AND state IN ('pending', 'waiting', 'running', 'recovering')
+        AND state IN ('pending', 'waiting', 'running')
     `;
     const next = rows[0]?.next_at;
     if (typeof next === "number") {
@@ -365,7 +344,7 @@ export class Tasks<
   async #syncAllWakes(): Promise<void> {
     const rows = this.#sql<{ run_id: string }>`
       SELECT run_id FROM cf_agents_task_runs
-      WHERE state IN ('pending', 'waiting', 'running', 'recovering')
+      WHERE state IN ('pending', 'waiting', 'running')
         AND next_at IS NOT NULL
     `;
     for (const { run_id } of rows) {
@@ -586,8 +565,8 @@ export class Tasks<
     }
     if (row.next_at !== null && row.next_at > now) return;
 
-    const entry = this.#resolveDefinition(row.definition);
-    if (!entry) {
+    const handler = this.#resolveDefinition(row.definition);
+    if (!handler) {
       const error = new MissingTaskDefinitionError(row.definition);
       console.error(error.message);
       this.#settleFailed(runId, null, toErrorSummary(error));
@@ -597,24 +576,16 @@ export class Tasks<
     }
 
     if (row.state === "running") {
+      // Unclean interruption: the previous attempt's isolate is gone. The
+      // claim below replays the handler; completed steps return journaled
+      // results and durable state (a stream's cursor, an idempotent write)
+      // carries whatever the lost attempt got done.
       this.#emit("task:attempt:interrupted", {
         runId,
         definition: row.definition,
         attempt: row.attempt,
         step: this.#interruptedStepName(runId)
       });
-    }
-
-    // Unclean interruption with a recovery callback: the definition decides
-    // what a lost attempt means. Without one, the claim below replays. A
-    // 'recovering' row without a recovery callback (removed by a deploy)
-    // also falls through to replay.
-    if (
-      (row.state === "running" || row.state === "recovering") &&
-      entry.recover
-    ) {
-      await this.#runRecovery(row, entry.recover);
-      return;
     }
 
     const generation = nanoid();
@@ -626,7 +597,7 @@ export class Tasks<
           next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
           updated_at = ${now}
       WHERE run_id = ${runId}
-        AND state IN ('pending', 'waiting', 'running', 'recovering')
+        AND state IN ('pending', 'waiting', 'running')
     `;
 
     const controller = new AbortController();
@@ -639,7 +610,7 @@ export class Tasks<
     });
     const promise = this.#runAttempt(
       row,
-      entry.run,
+      handler,
       generation,
       attempt,
       controller
@@ -650,241 +621,6 @@ export class Tasks<
     } finally {
       this.#active.delete(runId);
     }
-  }
-
-  /** Claim an interrupted run for its definition's recovery callback. */
-  async #runRecovery(
-    row: TaskRunRow,
-    recover: NonNullable<ResolvedTaskEntry["recover"]>
-  ): Promise<void> {
-    const runId = row.run_id;
-    const generation = nanoid();
-    const now = Date.now();
-    this.#sql`
-      UPDATE cf_agents_task_runs
-      SET state = 'recovering', generation = ${generation},
-          next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
-          updated_at = ${now}
-      WHERE run_id = ${runId} AND state IN ('running', 'recovering')
-    `;
-    this.#emit("task:recovery:started", {
-      runId,
-      definition: row.definition,
-      attempt: row.attempt
-    });
-
-    const controller = new AbortController();
-    let replayNow = false;
-    const promise = this.#recoverAttempt(
-      row,
-      recover,
-      generation,
-      controller
-    ).then((outcome) => {
-      replayNow = outcome === "replay-now";
-    });
-    this.#active.set(runId, { generation, controller, promise });
-    try {
-      await promise;
-    } finally {
-      this.#active.delete(runId);
-    }
-    if (replayNow) await this.#executeRun(runId);
-  }
-
-  /** Invoke one recovery attempt and persist its decision, fenced. */
-  async #recoverAttempt(
-    row: TaskRunRow,
-    recover: NonNullable<ResolvedTaskEntry["recover"]>,
-    generation: string,
-    controller: AbortController
-  ): Promise<"replay-now" | undefined> {
-    const runId = row.run_id;
-    try {
-      const interruption = this.#buildInterruption(row, controller.signal);
-      const decision = (await this.lifecycle.runInHostContext(() =>
-        recover(interruption)
-      )) as TaskRecoveryDecision;
-      const action = decision?.action;
-      if (
-        action !== "replay" &&
-        action !== "complete" &&
-        action !== "fail" &&
-        action !== "cancel"
-      ) {
-        throw new Error(
-          `Recovery for Task run "${runId}" returned an unknown decision; ` +
-            `expected an action of replay, complete, fail, or cancel`
-        );
-      }
-      this.#emit("task:recovery:decided", {
-        runId,
-        definition: row.definition,
-        action
-      });
-      return await this.#applyRecoveryDecision(row, generation, decision);
-    } catch (thrown) {
-      if (thrown instanceof AttemptSupersededError) return undefined;
-      if (isTaskCancellation(thrown)) {
-        this.#settleCancelled(runId, generation, thrown.reason);
-        await this.#syncWake(runId);
-        return undefined;
-      }
-      await this.#recoveryFailure(row, generation, thrown);
-      return undefined;
-    }
-  }
-
-  /** Apply one recovery decision under the recovery claim's fence. */
-  async #applyRecoveryDecision(
-    row: TaskRunRow,
-    generation: string,
-    decision: TaskRecoveryDecision
-  ): Promise<"replay-now" | undefined> {
-    const runId = row.run_id;
-    switch (decision.action) {
-      case "replay": {
-        const at =
-          decision.at instanceof Date ? decision.at.getTime() : decision.at;
-        const later = at !== undefined && at > Date.now();
-        const wakeAt = later ? (at as number) : Date.now();
-        const parked = this.#fencedWrite(
-          runId,
-          generation,
-          `UPDATE cf_agents_task_runs
-           SET state = 'waiting', wait_reason = 'recovery', next_at = ?,
-               generation = NULL, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
-          [wakeAt, Date.now()]
-        );
-        if (parked && later) {
-          this.#emit("task:waiting", {
-            runId,
-            definition: row.definition,
-            reason: "recovery",
-            wakeAt
-          });
-        }
-        await this.#syncWake(runId);
-        return parked && !later ? "replay-now" : undefined;
-      }
-      case "complete": {
-        const resultJson = serializeTaskValue(
-          decision.result,
-          `recovery result for Task definition "${row.definition}"`
-        );
-        const settled = this.#fencedWrite(
-          runId,
-          generation,
-          `UPDATE cf_agents_task_runs
-           SET state = 'completed', result = ?, generation = NULL,
-               next_at = NULL, settled_at = ?, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
-          [resultJson, Date.now(), Date.now()]
-        );
-        if (settled) {
-          this.#emit("task:completed", { runId, definition: row.definition });
-          if (row.retain === 0) this.#deleteRun(runId);
-        }
-        await this.#syncWake(runId);
-        return undefined;
-      }
-      case "fail": {
-        const summary = toErrorSummary(decision.error);
-        const failed = this.#settleFailed(runId, generation, summary);
-        if (failed) {
-          console.error(
-            `Task run "${runId}" (definition "${row.definition}") failed by ` +
-              `recovery decision: ${summary.name}: ${summary.message}`
-          );
-        }
-        await this.#syncWake(runId);
-        await this.#observeError(decision.error);
-        return undefined;
-      }
-      case "cancel": {
-        this.#settleCancelled(runId, generation, decision.reason);
-        await this.#syncWake(runId);
-        return undefined;
-      }
-    }
-  }
-
-  /** Park a throwing recovery callback with backoff, or exhaust its budget. */
-  async #recoveryFailure(
-    row: TaskRunRow,
-    generation: string,
-    thrown: unknown
-  ): Promise<void> {
-    const runId = row.run_id;
-    const recoveryAttempt = row.recovery_attempt + 1;
-    const summary = toErrorSummary(thrown);
-    if (recoveryAttempt >= RECOVERY_MAX_ATTEMPTS) {
-      const failed = this.#settleFailed(runId, generation, summary);
-      if (failed) {
-        console.error(
-          `Task run "${runId}" (definition "${row.definition}") failed ` +
-            `after ${recoveryAttempt} recovery attempts: ${summary.name}: ${summary.message}`
-        );
-      }
-      await this.#syncWake(runId);
-      await this.#observeError(thrown);
-      return;
-    }
-    const wakeAt = Date.now() + recoveryBackoffMs(recoveryAttempt);
-    const parked = this.#fencedWrite(
-      runId,
-      generation,
-      `UPDATE cf_agents_task_runs
-       SET recovery_attempt = ?, next_at = ?, generation = NULL, updated_at = ?
-       WHERE run_id = ? AND generation = ? AND state = 'recovering'`,
-      [recoveryAttempt, wakeAt, Date.now()]
-    );
-    if (parked) {
-      console.warn(
-        `Recovery for Task run "${runId}" (definition "${row.definition}") ` +
-          `threw (${summary.name}: ${summary.message}); retrying recovery at ` +
-          `${new Date(wakeAt).toISOString()}`
-      );
-    }
-    await this.#syncWake(runId);
-  }
-
-  /** Assemble the recovery context from the pre-claim run row. */
-  #buildInterruption(
-    row: TaskRunRow,
-    signal: AbortSignal
-  ): TaskInterruption<unknown> {
-    const stepRows = this.#sql<TaskStepRow>`
-      SELECT * FROM cf_agents_task_steps
-      WHERE run_id = ${row.run_id} AND state = 'running' AND kind = 'do'
-      ORDER BY started_at DESC
-      LIMIT 1
-    `;
-    const stepRow = stepRows[0];
-    return {
-      runId: row.run_id,
-      definition: row.definition,
-      input: deserializeTaskValue(row.input) as Readonly<unknown>,
-      attempt: row.attempt,
-      createdAt: row.created_at,
-      interruptedAt: row.updated_at,
-      metadata:
-        row.metadata !== null
-          ? (JSON.parse(row.metadata) as Record<string, TaskJson>)
-          : null,
-      interruptedStep: stepRow
-        ? {
-            name: stepRow.step_name,
-            kind: "do",
-            attempt: stepRow.attempt,
-            idempotencyKey: `${row.run_id}:${stepRow.step_name}`,
-            checkpoint: deserializeTaskValue(stepRow.checkpoint) as TaskValue,
-            startedAt: stepRow.started_at ?? stepRow.created_at
-          }
-        : null,
-      signal
-    };
   }
 
   /** Run one claimed attempt and persist its outcome, generation-fenced. */
@@ -1097,18 +833,6 @@ export class Tasks<
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
       },
-      writeCheckpoint: (name, value) => {
-        assertCurrent();
-        const checkpointJson = serializeTaskValue(
-          value,
-          `checkpoint for step "${name}" in run "${runId}"`
-        );
-        this.#sql`
-          UPDATE cf_agents_task_steps
-          SET checkpoint = ${checkpointJson}, updated_at = ${Date.now()}
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
-      },
       refreshClaim: () => {
         this.#fencedWrite(
           runId,
@@ -1223,7 +947,7 @@ export class Tasks<
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
-           AND state IN ('running', 'recovering')`,
+           AND state = 'running'`,
         [reason ?? null, now, now]
       );
     } else {
@@ -1232,7 +956,7 @@ export class Tasks<
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
-           AND state IN ('pending', 'waiting', 'running', 'recovering')`,
+           AND state IN ('pending', 'waiting', 'running')`,
         [reason ?? null, now, now, runId]
       );
       settled = written > 0;
@@ -1263,7 +987,7 @@ export class Tasks<
          SET state = 'failed', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
-           AND state IN ('running', 'recovering')`,
+           AND state = 'running'`,
         [error.name, error.message, now, now]
       );
     } else {
@@ -1272,7 +996,7 @@ export class Tasks<
          SET state = 'failed', error_name = ?, error_message = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
-           AND state IN ('pending', 'waiting', 'running', 'recovering')`,
+           AND state IN ('pending', 'waiting', 'running')`,
         [error.name, error.message, now, now, runId]
       );
       settled = written > 0;
@@ -1315,7 +1039,7 @@ export class Tasks<
         definition TEXT NOT NULL,
         input TEXT,
         state TEXT NOT NULL CHECK (state IN (
-          'pending', 'running', 'waiting', 'recovering',
+          'pending', 'running', 'waiting',
           'completed', 'failed', 'cancelled'
         )),
         result TEXT,
@@ -1326,7 +1050,6 @@ export class Tasks<
         idempotency_key TEXT UNIQUE,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
-        recovery_attempt INTEGER NOT NULL DEFAULT 0,
         generation TEXT,
         next_at INTEGER,
         wait_reason TEXT,
@@ -1358,7 +1081,6 @@ export class Tasks<
         error_name TEXT,
         error_message TEXT,
         attempt INTEGER NOT NULL DEFAULT 0,
-        checkpoint TEXT,
         next_at INTEGER,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
@@ -1373,12 +1095,10 @@ export class Tasks<
   #reconcile(): void {
     const now = Date.now();
     // A fresh isolate has no live attempts, so every claimed row is an
-    // interrupted attempt (or interrupted recovery): make it due immediately
-    // for reclaim. Parked 'recovering' rows (generation NULL) keep their
-    // recovery backoff deadlines.
+    // interrupted attempt: make it due immediately for reclaim and replay.
     this.#sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
-      WHERE state IN ('running', 'recovering') AND generation IS NOT NULL
+      WHERE state = 'running' AND generation IS NOT NULL
     `;
     // Non-terminal rows must always carry a deadline; repair any without one.
     this.#sql`
@@ -1446,13 +1166,6 @@ export class Tasks<
           ...(row.status_message !== null
             ? { statusMessage: row.status_message }
             : {})
-        };
-      case "recovering":
-        return {
-          ...base,
-          state: "recovering",
-          interruptedStep: this.#interruptedStepName(row.run_id),
-          attempt: row.attempt
         };
       case "completed":
         return {

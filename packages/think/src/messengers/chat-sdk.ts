@@ -437,6 +437,11 @@ export class ThinkMessengerRuntime {
   }
 
   /** Execute one live (same-isolate) reply under the given fiber context. */
+  /** Whether this isolate still holds the live closure for one reply. */
+  hasLiveReply(nonce: string): boolean {
+    return this.liveReplies.has(nonce);
+  }
+
   async executeLiveReply(nonce: string, fiber: FiberContext): Promise<void> {
     const entry = this.liveReplies.get(nonce);
     if (!entry) {

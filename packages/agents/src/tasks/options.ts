@@ -6,8 +6,6 @@ export type TaskEventType =
   | "task:accepted"
   | "task:attempt:started"
   | "task:attempt:interrupted"
-  | "task:recovery:started"
-  | "task:recovery:decided"
   | "task:step:started"
   | "task:step:retry"
   | "task:step:completed"

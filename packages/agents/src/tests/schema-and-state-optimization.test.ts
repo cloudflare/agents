@@ -94,7 +94,7 @@ const EXPECTED_SCHEMA_DDL = [
         definition TEXT NOT NULL,
         input TEXT,
         state TEXT NOT NULL CHECK (state IN (
-          'pending', 'running', 'waiting', 'recovering',
+          'pending', 'running', 'waiting',
           'completed', 'failed', 'cancelled'
         )),
         result TEXT,
@@ -105,7 +105,6 @@ const EXPECTED_SCHEMA_DDL = [
         idempotency_key TEXT UNIQUE,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
-        recovery_attempt INTEGER NOT NULL DEFAULT 0,
         generation TEXT,
         next_at INTEGER,
         wait_reason TEXT,
@@ -127,7 +126,6 @@ const EXPECTED_SCHEMA_DDL = [
         error_name TEXT,
         error_message TEXT,
         attempt INTEGER NOT NULL DEFAULT 0,
-        checkpoint TEXT,
         next_at INTEGER,
         created_at INTEGER NOT NULL,
         started_at INTEGER,

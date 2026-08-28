@@ -26,7 +26,7 @@ not. Three symptoms:
   cannot have a resumable stream without importing a chat stack.
 - The Tasks migration formalized a composition pattern — a task step appends
   chunks to a store it does not own and `checkpoint()`s a cursor, and its
-  `recover` callback reads the store's status as interruption evidence —
+  replayed handler reads the store's status as interruption evidence —
   but the "store" half of that contract has no first-class API. Every new
   streaming producer (voice, progress feeds, channel delivery) re-invents a
   chunk table.
@@ -142,7 +142,7 @@ top of both can exist later.
 ### Keep the store chat-only (status quo)
 
 Blocks plain DOs and non-chat producers from resumable output, and leaves
-the Tasks recovery contract pointing at an ad-hoc store. Rejected.
+the Tasks replay contract pointing at an ad-hoc store. Rejected.
 
 ### Build on an external log (Durable Streams / ElectricSQL shapes)
 
@@ -187,3 +187,10 @@ storage-ops benchmark pins the cost model: packed writes stay within 2× the
 legacy pattern (the fence per segment), ~9× under naive per-chunk appends,
 with sweep reads down ~6× and no longer proportional to stored chunks. The
 resume protocol (handshake, wire format) stayed in chat as designed.
+
+**Amendment (replay contract):** after `recover` was removed from Tasks
+(see rfc-fibers.md's amendment), the composition contract simplified to the
+form the proposal's own producer loop already implied: the replayed handler
+resumes from `stream.cursor`, and the stream itself is the interruption
+evidence — no checkpoint hop, no recovery callback. The `{ run, recover }`
+example above is retained as the historical shape.

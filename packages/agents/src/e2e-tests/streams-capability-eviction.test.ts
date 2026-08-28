@@ -103,8 +103,9 @@ describe("streams capability eviction e2e", () => {
     wrangler = startWrangler(HARNESS);
     await waitForReady(HARNESS);
 
-    // The first poll wakes the agent; boot recovery dispatches the
-    // interrupted task, whose recover callback finalizes the stream.
+    // The first poll wakes the agent; the interrupted task's overdue queue
+    // job re-fires and the replayed producer resumes from the durable
+    // cursor, finishing the remaining chunks.
     let completed: { state: string; result: unknown } | null = null;
     for (let i = 0; i < 30; i++) {
       await sleep(1000);
@@ -128,33 +129,27 @@ describe("streams capability eviction e2e", () => {
       state: string;
       cursor: number;
     };
-    // The stream was finalized at exactly the durable cursor: every chunk
-    // appended before death survived, and nothing was produced after it.
+    // The resumed producer finished the full stream: every chunk appended
+    // before death survived and none was produced twice — the seq sequence
+    // is gapless and duplicate-free.
     expect(status.state).toBe("completed");
-    expect(status.cursor).toBeGreaterThan(0);
-    expect(status.cursor).toBeLessThan(8);
-    expect(completed?.result).toEqual({
-      streamId: STREAM_ID,
-      cursor: status.cursor
-    });
+    expect(status.cursor).toBe(8);
+    expect(completed?.result).toEqual({ streamId: STREAM_ID, cursor: 8 });
 
     const seqs = (await callStreamAgent("readAllChunks", [
       STREAM_ID
     ])) as number[];
-    expect(seqs).toEqual(
-      Array.from({ length: status.cursor }, (_value, index) => index)
-    );
+    expect(seqs).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
 
     const recoveries = (await callStreamAgent("getRecoveries", [])) as Array<{
       stream_state: string | null;
       stream_cursor: number;
-      checkpoint_cursor: number;
     }>;
+    // Exactly one replay entry, resuming from the mid-production cursor the
+    // kill left behind — proof the kill was real and the resume durable.
     expect(recoveries).toHaveLength(1);
-    expect(recoveries[0]).toEqual({
-      stream_state: "streaming",
-      stream_cursor: status.cursor,
-      checkpoint_cursor: status.cursor
-    });
+    expect(recoveries[0].stream_state).toBe("streaming");
+    expect(recoveries[0].stream_cursor).toBeGreaterThan(0);
+    expect(recoveries[0].stream_cursor).toBeLessThan(8);
   });
 });

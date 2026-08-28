@@ -430,15 +430,15 @@ describe("Streams composed with Tasks", () => {
     );
   });
 
-  it("recover reads stream evidence and finalizes from the cursor", async () => {
+  it("replay resumes the producer from the stream's durable cursor", async () => {
     const stub = env.TaskStreamComposeObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
       async (instance: TaskStreamComposeObject, state) => {
         await instance.lifecycle.start();
         // A real stream with two durably appended chunks whose producer
-        // "died": the task run is seeded as claimed by a dead generation,
-        // with the step checkpoint carrying the stream cursor.
+        // "died": the task run is seeded as claimed by a dead generation
+        // with its producing step mid-execution.
         const stream = await instance.streams.open("gen-lost");
         stream.append({ i: 0 });
         stream.append({ i: 1 });
@@ -457,8 +457,7 @@ describe("Streams composed with Tasks", () => {
           name: "stream",
           kind: "do",
           state: "running",
-          attempt: 1,
-          checkpoint: { streamId: "gen-lost", cursor: 2 }
+          attempt: 1
         });
         await instance.lifecycle.rearmAlarm();
       }
@@ -475,27 +474,32 @@ describe("Streams composed with Tasks", () => {
           if (snapshot?.state === "completed") {
             expect(snapshot.result).toEqual({
               streamId: "gen-lost",
-              cursor: 2
+              cursor: 5
             });
             break;
           }
-          if (Date.now() > deadline) throw new Error("recovery never settled");
+          if (Date.now() > deadline) throw new Error("replay never settled");
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
 
-        // The recovery decision finalized the stream from durable evidence;
-        // no producer code re-ran.
-        expect(instance.produced).toEqual([]);
-        expect(instance.recoveryEvidence).toEqual([
-          {
-            step: "stream",
-            streamState: "streaming",
-            streamCursor: 2,
-            checkpointCursor: 2
-          }
+        // The replayed producer read the stream's durable cursor as its
+        // recovery evidence and resumed exactly there — the two chunks that
+        // survived the interruption were never produced again.
+        expect(instance.entryCursors).toEqual([
+          { streamId: "gen-lost", cursor: 2 }
+        ]);
+        expect(instance.produced).toEqual([
+          "gen-lost:2",
+          "gen-lost:3",
+          "gen-lost:4"
         ]);
         const status = await instance.streams.status("gen-lost");
-        expect(status).toMatchObject({ state: "completed", cursor: 2 });
+        expect(status).toMatchObject({ state: "completed", cursor: 5 });
+        const chunks: number[] = [];
+        for await (const chunk of instance.streams.read("gen-lost")) {
+          chunks.push(chunk.seq);
+        }
+        expect(chunks).toEqual([0, 1, 2, 3, 4]);
       }
     );
   });

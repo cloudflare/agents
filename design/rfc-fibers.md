@@ -2768,3 +2768,18 @@ likewise), so the recovery brain did not move. The legacy `runFiber()` /
 `startFiber()` user APIs are untouched and still recovered by their own scan,
 and facet-hosted turns stay on the legacy engine until routed Fibers land —
 deprecation still waits for migration evidence.
+
+## Amendment: `recover` removed (post-usage evidence)
+
+The custom-recovery surface (`{ run, recover }` definitions,
+`TaskInterruption`, `TaskRecoveryDecision`, the `recovering` state and its
+backoff budget, and step `checkpoint()`) was removed after the API was
+exercised in anger. Two things made it unnecessary: the Streams capability
+turned interruption evidence into durable state a replayed handler can read
+directly (a producer that starts at `stream.cursor` resumes rather than
+redoes), and the chat replatform showed the one real `recover` consumer —
+the ChatRecoveryEngine — expresses the same decision as a branch at handler
+entry when its live closure is missing. Interruption handling is now
+uniform: replay from the journal, with step idempotency keys and durable
+evidence carrying replay safety. The `task:attempt:interrupted` event
+preserves observability of the interrupted step.

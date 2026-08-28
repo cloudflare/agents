@@ -684,71 +684,72 @@ export class AIChatAgent<
   >();
 
   /**
-   * The chat-turn Fiber definition. Every chat turn runs as one journaled
-   * step on the `fibers` capability: the live closure executes under the
-   * fiber stash context (so `this.stash()` keeps checkpointing), and an
-   * unclean interruption routes through the same `_handleInternalFiberRecovery`
-   * seam the legacy fiber scan used — the ChatRecoveryEngine and every hook
-   * behind it are unchanged.
+   * The chat-turn Task definition. Every chat turn runs as one journaled
+   * step on the `tasks` capability. A live turn executes its closure under
+   * the fiber stash context (so `this.stash()` keeps persisting the
+   * recovery snapshot, now into host storage); a replay whose closure is
+   * gone — the producing isolate died — drives the same
+   * `_handleInternalFiberRecovery` seam the legacy fiber scan used, so the
+   * ChatRecoveryEngine and every hook behind it are unchanged.
    */
   private _registerChatTurnFiberDefinition(): void {
     const chatFiberName = (this.constructor as typeof AIChatAgent)
       .CHAT_FIBER_NAME;
-    this._registerInternalTaskDefinition(chatFiberName, {
-      run: async (input, step) => {
-        const { nonce } = input as { requestId: string; nonce: string };
-        await step.do(
-          "model-turn",
-          { retries: { limit: 1 }, timeout: "1 day" },
-          async ({ checkpoint, signal }) => {
-            const entry = this._liveChatTurnClosures.get(nonce);
-            if (!entry) {
-              // The accepted run reached a fresh isolate before its live
-              // closure ever executed. Stream-metadata evidence drives
-              // user-visible recovery for this turn.
-              throw new Error(
-                "Chat turn closure is no longer available in this isolate"
-              );
-            }
-            // SAFETY: chat fiber snapshots are the same JSON envelopes the
-            // legacy stash wrapper persisted; the serializer validates them.
-            checkpoint(entry.initial as Parameters<typeof checkpoint>[0]);
-            try {
-              const value = await this.keepAliveWhile(() =>
-                this._withFiberStash(
-                  {
-                    id: nonce,
-                    signal,
-                    stash: (data) =>
-                      checkpoint(
-                        entry.wrap(data) as Parameters<typeof checkpoint>[0]
-                      )
-                  },
-                  () => entry.run()
-                )
-              );
-              entry.settle.resolve(value);
-            } catch (error) {
-              entry.settle.reject(error);
-              throw error;
-            }
+    this._registerInternalTaskDefinition(chatFiberName, async (input, step) => {
+      const { requestId, nonce } = input as {
+        requestId: string;
+        nonce: string;
+      };
+      await step.do(
+        "model-turn",
+        { retries: { limit: 1 }, timeout: "1 day" },
+        async ({ signal }) => {
+          const runId = `chat_${nonce}`;
+          const snapshotKey = `__cf_chat_turn_snapshot:${runId}`;
+          const entry = this._liveChatTurnClosures.get(nonce);
+          if (!entry) {
+            // Replay after an unclean interruption: the producing isolate
+            // is gone. The durably persisted turn snapshot plus stream
+            // evidence drive user-visible recovery.
+            const persisted = await this.ctx.storage.get(snapshotKey);
+            const createdAt =
+              (await this.tasks.get(runId))?.createdAt ?? Date.now();
+            const ctx: FiberRecoveryContext = {
+              id: runId,
+              name: `${chatFiberName}:${requestId}`,
+              snapshot: (persisted ?? null) as unknown,
+              createdAt,
+              recoveryReason: "interrupted"
+            };
+            await this._handleInternalFiberRecovery(ctx);
+            await this.ctx.storage.delete(snapshotKey);
             return undefined;
           }
-        );
-      },
-      recover: async (interruption) => {
-        const input = interruption.input as { requestId: string };
-        const ctx: FiberRecoveryContext = {
-          id: interruption.runId,
-          name: `${chatFiberName}:${input.requestId}`,
-          snapshot: (interruption.interruptedStep?.checkpoint ??
-            null) as unknown,
-          createdAt: interruption.createdAt,
-          recoveryReason: "interrupted"
-        };
-        await this._handleInternalFiberRecovery(ctx);
-        return { action: "complete" as const, result: undefined };
-      }
+          // SAFETY: chat fiber snapshots are the same JSON envelopes the
+          // legacy stash wrapper persisted; storage round-trips them.
+          await this.ctx.storage.put(snapshotKey, entry.initial);
+          try {
+            const value = await this.keepAliveWhile(() =>
+              this._withFiberStash(
+                {
+                  id: nonce,
+                  signal,
+                  stash: (data) =>
+                    void this.ctx.storage.put(snapshotKey, entry.wrap(data))
+                },
+                () => entry.run()
+              )
+            );
+            entry.settle.resolve(value);
+          } catch (error) {
+            entry.settle.reject(error);
+            throw error;
+          } finally {
+            void this.ctx.storage.delete(snapshotKey);
+          }
+          return undefined;
+        }
+      );
     });
   }
 

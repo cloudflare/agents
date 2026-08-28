@@ -101,32 +101,24 @@ accumulated since the last wakeup as one array.
 
 ## Composing with Tasks
 
-The contract [Tasks](./tasks.md) recovery was designed around: the task step
-appends to a stream it does not own and checkpoints the cursor; `recover`
-reads `status()` as interruption evidence.
+The contract [Tasks](./tasks.md) replay was designed around: a task step
+appends to a stream it does not own, and because the producer starts its
+loop at the stream's own durable cursor, a replay after interruption is a
+resume — the stream is the recovery evidence.
 
 ```ts
 readonly tasks = new Tasks({
   definitions: {
-    "generate@v1": {
-      run: async (input: GenerateInput, step: TaskStep) => {
-        return step.do("stream", async ({ checkpoint }) => {
-          const stream = await this.streams.open(input.streamId);
-          // Resuming producers start from the stream's own cursor, so a
-          // replay never duplicates a chunk.
-          for (let i = stream.cursor; i < input.total; i++) {
-            stream.append(await this.produce(i));
-            checkpoint({ streamId: input.streamId, cursor: stream.cursor });
-          }
-          stream.close();
-        });
-      },
-      recover: async (interruption) => {
-        const { streamId } = interruption.interruptedStep?.checkpoint ?? {};
-        const status = await this.streams.status(streamId);
-        // reattach the provider at status.cursor, finalize the partial
-        // (open + close), or replay — with durable evidence in hand
-      }
+    "generate@v1": async (input: GenerateInput, step: TaskStep) => {
+      return step.do("stream", async () => {
+        const stream = await this.streams.open(input.streamId);
+        // Resuming producers start from the stream's own cursor, so a
+        // replay after interruption never duplicates a chunk.
+        for (let i = stream.cursor; i < input.total; i++) {
+          stream.append(await this.produce(i));
+        }
+        stream.close();
+      });
     }
   }
 });

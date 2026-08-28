@@ -4506,135 +4506,130 @@ export class Think<
   >();
 
   /**
-   * The chat-turn Fiber definition. Every chat turn runs as one journaled
-   * step on the `fibers` capability: the live closure executes under the
-   * fiber stash context (so `this.stash()` keeps checkpointing), and an
-   * unclean interruption routes through the same `_handleInternalFiberRecovery`
-   * seam the legacy fiber scan used — the ChatRecoveryEngine and every hook
-   * behind it are unchanged.
+   * The chat-turn Task definition. Every chat turn runs as one journaled
+   * step on the `tasks` capability. A live turn executes its closure under
+   * the fiber stash context (so `this.stash()` keeps persisting the
+   * recovery snapshot, now into host storage); a replay whose closure is
+   * gone — the producing isolate died — drives the same
+   * `_handleInternalFiberRecovery` seam the legacy fiber scan used, so the
+   * ChatRecoveryEngine and every hook behind it are unchanged.
    */
   private _registerChatTurnFiberDefinition(): void {
     const chatFiberName = (this.constructor as typeof Think).CHAT_FIBER_NAME;
-    this._registerInternalTaskDefinition(chatFiberName, {
-      run: async (input, step) => {
-        const { nonce } = input as { requestId: string; nonce: string };
-        await step.do(
-          "model-turn",
-          { retries: { limit: 1 }, timeout: "1 day" },
-          async ({ checkpoint, signal }) => {
-            const entry = this._liveChatTurnClosures.get(nonce);
-            if (!entry) {
-              // The accepted run reached a fresh isolate before its live
-              // closure ever executed. Stream-metadata evidence drives
-              // user-visible recovery for this turn.
-              throw new Error(
-                "Chat turn closure is no longer available in this isolate"
-              );
-            }
-            // SAFETY: chat fiber snapshots are the same JSON envelopes the
-            // legacy stash wrapper persisted; the serializer validates them.
-            checkpoint(entry.initial as Parameters<typeof checkpoint>[0]);
-            try {
-              const value = await this.keepAliveWhile(() =>
-                this._withFiberStash(
-                  {
-                    id: nonce,
-                    signal,
-                    stash: (data) =>
-                      checkpoint(
-                        entry.wrap(data) as Parameters<typeof checkpoint>[0]
-                      )
-                  },
-                  () => entry.run()
-                )
-              );
-              entry.settle.resolve(value);
-            } catch (error) {
-              entry.settle.reject(error);
-              throw error;
-            }
+    this._registerInternalTaskDefinition(chatFiberName, async (input, step) => {
+      const { requestId, nonce } = input as {
+        requestId: string;
+        nonce: string;
+      };
+      await step.do(
+        "model-turn",
+        { retries: { limit: 1 }, timeout: "1 day" },
+        async ({ signal }) => {
+          const runId = `chat_${nonce}`;
+          const snapshotKey = `__cf_chat_turn_snapshot:${runId}`;
+          const entry = this._liveChatTurnClosures.get(nonce);
+          if (!entry) {
+            // Replay after an unclean interruption: the producing isolate
+            // is gone. The durably persisted turn snapshot plus stream
+            // evidence drive user-visible recovery.
+            const persisted = await this.ctx.storage.get(snapshotKey);
+            const createdAt =
+              (await this.tasks.get(runId))?.createdAt ?? Date.now();
+            const ctx: FiberRecoveryContext = {
+              id: runId,
+              name: `${chatFiberName}:${requestId}`,
+              snapshot: (persisted ?? null) as unknown,
+              createdAt,
+              recoveryReason: "interrupted"
+            };
+            await this._handleInternalFiberRecovery(ctx);
+            await this.ctx.storage.delete(snapshotKey);
             return undefined;
           }
-        );
-      },
-      recover: async (interruption) => {
-        const input = interruption.input as { requestId: string };
-        const ctx: FiberRecoveryContext = {
-          id: interruption.runId,
-          name: `${chatFiberName}:${input.requestId}`,
-          snapshot: (interruption.interruptedStep?.checkpoint ??
-            null) as unknown,
-          createdAt: interruption.createdAt,
-          recoveryReason: "interrupted"
-        };
-        await this._handleInternalFiberRecovery(ctx);
-        return { action: "complete" as const, result: undefined };
-      }
+          // SAFETY: chat fiber snapshots are the same JSON envelopes the
+          // legacy stash wrapper persisted; storage round-trips them.
+          await this.ctx.storage.put(snapshotKey, entry.initial);
+          try {
+            const value = await this.keepAliveWhile(() =>
+              this._withFiberStash(
+                {
+                  id: nonce,
+                  signal,
+                  stash: (data) =>
+                    void this.ctx.storage.put(snapshotKey, entry.wrap(data))
+                },
+                () => entry.run()
+              )
+            );
+            entry.settle.resolve(value);
+          } catch (error) {
+            entry.settle.reject(error);
+            throw error;
+          } finally {
+            void this.ctx.storage.delete(snapshotKey);
+          }
+          return undefined;
+        }
+      );
     });
   }
 
   /**
-   * The messenger-reply Fiber definition. A live webhook reply executes as
-   * one journaled step through the runtime's closure registry; an unclean
-   * interruption is recovered on wake by the same
-   * `ThinkMessengerRuntime.handleFiberRecovery` the legacy scan used, with
-   * re-entry checkpoints persisted in host storage because capability runs
-   * have no legacy ledger row to resolve.
+   * The messenger-reply Task definition. A live webhook reply executes as
+   * one journaled step through the runtime's closure registry, persisting
+   * its re-entry snapshot in host storage; a replay whose closure is gone
+   * is recovered on wake by the same
+   * `ThinkMessengerRuntime.handleFiberRecovery` the legacy scan used.
    */
   private _registerMessengerReplyFiberDefinition(): void {
-    this._registerInternalTaskDefinition(MESSENGER_REPLY_TASK_DEFINITION, {
-      run: async (input, step) => {
+    this._registerInternalTaskDefinition(
+      MESSENGER_REPLY_TASK_DEFINITION,
+      async (input, step) => {
         const { nonce } = input as { nonce: string };
         await step.do(
           "deliver",
           { retries: { limit: 1 }, timeout: "1 day" },
-          async ({ checkpoint, signal }) => {
+          async ({ signal }) => {
             const runtime = this._messengerRuntime;
             if (!runtime) {
               throw new Error("Messenger runtime is unavailable");
             }
+            const runId = `msgr_${nonce}`;
+            const persistKey = `__cf_messenger_recovery:${runId}`;
+            if (!runtime.hasLiveReply(nonce)) {
+              // Replay after an unclean interruption: recover through the
+              // runtime seam, preferring the snapshot a prior attempt (live
+              // or recovering) persisted before being interrupted itself.
+              const persisted = await this.ctx.storage.get(persistKey);
+              const createdAt =
+                (await this.tasks.get(runId))?.createdAt ?? Date.now();
+              const ctx: FiberRecoveryContext = {
+                id: runId,
+                name: MESSENGER_REPLY_FIBER_NAME,
+                snapshot: (persisted ?? null) as unknown,
+                createdAt,
+                recoveryReason: "interrupted"
+              };
+              await runtime.handleFiberRecovery(ctx, {
+                persistRecoverySnapshot: async (snapshot) => {
+                  await this.ctx.storage.put(persistKey, snapshot);
+                }
+              });
+              await this.ctx.storage.delete(persistKey);
+              return undefined;
+            }
             await runtime.executeLiveReply(nonce, {
-              id: nonce,
+              id: runId,
               signal,
-              stash: (data) =>
-                checkpoint(data as Parameters<typeof checkpoint>[0]),
+              stash: (data) => void this.ctx.storage.put(persistKey, data),
               snapshot: null
             });
+            await this.ctx.storage.delete(persistKey);
             return undefined;
           }
         );
-      },
-      recover: async (interruption) => {
-        const runtime = this._messengerRuntime;
-        if (!runtime) {
-          return {
-            action: "fail" as const,
-            error: new Error("Messenger runtime is unavailable")
-          };
-        }
-        // A prior recovery attempt may have advanced the reply and persisted
-        // its checkpoint here before being interrupted itself; prefer it
-        // over the lost attempt's step checkpoint.
-        const persistKey = `__cf_messenger_recovery:${interruption.runId}`;
-        const persisted = await this.ctx.storage.get(persistKey);
-        const ctx: FiberRecoveryContext = {
-          id: interruption.runId,
-          name: MESSENGER_REPLY_FIBER_NAME,
-          snapshot: (persisted ??
-            interruption.interruptedStep?.checkpoint ??
-            null) as unknown,
-          createdAt: interruption.createdAt,
-          recoveryReason: "interrupted"
-        };
-        await runtime.handleFiberRecovery(ctx, {
-          persistRecoverySnapshot: async (snapshot) => {
-            await this.ctx.storage.put(persistKey, snapshot);
-          }
-        });
-        await this.ctx.storage.delete(persistKey);
-        return { action: "complete" as const, result: undefined };
       }
-    });
+    );
   }
 
   /**
@@ -4652,6 +4647,7 @@ export class Think<
       MESSENGER_REPLY_TASK_DEFINITION,
       { nonce: input.nonce },
       {
+        runId: `msgr_${input.nonce}`,
         idempotencyKey: input.idempotencyKey,
         metadata: input.metadata as Record<
           string,

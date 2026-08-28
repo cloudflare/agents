@@ -25,30 +25,20 @@ export type TaskValue = TaskJson | undefined | void;
 /**
  * Constraint for a Tasks definitions map: named handlers invoked from the
  * beginning on every execution attempt, with completed steps returning
- * journaled results instead of running again. A definition is either a bare
- * run handler (unclean interruption replays it automatically) or a
- * `{ run, recover }` pair whose recovery callback owns the interruption
- * decision instead.
+ * journaled results instead of running again. An unclean interruption —
+ * process loss mid-attempt — replays the handler the same way; durable
+ * progress lives in the step journal and in whatever durable state the
+ * handler wrote (a stream's cursor, an idempotent external write), so
+ * handlers resume from evidence instead of receiving a recovery callback.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export type TaskHandlers = Record<
   string,
-  // Input and interruption parameters are `never` so any concretely-typed
-  // definition satisfies the constraint under contravariance; each
-  // definition's real input type is recovered with `TaskInput`.
-  | ((input: never, step: TaskStep) => TaskValue | Promise<TaskValue>)
-  | {
-      readonly run: (
-        input: never,
-        step: TaskStep
-      ) => TaskValue | Promise<TaskValue>;
-      readonly recover: (
-        interruption: never
-      ) =>
-        | TaskRecoveryDecision<TaskValue>
-        | Promise<TaskRecoveryDecision<TaskValue>>;
-    }
+  // The input parameter is `never` so any concretely-typed definition
+  // satisfies the constraint under contravariance; each definition's real
+  // input type is recovered with `TaskInput`.
+  (input: never, step: TaskStep) => TaskValue | Promise<TaskValue>
 >;
 
 /**
@@ -61,18 +51,7 @@ export type TaskHandlers = Record<
  */
 export type TaskCallbacks = Record<
   string,
-  | ((input: unknown, step: TaskStep) => TaskValue | Promise<TaskValue>)
-  | {
-      readonly run: (
-        input: unknown,
-        step: TaskStep
-      ) => TaskValue | Promise<TaskValue>;
-      readonly recover: (
-        interruption: TaskInterruption<unknown>
-      ) =>
-        | TaskRecoveryDecision<TaskValue>
-        | Promise<TaskRecoveryDecision<TaskValue>>;
-    }
+  (input: unknown, step: TaskStep) => TaskValue | Promise<TaskValue>
 >;
 
 /**
@@ -80,99 +59,25 @@ export type TaskCallbacks = Record<
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type TaskInput<Handler> = Handler extends {
-  run: (input: infer Input, ...rest: never[]) => unknown;
-}
+export type TaskInput<Handler> = Handler extends (
+  input: infer Input,
+  ...rest: never[]
+) => unknown
   ? Input
-  : Handler extends (input: infer Input, ...rest: never[]) => unknown
-    ? Input
-    : never;
+  : never;
 
 /**
  * The settled output type a registered Task definition produces.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type TaskOutput<Handler> = Handler extends {
-  run: (...args: never[]) => infer Output;
-}
+export type TaskOutput<Handler> = Handler extends (
+  ...args: never[]
+) => infer Output
   ? Awaited<Output> extends TaskValue
     ? Awaited<Output>
     : never
-  : Handler extends (...args: never[]) => infer Output
-    ? Awaited<Output> extends TaskValue
-      ? Awaited<Output>
-      : never
-    : never;
-
-/**
- * The interrupted step a recovery callback may reconcile against: the `do`
- * step a lost attempt left mid-execution, or `null` when interruption
- * happened between named steps.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export interface TaskInterruptedStep {
-  readonly name: string;
-  readonly kind: "do";
-  /** One-based attempt number the lost execution had claimed. */
-  readonly attempt: number;
-  /** Stable external deduplication key, identical across attempts. */
-  readonly idempotencyKey: string;
-  /** Last checkpoint the lost attempt wrote, or `undefined` if none. */
-  readonly checkpoint: TaskValue;
-  readonly startedAt: number;
-}
-
-/**
- * Context passed to a definition's `recover` callback after an unclean
- * interruption — an execution attempt that was claimed but never settled.
- * Clean step failures never reach recovery; the retry policy handles them.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export interface TaskInterruption<Input> {
-  readonly runId: string;
-  readonly definition: string;
-  readonly input: Readonly<Input>;
-  /** Attempts the run had made when it was interrupted. */
-  readonly attempt: number;
-  readonly createdAt: number;
-  /** When the lost attempt last persisted durable progress. */
-  readonly interruptedAt: number;
-  readonly metadata: Readonly<Record<string, TaskJson>> | null;
-  readonly interruptedStep: TaskInterruptedStep | null;
-  /** Aborted when the run is cancelled while recovery executes. */
-  readonly signal: AbortSignal;
-}
-
-/**
- * What a recovery callback decided about an interrupted run. Recovery
- * callbacks must be idempotent: recovery itself can be interrupted and is
- * invoked again on the next wake.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export type TaskRecoveryDecision<Output extends TaskValue = TaskValue> =
-  | {
-      /** Replay the run handler. Completed steps stay memoized. */
-      action: "replay";
-      /** Optional future replay time. Omit for immediate replay. */
-      at?: number | Date;
-    }
-  | {
-      /** Settle the run without replaying its handler. */
-      action: "complete";
-      result: Output;
-    }
-  | {
-      action: "fail";
-      error: unknown;
-    }
-  | {
-      action: "cancel";
-      reason?: string;
-    };
+  : never;
 
 /**
  * Per-attempt context passed to a `step.do()` callback.
@@ -191,13 +96,6 @@ export interface TaskStepAttempt {
 
   /** Aborted on cancellation or when this attempt's timeout elapses. */
   readonly signal: AbortSignal;
-
-  /**
-   * Replace this step's recovery checkpoint. The write is synchronous
-   * against the owning Durable Object's SQLite database; a later `recover`
-   * callback reads it from `interruptedStep.checkpoint`.
-   */
-  checkpoint(value: TaskValue): void;
 }
 
 /**
@@ -267,13 +165,12 @@ export type TaskRunState =
   | "pending"
   | "running"
   | "waiting"
-  | "recovering"
   | "completed"
   | "failed"
   | "cancelled";
 
 /** Why a waiting run is waiting. */
-export type TaskWaitReason = "sleep" | "retry" | "recovery";
+export type TaskWaitReason = "sleep" | "retry";
 
 /** Safe projection of an error retained with a failed run. */
 export interface TaskError {
@@ -351,16 +248,6 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "recovering";
-      /** The step the lost attempt left mid-execution, if any. */
-      interruptedStep: string | null;
-      attempt: number;
-      createdAt: number;
-      metadata?: Record<string, TaskJson>;
-    }
-  | {
-      runId: string;
-      definition: string;
       state: "completed";
       result: Output;
       createdAt: number;
@@ -425,7 +312,6 @@ export type TaskRunRow = {
   idempotency_key: string | null;
   retain: number;
   attempt: number;
-  recovery_attempt: number;
   generation: string | null;
   next_at: number | null;
   wait_reason: TaskWaitReason | null;
@@ -447,7 +333,6 @@ export type TaskStepRow = {
   error_name: string | null;
   error_message: string | null;
   attempt: number;
-  checkpoint: string | null;
   next_at: number | null;
   created_at: number;
   started_at: number | null;

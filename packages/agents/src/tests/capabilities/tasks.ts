@@ -1,11 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
-import {
-  Tasks,
-  NonRetryableError,
-  type TaskInterruption,
-  type TaskStep
-} from "../../tasks";
+import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
 import { Scheduler } from "../../schedules";
 
 /**
@@ -29,16 +24,19 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   failuresBeforeSuccess = 0;
   /** Monotonic counter proving handlers re-ran from the top on replay. */
   statusCounter = 0;
-  /** Recovery invocations, recorded as definition:input:step:checkpoint. */
-  readonly recoveryCalls: string[] = [];
-  /** What the guarded definition's recover callback decides. */
-  recoveryMode:
-    | "complete"
-    | "replay"
-    | "replay-later"
-    | "fail"
-    | "cancel"
-    | "explode" = "complete";
+  /** Guarded handler entries, recorded as entry:input:interrupted-step. */
+  readonly guardedEntries: string[] = [];
+
+  /** The step a lost attempt left 'running', read at handler entry. */
+  interruptedStepProbe(): string {
+    const rows = [
+      ...this.ctx.storage.sql.exec(
+        `SELECT step_name FROM cf_agents_task_steps
+         WHERE state = 'running' ORDER BY started_at DESC LIMIT 1`
+      )
+    ] as Array<{ step_name: string }>;
+    return rows[0]?.step_name ?? "none";
+  }
 
   readonly tasks = new Tasks({
     definitions: {
@@ -158,63 +156,36 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
       },
 
       /**
-       * A definition with a recovery callback: unclean interruption invokes
-       * `recover` (behavior selected by `recoveryMode`) instead of replaying;
-       * clean step failures follow the ordinary retry policy.
+       * Observes replay after unclean interruption: a reclaimed run
+       * re-executes from the top, journaled steps short-circuit, and the
+       * handler records each entry so tests can prove replay semantics.
        */
-      guarded: {
-        run: async (input: { label: string }, step: TaskStep) => {
-          const first = await step.do("g-first", () => {
-            this.stepRuns.push("guarded:first");
-            return `g:${input.label}`;
-          });
-          await step.do(
-            "g-second",
-            { retries: { limit: 2, delay: "1 minute" } },
-            () => {
-              this.stepRuns.push("guarded:second");
-              if (this.failuresBeforeSuccess > 0) {
-                this.failuresBeforeSuccess -= 1;
-                throw new Error("second failed cleanly");
-              }
-              return "s";
+      guarded: async (input: { label: string }, step: TaskStep) => {
+        this.guardedEntries.push(
+          `entry:${input.label}:${this.interruptedStepProbe()}`
+        );
+        const first = await step.do("g-first", () => {
+          this.stepRuns.push("guarded:first");
+          return `g:${input.label}`;
+        });
+        await step.do(
+          "g-second",
+          { retries: { limit: 2, delay: "1 minute" } },
+          () => {
+            this.stepRuns.push("guarded:second");
+            if (this.failuresBeforeSuccess > 0) {
+              this.failuresBeforeSuccess -= 1;
+              throw new Error("second failed cleanly");
             }
-          );
-          return `run-done:${first}`;
-        },
-        recover: async (interruption: TaskInterruption<{ label: string }>) => {
-          this.recoveryCalls.push(
-            `${interruption.definition}:${interruption.input.label}:` +
-              `${interruption.interruptedStep?.name ?? "none"}:` +
-              `${JSON.stringify(interruption.interruptedStep?.checkpoint ?? null)}`
-          );
-          switch (this.recoveryMode) {
-            case "complete":
-              return { action: "complete" as const, result: "recovered" };
-            case "replay":
-              return { action: "replay" as const };
-            case "replay-later":
-              return { action: "replay" as const, at: Date.now() + 60_000 };
-            case "fail":
-              return {
-                action: "fail" as const,
-                error: new Error("recover says fail")
-              };
-            case "cancel":
-              return {
-                action: "cancel" as const,
-                reason: "recover says cancel"
-              };
-            case "explode":
-              throw new Error("recover exploded");
+            return "s";
           }
-        }
+        );
+        return `run-done:${first}`;
       },
 
-      /** Writes a step checkpoint for later recovery inspection. */
+      /** A single journaled step, for replay-memoization assertions. */
       checkpointing: async (_input: undefined, step: TaskStep) => {
-        await step.do("mark", ({ checkpoint }) => {
-          checkpoint({ phase: "submitted" });
+        await step.do("mark", () => {
           this.stepRuns.push("checkpointing:mark");
           return "ok";
         });
@@ -339,24 +310,20 @@ export function seedTaskStep(
     readonly result?: unknown;
     readonly attempt?: number;
     readonly nextAt?: number;
-    readonly checkpoint?: unknown;
   }
 ): void {
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_agents_task_steps
-       (run_id, step_name, kind, state, result, attempt, checkpoint, next_at,
+       (run_id, step_name, kind, state, result, attempt, next_at,
         created_at, started_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     options.runId,
     options.name,
     options.kind,
     options.state,
     options.result === undefined ? null : JSON.stringify(options.result),
     options.attempt ?? (options.state === "waiting" ? 1 : 0),
-    options.checkpoint === undefined
-      ? null
-      : JSON.stringify(options.checkpoint),
     options.nextAt ?? null,
     now,
     now,

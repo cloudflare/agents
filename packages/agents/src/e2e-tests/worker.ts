@@ -6,7 +6,7 @@
  * happens quickly in tests instead of waiting the default 30s.
  */
 import { Agent, callable, routeAgentRequest } from "agents";
-import type { TaskHandlers, TaskInterruption, TaskStep } from "agents/tasks";
+import type { TaskHandlers, TaskStep } from "agents/tasks";
 import { Streams } from "agents/streams";
 import type {
   FiberInspection,
@@ -809,31 +809,27 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
       return { totalSteps: input.totalSteps };
     },
 
-    guardedSteps: {
-      run: async (input: { totalSteps: number }, step: TaskStep) => {
-        for (let i = 0; i < input.totalSteps; i++) {
-          await step.do(`step:${i}`, async ({ checkpoint }) => {
-            checkpoint({ lastStarted: i });
-            await fiberSleep(1000);
-            return i;
-          });
-        }
-        return "ran-to-completion";
-      },
-      recover: async (
-        interruption: TaskInterruption<{ totalSteps: number }>
-      ) => {
+    guardedSteps: async (input: { totalSteps: number }, step: TaskStep) => {
+      // Replay-entry evidence: the step a lost attempt left mid-execution,
+      // read from the journal before any step re-executes.
+      const interrupted = this.sql<{ step_name: string }>`
+        SELECT step_name FROM cf_agents_task_steps
+        WHERE run_id = 'e2e-guarded' AND state = 'running'
+        ORDER BY started_at DESC LIMIT 1
+      `[0]?.step_name;
+      if (interrupted !== undefined) {
         this.sql`
-          INSERT INTO e2e_task_recoveries
-            (run_id, interrupted_step, checkpoint_json, recovered_at)
-          VALUES
-            (${interruption.runId},
-             ${interruption.interruptedStep?.name ?? null},
-             ${JSON.stringify(interruption.interruptedStep?.checkpoint ?? null)},
-             ${Date.now()})
+          INSERT INTO e2e_task_recoveries (run_id, interrupted_step, recovered_at)
+          VALUES ('e2e-guarded', ${interrupted}, ${Date.now()})
         `;
-        return { action: "complete" as const, result: "recovered-e2e" };
       }
+      for (let i = 0; i < input.totalSteps; i++) {
+        await step.do(`step:${i}`, async () => {
+          await fiberSleep(1000);
+          return i;
+        });
+      }
+      return "ran-to-completion";
     }
   } satisfies TaskHandlers;
 
@@ -848,7 +844,6 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
       CREATE TABLE IF NOT EXISTS e2e_task_recoveries (
         run_id TEXT NOT NULL,
         interrupted_step TEXT,
-        checkpoint_json TEXT,
         recovered_at INTEGER NOT NULL
       )
     `;
@@ -898,14 +893,12 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
   getRecoveries(): Array<{
     run_id: string;
     interrupted_step: string | null;
-    checkpoint_json: string | null;
   }> {
     return this.sql<{
       run_id: string;
       interrupted_step: string | null;
-      checkpoint_json: string | null;
     }>`
-      SELECT run_id, interrupted_step, checkpoint_json
+      SELECT run_id, interrupted_step
       FROM e2e_task_recoveries
       ORDER BY recovered_at ASC
     `;
@@ -916,9 +909,9 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
 
 /**
  * Proves the Tasks + Streams composition across a real process kill: a task
- * produces 1s-spaced chunks into a durable stream while checkpointing the
- * cursor; after SIGKILL + restart, the recover callback reads the stream's
- * durable status and finalizes from exactly the chunks that survived.
+ * produces 1s-spaced chunks into a durable stream; after SIGKILL + restart,
+ * the replayed producer resumes from the stream's durable cursor — exactly
+ * the chunks that survived — and finishes without duplicating any.
  */
 export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
   static options = { keepAliveIntervalMs: 2_000 };
@@ -933,46 +926,29 @@ export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
   }
 
   override readonly taskDefinitions = {
-    generate: {
-      run: async (
-        input: { streamId: string; total: number },
-        step: TaskStep
-      ) => {
-        return step.do("stream", async ({ checkpoint }) => {
-          const stream = await this.streams.open(input.streamId);
-          for (let i = stream.cursor; i < input.total; i++) {
-            await fiberSleep(1000);
-            stream.append({ i });
-            checkpoint({ streamId: input.streamId, cursor: stream.cursor });
-          }
-          stream.close();
-          return { streamId: input.streamId, cursor: input.total };
-        });
-      },
-      recover: async (
-        interruption: TaskInterruption<{ streamId: string; total: number }>
-      ) => {
-        const checkpoint = (interruption.interruptedStep?.checkpoint ??
-          null) as { streamId: string; cursor: number } | null;
-        if (!checkpoint) return { action: "replay" as const };
-        const status = await this.streams.status(checkpoint.streamId);
-        this.sql`
-          INSERT INTO e2e_stream_recoveries
-            (stream_id, stream_state, stream_cursor, checkpoint_cursor, recovered_at)
-          VALUES
-            (${checkpoint.streamId}, ${status?.state ?? null},
-             ${status?.cursor ?? -1}, ${checkpoint.cursor}, ${Date.now()})
-        `;
-        const writer = await this.streams.open(checkpoint.streamId);
-        writer.close();
-        return {
-          action: "complete" as const,
-          result: {
-            streamId: checkpoint.streamId,
-            cursor: status?.cursor ?? 0
-          }
-        };
-      }
+    generate: async (
+      input: { streamId: string; total: number },
+      step: TaskStep
+    ) => {
+      return step.do("stream", async () => {
+        const stream = await this.streams.open(input.streamId);
+        if (stream.cursor > 0) {
+          // Replay after interruption: the stream's durable cursor is the
+          // recovery evidence, and production resumes exactly there.
+          this.sql`
+            INSERT INTO e2e_stream_recoveries
+              (stream_id, stream_state, stream_cursor, recovered_at)
+            VALUES
+              (${input.streamId}, 'streaming', ${stream.cursor}, ${Date.now()})
+          `;
+        }
+        for (let i = stream.cursor; i < input.total; i++) {
+          await fiberSleep(1000);
+          stream.append({ i });
+        }
+        stream.close();
+        return { streamId: input.streamId, cursor: input.total };
+      });
     }
   } satisfies TaskHandlers;
 
@@ -982,7 +958,6 @@ export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
         stream_id TEXT NOT NULL,
         stream_state TEXT,
         stream_cursor INTEGER NOT NULL,
-        checkpoint_cursor INTEGER NOT NULL,
         recovered_at INTEGER NOT NULL
       )
     `;
@@ -1031,14 +1006,12 @@ export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
   getRecoveries(): Array<{
     stream_state: string | null;
     stream_cursor: number;
-    checkpoint_cursor: number;
   }> {
     return this.sql<{
       stream_state: string | null;
       stream_cursor: number;
-      checkpoint_cursor: number;
     }>`
-      SELECT stream_state, stream_cursor, checkpoint_cursor
+      SELECT stream_state, stream_cursor
       FROM e2e_stream_recoveries ORDER BY recovered_at ASC
     `;
   }

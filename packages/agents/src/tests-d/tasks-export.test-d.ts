@@ -4,9 +4,7 @@ import {
   Tasks,
   NonRetryableError,
   type Task,
-  type TaskInterruption,
   type TaskReceipt,
-  type TaskRecoveryDecision,
   type TaskRunSnapshot,
   type TaskStep,
   type TaskValue
@@ -58,31 +56,15 @@ object.tasks.handle("unknownDefinition");
 object.tasks.get("task_x") satisfies Promise<TaskRunSnapshot<TaskValue> | null>;
 object.tasks.cancel("task_x", "done") satisfies Promise<boolean>;
 
-// A definition may pair its handler with a recovery callback; input and
-// output stay typed through the object form.
+// Handlers with idempotent external writes carry replay safety themselves.
 const guarded = new Tasks({
   definitions: {
-    payment: {
-      run: async (input: { orderId: string }, step: TaskStep) => {
-        const captured = await step.do("capture", ({ checkpoint }) => {
-          checkpoint({ phase: "submitted" });
-          return input.orderId.length;
-        });
-        return { captured };
-      },
-      recover: async (
-        interruption: TaskInterruption<{ orderId: string }>
-      ): Promise<TaskRecoveryDecision<{ captured: number }>> => {
-        interruption.input.orderId satisfies string;
-        interruption.interruptedStep?.checkpoint satisfies TaskValue;
-        interruption.interruptedStep?.idempotencyKey satisfies
-          | string
-          | undefined;
-        if (interruption.interruptedStep === null) {
-          return { action: "replay" };
-        }
-        return { action: "complete", result: { captured: 1 } };
-      }
+    payment: async (input: { orderId: string }, step: TaskStep) => {
+      const captured = await step.do("capture", ({ idempotencyKey }) => {
+        idempotencyKey satisfies string;
+        return input.orderId.length;
+      });
+      return { captured };
     }
   }
 });
@@ -91,7 +73,7 @@ guarded.handle("payment") satisfies Task<
   { orderId: string },
   { captured: number }
 >;
-// @ts-expect-error the object form checks the input shape too.
+// @ts-expect-error the input shape is checked here too.
 guarded.run("payment", { orderId: 1 });
 
 // A Tasks constructed without definitions is string-typed: any name
