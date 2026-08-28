@@ -8,7 +8,18 @@ base class.
 export class DoAgent extends DurableObject<Env> {
   private readonly activity = new ActivityCapability(this.ctx.storage);
   private wake: { id: string; startedAt: string } | undefined;
-  readonly lifecycle = Lifecycle.install(this).use(this.activity);
+
+  // WebSockets are opt-in: connections live in the WebSockets capability.
+  private readonly webSockets = new WebSockets({
+    handlers: {
+      onConnect: (connection) => connection.send("connected"),
+      onMessage: (connection, message) => connection.send(`echo:${message}`)
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.activity)
+    .use(this.webSockets);
 
   onStart() {
     // Runs once whenever this Durable Object enters memory, including after a
@@ -55,10 +66,12 @@ curl http://localhost:8787/agents/do-agent/demo
 curl http://localhost:8787/agents/do-agent/demo/stats
 ```
 
-Connect a WebSocket to `ws://localhost:8787/agents/do-agent/demo`. The object
-sends a connection snapshot and echoes each message. The socket uses Cloudflare's
-WebSocket Hibernation API, so it remains connected while the Durable Object can
-leave memory.
+Connect a WebSocket to `ws://localhost:8787/agents/do-agent/demo`. The
+`WebSockets` capability claims the upgrade, sends a connection snapshot, and
+echoes each message. The socket uses Cloudflare's WebSocket Hibernation API, so
+it remains connected while the Durable Object can leave memory. Lifecycle itself
+does not model WebSockets — without the capability installed, upgrades are
+declined.
 
 Each normal HTTP request schedules an alarm five seconds later. The capability
 records the alarm before the object's `onAlarm` callback runs.

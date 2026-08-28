@@ -5,8 +5,9 @@
 import type {
   Connection,
   ConnectionSetStateFn,
-  ConnectionState
-} from "./types";
+  ConnectionState,
+  LifecycleSockets
+} from "../lifecycle";
 
 if (!("OPEN" in WebSocket)) {
   const WebSocketStatus = {
@@ -182,9 +183,9 @@ export const createConnection = (ws: WebSocket | Connection): Connection => {
 
 class ConnectionIterator<T> implements IterableIterator<Connection<T>> {
   private index = 0;
-  private sockets: WebSocket[] | undefined;
+  #sockets: WebSocket[] | undefined;
   constructor(
-    private state: DurableObjectState,
+    private sockets: LifecycleSockets,
     private tag?: string
   ) {}
 
@@ -194,7 +195,7 @@ class ConnectionIterator<T> implements IterableIterator<Connection<T>> {
 
   next(): IteratorResult<Connection<T>, number | undefined> {
     const sockets =
-      this.sockets ?? (this.sockets = this.state.getWebSockets(this.tag));
+      this.#sockets ?? (this.#sockets = this.sockets.get(this.tag));
 
     let socket: WebSocket;
     while ((socket = sockets[this.index++])) {
@@ -247,11 +248,11 @@ function prepareTags(connectionId: string, userTags: string[]): string[] {
 
 /** The platform-backed manager for hibernating WebSockets. */
 export class ConnectionManager<TState = unknown> {
-  constructor(private controller: DurableObjectState) {}
+  constructor(private controller: LifecycleSockets) {}
 
   getConnection<T = TState>(id: string) {
     // TODO: Should we cache the connections?
-    const sockets = this.controller.getWebSockets(id);
+    const sockets = this.controller.get(id);
     const matching = sockets.filter((ws) => {
       return tryGetManagedWebSocketMeta(ws)?.id === id;
     });
@@ -272,7 +273,7 @@ export class ConnectionManager<TState = unknown> {
   accept(connection: Connection, options: { tags: string[] }) {
     const tags = prepareTags(connection.id, options.tags);
 
-    this.controller.acceptWebSocket(connection, tags);
+    this.controller.accept(connection, tags);
     attachments.set(connection, {
       __pk: {
         id: connection.id,
