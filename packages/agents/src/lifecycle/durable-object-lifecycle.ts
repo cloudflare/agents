@@ -771,15 +771,11 @@ export class Lifecycle<
     if (owner === HOST_JOB_CAPABILITY) {
       const host = this.#host;
       if (!host.onJob) return undefined;
+      // No host onJobError: a host job's terminal application failure
+      // completes it, and the host re-derives its jobs from durable state.
       return {
         onJob: async (context) =>
-          runInLifecycleHostContext({ host }, () => host.onJob!(context)),
-        onJobError: host.onJobError
-          ? async (context, error) =>
-              runInLifecycleHostContext({ host }, () =>
-                host.onJobError!(context, error)
-              )
-          : undefined
+          runInLifecycleHostContext({ host }, () => host.onJob!(context))
       };
     }
     const capability = await this.#capabilityRunner.findById(owner);

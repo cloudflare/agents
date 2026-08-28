@@ -24,10 +24,6 @@ export interface LifecycleObject<
   onJob?(
     context: LifecycleJobContext
   ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void>;
-  onJobError?(
-    context: LifecycleJobContext,
-    error: unknown
-  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void>;
   onAlarmMemoryLimit?(context: {
     readonly sealed: boolean;
     readonly nextTime?: number;

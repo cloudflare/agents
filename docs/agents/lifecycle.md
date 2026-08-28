@@ -199,7 +199,9 @@ while it is pending — Agent's deferred destroy uses this so a condemned
 object cannot be kept alive by other work. A `singleflight` job is skipped
 while a previous run is still in flight, until it crosses its hung timeout.
 The host pushes jobs through `lifecycle.jobs` and implements the same
-`onJob()`/`onJobError()` hooks. Capabilities do not depend on Scheduler or
+`onJob()` hook (a host job's terminal failure completes it; the host
+re-derives its jobs from durable state). Capabilities do not depend on
+Scheduler or
 on each other merely to receive wakes.
 
 ## Capability events

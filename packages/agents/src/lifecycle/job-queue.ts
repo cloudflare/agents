@@ -17,7 +17,7 @@ import { SqlError } from "../sql-error";
 export const HOST_JOB_CAPABILITY = "host";
 
 /** Seconds before an in-flight single-flight job is treated as hung. */
-export const DEFAULT_HUNG_TIMEOUT_SECONDS = 30;
+const DEFAULT_HUNG_TIMEOUT_SECONDS = 30;
 
 /** One durable job in the Lifecycle queue. */
 export type LifecycleJob = {

@@ -83,9 +83,10 @@ type LifecycleJobOutcome =
   | "yield";                  // yielded: leave due, wake again immediately
 ```
 
-The host implements the same hooks for host-owned jobs (dispatched inside
-the host invocation boundary); capability jobs dispatch outside ambient host
-context. Host `onAlarm()` survives: it runs once per alarm invocation after
+The host implements `onJob` for host-owned jobs (dispatched inside the
+host invocation boundary; there is no host `onJobError` — a host job's
+terminal failure completes it, and the host re-derives its jobs from
+durable state); capability jobs dispatch outside ambient host context. Host `onAlarm()` survives: it runs once per alarm invocation after
 due jobs are driven. Host `getNextAlarm()` is removed.
 
 ## The event loop
