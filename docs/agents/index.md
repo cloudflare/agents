@@ -142,6 +142,7 @@ The differentiator is not "we have durable state" — it is what happens when a 
 
 - [Durable Object Lifecycle](./lifecycle.md) - Compose reusable durable components outside the Agent base class
 - [Tasks](./tasks.md) - Durable, replayable background work with journaled steps and durable sleeps (experimental)
+- [Streams](./streams.md) - Durable incremental output: chunk log, cursor, replay-then-tail reads (experimental)
 - TODO: [API Reference](./api-reference.md) - Complete API documentation
 - TODO: [FAQ / How is this different from Durable Objects?](./faq.md)
 - TODO: [Resources & Further Reading](./resources.md)

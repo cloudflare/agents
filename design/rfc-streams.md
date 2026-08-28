@@ -1,6 +1,17 @@
 # RFC: Streams — a durable incremental-output capability
 
-Status: proposed
+Status: accepted
+
+> Accepted with the open questions settled for the first release: cursors
+> are monotonic sequence numbers (0-based; a read's `from` is inclusive and
+> `status().cursor` is the next sequence to be assigned); live fanout is
+> in-isolate only, which is sufficient because a Durable Object executes in
+> one isolate at a time and `read()` accepts an abort signal; producer
+> fencing on `open()` is deferred (terminal-state fences on every append
+> cover the realistic races); retention is explicit `delete()` in phase 1
+> with age-based sweeping deferred until an alarm contribution is justified;
+> and messenger reply snapshots stay on Task checkpoints. Because Streams
+> needs no alarm, the capability also works on facets.
 
 ## The problem
 
@@ -154,10 +165,11 @@ could be an adapter.
 5. Does channel delivery (Think messengers) adopt Streams for its reply
    snapshots, or stay on checkpoints alone?
 
-## Decision requested
+## Decision
 
-Approve the direction: one `Streams` capability owning the durable chunk
-log, cursor, replay-then-tail reads, and terminal status; composed with
-Tasks through checkpointed cursors and `status()` evidence; populated by
-extracting chat's resumable-stream store with the chat suites as the parity
-ratchet.
+Approved: one `Streams` capability owning the durable chunk log, cursor,
+replay-then-tail reads, and terminal status; composed with Tasks through
+checkpointed cursors and `status()` evidence. The first PR ships the
+capability, its standalone and Tasks-composed real-DO tests (including a
+process-kill e2e), and a composition example; the chat resumable-stream
+extraction follows with the chat suites as the parity ratchet.

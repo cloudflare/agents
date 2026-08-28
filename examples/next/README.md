@@ -10,6 +10,7 @@ lands.
 | [`lifecycle`](./lifecycle)   | Available | A plain `DurableObject` composed with `Lifecycle` and a reusable capability |
 | [`schedules`](./schedules)   | Available | `Scheduler` installed as a reusable lifecycle capability                    |
 | [`tasks`](./tasks)           | This PR   | Durable replayable `Tasks` installed as a reusable lifecycle capability     |
+| [`streams`](./streams)       | This PR   | Durable `Streams` composed with `Tasks`, served over SSE                    |
 | [`mcp-client`](./mcp-client) | Available | `MCPClientManager` installed as a reusable lifecycle capability             |
 
 Each example is an independent workspace package and should stay focused on one

@@ -7,6 +7,7 @@
  */
 import { Agent, callable, routeAgentRequest } from "agents";
 import type { TaskHandlers, TaskInterruption, TaskStep } from "agents/tasks";
+import { Streams } from "agents/streams";
 import type {
   FiberInspection,
   FiberRecoveryContext as RunFiberRecoveryContext,
@@ -19,6 +20,7 @@ import type { Observability } from "agents/observability";
 type Env = {
   RunFiberTestAgent: DurableObjectNamespace<RunFiberTestAgent>;
   TaskKillTestAgent: DurableObjectNamespace<TaskKillTestAgent>;
+  StreamKillTestAgent: DurableObjectNamespace<StreamKillTestAgent>;
   SubAgentFiberParent: DurableObjectNamespace<SubAgentFiberParent>;
   SubAgentFiberChild: DurableObjectNamespace<SubAgentFiberChild>;
   PoisonRowAgent: DurableObjectNamespace<PoisonRowAgent>;
@@ -906,6 +908,138 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
       SELECT run_id, interrupted_step, checkpoint_json
       FROM e2e_task_recoveries
       ORDER BY recovered_at ASC
+    `;
+  }
+}
+
+// ── StreamKillTestAgent (Tasks + Streams composition under real SIGKILL) ──
+
+/**
+ * Proves the Tasks + Streams composition across a real process kill: a task
+ * produces 1s-spaced chunks into a durable stream while checkpointing the
+ * cursor; after SIGKILL + restart, the recover callback reads the stream's
+ * durable status and finalizes from exactly the chunks that survived.
+ */
+export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  readonly streams = new Streams();
+
+  constructor(ctx: DurableObjectState, env: Record<string, unknown>) {
+    super(ctx, env);
+    // Subclass-owned capabilities install onto the Agent's lifecycle before
+    // it starts — the pattern for composing extra capabilities on an Agent.
+    this.lifecycle.use(this.streams);
+  }
+
+  override readonly taskDefinitions = {
+    generate: {
+      run: async (
+        input: { streamId: string; total: number },
+        step: TaskStep
+      ) => {
+        return step.do("stream", async ({ checkpoint }) => {
+          const stream = await this.streams.open(input.streamId);
+          for (let i = stream.cursor; i < input.total; i++) {
+            await fiberSleep(1000);
+            stream.append({ i });
+            checkpoint({ streamId: input.streamId, cursor: stream.cursor });
+          }
+          stream.close();
+          return { streamId: input.streamId, cursor: input.total };
+        });
+      },
+      recover: async (
+        interruption: TaskInterruption<{ streamId: string; total: number }>
+      ) => {
+        const checkpoint = (interruption.interruptedStep?.checkpoint ??
+          null) as { streamId: string; cursor: number } | null;
+        if (!checkpoint) return { action: "replay" as const };
+        const status = await this.streams.status(checkpoint.streamId);
+        this.sql`
+          INSERT INTO e2e_stream_recoveries
+            (stream_id, stream_state, stream_cursor, checkpoint_cursor, recovered_at)
+          VALUES
+            (${checkpoint.streamId}, ${status?.state ?? null},
+             ${status?.cursor ?? -1}, ${checkpoint.cursor}, ${Date.now()})
+        `;
+        const writer = await this.streams.open(checkpoint.streamId);
+        writer.close();
+        return {
+          action: "complete" as const,
+          result: {
+            streamId: checkpoint.streamId,
+            cursor: status?.cursor ?? 0
+          }
+        };
+      }
+    }
+  } satisfies TaskHandlers;
+
+  onStart(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS e2e_stream_recoveries (
+        stream_id TEXT NOT NULL,
+        stream_state TEXT,
+        stream_cursor INTEGER NOT NULL,
+        checkpoint_cursor INTEGER NOT NULL,
+        recovered_at INTEGER NOT NULL
+      )
+    `;
+  }
+
+  @callable()
+  async startGenerate(streamId: string, total: number): Promise<string> {
+    const receipt = await this.tasks.run(
+      "generate",
+      { streamId, total },
+      { runId: "e2e-stream-gen" }
+    );
+    return receipt.runId;
+  }
+
+  @callable()
+  async getRunState(
+    runId: string
+  ): Promise<{ state: string; result: unknown } | null> {
+    const snapshot = await this.tasks.get(runId);
+    if (!snapshot) return null;
+    return {
+      state: snapshot.state,
+      result: snapshot.state === "completed" ? snapshot.result : null
+    };
+  }
+
+  @callable()
+  async getStreamStatus(
+    streamId: string
+  ): Promise<{ state: string; cursor: number } | null> {
+    const status = await this.streams.status(streamId);
+    return status ? { state: status.state, cursor: status.cursor } : null;
+  }
+
+  @callable()
+  async readAllChunks(streamId: string): Promise<number[]> {
+    const seqs: number[] = [];
+    for await (const chunk of this.streams.read(streamId)) {
+      seqs.push(chunk.seq);
+    }
+    return seqs;
+  }
+
+  @callable()
+  getRecoveries(): Array<{
+    stream_state: string | null;
+    stream_cursor: number;
+    checkpoint_cursor: number;
+  }> {
+    return this.sql<{
+      stream_state: string | null;
+      stream_cursor: number;
+      checkpoint_cursor: number;
+    }>`
+      SELECT stream_state, stream_cursor, checkpoint_cursor
+      FROM e2e_stream_recoveries ORDER BY recovered_at ASC
     `;
   }
 }

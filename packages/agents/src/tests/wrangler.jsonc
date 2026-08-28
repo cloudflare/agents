@@ -49,6 +49,14 @@
         "name": "TaskSchedulerCoexistObject"
       },
       {
+        "class_name": "StreamHarnessObject",
+        "name": "StreamHarnessObject"
+      },
+      {
+        "class_name": "TaskStreamComposeObject",
+        "name": "TaskStreamComposeObject"
+      },
+      {
         "class_name": "PlainMcpClientObject",
         "name": "PlainMcpClientObject"
       },
@@ -388,6 +396,8 @@
         "TaskHarnessObject",
         "TaskBatchHarnessObject",
         "TaskSchedulerCoexistObject",
+        "StreamHarnessObject",
+        "TaskStreamComposeObject",
         "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",

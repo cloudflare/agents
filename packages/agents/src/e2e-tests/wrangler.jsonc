@@ -48,6 +48,10 @@
       {
         "name": "TaskKillTestAgent",
         "class_name": "TaskKillTestAgent"
+      },
+      {
+        "name": "StreamKillTestAgent",
+        "class_name": "StreamKillTestAgent"
       }
     ]
   },
@@ -71,6 +75,10 @@
     {
       "tag": "v4",
       "new_sqlite_classes": ["TaskKillTestAgent"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["StreamKillTestAgent"]
     }
   ]
 }

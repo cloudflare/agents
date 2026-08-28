@@ -24,6 +24,9 @@ per capability, all registered in the shared workers project
   execution from journal hits, `TaskBatchHarnessObject` (alarm batch
   bound), and the `seedTaskRun()` / `seedTaskStep()` /
   `backdateTaskWake()` helpers that fabricate interrupted or due runs.
+- `streams.ts` — `StreamHarnessObject` (Streams as the only capability) and
+  `TaskStreamComposeObject` (the checkpointed-cursor contract with Tasks,
+  including recovery from stream evidence).
 - `mcp-client.ts` — `PlainMcpClientObject` (manager as an installed
   capability); its driver `withMcpHarness()` (in `../shared/mcp-harness.ts`)
   creates per-test managers over shared real storage, simulating hibernation
@@ -46,6 +49,8 @@ Tests mirror source modules (`src/<module>` ↔ `src/tests/<module>`):
   host context, WebSockets, identity, disposal).
 - `../schedules/capability.test.ts` and `../schedules/timing.test.ts` — the
   Scheduler capability contract and its pure timing rules.
+- `../streams/capability.test.ts` — the Streams capability contract and its
+  Tasks composition.
 - `../tasks/capability.test.ts` — the Tasks capability contract: replay
   memoization, interruption reclaim, durable sleeps, cancellation, and alarm
   coexistence.
