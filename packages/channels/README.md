@@ -297,7 +297,7 @@ Durability is a property of how your application uses it.
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | A `dispatchId` stable across redelivery and unaffected by routing       | Deduplicate on it before starting any side effect                           |
 | The Host awaits your callback before the provider is acknowledged       | Hand off durably before returning — a DO RPC, queue send, or workflow start |
-| One provider attempt per `deliver()`, reported honestly                 | Decide whether to retry; `uncertain` may duplicate a real delivery          |
+| One outbound attempt per `deliver()` or `stream()`, reported honestly   | Decide whether to retry; `uncertain` may duplicate a real delivery          |
 | Surfaces are plain JSON you can persist                                 | Keep configured channel keys stable                                         |
 | Decisions arrive as normalized events carrying your own `interactionId` | Own settlement; an interaction id is not an authorization credential        |
 
@@ -305,8 +305,10 @@ Durability is a property of how your application uses it.
 
 - [ ] Approval-link ingress: signing, verification, and a confirmation page, so
       link approvals return through the same normalized path as Slack buttons
-- [ ] Streaming output delivery — see
-      [`design/rfc-channel-streaming.md`](../../design/rfc-channel-streaming.md)
+- [ ] Reader-initiated stream cancellation: Slack's `message_stream_stopped`
+      and Telegram's `stopped_message_generation` should reach the running
+      generation as ordinary ingress, so aborting it errors the stream and
+      each Channel finalizes on the path it already has
 - [ ] More built-in channels
 - [ ] Rendering templates (pretty emails)
 - [ ] Automatic webhook registration

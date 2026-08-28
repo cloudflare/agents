@@ -26,12 +26,15 @@ export type DeliveryFailure = {
 };
 
 /**
- * The result of a direct delivery attempt.
+ * The result of a direct delivery attempt, defined by what reached the reader.
  *
- * `delivered` means the transport accepted the message, not that a person read
- * it. `failed` means the transport confirmed that no delivery occurred; its
- * `retryable` field says whether the same route can be attempted again.
- * `uncertain` means another attempt or route could produce a duplicate.
+ * `delivered` means the whole message reached the reader, not that a person
+ * read it. `failed` means none of it did; its `retryable` field says whether
+ * the same route can be attempted again. `uncertain` means an unknown amount
+ * of the message reached the reader, so another attempt or route could
+ * duplicate content. A stream that ends before its answer is complete is
+ * `uncertain`, and carries a `reference` when the Channel created something
+ * the caller can point at.
  */
 export type DeliveryResult =
   | {
@@ -45,8 +48,50 @@ export type DeliveryResult =
     }
   | {
       status: "uncertain";
+      reference?: string;
       error: DeliveryFailure;
     };
+
+/**
+ * One element of a progressively generated answer.
+ *
+ * The variants describe what an Agent produces, not what a provider renders.
+ * Any Channel may ignore any variant, so `text` alone must always be a
+ * complete answer; a variant carrying meaning `text` does not is a bug in the
+ * variant.
+ */
+export type ChannelChunk =
+  | { type: "text"; text: string }
+  | { type: "reasoning"; text: string }
+  | {
+      type: "tool";
+      name: string;
+      status: "started" | "completed" | "failed";
+      title?: string;
+      detail?: string;
+    }
+  | { type: "source"; url: string; title?: string };
+
+/** The normalized stream shape accepted by `ChannelHost.stream`. */
+export type ChannelChunkSource = ReadableStream<ChannelChunk>;
+
+/** Caller options for one finished delivery. */
+export type ChannelDeliveryOptions = {
+  /** Caller-owned identity for provider idempotency and observability. */
+  delivery?: ChannelDeliveryContext;
+};
+
+/** Caller options for one streamed answer. */
+export type ChannelStreamOptions = {
+  /**
+   * Optional topic. It is an option rather than a chunk because it is known
+   * before the first token, and a Channel usually needs it in its opening
+   * provider call.
+   */
+  title?: string;
+  /** Caller-owned identity for provider idempotency and observability. */
+  delivery?: ChannelDeliveryContext;
+};
 
 /** A caller-owned identity supplied to one provider delivery attempt. */
 export type ChannelDeliveryContext = {
@@ -91,7 +136,12 @@ export type OutboundResolver = {
   deliver(
     surface: ChannelMessageSurface,
     message: ChannelMessage,
-    context?: ChannelDeliveryContext
+    options?: ChannelDeliveryOptions
+  ): Promise<DeliveryResult>;
+  stream(
+    surface: ChannelMessageSurface,
+    chunks: ChannelChunkSource,
+    options?: ChannelStreamOptions
   ): Promise<DeliveryResult>;
   requestApproval(
     surface: ChannelMessageSurface,
@@ -121,7 +171,20 @@ export interface Channel<TRaw = unknown> {
   deliver?(
     surface: ChannelMessageSurface,
     message: ChannelMessage,
-    context?: ChannelDeliveryContext
+    options?: ChannelDeliveryOptions
+  ): Promise<DeliveryResult>;
+  /**
+   * Deliver one progressively generated answer. Absent for Channels that
+   * cannot stream, which the Host serves by collecting and calling `deliver`.
+   *
+   * The Channel owns the consumption loop. It must finalize whether the
+   * stream closed or errored, because a model can fail mid-generation, and it
+   * must not abandon a terminal provider call on error.
+   */
+  stream?(
+    surface: ChannelMessageSurface,
+    chunks: ReadableStream<ChannelChunk>,
+    options: ChannelStreamOptions
   ): Promise<DeliveryResult>;
   requestApproval?(
     surface: ChannelMessageSurface,
