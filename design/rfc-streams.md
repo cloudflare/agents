@@ -59,7 +59,7 @@ const status = await this.streams.status("reply:123");
   happen inside the producer's invocation; in-isolate readers are woken by
   the append itself; external readers hold a connection or replay on
   reconnect. This is also why the capability works on facets. In the
-  composed architecture, the job queue wakes the *producer* (a Task's
+  composed architecture, the job queue wakes the _producer_ (a Task's
   mirror job); the task's step appends; the append wakes readers.
 - **Serving**: `sseResponse(streams, id, { request })` serves the whole
   lifecycle over SSE — each chunk's seq rides the SSE `id:` field so a
@@ -121,7 +121,7 @@ down ~6× and no longer proportional to stored chunks.
 
 1. **The composition contract simplified from checkpoints to cursors.**
    The original contract had the producing step `checkpoint({ streamId,
-   cursor })` and a `recover` callback read `status()` as evidence. When
+cursor })` and a `recover` callback read `status()` as evidence. When
    Tasks' custom recovery was removed (see rfc-fibers.md), the contract
    collapsed to what the producer loop already implied: resume from
    `stream.cursor`, no checkpoint hop, no callback.

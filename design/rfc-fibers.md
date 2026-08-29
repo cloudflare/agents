@@ -41,7 +41,7 @@ registered after startup cannot be resolved on the wake that needs it.)
 ### Execution model
 
 - **Acceptance is durable and idempotent.** `tasks.run(name, input,
-  options)` inserts the run row and returns a receipt without waiting for
+options)` inserts the run row and returns a receipt without waiting for
   terminal state; an existing `runId` or `idempotencyKey` joins the run
   (`accepted: false`) instead of duplicating it.
 - **Replay from the top.** Every execution attempt invokes the handler from
@@ -161,7 +161,7 @@ by using the API rather than reasoning about it:
 
 - **A general work-queue table with leases.** Rejected in the original
   proposal in favor of run-row deadlines plus generation fencing and
-  hang-detection; the Lifecycle queue that later arrived is a *dispatch*
+  hang-detection; the Lifecycle queue that later arrived is a _dispatch_
   mechanism, not a lease manager, and the run row remains authoritative.
 - **Delegating to Cloudflare Workflows.** A separate product for
   cross-service orchestration: runs leave the object, cannot touch its
