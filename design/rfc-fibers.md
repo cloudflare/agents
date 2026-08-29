@@ -88,7 +88,9 @@ retry policy owns it.
 Tasks never touches the physical alarm. Every non-terminal run's
 authoritative `next_at` deadline (acceptance, sleeps, retries, claim
 backstops all write it) is mirrored as one job in the Lifecycle work queue
-— `id = the run id`, so a retime is a same-id push. Wakes dispatch through
+— `id = "task:" + the run id`, so a retime is a same-id push and
+caller-selected run IDs stay inside Tasks' own job namespace. Wakes dispatch
+through
 `onJob`, whose outcome is derived from the run row after execution: the
 row is the single source of truth for whether and when the run wakes
 again, superseding any same-id push made mid-drive. Mirror maintenance

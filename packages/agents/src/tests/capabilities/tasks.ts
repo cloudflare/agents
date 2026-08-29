@@ -283,7 +283,7 @@ export function seedTaskRun(
   storage.sql.exec(
     `INSERT OR REPLACE INTO cf_agents_jobs (id, capability, fn, time)
      VALUES (?, 'tasks', 'wake', ?)`,
-    options.runId,
+    `task:${options.runId}`,
     options.nextAt
   );
 }
@@ -335,7 +335,7 @@ export function backdateTaskWake(
   storage.sql.exec(
     "UPDATE cf_agents_jobs SET time = ? WHERE id = ? AND capability = 'tasks'",
     past,
-    runId
+    `task:${runId}`
   );
   if (stepName !== undefined) {
     storage.sql.exec(

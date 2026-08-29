@@ -358,6 +358,33 @@ describe("Streams capability", () => {
       expect(resumed).not.toContain("id: 2\n");
       expect(resumed).toContain('id: 3\ndata: {"i":3}');
 
+      // A fresh EventSource connection sends no Last-Event-ID header at all;
+      // the documented `{ request }` form must start at chunk 0.
+      const fresh = await readAll(
+        await sseResponse(instance.streams, "sse", {
+          heartbeatMs: 0,
+          request: new Request("https://example.com/sse")
+        })
+      );
+      expect(fresh).toContain('id: 0\ndata: {"i":0}');
+
+      // Without the header, `?from=` picks the start; garbage falls back to 0.
+      const fromParam = await readAll(
+        await sseResponse(instance.streams, "sse", {
+          heartbeatMs: 0,
+          request: new Request("https://example.com/sse?from=2")
+        })
+      );
+      expect(fromParam).not.toContain("id: 1\n");
+      expect(fromParam).toContain('id: 2\ndata: {"i":2}');
+      const garbage = await readAll(
+        await sseResponse(instance.streams, "sse", {
+          heartbeatMs: 0,
+          request: new Request("https://example.com/sse?from=abc")
+        })
+      );
+      expect(garbage).toContain('id: 0\ndata: {"i":0}');
+
       const broken = await instance.streams.open("sse-broken");
       broken.append({ i: 0 });
       broken.error("provider hung up");

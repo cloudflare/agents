@@ -42,13 +42,22 @@ function resumeFrom(options: SSEResponseOptions): number {
   if (options.from !== undefined) return Math.max(0, options.from);
   const request = options.request;
   if (request) {
-    const lastEventId = Number(request.headers.get("Last-Event-ID"));
-    // Last-Event-ID names the last chunk the client received; resume after.
-    if (Number.isInteger(lastEventId) && lastEventId >= 0) {
-      return lastEventId + 1;
+    // A fresh EventSource sends no Last-Event-ID at all; Number(null) is 0,
+    // so the header must be checked for presence before parsing or every
+    // first connection would skip chunk 0.
+    const header = request.headers.get("Last-Event-ID");
+    if (header !== null && header !== "") {
+      const lastEventId = Number(header);
+      // Last-Event-ID names the last chunk the client received; resume after.
+      if (Number.isInteger(lastEventId) && lastEventId >= 0) {
+        return lastEventId + 1;
+      }
     }
-    const fromParam = Number(new URL(request.url).searchParams.get("from"));
-    if (Number.isInteger(fromParam) && fromParam >= 0) return fromParam;
+    const fromParam = new URL(request.url).searchParams.get("from");
+    if (fromParam !== null) {
+      const from = Number(fromParam);
+      if (Number.isInteger(from) && from >= 0) return from;
+    }
   }
   return 0;
 }

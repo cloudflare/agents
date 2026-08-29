@@ -94,6 +94,12 @@ const CLAIM_SLACK_MS = 30_000;
 
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_DEFINITION_NAME_LENGTH = 256;
+/**
+ * Queue-job id prefix for run wakes. Run IDs are caller-selectable, so the
+ * job id namespaces them instead of exposing them verbatim to the shared
+ * job id space.
+ */
+const WAKE_JOB_PREFIX = "task:";
 
 const TERMINAL_STATES: ReadonlySet<TaskRunState> = new Set([
   "completed",
@@ -253,8 +259,20 @@ export class Tasks<
       get: (runId) => this.#snapshot(runId, definition),
       getByIdempotencyKey: (idempotencyKey) =>
         this.#snapshotByKey(idempotencyKey, definition),
-      cancel: (runId, reason) => this.cancel(runId, reason)
+      cancel: (runId, reason) => this.#cancelScoped(runId, definition, reason)
     };
+  }
+
+  /** Cancel through a handle: another definition's run is not visible. */
+  async #cancelScoped(
+    runId: string,
+    definition: string,
+    reason?: string
+  ): Promise<boolean> {
+    await this.lifecycle.ready();
+    const row = this.#store.getRun(runId);
+    if (!row || row.definition !== definition) return false;
+    return this.cancel(runId, reason);
   }
 
   // ── Lifecycle capability hooks ───────────────────────────────────────────
@@ -275,7 +293,7 @@ export class Tasks<
   async onJob(
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
-    const runId = context.job.id;
+    const runId = context.job.id.slice(WAKE_JOB_PREFIX.length);
     if (this.#active.has(runId)) {
       // A live attempt in this isolate; push the claim backstop forward so
       // the due job does not hot-loop the alarm while it works.
@@ -315,10 +333,11 @@ export class Tasks<
 
   /**
    * The queue outcome for one run's wake job, derived from the run row's
-   * authoritative `next_at` after dispatch. This return supersedes any
-   * same-id push made mid-drive (completing a job deletes its row), so the
-   * row is the single source of truth for whether — and when — the run
-   * wakes again.
+   * authoritative `next_at` after dispatch. A same-id `#syncWake` push made
+   * mid-drive supersedes this return at the queue (newer pushes win over
+   * drive results), but both are computed from the same row, so the row is
+   * the single source of truth for whether — and when — the run wakes
+   * again either way.
    */
   #wakeOutcome(runId: string): LifecycleJobOutcome {
     const rows = this.#store.sql<{ next_at: number | null }>`
@@ -332,9 +351,11 @@ export class Tasks<
 
   /**
    * Mirror one run's authoritative deadline into the Lifecycle job queue:
-   * a non-terminal run with a `next_at` gets one job (id = run id, so a
-   * retime is a same-id replace); anything else cancels the mirror. Every
-   * durable mutation of a run's deadline or state funnels through here.
+   * a non-terminal run with a `next_at` gets one job (id = `task:` plus the
+   * run id, so a retime is a same-id replace); anything else cancels the
+   * mirror. The prefix keeps caller-selected run IDs inside Tasks' own job
+   * namespace. Every durable mutation of a run's deadline or state funnels
+   * through here.
    */
   async #syncWake(runId: string): Promise<void> {
     const rows = this.#store.sql<{ next_at: number | null }>`
@@ -343,10 +364,11 @@ export class Tasks<
         AND state IN ('pending', 'waiting', 'running')
     `;
     const next = rows[0]?.next_at;
+    const jobId = `${WAKE_JOB_PREFIX}${runId}`;
     if (typeof next === "number") {
-      await this.lifecycle.jobs.push({ id: runId, fn: "wake", time: next });
+      await this.lifecycle.jobs.push({ id: jobId, fn: "wake", time: next });
     } else {
-      await this.lifecycle.jobs.cancel(runId);
+      await this.lifecycle.jobs.cancel(jobId);
     }
   }
 
@@ -520,6 +542,25 @@ export class Tasks<
             `"${existing.definition}"; refusing to reuse its ` +
             `${options.runId !== undefined ? "run ID" : "idempotency key"} for ` +
             `"${definition}"`
+        );
+      }
+      // When both identifiers are provided they must name the same run:
+      // joining by one while the other points elsewhere would silently hand
+      // the caller an unrelated run.
+      if (
+        options.idempotencyKey !== undefined &&
+        existing.idempotency_key !== options.idempotencyKey
+      ) {
+        throw new Error(
+          `Task run "${existing.run_id}" carries idempotency key ` +
+            `${existing.idempotency_key === null ? "none" : `"${existing.idempotency_key}"`}; ` +
+            `refusing to join it with conflicting key "${options.idempotencyKey}"`
+        );
+      }
+      if (options.runId !== undefined && existing.run_id !== options.runId) {
+        throw new Error(
+          `Idempotency key "${options.idempotencyKey}" already names run ` +
+            `"${existing.run_id}"; refusing to join it as "${options.runId}"`
         );
       }
       return {

@@ -93,6 +93,16 @@ export function createChatTurnTaskDefinition(
         }
         // SAFETY: chat fiber snapshots are the same JSON envelopes the
         // legacy stash wrapper persisted; storage round-trips them.
+        //
+        // The initial snapshot is awaited; every later stash write and the
+        // final delete are fire-and-forget. That is safe because Durable
+        // Object storage applies same-key operations in issuance order and
+        // reads see unconfirmed writes, so the delete below can never be
+        // overtaken by an earlier stash put — and the output gate holds
+        // client-visible chunks until prior writes flush. A crash mid-turn
+        // loses only the unflushed tail of stash writes, which recovery
+        // tolerates by design: the snapshot is a hint, stream cursors are
+        // the evidence.
         await hooks.storage.put(snapshotKey, entry.initial);
         try {
           const value = await hooks.keepAliveWhile(() =>

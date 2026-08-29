@@ -100,8 +100,38 @@ describe("Tasks capability", () => {
         instance.tasks.run("flaky", { label: "x" }, { idempotencyKey: "K" })
       ).rejects.toThrow(/already belongs to definition "pipeline"/);
 
+      // Both identifiers together must name the same run: a join through one
+      // while the other points elsewhere is a conflict, not a silent join.
+      const both = await instance.tasks.run(
+        "pipeline",
+        { label: "a" },
+        { runId: first.runId, idempotencyKey: "K" }
+      );
+      expect(both.accepted).toBe(false);
+      await expect(
+        instance.tasks.run(
+          "pipeline",
+          { label: "a" },
+          { runId: first.runId, idempotencyKey: "other-key" }
+        )
+      ).rejects.toThrow(/conflicting key "other-key"/);
+      await expect(
+        instance.tasks.run(
+          "pipeline",
+          { label: "a" },
+          { runId: "some-other-id", idempotencyKey: "K" }
+        )
+      ).rejects.toThrow(/refusing to join it as "some-other-id"/);
+
       // Handles only see runs of their own definition.
       expect(await instance.tasks.handle("flaky").get(first.runId)).toBeNull();
+      // ...and cannot cancel across definitions either.
+      expect(await instance.tasks.handle("flaky").cancel(first.runId)).toBe(
+        false
+      );
+      expect((await instance.tasks.get(first.runId))?.state).not.toBe(
+        "cancelled"
+      );
       expect(
         (await instance.tasks.handle("pipeline").getByIdempotencyKey("K"))
           ?.runId

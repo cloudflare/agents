@@ -27,7 +27,7 @@ capabilities push jobs instead of contributing wake times.
 - **Tasks** — the capability for durable replayable execution. Every
   non-terminal run's authoritative `next_at` deadline (acceptance, sleeps,
   retries, and claim backstops all write it) is mirrored as one queue job
-  per run (`id = the run id`, so a retime is a same-id push); the run's
+  per run (`id = "task:" + the run id`, so a retime is a same-id push); the run's
   wake dispatches through `onJob` and settles or reschedules via the drive
   result.
 
