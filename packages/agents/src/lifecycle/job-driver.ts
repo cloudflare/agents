@@ -17,6 +17,7 @@ import {
   tryN
 } from "../retries";
 import {
+  hungTimeoutMs,
   isHungRow,
   jobFromRow,
   type JobQueue,
@@ -156,9 +157,10 @@ export class JobDriver {
           )}s ago)`
         );
       }
-      if (row.singleflight === 1) {
-        this.#options.queue.markRunning(row.id, nowMs);
-      }
+      // Every dispatch is marked, not just single-flight: the marker is
+      // what lets a same-id push made mid-dispatch supersede the returned
+      // drive result (see JobQueue.applyOutcome).
+      this.#options.queue.markRunning(row.id, nowMs);
 
       await this.#driveJob(row);
     }
@@ -180,6 +182,30 @@ export class JobDriver {
 
     const maxAttempts = job.retry?.maxAttempts ?? DEFAULT_JOB_RETRY.maxAttempts;
 
+    // Dispatch must be bounded: the drive loop awaits each job inline, so
+    // one long dispatch delays every other job on this object. The queue
+    // cannot safely abandon owner code, so the contract is enforced by
+    // visibility — a dispatch that outlives the job's hung timeout warns
+    // loudly and emits telemetry naming the owner.
+    const slowWatchdog = setTimeout(() => {
+      const seconds = Math.round(hungTimeoutMs(row) / 1000);
+      console.warn(
+        `Job ${row.id} (${row.capability}/${row.fn}) has been dispatching ` +
+          `for over ${seconds}s. Long dispatches starve every other job on ` +
+          `this object; onJob must detach unbounded work and return.`
+      );
+      try {
+        this.#options.emit("job:slow_dispatch", {
+          capability: row.capability,
+          fn: row.fn,
+          id: row.id,
+          thresholdMs: hungTimeoutMs(row)
+        });
+      } catch {
+        // telemetry never blocks the dispatch
+      }
+    }, hungTimeoutMs(row));
+
     this.#executingRow = row;
     let outcome: LifecycleJobOutcome | void;
     try {
@@ -199,10 +225,11 @@ export class JobDriver {
       if (isPlatformFailure(error)) {
         // Platform-class failure: preserve the job and re-throw so the
         // platform retries a fresh invocation (or the memory-limit breaker
-        // engages at the alarm boundary). Best-effort running reset so a
-        // single-flight job does not wait out its hung timeout first.
+        // engages at the alarm boundary). Best-effort dispatch-marker reset
+        // so the preserved job is not mistaken for one still in flight (and
+        // a single-flight job does not wait out its hung timeout first).
         try {
-          if (row.singleflight === 1) queue.clearRunning(row.id);
+          queue.clearRunning(row.id);
         } catch {
           // the hung timeout eventually recovers the flag
         }
@@ -224,6 +251,8 @@ export class JobDriver {
       } catch (hookError) {
         console.error(`Job failure hook threw for ${row.id}`, hookError);
       }
+    } finally {
+      clearTimeout(slowWatchdog);
     }
 
     if (disabled()) return;
@@ -315,7 +344,7 @@ export class JobDriver {
         if (sealed) {
           queue.delete(executing.id);
         } else if (nextTime !== undefined) {
-          queue.applyOutcome(executing.id, { rescheduleAt: nextTime });
+          queue.retime(executing.id, nextTime);
         }
       }
     } catch {
