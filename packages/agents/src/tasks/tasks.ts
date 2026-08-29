@@ -45,7 +45,6 @@ import type {
   TaskRunRow,
   TaskRunSnapshot,
   TaskRunState,
-  TaskStep,
   TaskValue
 } from "./types";
 
