@@ -1826,7 +1826,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    */
   _simulateTransientErrorMessage: string | null = null;
 
-  override async _chatRecoveryContinue(
+  protected override async _chatRecoveryContinueDetached(
     ...args: Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>
   ): Promise<void> {
     if (this._simulateSupersededIsolate) {
@@ -1840,7 +1840,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         { cause: new Error(this._simulateTransientErrorMessage) }
       );
     }
-    return super._chatRecoveryContinue(...args);
+    return super._chatRecoveryContinueDetached(...args);
   }
 
   setSimulateSupersededIsolateForTest(value: boolean): void {
@@ -2369,7 +2369,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await super._chatRecoveryContinue(
+    await super._chatRecoveryContinueDetached(
       data as Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>[0]
     );
   }
@@ -2377,7 +2377,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async runChatRecoveryRetryDirectForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await super._chatRecoveryRetry(
+    await super._chatRecoveryRetryDetached(
       data as Parameters<AIChatAgent<Env>["_chatRecoveryRetry"]>[0]
     );
   }
@@ -2664,7 +2664,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     lastBody?: Record<string, unknown>;
     lastClientTools?: ClientToolSchema[];
   }): Promise<void> {
-    await this._chatRecoveryRetry(options);
+    await this._chatRecoveryRetryDetached(options);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
@@ -2675,7 +2675,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       LIMIT 1
     `;
     if (!rows[0]) return;
-    await this._chatRecoveryRetry(
+    await this._chatRecoveryRetryDetached(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
         lastBody?: Record<string, unknown>;
@@ -2692,7 +2692,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       LIMIT 1
     `;
     if (!rows[0]) return;
-    await this._chatRecoveryContinue(
+    await this._chatRecoveryContinueDetached(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
         lastBody?: Record<string, unknown> | null;
@@ -3733,19 +3733,21 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     `;
     const before = this._readChildRunStatusForTest(runId);
     const recovery = this as unknown as {
-      _chatRecoveryContinue(d?: { targetAssistantId?: string }): Promise<void>;
-      _chatRecoveryRetry(d?: Record<string, never>): Promise<void>;
+      _chatRecoveryContinueDetached(d?: {
+        targetAssistantId?: string;
+      }): Promise<void>;
+      _chatRecoveryRetryDetached(d?: Record<string, never>): Promise<void>;
     };
     if (path === "continue") {
       // A non-leaf `targetAssistantId` → benign "conversation_changed" skip
       // that still reaches the `finally`.
-      await recovery._chatRecoveryContinue({
+      await recovery._chatRecoveryContinueDetached({
         targetAssistantId: "no-such-leaf"
       });
     } else {
       // A non-user leaf (or empty transcript) → benign "no_unanswered_user_
       // message" skip that still reaches the `finally`.
-      await recovery._chatRecoveryRetry({});
+      await recovery._chatRecoveryRetryDetached({});
     }
     return { before, after: this._readChildRunStatusForTest(runId) };
   }

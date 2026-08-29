@@ -242,6 +242,10 @@ import {
 } from "agents/chat";
 import type { Streams } from "agents/streams";
 import { createChatTurnTaskDefinition } from "agents/chat";
+import {
+  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+  isPlatformFailure
+} from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
@@ -15029,6 +15033,44 @@ export class Think<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
+    // Queue-driven schedule callback: the recovered turn can legitimately
+    // run for a long time (a hanging model stream is bounded only by the
+    // step timeout), and awaiting it here would hold the Lifecycle job
+    // queue — starving every other job on this object, including the very
+    // replay-wakes that advance recovery budgets. Dispatch detached, exactly
+    // as the legacy fire-and-forget runFiber dispatch did; all incident
+    // bookkeeping settles inside the detached body when the turn does.
+    let handoff: () => void = () => {};
+    const reachedTurn = new Promise<void>((resolve) => {
+      handoff = resolve;
+    });
+    const dispatch = this._chatRecoveryRetryDetached(data, handoff);
+    dispatch.catch((error) => {
+      if (isPlatformFailure(error)) {
+        // The queue job completed at the turn handoff, so the driver's
+        // platform-failure deferral can no longer apply; re-defer the
+        // dispatch ourselves so the turn re-runs on a fresh invocation
+        // (#1730).
+        void this.schedule(
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          "_chatRecoveryRetry",
+          data
+        ).catch(() => {});
+        return;
+      }
+      // Other failures after the handoff are the detached turn's own; its
+      // internal handling (OOM intercept, incident bookkeeping) already ran.
+      console.error("[Think] _chatRecoveryRetry dispatch failed", error);
+    });
+    // A platform transient thrown before the turn starts must reach the
+    // queue so the job defers and retries (#1730).
+    await Promise.race([dispatch, reachedTurn]);
+  }
+
+  protected async _chatRecoveryRetryDetached(
+    data?: ChatRecoveryRetryData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
@@ -15129,6 +15171,7 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      onTurnStarted?.();
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody,
@@ -15271,6 +15314,44 @@ export class Think<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
+    // Queue-driven schedule callback: the recovered turn can legitimately
+    // run for a long time (a hanging model stream is bounded only by the
+    // step timeout), and awaiting it here would hold the Lifecycle job
+    // queue — starving every other job on this object, including the very
+    // replay-wakes that advance recovery budgets. Dispatch detached, exactly
+    // as the legacy fire-and-forget runFiber dispatch did; all incident
+    // bookkeeping settles inside the detached body when the turn does.
+    let handoff: () => void = () => {};
+    const reachedTurn = new Promise<void>((resolve) => {
+      handoff = resolve;
+    });
+    const dispatch = this._chatRecoveryContinueDetached(data, handoff);
+    dispatch.catch((error) => {
+      if (isPlatformFailure(error)) {
+        // The queue job completed at the turn handoff, so the driver's
+        // platform-failure deferral can no longer apply; re-defer the
+        // dispatch ourselves so the turn re-runs on a fresh invocation
+        // (#1730).
+        void this.schedule(
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          "_chatRecoveryContinue",
+          data
+        ).catch(() => {});
+        return;
+      }
+      // Other failures after the handoff are the detached turn's own; its
+      // internal handling (OOM intercept, incident bookkeeping) already ran.
+      console.error("[Think] _chatRecoveryContinue dispatch failed", error);
+    });
+    // A platform transient thrown before the turn starts must reach the
+    // queue so the job defers and retries (#1730).
+    await Promise.race([dispatch, reachedTurn]);
+  }
+
+  protected async _chatRecoveryContinueDetached(
+    data?: ChatRecoveryContinueData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
@@ -15369,6 +15450,7 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      onTurnStarted?.();
       const result = await this.continueLastTurn(
         undefined,
         controller

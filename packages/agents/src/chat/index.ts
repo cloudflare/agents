@@ -61,6 +61,12 @@ export {
 
 export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
 
+/**
+ * @internal Platform-failure classifier shared with the chat hosts'
+ * queue-dispatch deferral (#1730); sibling-package support, not a public API.
+ */
+export { isPlatformFailure } from "../retries";
+
 export {
   createToolsFromClientSchemas,
   type ClientToolSchema,

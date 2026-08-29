@@ -1212,11 +1212,13 @@ export class ThinkTestAgent extends Think {
     if (path === "continue") {
       // A non-leaf `targetAssistantId` → benign "conversation_changed" skip
       // that still reaches the `finally`.
-      await this._chatRecoveryContinue({ targetAssistantId: "no-such-leaf" });
+      await this._chatRecoveryContinueDetached({
+        targetAssistantId: "no-such-leaf"
+      });
     } else {
       // No `recoveredRequestId` (avoids the pre-`try` early return) + a non-user
       // leaf (or empty transcript) → benign skip that still reaches `finally`.
-      await this._chatRecoveryRetry({});
+      await this._chatRecoveryRetryDetached({});
     }
     return { before, after: this._readChildRunStatusForTest(runId) };
   }
@@ -1417,9 +1419,9 @@ export class ThinkTestAgent extends Think {
       if (scheduled[0]) {
         await (
           this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
+            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
           }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
       }
 
       const messages = await this.getMessages();
@@ -1479,9 +1481,9 @@ export class ThinkTestAgent extends Think {
       if (scheduled[0]) {
         await (
           this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
+            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
           }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
       }
       const messages = await this.getMessages();
       const assistant = messages.filter((m) => m.role === "assistant");
@@ -4826,12 +4828,12 @@ export class ThinkToolsTestAgent extends Think {
     if (!rows[0]) return;
     await (
       this as unknown as {
-        _chatRecoveryRetry(d: {
+        _chatRecoveryRetryDetached(d: {
           targetUserId?: string;
           lastBody?: Record<string, unknown>;
         }): Promise<void>;
       }
-    )._chatRecoveryRetry(
+    )._chatRecoveryRetryDetached(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
         lastBody?: Record<string, unknown>;
@@ -4872,13 +4874,13 @@ export class ThinkToolsTestAgent extends Think {
     if (!rows[0]) return;
     await (
       this as unknown as {
-        _chatRecoveryContinue(d: {
+        _chatRecoveryContinueDetached(d: {
           targetAssistantId?: string;
           lastBody?: Record<string, unknown> | null;
           lastClientTools?: ClientToolSchema[] | null;
         }): Promise<void>;
       }
-    )._chatRecoveryContinue(
+    )._chatRecoveryContinueDetached(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
         lastBody?: Record<string, unknown> | null;
@@ -5743,7 +5745,9 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   async continueRecoveredChatForTest(requestId: string): Promise<void> {
-    await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+    await this._chatRecoveryContinueDetached({
+      recoveredRequestId: requestId
+    });
   }
 
   /**
@@ -5756,7 +5760,9 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string
   ): Promise<string | null> {
     try {
-      await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+      await this._chatRecoveryContinueDetached({
+        recoveredRequestId: requestId
+      });
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
@@ -5767,7 +5773,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string,
     delayMs: number
   ): Promise<void> {
-    const continuation = this._chatRecoveryContinue({
+    const continuation = this._chatRecoveryContinueDetached({
       recoveredRequestId: requestId
     });
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -7602,7 +7608,7 @@ export class ThinkRecoveryTestAgent extends Think {
     targetUserId?: string;
     lastBody?: Record<string, unknown>;
   }): Promise<void> {
-    await this._chatRecoveryRetry(options);
+    await this._chatRecoveryRetryDetached(options);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
@@ -7613,7 +7619,7 @@ export class ThinkRecoveryTestAgent extends Think {
       LIMIT 1
     `;
     if (!rows[0]) return;
-    await this._chatRecoveryRetry(
+    await this._chatRecoveryRetryDetached(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
         lastBody?: Record<string, unknown>;
@@ -7629,7 +7635,7 @@ export class ThinkRecoveryTestAgent extends Think {
       LIMIT 1
     `;
     if (!rows[0]) return;
-    await this._chatRecoveryContinue(
+    await this._chatRecoveryContinueDetached(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
         lastBody?: Record<string, unknown> | null;
