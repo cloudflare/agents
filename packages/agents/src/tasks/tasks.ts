@@ -49,13 +49,17 @@ import type {
   TaskValue
 } from "./types";
 
-/** A resolved run handler for a definition name. */
-type ResolvedTaskHandler = (input: unknown, step: TaskStep) => unknown;
+/**
+ * A composition-root fallback for definition names outside the declared
+ * map. The value type is the input-erased handler form (`TaskCallbacks`),
+ * so a host resolving concretely-typed definitions casts once, here, and
+ * nowhere else.
+ */
+export type TaskDefinitionResolver = (
+  name: string
+) => TaskCallbacks[string] | undefined;
 
-const taskDefinitionResolvers = new WeakMap<
-  object,
-  (name: string) => ResolvedTaskHandler | undefined
->();
+const taskDefinitionResolvers = new WeakMap<object, TaskDefinitionResolver>();
 
 /**
  * @internal Supply a composition-root fallback for definition names outside
@@ -67,7 +71,7 @@ const taskDefinitionResolvers = new WeakMap<
  */
 export function setTaskDefinitionResolver(
   tasks: Tasks<never>,
-  resolver: (name: string) => ResolvedTaskHandler | undefined
+  resolver: TaskDefinitionResolver
 ): void {
   taskDefinitionResolvers.set(tasks, resolver);
 }
@@ -181,14 +185,14 @@ export class Tasks<
   // ── Definitions ──────────────────────────────────────────────────────────
 
   /** Resolve a name to its declared or composition-root-supplied handler. */
-  #resolveDefinition(name: string): ResolvedTaskHandler | undefined {
+  #resolveDefinition(name: string): TaskCallbacks[string] | undefined {
     // SAFETY: declared definitions are constrained with `never` parameters
     // so concrete definition types satisfy the map under contravariance; the
     // values passed at dispatch were parsed from rows this definition's name
     // was persisted with.
     return (this.#definitions[name] ??
       taskDefinitionResolvers.get(this)?.(name)) as
-      | ResolvedTaskHandler
+      | TaskCallbacks[string]
       | undefined;
   }
 
@@ -635,7 +639,7 @@ export class Tasks<
   /** Run one claimed attempt and persist its outcome, generation-fenced. */
   async #runAttempt(
     row: TaskRunRow,
-    handler: ResolvedTaskHandler,
+    handler: TaskCallbacks[string],
     generation: string,
     attempt: number,
     controller: AbortController,
@@ -742,8 +746,11 @@ export class Tasks<
   }
 
   async #observeError(error: unknown): Promise<void> {
+    if (!this.#onError) return;
     try {
-      await this.#onError?.(error);
+      // Observing terminal failures is host-facing user code: run it inside
+      // the host invocation boundary, like definition handlers.
+      await this.lifecycle.runInHostContext(() => this.#onError?.(error));
     } catch {
       // swallow onError errors
     }

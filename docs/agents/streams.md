@@ -7,8 +7,9 @@
 Object](./lifecycle.md): an ordered, durable chunk log per stream with a
 monotonic cursor, replay-then-tail reads, and terminal status. A consumer
 that reconnects replays from its cursor; a producer that dies mid-stream
-leaves exactly the chunks it durably appended, ready for recovery to
-finalize. The capability needs no alarm, so it also works on facets.
+leaves exactly the chunks it durably appended, ready for a replayed
+producer to resume from. The capability needs no alarm, so it also works
+on facets.
 
 ## Install and use
 
@@ -133,6 +134,8 @@ reports afterward (proven by the SIGKILL e2e suite).
 For SSE, one call serves the whole lifecycle:
 
 ```ts
+import { sseResponse } from "agents/streams";
+
 async onRequest(request: Request) {
   return sseResponse(this.streams, "reply:123", { request });
 }

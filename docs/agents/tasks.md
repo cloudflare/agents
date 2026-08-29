@@ -32,7 +32,7 @@ interface ReportInput {
 }
 
 export class ReportObject extends DurableObject<Env> {
-  readonly fibers = new Tasks({
+  readonly tasks = new Tasks({
     definitions: {
       "build-report@v1": async (input: ReportInput, step: TaskStep) => {
         await step.status("Researching");
@@ -88,8 +88,9 @@ export class ReportAgent extends Agent<Env> {
 ```
 
 Task deadlines share the Agent's physical alarm with schedules, keep-alive,
-and the rest of the Agent's durable work through the Lifecycle job queue. Internally, Agent's own chat frameworks (Think, AIChatAgent, and
-Think's messenger replies) run their turns on this same capability.
+and the rest of the Agent's durable work through the Lifecycle job queue.
+Internally, Agent's own chat frameworks (Think, AIChatAgent, and Think's
+messenger replies) run their turns on this same capability.
 
 ## Starting runs
 
@@ -156,31 +157,6 @@ A run whose definition name is no longer registered after a deployment fails
 with a `MissingTaskDefinitionError`; it is never silently deleted or run
 against a different handler.
 
-## Inspection and control
-
-```ts
-const snapshot = await this.tasks.get(receipt.runId);
-const joined = await this.tasks.getByIdempotencyKey("report:42");
-const recent = await this.tasks.list({ definition: "build-report@v1" });
-await this.tasks.cancel(receipt.runId, "superseded");
-await this.tasks.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
-```
-
-A snapshot is discriminated by `state`:
-
-| State       | Meaning                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `pending`   | Accepted, first attempt not yet claimed.                           |
-| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`). |
-| `waiting`   | Parked on a durable deadline (`reason`: `sleep` or `retry`).       |
-| `completed` | Settled with `result`.                                             |
-| `failed`    | Settled with a safe `error` projection.                            |
-| `cancelled` | Settled by cancellation, with its optional `reason`.               |
-
-Cancellation is cooperative: a parked run settles immediately, a live attempt
-is aborted through its signal and settles at its next step boundary. An
-external effect already accepted cannot be undone.
-
 ## Interruption and replay
 
 There is no separate recovery mode: an unclean interruption — an attempt
@@ -225,6 +201,31 @@ A step callback that throws is not an interruption; the retry policy owns
 it, with the run parked `waiting` between attempts. Interruptions also emit
 a `task:attempt:interrupted` event carrying the same step name.
 
+## Inspection and control
+
+```ts
+const snapshot = await this.tasks.get(receipt.runId);
+const joined = await this.tasks.getByIdempotencyKey("report:42");
+const recent = await this.tasks.list({ definition: "build-report@v1" });
+await this.tasks.cancel(receipt.runId, "superseded");
+await this.tasks.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
+```
+
+A snapshot is discriminated by `state`:
+
+| State       | Meaning                                                            |
+| ----------- | ------------------------------------------------------------------ |
+| `pending`   | Accepted, first attempt not yet claimed.                           |
+| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`). |
+| `waiting`   | Parked on a durable deadline (`reason`: `sleep` or `retry`).       |
+| `completed` | Settled with `result`.                                             |
+| `failed`    | Settled with a safe `error` projection.                            |
+| `cancelled` | Settled by cancellation, with its optional `reason`.               |
+
+Cancellation is cooperative: a parked run settles immediately, a live attempt
+is aborted through its signal and settles at its next step boundary. An
+external effect already accepted cannot be undone.
+
 ## Choosing an API
 
 | Requirement                                                      | Use                                    |
@@ -238,7 +239,8 @@ a `task:attempt:interrupted` event carrying the same step name.
 
 The first release is deliberately narrow: no `waitForCompletion` mode on
 `run()`, and no runs on routed sub-agents (facet-hosted work stays on the
-legacy fiber engine for now). The legacy `runFiber()`/`startFiber()` APIs are
-unchanged and still recovered by their own scan; deprecation waits for
-migration evidence per the RFC. The design and its phases are recorded in
+legacy fiber engine until owner-path routed dispatch lands). The legacy
+`runFiber()`/`startFiber()` APIs are released public API and remain
+unchanged, still recovered by their own scan. The design and its evolution
+are recorded in
 [`design/rfc-fibers.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-fibers.md).

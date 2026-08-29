@@ -1,196 +1,164 @@
-# RFC: Streams — a durable incremental-output capability
+# Design record: Streams — durable incremental output
 
-Status: accepted
-
-> Accepted with the open questions settled for the first release: cursors
-> are monotonic sequence numbers (0-based; a read's `from` is inclusive and
-> `status().cursor` is the next sequence to be assigned); live fanout is
-> in-isolate only, which is sufficient because a Durable Object executes in
-> one isolate at a time and `read()` accepts an abort signal; producer
-> fencing on `open()` is deferred (terminal-state fences on every append
-> cover the realistic races); retention is explicit `delete()` in phase 1
-> with age-based sweeping deferred until an alarm contribution is justified;
-> and messenger reply snapshots stay on Task checkpoints. Because Streams
-> needs no alarm, the capability also works on facets.
+Status: shipped as `agents/streams` (this document records the shipped
+design and how it evolved during implementation).
 
 ## The problem
 
-Durable _execution_ now has one home — the Tasks capability (`agents/tasks`,
-[rfc-fibers.md](./rfc-fibers.md)) — but durable _incremental output_ does
-not. Three symptoms:
+Durable _execution_ has one home — the Tasks capability
+([rfc-fibers.md](./rfc-fibers.md)) — but durable _incremental output_ had
+none. The chunk-log machinery that makes chat streams resumable lived in
+`packages/agents/src/chat` with chat vocabulary attached, so a plain
+Durable Object could not have a resumable stream without importing a chat
+stack; every new streaming producer re-invented a chunk table; and a task
+step's single JSON result is the wrong shape for output that must be
+observable while it is produced and must survive the producer's death
+mid-production.
 
-- The chunk-log machinery that makes chat streams resumable (stream metadata
-  and chunk persistence, replay-then-tail reads, terminal status) lives in
-  `packages/agents/src/chat` with chat vocabulary attached. `AIChatAgent`
-  and `Think` both drive it; a plain Durable Object or a non-chat Agent
-  cannot have a resumable stream without importing a chat stack.
-- The Tasks migration formalized a composition pattern — a task step appends
-  chunks to a store it does not own and `checkpoint()`s a cursor, and its
-  replayed handler reads the store's status as interruption evidence —
-  but the "store" half of that contract has no first-class API. Every new
-  streaming producer (voice, progress feeds, channel delivery) re-invents a
-  chunk table.
-- A step result is a single JSON value written once at completion (≤ 1 MiB),
-  which is the wrong shape for output that must be observable while it is
-  produced and must survive the producer's death mid-production.
+## The shipped design
 
-## The proposal
-
-One `Streams` capability in `agents/streams`, following the same lego rules
-as Scheduler and Tasks: standard Lifecycle services only, its own tables,
-alarm participation only if retention needs it, no host adapter bags.
+One `Streams` capability per Lifecycle Object owns an ordered, durable
+chunk log per stream with a monotonic cursor, in its own tables
+(`cf_agents_streams`, `cf_agents_stream_chunks`):
 
 ```ts
-export class ReportObject extends DurableObject<Env> {
-  readonly streams = new Streams();
-  readonly tasks = new Tasks({
-    definitions: {
-      /* ... */
-    }
-  });
-  readonly lifecycle = Lifecycle.install(this)
-    .use(this.streams)
-    .use(this.tasks);
+readonly streams = new Streams();
+readonly lifecycle = Lifecycle.install(this).use(this.streams);
+
+const stream = await this.streams.open("reply:123", { tag: requestId });
+stream.append(chunk); // synchronous durable write; wakes live readers
+stream.close(); // or stream.error(reason)
+
+for await (const batch of this.streams.readBatches("reply:123", {
+  from,
+  onUpToDate
+})) {
+  /* replay from the cursor, then live-tail */
 }
+const status = await this.streams.status("reply:123");
+// { state, cursor, tag?, ... } — the evidence a replayed producer resumes from
 ```
 
-### Producer surface
-
-```ts
-const stream = await this.streams.open("reply:123", { metadata });
-stream.append(chunk); // durable write + live fanout, ordered
-stream.close(); // terminal: completed
-stream.error(reason); // terminal: errored
-```
-
-`open()` is idempotent on the stream id: reopening a live stream returns a
-writer positioned at its cursor; reopening a terminal stream throws. Chunks
-are opaque JSON values with a per-chunk size limit; the store assigns each a
-monotonic sequence number — the **cursor**.
-
-### Consumer surface
-
-```ts
-for await (const chunk of this.streams.read("reply:123", { from: cursor })) {
-  // replays persisted chunks from `from`, then tails live appends,
-  // ends when the stream closes or errors
-}
-
-const { state, cursor } = await this.streams.status("reply:123");
-// state: "streaming" | "completed" | "errored" — recovery evidence
-```
-
-Reads are independent of producer liveness: a consumer that reconnects
-replays from its last cursor and tails; a consumer observing a dead
-producer's stream sees exactly the chunks that were durably appended.
+- **Cursors are monotonic sequence numbers** (0-based; `from` is
+  inclusive; `status().cursor` is the next to be assigned). The append
+  fence — a count-bump UPDATE that succeeds only while the stream is live —
+  assigns them and rejects writes to settled streams.
+- **`open()` is idempotent on the id**: reopening a live stream returns a
+  writer at its cursor; reopening a settled stream throws; settling twice
+  is a no-op so recovery callers stay idempotent.
+- **Reads are independent of producer liveness**: replay from any cursor,
+  then tail live appends, ending at settlement. `readBatches` yields one
+  array per replay slice and per live-tail wakeup (`onUpToDate` fires once
+  at the tail — caught-up is distinct from ended). `read` is the per-chunk
+  form over the same core.
+- **Tags are the lookup side of the id**: `open(id, { tag })` stamps an
+  indexed, deliberately non-unique application key, fixed at creation; an
+  operation whose retries produce successive streams finds the latest with
+  `list({ tag, limit: 1 })`.
+- **No time-based behavior, therefore no jobs and no alarm.** Appends
+  happen inside the producer's invocation; in-isolate readers are woken by
+  the append itself; external readers hold a connection or replay on
+  reconnect. This is also why the capability works on facets. In the
+  composed architecture, the job queue wakes the *producer* (a Task's
+  mirror job); the task's step appends; the append wakes readers.
+- **Serving**: `sseResponse(streams, id, { request })` serves the whole
+  lifecycle over SSE — each chunk's seq rides the SSE `id:` field so a
+  reconnecting `EventSource` resumes via `Last-Event-ID` with zero client
+  code, with `up-to-date`/`done`/`error` control events and heartbeat
+  comments. `read()`/`readBatches()` remain the raw iterables for other
+  transports.
+- **Live fanout is in-isolate only** — sufficient because a Durable Object
+  executes in one isolate at a time; reconnecting readers replay from
+  their cursor.
 
 ### The Tasks composition contract
 
-The pattern Think validated in production shape, named:
+A task step appends to a stream it does not own and starts its producer
+loop at the stream's own durable cursor, so a replay after interruption is
+a resume — the stream **is** the interruption evidence:
 
 ```ts
-"generate@v1": {
-  run: (input, step) =>
-    step.do("stream", async ({ checkpoint, signal }) => {
-      const stream = await this.streams.open(input.streamId);
-      for await (const chunk of model.stream(input, { signal })) {
-        stream.append(chunk);
-        checkpoint({ streamId: input.streamId, cursor: stream.cursor });
-      }
-      stream.close();
-      return { streamId: input.streamId };
-    }),
-  recover: async (interruption) => {
-    const cp = interruption.interruptedStep?.checkpoint;
-    const status = await this.streams.status(cp.streamId);
-    // reattach the provider at status.cursor, finalize the partial, or replay
-  }
-}
+"generate@v1": async (input, step) =>
+  step.do("stream", async () => {
+    const stream = await this.streams.open(input.streamId);
+    for (let i = stream.cursor; i < input.total; i++) {
+      stream.append(await produce(i));
+    }
+    stream.close();
+  });
 ```
 
-Tasks never imports Streams and Streams never imports Tasks: the checkpoint
-carries the stream id and cursor across the boundary, and `status()` is the
-recovery-evidence read. Convenience glue (for example a helper that fails a
-stream when its producing run settles failed) can come later as an optional
-adapter, not a coupling.
+Neither capability imports the other. The contract is proven across a real
+SIGKILL: the chunks appended before death are exactly what `status()`
+reports afterward, and the resumed producer finishes with a gapless,
+duplicate-free sequence.
 
-### Serving
+### The chat replatform
 
-A stream must reach clients. Phase 1 keeps this minimal: `read()` is an
-async iterable the host can pipe into its own SSE/WebSocket handler. A later
-phase can add transport helpers (an SSE `Response` builder, a WebSocket
-resume handshake) extracted from chat's existing resume protocol.
+`ResumableStream` — the store behind resumable chat streaming in
+`AIChatAgent` and `Think` — is a thin adapter over this capability:
+producer-side coalescing (~10 wire chunks packed per stored segment, for
+storage-op economy), the chat wire protocol and replay handshake, and
+retention policy (10-minute completed grace, 1-hour abandoned window keyed
+off the stream row's `updated_at`, swept on chat's own schedule). Chat
+streams carry their request id as the indexed `tag`; legacy
+`cf_ai_chat_stream_*` tables migrate wholesale on first construction —
+an in-flight stream survives the upgrade — then are dropped. The adapter
+runs on a fully typed internal sync aperture
+(`Streams.__DO_NOT_USE_WILL_BREAK__sync()`), because its surface is
+synchronous and constructed before the Lifecycle starts; the
+invariant-bearing writes go through the same private methods as the
+public API, so live readers and diagnostics observe chat streams like any
+other stream.
 
-### Migration
+Storage-op accounting (benchmarked in-suite on real DO SQLite): the packed
+adapter writes within 2× of the legacy pattern (the fence per segment,
+buying settled-write rejection, the cursor, and `updated_at`), ~9× under
+naive per-chunk appends, and retention sweeps read only stream rows —
+down ~6× and no longer proportional to stored chunks.
 
-The store behind `agents/chat`'s resumable streams becomes the capability's
-implementation; ai-chat and Think consume it through the capability instead
-of the chat-local modules — the same staged playbook as the Tasks
-replatform, with the chat suites (887 + 655) as the parity ratchet. Chat's
-resume _protocol_ (client handshake, wire format) stays in chat; only the
-durable store and cursor semantics move down.
+## How the design evolved
+
+1. **The composition contract simplified from checkpoints to cursors.**
+   The original contract had the producing step `checkpoint({ streamId,
+   cursor })` and a `recover` callback read `status()` as evidence. When
+   Tasks' custom recovery was removed (see rfc-fibers.md), the contract
+   collapsed to what the producer loop already implied: resume from
+   `stream.cursor`, no checkpoint hop, no callback.
+2. **Tags, `onUpToDate`, and `sseResponse` were added from use.** Chat's
+   replay-by-request lookups motivated the indexed tag; the caught-up
+   signal and one-call SSE serving replaced hand-rolled `ReadableStream`
+   plumbing in the example. The SSE resume design deliberately rides the
+   protocol's own `Last-Event-ID` rather than inventing an offset header.
+3. **The chat replatform landed in the same PR** rather than as a
+   follow-up, with the chat suites as the parity ratchet.
 
 ## Alternatives considered
 
-### Fold streams into Tasks (`step.stream()`)
+- **Fold streams into Tasks (`step.stream()`).** Couples transport to
+  execution: streams have consumers that are not tasks, and tasks that
+  produce no stream pay nothing today. Rejected.
+- **Keep the store chat-only.** Blocks plain DOs and non-chat producers,
+  and leaves the Tasks replay contract pointing at an ad-hoc store.
+  Rejected.
+- **Build on an external log** (see
+  [durable-streams-comparison.md](./durable-streams-comparison.md)).
+  Changes the trust and latency model and adds an infrastructure
+  dependency; the DO-local SQLite chunk log is proven by chat at
+  production scale. An external sink could be an adapter later.
 
-Couples transport to execution: streams have consumers that are not tasks
-(a live chat turn streaming to a client is not obligated to be a task) and
-tasks that produce no stream pay nothing today. Rejected; a thin helper on
-top of both can exist later.
+## Deliberately deferred
 
-### Keep the store chat-only (status quo)
+- Age-based retention sweeping in the capability itself (one queue job
+  when built; chat sweeps its own rows meanwhile).
+- Producer-generation fencing on `open()` (terminal-state fences on every
+  append cover the realistic races today).
+- Transport helpers beyond SSE, extracted from chat's resume protocol.
 
-Blocks plain DOs and non-chat producers from resumable output, and leaves
-the Tasks replay contract pointing at an ad-hoc store. Rejected.
+## Verification stance
 
-### Build on an external log (Durable Streams / ElectricSQL shapes)
-
-See [durable-streams-comparison.md](./durable-streams-comparison.md). An
-external log changes the trust and latency model and adds an infrastructure
-dependency; the DO-local SQLite chunk log is already proven by chat at
-production scale. Not pursued for the capability itself; an external sink
-could be an adapter.
-
-## Open questions
-
-1. Cursor semantics: monotonic sequence (proposed) vs byte offset — sequence
-   is provider-agnostic and matches chat's chunk model.
-2. Limits and retention: per-chunk size, per-stream chunk count, and a
-   retention/delete policy (age-based sweep needs an alarm contribution).
-3. Live fanout mechanics: in-isolate subscription only (consumers on the
-   same DO) vs a WebSocket bridge in phase 1.
-4. Should `open()` accept an expected-producer generation to fence two
-   producers racing on one stream id, mirroring Tasks' generation fencing?
-5. Does channel delivery (Think messengers) adopt Streams for its reply
-   snapshots, or stay on checkpoints alone?
-
-## Decision
-
-Approved: one `Streams` capability owning the durable chunk log, cursor,
-replay-then-tail reads, and terminal status; composed with Tasks through
-checkpointed cursors and `status()` evidence. The first PR ships the
-capability, its standalone and Tasks-composed real-DO tests (including a
-process-kill e2e), and a composition example.
-
-**Amendment (chat replatform, same PR):** the chat resumable-stream
-extraction landed alongside the capability rather than as a follow-up.
-`ResumableStream` became chat's producer-side coalescing and wire-protocol
-adapter over Streams (through an internal sync aperture — its surface is
-synchronous and constructed pre-start): chat's packed segments are stored as
-Streams chunks, settlement maps onto `close()`/`error()`, restore and
-recovery-evidence lookups read the capability's rows, retention sweeps key
-off the stream row's `updated_at` (no chunk-table scans), and legacy
-`cf_ai_chat_stream_*` tables migrate wholesale on first construction. The
-chat suites passed unchanged (think 887, ai-chat 737, agents 1953) and a
-storage-ops benchmark pins the cost model: packed writes stay within 2× the
-legacy pattern (the fence per segment), ~9× under naive per-chunk appends,
-with sweep reads down ~6× and no longer proportional to stored chunks. The
-resume protocol (handshake, wire format) stayed in chat as designed.
-
-**Amendment (replay contract):** after `recover` was removed from Tasks
-(see rfc-fibers.md's amendment), the composition contract simplified to the
-form the proposal's own producer loop already implied: the replayed handler
-resumes from `stream.cursor`, and the stream itself is the interruption
-evidence — no checkpoint hop, no recovery callback. The `{ run, recover }`
-example above is retained as the historical shape.
+Real Durable Objects only: standalone (`StreamHarnessObject`, Streams as
+the sole capability) and composed (`TaskStreamComposeObject`) fixtures over
+a real Lifecycle and real SQLite; a SIGKILL e2e killing a producer
+mid-stream; an in-suite storage-ops benchmark that asserts the cost model
+so regressions fail CI; and the chat suites as the replatform ratchet.

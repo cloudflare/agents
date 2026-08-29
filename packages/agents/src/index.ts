@@ -2351,16 +2351,7 @@ export class Agent<
     });
 
     this.tasks = new Tasks({
-      onError: (error: unknown) =>
-        runInInvocation(
-          {
-            agent: this,
-            connection: undefined,
-            request: undefined,
-            email: undefined
-          },
-          () => this.onError(error)
-        )
+      onError: (error) => this.onError(error)
     });
 
     // Agent's definitions live on the class, not in the capability
@@ -2369,13 +2360,12 @@ export class Agent<
     // then the subclass's overridable `taskDefinitions` field. Both are
     // resolved lazily, so field initialization order never matters.
     setTaskDefinitionResolver(this.tasks, (name) => {
-      // SAFETY: declared definitions are constrained with `never` parameters
-      // so concrete definition types satisfy the map under contravariance —
-      // the same erasure the Tasks constructor map performs.
-      return (this._internalTaskDefinitions.get(name) ??
-        this.taskDefinitions?.[name]) as ReturnType<
-        Parameters<typeof setTaskDefinitionResolver>[1]
-      >;
+      // SAFETY: declared definitions carry concrete input types; the
+      // resolver surface is the input-erased `TaskCallbacks` form — the
+      // same erasure the Tasks constructor map performs. One cast, here.
+      const definition =
+        this._internalTaskDefinitions.get(name) ?? this.taskDefinitions?.[name];
+      return definition as TaskCallbacks[string] | undefined;
     });
 
     this.mcp = this._withAgentSpan(

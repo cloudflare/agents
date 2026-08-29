@@ -36,6 +36,6 @@ export interface TasksOptions<Handlers extends TaskHandlers = TaskCallbacks> {
   /** Default timeout of one step callback attempt. Default: 5 minutes. */
   readonly stepTimeout?: number | TaskDurationString;
 
-  /** Observe terminal run failures. Runs as capability code without host context. */
+  /** Observe terminal run failures. Runs inside the host invocation context. */
   readonly onError?: (error: unknown) => void | Promise<void>;
 }
