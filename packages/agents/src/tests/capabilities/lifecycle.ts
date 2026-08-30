@@ -403,16 +403,23 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
     await this.lifecycle.start();
     this.#jobProbe.repushTime = futureTime;
     this.#jobProbe.retimeTargetId = "victim";
-    await this.#jobProbe.push({
-      id: "victim",
-      fn: "tick",
-      time: Date.now() - 1
-    });
-    await this.#jobProbe.push({
-      id: "retimer",
-      fn: "retime-other",
-      time: Date.now() - 2
-    });
+    // Push far-future first: a backdated push can auto-fire its alarm
+    // between two awaited arms. The synchronous backdate below then makes
+    // both jobs due in one breath — retimer first — with no window for the
+    // alarm to drive one alone.
+    const far = Date.now() + 3_600_000;
+    await this.#jobProbe.push({ id: "victim", fn: "tick", time: far });
+    await this.#jobProbe.push({ id: "retimer", fn: "retime-other", time: far });
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = 'retimer'",
+      now - 2
+    );
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = 'victim'",
+      now - 1
+    );
+    await this.lifecycle.jobs.rearm();
   }
 
   /**
