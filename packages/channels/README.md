@@ -147,6 +147,47 @@ export default {
 Each Channel authenticates its own input and declines what isn't its business,
 so the Host asks them in configuration order and the first to claim it wins.
 
+### Web chat from any Durable Object
+
+The Web Channel speaks the same browser protocol as `AIChatAgent` without
+requiring the Durable Object to extend `Agent`. It is an ordinary Channel that
+uses an owned WebSockets capability; install that capability into Lifecycle and
+handle its normalized messages through the Host:
+
+```typescript
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import { ChannelHost, type ChannelInboundMessage } from "@cloudflare/channels";
+import { toChannelChunks } from "@cloudflare/channels/ai-sdk";
+import { web } from "@cloudflare/channels/web";
+import { streamText } from "ai";
+
+export class Chat extends DurableObject<Env> {
+  readonly web = web();
+  readonly channels = new ChannelHost({
+    channels: { web: this.web },
+    onMessage: ({ message }) => this.onMessage(message)
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.web.webSockets);
+
+  async onMessage(message: ChannelInboundMessage) {
+    const result = streamText({
+      model: this.env.MODEL,
+      prompt: message.message.text
+    });
+    await this.channels.stream(
+      message.replySurface!,
+      toChannelChunks(result.fullStream)
+    );
+  }
+}
+```
+
+The current compatibility layer converts neutral `ChannelChunk`s into AI SDK
+UI message chunks. Live cancellation is supported, while durable stream replay
+is intentionally not yet implemented; reconnecting clients receive an idle
+resume response.
+
 ### Routing
 
 A Channel's `route` turns one normalized event into an opaque application

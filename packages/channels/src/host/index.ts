@@ -17,7 +17,11 @@ import type {
   ChannelIdentityInput,
   UserIdentity
 } from "../identity";
-import { unsupported } from "../internal";
+import {
+  bindChannelIngress,
+  type BindableChannelIngress,
+  unsupported
+} from "../internal";
 import { collectText } from "../stream";
 import type {
   ChannelApprovalResponse,
@@ -106,6 +110,15 @@ export class ChannelHost {
     this.#onRoute = options.onRoute;
     this.#onMessage = options.onMessage;
     this.#onApprovalResponse = options.onApprovalResponse;
+
+    for (const [channelKey, channel] of Object.entries(options.channels)) {
+      const bind = (channel as Channel & Partial<BindableChannelIngress>)[
+        bindChannelIngress
+      ];
+      bind?.call(channel, (envelope) =>
+        this.#dispatch(channelKey, channel, envelope)
+      );
+    }
   }
 
   async handleRequest(request: Request): Promise<Response | undefined> {

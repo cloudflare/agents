@@ -12,6 +12,11 @@ export type ChunkConsumer<TChunk, TResult> = {
   onFinish(outcome: StreamOutcome): Awaitable<TResult>;
 };
 
+export type ConsumeChunksOptions = {
+  /** Stop consumption and cancel the producer when aborted. */
+  signal?: AbortSignal;
+};
+
 /** The complete text of a stream, and whether it ended before its answer did. */
 export type CollectedText = {
   text: string;
@@ -27,21 +32,36 @@ export type CollectedText = {
  */
 export async function consumeChunks<TChunk, TResult>(
   chunks: ReadableStream<TChunk>,
-  consumer: ChunkConsumer<TChunk, TResult>
+  consumer: ChunkConsumer<TChunk, TResult>,
+  options: ConsumeChunksOptions = {}
 ): Promise<TResult> {
   const reader = chunks.getReader();
   let outcome: StreamOutcome = { interrupted: false };
+  const abortError = new DOMException("The stream was cancelled", "AbortError");
+  const abort = () => {
+    outcome = {
+      interrupted: true,
+      error: options.signal?.reason ?? abortError
+    };
+    void reader.cancel(outcome.error).catch(() => {});
+  };
+  options.signal?.addEventListener("abort", abort, { once: true });
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      await consumer.onChunk(value);
+    if (options.signal?.aborted) {
+      abort();
+    } else {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await consumer.onChunk(value);
+      }
     }
   } catch (error) {
     outcome = { interrupted: true, error };
     // Stop the producer, which is still generating when `onChunk` threw.
     await reader.cancel().catch(() => {});
   } finally {
+    options.signal?.removeEventListener("abort", abort);
     reader.releaseLock();
   }
   return consumer.onFinish(outcome);

@@ -43,6 +43,11 @@
       "import": "./dist/tanstack-ai.js",
       "require": "./dist/tanstack-ai.js"
     },
+    "./web": {
+      "types": "./dist/web.d.ts",
+      "import": "./dist/web.js",
+      "require": "./dist/web.js"
+    },
     "./voice": {
       "types": "./dist/voice.d.ts",
       "import": "./dist/voice.js",

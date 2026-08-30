@@ -1,8 +1,18 @@
 import type { ChannelMessage, DeliveryResult } from "./channel";
-import type { ChannelIngressResult } from "./ingress";
+import type { ChannelIngressEnvelope, ChannelIngressResult } from "./ingress";
 import { isChannelMessageSurface, type ChannelMessageSurface } from "./surface";
 
 const textEncoder = new TextEncoder();
+
+/** @internal Binds push-based ingress to the Host's normal dispatch path. */
+export const bindChannelIngress = Symbol("bindChannelIngress");
+
+/** @internal Implemented by Channels whose provider pushes live events. */
+export type BindableChannelIngress<TRaw = unknown> = {
+  [bindChannelIngress](
+    dispatch: (envelope: ChannelIngressEnvelope<TRaw>) => Promise<void>
+  ): void;
+};
 
 export function encodeUtf8(value: string): Uint8Array<ArrayBuffer> {
   return textEncoder.encode(value);

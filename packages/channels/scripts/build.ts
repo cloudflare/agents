@@ -11,6 +11,7 @@ async function main() {
       "ai-sdk": "src/ai-sdk.ts",
       slack: "src/adapters/slack.ts",
       "tanstack-ai": "src/tanstack-ai.ts",
+      web: "src/adapters/web.ts",
       voice: "src/adapters/voice.ts"
     },
     deps: {

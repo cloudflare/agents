@@ -14,6 +14,7 @@ import {
   type ChannelRouteContext,
   type ChannelRouteEvent
 } from "..";
+import { bindChannelIngress, type BindableChannelIngress } from "../internal";
 
 const delivered = async () => ({ status: "delivered" as const });
 const surface = {
@@ -90,6 +91,41 @@ function host(
 }
 
 describe("stateless ChannelHost", () => {
+  it("routes push-based Channel ingress through onMessage", async () => {
+    let push:
+      | ((
+          envelope: ChannelIngressEnvelope<{ requestId: string }>
+        ) => Promise<void>)
+      | undefined;
+    const channel: Channel<{ requestId: string }> &
+      BindableChannelIngress<{ requestId: string }> = {
+      [bindChannelIngress](dispatch) {
+        push = dispatch;
+      },
+      route: vi.fn((_event, raw) => `request:${raw.requestId}`)
+    };
+    const onMessage = vi.fn();
+    host({ web: channel }, { onMessage });
+
+    await push?.({
+      event: message(),
+      raw: { requestId: "turn-1" }
+    });
+
+    expect(channel.route).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: "event-1" }),
+      { requestId: "turn-1" },
+      expect.objectContaining({ findUser: expect.any(Function) })
+    );
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelKey: "web",
+        route: "request:turn-1",
+        message: expect.objectContaining({ type: "message" })
+      })
+    );
+  });
+
   it("allows an outbound-only Host without ingress callbacks", async () => {
     const deliver = vi.fn(delivered);
     const channelHost = new ChannelHost({

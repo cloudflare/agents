@@ -137,6 +137,28 @@ describe("consumeChunks", () => {
     expect(outcome).toEqual({ interrupted: true, error });
     expect(cancel).toHaveBeenCalledOnce();
   });
+
+  it("finalizes and stops the producer when aborted", async () => {
+    const cancel = vi.fn();
+    const chunks = new ReadableStream<ChannelChunk>({ cancel });
+    const abort = new AbortController();
+    const consuming = consumeChunks(
+      chunks,
+      {
+        onChunk() {},
+        onFinish: (result) => result
+      },
+      { signal: abort.signal }
+    );
+
+    abort.abort("cancelled");
+
+    await expect(consuming).resolves.toEqual({
+      interrupted: true,
+      error: "cancelled"
+    });
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("cancelled");
+  });
 });
 
 describe("createPacer", () => {
