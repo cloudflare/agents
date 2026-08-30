@@ -100,8 +100,8 @@ describe("Tasks capability", () => {
         instance.tasks.run("flaky", { label: "x" }, { idempotencyKey: "K" })
       ).rejects.toThrow(/already belongs to definition "pipeline"/);
 
-      // Both identifiers together must name the same run: a join through one
-      // while the other points elsewhere is a conflict, not a silent join.
+      // A matching identifier pair joins; a run matched by ID with a
+      // DIFFERENT stored key is a conflict, not a silent join.
       const both = await instance.tasks.run(
         "pipeline",
         { label: "a" },
@@ -115,13 +115,17 @@ describe("Tasks capability", () => {
           { runId: first.runId, idempotencyKey: "other-key" }
         )
       ).rejects.toThrow(/conflicting key "other-key"/);
-      await expect(
-        instance.tasks.run(
-          "pipeline",
-          { label: "a" },
-          { runId: "some-other-id", idempotencyKey: "K" }
-        )
-      ).rejects.toThrow(/refusing to join it as "some-other-id"/);
+      // The key is the dedup authority: a fresh runId alongside a key that
+      // names an existing run joins that run (a repeated delivery pattern —
+      // new nonce, stable event key); the receipt carries the real id.
+      const redelivered = await instance.tasks.run(
+        "pipeline",
+        { label: "a" },
+        { runId: "some-other-id", idempotencyKey: "K" }
+      );
+      expect(redelivered.accepted).toBe(false);
+      expect(redelivered.runId).toBe(first.runId);
+      expect(await instance.tasks.get("some-other-id")).toBeNull();
 
       // Handles only see runs of their own definition.
       expect(await instance.tasks.handle("flaky").get(first.runId)).toBeNull();
@@ -553,6 +557,39 @@ describe("Tasks capability", () => {
         // it is re-armed, not deleted.
         await instance.tasks.cancel(receipt.runId);
         expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
+      }
+    );
+  });
+
+  it("a stalled attempt detaches at the dispatch budget instead of starving the queue", async () => {
+    const stub = env.TaskSchedulerCoexistObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskSchedulerCoexistObject, state) => {
+        await instance.lifecycle.start();
+        // Seed directly so the QUEUE wake drives the run — the public run()
+        // starts a warm attempt outside the dispatch loop.
+        seedTaskRun(state.storage, {
+          runId: "stall-1",
+          definition: "stall",
+          state: "pending",
+          nextAt: Date.now() - 1_000
+        });
+        await instance.scheduler.set(0, "remind", "tick");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskSchedulerCoexistObject) => {
+        // The stalled step was claimed, then execution detached at the
+        // dispatch budget — so the schedule behind it fired within seconds,
+        // not after the five-minute default step timeout.
+        await waitFor(() => instance.remindRuns.includes("tick"), 15_000);
+        expect(instance.stepRuns).toContain("stall:hang");
+        await instance.tasks.cancel("stall-1");
       }
     );
   });

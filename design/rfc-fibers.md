@@ -89,14 +89,17 @@ Tasks never touches the physical alarm. Every non-terminal run's
 authoritative `next_at` deadline (acceptance, sleeps, retries, claim
 backstops all write it) is mirrored as one job in the Lifecycle work queue
 — `id = "task:" + the run id`, so a retime is a same-id push and
-caller-selected run IDs stay inside Tasks' own job namespace. Wakes dispatch
-through
-`onJob`, whose outcome is derived from the run row after execution: the
-row is the single source of truth for whether and when the run wakes
-again, superseding any same-id push made mid-drive. Mirror maintenance
-lives inside the settle/park helpers so a state transition cannot forget
-its wake. See [alarm-coordination.md](./alarm-coordination.md) for the
-queue model itself.
+caller-selected run IDs stay inside Tasks' own job namespace. Wakes dispatch through `onJob`, whose outcome is derived from the run row:
+the row is the single source of truth for whether and when the run wakes
+again. Mirror maintenance lives inside the settle/park helpers so a state
+transition cannot forget its wake. Dispatch is bounded: a queue-driven
+attempt holds the serial dispatch loop for at most a small budget, then
+detaches and keeps executing while the isolate lives — durability never
+depends on the inline await, because the claim backstop in the run row is
+the wake that survives isolate death, and a detached settle re-syncs the
+mirror (newer pushes win over drive results at the queue). See
+[alarm-coordination.md](./alarm-coordination.md) for the queue model
+itself.
 
 ### Module layout
 

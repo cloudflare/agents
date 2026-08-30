@@ -202,6 +202,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
 export class TaskSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
   /** Step callbacks that actually ran. */
   readonly stepRuns: string[] = [];
+  /** Payloads the `remind` schedule callback observed. */
+  readonly remindRuns: string[] = [];
 
   readonly tasks = new Tasks({
     definitions: {
@@ -216,13 +218,27 @@ export class TaskSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
           return "after";
         });
         return "done";
+      },
+
+      /** Hangs until aborted; proves a stuck attempt cannot starve the queue. */
+      stall: async (_input: undefined, step: TaskStep) => {
+        await step.do("hang", ({ signal }) => {
+          this.stepRuns.push("stall:hang");
+          return new Promise<never>((_resolve, reject) => {
+            const fail = () => reject(signal.reason ?? new Error("aborted"));
+            if (signal.aborted) return fail();
+            signal.addEventListener("abort", fail, { once: true });
+          });
+        });
       }
     }
   });
 
   readonly scheduler = new Scheduler({
     callbacks: {
-      remind: () => {}
+      remind: (payload) => {
+        this.remindRuns.push(String(payload));
+      }
     }
   });
 

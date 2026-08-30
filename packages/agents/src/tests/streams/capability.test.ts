@@ -385,6 +385,19 @@ describe("Streams capability", () => {
       );
       expect(garbage).toContain('id: 0\ndata: {"i":0}');
 
+      // A pre-aborted signal ends the response instead of tailing the live
+      // stream forever — listeners added to aborted signals never fire, so
+      // completion of this read IS the assertion.
+      const live = await instance.streams.open("sse-live");
+      live.append({ i: 0 });
+      await readAll(
+        await sseResponse(instance.streams, "sse-live", {
+          heartbeatMs: 0,
+          signal: AbortSignal.abort()
+        })
+      );
+      live.close();
+
       const broken = await instance.streams.open("sse-broken");
       broken.append({ i: 0 });
       broken.error("provider hung up");

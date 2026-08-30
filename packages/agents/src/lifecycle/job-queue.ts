@@ -322,6 +322,15 @@ export class JobQueue {
     );
   }
 
+  /** One job's current row when it still exists and is still due. */
+  dueRow(id: string, nowMs: number): JobStorageRow | undefined {
+    return this.#sql(
+      "SELECT * FROM cf_agents_jobs WHERE id = ? AND time <= ?",
+      id,
+      Math.floor(nowMs)
+    )[0];
+  }
+
   markRunning(id: string, nowMs: number): void {
     this.#sql(
       `UPDATE cf_agents_jobs

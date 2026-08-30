@@ -100,6 +100,13 @@ const MAX_DEFINITION_NAME_LENGTH = 256;
  * job id space.
  */
 const WAKE_JOB_PREFIX = "task:";
+/**
+ * How long one queue-driven attempt may hold the serial dispatch loop
+ * before detaching. Correctness never depends on the inline await — the
+ * claim backstop owns the durable wake — so this only trades a prompt
+ * inline settle for queue liveness.
+ */
+const DISPATCH_BUDGET_MS = 5_000;
 
 const TERMINAL_STATES: ReadonlySet<TaskRunState> = new Set([
   "completed",
@@ -304,7 +311,30 @@ export class Tasks<
       `;
       return this.#wakeOutcome(runId);
     }
-    await this.#executeRun(runId);
+    // Dispatch is bounded: the queue drives jobs serially, so this attempt
+    // may not hold the loop for its full step budget. Short attempts (the
+    // common case — memoized replays, quick steps) settle inline; a longer
+    // one detaches at the budget and keeps executing while this isolate
+    // lives. Durability does not depend on the await: the claim backstop in
+    // the run row is the wake that survives isolate death, and a detached
+    // settle re-syncs the wake mirror, superseding the outcome returned
+    // below (newer pushes win over drive results).
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    const budget = new Promise<"budget">((resolve) => {
+      budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
+    });
+    const attempt = this.#executeRun(runId).then(() => "settled" as const);
+    try {
+      // A platform failure inside the budget rejects the race and re-enters
+      // the driver's deferral path unchanged.
+      const winner = await Promise.race([attempt, budget]);
+      if (winner === "budget") {
+        // Detached: a later failure re-enters through the claim backstop.
+        attempt.catch(() => {});
+      }
+    } finally {
+      clearTimeout(budgetTimer);
+    }
     return this.#wakeOutcome(runId);
   }
 
@@ -544,9 +574,11 @@ export class Tasks<
             `"${definition}"`
         );
       }
-      // When both identifiers are provided they must name the same run:
-      // joining by one while the other points elsewhere would silently hand
-      // the caller an unrelated run.
+      // The idempotency key is the deduplication authority: a run matched
+      // by its key joins even when the caller requested a different (still
+      // unused) runId — the receipt carries the real id. The reverse is a
+      // conflict: a run matched by ID whose stored key differs from the
+      // provided one would silently bind the caller's key to nothing.
       if (
         options.idempotencyKey !== undefined &&
         existing.idempotency_key !== options.idempotencyKey
@@ -555,12 +587,6 @@ export class Tasks<
           `Task run "${existing.run_id}" carries idempotency key ` +
             `${existing.idempotency_key === null ? "none" : `"${existing.idempotency_key}"`}; ` +
             `refusing to join it with conflicting key "${options.idempotencyKey}"`
-        );
-      }
-      if (options.runId !== undefined && existing.run_id !== options.runId) {
-        throw new Error(
-          `Idempotency key "${options.idempotencyKey}" already names run ` +
-            `"${existing.run_id}"; refusing to join it as "${options.runId}"`
         );
       }
       return {

@@ -109,10 +109,13 @@ Four named rules define what a job owner can and cannot rely on:
 3. **Newer pushes win over drive results.** Every dispatched job carries
    a durable in-flight marker; a same-id `push()` or `reschedule()` made
    while the job executes clears it, and `applyOutcome` only applies a
-   drive result to a still-marked job. An owner can therefore never lose
-   a wake it explicitly pushed mid-drive. Owners that both push and
-   return outcomes for the same job (Tasks) should derive both from the
-   same durable state so they always agree.
+   drive result to a still-marked job. The drive loop also refetches each
+   due job before claiming it, so a job replaced earlier in the same
+   alarm cycle dispatches with fresh data — or, if no longer due, is
+   skipped. An owner can therefore never lose a wake it explicitly
+   pushed mid-drive. Owners that both push and return outcomes for the
+   same job (Tasks) should derive both from the same durable state so
+   they always agree.
 4. **Platform failures abort the drive loop.** A platform-class failure
    (superseded isolate, memory-limit reset, platform transient) preserves
    the failing job and re-throws, deferring the _remaining_ due jobs to

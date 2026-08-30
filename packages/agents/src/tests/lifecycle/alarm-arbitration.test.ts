@@ -95,6 +95,29 @@ describe("Lifecycle job queue", () => {
     expect(survivor).toEqual({ fn: "tick", time: futureTime });
   });
 
+  it("skips a due job's stale snapshot after an earlier dispatch retimed it", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    await stub.startFromRpc({ label: "rpc" });
+    const futureTime = Date.now() + 120_000;
+    await stub.armStaleSnapshotProbe(futureTime);
+
+    await vi.waitFor(
+      async () => {
+        expect(await stub.getEvents()).toContain("capability:job:retime-other");
+      },
+      { timeout: 10_000 }
+    );
+
+    // The victim was due in the same batch, but the retimer moved it to the
+    // future first: its stale snapshot must not have dispatched, and the
+    // retimed job must survive untouched.
+    expect(await stub.getEvents()).not.toContain("capability:job:tick");
+    expect(await stub.getProbeJob("victim")).toEqual({
+      fn: "tick",
+      time: futureTime
+    });
+  });
+
   it("scopes job ids to their owner instead of clobbering across owners", async () => {
     const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
     await stub.startFromRpc({ label: "rpc" });

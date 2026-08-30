@@ -65,6 +65,8 @@ class JobProbe extends LifecycleCapability {
   readonly #onExecute: (fn: string) => void;
   /** When set, a `repush` job pushes itself to this time mid-dispatch. */
   repushTime: number | undefined;
+  /** When set, a `retime-other` job pushes this job id to `repushTime`. */
+  retimeTargetId: string | undefined;
 
   constructor(onExecute: (fn: string) => void) {
     super("job-probe");
@@ -79,6 +81,19 @@ class JobProbe extends LifecycleCapability {
       // it survive the completion outcome this handler returns.
       await this.lifecycle.jobs.push({
         id: job.id,
+        fn: "tick",
+        time: this.repushTime
+      });
+    }
+    if (
+      job.fn === "retime-other" &&
+      this.retimeTargetId !== undefined &&
+      this.repushTime !== undefined
+    ) {
+      // Retime a LATER job in the same due batch: the drive loop must not
+      // dispatch that job's stale snapshot afterwards.
+      await this.lifecycle.jobs.push({
+        id: this.retimeTargetId,
         fn: "tick",
         time: this.repushTime
       });
@@ -377,6 +392,26 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       id: "repush-probe",
       fn: "repush",
       time: Date.now() - 1
+    });
+  }
+
+  /**
+   * Arm two due probe jobs where the first dispatch retimes the second to
+   * `futureTime`: the second's stale due snapshot must not dispatch.
+   */
+  async armStaleSnapshotProbe(futureTime: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#jobProbe.repushTime = futureTime;
+    this.#jobProbe.retimeTargetId = "victim";
+    await this.#jobProbe.push({
+      id: "victim",
+      fn: "tick",
+      time: Date.now() - 1
+    });
+    await this.#jobProbe.push({
+      id: "retimer",
+      fn: "retime-other",
+      time: Date.now() - 2
     });
   }
 

@@ -100,10 +100,16 @@ export async function sseResponse(
   const heartbeatMs = options.heartbeatMs ?? 30_000;
   const abort = new AbortController();
   const onUpstreamAbort = () => abort.abort();
-  options.signal?.addEventListener("abort", onUpstreamAbort, { once: true });
-  options.request?.signal.addEventListener("abort", onUpstreamAbort, {
-    once: true
-  });
+  // A listener added to an already-aborted signal never fires: check first,
+  // or a pre-aborted request would tail a live stream forever.
+  if (options.signal?.aborted || options.request?.signal.aborted) {
+    abort.abort();
+  } else {
+    options.signal?.addEventListener("abort", onUpstreamAbort, { once: true });
+    options.request?.signal.addEventListener("abort", onUpstreamAbort, {
+      once: true
+    });
+  }
 
   let open = true;
   const body = new ReadableStream<Uint8Array>({

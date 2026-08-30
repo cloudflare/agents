@@ -140,9 +140,17 @@ export class JobDriver {
       await this.#options.storage.setAlarm(nowMs + DEADMAN_ALARM_DELAY_MS);
     }
 
-    for (const row of due) {
+    for (const stale of due) {
       // Host teardown mid-phase: its storage is gone, stop touching it.
       if (this.#options.disabled()) return;
+
+      // Refetch before claiming: an earlier dispatch in this loop may have
+      // pushed, rescheduled, or cancelled this job since the due snapshot
+      // was taken. A row that is gone or no longer due belongs to that
+      // newer intent — skip it (the final re-arm owns any future wake). A
+      // row that changed but is still due dispatches with its fresh data.
+      const row = this.#options.queue.dueRow(stale.id, nowMs);
+      if (!row) continue;
 
       if (row.singleflight === 1 && row.running === 1) {
         if (!isHungRow(row, nowMs)) {
