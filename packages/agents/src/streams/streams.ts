@@ -396,6 +396,9 @@ export class Streams extends LifecycleCapability {
           [streamId]
         );
         if (removed > 0) this.#emit("stream:deleted", { streamId });
+        // Unchecked deletes can remove a live stream: wake tailing readers
+        // so they observe the deletion instead of pending forever.
+        this.#wake(streamId);
       },
       deleteMany: (streamIds) => {
         for (const streamId of streamIds) {
@@ -403,6 +406,7 @@ export class Streams extends LifecycleCapability {
             DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}
           `;
           this.#sql`DELETE FROM cf_agents_streams WHERE stream_id = ${streamId}`;
+          this.#wake(streamId);
         }
       },
       readAll: (streamId) => this.#sql<StreamChunkRow>`

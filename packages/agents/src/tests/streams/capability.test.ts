@@ -354,6 +354,29 @@ describe("Streams capability", () => {
     });
   });
 
+  it("deleting a live stream wakes tailing readers", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      const stream = await instance.streams.open("doomed");
+      stream.append({ i: 0 });
+
+      const seqs: number[] = [];
+      const reading = (async () => {
+        for await (const batch of instance.streams.readBatches("doomed")) {
+          seqs.push(...batch.map((c) => c.seq));
+        }
+      })();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // The sweep path can remove a live stream; parked readers must wake
+      // and observe the deletion instead of pending until an unrelated
+      // abort.
+      instance.streams.__DO_NOT_USE_WILL_BREAK__sync().deleteMany(["doomed"]);
+      await reading;
+      expect(seqs).toEqual([0]);
+    });
+  });
+
   it("serves a stream over SSE with Last-Event-ID resume and terminal events", async () => {
     const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
