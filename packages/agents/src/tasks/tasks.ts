@@ -17,6 +17,7 @@ import type {
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
+import { isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
 import { TaskStore } from "./store";
 import { createTaskStepEngine } from "./engine-port";
@@ -762,6 +763,16 @@ export class Tasks<
     if (thrown instanceof AttemptSupersededError) {
       // A newer attempt owns the run; this one unwinds without settling.
       return;
+    }
+
+    if (isPlatformFailure(thrown)) {
+      // Platform-class failure (superseded isolate, memory-limit reset,
+      // storage transient): not an application outcome, so the run must not
+      // settle. Unwind and rethrow — the claim backstop written at claim
+      // time is the durable wake, and the next invocation reclaims and
+      // replays the run; a queue-driven dispatch defers through the
+      // driver's platform-failure path.
+      throw thrown;
     }
 
     if (isTaskCancellation(thrown)) {

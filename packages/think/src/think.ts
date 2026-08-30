@@ -4579,11 +4579,20 @@ export class Think<
               await this.ctx.storage.delete(persistKey);
               return undefined;
             }
-            // Fire-and-forget stash writes are safe: Durable Object storage
-            // applies same-key operations in issuance order, so the delete
-            // below can never be overtaken by an earlier put. A crash loses
-            // only the unflushed tail, which recovery tolerates by design
-            // (the snapshot is a hint; stream evidence is authoritative).
+            // The initial "accepted" snapshot must be durable before any
+            // delivery work begins: an isolate lost mid-answer recovers
+            // through this snapshot, and without it replay could neither
+            // deliver nor apologize.
+            const initial = runtime.initialReplySnapshot(nonce);
+            if (initial !== undefined) {
+              await this.ctx.storage.put(persistKey, initial);
+            }
+            // Later fire-and-forget stash writes are safe: Durable Object
+            // storage applies same-key operations in issuance order, so the
+            // delete below can never be overtaken by an earlier put. A crash
+            // loses only the unflushed tail, which recovery tolerates by
+            // design (the snapshot is a hint; stream evidence is
+            // authoritative).
             await runtime.executeLiveReply(nonce, {
               id: runId,
               signal,

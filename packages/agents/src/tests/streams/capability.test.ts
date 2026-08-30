@@ -320,6 +320,40 @@ describe("Streams capability", () => {
     });
   });
 
+  it("a synchronous append inside onUpToDate is not a lost wakeup", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      const stream = await instance.streams.open("utd-append");
+      stream.append({ i: 0 });
+
+      const order: string[] = [];
+      const reading = (async () => {
+        for await (const batch of instance.streams.readBatches("utd-append", {
+          onUpToDate: () => {
+            order.push("up-to-date");
+            // Application code appending from the caught-up callback:
+            // its wake fires before any waiter registers, so only a
+            // re-poll can observe this chunk without a later append.
+            stream.append({ i: 1 });
+          }
+        })) {
+          order.push(`batch:${batch.map((c) => c.seq).join(",")}`);
+        }
+      })();
+
+      // The callback's chunk must arrive with NO further append or close.
+      const deadline = Date.now() + 2_000;
+      while (!order.includes("batch:1") && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(order).toContain("batch:1");
+
+      stream.close();
+      await reading;
+      expect(order).toEqual(["batch:0", "up-to-date", "batch:1"]);
+    });
+  });
+
   it("serves a stream over SSE with Last-Event-ID resume and terminal events", async () => {
     const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {

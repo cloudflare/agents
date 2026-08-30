@@ -436,12 +436,28 @@ export class ThinkMessengerRuntime {
     return chat.registerSingleton();
   }
 
-  /** Execute one live (same-isolate) reply under the given fiber context. */
   /** Whether this isolate still holds the live closure for one reply. */
   hasLiveReply(nonce: string): boolean {
     return this.liveReplies.has(nonce);
   }
 
+  /**
+   * The durable "accepted" snapshot for one live reply, when its closure is
+   * still held. The task definition persists this BEFORE delivery begins:
+   * an isolate lost mid-answer recovers through it, and without it replay
+   * could neither deliver nor apologize.
+   */
+  initialReplySnapshot(nonce: string): unknown | undefined {
+    const entry = this.liveReplies.get(nonce);
+    if (!entry) return undefined;
+    return messengerReplySnapshot(
+      "accepted",
+      entry.snapshotEvent,
+      entry.snapshotThread
+    );
+  }
+
+  /** Execute one live (same-isolate) reply under the given fiber context. */
   async executeLiveReply(nonce: string, fiber: FiberContext): Promise<void> {
     const entry = this.liveReplies.get(nonce);
     if (!entry) {
@@ -449,13 +465,6 @@ export class ThinkMessengerRuntime {
         "Messenger reply closure is no longer available in this isolate"
       );
     }
-    fiber.stash(
-      messengerReplySnapshot(
-        "accepted",
-        entry.snapshotEvent,
-        entry.snapshotThread
-      )
-    );
     await this.answer(
       entry.definition,
       entry.event,

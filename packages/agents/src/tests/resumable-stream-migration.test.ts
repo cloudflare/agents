@@ -78,4 +78,25 @@ describe("ResumableStream — legacy table migration", () => {
     expect(result.startThrew).toBe(false);
     expect(result.newStreamMessageId).toBe("msg-1");
   });
+
+  it("chat tag lookups ignore newer non-chat streams sharing the tag", async () => {
+    const agent = await getAgentByName(
+      env.TestSessionAgent,
+      crypto.randomUUID()
+    );
+    const result = await (
+      agent as unknown as {
+        chatTagCollisionForTest(): Promise<{
+          latest: { id: string; status: string } | null;
+          activeId: string | null;
+        }>;
+      }
+    ).chatTagCollisionForTest();
+
+    // The stream table is shared and tags are non-unique: newer application
+    // streams with the same tag must not mask chat's recovery evidence.
+    expect(result.latest).toEqual({ id: "chat-owned", status: "completed" });
+    // The unrelated live stream must not read as a recoverable chat turn.
+    expect(result.activeId).toBeNull();
+  });
 });

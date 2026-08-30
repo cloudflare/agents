@@ -563,12 +563,27 @@ export class ResumableStream {
     return null;
   }
 
+  /**
+   * Latest CHAT-owned row carrying a request tag. The stream table is
+   * shared with application producers and tags are non-unique, so the
+   * newest row by tag alone could be an unrelated stream masking chat's
+   * recovery evidence — ownership is the `cfChat` metadata marker.
+   */
+  private _latestChatRowByTag(
+    requestId: string,
+    state?: StreamRow["state"]
+  ): StreamRow | undefined {
+    return this.ops
+      .rowsByTag(requestId, state)
+      .find((row) => parseChatMetadata(row) !== null);
+  }
+
   replayCompletedChunksByRequestId(
     connection: Connection,
     requestId: string
   ): boolean {
     this.flushBuffer();
-    const row = this.ops.latestRowByTag(requestId, "completed");
+    const row = this._latestChatRowByTag(requestId, "completed");
     if (!row) return false;
 
     const continuation = parseChatMetadata(row)?.isContinuation === 1;
@@ -607,7 +622,7 @@ export class ResumableStream {
     requestId: string
   ): boolean {
     this.flushBuffer();
-    const row = this.ops.latestRowByTag(requestId, "errored");
+    const row = this._latestChatRowByTag(requestId, "errored");
     if (!row) return true;
     return sendReplayBodies(
       connection,
@@ -624,7 +639,7 @@ export class ResumableStream {
   latestStreamInfoForRequest(
     requestId: string
   ): { id: string; status: PublicStreamStatus; createdAt: number } | null {
-    const row = this.ops.latestRowByTag(requestId);
+    const row = this._latestChatRowByTag(requestId);
     if (!row) return null;
     return {
       id: row.stream_id,
@@ -639,7 +654,7 @@ export class ResumableStream {
   latestActiveStreamInfoForRequest(
     requestId: string
   ): { id: string; createdAt: number } | null {
-    const row = this.ops.latestRowByTag(requestId, "streaming");
+    const row = this._latestChatRowByTag(requestId, "streaming");
     if (!row) return null;
     return { id: row.stream_id, createdAt: row.created_at };
   }

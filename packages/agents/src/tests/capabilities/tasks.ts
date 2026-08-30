@@ -22,6 +22,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly runErrors: string[] = [];
   /** Failures injected into flaky step callbacks before they succeed. */
   failuresBeforeSuccess = 0;
+  /** Platform-shaped failures injected at handler level before success. */
+  platformFailuresRemaining = 0;
   /** Monotonic counter proving handlers re-ran from the top on replay. */
   statusCounter = 0;
   /** Guarded handler entries, recorded as entry:input:interrupted-step. */
@@ -170,6 +172,22 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           }
         );
         return `run-done:${first}`;
+      },
+
+      /**
+       * Throws a platform-shaped error at handler level (outside any step)
+       * while injected failures remain; replays complete normally.
+       */
+      platformFlaky: async (_input: undefined, step: TaskStep) => {
+        const seed = await step.do("seed", () => {
+          this.stepRuns.push("platform:seed");
+          return "seed";
+        });
+        if (this.platformFailuresRemaining > 0) {
+          this.platformFailuresRemaining -= 1;
+          throw new Error("Durable Object reset because its code was updated.");
+        }
+        return `${seed}-done`;
       },
 
       /** A single journaled step, for replay-memoization assertions. */

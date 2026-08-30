@@ -594,6 +594,40 @@ describe("Tasks capability", () => {
     );
   });
 
+  it("a platform-class failure never settles the run; replay completes it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    let runId = "";
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      instance.platformFailuresRemaining = 1;
+      const receipt = await instance.tasks.run("platformFlaky");
+      runId = receipt.runId;
+      await waitFor(() => instance.platformFailuresRemaining === 0);
+      // The warm attempt hit a platform-shaped reset AFTER journaling its
+      // step: the run must remain claimed — not failed — with the claim
+      // backstop as its durable wake, and onError must not observe it.
+      const after = await instance.tasks.get(receipt.runId);
+      expect(after?.state).toBe("running");
+      expect(instance.runErrors).toEqual([]);
+    });
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        backdateTaskWake(state.storage, runId);
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, runId, ["completed"]);
+      if (snapshot.state !== "completed") throw new Error("unreachable");
+      expect(snapshot.result).toBe("seed-done");
+      // The journaled step did not re-execute on replay.
+      expect(instance.stepRuns).toEqual(["platform:seed"]);
+    });
+  });
+
   it("removes non-retained records after completion", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

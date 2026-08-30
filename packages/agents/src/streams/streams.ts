@@ -87,8 +87,13 @@ export interface StreamsSyncInternal {
   readAll(streamId: string): StreamChunkRow[];
   /** Every stream row, newest first (created_at, then insertion order). */
   listRows(): StreamRow[];
-  /** Latest row carrying a tag, optionally narrowed to one state. */
-  latestRowByTag(tag: string, state?: StreamState): StreamRow | undefined;
+  /**
+   * Every row carrying a tag, newest first, optionally narrowed to one
+   * state. Tags are non-unique and the table is shared across producers,
+   * so callers apply their own ownership filter (e.g. chat's metadata
+   * marker) rather than trusting the newest row.
+   */
+  rowsByTag(tag: string, state?: StreamState): StreamRow[];
   /**
    * Import one historical stream row verbatim (migrations, test seeding):
    * explicit timestamps and count, no events, no wakeups.
@@ -269,6 +274,12 @@ export class Streams extends LifecycleCapability {
       if (!signaledUpToDate) {
         signaledUpToDate = true;
         options.onUpToDate?.();
+        // The callback is application code and can synchronously append to
+        // this same stream — a wake that would fire before any waiter is
+        // registered. Re-poll instead of sleeping so that append is never a
+        // lost wakeup; everything from the next query to waiter
+        // registration is synchronous, so no other append can slip past.
+        continue;
       }
 
       const stream = this.#getStream(streamId);
@@ -402,20 +413,18 @@ export class Streams extends LifecycleCapability {
       listRows: () => this.#sql<StreamRow>`
         SELECT * FROM cf_agents_streams ORDER BY created_at DESC, rowid DESC
       `,
-      latestRowByTag: (tag, state) => {
-        const rows = state
+      rowsByTag: (tag, state) =>
+        state
           ? this.#sql<StreamRow>`
               SELECT * FROM cf_agents_streams
               WHERE tag = ${tag} AND state = ${state}
-              ORDER BY created_at DESC, rowid DESC LIMIT 1
+              ORDER BY created_at DESC, rowid DESC
             `
           : this.#sql<StreamRow>`
               SELECT * FROM cf_agents_streams
               WHERE tag = ${tag}
-              ORDER BY created_at DESC, rowid DESC LIMIT 1
-            `;
-        return rows[0];
-      },
+              ORDER BY created_at DESC, rowid DESC
+            `,
       importStream: (row) => {
         this.#validateStreamId(row.streamId);
         const metadataJson = this.#serialize(
@@ -540,6 +549,11 @@ export class Streams extends LifecycleCapability {
       };
       const onAbort = () => {
         waiters.delete(wake);
+        // The last aborted waiter removes the map entry too, so abandoned
+        // streams do not accumulate empty sets for the isolate's lifetime.
+        if (waiters.size === 0 && this.#wakeups.get(streamId) === waiters) {
+          this.#wakeups.delete(streamId);
+        }
         // Resolve rather than reject: the read loop re-checks the signal
         // first and throws its reason from generator context.
         resolve();

@@ -259,6 +259,45 @@ export class TestSessionAgent extends Agent {
       values ('c1', 'legacy-stream', ${JSON.stringify(['{"type":"text-delta","delta":"b"}', '{"type":"text-delta","delta":"c"}'])}, 1, ${Date.now()})`;
   }
 
+  /**
+   * Prove chat tag lookups ignore non-chat streams sharing a tag: seed one
+   * chat-owned completed stream for a request, then NEWER application
+   * streams with the same tag (one streaming, one completed), and report
+   * what the chat lookups observe.
+   */
+  async chatTagCollisionForTest(): Promise<{
+    latest: { id: string; status: string } | null;
+    activeId: string | null;
+  }> {
+    const requestId = "collide-req";
+    const chat = await this.streams.open("chat-owned", {
+      tag: requestId,
+      metadata: { cfChat: 1 }
+    });
+    chat.append(JSON.stringify({ type: "text-delta", delta: "hi" }));
+    chat.close();
+    // Newer unrelated application streams sharing the tag, in the states
+    // that could mask each chat lookup.
+    const appLive = await this.streams.open("app-live", { tag: requestId });
+    appLive.append({ x: 1 });
+    const appDone = await this.streams.open("app-done", { tag: requestId });
+    appDone.append({ x: 2 });
+    appDone.close();
+
+    const stream = new ResumableStream(
+      this.streams,
+      <T = Record<string, unknown>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] => this.sql<T>(strings, ...values)
+    );
+    const latest = stream.latestStreamInfoForRequest(requestId);
+    return {
+      latest: latest ? { id: latest.id, status: latest.status } : null,
+      activeId: stream.latestActiveStreamInfoForRequest(requestId)?.id ?? null
+    };
+  }
+
   private streamMetadataColumnsForTest(): string[] {
     return this.sql<{ name: string }>`
       select name from pragma_table_info('cf_ai_chat_stream_metadata')
