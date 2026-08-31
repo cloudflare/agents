@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("agents/websockets", () => ({ WebSockets: mocks.FakeWebSockets }));
 
-import { ChannelHost, type ChannelChunk } from "..";
+import { ChannelHost, type ChannelChunk, type DeliveryResult } from "..";
 import { web } from "../adapters/web";
 
 function streamOf(...chunks: ChannelChunk[]): ReadableStream<ChannelChunk> {
@@ -44,12 +44,13 @@ describe("web Channel", () => {
     const connection = { id: "browser-1", send };
     capability.connections.set(connection.id, connection);
     const onMessage = vi.fn();
+    let result: DeliveryResult | undefined;
     let host!: ChannelHost;
     host = new ChannelHost({
       channels: { browser: channel },
       async onMessage(event) {
         onMessage(event);
-        await host.stream(
+        result = await host.stream(
           event.message.replySurface!,
           streamOf(
             { type: "reasoning", text: "Brief thought" },
@@ -94,6 +95,10 @@ describe("web Channel", () => {
         })
       })
     );
+    expect(result).toEqual({
+      status: "delivered",
+      reference: "web:browser-1:request:turn-1"
+    });
     expect(send.mock.calls.map(([frame]) => JSON.parse(frame))).toEqual([
       {
         body: JSON.stringify({

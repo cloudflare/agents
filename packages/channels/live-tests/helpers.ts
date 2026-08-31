@@ -18,8 +18,9 @@ export function uniqueText(text: string): string {
 export async function readObserved(
   channel: LiveDeliveryBinding
 ): Promise<ObservedMessage[]> {
-  return (await channel.read()).map((message) => ({
-    text: message.text.replaceAll(RUN_MARKER, "")
+  return (await channel.read()).map(({ text, ...observation }) => ({
+    text: text.replaceAll(RUN_MARKER, ""),
+    ...observation
   }));
 }
 

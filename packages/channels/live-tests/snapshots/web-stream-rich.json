@@ -1,0 +1,14 @@
+[
+  {
+    "text": "Rich streaming smoke test.",
+    "reasoning": [
+      "every Channel may ignore this"
+    ],
+    "sources": [
+      {
+        "url": "https://example.com",
+        "title": "Example"
+      }
+    ]
+  }
+]

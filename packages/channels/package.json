@@ -60,6 +60,7 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
+    "dev:live:web": "wrangler dev --config live-tests/web/wrangler.jsonc --port 8799 --inspector-port 0",
     "test": "vitest --run",
     "test:live": "vitest --run -c vitest.live.config.ts"
   },
@@ -83,6 +84,7 @@
   "devDependencies": {
     "@tanstack/ai": "0.38.0",
     "ai": "^7.0.0",
+    "capnweb": "^0.12.0",
     "teleproto": "^1.228.5",
     "vitest": "4.1.10"
   },

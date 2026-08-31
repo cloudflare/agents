@@ -1,6 +1,6 @@
 # Live delivery tests
 
-These local-only tests call the real `telegram()`, `slack()`, and `email()`
+These local-only tests call the real `telegram()`, `slack()`, `email()`, and `web()`
 adapters through `ChannelHost`, then read each destination through an independent
 provider API. They are not part of normal package tests, Nx affected tests, or
 CI.
@@ -23,6 +23,8 @@ Set these variables in an uncommitted environment file or the shell:
   `CHANNELS_LIVE_FASTMAIL_API_TOKEN`,
   `CHANNELS_LIVE_CLOUDFLARE_ACCOUNT_ID`,
   `CHANNELS_LIVE_CLOUDFLARE_API_TOKEN`
+- Web: `CHANNELS_LIVE_WEB_URL` and, for a deployed fixture,
+  `CHANNELS_LIVE_WEB_TOKEN`
 
 Telegram observation uses a non-bot Teleproto `StringSession`. Slack needs
 `chat:write`, `channels:history`, and membership in the configured channel. The
@@ -39,6 +41,12 @@ Telegram only shows drafts in private chats. Point
 draft path. A group still receives the terminal message, but cannot prove that
 streaming previews reached a reader.
 
+The Web binding observes the destination through a real
+`WebSocketChatTransport`. A separate non-hibernating Cap'n Web session drives
+the fixture Durable Object's `ChannelHost`, keeping each streamed delivery on
+one live object instance. The fixture persists only the reply surface; each test
+uses a fresh object name and clears it afterward.
+
 ## Run
 
 ```sh
@@ -50,3 +58,27 @@ Run one provider with Vitest's name filter:
 ```sh
 pnpm --filter @cloudflare/channels test:live -t telegram
 ```
+
+For a local Web run, start the fixture and test it from separate terminals:
+
+```sh
+pnpm --filter @cloudflare/channels dev:live:web
+```
+
+```sh
+CHANNELS_LIVE_WEB_URL=http://127.0.0.1:8799 \
+  pnpm --filter @cloudflare/channels test:live -t web
+```
+
+To use a deployed fixture, configure its token and deploy the worker, then set
+the matching URL and token in the test environment:
+
+```sh
+pnpm exec wrangler secret put LIVE_TEST_TOKEN \
+  --config packages/channels/live-tests/web/wrangler.jsonc
+pnpm exec wrangler deploy \
+  --config packages/channels/live-tests/web/wrangler.jsonc
+```
+
+The worker accepts tokenless requests only on localhost. Do not commit the
+token or an environment file containing it.

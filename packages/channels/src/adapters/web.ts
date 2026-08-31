@@ -83,10 +83,11 @@ function addressOf(surface: ChannelMessageSurface): WebChatAddress | null {
 function streamFailure(
   sent: boolean,
   code: string,
-  message: string
+  message: string,
+  reference: string
 ): DeliveryResult {
   return sent
-    ? { status: "uncertain", error: { code, message } }
+    ? { status: "uncertain", reference, error: { code, message } }
     : { status: "failed", retryable: true, error: { code, message } };
 }
 
@@ -206,6 +207,7 @@ class ConfiguredWebChannel
     const abort = new AbortController();
     this.#active.set(key, abort);
     const encoder = new WebChatChunkEncoder(address.requestId);
+    const reference = `web:${address.connectionId}:request:${address.requestId}`;
     let sent = false;
 
     try {
@@ -239,18 +241,20 @@ class ConfiguredWebChannel
                 return streamFailure(
                   sent,
                   "WEB_CHAT_STREAM_INTERRUPTED",
-                  message
+                  message,
+                  reference
                 );
               }
               connection.send(
                 responseFrame(address.requestId, "", { done: true })
               );
-              return { status: "delivered" };
+              return { status: "delivered", reference };
             } catch (error) {
               return streamFailure(
                 sent,
                 "WEB_CHAT_DELIVERY_FAILED",
-                errorMessage(error)
+                errorMessage(error),
+                reference
               );
             }
           }

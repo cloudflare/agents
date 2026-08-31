@@ -2,7 +2,13 @@ import type { ChannelChunk, DeliveryResult } from "../src/channel";
 import type { ChannelHost } from "../src/host";
 import type { ChannelMessageSurface } from "../src/surface";
 
-export type ObservedMessage = { text: string };
+export type ObservedMessage = {
+  text: string;
+  [key: string]: unknown;
+};
+
+/** The outbound Host surface exercised by every live delivery scenario. */
+export type LiveDeliveryHost = Pick<ChannelHost, "deliver" | "stream">;
 
 export type LiveStreamSession = {
   push(chunk: ChannelChunk): Promise<void>;
@@ -12,9 +18,9 @@ export type LiveStreamSession = {
 };
 
 export type LiveDeliveryBinding = {
-  name: "telegram" | "slack" | "slack-thread" | "email";
+  name: "telegram" | "slack" | "slack-thread" | "email" | "web";
   destination: string;
-  host: ChannelHost;
+  host: LiveDeliveryHost;
   surface: ChannelMessageSurface;
   /** Initialize the observer and start from an empty destination. */
   open(): Promise<void>;
