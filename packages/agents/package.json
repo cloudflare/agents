@@ -51,7 +51,7 @@
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "valibot": "1.4.1",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
