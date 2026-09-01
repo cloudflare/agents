@@ -93,7 +93,7 @@ const BREAK_PRESETS: Preset[] = [
   {
     id: "cpu-burn",
     label: "Burn CPU",
-    note: "Deployed, the platform meters real CPU and kills this with RUN_RESOURCE_LIMIT once cpuMs is spent. Local dev does not enforce CPU budgets, so there it just takes a few seconds.",
+    note: "Deployed, the platform meters real CPU and kills this with RUN_RESOURCE_LIMIT once cpuMs is spent — but enforcement lags a second or two, and the spinning child freezes the parent's clock, so the server-measured time underreports while the wall clock does not. Local dev does not enforce CPU budgets at all.",
     source: `// Heavy synchronous work against a 500ms CPU budget.
 let x = 0;
 for (let i = 0; i < 3_000_000_000; i++) {
@@ -198,9 +198,7 @@ function ModeToggle() {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="mb-1.5 text-xs font-semibold text-kumo-inactive">
-      {children}
-    </p>
+    <p className="mb-1.5 text-xs font-semibold text-kumo-default">{children}</p>
   );
 }
 
@@ -234,7 +232,7 @@ function LimitSlider({
   return (
     <div>
       <div className="mb-1 flex items-baseline justify-between">
-        <span className="font-mono text-xs text-kumo-inactive">{label}</span>
+        <span className="font-mono text-xs text-kumo-subtle">{label}</span>
         <span className="font-mono text-xs font-medium text-kumo-default">
           {format(value)}
         </span>
@@ -348,7 +346,7 @@ function StackTrace({
           return (
             <pre
               key={key}
-              className="font-mono text-xs text-kumo-inactive whitespace-pre-wrap break-words"
+              className="font-mono text-xs text-kumo-subtle whitespace-pre-wrap break-words"
             >
               {line}
             </pre>
@@ -376,7 +374,7 @@ const LOG_LEVEL_CLASSES: Record<string, string> = {
   warn: "text-status-warning",
   log: "text-kumo-default",
   info: "text-kumo-default",
-  debug: "text-kumo-inactive"
+  debug: "text-kumo-subtle"
 };
 
 export function App() {
@@ -385,7 +383,7 @@ export function App() {
   const [presetId, setPresetId] = useState(initialPreset?.id);
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<RunApiResponse>();
+  const [result, setResult] = useState<RunApiResponse & { wallMs: number }>();
   const [showRaw, setShowRaw] = useState(false);
   const [history, setHistory] = useState<RunHistoryEntry[]>([]);
   const editorRef = useRef<HTMLTextAreaElement>(null);
@@ -414,6 +412,7 @@ export function App() {
   async function handleRun() {
     setRunning(true);
     setResult(undefined);
+    const startedAt = performance.now();
     try {
       const response = await fetch("/api/run", {
         method: "POST",
@@ -421,7 +420,10 @@ export function App() {
         body: JSON.stringify({ source, limits })
       });
       const body = (await response.json()) as RunApiResponse;
-      setResult(body);
+      setResult({
+        ...body,
+        wallMs: Math.round(performance.now() - startedAt)
+      });
       setHistory((previous) =>
         [...previous, { durationMs: body.durationMs, ok: body.ok }].slice(-30)
       );
@@ -431,7 +433,8 @@ export function App() {
         code: "NETWORK",
         message: error instanceof Error ? error.message : String(error),
         logs: [],
-        durationMs: 0
+        durationMs: 0,
+        wallMs: Math.round(performance.now() - startedAt)
       });
     } finally {
       setRunning(false);
@@ -522,7 +525,7 @@ export function App() {
           </div>
 
           {activePreset !== undefined && (
-            <div className="flex items-start gap-1.5 text-kumo-inactive">
+            <div className="flex items-start gap-1.5 text-kumo-subtle">
               <span className="h-lh flex items-center">
                 <ArrowElbowDownRightIcon size={14} className="shrink-0" />
               </span>
@@ -624,8 +627,11 @@ export function App() {
                   />
                 )}
                 {result !== undefined && (
-                  <span className="font-mono text-xs text-kumo-inactive">
-                    {result.durationMs}ms
+                  <span
+                    className="font-mono text-xs text-kumo-subtle"
+                    title="time inside run() on the server · total round trip from this browser"
+                  >
+                    {result.durationMs}ms server · {result.wallMs}ms total
                   </span>
                 )}
               </div>
@@ -648,6 +654,12 @@ export function App() {
                 <pre className="mt-2 rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-status-success whitespace-pre-wrap break-words">
                   {showRaw ? result.raw : result.value}
                 </pre>
+                {showRaw && (
+                  <p className="mt-1.5 font-mono text-xs text-kumo-subtle">
+                    The full run result object — status, value, and captured
+                    logs.
+                  </p>
+                )}
               </div>
             )}
 
@@ -663,7 +675,7 @@ export function App() {
               </div>
             )}
 
-            {result !== undefined && result.logs.length > 0 && (
+            {result !== undefined && result.logs.length > 0 && !showRaw && (
               <div className="mt-3">
                 <SectionLabel>
                   Console ({result.logs.length} entr
@@ -676,7 +688,7 @@ export function App() {
                       key={index}
                       className={`font-mono text-xs whitespace-pre-wrap break-words ${LOG_LEVEL_CLASSES[log.level] ?? "text-kumo-default"}`}
                     >
-                      <span className="text-kumo-inactive">[{log.level}] </span>
+                      <span className="text-kumo-subtle">[{log.level}] </span>
                       {log.message}
                     </pre>
                   ))}
