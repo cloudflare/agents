@@ -23,6 +23,7 @@ import {
   jobFromRow,
   type JobQueue,
   type JobStorageRow,
+  type LifecycleJob,
   type LifecycleJobContext,
   type LifecycleJobOutcome
 } from "./job-queue";
@@ -345,6 +346,15 @@ export class JobDriver {
     const nextTime = sealed
       ? undefined
       : Date.now() + Math.min(300, 30 * strikes) * 1000;
+    // Capture routed ownership before sealing deletes the rows. Domain policy
+    // runs afterward, when the loop is already broken, and uses this snapshot
+    // only to terminalize durable state owned outside the alarm host.
+    let purgedRecoveryLoopJobs: LifecycleJob[] | undefined;
+    try {
+      if (sealed) purgedRecoveryLoopJobs = queue.recoveryLoopJobs();
+    } catch {
+      // best-effort at a failure boundary
+    }
 
     try {
       if (executing) {
@@ -367,7 +377,12 @@ export class JobDriver {
     }
 
     try {
-      await this.#options.onMemoryLimit({ sealed, nextTime });
+      await this.#options.onMemoryLimit({
+        sealed,
+        nextTime,
+        executing: executing ? jobFromRow(executing) : undefined,
+        purgedRecoveryLoopJobs
+      });
     } catch {
       // best-effort domain policy; the purge above already broke the loop
     }

@@ -1,7 +1,11 @@
 import { lifecycleCapabilityId } from "./capability";
 import type { LifecycleRouteContext } from "./capability";
 import type { WSMessage } from "./types";
-import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
+import type {
+  LifecycleJob,
+  LifecycleJobContext,
+  LifecycleJobOutcome
+} from "./job-queue";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -47,6 +51,24 @@ export type MemoryLimitContext = {
   readonly sealed: boolean;
   /** The backoff wake time (epoch ms) armed for an unsealed strike. */
   readonly nextTime?: number;
+  /**
+   * The queue job that was executing when the strike landed. Absent when the
+   * reset happened during startup or host alarm work. Lifecycle has already
+   * backed off or purged its row before invoking memory-limit policy.
+   *
+   * Capabilities whose durable state outlives their queue row use this to
+   * apply the same policy to the underlying work. Scheduler temporarily also
+   * uses a routed job's address to deliver sealing to its owning dynamic agent;
+   * chat recovery's Tasks migration removes that compatibility path.
+   */
+  readonly executing?: LifecycleJob;
+  /**
+   * Recovery-loop jobs removed when this strike sealed the breaker. This is a
+   * pre-purge snapshot because the durable rows no longer exist when policy
+   * hooks run. Routed capabilities can use it to notify each owning Lifecycle;
+   * ordinary capabilities should prefer `executing`.
+   */
+  readonly purgedRecoveryLoopJobs?: ReadonlyArray<LifecycleJob>;
 };
 
 /**

@@ -17,9 +17,13 @@ flag through internal scaffolding (`RecoveryLoopScheduleOptions`) that will
 be deleted when recovery migrates onto the Tasks capability, where
 OOM-prone loops belong.
 Capabilities can react to a strike through the new optional `onMemoryLimit`
-hook, hosts through `onAlarmMemoryLimit`, and the strike budget is real
-Lifecycle configuration (`Lifecycle.install(host, { maxAlarmMemoryLimitStrikes })`)
-rather than a composition-root side channel.
+hook, hosts through `onAlarmMemoryLimit`, and the context identifies the job
+that was executing when one exists. The strike budget is real Lifecycle
+configuration (`Lifecycle.install(host, { maxAlarmMemoryLimitStrikes })`)
+rather than a composition-root side channel. Until chat recovery moves to
+Tasks, a sealed routed recovery schedule also forwards the seal to its owning
+dynamic agent so a chat child under a plain Agent root persists its exhausted
+incident and terminal notification.
 
 Removed accordingly: `Agent.onAlarmMemoryLimit`'s relay implementation, the
 `_cf_recoveryAlarmCallbacks` / `_cf_sealMemoryLimitedRecovery` template

@@ -404,6 +404,17 @@ export class JobQueue {
   }
 
   /**
+   * Read every recovery-loop job before breaker sealing. The memory-limit
+   * policy phase uses this snapshot after the rows are purged so routed owners
+   * can terminalize their own durable recovery state.
+   */
+  recoveryLoopJobs(): LifecycleJob[] {
+    return this.#sql(
+      "SELECT * FROM cf_agents_jobs WHERE recovery_loop = 1 ORDER BY time ASC"
+    ).map(jobFromRow);
+  }
+
+  /**
    * Purge every recovery-loop job when the breaker seals at its strike
    * budget (#1825). Unrelated jobs are untouched.
    */
