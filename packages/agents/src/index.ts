@@ -2495,39 +2495,8 @@ export class Agent<
   }
 
   private async _restoreAgentFacetContext(): Promise<void> {
-    await this._withAgentSpan(
-      "restore_agent_state",
-      "startup",
-      {},
-      async () => {
-        // Facet identity and bridges belong to Agent, not to any capability.
-        const isFacet =
-          await this.ctx.storage.get<boolean>("cf_agents_is_facet");
-        if (isFacet) this._isFacet = true;
-
-        const storedFacetName = await this.ctx.storage.get<string>(
-          "cf_agents_facet_name"
-        );
-        if (typeof storedFacetName === "string") {
-          this._facetName = storedFacetName;
-        }
-
-        const storedParentPath = await this.ctx.storage.get<
-          Array<{ className: string; name: string }>
-        >("cf_agents_parent_path");
-        if (isValidParentPath(storedParentPath)) {
-          this._parentPath = storedParentPath;
-        }
-
-        try {
-          await this._cf_hydrateSubAgentConnectionsFromRoot();
-        } catch (error) {
-          console.warn(
-            "[Agent] Unable to hydrate sub-agent WebSocket connections:",
-            error
-          );
-        }
-      }
+    await this._withAgentSpan("restore_agent_state", "startup", {}, () =>
+      this._dynamicAgents.restoreFacetContext()
     );
   }
 

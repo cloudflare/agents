@@ -14,7 +14,7 @@ import {
 import { getAgentByName } from "../agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "../utils";
 import type { Agent } from "../index";
-import { agentPathKey } from "./identity";
+import { agentPathKey, isValidParentPath } from "./identity";
 import { DynamicAgentRegistry } from "./registry";
 import {
   DynamicAgentConnectionBridge,
@@ -1367,6 +1367,40 @@ export class DynamicAgents {
       },
       connection: stored?.connection ?? connection
     });
+  }
+
+  /**
+   * Restore the facet identity persisted by `init` (wake after
+   * hibernation), then best-effort hydrate the virtual connections
+   * from the root's WebSocket state.
+   */
+  async restoreFacetContext(): Promise<void> {
+    const isFacet =
+      await this.#host.ctx.storage.get<boolean>("cf_agents_is_facet");
+    if (isFacet) this.#host._isFacet = true;
+
+    const storedFacetName = await this.#host.ctx.storage.get<string>(
+      "cf_agents_facet_name"
+    );
+    if (typeof storedFacetName === "string") {
+      this.#host._facetName = storedFacetName;
+    }
+
+    const storedParentPath = await this.#host.ctx.storage.get<
+      Array<{ className: string; name: string }>
+    >("cf_agents_parent_path");
+    if (isValidParentPath(storedParentPath)) {
+      this.#host._parentPath = storedParentPath;
+    }
+
+    try {
+      await this.hydrateConnectionsFromRoot();
+    } catch (error) {
+      console.warn(
+        "[Agent] Unable to hydrate sub-agent WebSocket connections:",
+        error
+      );
+    }
   }
 
   async hydrateConnectionsFromRoot(): Promise<void> {
