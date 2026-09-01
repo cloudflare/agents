@@ -97,5 +97,6 @@ export type {
   SessionTokenCounterInput,
   SessionsAttachmentOptions,
   SessionsOptions,
-  StoredCompaction
+  StoredCompaction,
+  WriteOptions
 } from "./types";

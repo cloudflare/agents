@@ -104,6 +104,7 @@ export class SessionsCore {
   readonly attachments: AttachmentEngine;
   readonly #searchIndexing: boolean;
   readonly #reservedMetadataKeys: readonly string[];
+  readonly #missingUpdate: "ignore" | "error";
   #tablesEnsured = false;
 
   readonly #listeners = new Set<SessionChangeListener>();
@@ -115,6 +116,7 @@ export class SessionsCore {
     this.io = io;
     this.#searchIndexing = options.searchIndexing ?? false;
     this.#reservedMetadataKeys = options.reservedMetadataKeys ?? [];
+    this.#missingUpdate = options.missingUpdate ?? "error";
     this.attachments = new AttachmentEngine(options.attachments, {
       sql: (query, params) => this.io.sql(query, params),
       sqlWrite: (query, params) => this.io.sqlWrite(query, params),
@@ -829,6 +831,7 @@ export class SessionsCore {
       [message.id, sessionId]
     );
     if (oldRows.length === 0) {
+      if (this.#missingUpdate === "ignore") return Promise.resolve();
       throw new SessionMessageNotFoundError(sessionId, message.id);
     }
     const old = oldRows[0];

@@ -12,11 +12,13 @@ import {
   SessionAttachmentTooLargeError,
   SessionMessageNotFoundError,
   SessionSearchDisabledError,
+  Sessions,
+  estimateStringTokens,
   type SessionChangeEvent,
   type SessionMessage,
   type SkillProvider
 } from "../../sessions";
-import { estimateStringTokens } from "../../experimental/memory/utils/tokens";
+import { withCapabilityHarness } from "../shared/capability-harness";
 
 /**
  * Capability-level Sessions tests: the capability installed on a minimal
@@ -141,6 +143,22 @@ describe("Sessions capability", () => {
       await expect(
         session.updateMessage(text("missing", "nope"))
       ).rejects.toBeInstanceOf(SessionMessageNotFoundError);
+    });
+  });
+
+  it("can preserve legacy no-op semantics for missing updates", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const { capability, lifecycle } = install(
+        new Sessions({ missingUpdate: "ignore" })
+      );
+      await lifecycle.start();
+
+      await expect(
+        capability.session().updateMessage(text("missing", "ignored"))
+      ).resolves.toMatchObject({ id: "missing" });
+      await expect(
+        capability.session().getMessage("missing")
+      ).resolves.toBeNull();
     });
   });
 
@@ -347,6 +365,17 @@ describe("Sessions capability", () => {
       );
       expect((await session.getMessage("client-msg"))?.metadata).toEqual({
         other: 2
+      });
+
+      await session.updateMessage(
+        {
+          ...text("server-msg", "client rewrite"),
+          metadata: { turnMetadata: { admin: true }, other: 3 }
+        },
+        { source: "client" }
+      );
+      expect((await session.getMessage("server-msg"))?.metadata).toEqual({
+        other: 3
       });
     });
   });

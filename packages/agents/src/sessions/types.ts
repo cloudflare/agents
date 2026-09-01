@@ -137,6 +137,11 @@ export type SessionChangeEvent =
   | { type: "clear"; sessionId: string }
   | { type: "compact"; sessionId: string }
   | {
+      type: "eviction";
+      sessionId: string;
+      result: SessionEvictionResult;
+    }
+  | {
       /**
        * A maintenance pass (e.g. aged media eviction) rewrote a stored row.
        * Cache-owning hosts patch the row; no status or compaction side
@@ -239,12 +244,16 @@ export interface SessionsAttachmentOptions {
    * hosts whose store is constructed after the capability (e.g. a subclass
    * field or an `onStart` step).
    */
-  readonly store: SessionAttachmentStore | (() => SessionAttachmentStore);
+  readonly store:
+    | SessionAttachmentStore
+    | (() => SessionAttachmentStore | undefined);
   /**
    * File parts whose decoded payload is at least this many bytes are
    * offloaded at append time. Default 32 KiB.
    */
-  readonly inlineThresholdBytes?: number;
+  readonly inlineThresholdBytes?: number | (() => number);
+  /** Aged-row payload threshold. Defaults to `inlineThresholdBytes`. */
+  readonly evictionThresholdBytes?: number | (() => number);
   /** Directory inside the store. Default "/attachments". */
   readonly basePath?: string;
   /** Ceiling for one attachment accepted by `attachments.put`. Default 8 MiB. */
@@ -256,7 +265,11 @@ export interface SessionsAttachmentOptions {
    */
   readonly keepRecentMessages?: number | (() => number);
   /** Maximum aged rows rewritten by one maintenance pass. Default 64. */
-  readonly maxEvictionRowsPerPass?: number;
+  readonly maxEvictionRowsPerPass?: number | (() => number);
+  /** Enable aged-row maintenance. Default true. */
+  readonly evictAged?: boolean | (() => boolean);
+  /** Preserve evicted payloads in the store. Default true. */
+  readonly preserveEvicted?: boolean | (() => boolean);
   /** Read-side materialization default. Default: inline `data:` URLs. */
   readonly reconstruct?: AttachmentReconstructor;
 }
@@ -288,10 +301,21 @@ export interface SessionsOptions {
    * never search. Enabling it also lifts legacy FTS data during migration.
    */
   readonly searchIndexing?: boolean;
+  /** Missing `updateMessage` policy. Default `"error"`. */
+  readonly missingUpdate?: "ignore" | "error";
 }
 
-/** Options accepted by message writes. */
-export interface AppendOptions {
+/** Trust policy shared by append and update writes. */
+export interface WriteOptions {
+  /**
+   * `"client"` marks untrusted intake: reserved metadata keys and forged
+   * attachment pointers are stripped. Default `"server"`.
+   */
+  source?: "client" | "server";
+}
+
+/** Options accepted by append writes. */
+export interface AppendOptions extends WriteOptions {
   /**
    * - `undefined` / omitted → auto-detect: attach to the current latest leaf.
    * - `null` → create a root message with no parent.
@@ -299,11 +323,6 @@ export interface AppendOptions {
    *   parent does not belong to this session).
    */
   parentId?: string | null;
-  /**
-   * `"client"` marks untrusted intake: reserved metadata keys are stripped.
-   * Default `"server"` (trusted — the host stamps reserved keys itself).
-   */
-  source?: "client" | "server";
 }
 
 /** Context block options accepted by {@link Session.withContext}. */

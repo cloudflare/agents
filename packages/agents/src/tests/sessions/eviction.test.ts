@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { evictToolOutputStrings } from "../../sessions/eviction";
+import {
+  dropLargeFileParts,
+  evictToolOutputStrings
+} from "../../sessions/eviction";
 import type { SessionMessage } from "../../sessions/types";
 
 function message(output: unknown): SessionMessage {
@@ -102,6 +105,36 @@ describe("aged tool-output eviction", () => {
 
     expect(result.changed).toBe(false);
     expect(result.message).toBe(original);
+  });
+
+  it("drops file and tool payloads without writing when preservation is off", async () => {
+    const fileMessage: SessionMessage = {
+      id: "file",
+      role: "user",
+      parts: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(1000)}`
+        }
+      ]
+    };
+    const fileResult = dropLargeFileParts(fileMessage, 1000);
+    expect(fileResult).toMatchObject({ changed: true, parts: 1 });
+    expect(fileResult.message.parts[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("[evicted image/png")
+    });
+    expect(fileResult.attachments).toEqual([]);
+
+    const toolResult = await evictToolOutputStrings(
+      message({ value: "x".repeat(1000) }),
+      1000,
+      null
+    );
+    expect(toolResult).toMatchObject({ changed: true, parts: 1 });
+    expect(toolResult.attachments).toEqual([]);
+    expect(JSON.stringify(toolResult.message)).not.toContain("preserved at");
   });
 
   it("stops at the nesting limit", async () => {

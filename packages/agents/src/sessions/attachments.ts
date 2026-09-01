@@ -220,9 +220,15 @@ export class AttachmentEngine {
   }
 
   get inlineThresholdBytes(): number {
-    return (
-      this.#options?.inlineThresholdBytes ?? DEFAULT_INLINE_THRESHOLD_BYTES
-    );
+    const threshold = this.#options?.inlineThresholdBytes;
+    const resolved = typeof threshold === "function" ? threshold() : threshold;
+    return Math.max(1, resolved ?? DEFAULT_INLINE_THRESHOLD_BYTES);
+  }
+
+  get evictionThresholdBytes(): number {
+    const threshold = this.#options?.evictionThresholdBytes;
+    const resolved = typeof threshold === "function" ? threshold() : threshold;
+    return Math.max(1, resolved ?? this.inlineThresholdBytes);
   }
 
   get keepRecentMessages(): number {
@@ -232,7 +238,19 @@ export class AttachmentEngine {
   }
 
   get maxEvictionRowsPerPass(): number {
-    return Math.max(1, this.#options?.maxEvictionRowsPerPass ?? 64);
+    const maximum = this.#options?.maxEvictionRowsPerPass;
+    const resolved = typeof maximum === "function" ? maximum() : maximum;
+    return Math.max(1, resolved ?? 64);
+  }
+
+  get agedEvictionEnabled(): boolean {
+    const enabled = this.#options?.evictAged;
+    return (typeof enabled === "function" ? enabled() : enabled) ?? true;
+  }
+
+  get preserveEvicted(): boolean {
+    const preserve = this.#options?.preserveEvicted;
+    return (typeof preserve === "function" ? preserve() : preserve) ?? true;
   }
 
   get defaultReconstructor(): AttachmentReconstructor {
@@ -413,7 +431,10 @@ export class AttachmentEngine {
    * through untouched; with no store configured the message is returned
    * unchanged (with a one-time warning when oversized media flows past).
    */
-  async extract(message: SessionMessage): Promise<ExtractionResult> {
+  async extract(
+    message: SessionMessage,
+    thresholdBytes = this.inlineThresholdBytes
+  ): Promise<ExtractionResult> {
     const store = this.#resolveStore();
     const attachments: StoredAttachment[] = [];
     if (!this.configured || !store) {
@@ -424,7 +445,7 @@ export class AttachmentEngine {
             part.type === "file" &&
             typeof part.url === "string" &&
             part.url.startsWith("data:") &&
-            estimatedDataUrlBytes(part.url) >= this.inlineThresholdBytes
+            estimatedDataUrlBytes(part.url) >= thresholdBytes
         )
       ) {
         this.#warnedNoStore = true;
@@ -444,7 +465,7 @@ export class AttachmentEngine {
         part.type !== "file" ||
         typeof part.url !== "string" ||
         !part.url.startsWith("data:") ||
-        estimatedDataUrlBytes(part.url) < this.inlineThresholdBytes
+        estimatedDataUrlBytes(part.url) < thresholdBytes
       ) {
         parts.push(part);
         continue;

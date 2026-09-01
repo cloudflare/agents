@@ -19,7 +19,11 @@ import {
   type WritableContextProvider
 } from "./context";
 import type { SessionsCore } from "./core";
-import { evictToolOutputStrings } from "./eviction";
+import {
+  dropLargeFileParts,
+  evictToolOutputStrings,
+  type ToolOutputEvictionResult
+} from "./eviction";
 import { estimateStringTokens } from "./tokens";
 import type {
   AppendOptions,
@@ -37,7 +41,8 @@ import type {
   SessionRowStat,
   SessionStats,
   SessionTokenCounter,
-  StoredCompaction
+  StoredCompaction,
+  WriteOptions
 } from "./types";
 
 export type CompactionFunction = (
@@ -65,6 +70,7 @@ export class Session {
   #restorePromise: Promise<void> | undefined;
   #skillScanRan = false;
   #evictionRunning = false;
+  #evictionScheduled = false;
   #evictionObservedOversized = false;
   #compactionFn: CompactionFunction | null = null;
   #tokenThreshold: number | undefined;
@@ -219,13 +225,15 @@ export class Session {
     options: Pick<HistoryReadOptions, "reconstruct" | "leafId"> = {}
   ): Promise<RecentHistoryResult> {
     await this.#ensureRestored();
-    return this.#core.getRecentHistory(
+    const result = await this.#core.getRecentHistory(
       this.sessionId,
       maxContentBytes,
       minRecentMessages,
       this.#core.attachments.resolveReconstructor(options.reconstruct),
       options.leafId
     );
+    if (result.truncated) this.#scheduleEviction();
+    return result;
   }
 
   /**
@@ -325,9 +333,7 @@ export class Session {
       });
     }
     this.#observeEvictionCandidate(prepared.message);
-    if (this.#evictionObservedOversized) {
-      await this.#evictAgedMedia({ maxRows: 1 });
-    }
+    if (this.#evictionObservedOversized) this.#scheduleEviction();
     return {
       inserted: true,
       message: prepared.message,
@@ -350,9 +356,12 @@ export class Session {
     return lastId;
   }
 
-  async updateMessage(message: SessionMessage): Promise<SessionMessage> {
+  async updateMessage(
+    message: SessionMessage,
+    options: WriteOptions = {}
+  ): Promise<SessionMessage> {
     await this.#ensureRestored();
-    const prepared = await this.#prepare(message, undefined);
+    const prepared = await this.#prepare(message, options.source);
     await this.#core.update(
       this.sessionId,
       prepared.message,
@@ -373,7 +382,9 @@ export class Session {
     await this.#ensureRestored();
     const existing = this.#core.getMessageRaw(this.sessionId, message.id);
     if (existing) {
-      const stored = await this.updateMessage(message);
+      const stored = await this.updateMessage(message, {
+        source: options.source
+      });
       return { inserted: false, message: stored, attachments: [] };
     }
     return this.appendMessage(message, options);
@@ -402,9 +413,11 @@ export class Session {
    */
   async evictAgedMedia(): Promise<SessionEvictionResult | null> {
     await this.#ensureRestored();
-    return this.#evictAgedMedia({
+    const result = await this.#evictAgedMedia({
       maxRows: this.#core.attachments.maxEvictionRowsPerPass
     });
+    if (result?.backlogRemains) this.#scheduleEviction();
+    return result;
   }
 
   /**
@@ -741,10 +754,34 @@ export class Session {
     }
   }
 
+  #scheduleEviction(): void {
+    if (
+      this.#evictionScheduled ||
+      this.#evictionRunning ||
+      !this.#core.attachments.agedEvictionEnabled
+    ) {
+      return;
+    }
+    this.#evictionScheduled = true;
+    setTimeout(() => {
+      this.#evictionScheduled = false;
+      void this.#evictAgedMedia({
+        maxRows: this.#core.attachments.maxEvictionRowsPerPass
+      }).then((result) => {
+        if (result?.backlogRemains) this.#scheduleEviction();
+      });
+    }, 0);
+  }
+
   #observeEvictionCandidate(message: SessionMessage): void {
-    if (!this.#core.attachments.configured) return;
+    if (
+      !this.#core.attachments.configured ||
+      !this.#core.attachments.agedEvictionEnabled
+    ) {
+      return;
+    }
     const bytes = new TextEncoder().encode(JSON.stringify(message)).byteLength;
-    if (bytes >= this.#core.attachments.inlineThresholdBytes) {
+    if (bytes >= this.#core.attachments.evictionThresholdBytes) {
       this.#evictionObservedOversized = true;
     }
   }
@@ -752,7 +789,11 @@ export class Session {
   async #evictAgedMedia(options: {
     maxRows: number;
   }): Promise<SessionEvictionResult | null> {
-    if (this.#evictionRunning || !this.#core.attachments.configured) {
+    if (
+      this.#evictionRunning ||
+      !this.#core.attachments.configured ||
+      !this.#core.attachments.agedEvictionEnabled
+    ) {
       return null;
     }
     this.#evictionRunning = true;
@@ -760,7 +801,7 @@ export class Session {
       const stats = this.#core.pathRowStats(this.sessionId);
       const keepRecent = this.#core.attachments.keepRecentMessages;
       const aged = stats.slice(0, Math.max(0, stats.length - keepRecent));
-      const threshold = this.#core.attachments.inlineThresholdBytes;
+      const threshold = this.#core.attachments.evictionThresholdBytes;
       const agedIds = aged.map((row) => row.id);
       const candidates = this.#core.mediaMaintenanceCandidates(
         this.sessionId,
@@ -776,32 +817,23 @@ export class Session {
       };
 
       for (const candidate of candidates) {
-        const fileExtraction = await this.#core.attachments.extract(
-          candidate.message
-        );
-        let fileBytes = 0;
-        if (fileExtraction.changed) {
-          for (const part of candidate.message.parts) {
-            if (
-              part.type === "file" &&
-              typeof part.url === "string" &&
-              part.url.startsWith("data:")
-            ) {
-              fileBytes += new TextEncoder().encode(part.url).byteLength;
-            }
-          }
-        }
+        const preserve = this.#core.attachments.preserveEvicted;
+        const fileExtraction: ToolOutputEvictionResult = preserve
+          ? await this.#extractAgedFileParts(candidate.message, threshold)
+          : dropLargeFileParts(candidate.message, threshold);
         const toolEviction = await evictToolOutputStrings(
           fileExtraction.message,
           threshold,
-          async (value, mediaType) => {
-            const decoded = decodeDataUrl(value);
-            const stored = await this.#core.attachments.put(
-              decoded?.bytes ?? value,
-              { mediaType: decoded?.mediaType ?? mediaType }
-            );
-            return stored.attachment;
-          }
+          preserve
+            ? async (value, mediaType) => {
+                const decoded = decodeDataUrl(value);
+                const stored = await this.#core.attachments.put(
+                  decoded?.bytes ?? value,
+                  { mediaType: decoded?.mediaType ?? mediaType }
+                );
+                return stored.attachment;
+              }
+            : null
         );
         const attachments = [
           ...fileExtraction.attachments,
@@ -824,8 +856,8 @@ export class Session {
         );
         if (!rewritten) continue;
         totals.messages++;
-        totals.parts += fileExtraction.attachments.length + toolEviction.parts;
-        totals.bytes += fileBytes + toolEviction.bytes;
+        totals.parts += fileExtraction.parts + toolEviction.parts;
+        totals.bytes += fileExtraction.bytes + toolEviction.bytes;
         await this.#core.notify({
           type: "maintenance-rewrite",
           sessionId: this.sessionId,
@@ -851,6 +883,11 @@ export class Session {
           bytes: totals.bytes,
           backlogRemains: totals.backlogRemains
         });
+        await this.#core.notify({
+          type: "eviction",
+          sessionId: this.sessionId,
+          result: totals
+        });
       }
       return totals;
     } catch (error) {
@@ -862,6 +899,32 @@ export class Session {
     } finally {
       this.#evictionRunning = false;
     }
+  }
+
+  async #extractAgedFileParts(
+    message: SessionMessage,
+    threshold: number
+  ): Promise<ToolOutputEvictionResult> {
+    const extraction = await this.#core.attachments.extract(message, threshold);
+    let bytes = 0;
+    if (extraction.changed) {
+      for (const part of message.parts) {
+        if (
+          part.type === "file" &&
+          typeof part.url === "string" &&
+          part.url.startsWith("data:")
+        ) {
+          bytes += new TextEncoder().encode(part.url).byteLength;
+        }
+      }
+    }
+    return {
+      message: extraction.message,
+      changed: extraction.changed,
+      parts: extraction.attachments.length,
+      bytes,
+      attachments: extraction.attachments
+    };
   }
 
   /**

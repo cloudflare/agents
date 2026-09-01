@@ -34,7 +34,7 @@ export interface ToolOutputEvictionResult {
 
 type WalkState = {
   readonly minBytes: number;
-  readonly put: EvictionAttachmentSink;
+  readonly put: EvictionAttachmentSink | null;
   readonly attachments: StoredAttachment[];
   parts: number;
   bytes: number;
@@ -50,7 +50,7 @@ type WalkState = {
 export async function evictToolOutputStrings(
   message: SessionMessage,
   minBytes: number,
-  put: EvictionAttachmentSink
+  put: EvictionAttachmentSink | null
 ): Promise<ToolOutputEvictionResult> {
   const state: WalkState = {
     minBytes: Math.max(1, Math.floor(minBytes)),
@@ -94,12 +94,13 @@ async function walkAndEvict(
   if (typeof value === "string") {
     const bytes = new TextEncoder().encode(value).byteLength;
     if (bytes < state.minBytes) return value;
-    const mediaType = dataUrlMediaType(value) ?? "text/plain";
-    const attachment = await state.put(value, mediaType);
-    state.attachments.push(attachment);
+    const mediaType = dataUrlMediaType(value);
     state.parts++;
     state.bytes += bytes;
-    return `[evicted ${mediaType}, ${bytes} bytes; preserved at ${attachment.path}; pointer ${attachmentUrl(attachment.hash)}]`;
+    if (!state.put) return evictionMarker(bytes, mediaType, null);
+    const attachment = await state.put(value, mediaType ?? "text/plain");
+    state.attachments.push(attachment);
+    return evictionMarker(bytes, mediaType, attachment);
   }
 
   if (value === null || typeof value !== "object" || depth >= MAX_WALK_DEPTH) {
@@ -125,6 +126,57 @@ async function walkAndEvict(
     output[key] = next;
   }
   return changed ? output : value;
+}
+
+/** Replace oversized data-URL file parts without preserving their bytes. */
+export function dropLargeFileParts(
+  message: SessionMessage,
+  minBytes: number
+): ToolOutputEvictionResult {
+  let count = 0;
+  let bytes = 0;
+  let changed = false;
+  const threshold = Math.max(1, Math.floor(minBytes));
+  const parts = message.parts.map((part) => {
+    if (
+      part.type !== "file" ||
+      typeof part.url !== "string" ||
+      !part.url.startsWith("data:")
+    ) {
+      return part;
+    }
+    const size = new TextEncoder().encode(part.url).byteLength;
+    if (size < threshold) return part;
+    changed = true;
+    count++;
+    bytes += size;
+    return {
+      type: "text",
+      text: evictionMarker(
+        size,
+        part.mediaType ?? dataUrlMediaType(part.url),
+        null
+      )
+    };
+  });
+  return {
+    message: changed ? { ...message, parts } : message,
+    changed,
+    parts: count,
+    bytes,
+    attachments: []
+  };
+}
+
+function evictionMarker(
+  bytes: number,
+  mediaType: string | null | undefined,
+  attachment: StoredAttachment | null
+): string {
+  const media = mediaType ? `${mediaType}, ` : "";
+  return attachment
+    ? `[evicted ${media}${bytes} bytes; preserved at ${attachment.path}; pointer ${attachmentUrl(attachment.hash)}]`
+    : `[evicted ${media}${bytes} bytes]`;
 }
 
 function dataUrlMediaType(value: string): string | null {
