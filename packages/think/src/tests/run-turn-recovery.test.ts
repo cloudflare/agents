@@ -86,10 +86,11 @@ describe("recovery × runTurn", () => {
       }
     );
 
-    await agent.triggerFiberRecovery();
-    expect(
-      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
-    ).toBe(1);
+    // Assert on the counts returned from inside the trigger RPC: the
+    // zero-delay recovery alarm may fire (and consume the job row) as soon as
+    // the RPC releases the DO, so a follow-up count read can race it.
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
     await agent.runScheduledRecoveryContinueForTest();
 
     // Recovery resolved the interrupted turn and left no leaked fiber.
