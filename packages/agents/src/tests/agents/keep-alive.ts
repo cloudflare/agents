@@ -40,7 +40,7 @@ export class TestKeepAliveAgent extends Agent {
 
   async getScheduleCount(): Promise<number> {
     const result = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler'
     `;
     return result[0].count;
   }

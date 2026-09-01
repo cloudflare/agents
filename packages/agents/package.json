@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -24,6 +24,7 @@
     "@babel/plugin-proposal-decorators": "^8.0.2",
     "@cfworker/json-schema": "^4.1.1",
     "@rolldown/plugin-babel": "^0.2.3",
+    "capnweb": "^0.12.0",
     "cron-schedule": "^6.0.0",
     "esbuild": "^0.28.1",
     "mimetext": "^3.0.28",
@@ -50,7 +51,7 @@
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "valibot": "1.4.1",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
@@ -117,6 +118,16 @@
       "import": "./dist/client.js",
       "require": "./dist/client.js"
     },
+    "./streams": {
+      "types": "./dist/streams/index.d.ts",
+      "import": "./dist/streams/index.js",
+      "require": "./dist/streams/index.js"
+    },
+    "./tasks": {
+      "types": "./dist/tasks/index.d.ts",
+      "import": "./dist/tasks/index.js",
+      "require": "./dist/tasks/index.js"
+    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",
@@ -166,6 +177,11 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
       "require": "./dist/react.js"
+    },
+    "./websockets": {
+      "types": "./dist/websockets/index.d.ts",
+      "import": "./dist/websockets/index.js",
+      "require": "./dist/websockets/index.js"
     },
     "./schedule": {
       "types": "./dist/schedule.d.ts",

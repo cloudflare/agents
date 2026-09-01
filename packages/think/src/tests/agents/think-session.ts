@@ -743,6 +743,9 @@ export class ThinkTestAgent extends Think {
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
+  private _beforeStepGate: Promise<void> | null = null;
+  private _releaseBeforeStepGate: (() => void) | null = null;
+  private _beforeStepGateEntered = false;
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
@@ -902,6 +905,10 @@ export class ThinkTestAgent extends Think {
     if (this._beforeStepAsyncDelayMs > 0) {
       await new Promise((r) => setTimeout(r, this._beforeStepAsyncDelayMs));
     }
+    if (this._beforeStepGate) {
+      this._beforeStepGateEntered = true;
+      await this._beforeStepGate;
+    }
     if (this._stepConfigOverride) return this._stepConfigOverride;
   }
 
@@ -915,6 +922,31 @@ export class ThinkTestAgent extends Think {
 
   async setBeforeStepAsyncDelay(ms: number): Promise<void> {
     this._beforeStepAsyncDelayMs = ms;
+  }
+
+  /**
+   * Arm a promise gate that parks the next `beforeStep` until released. Tests
+   * use it to hold a turn deterministically in flight — instead of racing a
+   * wall-clock delay — while they reset or cancel from outside the turn.
+   */
+  async holdBeforeStepForTest(): Promise<void> {
+    this._beforeStepGateEntered = false;
+    this._beforeStepGate = new Promise((resolve) => {
+      this._releaseBeforeStepGate = resolve;
+    });
+  }
+
+  /** Whether a turn is currently parked inside the armed `beforeStep` gate. */
+  async hasEnteredBeforeStepForTest(): Promise<boolean> {
+    return this._beforeStepGateEntered;
+  }
+
+  /** Release the parked turn (and disarm the gate for later steps). */
+  async releaseBeforeStepForTest(): Promise<void> {
+    const release = this._releaseBeforeStepGate;
+    this._beforeStepGate = null;
+    this._releaseBeforeStepGate = null;
+    release?.();
   }
 
   async resetTurnStateForTest(): Promise<void> {
@@ -1159,13 +1191,7 @@ export class ThinkTestAgent extends Think {
   }
 
   async getLatestStreamStatusForTest(): Promise<string | null> {
-    const streams = this.sql<{ status: string }>`
-      SELECT status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    return streams[0]?.status ?? null;
+    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -1218,11 +1244,13 @@ export class ThinkTestAgent extends Think {
     if (path === "continue") {
       // A non-leaf `targetAssistantId` → benign "conversation_changed" skip
       // that still reaches the `finally`.
-      await this._chatRecoveryContinue({ targetAssistantId: "no-such-leaf" });
+      await this._chatRecoveryContinueDetached({
+        targetAssistantId: "no-such-leaf"
+      });
     } else {
       // No `recoveredRequestId` (avoids the pre-`try` early return) + a non-user
       // leaf (or empty transcript) → benign skip that still reaches `finally`.
-      await this._chatRecoveryRetry({});
+      await this._chatRecoveryRetryDetached({});
     }
     return { before, after: this._readChildRunStatusForTest(runId) };
   }
@@ -1409,23 +1437,23 @@ export class ThinkTestAgent extends Think {
     try {
       const first = await this.testChat("trigger stall then recover");
       const scheduled = this.sql<{ payload: string }>`
-        SELECT payload FROM cf_agents_schedules
-        WHERE callback = '_chatRecoveryContinue'
+        SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+        WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         ORDER BY time ASC LIMIT 1
       `;
       const scheduledContinues =
         this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         `[0]?.count ?? 0;
       // Drive the scheduled continuation — this inference streams normally (the
       // stall budget is exhausted), so the turn completes.
       if (scheduled[0]) {
         await (
           this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
+            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
           }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
       }
 
       const messages = await this.getMessages();
@@ -1473,21 +1501,21 @@ export class ThinkTestAgent extends Think {
     try {
       const first = await this.testChat("per-turn stall override");
       const scheduled = this.sql<{ payload: string }>`
-        SELECT payload FROM cf_agents_schedules
-        WHERE callback = '_chatRecoveryContinue'
+        SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+        WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         ORDER BY time ASC LIMIT 1
       `;
       const scheduledContinues =
         this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         `[0]?.count ?? 0;
       if (scheduled[0]) {
         await (
           this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
+            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
           }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
       }
       const messages = await this.getMessages();
       const assistant = messages.filter((m) => m.role === "assistant");
@@ -1575,8 +1603,8 @@ export class ThinkTestAgent extends Think {
       const streamingAssistantCleared = internal._streamingAssistant === null;
       const scheduledContinues =
         this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
         `[0]?.count ?? 0;
       return {
         firstError: first.error,
@@ -4807,37 +4835,55 @@ export class ThinkToolsTestAgent extends Think {
     `;
   }
 
-  async triggerFiberRecovery(): Promise<void> {
+  async triggerFiberRecovery(): Promise<{
+    scheduledContinueCount: number;
+    scheduledRetryCount: number;
+  }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+    // Recovery arms ZERO-delay schedules whose alarms the workers test pool
+    // can fire as soon as this RPC releases the DO, consuming the job rows.
+    // Read the counts synchronously inside the same invocation so callers can
+    // assert on them without racing that alarm.
+    return {
+      scheduledContinueCount: this._countScheduledChatRecovery(
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount:
+        this._countScheduledChatRecovery("_chatRecoveryRetry")
+    };
+  }
+
+  private _countScheduledChatRecovery(callback: string): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler' AND fn = ${callback}
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE callback = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+    return this._countScheduledChatRecovery(callback);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
       ORDER BY time ASC
       LIMIT 1
     `;
     if (!rows[0]) return;
     await (
       this as unknown as {
-        _chatRecoveryRetry(d: {
+        _chatRecoveryRetryDetached(d: {
           targetUserId?: string;
           lastBody?: Record<string, unknown>;
         }): Promise<void>;
       }
-    )._chatRecoveryRetry(
+    )._chatRecoveryRetryDetached(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
         lastBody?: Record<string, unknown>;
@@ -4852,36 +4898,39 @@ export class ThinkToolsTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
       `;
     }
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
       ORDER BY time ASC
       LIMIT 1
     `;
     if (!rows[0]) return;
     await (
       this as unknown as {
-        _chatRecoveryContinue(d: {
+        _chatRecoveryContinueDetached(d: {
           targetAssistantId?: string;
           lastBody?: Record<string, unknown> | null;
           lastClientTools?: ClientToolSchema[] | null;
         }): Promise<void>;
       }
-    )._chatRecoveryContinue(
+    )._chatRecoveryContinueDetached(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
         lastBody?: Record<string, unknown> | null;
@@ -5541,8 +5590,11 @@ export class ThinkProgrammaticTestAgent extends Think {
       const submission = await this.testSubmitMessages("alarm owned", {
         submissionId
       });
-      for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      // The drain is delivered by a platform-scheduled alarm whose firing
+      // latency is not bounded by our timer ticks — give it a generous (~5s)
+      // deadline; the happy path still exits on the first tick after it fires.
+      for (let attempt = 0; attempt < 200 && alarmDrainCalls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
       return { alarmDrainCalls, inlineDrainCalls, submission };
     } finally {
@@ -5746,7 +5798,9 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   async continueRecoveredChatForTest(requestId: string): Promise<void> {
-    await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+    await this._chatRecoveryContinueDetached({
+      recoveredRequestId: requestId
+    });
   }
 
   /**
@@ -5759,7 +5813,9 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string
   ): Promise<string | null> {
     try {
-      await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+      await this._chatRecoveryContinueDetached({
+        recoveredRequestId: requestId
+      });
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
@@ -5770,7 +5826,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string,
     delayMs: number
   ): Promise<void> {
-    const continuation = this._chatRecoveryContinue({
+    const continuation = this._chatRecoveryContinueDetached({
       recoveredRequestId: requestId
     });
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -6806,7 +6862,7 @@ export class ThinkRecoveryTestAgent extends Think {
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+        SELECT COUNT(*) as count FROM cf_agents_stream_chunks
         WHERE stream_id = ${streamId}
       `;
       return rows[0]?.count ?? 0;
@@ -7540,17 +7596,7 @@ export class ThinkRecoveryTestAgent extends Think {
     chunkCount: number;
     text: string;
   } | null> {
-    const streams = this.sql<{
-      id: string;
-      request_id: string;
-      status: "streaming" | "completed" | "error";
-    }>`
-      SELECT id, request_id, status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    const stream = streams[0];
+    const stream = this._resumableStream.getAllStreamMetadata()[0] ?? null;
     if (!stream) return null;
 
     // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
@@ -7579,7 +7625,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     return {
       requestId: stream.request_id,
-      status: stream.status,
+      status: stream.status as "streaming" | "completed" | "error",
       chunkCount: chunks.length,
       text
     };
@@ -7615,18 +7661,18 @@ export class ThinkRecoveryTestAgent extends Think {
     targetUserId?: string;
     lastBody?: Record<string, unknown>;
   }): Promise<void> {
-    await this._chatRecoveryRetry(options);
+    await this._chatRecoveryRetryDetached(options);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
       ORDER BY time ASC
       LIMIT 1
     `;
     if (!rows[0]) return;
-    await this._chatRecoveryRetry(
+    await this._chatRecoveryRetryDetached(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
         lastBody?: Record<string, unknown>;
@@ -7636,13 +7682,13 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
       ORDER BY time ASC
       LIMIT 1
     `;
     if (!rows[0]) return;
-    await this._chatRecoveryContinue(
+    await this._chatRecoveryContinueDetached(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
         lastBody?: Record<string, unknown> | null;
@@ -7698,15 +7744,18 @@ export class ThinkRecoveryTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
       `;
     }
   }
@@ -7714,12 +7763,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count
-      FROM cf_agents_schedules
-      WHERE callback = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+    return this._countScheduledChatRecovery(callback);
   }
 
   /** Insert a stream-metadata row aged `ageMs` in the past (for cleanup tests). */
@@ -7731,18 +7775,18 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<void> {
     const createdAt = Date.now() - ageMs;
     const completedAt = status === "streaming" ? null : createdAt + 1000;
+    const state = status === "error" ? "errored" : status;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${createdAt}, ${completedAt})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              0, ${createdAt}, ${completedAt ?? createdAt}, ${completedAt})
     `;
   }
 
-  /** Status of a single stream-metadata row, or null if absent. */
+  /** Status of a single stream row, or null if absent. */
   async getStreamStatusForTest(streamId: string): Promise<string | null> {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_ai_chat_stream_metadata WHERE id = ${streamId}
-    `;
-    return rows[0]?.status ?? null;
+    return this._resumableStream.getStreamMetadata(streamId)?.status ?? null;
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
@@ -7796,9 +7840,9 @@ export class ThinkRecoveryTestAgent extends Think {
    */
   async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
     const rows = this.sql<{ delayInSeconds: number | null }>`
-      SELECT delayInSeconds
-      FROM cf_agents_schedules
-      WHERE callback = '_cleanupStreamBuffers'
+      SELECT json_extract(payload, '$.delayInSeconds') AS delayInSeconds
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
       LIMIT 1
     `;
     return rows[0]?.delayInSeconds ?? null;
@@ -7812,9 +7856,9 @@ export class ThinkRecoveryTestAgent extends Think {
    */
   async fireDueCleanupAlarmForTest(): Promise<void> {
     this.sql`
-      UPDATE cf_agents_schedules
-      SET time = ${Math.floor(Date.now() / 1000) - 1}
-      WHERE callback = '_cleanupStreamBuffers'
+      UPDATE cf_agents_jobs
+      SET time = ${Date.now() - 1_000}
+      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
     `;
     await this.alarm();
   }
@@ -7830,10 +7874,33 @@ export class ThinkRecoveryTestAgent extends Think {
     `;
   }
 
-  async triggerFiberRecovery(): Promise<void> {
+  async triggerFiberRecovery(): Promise<{
+    scheduledContinueCount: number;
+    scheduledRetryCount: number;
+  }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+    // Recovery arms ZERO-delay schedules whose alarms the workers test pool
+    // can fire as soon as this RPC releases the DO, consuming the job rows.
+    // Read the counts synchronously inside the same invocation so callers can
+    // assert on them without racing that alarm.
+    return {
+      scheduledContinueCount: this._countScheduledChatRecovery(
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount:
+        this._countScheduledChatRecovery("_chatRecoveryRetry")
+    };
+  }
+
+  private _countScheduledChatRecovery(callback: string): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
@@ -8068,8 +8135,8 @@ export class ThinkRecoveryTestAgent extends Think {
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
     const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = ${callback}
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
       ORDER BY time ASC
       LIMIT 1
     `;

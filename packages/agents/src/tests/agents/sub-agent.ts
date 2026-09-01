@@ -1446,8 +1446,8 @@ export class TestSubAgentParent extends Agent {
   }
 
   async backdateSchedule(id: string): Promise<void> {
-    const past = Math.floor(Date.now() / 1000) - 1;
-    this.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${id}`;
+    const past = Date.now() - 1_000;
+    this.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${id}`;
   }
 
   async forgetCounterSubAgentRegistry(subAgentName: string): Promise<void> {
@@ -1475,8 +1475,14 @@ export class TestSubAgentParent extends Agent {
       type: string;
       running: number | null;
     }>`
-      SELECT id, callback, owner_path, owner_path_key, type, COALESCE(running, 0) AS running
-      FROM cf_agents_schedules
+      SELECT id,
+             fn AS callback,
+             json_extract(payload, '$.owner_path') AS owner_path,
+             json_extract(payload, '$.owner_path_key') AS owner_path_key,
+             json_extract(payload, '$.type') AS type,
+             COALESCE(running, 0) AS running
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler'
       ORDER BY id
     `.map((row) => ({
       id: row.id,

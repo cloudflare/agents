@@ -47,6 +47,20 @@ const EXPECTED_SCHEMA_DDL = [
           started_at INTEGER,
           completed_at INTEGER
         )`,
+  `CREATE TABLE cf_agents_jobs (
+        id TEXT PRIMARY KEY NOT NULL,
+        capability TEXT NOT NULL,
+        fn TEXT NOT NULL,
+        time INTEGER NOT NULL,
+        payload TEXT,
+        retry_options TEXT,
+        singleflight INTEGER NOT NULL DEFAULT 0,
+        hung_timeout_seconds INTEGER,
+        exclusive INTEGER NOT NULL DEFAULT 0,
+        running INTEGER NOT NULL DEFAULT 0,
+        execution_started_at INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_mcp_servers (
       id TEXT PRIMARY KEY NOT NULL,
       name TEXT NOT NULL,
@@ -68,26 +82,57 @@ const EXPECTED_SCHEMA_DDL = [
           snapshot TEXT,
           created_at INTEGER NOT NULL
         )`,
-  `CREATE TABLE cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          intervalSeconds INTEGER,
-          running INTEGER DEFAULT 0,
-          created_at INTEGER DEFAULT (unixepoch()),
-          execution_started_at INTEGER,
-          retry_options TEXT,
-          owner_path TEXT,
-          owner_path_key TEXT
-        )`,
   `CREATE TABLE cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
         state TEXT
       )`,
+  // The Tasks capability creates its tables during Lifecycle startup (its own
+  // version key gates the migration), so they are part of a started Agent's
+  // canonical schema even though the Agent constructor does not create them.
+  `CREATE TABLE cf_agents_task_runs (
+        run_id TEXT PRIMARY KEY,
+        definition TEXT NOT NULL,
+        input TEXT,
+        state TEXT NOT NULL CHECK (state IN (
+          'pending', 'running', 'waiting',
+          'completed', 'failed', 'cancelled'
+        )),
+        result TEXT,
+        error_name TEXT,
+        error_message TEXT,
+        status_message TEXT,
+        metadata TEXT,
+        idempotency_key TEXT UNIQUE,
+        retain INTEGER NOT NULL DEFAULT 1,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        generation TEXT,
+        next_at INTEGER,
+        wait_reason TEXT,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        cancel_reason TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        settled_at INTEGER
+      ) WITHOUT ROWID`,
+  `CREATE TABLE cf_agents_task_steps (
+        run_id TEXT NOT NULL,
+        step_name TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
+        state TEXT NOT NULL CHECK (state IN (
+          'running', 'waiting', 'completed', 'failed'
+        )),
+        result TEXT,
+        error_name TEXT,
+        error_message TEXT,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        next_at INTEGER,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        PRIMARY KEY (run_id, step_name)
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_workflows (
           id TEXT PRIMARY KEY NOT NULL,
           workflow_id TEXT NOT NULL UNIQUE,
@@ -140,7 +185,7 @@ describe("schema version gating", () => {
 
     expect(await agent.tableExists("cf_agents_state")).toBe(true);
     expect(await agent.tableExists("cf_agents_queues")).toBe(true);
-    expect(await agent.tableExists("cf_agents_schedules")).toBe(true);
+    expect(await agent.tableExists("cf_agents_jobs")).toBe(true);
     expect(await agent.tableExists("cf_agents_workflows")).toBe(true);
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);
     expect(await agent.tableExists("cf_agents_runs")).toBe(true);

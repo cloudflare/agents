@@ -37,6 +37,26 @@
         "name": "SchedulerStartupWarnObject"
       },
       {
+        "class_name": "TaskHarnessObject",
+        "name": "TaskHarnessObject"
+      },
+      {
+        "class_name": "TaskSchedulerCoexistObject",
+        "name": "TaskSchedulerCoexistObject"
+      },
+      {
+        "class_name": "StreamHarnessObject",
+        "name": "StreamHarnessObject"
+      },
+      {
+        "class_name": "TaskStreamComposeObject",
+        "name": "TaskStreamComposeObject"
+      },
+      {
+        "class_name": "StreamBenchObject",
+        "name": "StreamBenchObject"
+      },
+      {
         "class_name": "PlainMcpClientObject",
         "name": "PlainMcpClientObject"
       },
@@ -92,6 +112,10 @@
       {
         "class_name": "TestScheduleAgent",
         "name": "TestScheduleAgent"
+      },
+      {
+        "class_name": "TestTaskAgent",
+        "name": "TestTaskAgent"
       },
       {
         "class_name": "TestOnStartScheduleWarnAgent",
@@ -369,6 +393,11 @@
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
+        "TaskHarnessObject",
+        "TaskSchedulerCoexistObject",
+        "StreamHarnessObject",
+        "TaskStreamComposeObject",
+        "StreamBenchObject",
         "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
@@ -384,6 +413,7 @@
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",
         "TestScheduleAgent",
+        "TestTaskAgent",
         "TestOnStartScheduleWarnAgent",
         "TestOnStartScheduleNoWarnAgent",
         "TestOnStartScheduleExplicitFalseAgent",

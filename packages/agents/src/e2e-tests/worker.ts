@@ -6,6 +6,8 @@
  * happens quickly in tests instead of waiting the default 30s.
  */
 import { Agent, callable, routeAgentRequest } from "agents";
+import type { TaskHandlers, TaskStep } from "agents/tasks";
+import { Streams } from "agents/streams";
 import type {
   FiberInspection,
   FiberRecoveryContext as RunFiberRecoveryContext,
@@ -17,6 +19,8 @@ import type { Observability } from "agents/observability";
 
 type Env = {
   RunFiberTestAgent: DurableObjectNamespace<RunFiberTestAgent>;
+  TaskKillTestAgent: DurableObjectNamespace<TaskKillTestAgent>;
+  StreamKillTestAgent: DurableObjectNamespace<StreamKillTestAgent>;
   SubAgentFiberParent: DurableObjectNamespace<SubAgentFiberParent>;
   SubAgentFiberChild: DurableObjectNamespace<SubAgentFiberChild>;
   PoisonRowAgent: DurableObjectNamespace<PoisonRowAgent>;
@@ -775,6 +779,236 @@ export class FacetRecoveryParent extends Agent<Record<string, unknown>> {
   }> {
     const child = await this.subAgent(FacetRecoveryChild, childName);
     return child.getScanStatus();
+  }
+}
+
+// ── TaskKillTestAgent (the Tasks capability under real SIGKILL) ─────
+
+/**
+ * Drives the `tasks` capability through a real process kill: journaled step
+ * executions are recorded in the host's own SQLite (instance memory dies
+ * with the process), so the restart can prove which steps re-ran and which
+ * replayed from the journal. Only Fibers is exercised — no legacy fiber
+ * APIs.
+ */
+export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  override readonly taskDefinitions = {
+    slowSteps: async (input: { totalSteps: number }, step: TaskStep) => {
+      for (let i = 0; i < input.totalSteps; i++) {
+        await step.do(`step:${i}`, async () => {
+          await fiberSleep(1000);
+          this.sql`
+            INSERT INTO e2e_task_step_executions (step_index, executed_at)
+            VALUES (${i}, ${Date.now()})
+          `;
+          return i;
+        });
+      }
+      return { totalSteps: input.totalSteps };
+    },
+
+    guardedSteps: async (input: { totalSteps: number }, step: TaskStep) => {
+      // Replay-entry evidence: the step a lost attempt left mid-execution,
+      // surfaced by the engine before any step re-executes.
+      if (step.interrupted !== null) {
+        this.sql`
+          INSERT INTO e2e_task_recoveries (run_id, interrupted_step, recovered_at)
+          VALUES ('e2e-guarded', ${step.interrupted.name}, ${Date.now()})
+        `;
+      }
+      for (let i = 0; i < input.totalSteps; i++) {
+        await step.do(`step:${i}`, async () => {
+          await fiberSleep(1000);
+          return i;
+        });
+      }
+      return "ran-to-completion";
+    }
+  } satisfies TaskHandlers;
+
+  onStart(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS e2e_task_step_executions (
+        step_index INTEGER NOT NULL,
+        executed_at INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS e2e_task_recoveries (
+        run_id TEXT NOT NULL,
+        interrupted_step TEXT,
+        recovered_at INTEGER NOT NULL
+      )
+    `;
+  }
+
+  @callable()
+  async startSlowStepsRun(totalSteps: number): Promise<string> {
+    const receipt = await this.tasks.run(
+      "slowSteps",
+      { totalSteps },
+      { runId: "e2e-slow-steps" }
+    );
+    return receipt.runId;
+  }
+
+  @callable()
+  async startGuardedRun(totalSteps: number): Promise<string> {
+    const receipt = await this.tasks.run(
+      "guardedSteps",
+      { totalSteps },
+      { runId: "e2e-guarded" }
+    );
+    return receipt.runId;
+  }
+
+  @callable()
+  async getRunState(
+    runId: string
+  ): Promise<{ state: string; result: unknown } | null> {
+    const snapshot = await this.tasks.get(runId);
+    if (!snapshot) return null;
+    return {
+      state: snapshot.state,
+      result: snapshot.state === "completed" ? snapshot.result : null
+    };
+  }
+
+  @callable()
+  getStepExecutions(): Array<{ step_index: number }> {
+    return this.sql<{ step_index: number }>`
+      SELECT step_index FROM e2e_task_step_executions
+      ORDER BY executed_at ASC, step_index ASC
+    `;
+  }
+
+  @callable()
+  getRecoveries(): Array<{
+    run_id: string;
+    interrupted_step: string | null;
+  }> {
+    return this.sql<{
+      run_id: string;
+      interrupted_step: string | null;
+    }>`
+      SELECT run_id, interrupted_step
+      FROM e2e_task_recoveries
+      ORDER BY recovered_at ASC
+    `;
+  }
+}
+
+// ── StreamKillTestAgent (Tasks + Streams composition under real SIGKILL) ──
+
+/**
+ * Proves the Tasks + Streams composition across a real process kill: a task
+ * produces 1s-spaced chunks into a durable stream; after SIGKILL + restart,
+ * the replayed producer resumes from the stream's durable cursor — exactly
+ * the chunks that survived — and finishes without duplicating any.
+ */
+export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  readonly streams = new Streams();
+
+  constructor(ctx: DurableObjectState, env: Record<string, unknown>) {
+    super(ctx, env);
+    // Subclass-owned capabilities install onto the Agent's lifecycle before
+    // it starts — the pattern for composing extra capabilities on an Agent.
+    this.lifecycle.use(this.streams);
+  }
+
+  override readonly taskDefinitions = {
+    generate: async (
+      input: { streamId: string; total: number },
+      step: TaskStep
+    ) => {
+      return step.do("stream", async () => {
+        const stream = await this.streams.open(input.streamId);
+        if (stream.cursor > 0) {
+          // Replay after interruption: the stream's durable cursor is the
+          // recovery evidence, and production resumes exactly there.
+          this.sql`
+            INSERT INTO e2e_stream_recoveries
+              (stream_id, stream_state, stream_cursor, recovered_at)
+            VALUES
+              (${input.streamId}, 'streaming', ${stream.cursor}, ${Date.now()})
+          `;
+        }
+        for (let i = stream.cursor; i < input.total; i++) {
+          await fiberSleep(1000);
+          stream.append({ i });
+        }
+        stream.close();
+        return { streamId: input.streamId, cursor: input.total };
+      });
+    }
+  } satisfies TaskHandlers;
+
+  onStart(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS e2e_stream_recoveries (
+        stream_id TEXT NOT NULL,
+        stream_state TEXT,
+        stream_cursor INTEGER NOT NULL,
+        recovered_at INTEGER NOT NULL
+      )
+    `;
+  }
+
+  @callable()
+  async startGenerate(streamId: string, total: number): Promise<string> {
+    const receipt = await this.tasks.run(
+      "generate",
+      { streamId, total },
+      { runId: "e2e-stream-gen" }
+    );
+    return receipt.runId;
+  }
+
+  @callable()
+  async getRunState(
+    runId: string
+  ): Promise<{ state: string; result: unknown } | null> {
+    const snapshot = await this.tasks.get(runId);
+    if (!snapshot) return null;
+    return {
+      state: snapshot.state,
+      result: snapshot.state === "completed" ? snapshot.result : null
+    };
+  }
+
+  @callable()
+  async getStreamStatus(
+    streamId: string
+  ): Promise<{ state: string; cursor: number } | null> {
+    const status = await this.streams.status(streamId);
+    return status ? { state: status.state, cursor: status.cursor } : null;
+  }
+
+  @callable()
+  async readAllChunks(streamId: string): Promise<number[]> {
+    const seqs: number[] = [];
+    for await (const chunk of this.streams.read(streamId)) {
+      seqs.push(chunk.seq);
+    }
+    return seqs;
+  }
+
+  @callable()
+  getRecoveries(): Array<{
+    stream_state: string | null;
+    stream_cursor: number;
+  }> {
+    return this.sql<{
+      stream_state: string | null;
+      stream_cursor: number;
+    }>`
+      SELECT stream_state, stream_cursor
+      FROM e2e_stream_recoveries ORDER BY recovered_at ASC
+    `;
   }
 }
 

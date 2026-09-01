@@ -27,6 +27,24 @@ import type {
   SchedulerHarnessObject,
   SchedulerStartupWarnObject
 } from "./capabilities/scheduler.ts";
+export {
+  TaskHarnessObject,
+  TaskSchedulerCoexistObject
+} from "./capabilities/tasks.ts";
+export {
+  StreamHarnessObject,
+  TaskStreamComposeObject
+} from "./capabilities/streams.ts";
+export { StreamBenchObject } from "./capabilities/streams-bench.ts";
+import type {
+  StreamHarnessObject,
+  TaskStreamComposeObject
+} from "./capabilities/streams.ts";
+import type { StreamBenchObject } from "./capabilities/streams-bench.ts";
+import type {
+  TaskHarnessObject,
+  TaskSchedulerCoexistObject
+} from "./capabilities/tasks.ts";
 export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 
@@ -54,6 +72,7 @@ export {
   TestOnStartScheduleNoWarnAgent,
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent,
+  TestTaskAgent,
   TestWorkflowAgent,
   TestWorkflowOnStartSubAgent,
   TestWorkflowSubAgent,
@@ -140,6 +159,7 @@ import type {
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestScheduleAgent,
+  TestTaskAgent,
   TestWorkflowAgent,
   TestAgentToolReplayAgent,
   TestAddMcpServerAgent,
@@ -182,6 +202,11 @@ export type Env = {
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
   SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
+  TaskHarnessObject: DurableObjectNamespace<TaskHarnessObject>;
+  TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
+  StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;
+  TaskStreamComposeObject: DurableObjectNamespace<TaskStreamComposeObject>;
+  StreamBenchObject: DurableObjectNamespace<StreamBenchObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
@@ -199,6 +224,7 @@ export type Env = {
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
+  TestTaskAgent: DurableObjectNamespace<TestTaskAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
   TestAgentToolReplayAgent: DurableObjectNamespace<TestAgentToolReplayAgent>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;

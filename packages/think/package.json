@@ -9,7 +9,7 @@
     "tools"
   ],
   "type": "module",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/think",
@@ -43,7 +43,7 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "vite": "^8.1.0",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",

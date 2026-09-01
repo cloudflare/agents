@@ -165,6 +165,10 @@ import type {
   RetryOptions,
   WSMessage
 } from "agents";
+import type {
+  LifecycleJobContext,
+  LifecycleJobOutcome
+} from "agents/lifecycle";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -173,6 +177,7 @@ import {
   TurnQueue,
   ResumableStream,
   cleanupStreamBuffers,
+  createChatStreams,
   STREAM_CLEANUP_DELAY_SECONDS,
   ContinuationState,
   PreStreamTurns,
@@ -235,6 +240,12 @@ import {
   type ChatRecoveryIncident,
   type ChatRecoveryKind
 } from "agents/chat";
+import type { Streams } from "agents/streams";
+import { createChatTurnTaskDefinition } from "agents/chat";
+import {
+  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+  isPlatformFailure
+} from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
@@ -284,6 +295,7 @@ import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
+import { MESSENGER_REPLY_FIBER_NAME } from "./messengers";
 import type {
   DeliveryKind,
   MessengerContext,
@@ -1904,6 +1916,7 @@ type ThinkWorkflowPromptContext = {
 };
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
+const THINK_WORKFLOW_NOTIFICATIONS_JOB_ID = "think:workflow-notifications";
 
 /**
  * Message-metadata keys that are server-written turn context (stamped by
@@ -2667,6 +2680,14 @@ export type ThinkModelId =
  */
 export type ThinkModel = LanguageModel | ThinkModelId;
 
+/**
+ * Definition name for messenger reply runs on the Tasks capability. The
+ * reserved prefix keeps it outside the public `fibers.run()` surface; the
+ * recovery context still carries the historical `MESSENGER_REPLY_FIBER_NAME`
+ * so the messenger runtime's recovery gate is unchanged.
+ */
+const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -2934,6 +2955,10 @@ export class Think<
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
+    this.lifecycle.use(this.streams);
+    this._registerChatTurnTaskDefinition();
+    this._registerMessengerReplyTaskDefinition();
+
     const _onStart = this.onStart.bind(this);
     const startThink = async (
       props: Props | undefined,
@@ -3040,7 +3065,10 @@ export class Think<
         "startup",
         { "cloudflare.agents.component": "think" },
         async () => {
-          this._resumableStream = new ResumableStream(this.sql.bind(this));
+          this._resumableStream = new ResumableStream(
+            this.streams,
+            this.sql.bind(this)
+          );
           this._restoreClientTools();
           this._restoreBody();
           this._setupProtocolHandlers();
@@ -3680,6 +3708,13 @@ export class Think<
 
   private _aborts = new AbortRegistry();
   private _turnQueue = new TurnQueue();
+  /**
+   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * output lives in the shared durable chunk log, readable by any
+   * `streams.read()` consumer on this Durable Object.
+   */
+  readonly streams: Streams = createChatStreams();
+
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   /** Lazily-built shared resume-handshake driver (Tier-2). */
@@ -4459,6 +4494,146 @@ export class Think<
     return undefined;
   }
 
+  /**
+   * Live chat-turn closures keyed by run nonce. A closure exists only in the
+   * isolate that accepted the turn; recovery after interruption never re-runs
+   * it — the definition's `recover` callback hands the interruption to the
+   * shared ChatRecoveryEngine instead.
+   */
+  private readonly _liveChatTurnClosures = new Map<
+    string,
+    {
+      initial: unknown;
+      wrap: (data: unknown) => unknown;
+      run: () => Promise<unknown>;
+      settle: {
+        resolve: (value: unknown) => void;
+        reject: (error: unknown) => void;
+      };
+    }
+  >();
+
+  /**
+   * Register the shared chat-turn Task definition (see
+   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
+   * host wires its protected internals through the hooks.
+   */
+  private _registerChatTurnTaskDefinition(): void {
+    const chatFiberName = (this.constructor as typeof Think).CHAT_FIBER_NAME;
+    this._registerInternalTaskDefinition(
+      chatFiberName,
+      createChatTurnTaskDefinition({
+        definitionName: chatFiberName,
+        storage: this.ctx.storage,
+        getRunCreatedAt: async (runId) =>
+          (await this.tasks.get(runId))?.createdAt ?? null,
+        getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
+        keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+        withStash: (context, fn) => this._withFiberStash(context, fn),
+        handleRecovery: (ctx) => this._handleInternalFiberRecovery(ctx)
+      })
+    );
+  }
+
+  /**
+   * The messenger-reply Task definition. A live webhook reply executes as
+   * one journaled step through the runtime's closure registry, persisting
+   * its re-entry snapshot in host storage; a replay whose closure is gone
+   * is recovered on wake by the same
+   * `ThinkMessengerRuntime.handleFiberRecovery` the legacy scan used.
+   */
+  private _registerMessengerReplyTaskDefinition(): void {
+    this._registerInternalTaskDefinition(
+      MESSENGER_REPLY_TASK_DEFINITION,
+      async (input, step) => {
+        const { nonce } = input as { nonce: string };
+        await step.do(
+          "deliver",
+          { retries: { limit: 1 }, timeout: "1 day" },
+          async ({ signal }) => {
+            const runtime = this._messengerRuntime;
+            if (!runtime) {
+              throw new Error("Messenger runtime is unavailable");
+            }
+            const runId = `msgr_${nonce}`;
+            const persistKey = `__cf_messenger_recovery:${runId}`;
+            if (!runtime.hasLiveReply(nonce)) {
+              // Replay after an unclean interruption: recover through the
+              // runtime seam, preferring the snapshot a prior attempt (live
+              // or recovering) persisted before being interrupted itself.
+              const persisted = await this.ctx.storage.get(persistKey);
+              const createdAt =
+                (await this.tasks.get(runId))?.createdAt ?? Date.now();
+              const ctx: FiberRecoveryContext = {
+                id: runId,
+                name: MESSENGER_REPLY_FIBER_NAME,
+                snapshot: (persisted ?? null) as unknown,
+                createdAt,
+                recoveryReason: "interrupted"
+              };
+              await runtime.handleFiberRecovery(ctx, {
+                persistRecoverySnapshot: async (snapshot) => {
+                  await this.ctx.storage.put(persistKey, snapshot);
+                }
+              });
+              await this.ctx.storage.delete(persistKey);
+              return undefined;
+            }
+            // The initial "accepted" snapshot must be durable before any
+            // delivery work begins: an isolate lost mid-answer recovers
+            // through this snapshot, and without it replay could neither
+            // deliver nor apologize.
+            const initial = runtime.initialReplySnapshot(nonce);
+            if (initial !== undefined) {
+              await this.ctx.storage.put(persistKey, initial);
+            }
+            // Later fire-and-forget stash writes are safe: Durable Object
+            // storage applies same-key operations in issuance order, so the
+            // delete below can never be overtaken by an earlier put. A crash
+            // loses only the unflushed tail, which recovery tolerates by
+            // design (the snapshot is a hint; stream evidence is
+            // authoritative).
+            await runtime.executeLiveReply(nonce, {
+              id: runId,
+              signal,
+              stash: (data) =>
+                void this.ctx.storage.put(persistKey, data).catch(() => {}),
+              snapshot: null
+            });
+            await this.ctx.storage.delete(persistKey);
+            return undefined;
+          }
+        );
+      }
+    );
+  }
+
+  /**
+   * Host seam for {@link ThinkMessengerRuntime}: durably accept one reply
+   * run on the Tasks capability and execute it inline while this isolate
+   * lives.
+   * @internal
+   */
+  async _runMessengerReplyTask(input: {
+    nonce: string;
+    idempotencyKey: string;
+    metadata: Record<string, unknown>;
+  }): Promise<{ accepted: boolean }> {
+    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      MESSENGER_REPLY_TASK_DEFINITION,
+      { nonce: input.nonce },
+      {
+        runId: `msgr_${input.nonce}`,
+        idempotencyKey: input.idempotencyKey,
+        metadata: input.metadata as Record<
+          string,
+          import("agents/tasks").TaskJson
+        >
+      }
+    );
+    return { accepted: receipt.accepted };
+  }
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -4473,20 +4648,51 @@ export class Think<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
+    const wrap = (data: unknown) =>
+      wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, data);
 
-    return this._runFiberWithStashWrapper(
-      `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-      async () => fn(),
-      {
-        initialSnapshot: wrapChatFiberSnapshot(
-          "__cfThinkChatFiberSnapshot",
-          snapshot,
-          null
-        ),
-        wrapStash: (data) =>
-          wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, data)
-      }
-    );
+    // Facet-hosted turns stay on the legacy fiber engine: the Fibers
+    // capability does not accept runs on routed sub-agents yet, and facet
+    // recovery routes through the root's facet-run index.
+    if (this.parentPath.length > 0) {
+      return this._runFiberWithStashWrapper(
+        `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+        async () => fn(),
+        { initialSnapshot: wrap(null), wrapStash: wrap }
+      );
+    }
+
+    const nonce = crypto.randomUUID();
+    let resolveOutcome!: (value: unknown) => void;
+    let rejectOutcome!: (error: unknown) => void;
+    const outcome = new Promise<unknown>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    // Rejections can land while `runAttached` is still being awaited (before
+    // the outcome listener attaches); mark them handled so workerd does not
+    // report an unhandled rejection the wrapper is about to consume.
+    outcome.catch(() => {});
+    // The turn closure re-enters the caller's invocation context (live
+    // connection/request), exactly as legacy inline fiber execution did: the
+    // capability's host boundary intentionally carries no connection.
+    const ambient = agentContext.getStore();
+    this._liveChatTurnClosures.set(nonce, {
+      initial: wrap(null),
+      wrap,
+      run: ambient ? () => agentContext.run(ambient, fn) : fn,
+      settle: { resolve: resolveOutcome, reject: rejectOutcome }
+    });
+    try {
+      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+        (this.constructor as typeof Think).CHAT_FIBER_NAME,
+        { requestId, continuation, nonce },
+        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+      );
+      return (await outcome) as T;
+    } finally {
+      this._liveChatTurnClosures.delete(nonce);
+    }
   }
 
   private _systemPromptForTurn(baseSystem: string, tools: ToolSet): string {
@@ -9993,12 +10199,39 @@ export class Think<
     return Math.max(pending[0].updated_at + delayMs, Date.now() + 1);
   }
 
-  protected override _getExtensionAlarm(): number | null {
-    return this._nextWorkflowNotificationAlarm();
+  /**
+   * Drive the Think-owned workflow-notification host job. Unknown fns
+   * delegate to Agent's dispatch.
+   */
+  protected override _onHostJob(
+    fn: string,
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    if (fn === "thinkWorkflowNotifications") {
+      this._startWorkflowNotificationDrain();
+      const next = this._nextWorkflowNotificationAlarm();
+      return next === null ? undefined : { rescheduleAt: next };
+    }
+    return super._onHostJob(fn, context);
   }
 
-  private _rearmWorkflowNotificationAlarm(): Promise<void> {
-    return this.lifecycle.rearmAlarm();
+  /**
+   * Sync the workflow-notification wake job with pending-notification state.
+   * Replaces the pull-based `_getExtensionAlarm()` contribution.
+   */
+  private async _rearmWorkflowNotificationAlarm(): Promise<void> {
+    const next = this._nextWorkflowNotificationAlarm();
+    if (next === null) {
+      if (this.lifecycle.jobs.get(THINK_WORKFLOW_NOTIFICATIONS_JOB_ID)) {
+        await this.lifecycle.jobs.cancel(THINK_WORKFLOW_NOTIFICATIONS_JOB_ID);
+      }
+      return;
+    }
+    await this.lifecycle.jobs.push({
+      id: THINK_WORKFLOW_NOTIFICATIONS_JOB_ID,
+      fn: "thinkWorkflowNotifications",
+      time: next
+    });
   }
 
   async inspectSubmission(
@@ -10553,6 +10786,22 @@ export class Think<
     return applied === messages.length ? "all" : "partial";
   }
 
+  /**
+   * Wall-clock creation time of a non-terminal chat-turn run on the Tasks
+   * capability, or null. The metadata column holds the exact JSON the chat
+   * wrapper wrote, so string equality matches the requestId.
+   */
+  private _recoverableChatTurnTaskCreatedAt(requestId: string): number | null {
+    const rows = this.sql<{ created_at: number }>`
+      SELECT created_at FROM cf_agents_task_runs
+      WHERE definition = ${(this.constructor as typeof Think).CHAT_FIBER_NAME}
+        AND state IN ('pending', 'running', 'waiting', 'recovering')
+        AND metadata = ${JSON.stringify({ requestId })}
+      LIMIT 1
+    `;
+    return rows[0]?.created_at ?? null;
+  }
+
   private _hasRecoverableChatTurn(requestId: string): boolean {
     const fiberRows = this.sql<{ id: string }>`
       SELECT id FROM cf_agents_runs
@@ -10560,14 +10809,13 @@ export class Think<
       LIMIT 1
     `;
     if (fiberRows.length > 0) return true;
+    if (this._recoverableChatTurnTaskCreatedAt(requestId) !== null) {
+      return true;
+    }
 
-    const streamRows = this.sql<{ id: string }>`
-      SELECT id FROM cf_ai_chat_stream_metadata
-      WHERE request_id = ${requestId}
-        AND status = 'streaming'
-      LIMIT 1
-    `;
-    return streamRows.length > 0;
+    return (
+      this._resumableStream.latestActiveStreamInfoForRequest(requestId) !== null
+    );
   }
 
   private _hasFreshRecoverableSubmissionEvidence(row: ThinkSubmissionRow) {
@@ -10582,35 +10830,30 @@ export class Think<
     `;
     if (fiberRows[0] && fiberRows[0].created_at >= cutoff) return true;
 
-    const streamRows = this.sql<{ created_at: number }>`
-      SELECT created_at FROM cf_ai_chat_stream_metadata
-      WHERE request_id = ${row.request_id}
-        AND status = 'streaming'
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    return streamRows[0] ? streamRows[0].created_at >= cutoff : false;
+    const capabilityCreatedAt = this._recoverableChatTurnTaskCreatedAt(
+      row.request_id
+    );
+    if (capabilityCreatedAt !== null && capabilityCreatedAt >= cutoff) {
+      return true;
+    }
+
+    const streamInfo = this._resumableStream.latestActiveStreamInfoForRequest(
+      row.request_id
+    );
+    return streamInfo ? streamInfo.createdAt >= cutoff : false;
   }
 
   private _hasScheduledRecoveredContinuation(requestId: string): boolean {
-    const rows = this.sql<{ payload: string | null }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
-    `;
-    return rows.some((row) => {
-      if (!row.payload) return false;
-      try {
-        const payload = JSON.parse(row.payload) as unknown;
-        return (
-          payload !== null &&
-          typeof payload === "object" &&
-          "recoveredRequestId" in payload &&
-          (payload as { recoveredRequestId?: unknown }).recoveredRequestId ===
-            requestId
-        );
-      } catch {
-        return false;
-      }
+    return this.getSchedules().some((schedule) => {
+      if (schedule.callback !== "_chatRecoveryContinue") return false;
+      const payload: unknown = schedule.payload;
+      return (
+        payload !== null &&
+        typeof payload === "object" &&
+        "recoveredRequestId" in payload &&
+        (payload as { recoveredRequestId?: unknown }).recoveredRequestId ===
+          requestId
+      );
     });
   }
 
@@ -14255,17 +14498,10 @@ export class Think<
     let streamId = "";
     let streamStatus: "streaming" | "completed" | "error" | undefined;
     if (requestId) {
-      const rows = this.sql<{
-        id: string;
-        status: "streaming" | "completed" | "error";
-      }>`
-        SELECT id, status FROM cf_ai_chat_stream_metadata
-        WHERE request_id = ${requestId}
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (rows.length > 0) {
-        streamId = rows[0].id;
-        streamStatus = rows[0].status;
+      const info = this._resumableStream.latestStreamInfoForRequest(requestId);
+      if (info) {
+        streamId = info.id;
+        streamStatus = info.status;
       }
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {
@@ -14811,6 +15047,44 @@ export class Think<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
+    // Queue-driven schedule callback: the recovered turn can legitimately
+    // run for a long time (a hanging model stream is bounded only by the
+    // step timeout), and awaiting it here would hold the Lifecycle job
+    // queue — starving every other job on this object, including the very
+    // replay-wakes that advance recovery budgets. Dispatch detached, exactly
+    // as the legacy fire-and-forget runFiber dispatch did; all incident
+    // bookkeeping settles inside the detached body when the turn does.
+    let handoff: () => void = () => {};
+    const reachedTurn = new Promise<void>((resolve) => {
+      handoff = resolve;
+    });
+    const dispatch = this._chatRecoveryRetryDetached(data, handoff);
+    dispatch.catch((error) => {
+      if (isPlatformFailure(error)) {
+        // The queue job completed at the turn handoff, so the driver's
+        // platform-failure deferral can no longer apply; re-defer the
+        // dispatch ourselves so the turn re-runs on a fresh invocation
+        // (#1730).
+        void this.schedule(
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          "_chatRecoveryRetry",
+          data
+        ).catch(() => {});
+        return;
+      }
+      // Other failures after the handoff are the detached turn's own; its
+      // internal handling (OOM intercept, incident bookkeeping) already ran.
+      console.error("[Think] _chatRecoveryRetry dispatch failed", error);
+    });
+    // A platform transient thrown before the turn starts must reach the
+    // queue so the job defers and retries (#1730).
+    await Promise.race([dispatch, reachedTurn]);
+  }
+
+  protected async _chatRecoveryRetryDetached(
+    data?: ChatRecoveryRetryData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
@@ -14911,6 +15185,7 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      onTurnStarted?.();
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody,
@@ -15053,6 +15328,44 @@ export class Think<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
+    // Queue-driven schedule callback: the recovered turn can legitimately
+    // run for a long time (a hanging model stream is bounded only by the
+    // step timeout), and awaiting it here would hold the Lifecycle job
+    // queue — starving every other job on this object, including the very
+    // replay-wakes that advance recovery budgets. Dispatch detached, exactly
+    // as the legacy fire-and-forget runFiber dispatch did; all incident
+    // bookkeeping settles inside the detached body when the turn does.
+    let handoff: () => void = () => {};
+    const reachedTurn = new Promise<void>((resolve) => {
+      handoff = resolve;
+    });
+    const dispatch = this._chatRecoveryContinueDetached(data, handoff);
+    dispatch.catch((error) => {
+      if (isPlatformFailure(error)) {
+        // The queue job completed at the turn handoff, so the driver's
+        // platform-failure deferral can no longer apply; re-defer the
+        // dispatch ourselves so the turn re-runs on a fresh invocation
+        // (#1730).
+        void this.schedule(
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          "_chatRecoveryContinue",
+          data
+        ).catch(() => {});
+        return;
+      }
+      // Other failures after the handoff are the detached turn's own; its
+      // internal handling (OOM intercept, incident bookkeeping) already ran.
+      console.error("[Think] _chatRecoveryContinue dispatch failed", error);
+    });
+    // A platform transient thrown before the turn starts must reach the
+    // queue so the job defers and retries (#1730).
+    await Promise.race([dispatch, reachedTurn]);
+  }
+
+  protected async _chatRecoveryContinueDetached(
+    data?: ChatRecoveryContinueData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
@@ -15151,6 +15464,7 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      onTurnStarted?.();
       const result = await this.continueLastTurn(
         undefined,
         controller
