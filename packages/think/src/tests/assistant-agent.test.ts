@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 
@@ -235,14 +235,21 @@ describe("Think — clear", () => {
 
     await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
 
-    let messages = (await agent.getMessages()) as unknown as UIMessage[];
+    const messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(2);
 
     ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
-    await new Promise((r) => setTimeout(r, 200));
-
-    messages = (await agent.getMessages()) as unknown as UIMessage[];
-    expect(messages.length).toBe(0);
+    // The clear frame (WS) and the read (RPC) travel independent transports
+    // with no ordering guarantee, so poll for the effect instead of sleeping.
+    // Messages only reach 0 via the clear, so this cannot pass spuriously.
+    await vi.waitFor(
+      async () => {
+        expect(
+          ((await agent.getMessages()) as unknown as UIMessage[]).length
+        ).toBe(0);
+      },
+      { timeout: 5000, interval: 50 }
+    );
 
     await closeWS(ws);
   });
