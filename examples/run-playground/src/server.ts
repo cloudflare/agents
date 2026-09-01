@@ -65,11 +65,15 @@ const IS_LOCAL_DEV =
   (import.meta as { env?: { DEV?: boolean } }).env?.DEV === true;
 
 /**
- * Render a run result for display. Workers RPC can carry values JSON cannot
- * (BigInt, Map, Set, Date, typed arrays, cycles), so this walks the value
- * itself instead of using JSON.stringify.
+ * Pretty-print a run value for display, two-space indented. Workers RPC can
+ * carry values JSON cannot (BigInt, Map, Set, Date, typed arrays, cycles),
+ * so this walks the value itself instead of using JSON.stringify.
  */
-function formatRunValue(value: unknown, seen = new Set<unknown>()): string {
+function formatRunValue(
+  value: unknown,
+  seen = new Set<unknown>(),
+  depth = 0
+): string {
   if (value === undefined) return "undefined";
   if (value === null) return "null";
   switch (typeof value) {
@@ -87,18 +91,27 @@ function formatRunValue(value: unknown, seen = new Set<unknown>()): string {
   if (typeof value !== "object") return String(value);
   if (seen.has(value)) return "[Circular]";
   seen.add(value);
+  const pad = "  ".repeat(depth + 1);
+  const close = "  ".repeat(depth);
+  const block = (open: string, entries: string[], shut: string): string =>
+    entries.length === 0
+      ? `${open}${shut}`
+      : `${open}\n${pad}${entries.join(`,\n${pad}`)}\n${close}${shut}`;
   try {
     if (value instanceof Date) return `Date(${value.toISOString()})`;
     if (value instanceof RegExp) return String(value);
     if (value instanceof Map) {
       const entries = [...value.entries()].map(
-        ([k, v]) => `${formatRunValue(k, seen)} => ${formatRunValue(v, seen)}`
+        ([k, v]) =>
+          `${formatRunValue(k, seen, depth + 1)} => ${formatRunValue(v, seen, depth + 1)}`
       );
-      return `Map(${value.size}) { ${entries.join(", ")} }`;
+      return block(`Map(${value.size}) {`, entries, "}");
     }
     if (value instanceof Set) {
-      const entries = [...value.values()].map((v) => formatRunValue(v, seen));
-      return `Set(${value.size}) { ${entries.join(", ")} }`;
+      const entries = [...value.values()].map((v) =>
+        formatRunValue(v, seen, depth + 1)
+      );
+      return block(`Set(${value.size}) {`, entries, "}");
     }
     if (value instanceof ArrayBuffer) {
       return `ArrayBuffer(${value.byteLength})`;
@@ -107,13 +120,13 @@ function formatRunValue(value: unknown, seen = new Set<unknown>()): string {
       return `${value.constructor.name}(${value.byteLength} bytes)`;
     }
     if (Array.isArray(value)) {
-      const entries = value.map((v) => formatRunValue(v, seen));
-      return `[${entries.join(", ")}]`;
+      const entries = value.map((v) => formatRunValue(v, seen, depth + 1));
+      return block("[", entries, "]");
     }
     const entries = Object.entries(value).map(
-      ([k, v]) => `${k}: ${formatRunValue(v, seen)}`
+      ([k, v]) => `${k}: ${formatRunValue(v, seen, depth + 1)}`
     );
-    return `{ ${entries.join(", ")} }`;
+    return block("{", entries, "}");
   } finally {
     seen.delete(value);
   }

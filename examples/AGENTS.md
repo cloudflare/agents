@@ -171,7 +171,7 @@ Full-stack examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for co
 
 - Use Kumo components (`Button`, `Surface`, `Text`, `Badge`, `Empty`, etc.) instead of hand-rolled HTML
 - Use `@phosphor-icons/react` for icons (Kumo's icon library)
-- Use Kumo semantic color tokens (`text-kumo-default`, `bg-kumo-base`, `border-kumo-line`, etc.) instead of raw Tailwind colors
+- Use Kumo semantic color tokens (`text-kumo-default`, `text-kumo-subtle`, `text-kumo-brand`, `bg-kumo-base`, `border-kumo-line`, etc.) instead of raw Tailwind colors. There is no `kumo-accent` token — classes referencing it are silently dropped by Tailwind
 - `Text` does not accept a `className` prop — wrap in a `<span>` if you need custom classes
 - Use the `data-mode` attribute for dark mode — no `dark:` Tailwind variants
 
@@ -206,7 +206,7 @@ Every example should include an info card at the top of the page explaining what
     <InfoIcon
       size={20}
       weight="bold"
-      className="text-kumo-accent shrink-0 mt-0.5"
+      className="text-kumo-brand shrink-0 mt-0.5"
     />
     <div>
       <Text size="sm" bold>

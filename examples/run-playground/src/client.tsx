@@ -245,7 +245,7 @@ function LimitSlider({
         max={max}
         step={step}
         onChange={(event) => onChange(Number(event.currentTarget.value))}
-        className="w-full accent-kumo-accent"
+        className="w-full accent-kumo-brand"
       />
     </div>
   );
@@ -298,7 +298,7 @@ function LatencyCard({ history }: { history: RunHistoryEntry[] }) {
                 width={barWidth}
                 height={barHeight}
                 rx={1.5}
-                className={entry.ok ? "fill-kumo-accent" : "fill-status-error"}
+                className={entry.ok ? "fill-kumo-brand" : "fill-status-error"}
               >
                 <title>{`${entry.durationMs}ms${entry.ok ? "" : " (failed)"}`}</title>
               </rect>
@@ -359,7 +359,7 @@ function StackTrace({
             type="button"
             onClick={() => onJumpToLine(sourceLine)}
             title={`Jump to line ${sourceLine}`}
-            className="block w-full cursor-pointer rounded px-1 text-left font-mono text-xs text-kumo-accent underline decoration-dotted underline-offset-2 whitespace-pre-wrap break-words hover:bg-kumo-elevated"
+            className="block w-full cursor-pointer rounded px-1 text-left font-mono text-xs text-kumo-brand underline decoration-dotted underline-offset-2 whitespace-pre-wrap break-words hover:bg-kumo-elevated"
           >
             {line}
           </button>
@@ -460,7 +460,7 @@ export function App() {
     <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-4 p-4">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <PlayIcon size={20} weight="fill" className="text-kumo-accent" />
+          <PlayIcon size={20} weight="fill" className="text-kumo-brand" />
           <h1 className="text-base font-semibold text-kumo-default">
             Run Playground
           </h1>
@@ -474,7 +474,7 @@ export function App() {
       <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
         <div className="flex items-start gap-3">
           <span className="h-lh flex items-center">
-            <InfoIcon size={20} weight="bold" className="text-kumo-accent" />
+            <InfoIcon size={20} weight="bold" className="text-kumo-brand" />
           </span>
           <div className="grid gap-1">
             <Text size="sm" bold>
