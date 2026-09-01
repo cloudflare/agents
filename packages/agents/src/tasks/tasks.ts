@@ -13,6 +13,7 @@
 
 import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
+import type { MemoryLimitContext } from "../lifecycle/capability-runner";
 import type {
   LifecycleJobContext,
   LifecycleJobOutcome
@@ -337,6 +338,50 @@ export class Tasks<
       clearTimeout(budgetTimer);
     }
     return this.#wakeOutcome(runId);
+  }
+
+  /**
+   * Alarm memory-limit breaker policy (#1825), for every definition alike.
+   *
+   * The run row is the durable source of truth: startup reconciliation
+   * re-derives due-now wakes from it, so the breaker's queue-row backoff
+   * and purge alone cannot contain a run whose attempt deterministically
+   * exhausts memory — a fresh isolate would resurrect it immediately. On a
+   * strike the striking run is demoted to the breaker's backoff wake (its
+   * claim stripped, so reconciliation honors the deadline instead of
+   * flooring it to now); when the breaker seals, the run is terminally
+   * failed — a persisted, observable outcome (`task:failed`), which is the
+   * correct handling for work that exhausted memory three times running,
+   * not data loss.
+   */
+  async onMemoryLimit(context: MemoryLimitContext): Promise<void> {
+    const executing = context.executing;
+    if (!executing || executing.capability !== this.capabilityId) return;
+    if (!executing.id.startsWith(WAKE_JOB_PREFIX)) return;
+    const runId = executing.id.slice(WAKE_JOB_PREFIX.length);
+    const row = this.#store.getRun(runId);
+    if (!row || TERMINAL_STATES.has(row.state)) return;
+
+    if (context.sealed) {
+      await this.#settleFailed(runId, null, {
+        name: "TaskMemoryLimitSealed",
+        message:
+          "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
+          "consecutive Durable Object memory-limit resets."
+      });
+      return;
+    }
+    if (context.nextTime === undefined) return;
+    const now = Date.now();
+    this.#store.write(
+      `UPDATE cf_agents_task_runs
+       SET state = 'pending', generation = NULL, wait_reason = NULL,
+           next_at = ?, updated_at = ?
+       WHERE run_id = ?
+         AND state IN ('pending', 'waiting', 'running')`,
+      [context.nextTime, now, runId]
+    );
+    await this.#syncWake(runId);
   }
 
   /**

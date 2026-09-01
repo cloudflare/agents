@@ -197,6 +197,25 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           return "ok";
         });
         return "fin";
+      },
+
+      /**
+       * Deterministically exhausts memory while a durable countdown remains
+       * (#1825): the counter survives the breaker's isolate resets, so every
+       * reclaim re-throws until the countdown ends — the shape of a doomed
+       * recovery loop the alarm memory-limit breaker must contain.
+       */
+      oomLoop: async (_input: undefined, _step: TaskStep) => {
+        const remaining =
+          (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+        if (remaining > 0) {
+          await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+          await this.ctx.storage.sync();
+          throw new Error(
+            "Durable Object's isolate exceeded its memory limit and was reset."
+          );
+        }
+        return "recovered";
       }
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },

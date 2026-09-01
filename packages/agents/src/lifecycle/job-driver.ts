@@ -222,9 +222,14 @@ export class JobDriver {
         {
           baseDelayMs: job.retry?.baseDelayMs ?? DEFAULT_JOB_RETRY.baseDelayMs,
           maxDelayMs: job.retry?.maxDelayMs ?? DEFAULT_JOB_RETRY.maxDelayMs,
-          // In-process retries are futile on a superseded isolate: code
-          // never reloads mid-invocation. Defer to a fresh invocation.
-          shouldRetry: (error) => !isDurableObjectCodeUpdateReset(error)
+          // In-process retries are futile on a superseded isolate (code
+          // never reloads mid-invocation) and on a memory-limit reset (the
+          // isolate is condemned, and a retry can read half-claimed state
+          // as "nothing to do", converting the reset into a silent success
+          // that the breaker never sees). Defer both to the alarm boundary.
+          shouldRetry: (error) =>
+            !isDurableObjectCodeUpdateReset(error) &&
+            !isDurableObjectMemoryLimitReset(error)
         }
       );
     } catch (error) {
