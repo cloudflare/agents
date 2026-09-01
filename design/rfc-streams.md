@@ -124,7 +124,7 @@ removed the per-segment row write; ~8.5× under naive per-chunk appends,
 and retention sweeps read the stream rows plus at most one indexed
 chunk-tail row per stale live candidate — down ~6× from the legacy
 correlated-subquery shape and no longer proportional to stored chunks.
-In *billed* terms the gap is wider still: Cloudflare counts index
+In _billed_ terms the gap is wider still: Cloudflare counts index
 maintenance in `rowsWritten`, the tables are WITHOUT ROWID so a chunk
 append bills exactly one row, and the legacy schema's per-chunk hidden-PK
 and stream indexes billed three per chunk insert (13 vs 33 billed rows
