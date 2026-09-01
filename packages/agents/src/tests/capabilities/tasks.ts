@@ -270,6 +270,14 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
             return "recovered";
           }
         );
+      },
+
+      /** Settles successfully after Tasks detaches from JobDriver. */
+      lateSuccess: async (_input: undefined, step: TaskStep) => {
+        return step.do("late-success-step", { timeout: 10_000 }, async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5_250));
+          return "late-success";
+        });
       }
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },

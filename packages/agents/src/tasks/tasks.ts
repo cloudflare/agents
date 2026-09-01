@@ -127,6 +127,8 @@ const WAKE_JOB_FN = "wake";
  * The next alarm rethrows the signal inside JobDriver's breaker boundary.
  */
 const LATE_MEMORY_LIMIT_JOB_FN = "late-memory-limit";
+/** Clean alarm boundary after work previously detached from an alarm. */
+const LATE_SETTLED_JOB_FN = "late-settled";
 const MEMORY_LIMIT_RESET_MESSAGE =
   "Durable Object's isolate exceeded its memory limit and was reset.";
 /**
@@ -186,6 +188,7 @@ export class Tasks<
   readonly #definitions: TaskHandlers;
   readonly #active = new Map<string, ActiveAttempt>();
   readonly #detached = new Set<string>();
+  readonly #detachedByAlarm = new Set<string>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
@@ -339,6 +342,12 @@ export class Tasks<
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
     const runId = context.job.id.slice(WAKE_JOB_PREFIX.length);
+    if (context.job.fn === LATE_SETTLED_JOB_FN) {
+      // Restore the authoritative run wake if the detached attempt parked;
+      // terminal attempts have no deadline, so this simply removes the marker.
+      await this.#syncWake(runId);
+      return this.#wakeOutcome(runId);
+    }
     if (context.job.fn === LATE_MEMORY_LIMIT_JOB_FN) {
       const row = this.#store.getRun(runId);
       if (!row || TERMINAL_STATES.has(row.state)) return;
@@ -364,6 +373,7 @@ export class Tasks<
         SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
         WHERE run_id = ${runId} AND state = 'running'
       `;
+      this.#detachedByAlarm.add(runId);
       this.#observeDetachedAttempt(runId, active.promise);
       return this.#detachedWakeOutcome(runId);
     }
@@ -390,6 +400,7 @@ export class Tasks<
         // A late memory reset is different: no alarm frame remains to observe
         // it, so the attempt observer below persists an immediate marker that
         // the next alarm rethrows inside JobDriver's breaker boundary.
+        this.#detachedByAlarm.add(runId);
         this.#observeDetachedAttempt(runId, runAttempt);
         return this.#detachedWakeOutcome(runId);
       }
@@ -544,14 +555,35 @@ export class Tasks<
     if (this.#detached.has(runId)) return;
     this.#detached.add(runId);
     void attempt.then(
-      () => this.#detached.delete(runId),
+      () => {
+        if (this.#detachedByAlarm.has(runId)) {
+          this.#recordLateSettlement(runId);
+        }
+        this.#detached.delete(runId);
+        this.#detachedByAlarm.delete(runId);
+      },
       (error) => {
         if (isDurableObjectMemoryLimitReset(error)) {
           this.#recordLateMemoryLimit(runId, error);
+        } else if (this.#detachedByAlarm.has(runId)) {
+          this.#recordLateSettlement(runId);
         }
         this.#detached.delete(runId);
+        this.#detachedByAlarm.delete(runId);
       }
     );
+  }
+
+  /** Schedule the clean alarm boundary missing after detached work settles. */
+  #recordLateSettlement(runId: string): void {
+    void this.lifecycle.jobs
+      .push({
+        id: `${WAKE_JOB_PREFIX}${runId}`,
+        fn: LATE_SETTLED_JOB_FN,
+        time: Date.now(),
+        retry: { maxAttempts: 1 }
+      })
+      .catch(() => {});
   }
 
   /** Persist a late OOM for the next alarm-boundary breaker pass. */
@@ -635,6 +667,7 @@ export class Tasks<
       const existing = this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${run_id}`);
       if (
         existing?.fn === LATE_MEMORY_LIMIT_JOB_FN ||
+        existing?.fn === LATE_SETTLED_JOB_FN ||
         (existing?.fn === WAKE_JOB_FN &&
           existing.time === next_at &&
           existing.retry?.maxAttempts === 1 &&
@@ -942,7 +975,6 @@ export class Tasks<
       await promise;
     } finally {
       this.#active.delete(runId);
-      this.#detached.delete(runId);
     }
   }
 

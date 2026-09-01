@@ -292,6 +292,49 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     expect(view.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
   }, 10_000);
 
+  it("clears stale strikes when the last detached Task settles cleanly", async () => {
+    const stub = env.TaskHarnessObject.getByName(
+      `tasks-late-clean-${crypto.randomUUID()}`
+    );
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await state.storage.put(OOM_STRIKES_KEY, 2);
+        const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+          "lateSuccess",
+          undefined
+        );
+        backdateTaskWake(state.storage, receipt.runId);
+        await instance.lifecycle.rearmAlarm();
+        const alarm = (instance as unknown as { alarm(): Promise<void> }).alarm;
+        await alarm.call(instance);
+
+        const deadline = Date.now() + 2_000;
+        while ((await state.storage.get(OOM_STRIKES_KEY)) !== undefined) {
+          const marker = state.storage.sql
+            .exec(
+              `SELECT 1 FROM cf_agents_jobs
+               WHERE id = ? AND fn = 'late-settled'`,
+              `task:${receipt.runId}`
+            )
+            .toArray();
+          if (marker.length > 0) {
+            await state.storage.deleteAlarm();
+            await alarm.call(instance);
+            continue;
+          }
+          if (Date.now() > deadline) {
+            throw new Error("clean detached Task did not clear OOM strikes");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect((await instance.tasks.get(receipt.runId))?.state).toBe(
+          "completed"
+        );
+      }
+    );
+  }, 10_000);
+
   it("backs off sibling runs of the striking definition without rewriting unrelated run deadlines", async () => {
     const name = `tasks-oom-definition-group-${crypto.randomUUID()}`;
     const past = Date.now() - 1_000;
