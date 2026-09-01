@@ -58,6 +58,8 @@ import {
   type SubAgentIdentityVersion
 } from "./dynamic-agents/identity";
 import { DynamicAgentRegistry } from "./dynamic-agents/registry";
+import { DynamicAgents } from "./dynamic-agents/dynamic-agents";
+import type { DynamicAgentHostPort } from "./dynamic-agents/host";
 import type {
   FacetCapableCtx,
   FacetRunStorageRow,
@@ -1306,13 +1308,16 @@ export class Agent<
    */
   _keepAliveRefs = 0;
 
-  /**
-   * In-memory tokens for keepAlive leases acquired by facets and held
-   * on the root alarm owner. Lost on eviction, like `_keepAliveRefs`,
-   * because the in-memory work those leases were protecting is also gone.
-   * @internal
-   */
-  private _facetKeepAliveTokens = new Set<string>();
+  /** @internal The extracted dynamic-agent (facet) machinery. */
+  private _dynamicAgentsInstance: DynamicAgents | undefined;
+
+  /** @internal */
+  private get _dynamicAgents(): DynamicAgents {
+    this._dynamicAgentsInstance ??= new DynamicAgents(
+      this as unknown as DynamicAgentHostPort
+    );
+    return this._dynamicAgentsInstance;
+  }
 
   /** @internal In-memory set of fiber IDs running in this process. */
   private _runFiberActiveFibers = new Set<string>();
@@ -3511,89 +3516,24 @@ export class Agent<
   private _facetRunRowsForPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): FacetRunStorageRow[] {
-    const rows = this.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-    `;
-    return rows.filter((row) => {
-      try {
-        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-        return this._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
-      } catch {
-        return false;
-      }
-    });
-  }
-
-  private _deleteFacetRunRowsForPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): void {
-    for (const row of this._facetRunRowsForPrefix(ownerPath)) {
-      this.sql`
-        DELETE FROM cf_agents_facet_runs
-        WHERE owner_path_key = ${row.owner_path_key}
-          AND run_id = ${row.run_id}
-      `;
-    }
+    return this._dynamicAgents.facetRunRowsForPrefix(ownerPath);
   }
 
   private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
-    if (!this._isFacet) return undefined;
-    const key = agentPathKey(this.selfPath);
-    return key ? { key, data: JSON.stringify(this.selfPath) } : undefined;
+    return this._dynamicAgents.lifecycleRouteAddress();
   }
 
-  private async _routeLifecycleToRoot(
+  private _routeLifecycleToRoot(
     envelope: LifecycleRouteEnvelope
   ): Promise<unknown> {
-    if (!this._isFacet) return this.lifecycle.route(envelope);
-    return (await this._rootAlarmOwner())._cf_routeLifecycle(
-      undefined,
-      envelope
-    );
+    return this._dynamicAgents.routeLifecycleToRoot(envelope);
   }
 
-  private async _routeLifecycleToTarget(
+  private _routeLifecycleToTarget(
     target: LifecycleRouteAddress,
     envelope: LifecycleRouteEnvelope
   ): Promise<unknown> {
-    let targetPath: AgentPathStep[];
-    try {
-      targetPath = JSON.parse(target.data) as AgentPathStep[];
-    } catch {
-      throw new Error("Lifecycle route target is not a valid Agent path");
-    }
-
-    const selfPath = this.selfPath;
-    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
-      throw new Error(
-        `Lifecycle route does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-    if (selfPath.length === targetPath.length) {
-      return this.lifecycle.route(envelope);
-    }
-
-    const next = targetPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      const stalePath = targetPath.slice(0, selfPath.length + 1);
-      if (this._isFacet) {
-        await (await this._rootAlarmOwner())._cf_cleanupFacetPrefix(stalePath);
-      } else {
-        await this._cf_cleanupFacetPrefix(stalePath);
-      }
-      return false;
-    }
-
-    const child = await this._cf_resolveSubAgent(next.className, next.name);
-    return (
-      child as unknown as {
-        _cf_routeLifecycle(
-          target: LifecycleRouteAddress,
-          envelope: LifecycleRouteEnvelope
-        ): Promise<unknown>;
-      }
-    )._cf_routeLifecycle(target, envelope);
+    return this._dynamicAgents.routeLifecycleToTarget(target, envelope);
   }
 
   /** Single native-RPC aperture for routed Lifecycle capabilities. */
@@ -3601,44 +3541,15 @@ export class Agent<
     target: LifecycleRouteAddress | undefined,
     envelope: LifecycleRouteEnvelope
   ): Promise<unknown> {
-    return target
-      ? this._routeLifecycleToTarget(target, envelope)
-      : this.lifecycle.route(envelope);
+    return this._dynamicAgents.routeLifecycle(target, envelope);
   }
 
-  private async _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
-    const root = this._parentPath[0];
-    if (!root) {
-      throw new Error("Facet routing requires a root parent.");
-    }
-
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const binding = ctx.exports?.[root.className] as
-      | DurableObjectNamespace
-      | undefined;
-    if (!binding) {
-      throw new Error(
-        `Unable to resolve root "${root.className}" for facet routing.`
-      );
-    }
-
-    return (await getAgentByName<Cloudflare.Env, Agent>(
-      binding as unknown as DurableObjectNamespace<Agent>,
-      root.name
-    )) as unknown as RootFacetRpcSurface;
+  private _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
+    return this._dynamicAgents.rootAlarmOwner();
   }
 
   private _cf_rootResolvesToSelf(): boolean {
-    const root = this._parentPath[0];
-    if (!root) return false;
-
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const binding = ctx.exports?.[root.className] as
-      | DurableObjectNamespace
-      | undefined;
-    if (!binding?.idFromName) return false;
-
-    return binding.idFromName(root.name).equals(this.ctx.id);
+    return this._dynamicAgents.rootResolvesToSelf();
   }
 
   // ── Scheduling (delegates to agents/schedules) ─────────────────────────
@@ -3656,12 +3567,7 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const prefix = agentPathKey(ownerPath);
-    if (prefix) {
-      await this.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix);
-    }
-    this._deleteFacetRunRowsForPrefix(ownerPath);
-    await this._syncHostJobs();
+    await this._dynamicAgents.cleanupFacetPrefix(ownerPath);
   }
 
   /**
@@ -3670,17 +3576,10 @@ export class Agent<
    * alarm, so this lets facet work use the root alarm heartbeat.
    * @internal
    */
-  async _cf_acquireFacetKeepAlive(
+  _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
-    const ownerPathKey = agentPathKey(ownerPath);
-    const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
-    this._facetKeepAliveTokens.add(token);
-    this._keepAliveRefs++;
-    if (this._keepAliveRefs === 1) {
-      await this._syncHostJobs();
-    }
-    return token;
+    return this._dynamicAgents.acquireFacetKeepAlive(ownerPath);
   }
 
   /**
@@ -3688,10 +3587,8 @@ export class Agent<
    * Idempotent so disposer calls can safely race or run twice.
    * @internal
    */
-  async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
-    if (!this._facetKeepAliveTokens.delete(token)) return;
-    this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-    await this._syncHostJobs();
+  _cf_releaseFacetKeepAlive(token: string): Promise<void> {
+    return this._dynamicAgents.releaseFacetKeepAlive(token);
   }
 
   /**
@@ -3700,39 +3597,22 @@ export class Agent<
    * The facet remains authoritative for snapshots and recovery hooks.
    * @internal
    */
-  async _cf_registerFacetRun(
+  _cf_registerFacetRun(
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    const ownerPathJson = JSON.stringify(ownerPath);
-    const ownerPathKey = agentPathKey(ownerPath);
-    if (!ownerPathKey) {
-      throw new Error("_cf_registerFacetRun requires a non-empty owner path.");
-    }
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_facet_runs
-        (owner_path, owner_path_key, run_id, created_at)
-      VALUES
-        (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
-    `;
-    await this._syncHostJobs();
+    return this._dynamicAgents.registerFacetRun(ownerPath, runId);
   }
 
   /**
    * Remove a completed facet fiber from the root-side index.
    * @internal
    */
-  async _cf_unregisterFacetRun(
+  _cf_unregisterFacetRun(
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    const ownerPathKey = agentPathKey(ownerPath);
-    this.sql`
-      DELETE FROM cf_agents_facet_runs
-      WHERE owner_path_key IS ${ownerPathKey}
-        AND run_id = ${runId}
-    `;
-    await this._syncHostJobs();
+    return this._dynamicAgents.unregisterFacetRun(ownerPath, runId);
   }
 
   /**
