@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../index";
 
 const openSockets = new Set<WebSocket>();
@@ -146,7 +146,7 @@ describe("RoutedAgents", () => {
     ).toBe(`chat:${physicalName}:after-eviction`);
   });
 
-  it("makes an entry unreachable before destroying its Agent storage", async () => {
+  it("makes an entry unreachable, then its Agent storage is wiped", async () => {
     const name = ownerName();
     const owner = await getAgentByName(env.RoutingOwnerAgent, name);
     const created = await owner.createChat("Delete me");
@@ -165,7 +165,9 @@ describe("RoutedAgents", () => {
     );
     expect(route.status).toBe(404);
 
-    const recreated = await getAgentByName(env.RoutedChatAgent, physicalName);
-    expect(await recreated.getValue("message")).toBeNull();
+    await vi.waitFor(async () => {
+      const recreated = await getAgentByName(env.RoutedChatAgent, physicalName);
+      expect(await recreated.getValue("message")).toBeNull();
+    }, 10_000);
   });
 });

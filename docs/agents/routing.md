@@ -662,7 +662,7 @@ What the capability guarantees:
 - `create()`, `list()`, and `setMetadata()` touch only the hub's SQLite. No target wakes.
 - `get(id)` returns an initialized, typed stub for RPC, or `null` for an unknown or deleted ID.
 - A WebSocket upgrade is answered by the target, which then owns the socket. Chat frames never wake the hub. This is the same two-socket shape as connecting to the chat directly, but the hub stays the authority that resolves an ID, so it can gate, migrate, or redirect entries later.
-- `delete(id)` hides the entry first, destroys the target's storage, then removes the row. A destroy that fails leaves a hidden row, and calling `delete` again retries.
+- `delete(id)` hides the entry first, condemns the target, then removes the row. The target wipes its own storage on its next wake, moments later, and the condemned marker survives interruption. A failed call leaves a hidden row, and calling `delete` again retries.
 - Physical names are random UUIDs that never leave the hub. Clients only ever see entry IDs.
 - `namespace` is any `DurableObjectNamespace`, including a binding to a class exported by another Worker via `script_name`, so the hub and its targets can be deployed and scaled independently.
 

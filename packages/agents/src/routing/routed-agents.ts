@@ -151,9 +151,14 @@ export class RoutedAgents<
   }
 
   /**
-   * Make an entry unreachable, destroy its Agent, then remove the row.
-   * A failed destroy leaves a hidden `deleting` row so a repeated call
-   * retries. Returns false for unknown IDs.
+   * Make an entry unreachable, condemn its Agent, then remove the row.
+   * Returns false for unknown IDs.
+   *
+   * The target is condemned through Agent's deferred teardown, which
+   * durably marks it and returns without aborting the isolate; its storage
+   * is wiped on its own next wake, moments later, and the marker survives
+   * interruption. A failed RPC leaves a hidden `deleting` row so a
+   * repeated call retries.
    */
   async delete(id: string): Promise<boolean> {
     await this.lifecycle.ready();
@@ -166,7 +171,9 @@ export class RoutedAgents<
       this.#route,
       id
     );
-    await (await this.#stub(agentName)).destroy();
+    await this.#namespace
+      .get(this.#namespace.idFromName(agentName))
+      ._cf_scheduleDestroy();
     this.#sql(
       `DELETE FROM ${TABLE} WHERE route = ? AND id = ?`,
       this.#route,

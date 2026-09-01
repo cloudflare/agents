@@ -40,9 +40,10 @@ per-run tool agents — reached via `this.dynamicAgents`. See
 - **Listing and search** read only the hub. Each chat pushes its title
   and last message back with `recordChatActivity()`, which is one
   `setMetadata()` call; entries list most recently updated first.
-- **Deletion** is `chats.delete(id)`: the entry is hidden, the chat's
-  storage is destroyed, and the row removed. A push for a deleted chat
-  returns `false`, so delayed activity cannot resurrect it.
+- **Deletion** is `chats.delete(id)`: the entry is hidden, the chat is
+  condemned so it wipes its own storage moments later, and the row is
+  removed. A push for a deleted chat returns `false`, so delayed
+  activity cannot resurrect it.
 
 The pushed metadata is derived data. A failed push leaves it stale until
 the chat's next message; the chat itself stays the source of truth.
