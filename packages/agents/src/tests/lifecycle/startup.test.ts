@@ -14,6 +14,19 @@ class ServiceProbeCapability extends LifecycleCapability {
   }
 }
 
+class OrderedStartCapability extends LifecycleCapability {
+  constructor(
+    id: string,
+    private readonly order: string[]
+  ) {
+    super(id);
+  }
+
+  override onStart(): void {
+    this.order.push(this.capabilityId);
+  }
+}
+
 describe("Lifecycle startup", () => {
   it("starts capabilities and the host from RPC entry points", async () => {
     const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
@@ -49,6 +62,32 @@ describe("Lifecycle startup", () => {
       expect(() => lifecycle.use(new ServiceProbeCapability())).toThrow(
         'Lifecycle capability "service-probe" is already installed'
       );
+    });
+  });
+
+  it("positions capabilities relative to installed capability IDs", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const order: string[] = [];
+      const { lifecycle } = install(
+        new OrderedStartCapability("middle", order)
+      );
+      lifecycle
+        .use(new OrderedStartCapability("first", order), { before: "middle" })
+        .use(new OrderedStartCapability("last", order), { after: "middle" });
+
+      await lifecycle.start();
+      expect(order).toEqual(["first", "middle", "last"]);
+    });
+  });
+
+  it("rejects positioning relative to an unknown capability", async () => {
+    await withCapabilityHarness(({ install }) => {
+      const { lifecycle } = install(new ServiceProbeCapability());
+      expect(() =>
+        lifecycle.use(new ServiceProbeCapability("other"), {
+          before: "missing"
+        })
+      ).toThrow('Lifecycle capability "missing" is not installed');
     });
   });
 

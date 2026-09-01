@@ -97,6 +97,8 @@ export {
   TestSearchAgent,
   TestMultiSessionAgent,
   TestWaitConnectionsAgent,
+  RoutingOwnerAgent,
+  RoutedChatAgent,
   TestSubAgentParent,
   CustomBoundSubAgentParent,
   CounterSubAgent,
@@ -183,6 +185,8 @@ import type {
   TestSearchAgent,
   TestMultiSessionAgent,
   TestWaitConnectionsAgent,
+  RoutingOwnerAgent,
+  RoutedChatAgent,
   TestSubAgentParent,
   CustomBoundSubAgentParent,
   TestConnectionUriAgent,
@@ -250,6 +254,8 @@ export type Env = {
   TestSearchAgent: DurableObjectNamespace<TestSearchAgent>;
   TestMultiSessionAgent: DurableObjectNamespace<TestMultiSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
+  RoutingOwnerAgent: DurableObjectNamespace<RoutingOwnerAgent>;
+  RoutedChatAgent: DurableObjectNamespace<RoutedChatAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
   CUSTOM_BOUND_SUB_AGENT_PARENT: DurableObjectNamespace<CustomBoundSubAgentParent>;
   TestUnboundParentAgent: DurableObjectNamespace<TestUnboundParentAgent>;

@@ -601,6 +601,72 @@ Each agent is accessed via its own path:
 
 ---
 
+## Routing to independent Agents
+
+A hub Agent often owns an open-ended set of independent peers: one Durable Object per chat, document, or session for a user. `RoutedAgents` from `agents/routing` codifies that topology as a Lifecycle capability. The hub keeps a durable catalog of public IDs mapped to opaque physical names, and forwards requests under one route segment to the selected Agent:
+
+```typescript
+import { Agent, callable } from "agents";
+import { RoutedAgents } from "agents/routing";
+
+export class ChatAgent extends Agent<Env> {
+  // An ordinary top-level Agent: its own storage, alarms, and placement.
+}
+
+export class UserAgent extends Agent<Env> {
+  readonly chats = this.use(
+    new RoutedAgents<ChatAgent, { title: string }>({
+      namespace: this.env.ChatAgent,
+      route: "chats"
+    })
+  );
+
+  @callable()
+  createChat(title: string) {
+    return this.chats.create({ metadata: { title } });
+  }
+
+  @callable()
+  listChats() {
+    return this.chats.list();
+  }
+
+  @callable()
+  deleteChat(id: string) {
+    return this.chats.delete(id);
+  }
+}
+```
+
+The client keeps one connection to the hub and one to the active chat, both addressed through the hub:
+
+```
+/agents/user-agent/alice                    -> UserAgent "alice"
+/agents/user-agent/alice/chats/{id}         -> the ChatAgent behind that entry
+/agents/user-agent/alice/chats/{id}/...     -> same ChatAgent, suffix preserved
+```
+
+```tsx
+const user = useAgent({ agent: "UserAgent", name: "alice" });
+const chat = useAgent({
+  agent: "ChatAgent",
+  basePath: `agents/user-agent/alice/chats/${encodeURIComponent(chatId)}`
+});
+```
+
+What the capability guarantees:
+
+- `create()`, `list()`, and `setMetadata()` touch only the hub's SQLite. No target wakes.
+- `get(id)` returns an initialized, typed stub for RPC, or `null` for an unknown or deleted ID.
+- A WebSocket upgrade is answered by the target, which then owns the socket. Chat frames never wake the hub. This is the same two-socket shape as connecting to the chat directly, but the hub stays the authority that resolves an ID, so it can gate, migrate, or redirect entries later.
+- `delete(id)` hides the entry first, destroys the target's storage, then removes the row. A destroy that fails leaves a hidden row, and calling `delete` again retries.
+- Physical names are random UUIDs that never leave the hub. Clients only ever see entry IDs.
+- `namespace` is any `DurableObjectNamespace`, including a binding to a class exported by another Worker via `script_name`, so the hub and its targets can be deployed and scaled independently.
+
+The catalog stores existence, ownership, and application metadata. Conversation data stays in the target, and a target that needs its hub calls back with `getAgentByName(this.env.UserAgent, ownerName)`. When to prefer this over facets is covered in [Dynamic agents](./sub-agents.md#when-to-use-dynamic-agents).
+
+---
+
 ## Routing with Authentication
 
 Check authentication before routing to agents:

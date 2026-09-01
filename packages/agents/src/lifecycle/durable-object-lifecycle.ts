@@ -150,6 +150,11 @@ export type LifecycleOptions = {
   readonly maxAlarmMemoryLimitStrikes?: number;
 };
 
+/** Position for a capability relative to an already-installed named capability. */
+export type LifecycleUseOptions =
+  | { readonly before: string; readonly after?: never }
+  | { readonly after: string; readonly before?: never };
+
 /**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
@@ -273,10 +278,17 @@ export class Lifecycle<
   /**
    * Add a reusable capability before this lifecycle starts.
    *
-   * @param capability - The capability to add in dispatch order.
+   * Registration order is the default dispatch order. `before` or `after`
+   * positions a capability relative to an already-installed named capability.
+   *
+   * @param capability - The capability to add.
+   * @param options - Optional position relative to a named capability.
    * @returns This lifecycle.
    */
-  use(capability: DurableObjectCapability<Props>): this {
+  use(
+    capability: DurableObjectCapability<Props>,
+    options?: LifecycleUseOptions
+  ): this {
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
@@ -291,7 +303,22 @@ export class Lifecycle<
         `Lifecycle capability ${JSON.stringify(capabilityId)} is already installed`
       );
     }
-    this.#capabilities.push(capability);
+
+    let index = this.#capabilities.length;
+    if (options) {
+      const anchorId = options.before ?? options.after;
+      const anchor = this.#capabilities.findIndex(
+        (candidate) => lifecycleCapabilityId(candidate) === anchorId
+      );
+      if (anchor === -1) {
+        throw new Error(
+          `Lifecycle capability ${JSON.stringify(anchorId)} is not installed`
+        );
+      }
+      index = options.before === undefined ? anchor + 1 : anchor;
+    }
+    this.#capabilities.splice(index, 0, capability);
+
     if (capability instanceof LifecycleCapability) {
       bindLifecycleCapability(
         capability,
