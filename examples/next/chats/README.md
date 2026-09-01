@@ -10,7 +10,7 @@ UserAgent "alice"                ChatAgent "alice:{chatId}" (one per chat)
 │ chats                 │ update │ messages                 │
 │  chat_id → title,     │◀───────│  role, text, at          │
 │  last_message,        │  push  │  (own SQLite, own alarms,│
-│  updated_at, revision │        │   own placement)         │
+│  updated_at           │        │   own placement)         │
 └───────────────────────┘        └──────────────────────────┘
    listChats / searchChats            addMessage / getMessages
    read ONLY the index                destroy() deletes everything
@@ -34,29 +34,20 @@ per-run tool agents — reached via `this.dynamicAgents`. See
   without waking any chat DO. (This is the usual objection to
   DO-per-chat — "search across chats is impossible" — and the answer is
   a push-based mirror index, the same pattern the reference apps use.)
-- **Deletion** marks the catalog row `deleting`, destroys the Chat DO,
-  then removes one index row. New routes and stale-socket writes are
-  rejected as soon as deletion starts.
+- **Deletion** is `chat.destroy()` plus one index row — no manual
+  multi-table sweeps.
 
-The index is a derived projection; each Chat DO remains authoritative.
-Messages use caller-supplied ids, so retrying a request cannot duplicate
-a committed message. Each complete metadata snapshot carries the chat's
-monotonic revision. The User DO applies only newer revisions, updates only
-an existing catalog row, and assigns its own activity sequence. Delayed
-snapshots therefore cannot overwrite newer metadata or recreate a deleted
-chat.
+The index is derived data pushed on every write; the chats themselves
+stay the source of truth. A push updates only an existing catalog row,
+so delayed activity cannot recreate a chat after deletion. The User DO
+also assigns a monotonic activity sequence, avoiding timestamp ties
+between independently running Chat DOs.
 
-A failed projection does not make the accepted message fail. The index may
-be temporarily stale, and `UserAgent.repairChat(chatId)` pulls the latest
-authoritative snapshot from that Chat DO. This keeps the example free of
-callback objects, background queues, and dual-write races.
-
-The browser cannot address physical Agent routes. It connects to
-`/users/{userId}` for the User DO and `/users/{userId}/chats/{chatId}` for
-the active Chat DO. The Worker asks the User catalog to resolve only active
-chats, then returns the Chat DO's WebSocket upgrade. The Chat DO owns frames
-after that upgrade; each write rechecks catalog admission so an already-open
-stale socket cannot write after deletion starts.
+This example demonstrates the topology, not guaranteed cross-DO delivery.
+A failed metadata push leaves the derived index temporarily stale and does
+not fail the already-committed chat write. The proposed production protocol
+for idempotency, repair, deletion, and User-gated routing lives in
+[`design/rfc-user-chat-durable-objects.md`](../../../design/rfc-user-chat-durable-objects.md).
 
 ## Run
 

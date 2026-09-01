@@ -14,7 +14,7 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "TestUserAgent",
+        "class_name": "UserAgent",
         "name": "UserAgent"
       },
       {
@@ -26,7 +26,7 @@
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["TestUserAgent", "ChatAgent"],
+      "new_sqlite_classes": ["UserAgent", "ChatAgent"],
       "tag": "v1"
     }
   ]

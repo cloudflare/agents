@@ -453,21 +453,15 @@ The decision rule: **a facet is a child whose code or lifecycle the parent super
 One top-level Durable Object per chat, plus a per-user index DO the chats push their metadata into:
 
 ```typescript
-// ChatAgent (one DO per chat) projects a revision-fenced snapshot:
+// ChatAgent (one DO per chat) pushes on every write:
 const user = await getAgentByName(this.env.UserAgent, userId);
-await user.applyChatSnapshot({
-  chatId,
-  revision,
-  title,
-  lastMessage,
-  updatedAt
-});
+await user.recordChatActivity({ chatId, title, lastMessage, updatedAt });
 
 // UserAgent (per-user index) answers listing and cross-chat search
 // from its own SQLite — no chat DO wakes up.
 ```
 
-Each chat gets its own alarms, placement, and storage budget, while "search across all my chats" reads only the index. Chat writes are idempotent by message id, snapshots carry a monotonic chat revision, and the User DO can repair a stale projection by pulling the latest snapshot. Browser connections use User-gated routes rather than physical Agent names; deletion marks a catalog row inactive before destroying the Chat DO, so reconnects and stale-socket writes are refused. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. The proposed production topology, including a long-lived User-agent connection alongside the active Chat-agent connection, is in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
+Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. The example intentionally treats that index as an eventually consistent projection: a failed metadata push can leave it temporarily stale. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. Idempotency, repair, deletion fencing, and User-gated routing belong to the proposed production design in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
 
 ## Examples
 

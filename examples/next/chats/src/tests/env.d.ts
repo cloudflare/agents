@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 interface __TestEnv {
-  UserAgent: DurableObjectNamespace<import("./worker").TestUserAgent>;
+  UserAgent: DurableObjectNamespace<import("../index").UserAgent>;
   ChatAgent: DurableObjectNamespace<import("../index").ChatAgent>;
 }
 
@@ -9,7 +9,7 @@ declare namespace Cloudflare {
   interface Env extends __TestEnv {}
   interface GlobalProps {
     mainModule: typeof import("./worker");
-    durableNamespaces: "TestUserAgent" | "ChatAgent";
+    durableNamespaces: "UserAgent" | "ChatAgent";
   }
 }
 
