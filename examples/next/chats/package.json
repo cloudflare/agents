@@ -1,0 +1,24 @@
+{
+  "name": "@cloudflare/agents-next-chats-example",
+  "description": "Next: one Durable Object per chat plus a per-user push-based index — the recommended many-chats pattern",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest --run --config src/tests/vitest.config.ts"
+  },
+  "dependencies": {
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.19.1",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.115.0"
+  }
+}
