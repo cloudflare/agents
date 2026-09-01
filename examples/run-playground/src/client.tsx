@@ -1,9 +1,10 @@
 import "./styles.css";
 import {
   Badge,
+  Breadcrumbs,
   Button,
+  LayerCard,
   PoweredByCloudflare,
-  Surface,
   Switch,
   Tabs,
   Text,
@@ -196,7 +197,11 @@ function ModeToggle() {
   );
 }
 
-/** Dashboard-style card: bordered surface with a header row and body sections. */
+/**
+ * Layered dashboard card, matching the Workers service-overview cards in the
+ * Cloudflare dashboard: a muted header strip (`LayerCard.Secondary`) above a
+ * white inner panel (`LayerCard.Primary`).
+ */
 function Card({
   title,
   meta,
@@ -209,17 +214,17 @@ function Card({
   className?: string;
 }) {
   return (
-    <Surface
-      className={`rounded-xl ring ring-kumo-line ${className ?? ""}`.trim()}
-    >
-      <div className="flex min-h-12 items-center justify-between gap-3 border-b border-kumo-line px-5 py-3">
-        <h2 className="text-sm font-semibold text-kumo-default">{title}</h2>
+    <LayerCard className={className}>
+      <LayerCard.Secondary className="justify-between">
+        <div className="flex min-w-0 items-center gap-2">{title}</div>
         {meta !== undefined && (
-          <div className="flex items-center gap-3">{meta}</div>
+          <div className="flex shrink-0 items-center gap-2">{meta}</div>
         )}
-      </div>
-      {children}
-    </Surface>
+      </LayerCard.Secondary>
+      <LayerCard.Primary className="gap-0 p-0 pr-0">
+        {children}
+      </LayerCard.Primary>
+    </LayerCard>
   );
 }
 
@@ -272,7 +277,7 @@ function LimitSlider({
         max={max}
         step={step}
         onChange={(event) => onChange(Number(event.currentTarget.value))}
-        className="w-full accent-kumo-brand"
+        className="w-full accent-neutral-400 dark:accent-neutral-600"
       />
     </div>
   );
@@ -290,11 +295,11 @@ function percentile(values: number[], fraction: number): number {
 
 function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="px-5 py-4">
+    <div className="p-4">
       <Text size="sm" variant="secondary">
         {label}
       </Text>
-      <p className="mt-1 text-3xl font-semibold text-kumo-default">{value}</p>
+      <p className="mt-1 text-2xl font-semibold text-kumo-default">{value}</p>
     </div>
   );
 }
@@ -315,7 +320,7 @@ function MetricsTab({ history }: { history: RunHistoryEntry[] }) {
       meta={<Badge variant="secondary">This session</Badge>}
     >
       {history.length === 0 ? (
-        <div className="px-5 py-8">
+        <div className="px-4 py-8">
           <Text size="sm" variant="secondary">
             No runs yet. Run some code on the Playground tab and the server-side
             duration of each fresh isolate shows up here.
@@ -329,7 +334,7 @@ function MetricsTab({ history }: { history: RunHistoryEntry[] }) {
             <Stat label="P95" value={`${p95} ms`} />
             <Stat label="Failures" value={failures} />
           </div>
-          <div className="border-t border-kumo-line px-5 py-4">
+          <div className="border-t border-kumo-line p-4">
             <SectionLabel>
               Server-side duration per run — every bar is a brand-new isolate
             </SectionLabel>
@@ -371,9 +376,9 @@ function MetricsTab({ history }: { history: RunHistoryEntry[] }) {
 
 function AboutTab() {
   return (
-    <div className="grid gap-4">
+    <div className="grid gap-5">
       <Card title="How it works">
-        <div className="grid gap-3 px-5 py-4">
+        <div className="grid gap-3 p-4">
           <Text size="sm">
             Everything you type on the Playground tab executes in a brand-new{" "}
             <span className="font-mono text-[0.9em]">Dynamic Worker</span> via{" "}
@@ -395,7 +400,7 @@ function AboutTab() {
           {HOST_FUNCTIONS.map((hostFunction) => (
             <div
               key={hostFunction.signature}
-              className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-kumo-line px-5 py-3 last:border-b-0"
+              className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-kumo-line px-4 py-3 last:border-b-0"
             >
               <code className="rounded bg-kumo-elevated px-1.5 py-0.5 font-mono text-xs text-kumo-default">
                 {hostFunction.signature}
@@ -430,7 +435,7 @@ function AboutTab() {
           ].map(([label, description]) => (
             <div
               key={label}
-              className="grid gap-x-6 gap-y-1 border-b border-kumo-line px-5 py-3 last:border-b-0 sm:grid-cols-[8rem_1fr]"
+              className="grid gap-x-6 gap-y-1 border-b border-kumo-line px-4 py-3 last:border-b-0 sm:grid-cols-[8rem_1fr]"
             >
               <Text size="sm" bold>
                 {label}
@@ -589,242 +594,247 @@ export function App() {
   }
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-5xl flex-col gap-4 px-6 py-5">
-      <header className="flex items-center justify-between gap-3">
-        <div className="grid gap-0.5">
-          <div className="flex items-center gap-2">
-            <h1 className="text-lg font-semibold text-kumo-default">
-              Run playground
-            </h1>
-            <Badge variant="secondary">
-              <span className="font-mono text-[0.9em]">@cloudflare/run</span>
-            </Badge>
-          </div>
-          <Text size="sm" variant="secondary">
-            Untrusted code, fresh isolate per run, authority only through host
-            functions.
-          </Text>
-        </div>
+    <div className="flex min-h-screen flex-col bg-kumo-canvas">
+      {/* Breadcrumb header row, like the dashboard's global chrome. */}
+      <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-kumo-line bg-kumo-base px-4 md:px-6">
+        <Breadcrumbs size="sm">
+          <Breadcrumbs.Link href="https://github.com/cloudflare/agents">
+            <span className="font-mono">@cloudflare/run</span>
+          </Breadcrumbs.Link>
+          <Breadcrumbs.Separator />
+          <Breadcrumbs.Current>run-playground</Breadcrumbs.Current>
+        </Breadcrumbs>
         <ModeToggle />
       </header>
 
-      <Tabs
-        tabs={[
-          { value: "playground", label: "Playground" },
-          { value: "metrics", label: "Metrics" },
-          { value: "about", label: "About" }
-        ]}
-        value={tab}
-        onValueChange={setTab}
-      />
+      {/* Sticky navbar with segmented tabs, like the worker service view. */}
+      <nav className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-3 border-b border-kumo-line bg-kumo-canvas px-4 md:px-6">
+        <Tabs
+          variant="segmented"
+          tabs={[
+            { value: "playground", label: "Playground" },
+            { value: "metrics", label: "Metrics" },
+            { value: "about", label: "About" }
+          ]}
+          value={tab}
+          onValueChange={setTab}
+        />
+        <div className="ml-auto hidden items-center sm:flex">
+          <Text size="sm" variant="secondary">
+            Untrusted code, fresh isolate per run
+          </Text>
+        </div>
+      </nav>
 
-      {tab === "playground" && (
-        <div className="grid flex-1 gap-4">
-          <Card
-            title="Code"
-            meta={
-              <Button
-                variant="primary"
-                size="sm"
-                loading={running}
-                onClick={handleRun}
-                icon={<PlayIcon size={14} weight="fill" />}
-              >
-                Run
-              </Button>
-            }
-          >
-            <div className="grid gap-3 px-5 py-4">
-              <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
-                <div>
-                  <SectionLabel>Examples</SectionLabel>
-                  {renderPresetButtons(EXAMPLE_PRESETS)}
+      <main className="mx-auto grid w-full max-w-[1200px] grow auto-rows-min gap-5 px-4 pt-8 pb-6 md:px-8">
+        {tab === "playground" && (
+          <div className="grid gap-5">
+            <Card
+              title="Code"
+              meta={
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={running}
+                  onClick={handleRun}
+                  icon={<PlayIcon size={14} weight="fill" />}
+                >
+                  Run
+                </Button>
+              }
+            >
+              <div className="grid gap-3 p-4">
+                <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
+                  <div>
+                    <SectionLabel>Examples</SectionLabel>
+                    {renderPresetButtons(EXAMPLE_PRESETS)}
+                  </div>
+                  <div>
+                    <SectionLabel>Try to break it</SectionLabel>
+                    {renderPresetButtons(BREAK_PRESETS)}
+                  </div>
                 </div>
-                <div>
-                  <SectionLabel>Try to break it</SectionLabel>
-                  {renderPresetButtons(BREAK_PRESETS)}
-                </div>
-              </div>
 
-              {activePreset !== undefined && (
-                <div className="flex items-start gap-1.5 text-kumo-subtle">
-                  <span className="h-lh flex items-center">
-                    <ArrowElbowDownRightIcon size={14} className="shrink-0" />
-                  </span>
-                  <Text size="xs" variant="secondary">
-                    {activePreset.note}
-                  </Text>
-                </div>
-              )}
-
-              <Textarea
-                ref={editorRef}
-                value={source}
-                onChange={(event) => setSource(event.currentTarget.value)}
-                onKeyDown={handleEditorKeyDown}
-                spellCheck={false}
-                aria-label="Source editor"
-                className="min-h-[240px] resize-y font-mono text-[13px]"
-              />
-
-              <div className="flex flex-wrap gap-x-6 gap-y-1">
-                {HOST_FUNCTIONS.map((hostFunction) => (
-                  <div
-                    key={hostFunction.signature}
-                    className="flex items-baseline gap-2"
-                  >
-                    <code className="rounded bg-kumo-elevated px-1 font-mono text-xs text-kumo-default">
-                      {hostFunction.signature}
-                    </code>
+                {activePreset !== undefined && (
+                  <div className="flex items-start gap-1.5 text-kumo-subtle">
+                    <span className="h-lh flex items-center">
+                      <ArrowElbowDownRightIcon size={14} className="shrink-0" />
+                    </span>
                     <Text size="xs" variant="secondary">
-                      {hostFunction.description}
+                      {activePreset.note}
                     </Text>
                   </div>
-                ))}
-              </div>
-            </div>
+                )}
 
-            <div className="border-t border-kumo-line px-5 py-4">
-              <SectionLabel>Limits</SectionLabel>
-              <div className="grid gap-2.5 sm:grid-cols-3">
-                <LimitSlider
-                  label="timeoutMs"
-                  value={limits.timeoutMs}
-                  min={500}
-                  max={30_000}
-                  step={500}
-                  format={formatMilliseconds}
-                  onChange={(timeoutMs) =>
-                    setLimits((previous) => ({ ...previous, timeoutMs }))
-                  }
+                <Textarea
+                  ref={editorRef}
+                  value={source}
+                  onChange={(event) => setSource(event.currentTarget.value)}
+                  onKeyDown={handleEditorKeyDown}
+                  spellCheck={false}
+                  aria-label="Source editor"
+                  className="min-h-[240px] resize-y font-mono text-[13px]"
                 />
-                <LimitSlider
-                  label="cpuMs"
-                  value={limits.cpuMs}
-                  min={100}
-                  max={5_000}
-                  step={100}
-                  format={formatMilliseconds}
-                  onChange={(cpuMs) =>
-                    setLimits((previous) => ({ ...previous, cpuMs }))
-                  }
-                />
-                <LimitSlider
-                  label="maxLogBytes"
-                  value={limits.maxLogBytes}
-                  min={1_024}
-                  max={262_144}
-                  step={1_024}
-                  format={formatBytes}
-                  onChange={(maxLogBytes) =>
-                    setLimits((previous) => ({ ...previous, maxLogBytes }))
-                  }
-                />
-              </div>
-            </div>
-          </Card>
 
-          <Card
-            title="Result"
-            meta={
-              <>
-                {result?.ok === true && (
-                  <Switch
-                    size="sm"
-                    label="Raw"
-                    checked={showRaw}
-                    onCheckedChange={setShowRaw}
-                  />
-                )}
-                {result !== undefined && (
-                  <span
-                    className="font-mono text-xs text-kumo-subtle"
-                    title="time spent inside run() on the server"
-                  >
-                    {result.durationMs}ms
-                  </span>
-                )}
-                {result?.ok === true && (
-                  <Badge variant="success">completed</Badge>
-                )}
-                {result?.ok === false && (
-                  <Badge variant="destructive">{result.code}</Badge>
-                )}
-              </>
-            }
-          >
-            <div className="px-5 py-4">
-              {result === undefined && !running && (
-                <Text size="sm" variant="secondary">
-                  Run some code to see its result, logs, and errors here.
-                </Text>
-              )}
-              {running && (
-                <Text size="sm" variant="secondary">
-                  Loading a fresh isolate…
-                </Text>
-              )}
-
-              {result?.ok === true && (
-                <div>
-                  <pre className="rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-status-success whitespace-pre-wrap break-words">
-                    {showRaw ? result.raw : result.value}
-                  </pre>
-                  {showRaw && (
-                    <p className="mt-1.5 font-mono text-xs text-kumo-subtle">
-                      The full run result object — status, value, and captured
-                      logs.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {result?.ok === false && (
-                <div>
-                  <pre className="font-mono text-xs text-status-error whitespace-pre-wrap break-words">
-                    {result.message}
-                  </pre>
-                  {result.stack !== undefined && (
-                    <StackTrace
-                      stack={result.stack}
-                      onJumpToLine={jumpToLine}
-                    />
-                  )}
-                </div>
-              )}
-            </div>
-
-            {result !== undefined && result.logs.length > 0 && !showRaw && (
-              <div className="border-t border-kumo-line px-5 py-4">
-                <SectionLabel>
-                  Console ({result.logs.length} entr
-                  {result.logs.length === 1 ? "y" : "ies"})
-                </SectionLabel>
-                <div className="max-h-64 overflow-y-auto rounded-md bg-kumo-elevated p-2.5">
-                  {result.logs.map((log, index) => (
-                    <pre
-                      // biome-ignore lint: log order is the identity
-                      key={index}
-                      className={`font-mono text-xs whitespace-pre-wrap break-words ${LOG_LEVEL_CLASSES[log.level] ?? "text-kumo-default"}`}
+                <div className="flex flex-wrap gap-x-6 gap-y-1">
+                  {HOST_FUNCTIONS.map((hostFunction) => (
+                    <div
+                      key={hostFunction.signature}
+                      className="flex items-baseline gap-2"
                     >
-                      <span className="text-kumo-subtle">[{log.level}] </span>
-                      {log.message}
-                    </pre>
+                      <code className="rounded bg-kumo-elevated px-1 font-mono text-xs text-kumo-default">
+                        {hostFunction.signature}
+                      </code>
+                      <Text size="xs" variant="secondary">
+                        {hostFunction.description}
+                      </Text>
+                    </div>
                   ))}
                 </div>
               </div>
-            )}
-          </Card>
-        </div>
-      )}
 
-      {tab === "metrics" && <MetricsTab history={history} />}
+              <div className="border-t border-kumo-line p-4">
+                <SectionLabel>Limits</SectionLabel>
+                <div className="grid gap-2.5 sm:grid-cols-3">
+                  <LimitSlider
+                    label="timeoutMs"
+                    value={limits.timeoutMs}
+                    min={500}
+                    max={30_000}
+                    step={500}
+                    format={formatMilliseconds}
+                    onChange={(timeoutMs) =>
+                      setLimits((previous) => ({ ...previous, timeoutMs }))
+                    }
+                  />
+                  <LimitSlider
+                    label="cpuMs"
+                    value={limits.cpuMs}
+                    min={100}
+                    max={5_000}
+                    step={100}
+                    format={formatMilliseconds}
+                    onChange={(cpuMs) =>
+                      setLimits((previous) => ({ ...previous, cpuMs }))
+                    }
+                  />
+                  <LimitSlider
+                    label="maxLogBytes"
+                    value={limits.maxLogBytes}
+                    min={1_024}
+                    max={262_144}
+                    step={1_024}
+                    format={formatBytes}
+                    onChange={(maxLogBytes) =>
+                      setLimits((previous) => ({ ...previous, maxLogBytes }))
+                    }
+                  />
+                </div>
+              </div>
+            </Card>
 
-      {tab === "about" && <AboutTab />}
+            <Card
+              title="Result"
+              meta={
+                <>
+                  {result?.ok === true && (
+                    <Switch
+                      size="sm"
+                      label="Raw"
+                      checked={showRaw}
+                      onCheckedChange={setShowRaw}
+                    />
+                  )}
+                  {result !== undefined && (
+                    <span
+                      className="font-mono text-xs text-kumo-subtle"
+                      title="time spent inside run() on the server"
+                    >
+                      {result.durationMs}ms
+                    </span>
+                  )}
+                  {result?.ok === true && (
+                    <Badge variant="success">completed</Badge>
+                  )}
+                  {result?.ok === false && (
+                    <Badge variant="destructive">{result.code}</Badge>
+                  )}
+                </>
+              }
+            >
+              <div className="p-4">
+                {result === undefined && !running && (
+                  <Text size="sm" variant="secondary">
+                    Run some code to see its result, logs, and errors here.
+                  </Text>
+                )}
+                {running && (
+                  <Text size="sm" variant="secondary">
+                    Loading a fresh isolate…
+                  </Text>
+                )}
 
-      <footer className="flex justify-center pb-2">
-        <PoweredByCloudflare />
-      </footer>
+                {result?.ok === true && (
+                  <div>
+                    <pre className="rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-status-success whitespace-pre-wrap break-words">
+                      {showRaw ? result.raw : result.value}
+                    </pre>
+                    {showRaw && (
+                      <p className="mt-1.5 font-mono text-xs text-kumo-subtle">
+                        The full run result object — status, value, and captured
+                        logs.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {result?.ok === false && (
+                  <div>
+                    <pre className="font-mono text-xs text-status-error whitespace-pre-wrap break-words">
+                      {result.message}
+                    </pre>
+                    {result.stack !== undefined && (
+                      <StackTrace
+                        stack={result.stack}
+                        onJumpToLine={jumpToLine}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {result !== undefined && result.logs.length > 0 && !showRaw && (
+                <div className="border-t border-kumo-line p-4">
+                  <SectionLabel>
+                    Console ({result.logs.length} entr
+                    {result.logs.length === 1 ? "y" : "ies"})
+                  </SectionLabel>
+                  <div className="max-h-64 overflow-y-auto rounded-md bg-kumo-elevated p-2.5">
+                    {result.logs.map((log, index) => (
+                      <pre
+                        // biome-ignore lint: log order is the identity
+                        key={index}
+                        className={`font-mono text-xs whitespace-pre-wrap break-words ${LOG_LEVEL_CLASSES[log.level] ?? "text-kumo-default"}`}
+                      >
+                        <span className="text-kumo-subtle">[{log.level}] </span>
+                        {log.message}
+                      </pre>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Card>
+          </div>
+        )}
+
+        {tab === "metrics" && <MetricsTab history={history} />}
+
+        {tab === "about" && <AboutTab />}
+
+        <footer className="flex justify-center pt-2">
+          <PoweredByCloudflare />
+        </footer>
+      </main>
     </div>
   );
 }
