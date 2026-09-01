@@ -158,7 +158,7 @@ type SchedulerRouteMessage =
       readonly retry?: RetryOptions;
     }
   | {
-      /** @internal Removed with routed chat recovery's Tasks migration. */
+      /** @internal Removed when Tasks supports routed dynamic-agent wakes. */
       readonly type: "memoryLimit";
       readonly context: MemoryLimitContext;
     };
@@ -881,9 +881,9 @@ export class Scheduler<
     const idempotent = isRecurring(timing)
       ? options?.idempotent !== false
       : Boolean(options?.idempotent);
-    // Not part of the public ScheduleOptions vocabulary — chat-recovery
-    // scaffolding passed through to the job row until recovery migrates
-    // onto Tasks. See {@link RecoveryLoopScheduleOptions}.
+    // Not part of public ScheduleOptions. Root recovery uses Tasks; this
+    // remains only for legacy rows and routed dynamic agents until Tasks can
+    // mirror their wakes to the root. See RecoveryLoopScheduleOptions.
     const recoveryLoop = (
       options as Partial<RecoveryLoopScheduleOptions> | undefined
     )?.recoveryLoop;

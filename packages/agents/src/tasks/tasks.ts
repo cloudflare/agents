@@ -61,6 +61,10 @@ export type TaskDefinitionResolver = (
 ) => TaskCallbacks[string] | undefined;
 
 const taskDefinitionResolvers = new WeakMap<object, TaskDefinitionResolver>();
+const taskRecoveryLoopDefinitionResolvers = new WeakMap<
+  object,
+  (name: string) => boolean
+>();
 
 /**
  * @internal Supply a composition-root fallback for definition names outside
@@ -75,6 +79,19 @@ export function setTaskDefinitionResolver(
   resolver: TaskDefinitionResolver
 ): void {
   taskDefinitionResolvers.set(tasks, resolver);
+}
+
+/**
+ * @internal Mark framework-owned definitions whose concurrent runs form one
+ * memory-risk loop. Their disposable wake mirrors carry the Lifecycle breaker
+ * flag; public Task definitions remain individually protected through the
+ * executing-job context without gaining a new option.
+ */
+export function setTaskRecoveryLoopDefinitionResolver(
+  tasks: Tasks<never>,
+  resolver: (name: string) => boolean
+): void {
+  taskRecoveryLoopDefinitionResolvers.set(tasks, resolver);
 }
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
@@ -115,6 +132,9 @@ const TERMINAL_STATES: ReadonlySet<TaskRunState> = new Set([
   "failed",
   "cancelled"
 ]);
+
+/** Whether an internal acceptance may warm-start in its caller's invocation. */
+type TaskStartMode = "warm" | "queued";
 
 /** One live execution attempt in this isolate. */
 type ActiveAttempt = {
@@ -213,6 +233,11 @@ export class Tasks<
   /** True when a name resolves to a runnable definition. */
   #hasDefinition(name: string): boolean {
     return this.#resolveDefinition(name) !== undefined;
+  }
+
+  /** Whether sibling runs of this framework definition share breaker policy. */
+  #isRecoveryLoopDefinition(name: string): boolean {
+    return taskRecoveryLoopDefinitionResolvers.get(this)?.(name) ?? false;
   }
 
   #validateDefinitionName(name: string): void {
@@ -347,41 +372,68 @@ export class Tasks<
    * re-derives due-now wakes from it, so the breaker's queue-row backoff
    * and purge alone cannot contain a run whose attempt deterministically
    * exhausts memory — a fresh isolate would resurrect it immediately. On a
-   * strike the striking run is demoted to the breaker's backoff wake (its
-   * claim stripped, so reconciliation honors the deadline instead of
-   * flooring it to now); when the breaker seals, the run is terminally
-   * failed — a persisted, observable outcome (`task:failed`), which is the
-   * correct handling for work that exhausted memory three times running,
-   * not data loss.
+   * strike every active run of a breaker-flagged framework definition is
+   * demoted to the backoff wake (claims stripped, so reconciliation honors
+   * the deadline instead of flooring it to now); when the breaker seals,
+   * those runs terminally fail with an observable `task:failed` outcome.
+   * An ordinary public definition affects only the run that struck.
    */
   async onMemoryLimit(context: MemoryLimitContext): Promise<void> {
+    const active = this.#store.sql<{
+      run_id: string;
+      definition: string;
+    }>`
+      SELECT run_id, definition FROM cf_agents_task_runs
+      WHERE state IN ('pending', 'waiting', 'running')
+    `;
+    const affectedRunIds = new Set(
+      active
+        .filter((candidate) =>
+          this.#isRecoveryLoopDefinition(candidate.definition)
+        )
+        .map((candidate) => candidate.run_id)
+    );
+
     const executing = context.executing;
-    if (!executing || executing.capability !== this.capabilityId) return;
-    if (!executing.id.startsWith(WAKE_JOB_PREFIX)) return;
-    const runId = executing.id.slice(WAKE_JOB_PREFIX.length);
-    const row = this.#store.getRun(runId);
-    if (!row || TERMINAL_STATES.has(row.state)) return;
+    if (
+      executing?.capability === this.capabilityId &&
+      executing.id.startsWith(WAKE_JOB_PREFIX)
+    ) {
+      const executingRunId = executing.id.slice(WAKE_JOB_PREFIX.length);
+      if (active.some((candidate) => candidate.run_id === executingRunId)) {
+        affectedRunIds.add(executingRunId);
+      }
+    }
+    if (affectedRunIds.size === 0) return;
 
     if (context.sealed) {
-      await this.#settleFailed(runId, null, {
-        name: "TaskMemoryLimitSealed",
-        message:
-          "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
-          "consecutive Durable Object memory-limit resets."
-      });
+      for (const affectedRunId of affectedRunIds) {
+        await this.#settleFailed(affectedRunId, null, {
+          name: "TaskMemoryLimitSealed",
+          message:
+            "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
+            "consecutive Durable Object memory-limit resets."
+        });
+      }
       return;
     }
     if (context.nextTime === undefined) return;
     const now = Date.now();
-    this.#store.write(
-      `UPDATE cf_agents_task_runs
-       SET state = 'pending', generation = NULL, wait_reason = NULL,
-           next_at = ?, updated_at = ?
-       WHERE run_id = ?
-         AND state IN ('pending', 'waiting', 'running')`,
-      [context.nextTime, now, runId]
-    );
-    await this.#syncWake(runId);
+    for (const affectedRunId of affectedRunIds) {
+      this.#store.write(
+        `UPDATE cf_agents_task_runs
+         SET state = 'pending', generation = NULL, wait_reason = NULL,
+             next_at = CASE
+               WHEN next_at IS NULL OR next_at < ? THEN ?
+               ELSE next_at
+             END,
+             updated_at = ?
+         WHERE run_id = ?
+           AND state IN ('pending', 'waiting', 'running')`,
+        [context.nextTime, context.nextTime, now, affectedRunId]
+      );
+      await this.#syncWake(affectedRunId);
+    }
   }
 
   /**
@@ -405,6 +457,26 @@ export class Tasks<
     const receipt = await this.#accept(definition, input, options);
     if (receipt.accepted) await this.#executeRun(receipt.runId);
     return receipt;
+  }
+
+  /**
+   * @internal Framework aperture: durably accept one run — reserved
+   * (`__cf`-prefixed) definition names included, which the public `run()`
+   * refuses — and leave execution to its durable queue wake. This preserves
+   * an invocation boundary for framework work such as chat recovery while
+   * public `run()` keeps its normal warm-start behavior.
+   */
+  async __DO_NOT_USE_WILL_BREAK__enqueue(
+    definition: string,
+    input: unknown,
+    options?: TaskRunOptions
+  ): Promise<TaskReceipt> {
+    if (!this.#hasDefinition(definition)) {
+      throw new Error(
+        `Unknown Task definition "${definition}": not declared on this Tasks`
+      );
+    }
+    return this.#accept(definition, input, options, "queued");
   }
 
   /**
@@ -434,15 +506,25 @@ export class Tasks<
    * through here.
    */
   async #syncWake(runId: string): Promise<void> {
-    const rows = this.#store.sql<{ next_at: number | null }>`
-      SELECT next_at FROM cf_agents_task_runs
+    const rows = this.#store.sql<{
+      definition: string;
+      next_at: number | null;
+    }>`
+      SELECT definition, next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
     `;
-    const next = rows[0]?.next_at;
+    const row = rows[0];
+    const next = row?.next_at;
     const jobId = `${WAKE_JOB_PREFIX}${runId}`;
     if (typeof next === "number") {
-      await this.lifecycle.jobs.push({ id: jobId, fn: "wake", time: next });
+      await this.lifecycle.jobs.push({
+        id: jobId,
+        fn: "wake",
+        time: next,
+        recoveryLoop:
+          row !== undefined && this.#isRecoveryLoopDefinition(row.definition)
+      });
     } else {
       await this.lifecycle.jobs.cancel(jobId);
     }
@@ -590,7 +672,8 @@ export class Tasks<
   async #accept(
     definition: string,
     input: unknown,
-    options: TaskRunOptions = {}
+    options: TaskRunOptions = {},
+    startMode: TaskStartMode = "warm"
   ): Promise<TaskReceipt> {
     await this.lifecycle.ready();
     if (this.lifecycle.routes.source) {
@@ -676,7 +759,7 @@ export class Tasks<
 
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
-    if (!this.lifecycle.starting()) {
+    if (startMode === "warm" && !this.lifecycle.starting()) {
       void this.#executeRun(runId).catch(() => {});
     }
 

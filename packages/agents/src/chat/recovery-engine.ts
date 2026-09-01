@@ -75,11 +75,11 @@ export type RecoveryPartial = {
 export type ChatStreamStatus = "streaming" | "completed" | "error";
 
 /**
- * Resolve the `schedule()` options for a recovery schedule. Single source of
- * truth for both packages; see {@link ChatRecoveryScheduleReason} for the
- * rationale behind each idempotency case. Every recovery schedule is flagged
- * `recoveryLoop` so the alarm memory-limit circuit breaker (#1825) backs the
- * loop off on a strike and purges it when it seals.
+ * Resolve `schedule()` options for the routed dynamic-agent fallback. Root
+ * chat agents enqueue Tasks instead; dynamic agents temporarily retain
+ * root-owned routed schedules until Tasks can mirror child wakes to the alarm
+ * owner. Every fallback row is flagged `recoveryLoop` so the alarm memory-limit
+ * breaker backs it off and purges it when sealing.
  *
  * This is a cutover invariant: flipping either idempotency case silently
  * breaks deploy-storm dedup (initial) or stalls stable-timeout retries
@@ -174,15 +174,11 @@ export interface ChatRecoveryAdapter {
   /** Broadcast a lifecycle event produced by the evaluation or a transition. */
   emitRecoveryEvent(event: ChatRecoveryIncidentEvent): void;
   /**
-   * Enqueue a recovery callback. A thin pass-through to the package's
-   * `schedule(delaySeconds, callback, data, chatRecoverySchedulePolicy(reason))`
-   * — the engine owns the surrounding orchestration (the transition + emit for
-   * the initial schedule in {@link ChatRecoveryEngine.scheduleRecovery}, the
-   * attempt bump for {@link ChatRecoveryEngine.rescheduleAfterStableTimeout});
-   * the package owns the Durable Object alarm write and the payload shape.
-   * `reason` selects the idempotency policy and `delaySeconds` the alarm delay
-   * (`0` for the initial enqueue, `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` for
-   * a stable-timeout reschedule).
+   * Enqueue a recovery callback. The engine owns the surrounding orchestration
+   * and the package chooses its durable transport: a Task for a root chat agent,
+   * or the temporary routed-schedule fallback for a dynamic agent. `reason`
+   * selects deduplication and `delaySeconds` is `0` initially or the stable
+   * retry delay for a chained attempt.
    */
   scheduleRecovery(
     callback: ChatRecoveryScheduleCallback,
@@ -665,10 +661,10 @@ export class ChatRecoveryEngine {
    * Reschedule a recovery continuation/retry that timed out waiting for stable
    * state, INSIDE the currently-executing one-shot schedule row. Reads the
    * incident; if it is still under the attempt cap, bumps `attempt`, marks it
-   * `scheduled` with `reason:"stable_timeout_retry"`, and issues a delayed,
-   * NON-idempotent schedule (`alarm()` deletes the executing row only after this
-   * returns, so an idempotent reschedule would dedup onto that doomed row and
-   * never fire — see {@link chatRecoverySchedulePolicy}).
+   * `scheduled` with `reason:"stable_timeout_retry"`, and issues a separate
+   * delayed attempt. It must not join the currently executing attempt: Tasks
+   * enqueue an unkeyed chained run, while the routed fallback creates a
+   * non-idempotent schedule.
    *
    * Returns `true` when a retry was scheduled, `false` when there is no incident
    * (no id / record gone) or the attempt budget is already spent — in which case

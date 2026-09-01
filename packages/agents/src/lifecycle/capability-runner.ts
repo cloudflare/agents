@@ -59,7 +59,7 @@ export type MemoryLimitContext = {
    * Capabilities whose durable state outlives their queue row use this to
    * apply the same policy to the underlying work. Scheduler temporarily also
    * uses a routed job's address to deliver sealing to its owning dynamic agent;
-   * chat recovery's Tasks migration removes that compatibility path.
+   * routed Task wakes will remove that compatibility path.
    */
   readonly executing?: LifecycleJob;
   /**

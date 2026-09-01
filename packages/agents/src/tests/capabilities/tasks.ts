@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
 import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
+import { setTaskRecoveryLoopDefinitionResolver } from "../../tasks/tasks";
 import { Scheduler } from "../../schedules";
 
 /**
@@ -216,6 +217,26 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           );
         }
         return "recovered";
+      },
+
+      /** The same poison signal thrown from inside a journaled step. */
+      oomStepLoop: async (_input: undefined, step: TaskStep) => {
+        await step.do(
+          "oom-step",
+          { retries: { limit: 3, delay: "1 minute" } },
+          async () => {
+            const remaining =
+              (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+            if (remaining > 0) {
+              await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+              await this.ctx.storage.sync();
+              throw new Error(
+                "Durable Object's isolate exceeded its memory limit and was reset."
+              );
+            }
+            return "recovered";
+          }
+        );
       }
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },
@@ -228,6 +249,14 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   });
 
   readonly lifecycle = Lifecycle.install(this).use(this.tasks);
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    setTaskRecoveryLoopDefinitionResolver(
+      this.tasks,
+      (name) => name === "oomStepLoop"
+    );
+  }
 }
 
 /**
@@ -295,6 +324,7 @@ export function seedTaskRun(
     readonly generation?: string;
     readonly attempt?: number;
     readonly nextAt: number;
+    readonly recoveryLoop?: boolean;
   }
 ): void {
   const now = Date.now();
@@ -335,10 +365,12 @@ export function seedTaskRun(
     )`
   );
   storage.sql.exec(
-    `INSERT OR REPLACE INTO cf_agents_jobs (id, capability, fn, time)
-     VALUES (?, 'tasks', 'wake', ?)`,
+    `INSERT OR REPLACE INTO cf_agents_jobs
+       (id, capability, fn, time, recovery_loop)
+     VALUES (?, 'tasks', 'wake', ?, ?)`,
     `task:${options.runId}`,
-    options.nextAt
+    options.nextAt,
+    options.recoveryLoop ? 1 : 0
   );
 }
 

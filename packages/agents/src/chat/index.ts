@@ -58,6 +58,14 @@ export {
   type ChatTurnClosureEntry,
   type ChatTurnTaskHooks
 } from "./turn-task";
+export {
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
+  createChatRecoveryTaskDefinition,
+  type ChatRecoveryTaskHooks,
+  type ChatRecoveryTaskInput,
+  type ChatRecoveryTaskReason
+} from "./recovery-task";
 
 export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
 

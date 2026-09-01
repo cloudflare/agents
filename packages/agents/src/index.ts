@@ -130,7 +130,11 @@ import {
   setSchedulerCallbackResolver,
   setSchedulerRoutedMemoryLimitHandler
 } from "./schedules/scheduler";
-import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
+import {
+  Tasks,
+  setTaskDefinitionResolver,
+  setTaskRecoveryLoopDefinitionResolver
+} from "./tasks/tasks";
 import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
 import type {
   Schedule,
@@ -1775,6 +1779,7 @@ export class Agent<
     string,
     TaskCallbacks[string]
   >();
+  private readonly _recoveryLoopTaskDefinitions = new Set<string>();
 
   readonly mcp: MCPClientManager;
 
@@ -2389,6 +2394,9 @@ export class Agent<
         this._internalTaskDefinitions.get(name) ?? this.taskDefinitions?.[name];
       return definition as TaskCallbacks[string] | undefined;
     });
+    setTaskRecoveryLoopDefinitionResolver(this.tasks, (name) =>
+      this._recoveryLoopTaskDefinitions.has(name)
+    );
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -5251,14 +5259,19 @@ export class Agent<
    * `tasks` capability. Subclasses (Think, AIChatAgent) call this from
    * their constructors so the definition is rebuilt on every wake; names use
    * the reserved `__cf` prefix so users cannot start them through the public
-   * `tasks.run()`.
+   * `tasks.run()`. `recoveryLoop` marks framework definitions whose sibling
+   * runs share alarm memory-limit breaker policy.
    * @internal
    */
   protected _registerInternalTaskDefinition(
     name: string,
-    definition: TaskCallbacks[string]
+    definition: TaskCallbacks[string],
+    options?: { readonly recoveryLoop?: boolean }
   ): void {
     this._internalTaskDefinitions.set(name, definition);
+    if (options?.recoveryLoop) {
+      this._recoveryLoopTaskDefinitions.add(name);
+    }
   }
 
   /**

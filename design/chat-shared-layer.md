@@ -48,6 +48,7 @@ packages/agents/src/chat/          ← shared foundation
   recovery.ts                      chat-fiber snapshot codec
   recovery-incident.ts             incident budget math + storage helpers
   recovery-engine.ts               ChatRecoveryEngine + adapter / wake-hook seams
+  recovery-task.ts                 reserved chained Task definition for continuations
   recovery-codec.ts                ChatRecoveryCodec (AISDKRecoveryCodec)
   resume-handshake.ts              ResumeHandshake stream-resume driver
   stall-watchdog.ts                iterateWithStallWatchdog
@@ -175,6 +176,18 @@ Durable chat recovery is an invariant in both hosts: every chat entry path runs 
 | (d) upsert by id         | host store       | a `SessionProvider`-subset write                             |
 
 (b) is the one legitimately per-package step: ai-chat reads the stored stream `message_id` (#1691) because a flat `UIMessage[]` can't express parent/child (`AIChatAgent._resolveOrphanTargetId`); Think resolves it structurally from its Session tree. (c) `reconcileOrphanPartial` keeps an existing in-place tool result that lives only in storage — ai-chat's early tool-approval persist — rather than letting a replayed chunk re-advance it; Think has no early persist, so its whole-message replace is already dedup-safe and it doesn't use the helper. (d) is recognizably the same shape on both: ai-chat does `findIndex` → map-replace / append over its flat array; `Think._upsertMessageInHistory` does `session.getMessage` → `updateMessage` / `appendMessage` over a Session tree.
+
+Root-agent continuation attempts run as chained `__cf_internal_chat_recovery`
+Task runs. Initial detection joins by incident identity; stable-state and OOM
+retries enqueue a separate run and express their delay with `step.sleep`. The
+Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
+entry point, which returns at model handoff so a long turn never blocks the
+Lifecycle job loop. The incident record remains the recovery state machine.
+
+Facets do not yet have routed Task wakes. Dynamic-agent recovery therefore
+keeps the root-owned routed Scheduler transport as a compatibility path until
+Tasks can mirror a child run's wake to its alarm owner. Legacy recovery schedule
+rows use the same callback entry points and drain without migration.
 
 Full design + point-in-time decision record: [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 

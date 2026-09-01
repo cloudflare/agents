@@ -26,7 +26,12 @@ import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions
 } from "../";
-import { ResumableStream, chatRecoverySchedulePolicy } from "agents/chat";
+import {
+  CHAT_RECOVERY_TASK_NAME,
+  ResumableStream,
+  chatRecoverySchedulePolicy,
+  chatRecoveryTaskRunOptions
+} from "agents/chat";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -2382,22 +2387,36 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
-  /** Simulate the not-yet-deleted one-shot row `alarm()` is executing. */
+  /** Simulate the not-yet-settled recovery Task currently dispatching. */
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryContinue", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryContinue" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   /** Retry-path twin of {@link preScheduleRecoveryContinueForTest}. */
   async preScheduleRecoveryRetryForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryRetry", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getChatRecoveringForTest(): Promise<{ requestId?: string } | null> {
@@ -2667,14 +2686,51 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     await this._chatRecoveryRetryDetached(options);
   }
 
+  private async _runQueuedRecoveryTaskForTest(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+  ): Promise<boolean> {
+    const rows = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+        AND json_extract(metadata, '$.callback') = ${callback}
+      ORDER BY created_at ASC
+      LIMIT 1
+    `;
+    const runId = rows[0]?.run_id;
+    if (!runId) return false;
+    const past = Date.now() - 1_000;
+    this.sql`
+      UPDATE cf_agents_task_runs
+      SET next_at = ${past},
+          input = json_set(input, '$.delaySeconds', 0)
+      WHERE run_id = ${runId}
+    `;
+    this.sql`
+      UPDATE cf_agents_task_steps SET next_at = ${past}
+      WHERE run_id = ${runId} AND kind = 'sleep'
+    `;
+    this.sql`
+      UPDATE cf_agents_jobs SET time = ${past}
+      WHERE id = ${`task:${runId}`}
+    `;
+    await this.alarm();
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+    return true;
+  }
+
   async runScheduledRecoveryRetryForTest(): Promise<void> {
+    if (await this._runQueuedRecoveryTaskForTest("_chatRecoveryRetry")) return;
     const rows = this.sql<{ payload: string }>`
       SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
       ORDER BY time ASC
       LIMIT 1
     `;
-    if (!rows[0]) return;
+    if (!rows[0]) {
+      await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+      return;
+    }
     await this._chatRecoveryRetryDetached(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
@@ -2685,13 +2741,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
+    if (await this._runQueuedRecoveryTaskForTest("_chatRecoveryContinue")) {
+      return;
+    }
     const rows = this.sql<{ payload: string }>`
       SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
       ORDER BY time ASC
       LIMIT 1
     `;
-    if (!rows[0]) return;
+    if (!rows[0]) {
+      await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+      return;
+    }
     await this._chatRecoveryContinueDetached(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
@@ -2734,12 +2796,38 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this.onChatMessageClientTools;
   }
 
+  getRecoveryTransportCountsForTest(callback: string): {
+    tasks: number;
+    schedules: number;
+  } {
+    const schedules = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
+    `;
+    const tasks = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+        AND json_extract(metadata, '$.callback') = ${callback}
+    `;
+    return {
+      tasks: tasks[0]?.count ?? 0,
+      schedules: schedules[0]?.count ?? 0
+    };
+  }
+
   getScheduleCountForCallback(callback: string): number {
-    const rows = this.sql<{ count: number }>`
+    const scheduled = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = ${callback}
     `;
-    return rows[0]?.count ?? 0;
+    const tasks = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+        AND json_extract(metadata, '$.callback') = ${callback}
+    `;
+    return (scheduled[0]?.count ?? 0) + (tasks[0]?.count ?? 0);
   }
 
   getRunFiberCountForTest(): number {

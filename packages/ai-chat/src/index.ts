@@ -66,7 +66,13 @@ import {
   STREAM_CLEANUP_DELAY_SECONDS
 } from "agents/chat";
 import type { Streams } from "agents/streams";
-import { createChatTurnTaskDefinition } from "agents/chat";
+import {
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
+  createChatRecoveryTaskDefinition,
+  createChatTurnTaskDefinition,
+  type ChatRecoveryTaskReason
+} from "agents/chat";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   isPlatformFailure
@@ -712,6 +718,61 @@ export class AIChatAgent<
     );
   }
 
+  /** Register the shared Tasks transport for recovery continuations. */
+  private _registerChatRecoveryTaskDefinition(): void {
+    this._registerInternalTaskDefinition(
+      CHAT_RECOVERY_TASK_NAME,
+      createChatRecoveryTaskDefinition({
+        dispatch: async (callback, data) => {
+          // SAFETY: the recovery engine is the sole producer of each callback's
+          // payload. The Task persists that record verbatim and the callback
+          // discriminant selects the matching host input type here.
+          if (callback === "_chatRecoveryContinue") {
+            await this._chatRecoveryContinue(
+              data as Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>[0]
+            );
+          } else {
+            await this._chatRecoveryRetry(
+              data as Parameters<AIChatAgent<Env>["_chatRecoveryRetry"]>[0]
+            );
+          }
+        }
+      }),
+      { recoveryLoop: true }
+    );
+  }
+
+  /**
+   * Enqueue one recovery attempt. Root agents use Tasks; routed dynamic agents
+   * keep the root-owned Scheduler bridge until Tasks can mirror their wakes to
+   * the dynamic-agent alarm owner.
+   */
+  private async _enqueueChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown>,
+    reason: ChatRecoveryTaskReason,
+    delaySeconds: number
+  ): Promise<void> {
+    if (this.parentPath.length > 0) {
+      await this.schedule(
+        delaySeconds,
+        callback,
+        data,
+        reason === "redefer"
+          ? chatRecoveryRedeferPolicy()
+          : chatRecoverySchedulePolicy(reason)
+      );
+      return;
+    }
+
+    const input = { callback, data, delaySeconds };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, reason)
+    );
+  }
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -883,6 +944,7 @@ export class AIChatAgent<
     super(ctx, env);
     this.lifecycle.use(this.streams);
     this._registerChatTurnTaskDefinition();
+    this._registerChatRecoveryTaskDefinition();
     withAgentSpan(
       this,
       "chat_initialization",
@@ -4490,14 +4552,8 @@ export class AIChatAgent<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
-      scheduleRecovery: async (callback, data, reason, delaySeconds) => {
-        await this.schedule(
-          delaySeconds,
-          callback,
-          data,
-          chatRecoverySchedulePolicy(reason)
-        );
-      },
+      scheduleRecovery: (callback, data, reason, delaySeconds) =>
+        this._enqueueChatRecovery(callback, data, reason, delaySeconds),
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
@@ -4936,11 +4992,11 @@ export class AIChatAgent<
         // platform-failure deferral can no longer apply; re-defer the
         // dispatch ourselves so the turn re-runs on a fresh invocation
         // (#1730).
-        void this.schedule(
-          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+        void this._enqueueChatRecovery(
           "_chatRecoveryContinue",
-          data,
-          chatRecoveryRedeferPolicy()
+          data ?? {},
+          "redefer",
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
         ).catch(() => {});
         return;
       }
@@ -5241,10 +5297,10 @@ export class AIChatAgent<
   /**
    * Host memory-limit policy hook (#1825), dispatched structurally by
    * Lifecycle's circuit breaker — protected because it is framework
-   * machinery, not part of the public chat API. The breaker has already
-   * backed off / purged the `recoveryLoop`-flagged schedule rows (see
-   * `chatRecoverySchedulePolicy`); at the strike budget this seals
-   * in-flight recovery via {@link _cf_sealMemoryLimitedRecovery}.
+   * machinery, not part of the public chat API. Tasks applies the breaker to
+   * root recovery runs; the routed dynamic-agent fallback applies it to
+   * `recoveryLoop` schedule rows. At the strike budget this hook seals active
+   * incidents via {@link _cf_sealMemoryLimitedRecovery}.
    */
   protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
     if (!context.sealed) return;
@@ -5392,11 +5448,11 @@ export class AIChatAgent<
         // platform-failure deferral can no longer apply; re-defer the
         // dispatch ourselves so the turn re-runs on a fresh invocation
         // (#1730).
-        void this.schedule(
-          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+        void this._enqueueChatRecovery(
           "_chatRecoveryRetry",
-          data,
-          chatRecoveryRedeferPolicy()
+          data ?? {},
+          "redefer",
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
         ).catch(() => {});
         return;
       }

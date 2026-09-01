@@ -184,6 +184,47 @@ describe("Tasks capability", () => {
     }
   });
 
+  it("leaves internal enqueues for the durable wake and flags only recovery definitions", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const ordinary = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+          "pipeline",
+          {
+            label: "queued"
+          }
+        );
+        const recovery = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+          "oomStepLoop",
+          undefined
+        );
+        expect((await instance.tasks.get(ordinary.runId))?.state).toBe(
+          "pending"
+        );
+        expect((await instance.tasks.get(recovery.runId))?.state).toBe(
+          "pending"
+        );
+        expect(instance.stepRuns).toEqual([]);
+
+        const flags = state.storage.sql
+          .exec(
+            `SELECT id, recovery_loop FROM cf_agents_jobs
+             WHERE id IN (?, ?) ORDER BY id`,
+            `task:${ordinary.runId}`,
+            `task:${recovery.runId}`
+          )
+          .toArray() as Array<{ id: string; recovery_loop: number }>;
+        expect(flags).toEqual(
+          [
+            { id: `task:${ordinary.runId}`, recovery_loop: 0 },
+            { id: `task:${recovery.runId}`, recovery_loop: 1 }
+          ].sort((left, right) => left.id.localeCompare(right.id))
+        );
+      }
+    );
+  });
+
   it("parks on a step retry and replays without re-executing completed steps", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
 
