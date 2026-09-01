@@ -213,6 +213,7 @@ import {
   MAX_BOUND_PARAMS,
   buildInClauseStrings,
   resolveChatRecoveryConfig,
+  chatRecoveryRedeferPolicy,
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
@@ -15075,7 +15076,7 @@ export class Think<
           CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
           "_chatRecoveryRetry",
           data,
-          { recoveryLoop: true }
+          chatRecoveryRedeferPolicy()
         ).catch(() => {});
         return;
       }
@@ -15357,7 +15358,7 @@ export class Think<
           CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
           "_chatRecoveryContinue",
           data,
-          { recoveryLoop: true }
+          chatRecoveryRedeferPolicy()
         ).catch(() => {});
         return;
       }

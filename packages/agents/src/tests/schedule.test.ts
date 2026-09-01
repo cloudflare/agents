@@ -6,6 +6,7 @@ import {
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
+import type { RecoveryLoopScheduleOptions } from "../schedules/types";
 import type { TestScheduleAgent } from "./agents/schedule";
 
 describe("schedule operations", () => {
@@ -1161,9 +1162,10 @@ describe("schedule operations", () => {
       const oom =
         "Durable Object's isolate exceeded its memory limit and was reset.";
       const stub = await getAgentByName(env.TestScheduleAgent, name);
-      // A flagged sibling row that would fire before the backoff wake, and an
+      // A flagged sibling row due before the ~30s backoff wake (but far
+      // enough out that it cannot fire on its own mid-test), and an
       // unflagged control the breaker must never touch.
-      const flaggedId = await stub.createRecoveryLoopSchedule(1);
+      const flaggedId = await stub.createRecoveryLoopSchedule(20);
       const controlId = await stub.createSchedule(3600);
 
       // Strike 1: the flagged row travels with the strike — backed off past
@@ -1292,10 +1294,10 @@ describe("schedule operations", () => {
           `INSERT INTO cf_agents_schedules
              (id, callback, payload, type, time, delayInSeconds)
            VALUES
-             ('legacy-rec-near', '_chatRecoveryContinue', '{"incidentId":"i1"}', 'delayed', ?, 2),
+             ('legacy-rec-near', '_chatRecoveryContinue', '{"incidentId":"i1"}', 'delayed', ?, 20),
              ('legacy-rec-far', '_chatRecoveryRetry', '{"incidentId":"i2"}', 'delayed', ?, 3600),
              ('legacy-plain', 'testCallback', '"x"', 'delayed', ?, 3600)`,
-          nowSec + 2,
+          nowSec + 20,
           nowSec + 3600,
           nowSec + 3600
         );
@@ -1372,10 +1374,16 @@ describe("schedule operations", () => {
         const first = await instance.schedule(60, "testCallback", "seed", {
           idempotent: true
         });
-        const second = await instance.schedule(60, "testCallback", "seed", {
+        const flagged: RecoveryLoopScheduleOptions = {
           idempotent: true,
           recoveryLoop: true
-        });
+        };
+        const second = await instance.schedule(
+          60,
+          "testCallback",
+          "seed",
+          flagged
+        );
         expect(second.id).toBe(first.id);
         const rows = instance.sql<{ recovery_loop: number }>`
           SELECT recovery_loop FROM cf_agents_jobs WHERE id = ${first.id}

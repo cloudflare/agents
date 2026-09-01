@@ -4134,7 +4134,6 @@ export class Agent<
    * @param options Options for the scheduled task
    * @param options.retry Retry options for the callback execution
    * @param options.idempotent Dedup by callback+payload. Defaults to `true` for cron, `false` otherwise.
-   * @param options.recoveryLoop Let the alarm memory-limit circuit breaker back off / purge this schedule (#1825)
    * @returns Schedule object representing the scheduled task
    */
   schedule<T = string>(

@@ -10,6 +10,7 @@
  */
 
 import type { FiberRecoveryContext } from "../index";
+import type { RecoveryLoopScheduleOptions } from "../schedules/types";
 import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
@@ -87,8 +88,18 @@ export type ChatStreamStatus = "streaming" | "completed" | "error";
  */
 export function chatRecoverySchedulePolicy(
   reason: ChatRecoveryScheduleReason
-): { idempotent: boolean; recoveryLoop: true } {
+): RecoveryLoopScheduleOptions {
   return { idempotent: reason === "initial", recoveryLoop: true };
+}
+
+/**
+ * Options for a manual post-handoff re-defer of a recovery continuation
+ * (#1730): non-idempotent like every reschedule, and flagged for the alarm
+ * memory-limit breaker like every recovery schedule — the flag is internal
+ * scaffolding, so call sites route through here rather than writing it.
+ */
+export function chatRecoveryRedeferPolicy(): RecoveryLoopScheduleOptions {
+  return { idempotent: false, recoveryLoop: true };
 }
 
 /** Identity + context for opening (or re-evaluating) a recovery incident. */

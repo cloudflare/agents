@@ -85,6 +85,7 @@ import {
 } from "agents/chat";
 import {
   resolveChatRecoveryConfig,
+  chatRecoveryRedeferPolicy,
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
@@ -4939,7 +4940,7 @@ export class AIChatAgent<
           CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
           "_chatRecoveryContinue",
           data,
-          { recoveryLoop: true }
+          chatRecoveryRedeferPolicy()
         ).catch(() => {});
         return;
       }
@@ -5395,7 +5396,7 @@ export class AIChatAgent<
           CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
           "_chatRecoveryRetry",
           data,
-          { recoveryLoop: true }
+          chatRecoveryRedeferPolicy()
         ).catch(() => {});
         return;
       }

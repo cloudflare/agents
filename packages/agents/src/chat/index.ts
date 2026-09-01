@@ -255,6 +255,7 @@ export {
 } from "./recovery-incident";
 
 export {
+  chatRecoveryRedeferPolicy,
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,

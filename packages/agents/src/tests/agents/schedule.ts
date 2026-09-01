@@ -4,6 +4,7 @@ import {
   getCurrentAgent,
   type Schedule
 } from "../../index.ts";
+import type { RecoveryLoopScheduleOptions } from "../../schedules/types";
 import { captureConsoleWarnings } from "../capabilities/console-capture";
 
 /**
@@ -293,13 +294,15 @@ export class TestScheduleAgent extends Agent {
   // alarm memory-limit breaker backs it off on a strike and purges it at seal.
   @callable()
   async createRecoveryLoopSchedule(delaySeconds: number): Promise<string> {
+    const options: RecoveryLoopScheduleOptions = {
+      idempotent: false,
+      recoveryLoop: true
+    };
     const schedule = await this.schedule(
       delaySeconds,
       "testCallback",
       undefined,
-      {
-        recoveryLoop: true
-      }
+      options
     );
     return schedule.id;
   }

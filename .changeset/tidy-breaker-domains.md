@@ -7,11 +7,15 @@
 Make the alarm memory-limit circuit breaker (#1825) a self-contained
 Lifecycle concern instead of an Agent-mediated one.
 
-Recovery-loop membership is now a property of the job: schedules created
-with the new `recoveryLoop` option (and jobs pushed with the matching
-`LifecycleJobPushOptions` flag) are backed off by the breaker on a strike
-and purged when it seals at the strike budget, without disturbing unrelated
-rows — a new recovery schedule can no longer silently escape the breaker.
+Recovery-loop membership is now a property of the job row
+(`LifecycleJobPushOptions.recoveryLoop`): flagged jobs are backed off by
+the breaker on a strike and purged when it seals at the strike budget,
+without disturbing unrelated rows — a recovery schedule can no longer
+silently escape the breaker. The public `ScheduleOptions` vocabulary is
+unchanged: schedules only shape future work, and chat recovery reaches the
+flag through internal scaffolding (`RecoveryLoopScheduleOptions`) that will
+be deleted when recovery migrates onto the Tasks capability, where
+OOM-prone loops belong.
 Capabilities can react to a strike through the new optional `onMemoryLimit`
 hook, hosts through `onAlarmMemoryLimit`, and the strike budget is real
 Lifecycle configuration (`Lifecycle.install(host, { maxAlarmMemoryLimitStrikes })`)

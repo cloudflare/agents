@@ -34,6 +34,7 @@ import {
   type ScheduleTiming
 } from "./schedule-timing";
 import type {
+  RecoveryLoopScheduleOptions,
   Schedule,
   ScheduleCriteria,
   ScheduleOptions,
@@ -798,6 +799,12 @@ export class Scheduler<
     const idempotent = isRecurring(timing)
       ? options?.idempotent !== false
       : Boolean(options?.idempotent);
+    // Not part of the public ScheduleOptions vocabulary — chat-recovery
+    // scaffolding passed through to the job row until recovery migrates
+    // onto Tasks. See {@link RecoveryLoopScheduleOptions}.
+    const recoveryLoop = (
+      options as Partial<RecoveryLoopScheduleOptions> | undefined
+    )?.recoveryLoop;
 
     if (idempotent) {
       const existing = this.#findMatchingJob(
@@ -811,7 +818,7 @@ export class Scheduler<
         // for (a row migrated from the legacy schedule table) re-pushes the
         // same durable intent in place with the flag — otherwise the row
         // would escape the alarm memory-limit breaker (#1825) forever.
-        if (options?.recoveryLoop && !existing.job.recoveryLoop) {
+        if (recoveryLoop && !existing.job.recoveryLoop) {
           await this.lifecycle.jobs.push({
             id: existing.job.id,
             fn: existing.job.fn,
@@ -853,7 +860,7 @@ export class Scheduler<
       retry: resolveRetryConfig(options?.retry, this.#retryDefaults),
       singleflight: timing.type === "interval",
       hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
-      recoveryLoop: options?.recoveryLoop
+      recoveryLoop
     });
 
     return {
