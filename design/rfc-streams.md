@@ -124,6 +124,11 @@ removed the per-segment row write; ~8.5× under naive per-chunk appends,
 and retention sweeps read the stream rows plus at most one indexed
 chunk-tail row per stale live candidate — down ~6× from the legacy
 correlated-subquery shape and no longer proportional to stored chunks.
+In *billed* terms the gap is wider still: Cloudflare counts index
+maintenance in `rowsWritten`, the tables are WITHOUT ROWID so a chunk
+append bills exactly one row, and the legacy schema's per-chunk hidden-PK
+and stream indexes billed three per chunk insert (13 vs 33 billed rows
+for a 100-chunk turn — pinned by the write-accounting test).
 
 ## How the design evolved
 
@@ -152,6 +157,16 @@ cursor })` and a `recover` callback read `status()` as evidence. When
    deliberately stale; every consumer derives through one helper
    (`Streams.#tail`), and the storage-ops benchmark pins the resulting
    write parity with the pre-capability chat pattern.
+5. **The tables went WITHOUT ROWID once the billed metric was measured.**
+   Cloudflare bills `rowsWritten`, which counts index maintenance — and an
+   ordinary rowid table's PRIMARY KEY is a hidden UNIQUE index, so every
+   chunk INSERT was billing 2 rows while `total_changes()` (the parity
+   benchmark's metric) reported 1. WITHOUT ROWID makes the PK the table:
+   a chunk append bills exactly one row, pinned by the write-accounting
+   test. The same treatment covers the task run/step and job-queue
+   tables, and the task runs table dropped its `(state, next_at)` index —
+   a per-write tax on every claim, refresh, and settle, paid only to
+   speed the startup reconcile's one scan.
 
 ## Alternatives considered
 

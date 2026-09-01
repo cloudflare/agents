@@ -119,12 +119,14 @@ export class TaskStore {
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
         settled_at INTEGER
-      )
+      ) WITHOUT ROWID
     `);
-    rawSql(`
-      CREATE INDEX IF NOT EXISTS cf_agents_task_runs_due
-      ON cf_agents_task_runs (state, next_at)
-    `);
+    // No (state, next_at) index: every claim, refresh, and settle rewrites
+    // next_at, and Cloudflare bills each touched index as a row written —
+    // a per-write tax on the hottest run mutations, paid to accelerate the
+    // startup reconcile's one scan of a retention-bounded table. The
+    // definition index stays: list-by-definition reads scale with retained
+    // runs, and definition/created_at never change after insert.
     rawSql(`
       CREATE INDEX IF NOT EXISTS cf_agents_task_runs_definition
       ON cf_agents_task_runs (definition, created_at)
@@ -147,7 +149,7 @@ export class TaskStore {
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
         PRIMARY KEY (run_id, step_name)
-      )
+      ) WITHOUT ROWID
     `);
   }
 

@@ -41,6 +41,11 @@ const CHUNK_BUFFER_MAX_SIZE = 100;
  * segment.
  */
 const SEGMENT_MAX_BYTES = 512_000;
+/**
+ * Stored segments per page when replaying a stream's chunk log. Bounds
+ * replay memory to one page of segment bodies rather than the whole turn.
+ */
+const REPLAY_PAGE_SEGMENTS = 10;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /**
@@ -490,13 +495,23 @@ export class ResumableStream {
 
   // ── Chunk replay ───────────────────────────────────────────────────
 
-  /** Stored chunk bodies for one stream, packed segments expanded, in order. */
-  private _storedBodies(streamId: string): string[] {
-    const bodies: string[] = [];
-    for (const row of this.ops.readAll(streamId)) {
-      bodies.push(...unpackSegment(row.chunk));
+  /**
+   * Stored chunk bodies for one stream, packed segments expanded, in order.
+   * A generator over paged reads, so replaying a large turn holds one page
+   * of segments in memory instead of the whole stored stream; iteration is
+   * synchronous end to end (WebSocket sends don't await), so the pages see
+   * a consistent log.
+   */
+  private *_storedBodies(streamId: string): Generator<string> {
+    let next = 0;
+    for (;;) {
+      const rows = this.ops.readChunks(streamId, next, REPLAY_PAGE_SEGMENTS);
+      for (const row of rows) {
+        next = row.seq + 1;
+        yield* unpackSegment(row.chunk);
+      }
+      if (rows.length < REPLAY_PAGE_SEGMENTS) return;
     }
-    return bodies;
   }
 
   /**
@@ -788,7 +803,7 @@ export class ResumableStream {
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    return this._storedBodies(streamId).map((body, chunk_index) => ({
+    return [...this._storedBodies(streamId)].map((body, chunk_index) => ({
       body,
       chunk_index
     }));

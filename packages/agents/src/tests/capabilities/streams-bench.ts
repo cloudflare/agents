@@ -153,6 +153,71 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * The billed-write accounting model, measured: `rowsWritten` per INSERT
+   * and UPDATE against rowid vs WITHOUT ROWID tables and explicit indexes.
+   * `total_changes()` counts only table rows; Cloudflare bills index
+   * maintenance too, and `rowsWritten` is the billed metric — an ordinary
+   * rowid table's PRIMARY KEY is a hidden UNIQUE index that bills one
+   * extra row on every INSERT and DELETE, which is why the capability
+   * tables are WITHOUT ROWID. The `real*` entries pin the billed cost of
+   * the actual hot statements against the real schema.
+   */
+  async probeWriteAccounting(): Promise<Record<string, number>> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    sql.exec(`CREATE TABLE IF NOT EXISTS bench_probe_rowid (
+      a TEXT NOT NULL, b INTEGER NOT NULL, body TEXT, PRIMARY KEY (a, b))`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS bench_probe_worowid (
+      a TEXT NOT NULL, b INTEGER NOT NULL, body TEXT, PRIMARY KEY (a, b)
+      ) WITHOUT ROWID`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS bench_probe_indexed (
+      id TEXT PRIMARY KEY, tag TEXT, other TEXT)`);
+    sql.exec(
+      `CREATE INDEX IF NOT EXISTS bench_probe_tag ON bench_probe_indexed(tag)`
+    );
+    const w = (query: string, ...params: (string | number)[]) =>
+      Number(sql.exec(query, ...params).rowsWritten);
+    const now = Date.now();
+    return {
+      rowidCompositePkInsert: w(
+        `INSERT INTO bench_probe_rowid (a, b, body) VALUES ('x', 1, 'body')`
+      ),
+      withoutRowidInsert: w(
+        `INSERT INTO bench_probe_worowid (a, b, body) VALUES ('x', 1, 'body')`
+      ),
+      textPkPlusIndexInsert: w(
+        `INSERT INTO bench_probe_indexed (id, tag, other) VALUES ('i1', 't', 'o')`
+      ),
+      updateNotTouchingIndexed: w(
+        `UPDATE bench_probe_indexed SET other = 'o2' WHERE id = 'i1'`
+      ),
+      updateTouchingIndexed: w(
+        `UPDATE bench_probe_indexed SET tag = 't2' WHERE id = 'i1'`
+      ),
+      realStreamOpen: w(
+        `INSERT INTO cf_agents_streams
+           (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
+         VALUES ('probe-s', 'streaming', 'probe-tag', NULL, 0, ?, ?)`,
+        now,
+        now
+      ),
+      realChunkAppend: w(
+        `INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+         VALUES ('probe-s', 0, '"x"', ?)`,
+        now
+      ),
+      realStreamSettle: w(
+        `UPDATE cf_agents_streams
+         SET state = 'completed', error_message = NULL, closed_at = ?,
+             updated_at = ?, chunk_count = 1
+         WHERE stream_id = 'probe-s' AND state = 'streaming'`,
+        now,
+        now
+      )
+    };
+  }
+
+  /**
    * Sweep read amplification: rows read to decide abandonment for the
    * streams seeded by the paths above (bench_legacy_* vs cf_agents_streams).
    *

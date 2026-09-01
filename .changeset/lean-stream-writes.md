@@ -10,4 +10,8 @@ Chat adapter: the retention sweep decides abandonment in two phases (coarse row 
 
 Tasks: claim refreshes amortize to one row write per half claim-slack of wall time instead of one per step; already-elapsed sleeps journal born-completed in one INSERT; duplicate status messages skip their write; startup reconcile skips job-queue upserts that already match; a parked-run cancel settles in one row write; settle paths only re-sync the wake mirror when their write actually landed.
 
-The in-suite storage-ops benchmark now pins adapter/legacy write parity exactly (12 rows per 100-chunk turn, ~8.5× under naive per-chunk appends) and models the two-phase sweep.
+Replay memory is bounded: the chat adapter's chunk replay iterates the stored log in pages (a generator over paged reads) instead of materializing the whole turn per reconnecting client.
+
+Schema: the capability tables (streams, stream chunks, task runs, task steps, jobs — none released) are now WITHOUT ROWID. Cloudflare bills index maintenance as rows written, and an ordinary rowid table's PRIMARY KEY is a hidden UNIQUE index — so every chunk append was billing 2 rows despite being one table write. WITHOUT ROWID makes it exactly 1. The task runs table also drops its `(state, next_at)` index, which taxed every claim/refresh/settle write to speed one startup scan.
+
+The in-suite storage-ops benchmark now pins adapter/legacy write parity exactly (12 table rows per 100-chunk turn, ~8.5× under naive per-chunk appends), models the two-phase sweep, and a write-accounting test pins the billed model per statement (a 100-chunk turn bills 13 rows vs the legacy schema's 33).
