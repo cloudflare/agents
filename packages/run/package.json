@@ -26,6 +26,7 @@
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "test": "vitest run",
+    "test:e2e:deployed": "vitest --run -c src/e2e-tests/vitest.deployed.config.ts",
     "test:watch": "vitest"
   },
   "keywords": [

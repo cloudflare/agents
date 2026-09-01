@@ -1,0 +1,16 @@
+{
+  // Dedicated config for the OPT-IN deployed run e2e (test:e2e:deployed).
+  // Distinct name so it never collides with a real Worker; the suite deploys
+  // it, drives the scenarios over its workers.dev URL, then deletes it.
+  // Requires an authenticated paid Workers account (Worker Loader binding).
+  "name": "run-e2e-deployed",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ]
+}

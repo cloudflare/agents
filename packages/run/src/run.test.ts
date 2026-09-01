@@ -611,3 +611,29 @@ return 42;
     { level: "warn", message: "Console output truncated." }
   ]);
 });
+
+it("formats hostile and unusual console arguments without crossing RPC", async () => {
+  const result = await run<string>({
+    loader: LOCAL_DYNAMIC_WORKER_LOADER,
+    source: `
+const cyclic = { name: "cycle" };
+cyclic.self = cyclic;
+const { proxy, revoke } = Proxy.revocable({}, {});
+revoke();
+console.log(cyclic, [1, 2], proxy, Symbol("token"), () => 1, -0, NaN);
+return "formatted";
+`
+  });
+
+  expect(result).toEqual({
+    status: "completed",
+    value: "formatted",
+    logs: [
+      {
+        level: "log",
+        message:
+          "[Object] [Array] [Unformattable] Symbol(token) [Function] -0 NaN"
+      }
+    ]
+  });
+});
