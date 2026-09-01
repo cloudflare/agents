@@ -93,7 +93,7 @@ const BREAK_PRESETS: Preset[] = [
   {
     id: "cpu-burn",
     label: "Burn CPU",
-    note: "Deployed, the platform meters real CPU and kills this with RUN_RESOURCE_LIMIT once cpuMs is spent — but enforcement lags a second or two, and the spinning child freezes the parent's clock, so the server-measured time underreports while the wall clock does not. Local dev does not enforce CPU budgets at all.",
+    note: "Deployed, the platform meters real CPU and kills this with RUN_RESOURCE_LIMIT once cpuMs is spent — but enforcement lags a second or two, and the spinning child freezes the parent's clock, so the reported time underreports for this preset. Local dev does not enforce CPU budgets at all.",
     source: `// Heavy synchronous work against a 500ms CPU budget.
 let x = 0;
 for (let i = 0; i < 3_000_000_000; i++) {
@@ -383,7 +383,7 @@ export function App() {
   const [presetId, setPresetId] = useState(initialPreset?.id);
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<RunApiResponse & { wallMs: number }>();
+  const [result, setResult] = useState<RunApiResponse>();
   const [showRaw, setShowRaw] = useState(false);
   const [history, setHistory] = useState<RunHistoryEntry[]>([]);
   const editorRef = useRef<HTMLTextAreaElement>(null);
@@ -412,7 +412,6 @@ export function App() {
   async function handleRun() {
     setRunning(true);
     setResult(undefined);
-    const startedAt = performance.now();
     try {
       const response = await fetch("/api/run", {
         method: "POST",
@@ -420,10 +419,7 @@ export function App() {
         body: JSON.stringify({ source, limits })
       });
       const body = (await response.json()) as RunApiResponse;
-      setResult({
-        ...body,
-        wallMs: Math.round(performance.now() - startedAt)
-      });
+      setResult(body);
       setHistory((previous) =>
         [...previous, { durationMs: body.durationMs, ok: body.ok }].slice(-30)
       );
@@ -433,8 +429,7 @@ export function App() {
         code: "NETWORK",
         message: error instanceof Error ? error.message : String(error),
         logs: [],
-        durationMs: 0,
-        wallMs: Math.round(performance.now() - startedAt)
+        durationMs: 0
       });
     } finally {
       setRunning(false);
@@ -631,7 +626,7 @@ export function App() {
                     className="font-mono text-xs text-kumo-subtle"
                     title="time inside run() on the server · total round trip from this browser"
                   >
-                    {result.durationMs}ms server · {result.wallMs}ms total
+                    {result.durationMs}ms
                   </span>
                 )}
               </div>
