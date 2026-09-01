@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@cloudflare/codemode": "*",
-    "@cloudflare/kumo": "^2.6.0",
+    "@cloudflare/kumo": "^2.12.0",
     "@cloudflare/shell": "*",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",

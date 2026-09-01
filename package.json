@@ -36,7 +36,7 @@
     "@ai-sdk/react": "^4.0.0",
     "@changesets/changelog-github": "^0.7.0",
     "@changesets/cli": "^2.31.0",
-    "@cloudflare/kumo": "^2.6.0",
+    "@cloudflare/kumo": "^2.12.0",
     "@cloudflare/vite-plugin": "^1.48.0",
     "@cloudflare/vitest-pool-workers": "^0.19.1",
     "@cloudflare/workers-types": "^5.20260729.1",

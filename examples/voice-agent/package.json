@@ -9,7 +9,7 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/kumo": "^2.6.0",
+    "@cloudflare/kumo": "^2.12.0",
     "@cloudflare/voice": "*",
     "@cloudflare/voice-assemblyai": "*",
     "@cloudflare/voice-elevenlabs": "*",
