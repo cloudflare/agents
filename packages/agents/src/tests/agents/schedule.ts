@@ -206,6 +206,20 @@ export class TestOnStartScheduleExplicitFalseAgent extends Agent {
 
 export class TestScheduleAgent extends Agent {
   /**
+   * Legacy chat-package sealing hook retained by already-published hosts.
+   * Agents 0.23 must invoke it when the host has no new onAlarmMemoryLimit.
+   */
+  protected async _cf_sealMemoryLimitedRecovery(): Promise<void> {
+    const count =
+      (await this.ctx.storage.get<number>("legacyMemoryLimitSeals")) ?? 0;
+    await this.ctx.storage.put("legacyMemoryLimitSeals", count + 1);
+  }
+
+  async getLegacyMemoryLimitSealsForTest(): Promise<number> {
+    return (await this.ctx.storage.get<number>("legacyMemoryLimitSeals")) ?? 0;
+  }
+
+  /**
    * Simulate a memory-limit reset thrown during startup hydration (#1825):
    * while the durable countdown is set, every cold start throws the
    * platform's memory-limit error before any job can run.

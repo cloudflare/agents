@@ -1157,6 +1157,24 @@ describe("schedule operations", () => {
       expect(await fresh.getAlarmStrikesForTest()).toBe(0);
     });
 
+    it("seals recovery through the legacy chat-host hook when no new host hook exists", async () => {
+      const name = `oom-breaker-legacy-host-${crypto.randomUUID()}`;
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      await runInDurableObject(stub, async (_instance, state) => {
+        await state.storage.put("cf_agents:oom_alarm_strikes", 2);
+      });
+
+      expect(
+        await driveOomStrike(
+          name,
+          "Durable Object's isolate exceeded its memory limit and was reset."
+        )
+      ).toEqual({ threw: false, remaining: 0 });
+
+      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getLegacyMemoryLimitSealsForTest()).toBe(1);
+    });
+
     it("backs off pending recovery-loop schedules with the strike and purges them at seal", async () => {
       const name = "oom-breaker-recovery-loop-pack";
       const oom =

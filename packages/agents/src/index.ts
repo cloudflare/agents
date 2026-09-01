@@ -48,6 +48,7 @@ import {
 } from "cloudflare:workers";
 import {
   type LifecycleJobContext,
+  type MemoryLimitContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
@@ -5910,6 +5911,30 @@ export class Agent<
         console.warn(`Unknown Agent host job fn ${JSON.stringify(fn)}`);
         return undefined;
     }
+  }
+
+  /**
+   * Apply host policy after the alarm memory-limit breaker records a strike.
+   *
+   * New chat hosts override this hook directly. The sealed-only fallback keeps
+   * `agents` 0.23 compatible with already-published chat packages whose peer
+   * ranges accept it but which implement only the former
+   * `_cf_sealMemoryLimitedRecovery` template method. Queue membership remains
+   * job-row policy; this invokes terminalization only and can be removed once
+   * old chat releases no longer accept the current `agents` range.
+   *
+   * @internal
+   */
+  protected async onAlarmMemoryLimit(
+    context: MemoryLimitContext
+  ): Promise<void> {
+    if (!context.sealed) return;
+    const legacySeal = (
+      this as unknown as {
+        _cf_sealMemoryLimitedRecovery?: () => void | Promise<void>;
+      }
+    )._cf_sealMemoryLimitedRecovery;
+    await legacySeal?.call(this);
   }
 
   /**

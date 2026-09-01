@@ -25,11 +25,14 @@ Tasks, a sealed routed recovery schedule also forwards the seal to its owning
 dynamic agent so a chat child under a plain Agent root persists its exhausted
 incident and terminal notification.
 
-Removed accordingly: `Agent.onAlarmMemoryLimit`'s relay implementation, the
-`_cf_recoveryAlarmCallbacks` / `_cf_sealMemoryLimitedRecovery` template
-methods, `Scheduler.applyMemoryLimitPolicy`, and
+Removed accordingly: `Agent.onAlarmMemoryLimit`'s policy relay, the
+`_cf_recoveryAlarmCallbacks` template hook, `Scheduler.applyMemoryLimitPolicy`,
+and
 `setLifecycleAlarmMemoryLimitStrikes`. `AIChatAgent` and `Think` flag their
 recovery schedules via `chatRecoverySchedulePolicy` and seal in-flight
 incidents from their own protected `onAlarmMemoryLimit` hooks; both now
 require `agents >= 0.23.0` (they consume new `agents/chat` exports and no
-longer implement the old template-method breaker hooks).
+longer implement the old template-method breaker hooks). Agent retains a
+sealed-only call to `_cf_sealMemoryLimitedRecovery` so already-published chat
+packages whose peer ranges accept agents 0.23 keep terminal notifications;
+that fallback carries no callback-name or queue policy.
