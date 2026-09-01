@@ -119,8 +119,7 @@ export class TaskStore {
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
         settled_at INTEGER
-      ) WITHOUT ROWID
-    `);
+      ) WITHOUT ROWID`);
     // No (state, next_at) index: every claim, refresh, and settle rewrites
     // next_at, and Cloudflare bills each touched index as a row written —
     // a per-write tax on the hottest run mutations, paid to accelerate the
@@ -149,8 +148,7 @@ export class TaskStore {
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
         PRIMARY KEY (run_id, step_name)
-      ) WITHOUT ROWID
-    `);
+      ) WITHOUT ROWID`);
   }
 
   rowToSnapshot<Output extends TaskValue>(

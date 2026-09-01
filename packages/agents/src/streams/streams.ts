@@ -754,8 +754,7 @@ export class Streams extends LifecycleCapability {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         closed_at INTEGER
-      ) WITHOUT ROWID
-    `);
+      ) WITHOUT ROWID`);
     rawSql(`
       CREATE INDEX IF NOT EXISTS idx_cf_agents_streams_tag
       ON cf_agents_streams(tag, created_at)
@@ -767,8 +766,7 @@ export class Streams extends LifecycleCapability {
         chunk TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (stream_id, seq)
-      ) WITHOUT ROWID
-    `);
+      ) WITHOUT ROWID`);
   }
 
   #emit(type: string, payload: Record<string, unknown>): void {
