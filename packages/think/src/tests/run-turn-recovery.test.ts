@@ -88,9 +88,10 @@ describe("recovery × runTurn", () => {
 
     // Assert atomically with the recovery scan. An immediate alarm may consume
     // the Task after this RPC releases the Durable Object.
-    const scheduled = await agent.triggerFiberRecovery();
-    expect(scheduled.scheduledContinueCount).toBe(1);
-    expect(scheduled.continueTransport).toEqual({ tasks: 1, schedules: 0 });
+    const transport = await agent.triggerFiberRecoveryWithTransportForTest(
+      "_chatRecoveryContinue"
+    );
+    expect(transport).toEqual({ tasks: 1, schedules: 0 });
     await agent.runScheduledRecoveryContinueForTest();
 
     // Recovery resolved the interrupted turn and left no leaked fiber.

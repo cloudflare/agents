@@ -31,7 +31,7 @@ and
 `setLifecycleAlarmMemoryLimitStrikes`. `AIChatAgent` and `Think` flag their
 routed recovery fallback via `chatRecoverySchedulePolicy` and seal in-flight
 incidents from their own protected `onAlarmMemoryLimit` hooks; both now
-require `agents >= 0.23.1` after the stacked Tasks migration (they consume its
+require `agents >= 0.23.0` from the pending release batch (they consume its
 new `agents/chat` recovery exports and no longer implement the old
 template-method breaker hooks). Agent retains a
 sealed-only call to `_cf_sealMemoryLimitedRecovery` so already-published chat

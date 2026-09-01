@@ -4912,26 +4912,18 @@ export class ThinkToolsTestAgent extends Think {
   async triggerFiberRecovery(): Promise<{
     scheduledContinueCount: number;
     scheduledRetryCount: number;
-    continueTransport: { tasks: number; schedules: number };
-    retryTransport: { tasks: number; schedules: number };
   }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
     // Read recovery state synchronously inside the same invocation: an
-    // immediate alarm may consume the Task or fallback schedule after this RPC
-    // releases the Durable Object.
+    // immediate alarm may consume it after this RPC releases the object.
     return {
       scheduledContinueCount: recoveryWorkCountForTest(
         this,
         "_chatRecoveryContinue"
       ),
-      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
-      continueTransport: recoveryTransportCountsForTest(
-        this,
-        "_chatRecoveryContinue"
-      ),
-      retryTransport: recoveryTransportCountsForTest(this, "_chatRecoveryRetry")
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
     };
   }
 
@@ -7885,27 +7877,28 @@ export class ThinkRecoveryTestAgent extends Think {
   async triggerFiberRecovery(): Promise<{
     scheduledContinueCount: number;
     scheduledRetryCount: number;
-    continueTransport: { tasks: number; schedules: number };
-    retryTransport: { tasks: number; schedules: number };
   }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
     // Read recovery state synchronously inside the same invocation: an
-    // immediate alarm may consume the Task or fallback schedule after this RPC
-    // releases the Durable Object.
+    // immediate alarm may consume it after this RPC releases the object.
     return {
       scheduledContinueCount: recoveryWorkCountForTest(
         this,
         "_chatRecoveryContinue"
       ),
-      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
-      continueTransport: recoveryTransportCountsForTest(
-        this,
-        "_chatRecoveryContinue"
-      ),
-      retryTransport: recoveryTransportCountsForTest(this, "_chatRecoveryRetry")
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
     };
+  }
+
+  async triggerFiberRecoveryWithTransportForTest(
+    callback: string
+  ): Promise<{ tasks: number; schedules: number }> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+    return recoveryTransportCountsForTest(this, callback);
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {

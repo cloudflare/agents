@@ -8,4 +8,4 @@ Run root-agent chat recovery continuations as chained Tasks instead of schedule 
 
 Tasks now propagate condemned-isolate failures out of journaled steps, apply alarm memory-limit backoff and sealing to every active run of a flagged framework definition, and keep that definition policy internal. `retain: false` now removes failed and cancelled runs as well as completed runs, releasing journals and idempotency keys after every terminal outcome. Routed dynamic agents temporarily retain the root-owned schedule transport until Tasks supports routed child wakes.
 
-AI Chat and Think now require `agents >=0.23.1`, the release containing the shared recovery Task definition and internal enqueue support.
+AI Chat and Think require `agents >=0.23.0`, the pending release batch containing the shared recovery Task definition and internal enqueue support.
