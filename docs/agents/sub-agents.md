@@ -461,7 +461,7 @@ await user.recordChatActivity({ chatId, title, lastMessage, updatedAt });
 // from its own SQLite — no chat DO wakes up.
 ```
 
-Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. The example intentionally treats that index as an eventually consistent projection: a failed metadata push can leave it temporarily stale. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. Idempotency, repair, deletion fencing, and User-gated routing belong to the proposed production design in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
+Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. The example treats that index as a best-effort derived projection: failed metadata pushes can leave it stale, while older delivered timestamps cannot replace newer metadata. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. Idempotency, repair, deletion fencing, and User-gated routing belong to the proposed production design in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
 
 ## Examples
 

@@ -74,7 +74,8 @@ describe("one DO per chat + per-user index", () => {
     const user = await getAgentByName(env.UserAgent, uniqueUser());
     const first = await user.createChat();
     const second = await user.createChat();
-    const updatedAt = 123;
+    const updatedAt =
+      Math.max(...(await user.listChats()).map((chat) => chat.updatedAt)) + 1;
 
     await user.recordChatActivity({
       chatId: first,
@@ -104,6 +105,37 @@ describe("one DO per chat + per-user index", () => {
       first,
       second
     ]);
+  });
+
+  it("ignores metadata older than the indexed chat activity", async () => {
+    const user = await getAgentByName(env.UserAgent, uniqueUser());
+    const chatId = await user.createChat();
+    const createdAt = (await user.listChats())[0]?.updatedAt ?? 0;
+    const newerAt = createdAt + 2;
+
+    expect(
+      await user.recordChatActivity({
+        chatId,
+        title: "newer",
+        lastMessage: "newer activity",
+        updatedAt: newerAt
+      })
+    ).toBe(true);
+    expect(
+      await user.recordChatActivity({
+        chatId,
+        title: "stale",
+        lastMessage: "delayed old activity",
+        updatedAt: createdAt + 1
+      })
+    ).toBe(false);
+
+    expect((await user.listChats())[0]).toMatchObject({
+      chatId,
+      title: "newer",
+      lastMessage: "newer activity",
+      updatedAt: newerAt
+    });
   });
 
   it("does not recreate a deleted catalog row from delayed activity", async () => {

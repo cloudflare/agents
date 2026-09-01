@@ -38,8 +38,9 @@ per-run tool agents — reached via `this.dynamicAgents`. See
   multi-table sweeps.
 
 The index is derived data pushed on every write; the chats themselves
-stay the source of truth. A push updates only an existing catalog row,
-so delayed activity cannot recreate a chat after deletion. The User DO
+stay the source of truth. A push updates only an existing catalog row
+and cannot replace metadata with an older activity timestamp, so delayed
+activity cannot recreate a chat or overwrite newer metadata. The User DO
 also assigns a monotonic activity sequence, avoiding timestamp ties
 between independently running Chat DOs.
 

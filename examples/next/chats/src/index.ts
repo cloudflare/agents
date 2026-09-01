@@ -173,6 +173,7 @@ export class UserAgent extends Agent<Env> {
         updated_at = ${meta.updatedAt},
         activity_sequence = ${activitySequence}
       WHERE chat_id = ${meta.chatId}
+        AND updated_at <= ${meta.updatedAt}
       RETURNING chat_id AS chatId
     `;
     return rows.length > 0;
