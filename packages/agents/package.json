@@ -128,11 +128,6 @@
       "import": "./dist/tasks/index.js",
       "require": "./dist/tasks/index.js"
     },
-    "./dynamic-agents": {
-      "types": "./dist/dynamic-agents/index.d.ts",
-      "import": "./dist/dynamic-agents/index.js",
-      "require": "./dist/dynamic-agents/index.js"
-    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",

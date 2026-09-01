@@ -5881,7 +5881,7 @@ export class Agent<
     cls: SubAgentClass<T>,
     name: string
   ): Promise<SubAgentStub<T>> {
-    return (await this._cf_resolveSubAgent(cls.name, name)) as SubAgentStub<T>;
+    return this.dynamicAgents.get(cls, name);
   }
 
   /** Maximum number of non-terminal agent-tool runs this parent may own at once. */
@@ -8401,7 +8401,7 @@ export class Agent<
    * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.abort()} instead.
    */
   abortSubAgent(cls: SubAgentClass, name: string, reason?: unknown): void {
-    this._dynamicAgents.abort(cls.name, name, reason);
+    this.dynamicAgents.abort(cls, name, reason);
   }
 
   /**
@@ -8416,7 +8416,7 @@ export class Agent<
    * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.delete()} instead.
    */
   deleteSubAgent(cls: SubAgentClass, name: string): Promise<void> {
-    return this._dynamicAgents.delete(cls.name, name);
+    return this.dynamicAgents.delete(cls, name);
   }
 
   // ── Sub-agent registry (backs `hasSubAgent` / `listSubAgents`) ──────────
@@ -8476,9 +8476,7 @@ export class Agent<
   hasSubAgent<T extends Agent>(cls: SubAgentClass<T>, name: string): boolean;
   hasSubAgent(className: string, name: string): boolean;
   hasSubAgent(classOrName: SubAgentClass | string, name: string): boolean {
-    const className =
-      typeof classOrName === "string" ? classOrName : classOrName.name;
-    return this._subAgentRegistry.has(className, name);
+    return this.dynamicAgents.has(classOrName as SubAgentClass & string, name);
   }
 
   /**
@@ -8499,9 +8497,7 @@ export class Agent<
   listSubAgents(
     classOrName?: SubAgentClass | string
   ): Array<{ className: string; name: string; createdAt: number }> {
-    const className =
-      typeof classOrName === "string" ? classOrName : classOrName?.name;
-    return this._subAgentRegistry.list(className);
+    return this.dynamicAgents.list(classOrName as SubAgentClass & string);
   }
 
   /**
