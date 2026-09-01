@@ -1,6 +1,7 @@
 {
   "name": "@cloudflare/run",
   "version": "0.0.0",
+  "private": true,
   "description": "Run JavaScript in isolated Cloudflare Dynamic Workers",
   "repository": {
     "directory": "packages/run",
