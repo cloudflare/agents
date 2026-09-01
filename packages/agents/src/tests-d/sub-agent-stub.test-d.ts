@@ -1,5 +1,9 @@
 import { Agent } from "../index.ts";
-import type { SubAgentStub } from "../index.ts";
+import type {
+  DynamicAgentClass,
+  DynamicAgentStub,
+  SubAgentStub
+} from "../index.ts";
 
 // ── Test Agent with various method signatures (sub-agent stub) ───────
 
@@ -28,6 +32,11 @@ class TestSubAgent extends Agent {
 // ── User methods are present ─────────────────────────────────────────
 
 type Stub = SubAgentStub<TestSubAgent>;
+type DynamicStub = DynamicAgentStub<TestSubAgent>;
+
+TestSubAgent satisfies DynamicAgentClass<TestSubAgent>;
+null! as DynamicStub satisfies Stub;
+null! as Stub satisfies DynamicStub;
 
 // Sync methods are Promise-wrapped
 null! as Stub["syncMethod"] satisfies () => Promise<string>;

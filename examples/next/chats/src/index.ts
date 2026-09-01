@@ -185,7 +185,7 @@ export class UserAgent extends Agent<Env> {
       SELECT chat_id AS chatId, title, last_message AS lastMessage,
              updated_at AS updatedAt
       FROM chats
-      ORDER BY activity_sequence DESC, updated_at DESC, chat_id ASC
+      ORDER BY updated_at DESC, activity_sequence DESC, chat_id ASC
     `;
   }
 
@@ -201,7 +201,7 @@ export class UserAgent extends Agent<Env> {
              updated_at AS updatedAt
       FROM chats
       WHERE title LIKE ${like} OR last_message LIKE ${like}
-      ORDER BY activity_sequence DESC, updated_at DESC, chat_id ASC
+      ORDER BY updated_at DESC, activity_sequence DESC, chat_id ASC
     `;
   }
 

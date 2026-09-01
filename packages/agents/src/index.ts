@@ -62,6 +62,8 @@ import type {
   DynamicAgentStub as SubAgentStub
 } from "./dynamic-agents/types";
 export type {
+  DynamicAgentClass,
+  DynamicAgentStub,
   DynamicAgentClass as SubAgentClass,
   DynamicAgentStub as SubAgentStub
 } from "./dynamic-agents/types";

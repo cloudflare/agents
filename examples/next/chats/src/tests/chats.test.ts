@@ -138,6 +138,36 @@ describe("one DO per chat + per-user index", () => {
     });
   });
 
+  it("does not promote delayed old activity above newer chats", async () => {
+    const user = await getAgentByName(env.UserAgent, uniqueUser());
+    const recent = await user.createChat();
+    const delayed = await user.createChat();
+    const createdAt = Math.max(
+      ...(await user.listChats()).map((chat) => chat.updatedAt)
+    );
+
+    await user.recordChatActivity({
+      chatId: recent,
+      title: "match recent",
+      lastMessage: "newer activity",
+      updatedAt: createdAt + 2
+    });
+    await user.recordChatActivity({
+      chatId: delayed,
+      title: "match delayed",
+      lastMessage: "older activity delivered later",
+      updatedAt: createdAt + 1
+    });
+
+    expect((await user.listChats()).map((chat) => chat.chatId)).toEqual([
+      recent,
+      delayed
+    ]);
+    expect(
+      (await user.searchChats("match")).map((chat) => chat.chatId)
+    ).toEqual([recent, delayed]);
+  });
+
   it("does not recreate a deleted catalog row from delayed activity", async () => {
     const user = await getAgentByName(env.UserAgent, uniqueUser());
     const chatId = await user.createChat();
