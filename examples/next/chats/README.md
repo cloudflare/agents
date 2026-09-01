@@ -10,7 +10,7 @@ UserAgent "alice"                ChatAgent "alice:{chatId}" (one per chat)
 │ chats                 │ update │ messages                 │
 │  chat_id → title,     │◀───────│  role, text, at          │
 │  last_message,        │  push  │  (own SQLite, own alarms,│
-│  updated_at           │        │   own placement)         │
+│  updated_at, revision │        │   own placement)         │
 └───────────────────────┘        └──────────────────────────┘
    listChats / searchChats            addMessage / getMessages
    read ONLY the index                destroy() deletes everything
@@ -37,11 +37,18 @@ per-run tool agents — reached via `this.dynamicAgents`. See
 - **Deletion** is `chat.destroy()` plus one index row — no manual
   multi-table sweeps.
 
-The index is derived data pushed on every write; the chats themselves
-stay the source of truth. A push updates only an existing catalog row,
-so delayed activity cannot recreate a chat after deletion. The User DO
-also assigns a monotonic activity sequence, avoiding timestamp ties
-between independently running Chat DOs.
+The index is a derived projection; each Chat DO remains authoritative.
+Messages use caller-supplied ids, so retrying a request cannot duplicate
+a committed message. Each complete metadata snapshot carries the chat's
+monotonic revision. The User DO applies only newer revisions, updates only
+an existing catalog row, and assigns its own activity sequence. Delayed
+snapshots therefore cannot overwrite newer metadata or recreate a deleted
+chat.
+
+A failed projection does not make the accepted message fail. The index may
+be temporarily stale, and `UserAgent.repairChat(chatId)` pulls the latest
+authoritative snapshot from that Chat DO. This keeps the example free of
+callback objects, background queues, and dual-write races.
 
 ## Run
 

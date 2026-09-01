@@ -10,6 +10,15 @@ async function chatFor(userId: string, chatId: string) {
   return getAgentByName(env.ChatAgent, `${userId}:${chatId}`);
 }
 
+async function addMessage(
+  chat: Awaited<ReturnType<typeof chatFor>>,
+  role: "user" | "assistant",
+  text: string,
+  messageId: string = crypto.randomUUID()
+): Promise<number> {
+  return chat.addMessage(messageId, role, text);
+}
+
 describe("one DO per chat + per-user index", () => {
   it("createChat appears in listChats", async () => {
     const user = await getAgentByName(env.UserAgent, uniqueUser());
@@ -26,8 +35,8 @@ describe("one DO per chat + per-user index", () => {
     const chatId = await user.createChat();
 
     const chat = await chatFor(userId, chatId);
-    await chat.addMessage("user", "How do facets work?");
-    await chat.addMessage("assistant", "They are colocated isolates.");
+    await addMessage(chat, "user", "How do facets work?");
+    await addMessage(chat, "assistant", "They are colocated isolates.");
 
     const [meta] = await user.listChats();
     expect(meta.chatId).toBe(chatId);
@@ -42,9 +51,9 @@ describe("one DO per chat + per-user index", () => {
     const second = await user.createChat();
 
     const firstChat = await chatFor(userId, first);
-    await firstChat.addMessage("user", "older conversation");
+    await addMessage(firstChat, "user", "older conversation");
     const secondChat = await chatFor(userId, second);
-    await secondChat.addMessage("user", "newer conversation");
+    await addMessage(secondChat, "user", "newer conversation");
 
     expect((await user.listChats()).map((c) => c.chatId)).toEqual([
       second,
@@ -53,7 +62,7 @@ describe("one DO per chat + per-user index", () => {
 
     // Messaging the older chat flips the order — the push keeps the
     // index current without waking any other chat.
-    await firstChat.addMessage("user", "back to the old thread");
+    await addMessage(firstChat, "user", "back to the old thread");
     expect((await user.listChats()).map((c) => c.chatId)).toEqual([
       first,
       second
@@ -66,14 +75,16 @@ describe("one DO per chat + per-user index", () => {
     const second = await user.createChat();
     const updatedAt = 123;
 
-    await user.recordChatActivity({
+    await user.applyChatSnapshot({
       chatId: first,
+      revision: 1,
       title: "first",
       lastMessage: "first activity",
       updatedAt
     });
-    await user.recordChatActivity({
+    await user.applyChatSnapshot({
       chatId: second,
+      revision: 1,
       title: "second",
       lastMessage: "second activity",
       updatedAt
@@ -84,8 +95,9 @@ describe("one DO per chat + per-user index", () => {
       first
     ]);
 
-    await user.recordChatActivity({
+    await user.applyChatSnapshot({
       chatId: first,
+      revision: 2,
       title: "first",
       lastMessage: "latest activity",
       updatedAt
@@ -94,6 +106,15 @@ describe("one DO per chat + per-user index", () => {
       first,
       second
     ]);
+
+    await user.applyChatSnapshot({
+      chatId: first,
+      revision: 1,
+      title: "stale",
+      lastMessage: "must be ignored",
+      updatedAt
+    });
+    expect((await user.listChats())[0]?.lastMessage).toBe("latest activity");
   });
 
   it("does not recreate a deleted catalog row from delayed activity", async () => {
@@ -102,8 +123,9 @@ describe("one DO per chat + per-user index", () => {
     await user.deleteChat(chatId);
 
     expect(
-      await user.recordChatActivity({
+      await user.applyChatSnapshot({
         chatId,
+        revision: 1,
         title: "stale",
         lastMessage: "late completion",
         updatedAt: Date.now()
@@ -112,14 +134,42 @@ describe("one DO per chat + per-user index", () => {
     expect(await user.listChats()).toEqual([]);
   });
 
+  it("accepts a message once and repairs a failed index projection", async () => {
+    const userId = uniqueUser();
+    const user = await getAgentByName(env.UserAgent, userId);
+    const chatId = await user.createChat();
+    const chat = await chatFor(userId, chatId);
+
+    await user.setProjectionDeliveryBlocked(true);
+
+    await expect(
+      chat.addMessage("message-1", "user", "survives delivery failure")
+    ).resolves.toBe(1);
+    expect((await user.listChats())[0]?.lastMessage).toBeNull();
+
+    await user.setProjectionDeliveryBlocked(false);
+    await expect(user.repairChat(chatId)).resolves.toBe(true);
+    expect((await user.listChats())[0]?.lastMessage).toBe(
+      "survives delivery failure"
+    );
+
+    await addMessage(chat, "assistant", "a newer message", "message-2");
+    await user.setProjectionDeliveryBlocked(true);
+    await expect(
+      chat.addMessage("message-1", "user", "survives delivery failure")
+    ).resolves.toBe(1);
+    expect(await chat.getMessages()).toHaveLength(2);
+    expect((await user.listChats())[0]?.lastMessage).toBe("a newer message");
+  });
+
   it("searches across chats via the index only", async () => {
     const userId = uniqueUser();
     const user = await getAgentByName(env.UserAgent, userId);
     const a = await user.createChat();
     const b = await user.createChat();
 
-    await (await chatFor(userId, a)).addMessage("user", "plan the offsite");
-    await (await chatFor(userId, b)).addMessage("user", "debug the deploy");
+    await addMessage(await chatFor(userId, a), "user", "plan the offsite");
+    await addMessage(await chatFor(userId, b), "user", "debug the deploy");
 
     const hits = await user.searchChats("offsite");
     expect(hits.map((c) => c.chatId)).toEqual([a]);
@@ -132,7 +182,7 @@ describe("one DO per chat + per-user index", () => {
     const chatId = await user.createChat();
 
     const chat = await chatFor(userId, chatId);
-    await chat.addMessage("user", "to be deleted");
+    await addMessage(chat, "user", "to be deleted");
 
     await user.deleteChat(chatId);
     expect(await user.listChats()).toEqual([]);

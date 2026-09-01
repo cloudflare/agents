@@ -453,15 +453,21 @@ The decision rule: **a facet is a child whose code or lifecycle the parent super
 One top-level Durable Object per chat, plus a per-user index DO the chats push their metadata into:
 
 ```typescript
-// ChatAgent (one DO per chat) pushes on every write:
+// ChatAgent (one DO per chat) projects a revision-fenced snapshot:
 const user = await getAgentByName(this.env.UserAgent, userId);
-await user.recordChatActivity({ chatId, title, lastMessage, updatedAt });
+await user.applyChatSnapshot({
+  chatId,
+  revision,
+  title,
+  lastMessage,
+  updatedAt
+});
 
 // UserAgent (per-user index) answers listing and cross-chat search
 // from its own SQLite — no chat DO wakes up.
 ```
 
-Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. The proposed production topology, including a long-lived User-agent connection alongside the active Chat-agent connection, is in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
+Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. Chat writes are idempotent by message id, snapshots carry a monotonic chat revision, and the User DO can repair a stale projection by pulling the latest snapshot. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. The proposed production topology, including a long-lived User-agent connection alongside the active Chat-agent connection, is in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
 
 ## Examples
 

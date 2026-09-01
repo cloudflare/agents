@@ -91,10 +91,11 @@ function ChatPane({
       setBusy(true);
       setDraft("");
       try {
-        await chat.call("addMessage", ["user", text]);
+        await chat.call("addMessage", [crypto.randomUUID(), "user", text]);
         // No model is wired into this example — the "assistant" reply
         // just proves both roles land in the chat's own SQLite.
         await chat.call("addMessage", [
+          crypto.randomUUID(),
           "assistant",
           `Echo from ${chatId.slice(0, 8)}: ${text}`
         ]);

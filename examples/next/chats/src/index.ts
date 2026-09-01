@@ -19,6 +19,10 @@ type ChatMeta = {
   updatedAt: number;
 };
 
+type ChatIndexSnapshot = ChatMeta & {
+  revision: number;
+};
+
 type ChatMessage = {
   role: "user" | "assistant";
   text: string;
@@ -36,6 +40,7 @@ export class ChatAgent extends Agent<Env> {
     this.sql`
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL UNIQUE,
         role TEXT NOT NULL,
         text TEXT NOT NULL,
         at INTEGER NOT NULL
@@ -56,32 +61,96 @@ export class ChatAgent extends Agent<Env> {
     };
   }
 
-  @callable()
-  async addMessage(role: "user" | "assistant", text: string): Promise<number> {
-    const at = Date.now();
-    this.sql`
-      INSERT INTO messages (role, text, at) VALUES (${role}, ${text}, ${at})
+  #indexSnapshot(): ChatIndexSnapshot | null {
+    const [last] = this.sql<{ id: number; text: string; at: number }>`
+      SELECT id, text, at FROM messages ORDER BY id DESC LIMIT 1
     `;
-    const [{ n }] = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM messages
-    `;
+    if (!last) return null;
 
-    // Push metadata to the per-user index so listing and search never
-    // wake this DO. The index is derived data: it can always be
-    // rebuilt from the chats themselves.
-    const { userId, chatId } = this.#ids();
     const [first] = this.sql<{ text: string }>`
       SELECT text FROM messages WHERE role = 'user' ORDER BY id ASC LIMIT 1
     `;
-    const user = await getAgentByName(this.env.UserAgent, userId);
-    await user.recordChatActivity({
+    const { chatId } = this.#ids();
+    return {
       chatId,
+      revision: last.id,
       title: first ? first.text.slice(0, 80) : null,
-      lastMessage: text.slice(0, 120),
-      updatedAt: at
+      lastMessage: last.text.slice(0, 120),
+      updatedAt: last.at
+    };
+  }
+
+  @callable()
+  async addMessage(
+    messageId: string,
+    role: "user" | "assistant",
+    text: string
+  ): Promise<number> {
+    if (messageId.trim() === "") {
+      throw new Error("messageId must not be empty");
+    }
+
+    const result = this.ctx.storage.transactionSync(() => {
+      let messageRevision: number;
+      const [existing] = this.sql<{
+        id: number;
+        role: string;
+        text: string;
+      }>`
+        SELECT id, role, text FROM messages WHERE message_id = ${messageId}
+      `;
+      if (existing) {
+        if (existing.role !== role || existing.text !== text) {
+          throw new Error(
+            `Message ${JSON.stringify(messageId)} was already used with different content`
+          );
+        }
+        messageRevision = existing.id;
+      } else {
+        const [inserted] = this.sql<{ id: number }>`
+          INSERT INTO messages (message_id, role, text, at)
+          VALUES (${messageId}, ${role}, ${text}, ${Date.now()})
+          RETURNING id
+        `;
+        if (!inserted) {
+          throw new Error(
+            `Message ${JSON.stringify(messageId)} was not stored`
+          );
+        }
+        messageRevision = inserted.id;
+      }
+
+      const snapshot = this.#indexSnapshot();
+      if (!snapshot) {
+        throw new Error("Stored message did not produce an index snapshot");
+      }
+      return { messageRevision, snapshot };
     });
 
-    return n;
+    // The message is authoritative and already committed. Updating the User
+    // index is an idempotent projection: a temporary cross-DO failure may leave
+    // the list stale, but it must not make the accepted message look failed.
+    const { userId } = this.#ids();
+    try {
+      const user = await getAgentByName(this.env.UserAgent, userId);
+      await user.applyChatSnapshot(result.snapshot);
+    } catch (error) {
+      console.warn(
+        "[ChatAgent] User index update failed; repair is available",
+        {
+          chatId: result.snapshot.chatId,
+          revision: result.snapshot.revision,
+          error
+        }
+      );
+    }
+
+    return result.messageRevision;
+  }
+
+  /** Authoritative metadata projection used by UserAgent repair. */
+  getIndexSnapshot(): ChatIndexSnapshot | null {
+    return this.#indexSnapshot();
   }
 
   @callable()
@@ -105,15 +174,10 @@ export class UserAgent extends Agent<Env> {
         title TEXT,
         last_message TEXT,
         updated_at INTEGER NOT NULL,
-        activity_sequence INTEGER NOT NULL DEFAULT 0
+        activity_sequence INTEGER NOT NULL DEFAULT 0,
+        indexed_revision INTEGER NOT NULL DEFAULT 0
       )
     `;
-    const columns = this.sql<{ name: string }>`PRAGMA table_info(chats)`;
-    if (!columns.some((column) => column.name === "activity_sequence")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE chats ADD COLUMN activity_sequence INTEGER NOT NULL DEFAULT 0"
-      );
-    }
     this.sql`
       CREATE TABLE IF NOT EXISTS chat_index_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -146,32 +210,60 @@ export class UserAgent extends Agent<Env> {
         title,
         last_message,
         updated_at,
-        activity_sequence
+        activity_sequence,
+        indexed_revision
       )
       VALUES (
         ${chatId},
         NULL,
         NULL,
         ${Date.now()},
-        ${this.#nextActivitySequence()}
+        ${this.#nextActivitySequence()},
+        0
       )
     `;
     return chatId;
   }
 
-  /** Internal DO-RPC target for ChatAgent metadata updates. */
-  recordChatActivity(meta: ChatMeta): boolean {
-    const activitySequence = this.#nextActivitySequence();
-    const rows = this.sql<{ chatId: string }>`
-      UPDATE chats SET
-        title = ${meta.title},
-        last_message = ${meta.lastMessage},
-        updated_at = ${meta.updatedAt},
-        activity_sequence = ${activitySequence}
-      WHERE chat_id = ${meta.chatId}
-      RETURNING chat_id AS chatId
+  /** Apply an idempotent, revision-fenced metadata snapshot from a ChatAgent. */
+  applyChatSnapshot(snapshot: ChatIndexSnapshot): boolean {
+    return this.ctx.storage.transactionSync(() => {
+      const [current] = this.sql<{ indexedRevision: number }>`
+        SELECT indexed_revision AS indexedRevision FROM chats
+        WHERE chat_id = ${snapshot.chatId}
+      `;
+      if (!current) return false;
+      if (current.indexedRevision >= snapshot.revision) return true;
+
+      const activitySequence = this.#nextActivitySequence();
+      const rows = this.sql<{ chatId: string }>`
+        UPDATE chats SET
+          title = ${snapshot.title},
+          last_message = ${snapshot.lastMessage},
+          updated_at = ${snapshot.updatedAt},
+          activity_sequence = ${activitySequence},
+          indexed_revision = ${snapshot.revision}
+        WHERE chat_id = ${snapshot.chatId}
+          AND indexed_revision < ${snapshot.revision}
+        RETURNING chat_id AS chatId
+      `;
+      return rows.length > 0;
+    });
+  }
+
+  /** Pull the authoritative metadata snapshot for one known chat. */
+  async repairChat(chatId: string): Promise<boolean> {
+    const [known] = this.sql<{ chatId: string }>`
+      SELECT chat_id AS chatId FROM chats WHERE chat_id = ${chatId}
     `;
-    return rows.length > 0;
+    if (!known) return false;
+
+    const chat = await getAgentByName(
+      this.env.ChatAgent,
+      `${this.name}:${chatId}`
+    );
+    const snapshot = await chat.getIndexSnapshot();
+    return snapshot ? this.applyChatSnapshot(snapshot) : true;
   }
 
   @callable()
@@ -180,7 +272,7 @@ export class UserAgent extends Agent<Env> {
       SELECT chat_id AS chatId, title, last_message AS lastMessage,
              updated_at AS updatedAt
       FROM chats
-      ORDER BY activity_sequence DESC, updated_at DESC, chat_id ASC
+      ORDER BY updated_at DESC, activity_sequence DESC, chat_id ASC
     `;
   }
 
@@ -196,7 +288,7 @@ export class UserAgent extends Agent<Env> {
              updated_at AS updatedAt
       FROM chats
       WHERE title LIKE ${like} OR last_message LIKE ${like}
-      ORDER BY activity_sequence DESC, updated_at DESC, chat_id ASC
+      ORDER BY updated_at DESC, activity_sequence DESC, chat_id ASC
     `;
   }
 

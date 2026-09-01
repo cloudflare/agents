@@ -346,19 +346,27 @@ accepts an activity update, it allocates a per-user monotonic
 This handles two chats finishing in the same millisecond and delayed delivery
 from independently executing Chat agents.
 
-### Durable projection delivery
+### Projection failure and repair
 
 A committed Chat turn and its catalog projection cross two Durable Objects and
-cannot share a transaction. The Chat agent writes a small durable outbox record
-with the metadata projection in the same local transaction as its committed
-turn. It retries delivery to the User agent until:
+cannot share a transaction. The Chat write is authoritative. A failed User-index
+update must not reject that committed write and invite the client to duplicate
+it.
 
-- the User agent accepts it; or
-- the User agent reports that the catalog generation is no longer active.
+Chat message commands carry a caller-supplied idempotency key. Retrying the same
+command returns the existing result when the key and content match, and rejects
+reuse of that key for different content.
 
-An example may begin with best-effort push plus repair, but the reusable pattern
-and production migration should use the outbox. The index is derived data, so a
-repair path must also exist.
+After each committed write, the Chat agent makes a best-effort RPC with its
+complete latest snapshot. It does not enqueue callbacks or maintain a second
+outbox. A failed call leaves only a stale derived projection, which the User
+agent repairs by pulling the current snapshot from that known Chat agent.
+
+This deliberately chooses simple eventual consistency. Strict atomic agreement
+between two independent Durable Objects would require moving both records into
+one object or adding a durable distributed protocol. The revision-fenced full
+snapshot means repeated, delayed, concurrent, and repair writes all converge
+without that machinery.
 
 ### Repair and search
 
@@ -385,10 +393,10 @@ Deletion must close the race with active turns and delayed projections:
 5. Remove the catalog row or retain a tombstone for the product's restore
    window.
 
-Because activity writes require an active matching generation, late outbox
-retries cannot resurrect the row. Reusing a chat id allocates a new generation.
-Deletion is idempotent and a failed destroy remains retryable from the
-`deleting` state.
+Because activity snapshots require an active matching generation, delayed or
+replayed snapshots cannot resurrect the row. Reusing a chat id allocates a new
+generation. Deletion is idempotent and a failed destroy remains retryable from
+the `deleting` state.
 
 ## Schedules and background work
 
@@ -524,7 +532,7 @@ The implementation is not complete without tests for:
 - activity events accepted in User-observed order even with equal wall-clock
   timestamps;
 - delayed activity after deletion not recreating the catalog row;
-- a failed projection push recovering from the Chat outbox;
+- a failed projection push leaving the message accepted, then converging through User-initiated repair;
 - repair rebuilding projections from catalog rows without global enumeration;
 - Chat-local alarms firing independently;
 - User-owned cross-chat scheduling invoking the intended Chat;
@@ -574,8 +582,6 @@ leaving the routing and consistency rules implicit.
   `chat.fetch()`? Phase 0 decides this from deployed behavior and wake metrics.
 - What is the smallest projection event shared by `AIChatAgent` and `Think`
   without freezing a product-specific catalog schema?
-- Should durable projection delivery use the existing Tasks capability, a
-  small chat-local outbox, or both?
 - How long should migrated facet storage and deletion tombstones remain for
   rollback?
 
