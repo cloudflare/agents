@@ -96,6 +96,25 @@ export type LifecycleJobOutcome =
   | { readonly rescheduleAt: number }
   | "yield";
 
+const detachedLifecycleJobOutcomes = new WeakSet<object>();
+
+/** @internal Mark a rescheduled job whose owner still has detached work. */
+export function detachedLifecycleJobOutcome(outcome: {
+  readonly rescheduleAt: number;
+}): { readonly rescheduleAt: number } {
+  detachedLifecycleJobOutcomes.add(outcome);
+  return outcome;
+}
+
+/** @internal Whether a job returned while its owner still had detached work. */
+export function isDetachedLifecycleJobOutcome(
+  outcome: LifecycleJobOutcome | void
+): boolean {
+  return (
+    typeof outcome === "object" && detachedLifecycleJobOutcomes.has(outcome)
+  );
+}
+
 /** Context supplied when a job is dispatched to its owner. */
 export type LifecycleJobContext = {
   /** The due job being executed. */

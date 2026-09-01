@@ -249,6 +249,27 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
             throw new Error("Network connection lost.");
           }
         );
+      },
+
+      /** Throws the OOM signal only after Tasks detaches from JobDriver. */
+      lateOomStepLoop: async (_input: undefined, step: TaskStep) => {
+        await step.do(
+          "late-oom-step",
+          { retries: { limit: 3 }, timeout: 10_000 },
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 5_050));
+            const remaining =
+              (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+            if (remaining > 0) {
+              await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+              await this.ctx.storage.sync();
+              throw new Error(
+                "Durable Object's isolate exceeded its memory limit and was reset."
+              );
+            }
+            return "recovered";
+          }
+        );
       }
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },
@@ -266,7 +287,7 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     super(ctx, env);
     setTaskRecoveryLoopDefinitionResolver(
       this.tasks,
-      (name) => name === "oomStepLoop"
+      (name) => name === "oomStepLoop" || name === "lateOomStepLoop"
     );
   }
 }

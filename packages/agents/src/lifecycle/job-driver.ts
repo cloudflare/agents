@@ -19,6 +19,7 @@ import {
 import type { MemoryLimitContext } from "./capability-runner";
 import {
   hungTimeoutMs,
+  isDetachedLifecycleJobOutcome,
   isHungRow,
   jobFromRow,
   type JobQueue,
@@ -90,6 +91,7 @@ export type JobDriverOptions = {
 export class JobDriver {
   readonly #options: JobDriverOptions;
   #executingRow: JobStorageRow | undefined;
+  #detachedDispatch = false;
 
   constructor(options: JobDriverOptions) {
     this.#options = options;
@@ -111,11 +113,15 @@ export class JobDriver {
     initialize: () => Promise<void>,
     runHostAlarm: () => Promise<void>
   ): Promise<void> {
+    this.#detachedDispatch = false;
     try {
       await initialize();
       await this.#driveDueJobs();
       await runHostAlarm();
-      await this.#clearMemoryLimitStrikes();
+      // An owner that returned at a bounded handoff still has work whose late
+      // platform failure belongs to this alarm chain. A later fully settled
+      // alarm is the clean boundary that resets prior strikes.
+      if (!this.#detachedDispatch) await this.#clearMemoryLimitStrikes();
     } catch (error) {
       if (!isDurableObjectMemoryLimitReset(error)) throw error;
       await this.#handleMemoryLimitReset(error);
@@ -268,6 +274,9 @@ export class JobDriver {
     }
 
     if (disabled()) return;
+    if (isDetachedLifecycleJobOutcome(outcome)) {
+      this.#detachedDispatch = true;
+    }
     queue.applyOutcome(row.id, outcome ?? undefined);
     this.#executingRow = undefined;
   }

@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  backdateTaskWake,
   seedTaskRun,
   seedTaskStep,
   type TaskHarnessObject
@@ -25,7 +26,7 @@ async function seedDoomedRun(
   name: string,
   runId: string,
   budget: number,
-  definition: "oomLoop" | "oomStepLoop" = "oomLoop"
+  definition: "oomLoop" | "oomStepLoop" | "lateOomStepLoop" = "oomLoop"
 ) {
   const stub = env.TaskHarnessObject.getByName(name);
   await runInDurableObject(stub, async (instance: TaskHarnessObject, state) => {
@@ -133,6 +134,163 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     expect(view.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
     expect(view.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
   });
+
+  it("carries a post-dispatch-budget memory reset into breaker backoff and sealing", async () => {
+    const driveLateAttempt = async (
+      name: string,
+      runId: string,
+      priorStrikes: number
+    ): Promise<void> => {
+      const stub = env.TaskHarnessObject.getByName(name);
+      try {
+        await runInDurableObject(
+          stub,
+          async (instance: TaskHarnessObject, state) => {
+            await state.storage.put("oomLoopRemaining", 1);
+            if (priorStrikes > 0) {
+              await state.storage.put(OOM_STRIKES_KEY, priorStrikes);
+            }
+            await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+              "lateOomStepLoop",
+              undefined,
+              { runId }
+            );
+            backdateTaskWake(state.storage, runId);
+            await instance.lifecycle.rearmAlarm();
+
+            // The callback crosses Tasks' five-second dispatch budget. Wait
+            // until its detached failure has replaced the ordinary wake with
+            // the durable breaker marker, then drive that marker explicitly.
+            const alarm = (instance as unknown as { alarm(): Promise<void> })
+              .alarm;
+            await alarm.call(instance);
+            const deadline = Date.now() + 1_000;
+            for (;;) {
+              const marker = state.storage.sql
+                .exec(
+                  `SELECT 1 FROM cf_agents_jobs
+                   WHERE id = ? AND fn = 'late-memory-limit'`,
+                  `task:${runId}`
+                )
+                .toArray();
+              if (marker.length > 0) {
+                await state.storage.deleteAlarm();
+                await alarm.call(instance);
+                break;
+              }
+              const run = state.storage.sql
+                .exec(
+                  `SELECT state FROM cf_agents_task_runs WHERE run_id = ?`,
+                  runId
+                )
+                .toArray()[0] as { state: string } | undefined;
+              const strikes =
+                (await state.storage.get<number>(OOM_STRIKES_KEY)) ?? 0;
+              // An immediate platform alarm may consume the marker before this
+              // poll sees its row. The resulting breaker state is equivalent.
+              if (run?.state === "failed" || strikes > priorStrikes) break;
+              if (Date.now() > deadline) {
+                const jobs = state.storage.sql
+                  .exec(
+                    `SELECT id, fn, time, running FROM cf_agents_jobs
+                     WHERE id = ?`,
+                    `task:${runId}`
+                  )
+                  .toArray();
+                const budget =
+                  (await state.storage.get<number>("oomLoopRemaining")) ?? -1;
+                throw new Error(
+                  `late memory-limit marker was not persisted: ${JSON.stringify({ run, strikes, jobs, budget })}`
+                );
+              }
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+          }
+        );
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !error.message.includes("Alarm memory-limit strike")
+        ) {
+          throw error;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    };
+
+    const backedOffName = `tasks-late-oom-backoff-${crypto.randomUUID()}`;
+    await driveLateAttempt(backedOffName, "late-backoff", 0);
+    const backedOff = await readBreakerView(backedOffName, "late-backoff");
+    expect(backedOff.strikes).toBe(1);
+    expect(backedOff.run?.state).toBe("pending");
+    expect(backedOff.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
+    expect(backedOff.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
+
+    // Seed two preceding consecutive strikes. The clean alarm that detaches
+    // this attempt must not clear them: its late marker is strike 3 and seals.
+    const sealedName = `tasks-late-oom-seal-${crypto.randomUUID()}`;
+    await driveLateAttempt(sealedName, "late-seal", 2);
+    const sealed = await readBreakerView(sealedName, "late-seal");
+    expect(sealed.run?.state).toBe("failed");
+    expect(sealed.wake).toBeUndefined();
+    expect(sealed.strikes).toBe(0);
+    expect(sealed.budget).toBe(0);
+  }, 20_000);
+
+  it("carries a late OOM from a warm attempt into breaker backoff", async () => {
+    const name = `tasks-warm-late-oom-${crypto.randomUUID()}`;
+    const runId = "warm-late-oom";
+    const stub = env.TaskHarnessObject.getByName(name);
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: TaskHarnessObject, state) => {
+          await state.storage.put("oomLoopRemaining", 1);
+          await instance.tasks.run("lateOomStepLoop", undefined, { runId });
+          backdateTaskWake(state.storage, runId);
+          await instance.lifecycle.rearmAlarm();
+          await (instance as unknown as { alarm(): Promise<void> }).alarm();
+
+          // Keep the invocation open until either the marker is visible or its
+          // immediate alarm has already applied the breaker and reset us.
+          const deadline = Date.now() + 6_000;
+          for (;;) {
+            const marker = state.storage.sql
+              .exec(
+                `SELECT 1 FROM cf_agents_jobs
+                 WHERE id = ? AND fn = 'late-memory-limit'`,
+                `task:${runId}`
+              )
+              .toArray();
+            if (marker.length > 0) {
+              await state.storage.deleteAlarm();
+              await (instance as unknown as { alarm(): Promise<void> }).alarm();
+              break;
+            }
+            if (Date.now() > deadline) {
+              throw new Error("warm Task did not persist its late OOM marker");
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes("Alarm memory-limit strike")
+      ) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const view = await readBreakerView(name, runId);
+    expect(view.strikes).toBe(1);
+    expect(view.budget).toBe(0);
+    expect(view.run?.state).toBe("pending");
+    expect(view.run?.next_at ?? 0).toBeGreaterThan(Date.now() + 20_000);
+    expect(view.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
+  }, 10_000);
 
   it("backs off sibling runs of the striking definition without rewriting unrelated run deadlines", async () => {
     const name = `tasks-oom-definition-group-${crypto.randomUUID()}`;

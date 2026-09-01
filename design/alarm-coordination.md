@@ -53,8 +53,12 @@ them; existing rows receive the policy's safe default.
 `Lifecycle.alarm()` runs the event loop: arm the deadman, drive due jobs in
 due order (single-flight skip/hung-recovery, per-job retry, platform-failure
 deferral, `onJobError` for terminal application failures), run host
-`onAlarm()`, clear the memory-limit strike counter, re-arm from queue state.
-The loop stops if teardown disabled alarms mid-phase.
+`onAlarm()`, clear the memory-limit strike counter after a fully settled alarm,
+and re-arm from queue state. A bounded capability dispatch can mark its outcome
+as detached; that alarm does not clear prior strikes because outstanding work
+can still report a late memory reset. A later fully settled alarm remains the
+clean boundary that resets the chain. The loop stops if teardown disabled
+alarms mid-phase.
 
 The alarm memory-limit circuit breaker (#1825) lives at this boundary. A
 memory-limit reset is intercepted while every other error keeps platform alarm
@@ -64,12 +68,16 @@ Lifecycle then supplies the executing-job identity to capability and host
 policy hooks.
 
 Tasks uses that hook to update its authoritative run rows, preventing startup
-reconciliation from undoing queue backoff. An ordinary definition updates only
-the run that struck. A framework definition marked as a recovery loop updates
-all active runs of every such definition, matching the queue rows that moved as
-a pack. Root chat recovery uses the reserved `__cf_internal_chat_recovery`
-definition. Routed dynamic-agent recovery temporarily keeps its root-owned
-Scheduler rows and receives sealing through the routed compatibility bridge.
+reconciliation from undoing queue backoff. If an OOM surfaces after Tasks'
+five-second queue dispatch budget detached the attempt, Tasks replaces the
+ordinary run wake with an immediate durable marker. The next alarm rethrows a
+canonical memory-limit signal inside JobDriver, preserving the same breaker
+authority and policy. An ordinary definition updates only the run that struck.
+A framework definition marked as a recovery loop updates all active runs of
+every such definition, matching the queue rows that moved as a pack. Root chat
+recovery uses the reserved `__cf_internal_chat_recovery` definition. Routed
+dynamic-agent recovery temporarily keeps its root-owned Scheduler rows and
+receives sealing through the routed compatibility bridge.
 
 ## Agent integration
 

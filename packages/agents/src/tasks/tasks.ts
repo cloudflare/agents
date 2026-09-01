@@ -14,11 +14,12 @@
 import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
 import type { MemoryLimitContext } from "../lifecycle/capability-runner";
-import type {
-  LifecycleJobContext,
-  LifecycleJobOutcome
+import {
+  detachedLifecycleJobOutcome,
+  type LifecycleJobContext,
+  type LifecycleJobOutcome
 } from "../lifecycle/job-queue";
-import { isPlatformFailure } from "../retries";
+import { isDurableObjectMemoryLimitReset, isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
 import { TaskStore } from "./store";
 import { createTaskStepEngine } from "./engine-port";
@@ -119,6 +120,15 @@ const MAX_DEFINITION_NAME_LENGTH = 256;
  * job id space.
  */
 const WAKE_JOB_PREFIX = "task:";
+/** Normal Task deadline dispatch. */
+const WAKE_JOB_FN = "wake";
+/**
+ * Durable bridge for an OOM that surfaced after queue dispatch detached.
+ * The next alarm rethrows the signal inside JobDriver's breaker boundary.
+ */
+const LATE_MEMORY_LIMIT_JOB_FN = "late-memory-limit";
+const MEMORY_LIMIT_RESET_MESSAGE =
+  "Durable Object's isolate exceeded its memory limit and was reset.";
 /**
  * How long one queue-driven attempt may hold the serial dispatch loop
  * before detaching. Correctness never depends on the inline await — the
@@ -175,6 +185,7 @@ export class Tasks<
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
   readonly #active = new Map<string, ActiveAttempt>();
+  readonly #detached = new Set<string>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
@@ -328,7 +339,24 @@ export class Tasks<
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
     const runId = context.job.id.slice(WAKE_JOB_PREFIX.length);
-    if (this.#active.has(runId)) {
+    if (context.job.fn === LATE_MEMORY_LIMIT_JOB_FN) {
+      const row = this.#store.getRun(runId);
+      if (!row || TERMINAL_STATES.has(row.state)) return;
+      const payload = context.job.payload;
+      const detail =
+        typeof payload === "object" &&
+        payload !== null &&
+        "message" in payload &&
+        typeof payload.message === "string"
+          ? payload.message
+          : "unknown detached Task failure";
+      // Classification may originally have come from a nested `cause`. Persist
+      // the detail for operators, but restore a canonical platform signal so
+      // serialization cannot turn the marker into an application failure.
+      throw new Error(`${MEMORY_LIMIT_RESET_MESSAGE} ${detail}`);
+    }
+    const active = this.#active.get(runId);
+    if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
       // the due job does not hot-loop the alarm while it works.
       this.#store.sql`
@@ -336,7 +364,8 @@ export class Tasks<
         SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
         WHERE run_id = ${runId} AND state = 'running'
       `;
-      return this.#wakeOutcome(runId);
+      this.#observeDetachedAttempt(runId, active.promise);
+      return this.#detachedWakeOutcome(runId);
     }
     // Dispatch is bounded: the queue drives jobs serially, so this attempt
     // may not hold the loop for its full step budget. Short attempts (the
@@ -350,14 +379,19 @@ export class Tasks<
     const budget = new Promise<"budget">((resolve) => {
       budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
     });
-    const attempt = this.#executeRun(runId).then(() => "settled" as const);
+    const runAttempt = this.#executeRun(runId);
+    const attempt = runAttempt.then(() => "settled" as const);
     try {
       // A platform failure inside the budget rejects the race and re-enters
       // the driver's deferral path unchanged.
       const winner = await Promise.race([attempt, budget]);
       if (winner === "budget") {
-        // Detached: a later failure re-enters through the claim backstop.
-        attempt.catch(() => {});
+        // Detached platform transients re-enter through the claim backstop.
+        // A late memory reset is different: no alarm frame remains to observe
+        // it, so the attempt observer below persists an immediate marker that
+        // the next alarm rethrows inside JobDriver's breaker boundary.
+        this.#observeDetachedAttempt(runId, runAttempt);
+        return this.#detachedWakeOutcome(runId);
       }
     } finally {
       clearTimeout(budgetTimer);
@@ -497,6 +531,52 @@ export class Tasks<
     return typeof next === "number" ? { rescheduleAt: next } : undefined;
   }
 
+  /** Return the run's wake while telling JobDriver work remains detached. */
+  #detachedWakeOutcome(runId: string): LifecycleJobOutcome {
+    const outcome = this.#wakeOutcome(runId);
+    return typeof outcome === "object"
+      ? detachedLifecycleJobOutcome(outcome)
+      : outcome;
+  }
+
+  /** Observe one attempt from the point its caller stops awaiting it. */
+  #observeDetachedAttempt(runId: string, attempt: Promise<void>): void {
+    if (this.#detached.has(runId)) return;
+    this.#detached.add(runId);
+    void attempt.then(
+      () => this.#detached.delete(runId),
+      (error) => {
+        if (isDurableObjectMemoryLimitReset(error)) {
+          this.#recordLateMemoryLimit(runId, error);
+        }
+        this.#detached.delete(runId);
+      }
+    );
+  }
+
+  /** Persist a late OOM for the next alarm-boundary breaker pass. */
+  #recordLateMemoryLimit(runId: string, error: unknown): void {
+    try {
+      const row = this.#store.getRun(runId);
+      if (!row || TERMINAL_STATES.has(row.state)) return;
+      void this.lifecycle.jobs
+        .push({
+          id: `${WAKE_JOB_PREFIX}${runId}`,
+          fn: LATE_MEMORY_LIMIT_JOB_FN,
+          time: Date.now(),
+          payload: {
+            message: error instanceof Error ? error.message : String(error)
+          },
+          retry: { maxAttempts: 1 },
+          recoveryLoop: this.#isRecoveryLoopDefinition(row.definition)
+        })
+        .catch(() => {});
+    } catch {
+      // The run's ordinary claim backstop remains if this best-effort write
+      // also fails under memory pressure.
+    }
+  }
+
   /**
    * Mirror one run's authoritative deadline into the Lifecycle job queue:
    * a non-terminal run with a `next_at` gets one job (id = `task:` plus the
@@ -520,7 +600,7 @@ export class Tasks<
     if (typeof next === "number") {
       await this.lifecycle.jobs.push({
         id: jobId,
-        fn: "wake",
+        fn: WAKE_JOB_FN,
         time: next,
         // ReplayStep owns the durable step retry budget. If it propagates a
         // platform failure, retrying this wake inside JobDriver would run past
@@ -554,10 +634,11 @@ export class Tasks<
       // one-attempt policy, and internal definitions may need breaker policy.
       const existing = this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${run_id}`);
       if (
-        existing?.fn === "wake" &&
-        existing.time === next_at &&
-        existing.retry?.maxAttempts === 1 &&
-        existing.recoveryLoop === this.#isRecoveryLoopDefinition(definition)
+        existing?.fn === LATE_MEMORY_LIMIT_JOB_FN ||
+        (existing?.fn === WAKE_JOB_FN &&
+          existing.time === next_at &&
+          existing.retry?.maxAttempts === 1 &&
+          existing.recoveryLoop === this.#isRecoveryLoopDefinition(definition))
       ) {
         skipped = true;
         continue;
@@ -775,7 +856,8 @@ export class Tasks<
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
     if (startMode === "warm" && !this.lifecycle.starting()) {
-      void this.#executeRun(runId).catch(() => {});
+      const warmAttempt = this.#executeRun(runId);
+      this.#observeDetachedAttempt(runId, warmAttempt);
     }
 
     return {
@@ -860,6 +942,7 @@ export class Tasks<
       await promise;
     } finally {
       this.#active.delete(runId);
+      this.#detached.delete(runId);
     }
   }
 

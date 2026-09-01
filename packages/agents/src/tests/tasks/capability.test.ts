@@ -219,11 +219,13 @@ describe("Tasks capability", () => {
             `task:${recovery.runId}`
           )
           .toArray() as Array<{ id: string; recovery_loop: number }>;
-        expect(flags).toEqual(
-          [
-            { id: `task:${ordinary.runId}`, recovery_loop: 0 },
-            { id: `task:${recovery.runId}`, recovery_loop: 1 }
-          ].sort((left, right) => left.id.localeCompare(right.id))
+        expect(
+          new Map(flags.map((row) => [row.id, row.recovery_loop]))
+        ).toEqual(
+          new Map([
+            [`task:${ordinary.runId}`, 0],
+            [`task:${recovery.runId}`, 1]
+          ])
         );
       }
     );
@@ -320,19 +322,32 @@ describe("Tasks capability", () => {
     );
   });
 
-  it("upgrades an existing Task wake to defer after one job attempt", async () => {
+  it("upgrades ordinary Task wakes without overwriting late breaker markers", async () => {
     const name = crypto.randomUUID();
     const stub = env.TaskHarnessObject.getByName(name);
     await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
         await instance.lifecycle.start();
+        const nextAt = Date.now() + 60 * 60 * 1000;
         seedTaskRun(state.storage, {
           runId: "old-wake-policy",
           definition: "checkpointing",
           state: "pending",
-          nextAt: Date.now() + 60 * 60 * 1000
+          nextAt
         });
+        seedTaskRun(state.storage, {
+          runId: "late-marker-policy",
+          definition: "oomStepLoop",
+          state: "pending",
+          nextAt,
+          recoveryLoop: true
+        });
+        state.storage.sql.exec(
+          `UPDATE cf_agents_jobs
+           SET fn = 'late-memory-limit', payload = '{"message":"late"}'
+           WHERE id = 'task:late-marker-policy'`
+        );
       }
     );
 
@@ -344,13 +359,27 @@ describe("Tasks capability", () => {
         await instance.lifecycle.start();
         const rows = state.storage.sql
           .exec(
-            `SELECT retry_options FROM cf_agents_jobs
-             WHERE id = 'task:old-wake-policy'`
+            `SELECT id, fn, retry_options FROM cf_agents_jobs
+             WHERE id IN ('task:old-wake-policy', 'task:late-marker-policy')
+             ORDER BY id`
           )
-          .toArray() as Array<{ retry_options: string | null }>;
-        expect(JSON.parse(rows[0]?.retry_options ?? "null")).toEqual({
+          .toArray() as Array<{
+          id: string;
+          fn: string;
+          retry_options: string | null;
+        }>;
+        expect(rows[0]).toMatchObject({
+          id: "task:late-marker-policy",
+          fn: "late-memory-limit"
+        });
+        expect(rows[1]).toMatchObject({
+          id: "task:old-wake-policy",
+          fn: "wake"
+        });
+        expect(JSON.parse(rows[1].retry_options ?? "null")).toEqual({
           maxAttempts: 1
         });
+        await instance.tasks.cancel("late-marker-policy");
         await instance.tasks.cancel("old-wake-policy");
       }
     );
