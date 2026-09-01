@@ -44,12 +44,12 @@ stay the source of truth.
 
 ```sh
 pnpm install
-pnpm run dev
+pnpm run start
 ```
 
-Everything is exposed via `@callable` RPC; the routing worker serves the
-standard `/agents/{class}/{name}` surface, so you can drive it with the
-agents client or from another Worker via `getAgentByName`.
+The React UI (Vite + Kumo) shows the whole pattern: the sidebar and
+search read only the per-user index DO over one `useAgent` connection,
+and each open chat gets its own WebSocket straight to that chat's DO.
 
 ## Test
 

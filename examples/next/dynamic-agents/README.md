@@ -42,7 +42,7 @@ see `examples/next/chats` and the decision rule in
 
 ```sh
 pnpm install
-pnpm run dev
+pnpm run start
 ```
 
 ## Test
