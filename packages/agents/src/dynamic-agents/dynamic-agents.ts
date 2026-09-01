@@ -1,18 +1,55 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { nanoid } from "nanoid";
-import type { LifecycleRouteEnvelope } from "../lifecycle/durable-object-lifecycle";
+import type {
+  Connection,
+  LifecycleRouteEnvelope,
+  WSMessage
+} from "../lifecycle/durable-object-lifecycle";
 import type { LifecycleRouteAddress } from "../lifecycle/capability";
-import { SUB_PREFIX, type AgentPathStep } from "../sub-routing";
+import {
+  SUB_PREFIX,
+  parseSubAgentPath,
+  type AgentPathStep
+} from "../sub-routing";
 import { getAgentByName } from "../agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "../utils";
 import type { Agent } from "../index";
 import { agentPathKey } from "./identity";
 import { DynamicAgentRegistry } from "./registry";
+import {
+  DynamicAgentConnectionBridge,
+  RootDynamicAgentConnectionBridge,
+  dynamicAgentRpcReplyContext,
+  type DynamicAgentRpcReplyInvocationContext
+} from "./bridges";
 import type { DynamicAgentHostPort } from "./host";
 import type {
+  DynamicAgentBridgeInvocationContext,
+  DynamicAgentConnectionBridgeLike,
+  DynamicAgentConnectionMeta,
+  DynamicAgentConnectionOperationName,
+  DynamicAgentPathInvokeEndpoint,
+  DynamicAgentWebSocketEndpoint,
   FacetCapableCtx,
   FacetRunStorageRow,
-  RootFacetRpcSurface
+  RootFacetRpcSurface,
+  StoredDynamicAgentConnection
 } from "./types";
+
+/**
+ * Internal key used to remember the outer `/sub/...` URL for a
+ * WebSocket accepted by the parent on behalf of a child facet.
+ * Hibernated events then wake the parent, which forwards frames to
+ * the child over serializable RPC while keeping native WebSocket I/O
+ * parent-owned.
+ *
+ * Storage-frozen — never rename.
+ */
+export const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
+export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
+
+/** Wire-frozen internal header carrying the outer URL on WS upgrades. */
+export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
 
 /**
  * The facet-backed dynamic-agent machinery, extracted from the Agent
@@ -38,6 +75,22 @@ export class DynamicAgents {
    */
   #facetKeepAliveTokens = new Set<string>();
 
+  /** Per-frame bridge context while a forwarded WS event runs in a facet. */
+  #bridgeContext = new AsyncLocalStorage<DynamicAgentBridgeInvocationContext>();
+
+  /**
+   * Facet-side virtual connections: real WebSockets owned by the ROOT
+   * DO, mirrored here as `Connection`-shaped objects whose operations
+   * route back through the live frame bridge or the root over RPC.
+   */
+  #virtualConnections = new Map<string, StoredDynamicAgentConnection>();
+
+  /** Per-connection operation queues (send/setState/close ordering). */
+  #connectionOperationTails = new Map<string, Promise<void>>();
+
+  /** One-way barrier so facet broadcasts wait for older queued operations. */
+  #broadcastOperationTail?: Promise<void>;
+
   constructor(host: DynamicAgentHostPort) {
     this.#host = host;
     this.registry = new DynamicAgentRegistry({
@@ -46,7 +99,7 @@ export class DynamicAgents {
     });
   }
 
-  facetRunRowsForPrefix(
+  runRowsForPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): FacetRunStorageRow[] {
     const rows = this.#host.sql<FacetRunStorageRow>`
@@ -63,8 +116,8 @@ export class DynamicAgents {
     });
   }
 
-  deleteFacetRunRowsForPrefix(ownerPath: ReadonlyArray<AgentPathStep>): void {
-    for (const row of this.facetRunRowsForPrefix(ownerPath)) {
+  deleteRunRowsForPrefix(ownerPath: ReadonlyArray<AgentPathStep>): void {
+    for (const row of this.runRowsForPrefix(ownerPath)) {
       this.#host.sql`
         DELETE FROM cf_agents_facet_runs
         WHERE owner_path_key = ${row.owner_path_key}
@@ -185,23 +238,21 @@ export class DynamicAgents {
    * schedules under the owner-path prefix and delete root-side facet
    * fiber recovery leases for the same sub-tree.
    */
-  async cleanupFacetPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void> {
+  async cleanupPrefix(ownerPath: ReadonlyArray<AgentPathStep>): Promise<void> {
     const prefix = agentPathKey(ownerPath);
     if (prefix) {
       await this.#host.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
         prefix
       );
     }
-    this.deleteFacetRunRowsForPrefix(ownerPath);
+    this.deleteRunRowsForPrefix(ownerPath);
     await this.#host._syncHostJobs();
   }
 
   /**
    * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
    */
-  async acquireFacetKeepAlive(
+  async acquireKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
     const ownerPathKey = agentPathKey(ownerPath);
@@ -218,7 +269,7 @@ export class DynamicAgents {
    * Release a root-owned keepAlive ref previously acquired for a facet.
    * Idempotent so disposer calls can safely race or run twice.
    */
-  async releaseFacetKeepAlive(token: string): Promise<void> {
+  async releaseKeepAlive(token: string): Promise<void> {
     if (!this.#facetKeepAliveTokens.delete(token)) return;
     this.#host._keepAliveRefs = Math.max(0, this.#host._keepAliveRefs - 1);
     await this.#host._syncHostJobs();
@@ -228,7 +279,7 @@ export class DynamicAgents {
    * Register a facet's durable run row in the root-side index so root
    * alarm housekeeping can dispatch recovery checks into idle facets.
    */
-  async registerFacetRun(
+  async registerRun(
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
@@ -251,7 +302,7 @@ export class DynamicAgents {
    * `cf_agents_facet_runs` is only an index; actual snapshots and
    * recovery hooks live in each facet's own `cf_agents_runs` table.
    */
-  async checkFacetRunFibers(): Promise<void> {
+  async checkRunFibers(): Promise<void> {
     // Only the root owns the physical alarm and facet-run index.
     if (this.#host._parentPath.length > 0) return;
 
@@ -284,7 +335,10 @@ export class DynamicAgents {
       }
 
       try {
-        const remaining = await this.checkRunFibersForFacet(ownerPath);
+        // Dispatch through the host so subclass overrides of the
+        // `_cf_checkRunFibersForFacet` RPC entry point keep intercepting.
+        const remaining =
+          await this.#host._cf_checkRunFibersForFacet(ownerPath);
         if (remaining === 0) {
           this.#host.sql`
             DELETE FROM cf_agents_facet_runs
@@ -307,7 +361,7 @@ export class DynamicAgents {
    * `ownerPath`. Returns the number of remaining local `cf_agents_runs`
    * rows on the target facet after recovery.
    */
-  async checkRunFibersForFacet(
+  async checkRunFibersAtPath(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<number> {
     const selfPath = this.#host.selfPath;
@@ -333,7 +387,7 @@ export class DynamicAgents {
       return 0;
     }
 
-    const stub = await this.resolveSubAgent(next.className, next.name);
+    const stub = await this.resolve(next.className, next.name);
     const handle = stub as unknown as {
       _cf_checkRunFibersForFacet(
         ownerPath: ReadonlyArray<AgentPathStep>
@@ -397,7 +451,7 @@ export class DynamicAgents {
       );
     }
 
-    const stub = await this.resolveSubAgent(next.className, next.name);
+    const stub = await this.resolve(next.className, next.name);
     const handle = stub as unknown as {
       _cf_invokeAgentPath(
         path: ReadonlyArray<AgentPathStep>,
@@ -415,7 +469,7 @@ export class DynamicAgents {
    * any descendants), removes the target from the registry, and calls
    * `ctx.facets.delete` to wipe the target's storage.
    */
-  async destroyDescendantFacet(
+  async destroyDescendant(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     const selfPath = this.#host.selfPath;
@@ -445,7 +499,7 @@ export class DynamicAgents {
 
     if (selfPath.length === targetPath.length - 1) {
       // We are the immediate parent of the target — perform the local
-      // facet teardown the same way `deleteSubAgent` does.
+      // facet teardown the same way `delete` does.
       const target = targetPath[targetPath.length - 1];
       const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
       if (!ctx.facets) {
@@ -470,7 +524,7 @@ export class DynamicAgents {
       // Already gone — schedules are cleared, nothing more to do.
       return;
     }
-    const stub = await this.resolveSubAgent(next.className, next.name);
+    const stub = await this.resolve(next.className, next.name);
     const handle = stub as unknown as {
       _cf_destroyDescendantFacet(
         targetPath: ReadonlyArray<AgentPathStep>
@@ -486,7 +540,7 @@ export class DynamicAgents {
    * funnel through here so registry bookkeeping and the
    * `_cf_initAsFacet` handshake are consistent.
    */
-  async resolveSubAgent(className: string, name: string): Promise<unknown> {
+  async resolve(className: string, name: string): Promise<unknown> {
     const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets || !ctx.exports) {
       throw new Error(
@@ -612,11 +666,11 @@ export class DynamicAgents {
    * Forcefully abort a running facet. Transitively aborts the child's
    * own children; storage is preserved.
    */
-  abortSubAgent(className: string, name: string, reason?: unknown): void {
+  abort(className: string, name: string, reason?: unknown): void {
     const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
-        "abortSubAgent() is not supported in this runtime — " +
+        "abort() is not supported in this runtime — " +
           "`ctx.facets` is unavailable. " +
           "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
@@ -629,11 +683,11 @@ export class DynamicAgents {
    * Delete a facet: abort it if running, then permanently wipe its
    * storage. Transitively deletes the child's own children.
    */
-  async deleteSubAgent(className: string, name: string): Promise<void> {
+  async delete(className: string, name: string): Promise<void> {
     const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
-        "deleteSubAgent() is not supported in this runtime — " +
+        "delete() is not supported in this runtime — " +
           "`ctx.facets` is unavailable. " +
           "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
@@ -660,8 +714,861 @@ export class DynamicAgents {
     this.registry.forget(className, name);
   }
 
+  // ── WebSocket forwarding + virtual connections ────────────────────────
+
+  /** Drop all facet-side virtual connections (test/rehydration hook). */
+  clearVirtualConnections(): void {
+    this.#virtualConnections.clear();
+  }
+
+  /** Facet-side lookup of a virtual connection by id. */
+  getVirtualConnection(id: string): Connection | undefined {
+    const stored = this.#virtualConnections.get(id);
+    if (!stored) return undefined;
+    return this.createBridgeConnection(stored.meta);
+  }
+
+  /** Facet-side iteration over virtual connections, optionally by tag. */
+  *getVirtualConnections(tag?: string): Iterable<Connection> {
+    for (const stored of this.#virtualConnections.values()) {
+      if (!tag || stored.meta.tags.includes(tag)) {
+        yield this.createBridgeConnection(stored.meta);
+      }
+    }
+  }
+
+  activeBridge(
+    connectionId?: string
+  ): DynamicAgentConnectionBridgeLike | undefined {
+    const context = this.#bridgeContext.getStore();
+    if (connectionId !== undefined && context?.connectionId !== connectionId) {
+      return undefined;
+    }
+    return context?.bridge;
+  }
+
+  /**
+   * Route a virtual sub-agent connection operation through its live frame
+   * bridge, or through the durable root Agent after that frame completes.
+   * All operations share one per-connection queue. Facet broadcasts wait for
+   * older queued operations; failures do not block later work.
+   */
+  routeConnectionOperation(
+    connectionId: string,
+    operationName: DynamicAgentConnectionOperationName,
+    operation: (bridge: DynamicAgentConnectionBridgeLike) => unknown
+  ): void {
+    const activeBridge = this.activeBridge(connectionId);
+    const previousConnectionOperation =
+      this.#connectionOperationTails.get(connectionId);
+    let pending: Promise<void>;
+    if (activeBridge && !previousConnectionOperation) {
+      try {
+        pending = Promise.resolve(operation(activeBridge)).then(() => {});
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+    } else {
+      pending = (previousConnectionOperation ?? Promise.resolve()).then(
+        async () => {
+          const root = await this.rootAlarmOwner();
+          await operation(
+            new RootDynamicAgentConnectionBridge(root, connectionId)
+          );
+        }
+      );
+    }
+    const completion = pending.catch((error: unknown) => {
+      this.#reportConnectionOperationFailure(
+        connectionId,
+        operationName,
+        error
+      );
+    });
+
+    this.#connectionOperationTails.set(connectionId, completion);
+    this.#host.ctx.waitUntil(completion);
+    void completion.then(() => {
+      if (this.#connectionOperationTails.get(connectionId) === completion) {
+        this.#connectionOperationTails.delete(connectionId);
+      }
+    });
+  }
+
+  /**
+   * Route a facet broadcast after every older connection operation.
+   *
+   * This barrier is intentionally one-way: facet startup can broadcast before
+   * a child connection has finished initializing its tags and protocol flags.
+   * Making those later connection operations wait would let the next frame
+   * observe stale root-owned metadata.
+   */
+  async routeBroadcast(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[],
+    upstreamBridge?: DynamicAgentConnectionBridgeLike
+  ): Promise<void> {
+    const activeBridge = upstreamBridge ?? this.activeBridge();
+    const previousOperations = new Set([
+      ...(this.#broadcastOperationTail ? [this.#broadcastOperationTail] : []),
+      ...this.#connectionOperationTails.values()
+    ]);
+    let pending: Promise<void>;
+    if (activeBridge && previousOperations.size === 0) {
+      try {
+        pending = Promise.resolve(
+          activeBridge.broadcast(ownerPath, message, without)
+        );
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+    } else {
+      pending = Promise.all(previousOperations).then(async () => {
+        const root = await this.rootAlarmOwner();
+        await root._cf_broadcastToSubAgent(ownerPath, message, without);
+      });
+    }
+    const completion = pending.catch((error: unknown) => {
+      console.error("[Agent] Sub-agent broadcast operation failed:", {
+        operation: "broadcast",
+        error
+      });
+    });
+
+    this.#broadcastOperationTail = completion;
+    this.#host.ctx.waitUntil(completion);
+    void completion.then(() => {
+      if (this.#broadcastOperationTail === completion) {
+        this.#broadcastOperationTail = undefined;
+      }
+    });
+    await completion;
+  }
+
+  #reportConnectionOperationFailure(
+    connectionId: string,
+    operation: DynamicAgentConnectionOperationName,
+    error: unknown
+  ): void {
+    console.error("[Agent] Sub-agent connection operation failed:", {
+      connectionId,
+      operation,
+      error
+    });
+  }
+
+  async broadcastToParent(
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    await this.routeBroadcast(this.#host.selfPath, message, without);
+  }
+
+  async broadcastToPath(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    if (this.#host._isFacet) {
+      await this.routeBroadcast(ownerPath, message, without);
+      return;
+    }
+
+    for (const connection of this.#host._webSockets.getConnections()) {
+      if (without?.includes(connection.id)) continue;
+      const targetPath = this.connectionTargetPath(connection);
+      if (!targetPath) continue;
+      if (!this.isSameAgentPath(targetPath, ownerPath)) continue;
+      connection.send(message);
+    }
+  }
+
+  async connectionMetas(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<DynamicAgentConnectionMeta[]> {
+    const metas: DynamicAgentConnectionMeta[] = [];
+    for (const connection of this.#host._webSockets.getConnections()) {
+      const meta = this.#connectionMetaForPath(connection, ownerPath);
+      if (meta) metas.push(meta);
+    }
+    return metas;
+  }
+
+  async sendToConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    const connection = this.#host._webSockets.getConnection(connectionId);
+    if (!connection || !this.connectionHasChildTarget(connection)) {
+      return;
+    }
+    connection.send(message);
+  }
+
+  async closeConnection(
+    connectionId: string,
+    code?: number,
+    reason?: string
+  ): Promise<void> {
+    const connection = this.#host._webSockets.getConnection(connectionId);
+    if (!connection || !this.connectionHasChildTarget(connection)) {
+      return;
+    }
+    connection.close(code, reason);
+  }
+
+  async setConnectionState(
+    connectionId: string,
+    state: unknown
+  ): Promise<unknown> {
+    const connection = this.#host._webSockets.getConnection(connectionId);
+    if (!connection || !this.connectionHasChildTarget(connection)) {
+      return null;
+    }
+    this.#host._ensureConnectionWrapped(connection);
+    connection.setState(state);
+    return this.getForwardedState(connection);
+  }
+
+  #connectionMetaForPath(
+    connection: Connection,
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): DynamicAgentConnectionMeta | null {
+    this.#host._ensureConnectionWrapped(connection);
+    const outerUri = this.#host._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    if (typeof outerUri !== "string") return null;
+
+    const target = this.#pathFromOuterUri(outerUri, ownerPath);
+    if (!target) return null;
+
+    const raw = this.getRawConnectionState(connection);
+    const rawTags =
+      raw != null && typeof raw === "object"
+        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+        : undefined;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((tag): tag is string => typeof tag === "string")
+      : [...connection.tags];
+    return {
+      id: connection.id,
+      uri: target.uri,
+      tags,
+      state: this.getForwardedState(connection)
+    };
+  }
+
+  connectionTargetPath(
+    connection: Connection
+  ): ReadonlyArray<AgentPathStep> | null {
+    this.#host._ensureConnectionWrapped(connection);
+    const outerUri = this.#host._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    if (typeof outerUri !== "string") return null;
+
+    return this.#pathFromOuterUri(outerUri)?.path ?? null;
+  }
+
+  #pathFromOuterUri(
+    outerUri: string,
+    stopAt?: ReadonlyArray<AgentPathStep>
+  ): { path: ReadonlyArray<AgentPathStep>; uri: string } | null {
+    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
+    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
+    const path: AgentPathStep[] = [...this.#host.selfPath];
+    let currentUrl = outerUri;
+
+    while (true) {
+      const match = parseSubAgentPath(currentUrl, { knownClasses });
+      if (!match) break;
+      path.push({ className: match.childClass, name: match.childName });
+      const rewritten = new URL(currentUrl);
+      rewritten.pathname = match.remainingPath;
+      currentUrl = rewritten.toString();
+      if (stopAt && this.isSameAgentPath(path, stopAt)) {
+        return { path, uri: currentUrl };
+      }
+    }
+
+    if (path.length === this.#host.selfPath.length) return null;
+    if (stopAt) return null;
+    return { path, uri: currentUrl };
+  }
+
+  isSameAgentPath(
+    a: ReadonlyArray<AgentPathStep>,
+    b: ReadonlyArray<AgentPathStep>
+  ): boolean {
+    if (a.length !== b.length) return false;
+    return a.every(
+      (step, index) =>
+        step.className === b[index]?.className && step.name === b[index]?.name
+    );
+  }
+
+  connectionHasChildTarget(connection: Connection): boolean {
+    this.#host._ensureConnectionWrapped(connection);
+    return (
+      typeof this.#host._unsafe_getConnectionFlag(
+        connection,
+        CF_SUB_AGENT_OUTER_URL_KEY
+      ) === "string"
+    );
+  }
+
+  connectionTargetsChild(connection: Connection): boolean {
+    if (!connection.uri) return false;
+    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      parseSubAgentPath(connection.uri, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
+    );
+  }
+
+  requestTargetsChild(request: Request): boolean {
+    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      parseSubAgentPath(request.url, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
+    );
+  }
+
+  async forwardWebSocketConnect(
+    connection: Connection,
+    request: Request,
+    options: { gate: boolean }
+  ): Promise<boolean> {
+    const routed = await this.#resolveConnection(connection, request, options);
+    if (!routed) return false;
+
+    await routed.child._cf_handleSubAgentWebSocketConnect(
+      this.#createConnectionBridge(connection),
+      routed.meta
+    );
+    return true;
+  }
+
+  #createConnectionBridge(
+    connection: Connection
+  ): DynamicAgentConnectionBridge {
+    // A child-to-parent RPC callback starts a fresh async context. Capture the
+    // upstream bridge explicitly while this forwarding frame is still active.
+    const upstreamBroadcastBridge = this.#host._isFacet
+      ? this.activeBridge(connection.id)
+      : undefined;
+
+    return new DynamicAgentConnectionBridge(
+      connection,
+      (ownerPath, message, without) => {
+        if (upstreamBroadcastBridge) {
+          return this.routeBroadcast(
+            ownerPath,
+            message,
+            without,
+            upstreamBroadcastBridge
+          );
+        }
+        // Dispatch through the host so subclass overrides of the
+        // `_cf_broadcastToSubAgent` RPC entry point keep intercepting.
+        return this.#host._cf_broadcastToSubAgent(ownerPath, message, without);
+      }
+    );
+  }
+
+  async forwardWebSocketMessage(
+    connection: Connection,
+    message: WSMessage,
+    replyBridge?: DynamicAgentConnectionBridge
+  ): Promise<boolean> {
+    const routed = await this.#resolveConnection(connection);
+    if (!routed) return false;
+
+    const bridge = this.#createConnectionBridge(connection);
+    await routed.child._cf_handleSubAgentWebSocketMessage(
+      message,
+      bridge,
+      routed.meta,
+      replyBridge ?? bridge
+    );
+    return true;
+  }
+
+  async forwardWebSocketClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<boolean> {
+    const routed = await this.#resolveConnection(connection);
+    if (!routed) return false;
+
+    await routed.child._cf_handleSubAgentWebSocketClose(
+      code,
+      reason,
+      wasClean,
+      this.#createConnectionBridge(connection),
+      routed.meta
+    );
+    return true;
+  }
+
+  async #resolveConnection(
+    connection: Connection,
+    request?: Request,
+    options: { gate: boolean } = { gate: false }
+  ): Promise<{
+    child: DynamicAgentWebSocketEndpoint;
+    meta: DynamicAgentConnectionMeta;
+  } | null> {
+    this.#host._ensureConnectionWrapped(connection);
+    const outerUri = this.#host._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    const uri = typeof outerUri === "string" ? outerUri : connection.uri;
+    if (!uri) return null;
+
+    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
+    let match = parseSubAgentPath(uri, {
+      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+    });
+    if (!match) return null;
+    if (
+      this.#host._ParentClass.name === match.childClass &&
+      this.#host.name === match.childName
+    ) {
+      const tailUri = new URL(uri);
+      tailUri.pathname = match.remainingPath;
+      match = parseSubAgentPath(tailUri.toString(), {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      });
+      if (!match) return null;
+    }
+
+    let forwardReq = request;
+    if (request && options.gate) {
+      const decision = await this.#host.onBeforeSubAgent(request, {
+        className: match.childClass,
+        name: match.childName
+      });
+      if (decision instanceof Response) {
+        connection.close(1008, "Sub-agent connection rejected");
+        return null;
+      }
+      forwardReq = decision instanceof Request ? decision : request;
+    }
+
+    const child = (await this.resolve(
+      match.childClass,
+      match.childName
+    )) as DynamicAgentWebSocketEndpoint;
+
+    const childUri = new URL(forwardReq?.url ?? uri);
+    childUri.pathname = match.remainingPath;
+    const raw = this.getRawConnectionState(connection);
+    const rawTags =
+      raw != null && typeof raw === "object"
+        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+        : undefined;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((tag): tag is string => typeof tag === "string")
+      : [...connection.tags];
+
+    return {
+      child,
+      meta: {
+        id: connection.id,
+        uri: childUri.toString(),
+        tags,
+        state: this.getForwardedState(connection),
+        requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
+      }
+    };
+  }
+
+  async handleWebSocketConnect(
+    bridge: DynamicAgentConnectionBridge,
+    meta: DynamicAgentConnectionMeta
+  ): Promise<void> {
+    await this.runWithBridge(bridge, meta.id, async () => {
+      const connection = this.createBridgeConnection(meta);
+      const request = new Request(meta.uri ?? "http://placeholder/", {
+        headers: meta.requestHeaders
+      });
+      if (
+        await this.forwardWebSocketConnect(connection, request, {
+          gate: true
+        })
+      ) {
+        return;
+      }
+
+      if (this.#host.shouldConnectionBeReadonly(connection, { request })) {
+        this.#host.setConnectionReadonly(connection, true);
+      }
+      if (!this.#host.shouldSendProtocolMessages(connection, { request })) {
+        this.#host._setConnectionNoProtocol(connection);
+      }
+
+      const childTags = await this.#host.getConnectionTags(connection, {
+        request
+      });
+      (connection as unknown as { tags: string[] }).tags = [
+        connection.id,
+        ...childTags.filter((tag) => tag !== connection.id)
+      ];
+      this.storeVirtualConnection(connection);
+      await this.#host.onConnect(connection, { request });
+      this.storeVirtualConnection(connection);
+    });
+  }
+
+  async handleWebSocketMessage(
+    message: WSMessage,
+    bridge: DynamicAgentConnectionBridge,
+    meta: DynamicAgentConnectionMeta,
+    replyBridge: DynamicAgentConnectionBridge = bridge
+  ): Promise<void> {
+    const connection = this.createBridgeConnection(meta);
+    this.storeVirtualConnection(connection);
+    const replyContext: DynamicAgentRpcReplyInvocationContext = {
+      bridge: replyBridge
+    };
+    try {
+      await dynamicAgentRpcReplyContext.run(replyContext, () =>
+        this.runWithBridge(bridge, meta.id, () =>
+          this.#host.onMessage(connection, message)
+        )
+      );
+    } finally {
+      replyContext.bridge = undefined;
+    }
+  }
+
+  async handleWebSocketClose(
+    code: number,
+    reason: string,
+    wasClean: boolean,
+    bridge: DynamicAgentConnectionBridge,
+    meta: DynamicAgentConnectionMeta
+  ): Promise<void> {
+    const connection = this.createBridgeConnection(meta);
+    this.storeVirtualConnection(connection);
+    await this.runWithBridge(bridge, meta.id, () =>
+      this.#host.onClose(connection, code, reason, wasClean)
+    );
+    this.#virtualConnections.delete(meta.id);
+  }
+
+  async runWithBridge<T>(
+    bridge: DynamicAgentConnectionBridgeLike,
+    connectionId: string,
+    fn: () => Promise<T> | T
+  ): Promise<T> {
+    const context: DynamicAgentBridgeInvocationContext = {
+      bridge,
+      connectionId
+    };
+    try {
+      return await this.#bridgeContext.run(context, fn);
+    } finally {
+      // Detached work inherits this context, but a forwarded RPC bridge is only
+      // valid until its originating connect, message, or close call completes.
+      context.bridge = undefined;
+    }
+  }
+
+  createBridgeConnection(meta: DynamicAgentConnectionMeta): Connection {
+    let stored = this.#virtualConnections.get(meta.id);
+    if (stored) {
+      stored.meta = meta;
+      if (stored.connection) {
+        (
+          stored.connection as unknown as {
+            uri: string | null;
+            tags: string[];
+          }
+        ).uri = meta.uri;
+        (
+          stored.connection as unknown as {
+            uri: string | null;
+            tags: string[];
+          }
+        ).tags = meta.tags;
+        return stored.connection;
+      }
+    } else {
+      stored = { meta };
+      this.#virtualConnections.set(meta.id, stored);
+    }
+
+    const owner = this;
+    const getStored = () => this.#virtualConnections.get(meta.id) ?? stored;
+    const updateStoredState = (nextState: unknown) => {
+      const current = this.#virtualConnections.get(meta.id);
+      if (current) {
+        current.meta = { ...current.meta, state: nextState };
+      }
+    };
+
+    const connection = {
+      id: meta.id,
+      uri: meta.uri,
+      tags: meta.tags,
+      get state() {
+        return getStored().meta.state;
+      },
+      setState(next: unknown | ((prev: unknown) => unknown)) {
+        const currentState = getStored().meta.state;
+        const state = typeof next === "function" ? next(currentState) : next;
+        updateStoredState(state);
+        owner.routeConnectionOperation(meta.id, "setState", (bridge) =>
+          bridge.setState(state)
+        );
+        return state;
+      },
+      send(message: string | ArrayBuffer | ArrayBufferView) {
+        owner.routeConnectionOperation(meta.id, "send", (bridge) =>
+          bridge.send(message)
+        );
+      },
+      close(code?: number, reason?: string) {
+        owner.routeConnectionOperation(meta.id, "close", (bridge) =>
+          bridge.close(code, reason)
+        );
+      },
+      addEventListener() {},
+      removeEventListener() {}
+    } as unknown as Connection;
+
+    stored.connection = connection;
+    this.#host._ensureConnectionWrapped(connection);
+    return connection;
+  }
+
+  storeVirtualConnection(connection: Connection): void {
+    this.#host._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
+      ...connection.tags
+    ]);
+    const stored = this.#virtualConnections.get(connection.id);
+    this.#virtualConnections.set(connection.id, {
+      meta: {
+        id: connection.id,
+        uri: connection.uri,
+        tags: [...connection.tags],
+        state: this.getRawConnectionState(connection)
+      },
+      connection: stored?.connection ?? connection
+    });
+  }
+
+  async hydrateConnectionsFromRoot(): Promise<void> {
+    if (!this.#host._isFacet || this.#host._parentPath.length === 0) return;
+
+    if (this.rootResolvesToSelf()) {
+      // The root stub would resolve back to this blocked Durable Object
+      // during startup. The facet view cannot see root-owned hibernated
+      // sockets locally, so preserve liveness and skip best-effort hydration.
+      return;
+    }
+
+    const root = await this.rootAlarmOwner();
+    const metas = await root._cf_subAgentConnectionMetas(this.#host.selfPath);
+    for (const meta of metas) {
+      this.#virtualConnections.set(meta.id, { meta });
+    }
+  }
+
+  getRawConnectionState(connection: Connection): unknown {
+    this.#host._ensureConnectionWrapped(connection);
+    return this.#host._rawStateAccessors.get(connection)?.getRaw() ?? null;
+  }
+
+  getForwardedState(connection: Connection): unknown {
+    const raw = this.getRawConnectionState(connection);
+    if (raw == null || typeof raw !== "object") return raw;
+    const { [CF_SUB_AGENT_OUTER_URL_KEY]: _, ...rest } = raw as Record<
+      string,
+      unknown
+    >;
+    return Object.keys(rest).length > 0 ? rest : null;
+  }
+
+  /**
+   * Resolve the facet Fetcher for the match and forward the request to
+   * it with `/sub/{class}/{name}` stripped.
+   */
+  async forward(
+    req: Request,
+    match: {
+      childClass: string;
+      childName: string;
+      remainingPath: string;
+    }
+  ): Promise<Response> {
+    let fetcher: { fetch(r: Request): Promise<Response> };
+    try {
+      fetcher = (await this.resolve(match.childClass, match.childName)) as {
+        fetch(r: Request): Promise<Response>;
+      };
+    } catch (err) {
+      // Keep the wire response terse: don't leak the parent's view of
+      // exports or internal error text over HTTP. The full error is
+      // still available to developers via worker logs / `console.error`.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[agents] sub-agent route failed:", message);
+      if (/null character/i.test(message) || /reserved/i.test(message)) {
+        return new Response("Bad Request", { status: 400 });
+      }
+      return new Response("Not Found", { status: 404 });
+    }
+
+    // Rewrite the URL to strip the /sub/{class}/{name} prefix. The
+    // child's own fetch then processes either its own request (if
+    // no further /sub/... remains) or recurses into its own child.
+    const rewritten = new URL(req.url);
+    rewritten.pathname = match.remainingPath;
+    const forwardedHeaders = new Headers(req.headers);
+    const forwardedInit: RequestInit = {
+      method: req.method,
+      headers: forwardedHeaders
+    };
+    if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
+    }
+    // Hand the body through as a stream. Reading it here (e.g.
+    // `await req.arrayBuffer()`) materialises the entire body in the
+    // parent DO's isolate, ahead of any application-level intake limit,
+    // and re-materialises it once per `/sub/` hop — see #2015.
+    if (req.body && req.method !== "GET" && req.method !== "HEAD") {
+      forwardedInit.body = req.body;
+    }
+    const forwarded = new Request(rewritten, forwardedInit);
+    return fetcher.fetch(forwarded);
+  }
+
+  /**
+   * Bridge used by `getSubAgentByName`: resolve the facet and dispatch
+   * one RPC method. Stateless — no cached references.
+   */
+  async invoke(
+    className: string,
+    name: string,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    const stub = await this.resolve(className, name);
+    return await this.invokeStubMethod(stub, className, method, args);
+  }
+
+  /**
+   * Bridge used by `parentAgent()` when the requested parent is itself
+   * a facet (and therefore has no top-level env namespace). The root
+   * receives the full root-first target path, then each hop delegates
+   * to the next facet using that facet's own `ctx.facets`.
+   */
+  async invokePath(
+    path: ReadonlyArray<{ className: string; name: string }>,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    const [self, next, ...rest] = path;
+    if (!self) {
+      throw new Error(`Sub-agent path invocation requires a non-empty path.`);
+    }
+
+    const ownClassName = (
+      this.#host as unknown as { constructor: { name: string } }
+    ).constructor.name;
+    if (self.className !== ownClassName || self.name !== this.#host.name) {
+      throw new Error(
+        `Sub-agent path invocation reached ${ownClassName}("${this.#host.name}") ` +
+          `but expected ${self.className}("${self.name}").`
+      );
+    }
+
+    if (!next) {
+      return await this.invokeStubMethod(
+        this.#host,
+        ownClassName,
+        method,
+        args
+      );
+    }
+
+    const child = await this.resolve(next.className, next.name);
+    if (rest.length === 0) {
+      return await this.invokeStubMethod(child, next.className, method, args);
+    }
+
+    const bridge = child as DynamicAgentPathInvokeEndpoint;
+    return await bridge._cf_invokeSubAgentPath([next, ...rest], method, args);
+  }
+
+  async invokeStubMethod(
+    stub: unknown,
+    className: string,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    // Must call `handle[method](...)` in one expression — extracting
+    // via `const fn = handle[method]; fn.apply(handle, args)` breaks
+    // the workerd RpcProperty binding. (Confirmed by the spike.)
+    const handle = stub as unknown as Record<
+      string,
+      (...a: unknown[]) => Promise<unknown>
+    >;
+    if (typeof handle[method] !== "function") {
+      throw new Error(`Method "${method}" not found on ${className}.`);
+    }
+    return await handle[method](...args);
+  }
+
+  /**
+   * Initialize the host agent as a facet in a single RPC. Runs entirely
+   * inside the child's isolate, so every storage write and `onStart()`
+   * I/O is owned by the child DO.
+   */
+  async init(
+    name: string,
+    parentPath: ReadonlyArray<{ className: string; name: string }> = [],
+    identityName = name
+  ): Promise<void> {
+    const routedName = this.#host.lifecycle.name;
+    if (routedName !== identityName) {
+      throw new Error(
+        `Facet bootstrap mismatch: expected routed identity "${identityName}" but got "${routedName}". ` +
+          `This usually means the parent passed the wrong id to ctx.facets.get(). ` +
+          `See _cf_resolveSubAgent.`
+      );
+    }
+
+    this.#host._isFacet = true;
+    this.#host._facetName = name;
+    this.#host._parentPath = parentPath as AgentPathStep[];
+    // Persist the agent-specific facet keys in parallel.
+    await Promise.all([
+      this.#host.ctx.storage.put("cf_agents_is_facet", true),
+      this.#host.ctx.storage.put("cf_agents_facet_name", name),
+      this.#host.ctx.storage.put("cf_agents_parent_path", parentPath)
+    ]);
+    // Fire onStart() now since native RPC bypasses lifecycle fetch, which is the
+    // entry point that normally triggers it. Protocol broadcasts during this
+    // bootstrap window are safe: on a facet `getConnections()` returns only
+    // virtual sub-agent connections and `broadcast()` routes to the parent
+    // bridge, so neither touches the parent's own WebSocket handles (#1679).
+    await this.#host.__unsafe_ensureInitialized();
+  }
+
   /** Remove a completed facet fiber from the root-side index. */
-  async unregisterFacetRun(
+  async unregisterRun(
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
