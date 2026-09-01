@@ -126,6 +126,8 @@ import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
+import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
+import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
 import type { Schedule, ScheduleCriteria } from "./schedules/types";
 export type { Schedule, ScheduleCriteria } from "./schedules/types";
 export {
@@ -1722,6 +1724,44 @@ export class Agent<
    */
   readonly scheduler: Scheduler;
 
+  /**
+   * Durable replayable execution capability installed into this Agent's
+   * Lifecycle. Declare definitions on the overridable
+   * {@link taskDefinitions} property and start runs with
+   * `this.tasks.run(name, input, options)`.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly tasks: Tasks;
+
+  /**
+   * Named Task definitions for this Agent, resolved lazily on every
+   * dispatch. Declare as a field so the map is rebuilt on every Durable
+   * Object wake — that is what lets in-flight runs resolve their persisted
+   * definition names after a restart:
+   *
+   * ```ts
+   * readonly taskDefinitions = {
+   *   "build-report@v1": async (input: ReportInput, step: TaskStep) => {
+   *     // ...
+   *   }
+   * } satisfies TaskHandlers;
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  declare readonly taskDefinitions?: TaskHandlers;
+
+  /**
+   * Framework-internal Task definitions (chat turns, messenger replies),
+   * consulted before {@link taskDefinitions}. Their `__cf`-prefixed names
+   * cannot be started through the public `tasks.run()`.
+   */
+  private readonly _internalTaskDefinitions = new Map<
+    string,
+    TaskCallbacks[string]
+  >();
+
   readonly mcp: MCPClientManager;
 
   /**
@@ -2310,6 +2350,24 @@ export class Agent<
         ).call(this, payload, schedule);
     });
 
+    this.tasks = new Tasks({
+      onError: (error) => this.onError(error)
+    });
+
+    // Agent's definitions live on the class, not in the capability
+    // constructor: framework-internal definitions first (registered by
+    // subclasses like Think through `_registerInternalTaskDefinition`),
+    // then the subclass's overridable `taskDefinitions` field. Both are
+    // resolved lazily, so field initialization order never matters.
+    setTaskDefinitionResolver(this.tasks, (name) => {
+      // SAFETY: declared definitions carry concrete input types; the
+      // resolver surface is the input-erased `TaskCallbacks` form — the
+      // same erasure the Tasks constructor map performs. One cast, here.
+      const definition =
+        this._internalTaskDefinitions.get(name) ?? this.taskDefinitions?.[name];
+      return definition as TaskCallbacks[string] | undefined;
+    });
+
     this.mcp = this._withAgentSpan(
       "agent_initialization",
       "initialization",
@@ -2352,7 +2410,11 @@ export class Agent<
     // Agent's WebSocket connections ride the WebSockets capability —
     // Lifecycle itself no longer models connections. The handlers call
     // through `this.*` so they always hit the framework-wrapped hooks.
-    this.lifecycle.use(this.scheduler).use(this.mcp).use(this._webSockets);
+    this.lifecycle
+      .use(this.scheduler)
+      .use(this.mcp)
+      .use(this._webSockets)
+      .use(this.tasks);
 
     // MCP starts before Agent restores facet routing state. Defer its initial
     // publication until broadcasts can be routed to the correct owner.
@@ -2760,6 +2822,9 @@ export class Agent<
               async () => {
                 this._checkOrphanedWorkflows();
                 await this._checkRunFibers();
+                // Interrupted Task runs (including chat turns) recover via
+                // the Lifecycle job queue: their mirror jobs are overdue and
+                // re-fire on the post-startup alarm derivation.
                 return this._agentToolRunRecoveryRunIds();
               }
             );
@@ -4827,7 +4892,7 @@ export class Agent<
     `;
   }
 
-  // ── Fibers: durable execution ───────────────────────────────────────
+  // ── Legacy fibers: durable execution (see agents/tasks for the new engine) ──
 
   /**
    * Run a function as a durable fiber. The fiber is registered in SQLite
@@ -5157,6 +5222,38 @@ export class Agent<
       throw new Error("stash() called outside a fiber");
     }
     ctx.stash(data);
+  }
+
+  /**
+   * Register one framework-internal Task definition on this Agent's
+   * `tasks` capability. Subclasses (Think, AIChatAgent) call this from
+   * their constructors so the definition is rebuilt on every wake; names use
+   * the reserved `__cf` prefix so users cannot start them through the public
+   * `tasks.run()`.
+   * @internal
+   */
+  protected _registerInternalTaskDefinition(
+    name: string,
+    definition: TaskCallbacks[string]
+  ): void {
+    this._internalTaskDefinitions.set(name, definition);
+  }
+
+  /**
+   * Run `fn` inside the fiber stash context so `this.stash()` keeps working
+   * for turns executing on the `tasks` capability exactly as it does inside
+   * legacy `runFiber()` closures.
+   * @internal
+   */
+  protected _withFiberStash<T>(
+    context: {
+      id: string;
+      signal: AbortSignal;
+      stash: (data: unknown) => void;
+    },
+    fn: () => Promise<T>
+  ): Promise<T> {
+    return _fiberALS.run(context, fn);
   }
 
   /**

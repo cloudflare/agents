@@ -44,6 +44,7 @@ import {
   ChatRecoveryEngine,
   ContinuationState,
   ResumableStream,
+  createChatStreams,
   ResumeHandshake,
   buildChatRecoveringFrame,
   bumpChatRecoveryProgress,
@@ -77,6 +78,7 @@ import {
   type ResumeHandshakeHost,
   type SnapshotMessage
 } from "agents/chat";
+import type { Streams } from "agents/streams";
 import { FauxTanStackModel } from "./faux-model";
 import type { TurnModel, TurnProvider } from "./model";
 import { createWorkersAiModel } from "./workers-ai-model";
@@ -157,6 +159,8 @@ export class TanStackAgent extends Agent<Env> {
   // onStart) so fiber recovery reads the configured budgets on a cold wake.
   chatRecovery: ChatRecoveryConfig = true;
 
+  readonly streams: Streams = createChatStreams();
+
   private readonly _resumableStream: ResumableStream;
   private readonly _codec = tanStackRecoveryCodec;
   /** Per-isolate throttle for crediting progress from streaming-content deltas
@@ -181,6 +185,7 @@ export class TanStackAgent extends Agent<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.lifecycle.use(this.streams);
 
     this.sql`
       CREATE TABLE IF NOT EXISTS tanstack_messages (
@@ -193,7 +198,10 @@ export class TanStackAgent extends Agent<Env> {
       )
     `;
 
-    this._resumableStream = new ResumableStream(this.sql.bind(this));
+    this._resumableStream = new ResumableStream(
+      this.streams,
+      this.sql.bind(this)
+    );
     this._faux = new FauxTanStackModel(STREAM_TOKENS_PER_SECOND);
     this._transcript = this._loadTranscript();
   }

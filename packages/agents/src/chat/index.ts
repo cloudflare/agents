@@ -49,11 +49,23 @@ export {
 export {
   ResumableStream,
   cleanupStreamBuffers,
+  createChatStreams,
   STREAM_CLEANUP_DELAY_SECONDS,
   type SqlTaggedTemplate
 } from "./resumable-stream";
+export {
+  createChatTurnTaskDefinition,
+  type ChatTurnClosureEntry,
+  type ChatTurnTaskHooks
+} from "./turn-task";
 
 export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
+
+/**
+ * @internal Platform-failure classifier shared with the chat hosts'
+ * queue-dispatch deferral (#1730); sibling-package support, not a public API.
+ */
+export { isPlatformFailure } from "../retries";
 
 export {
   createToolsFromClientSchemas,

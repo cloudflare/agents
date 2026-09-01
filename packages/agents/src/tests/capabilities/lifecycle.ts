@@ -63,19 +63,53 @@ class StartupAlarmProbe extends LifecycleCapability<StartupProps> {
 class JobProbe extends LifecycleCapability {
   readonly ambientContexts: boolean[] = [];
   readonly #onExecute: (fn: string) => void;
+  /** When set, a `repush` job pushes itself to this time mid-dispatch. */
+  repushTime: number | undefined;
+  /** When set, a `retime-other` job pushes this job id to `repushTime`. */
+  retimeTargetId: string | undefined;
 
   constructor(onExecute: (fn: string) => void) {
     super("job-probe");
     this.#onExecute = onExecute;
   }
 
-  onJob({ job }: LifecycleJobContext): void {
+  async onJob({ job }: LifecycleJobContext): Promise<void> {
     this.ambientContexts.push(getCurrentAgent().agent !== undefined);
     this.#onExecute(job.fn);
+    if (job.fn === "repush" && this.repushTime !== undefined) {
+      // A same-id push made while this dispatch runs: the queue must let
+      // it survive the completion outcome this handler returns.
+      await this.lifecycle.jobs.push({
+        id: job.id,
+        fn: "tick",
+        time: this.repushTime
+      });
+    }
+    if (
+      job.fn === "retime-other" &&
+      this.retimeTargetId !== undefined &&
+      this.repushTime !== undefined
+    ) {
+      // Retime a LATER job in the same due batch: the drive loop must not
+      // dispatch that job's stale snapshot afterwards.
+      await this.lifecycle.jobs.push({
+        id: this.retimeTargetId,
+        fn: "tick",
+        time: this.repushTime
+      });
+    }
+    if (job.fn === "slow") {
+      // Long enough for a zero-threshold slow-dispatch watchdog to fire.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   }
 
   push(options: LifecycleJobPushOptions) {
     return this.lifecycle.jobs.push(options);
+  }
+
+  get(id: string) {
+    return this.lifecycle.jobs.get(id);
   }
 
   async clear(): Promise<void> {
@@ -345,6 +379,93 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   async pushDueProbeJob(fn: string): Promise<void> {
     await this.lifecycle.start();
     await this.#jobProbe.push({ fn, time: Date.now() - 1 });
+  }
+
+  /**
+   * Arm one due `repush` probe job whose dispatch pushes itself to
+   * `futureTime`; the mid-dispatch push must survive the drive outcome.
+   */
+  async armRepushProbeJob(futureTime: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#jobProbe.repushTime = futureTime;
+    await this.#jobProbe.push({
+      id: "repush-probe",
+      fn: "repush",
+      time: Date.now() - 1
+    });
+  }
+
+  /**
+   * Arm two due probe jobs where the first dispatch retimes the second to
+   * `futureTime`: the second's stale due snapshot must not dispatch.
+   */
+  async armStaleSnapshotProbe(futureTime: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#jobProbe.repushTime = futureTime;
+    this.#jobProbe.retimeTargetId = "victim";
+    // Push far-future first: a backdated push can auto-fire its alarm
+    // between two awaited arms. The synchronous backdate below then makes
+    // both jobs due in one breath — retimer first — with no window for the
+    // alarm to drive one alone.
+    const far = Date.now() + 3_600_000;
+    await this.#jobProbe.push({ id: "victim", fn: "tick", time: far });
+    await this.#jobProbe.push({ id: "retimer", fn: "retime-other", time: far });
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = 'retimer'",
+      now - 2
+    );
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = 'victim'",
+      now - 1
+    );
+    await this.lifecycle.jobs.rearm();
+  }
+
+  /**
+   * Arm one due probe job with a zero hung timeout whose dispatch takes
+   * ~50ms, so the slow-dispatch watchdog observably fires.
+   */
+  async armSlowProbeJob(): Promise<void> {
+    await this.lifecycle.start();
+    await this.#jobProbe.push({
+      id: "slow-probe",
+      fn: "slow",
+      time: Date.now() - 1,
+      hungTimeoutSeconds: 0
+    });
+  }
+
+  getProbeJob(id: string): { fn: string; time: number } | null {
+    const job = this.#jobProbe.get(id);
+    return job ? { fn: job.fn, time: job.time } : null;
+  }
+
+  /** Try to claim another owner's job id; reports what happened. */
+  async pushForeignIdForTest(): Promise<{
+    error: string | null;
+    probeJobTime: number | null;
+  }> {
+    await this.lifecycle.start();
+    await this.#jobProbe.push({
+      id: "contested",
+      fn: "tick",
+      time: Date.now() + 60_000
+    });
+    let error: string | null = null;
+    try {
+      await this.lifecycle.jobs.push({
+        id: "contested",
+        fn: "tick",
+        time: Date.now() + 30_000
+      });
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+    }
+    return {
+      error,
+      probeJobTime: this.#jobProbe.get("contested")?.time ?? null
+    };
   }
 
   /** Push one backdated host job so the alarm event loop drives it. */

@@ -62,7 +62,14 @@ import {
 import {
   ResumableStream,
   cleanupStreamBuffers,
+  createChatStreams,
   STREAM_CLEANUP_DELAY_SECONDS
+} from "agents/chat";
+import type { Streams } from "agents/streams";
+import { createChatTurnTaskDefinition } from "agents/chat";
+import {
+  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+  isPlatformFailure
 } from "agents/chat";
 import { MAX_BOUND_PARAMS, buildInClauseStrings } from "agents/chat";
 import {
@@ -317,12 +324,6 @@ type AIChatAgentToolRunRow = {
   progress_json?: string | null;
   last_signal_at?: number | null;
 };
-type AIChatStreamMetadataRow = {
-  id: string;
-  status: string;
-  request_id: string;
-};
-
 /**
  * Options passed to the onChatMessage handler.
  */
@@ -395,6 +396,13 @@ export class AIChatAgent<
    * Used to propagate cancellation signals for any external calls made by the agent.
    */
   private _abortRegistry: AbortRegistry;
+
+  /**
+   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * output lives in the shared durable chunk log, readable by any
+   * `streams.read()` consumer on this Durable Object.
+   */
+  readonly streams: Streams = createChatStreams();
 
   /**
    * Resumable stream manager -- handles chunk buffering, persistence, and replay.
@@ -661,6 +669,48 @@ export class AIChatAgent<
    */
   waitForMcpConnections: boolean | { timeout: number } = { timeout: 10_000 };
 
+  /**
+   * Live chat-turn closures keyed by run nonce. A closure exists only in the
+   * isolate that accepted the turn; recovery after interruption never re-runs
+   * it — the definition's `recover` callback hands the interruption to the
+   * shared ChatRecoveryEngine instead.
+   */
+  private readonly _liveChatTurnClosures = new Map<
+    string,
+    {
+      initial: unknown;
+      wrap: (data: unknown) => unknown;
+      run: () => Promise<unknown>;
+      settle: {
+        resolve: (value: unknown) => void;
+        reject: (error: unknown) => void;
+      };
+    }
+  >();
+
+  /**
+   * Register the shared chat-turn Task definition (see
+   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
+   * host wires its protected internals through the hooks.
+   */
+  private _registerChatTurnTaskDefinition(): void {
+    const chatFiberName = (this.constructor as typeof AIChatAgent)
+      .CHAT_FIBER_NAME;
+    this._registerInternalTaskDefinition(
+      chatFiberName,
+      createChatTurnTaskDefinition({
+        definitionName: chatFiberName,
+        storage: this.ctx.storage,
+        getRunCreatedAt: async (runId) =>
+          (await this.tasks.get(runId))?.createdAt ?? null,
+        getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
+        keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+        withStash: (context, fn) => this._withFiberStash(context, fn),
+        handleRecovery: (ctx) => this._handleInternalFiberRecovery(ctx)
+      })
+    );
+  }
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -675,20 +725,51 @@ export class AIChatAgent<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
+    const wrap = (data: unknown) =>
+      wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
 
-    return this._runFiberWithStashWrapper(
-      `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-      async () => fn(),
-      {
-        initialSnapshot: wrapChatFiberSnapshot(
-          "__cfAIChatFiberSnapshot",
-          snapshot,
-          null
-        ),
-        wrapStash: (data) =>
-          wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data)
-      }
-    );
+    // Facet-hosted turns stay on the legacy fiber engine: the Fibers
+    // capability does not accept runs on routed sub-agents yet, and facet
+    // recovery routes through the root's facet-run index.
+    if (this.parentPath.length > 0) {
+      return this._runFiberWithStashWrapper(
+        `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+        async () => fn(),
+        { initialSnapshot: wrap(null), wrapStash: wrap }
+      );
+    }
+
+    const nonce = nanoid();
+    let resolveOutcome!: (value: unknown) => void;
+    let rejectOutcome!: (error: unknown) => void;
+    const outcome = new Promise<unknown>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    // Rejections can land while `runAttached` is still being awaited (before
+    // the outcome listener attaches); mark them handled so workerd does not
+    // report an unhandled rejection the wrapper is about to consume.
+    outcome.catch(() => {});
+    // The turn closure re-enters the caller's invocation context (live
+    // connection/request), exactly as legacy inline fiber execution did: the
+    // capability's host boundary intentionally carries no connection.
+    const ambient = agentContext.getStore();
+    this._liveChatTurnClosures.set(nonce, {
+      initial: wrap(null),
+      wrap,
+      run: ambient ? () => agentContext.run(ambient, fn) : fn,
+      settle: { resolve: resolveOutcome, reject: rejectOutcome }
+    });
+    try {
+      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+        (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
+        { requestId, continuation, nonce },
+        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+      );
+      return (await outcome) as T;
+    } finally {
+      this._liveChatTurnClosures.delete(nonce);
+    }
   }
 
   /**
@@ -799,6 +880,8 @@ export class AIChatAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
+    this.lifecycle.use(this.streams);
+    this._registerChatTurnTaskDefinition();
     withAgentSpan(
       this,
       "chat_initialization",
@@ -844,7 +927,10 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this._resumableStream = new ResumableStream(this.sql.bind(this));
+            this._resumableStream = new ResumableStream(
+              this.streams,
+              this.sql.bind(this)
+            );
           }
         );
 
@@ -4001,14 +4087,7 @@ export class AIChatAgent<
   }
 
   private _getAgentToolStreamId(requestId: string): string | undefined {
-    const rows = this.sql<AIChatStreamMetadataRow>`
-      select id, status, request_id
-      from cf_ai_chat_stream_metadata
-      where request_id = ${requestId}
-      order by rowid desc
-      limit 1
-    `;
-    return rows[0]?.id;
+    return this._resumableStream.latestStreamInfoForRequest(requestId)?.id;
   }
 
   private _getAgentToolStoredChunks(
@@ -4684,14 +4763,8 @@ export class AIChatAgent<
   ): ResolvedRecoveryStream {
     let streamId = "";
     if (requestId) {
-      const rows = this.sql<{ id: string }>`
-        SELECT id FROM cf_ai_chat_stream_metadata
-        WHERE request_id = ${requestId}
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (rows.length > 0) {
-        streamId = rows[0].id;
-      }
+      streamId =
+        this._resumableStream.latestStreamInfoForRequest(requestId)?.id ?? "";
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {
       streamId = this._resumableStream.activeStreamId ?? "";
@@ -4844,6 +4917,47 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
+    // Queue-driven schedule callback: the recovered turn can legitimately
+    // run for a long time (a hanging model stream is bounded only by the
+    // step timeout), and awaiting it here would hold the Lifecycle job
+    // queue — starving every other job on this object, including the very
+    // replay-wakes that advance recovery budgets. Dispatch detached, exactly
+    // as the legacy fire-and-forget runFiber dispatch did; all incident
+    // bookkeeping settles inside the detached body when the turn does.
+    let handoff: () => void = () => {};
+    const reachedTurn = new Promise<void>((resolve) => {
+      handoff = resolve;
+    });
+    const dispatch = this._chatRecoveryContinueDetached(data, handoff);
+    dispatch.catch((error) => {
+      if (isPlatformFailure(error)) {
+        // The queue job completed at the turn handoff, so the driver's
+        // platform-failure deferral can no longer apply; re-defer the
+        // dispatch ourselves so the turn re-runs on a fresh invocation
+        // (#1730).
+        void this.schedule(
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          "_chatRecoveryContinue",
+          data
+        ).catch(() => {});
+        return;
+      }
+      // Other failures after the handoff are the detached turn's own; its
+      // internal handling (OOM intercept, incident bookkeeping) already ran.
+      console.error(
+        "[AIChatAgent] _chatRecoveryContinue dispatch failed",
+        error
+      );
+    });
+    // A platform transient thrown before the turn starts must reach the
+    // queue so the job defers and retries (#1730).
+    await Promise.race([dispatch, reachedTurn]);
+  }
+
+  protected async _chatRecoveryContinueDetached(
+    data?: ChatRecoveryContinueData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -4918,6 +5032,7 @@ export class AIChatAgent<
       // re-enters inference (`_repairInterruptedToolsBeforeTurn`), so the
       // recovered transcript is settled and the next `convertToModelMessages`
       // doesn't 400 with `AI_MissingToolResultsError`.
+      onTurnStarted?.();
       const result = await this.continueLastTurn();
       await this._updateChatRecoveryIncident(
         data?.incidentId,
@@ -5252,6 +5367,44 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
+    // Queue-driven schedule callback: the recovered turn can legitimately
+    // run for a long time (a hanging model stream is bounded only by the
+    // step timeout), and awaiting it here would hold the Lifecycle job
+    // queue — starving every other job on this object, including the very
+    // replay-wakes that advance recovery budgets. Dispatch detached, exactly
+    // as the legacy fire-and-forget runFiber dispatch did; all incident
+    // bookkeeping settles inside the detached body when the turn does.
+    let handoff: () => void = () => {};
+    const reachedTurn = new Promise<void>((resolve) => {
+      handoff = resolve;
+    });
+    const dispatch = this._chatRecoveryRetryDetached(data, handoff);
+    dispatch.catch((error) => {
+      if (isPlatformFailure(error)) {
+        // The queue job completed at the turn handoff, so the driver's
+        // platform-failure deferral can no longer apply; re-defer the
+        // dispatch ourselves so the turn re-runs on a fresh invocation
+        // (#1730).
+        void this.schedule(
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          "_chatRecoveryRetry",
+          data
+        ).catch(() => {});
+        return;
+      }
+      // Other failures after the handoff are the detached turn's own; its
+      // internal handling (OOM intercept, incident bookkeeping) already ran.
+      console.error("[AIChatAgent] _chatRecoveryRetry dispatch failed", error);
+    });
+    // A platform transient thrown before the turn starts must reach the
+    // queue so the job defers and retries (#1730).
+    await Promise.race([dispatch, reachedTurn]);
+  }
+
+  protected async _chatRecoveryRetryDetached(
+    data?: ChatRecoveryRetryData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -5322,6 +5475,7 @@ export class AIChatAgent<
       // (`_repairInterruptedToolsBeforeTurn`). The retry path normally re-runs
       // an unanswered user-message tail (no assistant orphan to repair), so that
       // is a defensive no-op here, but keeps both recovery entrypoints converged.
+      onTurnStarted?.();
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody

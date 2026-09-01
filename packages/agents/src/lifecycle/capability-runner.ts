@@ -124,6 +124,12 @@ export interface DurableObjectCapability<Props extends object = object> {
    * Drive one due job this capability pushed into the Lifecycle queue.
    * Return an outcome to reschedule or retain the job; returning nothing
    * completes it.
+   *
+   * Dispatch must be bounded: the event loop awaits each job inline, so a
+   * long-running `onJob` delays every other job on this object. Detach
+   * unbounded work (start it, keep durable evidence, return) instead of
+   * awaiting it here; a dispatch that outlives the job's hung timeout
+   * logs a warning and emits `job:slow_dispatch`.
    */
   onJob?(
     context: LifecycleJobContext

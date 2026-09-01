@@ -24,6 +24,12 @@ capabilities push jobs instead of contributing wake times.
   used for wakes that must not be delayed by other work (deferred destroy).
 - **Deadman pre-alarm** — armed before the event loop drives any due job, so
   an isolate death mid-drive still wakes the object to resume its queue.
+- **Tasks** — the capability for durable replayable execution. Every
+  non-terminal run's authoritative `next_at` deadline (acceptance, sleeps,
+  retries, and claim backstops all write it) is mirrored as one queue job
+  per run (`id = "task:" + the run id`, so a retime is a same-id push); the run's
+  wake dispatches through `onJob` and settles or reschedules via the drive
+  result.
 
 ## How the alarm is derived
 

@@ -1159,13 +1159,7 @@ export class ThinkTestAgent extends Think {
   }
 
   async getLatestStreamStatusForTest(): Promise<string | null> {
-    const streams = this.sql<{ status: string }>`
-      SELECT status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    return streams[0]?.status ?? null;
+    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -1218,11 +1212,13 @@ export class ThinkTestAgent extends Think {
     if (path === "continue") {
       // A non-leaf `targetAssistantId` → benign "conversation_changed" skip
       // that still reaches the `finally`.
-      await this._chatRecoveryContinue({ targetAssistantId: "no-such-leaf" });
+      await this._chatRecoveryContinueDetached({
+        targetAssistantId: "no-such-leaf"
+      });
     } else {
       // No `recoveredRequestId` (avoids the pre-`try` early return) + a non-user
       // leaf (or empty transcript) → benign skip that still reaches `finally`.
-      await this._chatRecoveryRetry({});
+      await this._chatRecoveryRetryDetached({});
     }
     return { before, after: this._readChildRunStatusForTest(runId) };
   }
@@ -1423,9 +1419,9 @@ export class ThinkTestAgent extends Think {
       if (scheduled[0]) {
         await (
           this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
+            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
           }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
       }
 
       const messages = await this.getMessages();
@@ -1485,9 +1481,9 @@ export class ThinkTestAgent extends Think {
       if (scheduled[0]) {
         await (
           this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
+            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
           }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
       }
       const messages = await this.getMessages();
       const assistant = messages.filter((m) => m.role === "assistant");
@@ -4832,12 +4828,12 @@ export class ThinkToolsTestAgent extends Think {
     if (!rows[0]) return;
     await (
       this as unknown as {
-        _chatRecoveryRetry(d: {
+        _chatRecoveryRetryDetached(d: {
           targetUserId?: string;
           lastBody?: Record<string, unknown>;
         }): Promise<void>;
       }
-    )._chatRecoveryRetry(
+    )._chatRecoveryRetryDetached(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
         lastBody?: Record<string, unknown>;
@@ -4852,15 +4848,18 @@ export class ThinkToolsTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
       `;
     }
   }
@@ -4875,13 +4874,13 @@ export class ThinkToolsTestAgent extends Think {
     if (!rows[0]) return;
     await (
       this as unknown as {
-        _chatRecoveryContinue(d: {
+        _chatRecoveryContinueDetached(d: {
           targetAssistantId?: string;
           lastBody?: Record<string, unknown> | null;
           lastClientTools?: ClientToolSchema[] | null;
         }): Promise<void>;
       }
-    )._chatRecoveryContinue(
+    )._chatRecoveryContinueDetached(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
         lastBody?: Record<string, unknown> | null;
@@ -5746,7 +5745,9 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   async continueRecoveredChatForTest(requestId: string): Promise<void> {
-    await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+    await this._chatRecoveryContinueDetached({
+      recoveredRequestId: requestId
+    });
   }
 
   /**
@@ -5759,7 +5760,9 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string
   ): Promise<string | null> {
     try {
-      await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+      await this._chatRecoveryContinueDetached({
+        recoveredRequestId: requestId
+      });
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
@@ -5770,7 +5773,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string,
     delayMs: number
   ): Promise<void> {
-    const continuation = this._chatRecoveryContinue({
+    const continuation = this._chatRecoveryContinueDetached({
       recoveredRequestId: requestId
     });
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -6806,7 +6809,7 @@ export class ThinkRecoveryTestAgent extends Think {
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+        SELECT COUNT(*) as count FROM cf_agents_stream_chunks
         WHERE stream_id = ${streamId}
       `;
       return rows[0]?.count ?? 0;
@@ -7540,17 +7543,7 @@ export class ThinkRecoveryTestAgent extends Think {
     chunkCount: number;
     text: string;
   } | null> {
-    const streams = this.sql<{
-      id: string;
-      request_id: string;
-      status: "streaming" | "completed" | "error";
-    }>`
-      SELECT id, request_id, status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    const stream = streams[0];
+    const stream = this._resumableStream.getAllStreamMetadata()[0] ?? null;
     if (!stream) return null;
 
     // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
@@ -7579,7 +7572,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     return {
       requestId: stream.request_id,
-      status: stream.status,
+      status: stream.status as "streaming" | "completed" | "error",
       chunkCount: chunks.length,
       text
     };
@@ -7615,7 +7608,7 @@ export class ThinkRecoveryTestAgent extends Think {
     targetUserId?: string;
     lastBody?: Record<string, unknown>;
   }): Promise<void> {
-    await this._chatRecoveryRetry(options);
+    await this._chatRecoveryRetryDetached(options);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
@@ -7626,7 +7619,7 @@ export class ThinkRecoveryTestAgent extends Think {
       LIMIT 1
     `;
     if (!rows[0]) return;
-    await this._chatRecoveryRetry(
+    await this._chatRecoveryRetryDetached(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
         lastBody?: Record<string, unknown>;
@@ -7642,7 +7635,7 @@ export class ThinkRecoveryTestAgent extends Think {
       LIMIT 1
     `;
     if (!rows[0]) return;
-    await this._chatRecoveryContinue(
+    await this._chatRecoveryContinueDetached(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
         lastBody?: Record<string, unknown> | null;
@@ -7698,15 +7691,18 @@ export class ThinkRecoveryTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
       `;
     }
   }
@@ -7731,18 +7727,18 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<void> {
     const createdAt = Date.now() - ageMs;
     const completedAt = status === "streaming" ? null : createdAt + 1000;
+    const state = status === "error" ? "errored" : status;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${createdAt}, ${completedAt})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              0, ${createdAt}, ${completedAt ?? createdAt}, ${completedAt})
     `;
   }
 
-  /** Status of a single stream-metadata row, or null if absent. */
+  /** Status of a single stream row, or null if absent. */
   async getStreamStatusForTest(streamId: string): Promise<string | null> {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_ai_chat_stream_metadata WHERE id = ${streamId}
-    `;
-    return rows[0]?.status ?? null;
+    return this._resumableStream.getStreamMetadata(streamId)?.status ?? null;
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */

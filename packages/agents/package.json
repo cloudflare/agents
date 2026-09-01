@@ -118,6 +118,16 @@
       "import": "./dist/client.js",
       "require": "./dist/client.js"
     },
+    "./streams": {
+      "types": "./dist/streams/index.d.ts",
+      "import": "./dist/streams/index.js",
+      "require": "./dist/streams/index.js"
+    },
+    "./tasks": {
+      "types": "./dist/tasks/index.d.ts",
+      "import": "./dist/tasks/index.js",
+      "require": "./dist/tasks/index.js"
+    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",

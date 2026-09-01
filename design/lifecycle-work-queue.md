@@ -89,6 +89,47 @@ terminal failure completes it, and the host re-derives its jobs from
 durable state); capability jobs dispatch outside ambient host context. Host `onAlarm()` survives: it runs once per alarm invocation after
 due jobs are driven. Host `getNextAlarm()` is removed.
 
+## The dispatch contract
+
+Four named rules define what a job owner can and cannot rely on:
+
+1. **Job ids are scoped to their owner.** Every queue verb — push
+   included — sees only the owner's own jobs. A same-id push replaces the
+   owner's job; a push whose id belongs to another owner throws instead
+   of clobbering. (Tasks additionally prefixes its wake jobs `task:` so
+   caller-selected run ids stay inside its own namespace.)
+2. **Dispatch must be bounded.** The event loop drives due jobs inline
+   and in order, so one long `onJob` delays every other job on the
+   object — this is the queue's biggest behavioral bet, learned the hard
+   way in the chat replatform. Detach unbounded work (start it, persist
+   durable evidence, return) rather than awaiting it in the hook. The
+   driver cannot safely abandon owner code, so the rule is enforced by
+   visibility: a dispatch that outlives the job's `hungTimeoutSeconds`
+   (default 30s) logs a warning and emits `job:slow_dispatch`.
+3. **Newer pushes win over drive results.** Every dispatched job carries
+   a durable in-flight marker; a same-id `push()` or `reschedule()` made
+   while the job executes clears it, and `applyOutcome` only applies a
+   drive result to a still-marked job. The drive loop also refetches each
+   due job before claiming it, so a job replaced earlier in the same
+   alarm cycle dispatches with fresh data — or, if no longer due, is
+   skipped. An owner can therefore never lose a wake it explicitly
+   pushed mid-drive. Owners that both push and return outcomes for the
+   same job (Tasks) should derive both from the same durable state so
+   they always agree.
+4. **Platform failures abort the drive loop.** A platform-class failure
+   (superseded isolate, memory-limit reset, platform transient) preserves
+   the failing job and re-throws, deferring the _remaining_ due jobs to
+   the platform's alarm retry. This is deliberate: platform failures are
+   properties of the isolate, not the job, so later jobs would fail the
+   same way, and the retry runs on a fresh invocation.
+
+Everything else about drive order — in particular the interleaving of
+different owners' jobs within one alarm cycle — is unspecified. Owners may
+not depend on cross-owner ordering; lanes, fairness, or parallel dispatch
+of independent owners can arrive later without a contract change. At-least-once
+delivery is the only delivery guarantee: a crash between a job's side
+effects and its outcome re-runs the job, so `onJob` must be replay-safe.
+
 ## The event loop
 
 The loop lives in its own module: `lifecycle/job-queue.ts` holds the pure

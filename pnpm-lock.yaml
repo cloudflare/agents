@@ -2188,6 +2188,38 @@ importers:
         specifier: ^4.115.0
         version: 4.120.1(@cloudflare/workers-types@5.20260812.1)
 
+  examples/next/streams:
+    dependencies:
+      agents:
+        specifier: '*'
+        version: link:../../../packages/agents
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260729.1
+        version: 5.20260812.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.115.0
+        version: 4.120.1(@cloudflare/workers-types@5.20260812.1)
+
+  examples/next/tasks:
+    dependencies:
+      agents:
+        specifier: '*'
+        version: link:../../../packages/agents
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260729.1
+        version: 5.20260812.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.115.0
+        version: 4.120.1(@cloudflare/workers-types@5.20260812.1)
+
   examples/playground:
     dependencies:
       '@cloudflare/ai-chat':

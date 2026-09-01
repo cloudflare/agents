@@ -31,6 +31,7 @@ import { Agent, type FiberContext, type FiberRecoveryContext } from "agents";
 import {
   ChatRecoveryEngine,
   ResumableStream,
+  createChatStreams,
   bumpChatRecoveryProgress,
   cleanupStreamBuffers,
   createChatFiberSnapshot,
@@ -55,6 +56,7 @@ import {
   type ResolvedRecoveryStream,
   type SnapshotMessage
 } from "agents/chat";
+import type { Streams } from "agents/streams";
 import { Agent as PiCore } from "@earendil-works/pi-agent-core";
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type {
@@ -139,6 +141,8 @@ export class PiAgent extends Agent<Env> {
   // onStart) so fiber recovery reads the configured budgets on a cold wake.
   chatRecovery: ChatRecoveryConfig = true;
 
+  readonly streams: Streams = createChatStreams();
+
   private readonly _resumableStream: ResumableStream;
   private readonly _codec = new PiRecoveryCodec();
   private readonly _faux: FauxPiModel;
@@ -157,6 +161,7 @@ export class PiAgent extends Agent<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.lifecycle.use(this.streams);
 
     this.sql`
       CREATE TABLE IF NOT EXISTS pi_messages (
@@ -169,7 +174,10 @@ export class PiAgent extends Agent<Env> {
       )
     `;
 
-    this._resumableStream = new ResumableStream(this.sql.bind(this));
+    this._resumableStream = new ResumableStream(
+      this.streams,
+      this.sql.bind(this)
+    );
     this._faux = createFauxPiModel({
       tokensPerSecond: STREAM_TOKENS_PER_SECOND
     });
