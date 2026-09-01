@@ -5,12 +5,12 @@ import {
   PoweredByCloudflare,
   Surface,
   Switch,
+  Tabs,
   Text,
   Textarea
 } from "@cloudflare/kumo";
 import {
   ArrowElbowDownRightIcon,
-  InfoIcon,
   MoonIcon,
   PlayIcon,
   SunIcon
@@ -196,9 +196,36 @@ function ModeToggle() {
   );
 }
 
+/** Dashboard-style card: bordered surface with a header row and body sections. */
+function Card({
+  title,
+  meta,
+  children,
+  className
+}: {
+  title: React.ReactNode;
+  meta?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <Surface
+      className={`rounded-xl ring ring-kumo-line ${className ?? ""}`.trim()}
+    >
+      <div className="flex min-h-12 items-center justify-between gap-3 border-b border-kumo-line px-5 py-3">
+        <h2 className="text-sm font-semibold text-kumo-default">{title}</h2>
+        {meta !== undefined && (
+          <div className="flex items-center gap-3">{meta}</div>
+        )}
+      </div>
+      {children}
+    </Surface>
+  );
+}
+
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="mb-1.5 text-xs font-semibold text-kumo-default">{children}</p>
+    <p className="mb-1.5 text-xs font-medium text-kumo-subtle">{children}</p>
   );
 }
 
@@ -261,70 +288,161 @@ function percentile(values: number[], fraction: number): number {
   return sorted[index] ?? 0;
 }
 
-function LatencyCard({ history }: { history: RunHistoryEntry[] }) {
-  if (history.length === 0) return null;
+function Stat({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="px-5 py-4">
+      <Text size="sm" variant="secondary">
+        {label}
+      </Text>
+      <p className="mt-1 text-3xl font-semibold text-kumo-default">{value}</p>
+    </div>
+  );
+}
+
+function MetricsTab({ history }: { history: RunHistoryEntry[] }) {
   const durations = history.map((entry) => entry.durationMs);
+  const failures = history.filter((entry) => !entry.ok).length;
   const median = percentile(durations, 0.5);
   const p95 = percentile(durations, 0.95);
   const max = Math.max(...durations, 1);
-  const barWidth = 8;
-  const gap = 3;
-  const height = 44;
+  const barWidth = 10;
+  const gap = 4;
+  const height = 96;
 
   return (
-    <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
-      <SectionLabel>
-        Fresh isolate per run — server-side latency, last {history.length} run
-        {history.length === 1 ? "" : "s"}
-      </SectionLabel>
-      <div className="flex items-end gap-4">
-        <svg
-          aria-label="Run duration history"
-          width={history.length * (barWidth + gap)}
-          height={height}
-          className="shrink-0"
-        >
-          {history.map((entry, index) => {
-            const barHeight = Math.max(
-              3,
-              Math.round((entry.durationMs / max) * (height - 4))
-            );
-            return (
-              <rect
-                // biome-ignore lint: order is the identity of a history bar
-                key={index}
-                x={index * (barWidth + gap)}
-                y={height - barHeight}
-                width={barWidth}
-                height={barHeight}
-                rx={1.5}
-                className={entry.ok ? "fill-kumo-brand" : "fill-status-error"}
-              >
-                <title>{`${entry.durationMs}ms${entry.ok ? "" : " (failed)"}`}</title>
-              </rect>
-            );
-          })}
-        </svg>
-        <div className="flex gap-6">
-          <div>
-            <p className="font-mono text-sm font-semibold text-kumo-default">
-              {median}ms
-            </p>
-            <Text size="xs" variant="secondary">
-              median
-            </Text>
-          </div>
-          <div>
-            <p className="font-mono text-sm font-semibold text-kumo-default">
-              {p95}ms
-            </p>
-            <Text size="xs" variant="secondary">
-              p95
-            </Text>
-          </div>
+    <Card
+      title="Metrics"
+      meta={<Badge variant="secondary">This session</Badge>}
+    >
+      {history.length === 0 ? (
+        <div className="px-5 py-8">
+          <Text size="sm" variant="secondary">
+            No runs yet. Run some code on the Playground tab and the server-side
+            duration of each fresh isolate shows up here.
+          </Text>
         </div>
-      </div>
-    </Surface>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 divide-x divide-kumo-line sm:grid-cols-4">
+            <Stat label="Runs" value={history.length} />
+            <Stat label="Median" value={`${median} ms`} />
+            <Stat label="P95" value={`${p95} ms`} />
+            <Stat label="Failures" value={failures} />
+          </div>
+          <div className="border-t border-kumo-line px-5 py-4">
+            <SectionLabel>
+              Server-side duration per run — every bar is a brand-new isolate
+            </SectionLabel>
+            <svg
+              aria-label="Run duration history"
+              width={history.length * (barWidth + gap)}
+              height={height}
+              className="max-w-full"
+            >
+              {history.map((entry, index) => {
+                const barHeight = Math.max(
+                  4,
+                  Math.round((entry.durationMs / max) * (height - 6))
+                );
+                return (
+                  <rect
+                    // biome-ignore lint: order is the identity of a history bar
+                    key={index}
+                    x={index * (barWidth + gap)}
+                    y={height - barHeight}
+                    width={barWidth}
+                    height={barHeight}
+                    rx={2}
+                    className={
+                      entry.ok ? "fill-kumo-brand" : "fill-status-error"
+                    }
+                  >
+                    <title>{`${entry.durationMs}ms${entry.ok ? "" : " (failed)"}`}</title>
+                  </rect>
+                );
+              })}
+            </svg>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function AboutTab() {
+  return (
+    <div className="grid gap-4">
+      <Card title="How it works">
+        <div className="grid gap-3 px-5 py-4">
+          <Text size="sm">
+            Everything you type on the Playground tab executes in a brand-new{" "}
+            <span className="font-mono text-[0.9em]">Dynamic Worker</span> via{" "}
+            <span className="font-mono text-[0.9em]">@cloudflare/run</span> — no
+            bindings, no imports, and no network. Its only authority is the{" "}
+            <span className="font-mono text-[0.9em]">demo.*</span> host
+            functions the server passes in.
+          </Text>
+          <Text size="sm" variant="secondary">
+            Pick a preset — especially the hostile ones — and watch each escape
+            attempt come back as a clean, typed RunError with a stable code,
+            bounded logs, and a stack that points at your own source lines.
+          </Text>
+        </div>
+      </Card>
+
+      <Card title="Host functions">
+        <div>
+          {HOST_FUNCTIONS.map((hostFunction) => (
+            <div
+              key={hostFunction.signature}
+              className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-kumo-line px-5 py-3 last:border-b-0"
+            >
+              <code className="rounded bg-kumo-elevated px-1.5 py-0.5 font-mono text-xs text-kumo-default">
+                {hostFunction.signature}
+              </code>
+              <Text size="sm" variant="secondary">
+                {hostFunction.description}
+              </Text>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card title="Guarantees">
+        <div>
+          {[
+            [
+              "Isolation",
+              "Fresh isolate per run, outbound network blocked at the platform, no parent bindings visible."
+            ],
+            [
+              "Limits",
+              "Wall timeout, CPU budget, log bytes, host-call counts — all bounded with safe defaults."
+            ],
+            [
+              "Errors",
+              "Every failure is one RunError with a stable code; host-side error details never leak into the sandbox."
+            ],
+            [
+              "Data",
+              "Results cross over native Workers RPC: BigInt, Map, Set, Date, typed arrays, and cycles survive."
+            ]
+          ].map(([label, description]) => (
+            <div
+              key={label}
+              className="grid gap-x-6 gap-y-1 border-b border-kumo-line px-5 py-3 last:border-b-0 sm:grid-cols-[8rem_1fr]"
+            >
+              <Text size="sm" bold>
+                {label}
+              </Text>
+              <Text size="sm" variant="secondary">
+                {description}
+              </Text>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
   );
 }
 
@@ -379,6 +497,7 @@ const LOG_LEVEL_CLASSES: Record<string, string> = {
 
 export function App() {
   const initialPreset = EXAMPLE_PRESETS[0];
+  const [tab, setTab] = useState("playground");
   const [source, setSource] = useState(initialPreset?.source ?? "");
   const [presetId, setPresetId] = useState(initialPreset?.id);
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
@@ -451,168 +570,164 @@ export function App() {
     });
   }
 
+  function renderPresetButtons(presets: Preset[]) {
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {presets.map((preset) => (
+          <Button
+            key={preset.id}
+            size="sm"
+            variant={preset.id === presetId ? "secondary" : "ghost"}
+            aria-pressed={preset.id === presetId}
+            onClick={() => applyPreset(preset)}
+          >
+            {preset.label}
+          </Button>
+        ))}
+      </div>
+    );
+  }
+
   return (
-    <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-4 p-4">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <PlayIcon size={20} weight="fill" className="text-kumo-brand" />
-          <h1 className="text-base font-semibold text-kumo-default">
-            Run Playground
-          </h1>
-          <Badge variant="secondary">
-            <span className="font-mono text-[0.9em]">@cloudflare/run</span>
-          </Badge>
+    <div className="mx-auto flex min-h-screen max-w-5xl flex-col gap-4 px-6 py-5">
+      <header className="flex items-center justify-between gap-3">
+        <div className="grid gap-0.5">
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg font-semibold text-kumo-default">
+              Run playground
+            </h1>
+            <Badge variant="secondary">
+              <span className="font-mono text-[0.9em]">@cloudflare/run</span>
+            </Badge>
+          </div>
+          <Text size="sm" variant="secondary">
+            Untrusted code, fresh isolate per run, authority only through host
+            functions.
+          </Text>
         </div>
         <ModeToggle />
       </header>
 
-      <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
-        <div className="flex items-start gap-3">
-          <span className="h-lh flex items-center">
-            <InfoIcon size={20} weight="bold" className="text-kumo-brand" />
-          </span>
-          <div className="grid gap-1">
-            <Text size="sm" bold>
-              Untrusted code, fresh isolate, explicit authority
-            </Text>
-            <Text size="xs" variant="secondary">
-              Everything you type here executes in a brand-new Dynamic Worker
-              with no bindings, no imports, and no network. Its only authority
-              is the demo.* host functions the server passes in. Pick a preset —
-              especially the hostile ones — and watch each escape attempt come
-              back as a clean, typed RunError.
-            </Text>
-          </div>
-        </div>
-      </Surface>
+      <Tabs
+        tabs={[
+          { value: "playground", label: "Playground" },
+          { value: "metrics", label: "Metrics" },
+          { value: "about", label: "About" }
+        ]}
+        value={tab}
+        onValueChange={setTab}
+      />
 
-      <div className="grid flex-1 gap-4 lg:grid-cols-2">
-        <Surface className="flex flex-col gap-3 rounded-xl px-4 py-3 ring ring-kumo-line">
-          <div>
-            <SectionLabel>Examples</SectionLabel>
-            <div className="flex flex-wrap gap-1.5">
-              {EXAMPLE_PRESETS.map((preset) => (
-                <Button
-                  key={preset.id}
-                  size="sm"
-                  variant={preset.id === presetId ? "primary" : "secondary"}
-                  onClick={() => applyPreset(preset)}
-                >
-                  {preset.label}
-                </Button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <SectionLabel>Try to break it</SectionLabel>
-            <div className="flex flex-wrap gap-1.5">
-              {BREAK_PRESETS.map((preset) => (
-                <Button
-                  key={preset.id}
-                  size="sm"
-                  variant={preset.id === presetId ? "primary" : "secondary"}
-                  onClick={() => applyPreset(preset)}
-                >
-                  {preset.label}
-                </Button>
-              ))}
-            </div>
-          </div>
+      {tab === "playground" && (
+        <div className="grid flex-1 gap-4">
+          <Card
+            title="Code"
+            meta={
+              <Button
+                variant="primary"
+                size="sm"
+                loading={running}
+                onClick={handleRun}
+                icon={<PlayIcon size={14} weight="fill" />}
+              >
+                Run
+              </Button>
+            }
+          >
+            <div className="grid gap-3 px-5 py-4">
+              <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
+                <div>
+                  <SectionLabel>Examples</SectionLabel>
+                  {renderPresetButtons(EXAMPLE_PRESETS)}
+                </div>
+                <div>
+                  <SectionLabel>Try to break it</SectionLabel>
+                  {renderPresetButtons(BREAK_PRESETS)}
+                </div>
+              </div>
 
-          {activePreset !== undefined && (
-            <div className="flex items-start gap-1.5 text-kumo-subtle">
-              <span className="h-lh flex items-center">
-                <ArrowElbowDownRightIcon size={14} className="shrink-0" />
-              </span>
-              <Text size="xs" variant="secondary">
-                {activePreset.note}
-              </Text>
-            </div>
-          )}
-
-          <Textarea
-            ref={editorRef}
-            value={source}
-            onChange={(event) => setSource(event.currentTarget.value)}
-            onKeyDown={handleEditorKeyDown}
-            spellCheck={false}
-            aria-label="Source editor"
-            className="min-h-[260px] flex-1 resize-none font-mono text-[13px]"
-          />
-
-          <div>
-            <SectionLabel>Host functions available to this code</SectionLabel>
-            <div className="grid gap-1">
-              {HOST_FUNCTIONS.map((hostFunction) => (
-                <div
-                  key={hostFunction.signature}
-                  className="flex flex-wrap items-baseline gap-x-2"
-                >
-                  <code className="rounded bg-kumo-elevated px-1 font-mono text-xs text-kumo-default">
-                    {hostFunction.signature}
-                  </code>
+              {activePreset !== undefined && (
+                <div className="flex items-start gap-1.5 text-kumo-subtle">
+                  <span className="h-lh flex items-center">
+                    <ArrowElbowDownRightIcon size={14} className="shrink-0" />
+                  </span>
                   <Text size="xs" variant="secondary">
-                    {hostFunction.description}
+                    {activePreset.note}
                   </Text>
                 </div>
-              ))}
+              )}
+
+              <Textarea
+                ref={editorRef}
+                value={source}
+                onChange={(event) => setSource(event.currentTarget.value)}
+                onKeyDown={handleEditorKeyDown}
+                spellCheck={false}
+                aria-label="Source editor"
+                className="min-h-[240px] resize-y font-mono text-[13px]"
+              />
+
+              <div className="flex flex-wrap gap-x-6 gap-y-1">
+                {HOST_FUNCTIONS.map((hostFunction) => (
+                  <div
+                    key={hostFunction.signature}
+                    className="flex items-baseline gap-2"
+                  >
+                    <code className="rounded bg-kumo-elevated px-1 font-mono text-xs text-kumo-default">
+                      {hostFunction.signature}
+                    </code>
+                    <Text size="xs" variant="secondary">
+                      {hostFunction.description}
+                    </Text>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
 
-          <div>
-            <SectionLabel>Limits</SectionLabel>
-            <div className="grid gap-2.5 sm:grid-cols-3">
-              <LimitSlider
-                label="timeoutMs"
-                value={limits.timeoutMs}
-                min={500}
-                max={30_000}
-                step={500}
-                format={formatMilliseconds}
-                onChange={(timeoutMs) =>
-                  setLimits((previous) => ({ ...previous, timeoutMs }))
-                }
-              />
-              <LimitSlider
-                label="cpuMs"
-                value={limits.cpuMs}
-                min={100}
-                max={5_000}
-                step={100}
-                format={formatMilliseconds}
-                onChange={(cpuMs) =>
-                  setLimits((previous) => ({ ...previous, cpuMs }))
-                }
-              />
-              <LimitSlider
-                label="maxLogBytes"
-                value={limits.maxLogBytes}
-                min={1_024}
-                max={262_144}
-                step={1_024}
-                format={formatBytes}
-                onChange={(maxLogBytes) =>
-                  setLimits((previous) => ({ ...previous, maxLogBytes }))
-                }
-              />
+            <div className="border-t border-kumo-line px-5 py-4">
+              <SectionLabel>Limits</SectionLabel>
+              <div className="grid gap-2.5 sm:grid-cols-3">
+                <LimitSlider
+                  label="timeoutMs"
+                  value={limits.timeoutMs}
+                  min={500}
+                  max={30_000}
+                  step={500}
+                  format={formatMilliseconds}
+                  onChange={(timeoutMs) =>
+                    setLimits((previous) => ({ ...previous, timeoutMs }))
+                  }
+                />
+                <LimitSlider
+                  label="cpuMs"
+                  value={limits.cpuMs}
+                  min={100}
+                  max={5_000}
+                  step={100}
+                  format={formatMilliseconds}
+                  onChange={(cpuMs) =>
+                    setLimits((previous) => ({ ...previous, cpuMs }))
+                  }
+                />
+                <LimitSlider
+                  label="maxLogBytes"
+                  value={limits.maxLogBytes}
+                  min={1_024}
+                  max={262_144}
+                  step={1_024}
+                  format={formatBytes}
+                  onChange={(maxLogBytes) =>
+                    setLimits((previous) => ({ ...previous, maxLogBytes }))
+                  }
+                />
+              </div>
             </div>
-          </div>
+          </Card>
 
-          <Button
-            variant="primary"
-            loading={running}
-            onClick={handleRun}
-            icon={<PlayIcon size={14} weight="fill" />}
-          >
-            Run
-          </Button>
-        </Surface>
-
-        <div className="flex flex-col gap-4">
-          <Surface className="flex-1 rounded-xl px-4 py-3 ring ring-kumo-line">
-            <div className="mb-2 flex items-center justify-between">
-              <SectionLabel>Result</SectionLabel>
-              <div className="flex items-center gap-3">
+          <Card
+            title="Result"
+            meta={
+              <>
                 {result?.ok === true && (
                   <Switch
                     size="sm"
@@ -624,54 +739,63 @@ export function App() {
                 {result !== undefined && (
                   <span
                     className="font-mono text-xs text-kumo-subtle"
-                    title="time inside run() on the server · total round trip from this browser"
+                    title="time spent inside run() on the server"
                   >
                     {result.durationMs}ms
                   </span>
                 )}
-              </div>
+                {result?.ok === true && (
+                  <Badge variant="success">completed</Badge>
+                )}
+                {result?.ok === false && (
+                  <Badge variant="destructive">{result.code}</Badge>
+                )}
+              </>
+            }
+          >
+            <div className="px-5 py-4">
+              {result === undefined && !running && (
+                <Text size="sm" variant="secondary">
+                  Run some code to see its result, logs, and errors here.
+                </Text>
+              )}
+              {running && (
+                <Text size="sm" variant="secondary">
+                  Loading a fresh isolate…
+                </Text>
+              )}
+
+              {result?.ok === true && (
+                <div>
+                  <pre className="rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-status-success whitespace-pre-wrap break-words">
+                    {showRaw ? result.raw : result.value}
+                  </pre>
+                  {showRaw && (
+                    <p className="mt-1.5 font-mono text-xs text-kumo-subtle">
+                      The full run result object — status, value, and captured
+                      logs.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {result?.ok === false && (
+                <div>
+                  <pre className="font-mono text-xs text-status-error whitespace-pre-wrap break-words">
+                    {result.message}
+                  </pre>
+                  {result.stack !== undefined && (
+                    <StackTrace
+                      stack={result.stack}
+                      onJumpToLine={jumpToLine}
+                    />
+                  )}
+                </div>
+              )}
             </div>
 
-            {result === undefined && !running && (
-              <Text size="xs" variant="secondary">
-                Run some code to see its result, logs, and errors here.
-              </Text>
-            )}
-            {running && (
-              <Text size="xs" variant="secondary">
-                Loading a fresh isolate…
-              </Text>
-            )}
-
-            {result?.ok === true && (
-              <div>
-                <Badge variant="success">completed</Badge>
-                <pre className="mt-2 rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-status-success whitespace-pre-wrap break-words">
-                  {showRaw ? result.raw : result.value}
-                </pre>
-                {showRaw && (
-                  <p className="mt-1.5 font-mono text-xs text-kumo-subtle">
-                    The full run result object — status, value, and captured
-                    logs.
-                  </p>
-                )}
-              </div>
-            )}
-
-            {result?.ok === false && (
-              <div>
-                <Badge variant="destructive">{result.code}</Badge>
-                <pre className="mt-2 font-mono text-xs text-status-error whitespace-pre-wrap break-words">
-                  {result.message}
-                </pre>
-                {result.stack !== undefined && (
-                  <StackTrace stack={result.stack} onJumpToLine={jumpToLine} />
-                )}
-              </div>
-            )}
-
             {result !== undefined && result.logs.length > 0 && !showRaw && (
-              <div className="mt-3">
+              <div className="border-t border-kumo-line px-5 py-4">
                 <SectionLabel>
                   Console ({result.logs.length} entr
                   {result.logs.length === 1 ? "y" : "ies"})
@@ -690,11 +814,13 @@ export function App() {
                 </div>
               </div>
             )}
-          </Surface>
-
-          <LatencyCard history={history} />
+          </Card>
         </div>
-      </div>
+      )}
+
+      {tab === "metrics" && <MetricsTab history={history} />}
+
+      {tab === "about" && <AboutTab />}
 
       <footer className="flex justify-center pb-2">
         <PoweredByCloudflare />
