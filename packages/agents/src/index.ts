@@ -57,6 +57,7 @@ import {
   SUB_AGENT_IDENTITY_VERSION_PATH_V2,
   type SubAgentIdentityVersion
 } from "./dynamic-agents/identity";
+import { DynamicAgentRegistry } from "./dynamic-agents/registry";
 import type {
   FacetCapableCtx,
   FacetRunStorageRow,
@@ -9564,42 +9565,15 @@ export class Agent<
   // ── Sub-agent registry (backs `hasSubAgent` / `listSubAgents`) ──────────
 
   /** @internal */
-  private _subAgentRegistryReady = false;
-
-  private _addColumnIfNotExists(sql: string): void {
-    try {
-      this.ctx.storage.sql.exec(sql);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      if (!message.toLowerCase().includes("duplicate column")) {
-        throw e;
-      }
-    }
-  }
+  private _subAgentRegistryInstance: DynamicAgentRegistry | undefined;
 
   /** @internal */
-  private _ensureSubAgentRegistry(): void {
-    if (this._subAgentRegistryReady) return;
-    // This registry is lazy because older agents may never create sub-agents.
-    // Keep its additive column migrations here instead of the global schema
-    // gate so first sub-agent access upgrades legacy registry tables in place.
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_sub_agents (
-        class TEXT NOT NULL,
-        name TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        identity_version TEXT,
-        identity_name TEXT,
-        PRIMARY KEY (class, name)
-      )
-    `;
-    this._addColumnIfNotExists(
-      "ALTER TABLE cf_agents_sub_agents ADD COLUMN identity_version TEXT"
-    );
-    this._addColumnIfNotExists(
-      "ALTER TABLE cf_agents_sub_agents ADD COLUMN identity_name TEXT"
-    );
-    this._subAgentRegistryReady = true;
+  private get _subAgentRegistry(): DynamicAgentRegistry {
+    this._subAgentRegistryInstance ??= new DynamicAgentRegistry({
+      sql: this.sql.bind(this),
+      execRawSql: (sql) => void this.ctx.storage.sql.exec(sql)
+    });
+    return this._subAgentRegistryInstance;
   }
 
   /** @internal */
@@ -9608,34 +9582,7 @@ export class Agent<
     name: string,
     identity: { version: SubAgentIdentityVersion; name: string }
   ): void {
-    this._ensureSubAgentRegistry();
-    this.sql`
-      INSERT OR IGNORE INTO cf_agents_sub_agents
-        (class, name, created_at, identity_version, identity_name)
-      VALUES
-        (${className}, ${name}, ${Date.now()}, ${identity.version}, ${identity.name})
-    `;
-  }
-
-  /** @internal */
-  private _subAgentRegistryRow(
-    className: string,
-    name: string
-  ): {
-    identity_version: string | null;
-    identity_name: string | null;
-  } | null {
-    this._ensureSubAgentRegistry();
-    const rows = this.sql<{
-      identity_version: string | null;
-      identity_name: string | null;
-    }>`
-      SELECT identity_version, identity_name
-      FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
+    this._subAgentRegistry.record(className, name, identity);
   }
 
   private async _cf_subAgentIdentity(
@@ -9647,44 +9594,12 @@ export class Agent<
     name: string;
     existing: boolean;
   }> {
-    const row = this._subAgentRegistryRow(className, name);
-    if (row) {
-      if (
-        row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
-        typeof row.identity_name === "string"
-      ) {
-        return {
-          version: SUB_AGENT_IDENTITY_VERSION_PATH_V2,
-          name: row.identity_name,
-          existing: true
-        };
-      }
-      return {
-        version: SUB_AGENT_IDENTITY_VERSION_LEGACY,
-        name,
-        existing: true
-      };
-    }
-
-    // Do not probe the legacy bare-name facet here. `ctx.facets.get()` is
-    // create-on-access, so probing would create or wake legacy storage as a
-    // side effect and could reintroduce old id collisions. Existing registry
-    // rows remain the compatibility signal; new rows use path-v2.
-    const digest = await sha256Hex(JSON.stringify(childPath));
-    return {
-      version: SUB_AGENT_IDENTITY_VERSION_PATH_V2,
-      name: pathV2IdentityName(name, digest),
-      existing: false
-    };
+    return this._subAgentRegistry.identity(className, name, childPath);
   }
 
   /** @internal */
   private _forgetSubAgent(className: string, name: string): void {
-    this._ensureSubAgentRegistry();
-    this.sql`
-      DELETE FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-    `;
+    this._subAgentRegistry.forget(className, name);
   }
 
   /**
@@ -9711,12 +9626,7 @@ export class Agent<
   hasSubAgent(classOrName: SubAgentClass | string, name: string): boolean {
     const className =
       typeof classOrName === "string" ? classOrName : classOrName.name;
-    this._ensureSubAgentRegistry();
-    const rows = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-    `;
-    return (rows[0]?.n ?? 0) > 0;
+    return this._subAgentRegistry.has(className, name);
   }
 
   /**
@@ -9737,22 +9647,7 @@ export class Agent<
   ): Array<{ className: string; name: string; createdAt: number }> {
     const className =
       typeof classOrName === "string" ? classOrName : classOrName?.name;
-    this._ensureSubAgentRegistry();
-    const rows = className
-      ? this.sql<{ class: string; name: string; created_at: number }>`
-          SELECT class, name, created_at FROM cf_agents_sub_agents
-          WHERE class = ${className}
-          ORDER BY created_at ASC
-        `
-      : this.sql<{ class: string; name: string; created_at: number }>`
-          SELECT class, name, created_at FROM cf_agents_sub_agents
-          ORDER BY created_at ASC
-        `;
-    return rows.map((r) => ({
-      className: r.class,
-      name: r.name,
-      createdAt: r.created_at
-    }));
+    return this._subAgentRegistry.list(className);
   }
 
   /**
