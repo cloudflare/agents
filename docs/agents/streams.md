@@ -157,8 +157,10 @@ request's signal aborts the tail when the client disconnects.
 `AIChatAgent` and `Think` store their in-flight turn output here:
 `ResumableStream` (from `agents/chat`) is a thin adapter over Streams that
 packs ~10 wire chunks into one stored segment for write economy, maps
-completion/error onto stream settlement, and reads `updated_at` as the
-retention signal. Existing `cf_ai_chat_stream_*` tables migrate onto the
+completion/error onto stream settlement, and decides retention in two
+phases: a coarse cutoff on the stream row's own timestamp, verified
+against the newest chunk so an actively appending stream is never swept.
+Existing `cf_ai_chat_stream_*` tables migrate onto the
 capability automatically. The packing pattern is worth copying for any
 high-frequency producer: buffer what you already hold synchronously, append
 one packed chunk, and unpack on read — durability is unchanged (nothing is

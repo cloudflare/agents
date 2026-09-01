@@ -202,8 +202,7 @@ export class JobQueue {
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
-      )
-    `);
+      ) WITHOUT ROWID`);
     this.#tableEnsured = true;
   }
 

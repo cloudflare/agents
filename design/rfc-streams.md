@@ -41,8 +41,12 @@ const status = await this.streams.status("reply:123");
 
 - **Cursors are monotonic sequence numbers** (0-based; `from` is
   inclusive; `status().cursor` is the next to be assigned). The append
-  fence — a count-bump UPDATE that succeeds only while the stream is live —
-  assigns them and rejects writes to settled streams.
+  fence is a read: `#append` is one synchronous block (state check, chunk-log
+  tail read, chunk INSERT), and a Durable Object executes one synchronous
+  block at a time, so the check cannot interleave with a settle or another
+  append. Settled streams reject writes exactly as before, but an append
+  costs one row write (the chunk), not two — the stream row is written only
+  at open and settle, where settlement stamps the final cursor.
 - **`open()` is idempotent on the id**: reopening a live stream returns a
   writer at its cursor; reopening a settled stream throws; settling twice
   is a no-op so recovery callers stay idempotent.
@@ -99,8 +103,10 @@ duplicate-free sequence.
 `AIChatAgent` and `Think` — is a thin adapter over this capability:
 producer-side coalescing (~10 wire chunks packed per stored segment, for
 storage-op economy), the chat wire protocol and replay handshake, and
-retention policy (10-minute completed grace, 1-hour abandoned window keyed
-off the stream row's `updated_at`, swept on chat's own schedule). Chat
+retention policy (10-minute completed grace; a 1-hour abandoned window
+decided in two phases — a coarse cutoff on the stream row's `updated_at`,
+then one indexed chunk-tail read per candidate to confirm the producer
+really stopped — swept on chat's own schedule). Chat
 streams carry their request id as the indexed `tag`; legacy
 `cf_ai_chat_stream_*` tables migrate wholesale on first construction —
 an in-flight stream survives the upgrade — then are dropped. The adapter
@@ -112,10 +118,17 @@ public API, so live readers and diagnostics observe chat streams like any
 other stream.
 
 Storage-op accounting (benchmarked in-suite on real DO SQLite): the packed
-adapter writes within 2× of the legacy pattern (the fence per segment,
-buying settled-write rejection, the cursor, and `updated_at`), ~9× under
-naive per-chunk appends, and retention sweeps read only stream rows —
-down ~6× and no longer proportional to stored chunks.
+adapter writes exactly the legacy pattern's rows — one stream-row insert,
+one chunk insert per segment, one settle update — since the read fence
+removed the per-segment row write; ~8.5× under naive per-chunk appends,
+and retention sweeps read the stream rows plus at most one indexed
+chunk-tail row per stale live candidate — down ~6× from the legacy
+correlated-subquery shape and no longer proportional to stored chunks.
+In _billed_ terms the gap is wider still: Cloudflare counts index
+maintenance in `rowsWritten`, the chunk table is WITHOUT ROWID so a chunk
+append bills exactly one row, and the legacy schema's per-chunk hidden-PK
+and stream indexes billed three per chunk insert (14 vs 33 billed rows
+for a 100-chunk turn — pinned by the write-accounting test).
 
 ## How the design evolved
 
@@ -132,6 +145,33 @@ cursor })` and a `recover` callback read `status()` as evidence. When
    protocol's own `Last-Event-ID` rather than inventing an offset header.
 3. **The chat replatform landed in the same PR** rather than as a
    follow-up, with the chat suites as the parity ratchet.
+4. **The append fence moved from a guarded UPDATE to a read, and live
+   authority moved from the stream row to the chunk log.** The original
+   fence was a count-bump UPDATE — one extra row write per append buying
+   settled-write rejection, the cursor, and `updated_at`. All three are
+   derivable: the isolate's single-threaded execution makes a synchronous
+   read-check-insert exactly as atomic, the chunk log's tail is the live
+   cursor and liveness signal (rows read cost ~1/1000th of rows written on
+   DO SQLite), and settlement stamps the row exact for terminal reads.
+   While a stream is live its row's `chunk_count`/`updated_at` are
+   deliberately stale; every consumer derives through one helper
+   (`Streams.#tail`), and the storage-ops benchmark pins the resulting
+   write parity with the pre-capability chat pattern.
+5. **The tables went WITHOUT ROWID once the billed metric was measured.**
+   Cloudflare bills `rowsWritten`, which counts index maintenance — and an
+   ordinary rowid table's PRIMARY KEY is a hidden UNIQUE index, so every
+   chunk INSERT was billing 2 rows while `total_changes()` (the parity
+   benchmark's metric) reported 1. WITHOUT ROWID makes the PK the table:
+   a chunk append bills exactly one row, pinned by the write-accounting
+   test. The same treatment covers the task run/step and job-queue
+   tables. The stream _metadata_ table is the deliberate exception: it
+   stays a rowid table because rowid is the insertion-order tiebreak that
+   keeps "newest first" deterministic when same-tag rows share a
+   created_at millisecond (ids are random nanoids), and its hidden-index
+   cost lands once per stream open, never per chunk. The task runs table
+   dropped its `(state, next_at)` index — a per-write tax on every claim,
+   refresh, and settle, paid only to speed the startup reconcile's one
+   scan.
 
 ## Alternatives considered
 

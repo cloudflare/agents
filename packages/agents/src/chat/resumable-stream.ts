@@ -9,7 +9,8 @@
  * - Chunk buffering (packed segments — batched writes for storage-op economy)
  * - Stream lifecycle (start, complete, error) mapped onto Streams settlement
  * - Chunk replay for reconnecting clients (framing in `replay-frames.ts`)
- * - Stale stream cleanup (row-level retention, no chunk-table scans)
+ * - Stale stream cleanup (row-level retention; at most one indexed
+ *   chunk-tail read per stale live candidate, never a chunk-table scan)
  * - Active stream restoration after agent restart
  * - One-time migration of legacy `cf_ai_chat_stream_*` tables
  *
@@ -40,6 +41,11 @@ const CHUNK_BUFFER_MAX_SIZE = 100;
  * segment.
  */
 const SEGMENT_MAX_BYTES = 512_000;
+/**
+ * Stored segments per page when replaying a stream's chunk log. Bounds
+ * replay memory to one page of segment bodies rather than the whole turn.
+ */
+const REPLAY_PAGE_SEGMENTS = 10;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /**
@@ -60,9 +66,11 @@ const COMPLETED_RETENTION_MS = 10 * 60 * 1000;
  * Generous relative to {@link COMPLETED_RETENTION_MS}: an interrupted turn must
  * have ample time to be resumed by a reconnecting client or healed by task
  * replay before its buffer is reaped. Only a stream that has produced no
- * chunk for this long is treated as truly dead. Keyed off last activity (the
- * stream row's `updated_at`, bumped by every append) so a long but still-active
- * stream is never swept mid-flight.
+ * chunk for this long is treated as truly dead. Last activity is decided in
+ * two phases — a coarse cutoff on the stream row's `updated_at` (stamped at
+ * open, not per append), then one indexed read of the newest chunk's
+ * timestamp for rows past it — so a long but still-active stream is never
+ * swept mid-flight.
  */
 const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
@@ -168,9 +176,6 @@ export type SqlTaggedTemplate = {
 export class ResumableStream {
   private _activeStreamId: string | null = null;
   private _activeRequestId: string | null = null;
-  /** Monotonic segment ordering index — the backing stream's cursor. */
-  private _segmentIndex = 0;
-
   /**
    * Whether the active stream was started in this instance (true) or
    * restored from SQLite after hibernation/restart (false). An orphaned
@@ -269,12 +274,18 @@ export class ResumableStream {
           createdAt
         );
 
+        // The row is imported complete: final chunk count and last-activity
+        // timestamp up front, because importChunk is a bare log INSERT that
+        // never touches the stream row. A terminal row must carry its exact
+        // cursor at rest (nothing stamps it later), and a live row's
+        // updated_at seeds the sweep's coarse cutoff until real appends
+        // resume.
         this.ops.importStream({
           streamId,
           state,
           tag: String(row.request_id),
           metadata,
-          chunkCount: 0,
+          chunkCount: chunkRows.length,
           createdAt,
           updatedAt: closedAt ?? lastChunkAt,
           closedAt
@@ -290,9 +301,6 @@ export class ResumableStream {
           } catch {
             // Opaque body string.
           }
-          // importChunk bumps updated_at to each chunk's own timestamp, so
-          // after the loop the row's last activity is the newest chunk's —
-          // exactly the legacy sweep's semantics.
           this.ops.importChunk(streamId, value, Number(chunk.created_at));
         }
       }
@@ -342,7 +350,6 @@ export class ResumableStream {
     const streamId = nanoid();
     this._activeStreamId = streamId;
     this._activeRequestId = requestId;
-    this._segmentIndex = 0;
     this._isLive = true;
     this._activeIsContinuation = options.continuation ?? false;
 
@@ -376,7 +383,6 @@ export class ResumableStream {
     this.ops.settle(streamId, "completed", null);
     this._activeStreamId = null;
     this._activeRequestId = null;
-    this._segmentIndex = 0;
     this._isLive = false;
     this._activeIsContinuation = false;
 
@@ -394,7 +400,6 @@ export class ResumableStream {
     this.ops.settle(streamId, "errored", null);
     this._activeStreamId = null;
     this._activeRequestId = null;
-    this._segmentIndex = 0;
     this._isLive = false;
     this._activeIsContinuation = false;
   }
@@ -478,7 +483,7 @@ export class ResumableStream {
           : chunks.map((chunk) => chunk.body);
 
       try {
-        this._segmentIndex = this.ops.append(streamId, segment) + 1;
+        this.ops.append(streamId, segment);
       } catch {
         // The stream settled or was deleted while chunks were buffered (a
         // late writer after markError/cleanup); the chunks are dropped.
@@ -490,13 +495,23 @@ export class ResumableStream {
 
   // ── Chunk replay ───────────────────────────────────────────────────
 
-  /** Stored chunk bodies for one stream, packed segments expanded, in order. */
-  private _storedBodies(streamId: string): string[] {
-    const bodies: string[] = [];
-    for (const row of this.ops.readAll(streamId)) {
-      bodies.push(...unpackSegment(row.chunk));
+  /**
+   * Stored chunk bodies for one stream, packed segments expanded, in order.
+   * A generator over paged reads, so replaying a large turn holds one page
+   * of segments in memory instead of the whole stored stream; iteration is
+   * synchronous end to end (WebSocket sends don't await), so the pages see
+   * a consistent log.
+   */
+  private *_storedBodies(streamId: string): Generator<string> {
+    let next = 0;
+    for (;;) {
+      const rows = this.ops.readChunks(streamId, next, REPLAY_PAGE_SEGMENTS);
+      for (const row of rows) {
+        next = row.seq + 1;
+        yield* unpackSegment(row.chunk);
+      }
+      if (rows.length < REPLAY_PAGE_SEGMENTS) return;
     }
-    return bodies;
   }
 
   /**
@@ -685,8 +700,6 @@ export class ResumableStream {
       // replayed after hibernation still carries `continuation: true` on
       // its frames (#1733).
       this._activeIsContinuation = row.chat.isContinuation === 1;
-      // Resume the segment ordering index past the stored cursor.
-      this._segmentIndex = row.chunk_count;
     }
   }
 
@@ -700,17 +713,19 @@ export class ResumableStream {
     this.ops.deleteMany(this._chatRows().map((row) => row.stream_id));
     this._activeStreamId = null;
     this._activeRequestId = null;
-    this._segmentIndex = 0;
     this._activeIsContinuation = false;
   }
 
   /**
    * Remove all chat stream data (called on destroy). The backing tables
    * belong to the Streams capability and are shared with other producers,
-   * so this deletes chat's rows rather than dropping tables.
+   * so this deletes chat's rows rather than dropping tables. Buffered
+   * chunks are dropped (clearAll resets the buffer), not flushed: they
+   * belong to a chat-owned stream this very call deletes, so writing them
+   * first would only pay row writes for rows that die in the same
+   * synchronous block.
    */
   destroy() {
-    this.flushBuffer();
     this.clearAll();
   }
 
@@ -719,10 +734,13 @@ export class ResumableStream {
    * gate used by {@link _maybeCleanupOldStreams}. Intended to be driven by an
    * alarm so idle/hibernated chat DOs still reclaim buffers even when no
    * further stream ever completes to trigger the lazy path.
+   *
+   * @returns How many chat stream rows survive the sweep — the re-arm
+   * signal, so the alarm body needs no second scan of the table.
    */
-  cleanup(now: number = Date.now()): void {
+  cleanup(now: number = Date.now()): number {
     this._lastCleanupTime = now;
-    this._sweepOldStreams(now);
+    return this._sweepOldStreams(now);
   }
 
   /**
@@ -750,19 +768,28 @@ export class ResumableStream {
    *  different retentions: a completed buffer is redundant with the persisted
    *  message and needs only a brief replay grace, whereas an in-flight buffer
    *  must outlive resume/replay before it is presumed dead. Abandonment is
-   *  keyed off the stream row's `updated_at` (bumped by every append), so the
-   *  sweep never scans the chunk table. */
-  private _sweepOldStreams(now: number) {
+   *  decided in two phases: the stream row's `updated_at` (stamped at open,
+   *  not per append — appends write only the chunk log) is the coarse
+   *  cutoff, and only rows past it pay one indexed read of the newest
+   *  chunk's timestamp to confirm the producer really stopped. An actively
+   *  appending stream is never swept, and a quiet sweep still reads no
+   *  chunk rows at all.
+   *  @returns How many chat stream rows survive the sweep. */
+  private _sweepOldStreams(now: number): number {
     const completedCutoff = now - COMPLETED_RETENTION_MS;
     const abandonedCutoff = now - ABANDONED_STREAM_RETENTION_MS;
-    const reclaimable = this._chatRows()
+    const rows = this._chatRows();
+    const reclaimable = rows
       .filter((row) =>
         row.state === "streaming"
-          ? row.updated_at < abandonedCutoff
+          ? row.updated_at < abandonedCutoff &&
+            (this.ops.lastChunkAt(row.stream_id) ?? row.updated_at) <
+              abandonedCutoff
           : (row.closed_at ?? row.updated_at) < completedCutoff
       )
       .map((row) => row.stream_id);
     this.ops.deleteMany(reclaimable);
+    return rows.length - reclaimable.length;
   }
 
   // ── Test helpers (matching old AIChatAgent test API) ────────────────
@@ -776,7 +803,7 @@ export class ResumableStream {
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    return this._storedBodies(streamId).map((body, chunk_index) => ({
+    return [...this._storedBodies(streamId)].map((body, chunk_index) => ({
       body,
       chunk_index
     }));
@@ -827,9 +854,10 @@ export class ResumableStream {
   }
 
   /**
-   * Append a chunk to a stream dated `ageMs` in the past. Used to exercise the
-   * last-activity sweep threshold: a long-running streaming row with a *recent*
-   * chunk must survive even when its start time is older than the cutoff.
+   * Append a chunk to a stream dated `ageMs` in the past. Used to exercise
+   * the sweep's phase-2 verification: a long-running streaming row with a
+   * *recent* chunk must survive even when its row `updated_at` (stamped at
+   * open, not per append) is older than the coarse cutoff.
    * @internal For testing only
    */
   insertChunkAt(streamId: string, body: string, ageMs: number): void {
@@ -850,11 +878,10 @@ export class ResumableStream {
  * `@internal`
  */
 export async function cleanupStreamBuffers(
-  stream: Pick<ResumableStream, "cleanup" | "hasReclaimableStreams">,
+  stream: Pick<ResumableStream, "cleanup">,
   rearm: () => Promise<void>
 ): Promise<void> {
-  stream.cleanup();
-  if (stream.hasReclaimableStreams()) {
+  if (stream.cleanup() > 0) {
     await rearm();
   }
 }

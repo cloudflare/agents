@@ -27,7 +27,8 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * The replatformed path: real `ResumableStream` over the real Streams
-   * capability — packed segments through the fenced append.
+   * capability — packed segments through the read-fenced append (one chunk
+   * INSERT per segment; the stream row is written only at open and settle).
    */
   async benchAdapterPath(
     turns: number,
@@ -131,7 +132,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return { rowsWritten: this.#totalChanges() - before, ms };
   }
 
-  /** The naive contrast: one fenced Streams append per chunk, no packing. */
+  /** The naive contrast: one Streams append (chunk INSERT) per chunk. */
   async benchPerChunkPath(
     turns: number,
     chunksPerTurn: number,
@@ -152,12 +153,80 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Sweep read amplification: rows read to decide abandonment for `streamCount`
-   * in-flight streams of `chunksPerStream` stored segments each.
+   * The billed-write accounting model, measured: `rowsWritten` per INSERT
+   * and UPDATE against rowid vs WITHOUT ROWID tables and explicit indexes.
+   * `total_changes()` counts only table rows; Cloudflare bills index
+   * maintenance too, and `rowsWritten` is the billed metric — an ordinary
+   * rowid table's PRIMARY KEY is a hidden UNIQUE index that bills one
+   * extra row on every INSERT and DELETE, which is why the capability
+   * tables are WITHOUT ROWID. The `real*` entries pin the billed cost of
+   * the actual hot statements against the real schema.
+   */
+  async probeWriteAccounting(): Promise<Record<string, number>> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    sql.exec(`CREATE TABLE IF NOT EXISTS bench_probe_rowid (
+      a TEXT NOT NULL, b INTEGER NOT NULL, body TEXT, PRIMARY KEY (a, b))`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS bench_probe_worowid (
+      a TEXT NOT NULL, b INTEGER NOT NULL, body TEXT, PRIMARY KEY (a, b)
+      ) WITHOUT ROWID`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS bench_probe_indexed (
+      id TEXT PRIMARY KEY, tag TEXT, other TEXT)`);
+    sql.exec(
+      `CREATE INDEX IF NOT EXISTS bench_probe_tag ON bench_probe_indexed(tag)`
+    );
+    const w = (query: string, ...params: (string | number)[]) =>
+      Number(sql.exec(query, ...params).rowsWritten);
+    const now = Date.now();
+    return {
+      rowidCompositePkInsert: w(
+        `INSERT INTO bench_probe_rowid (a, b, body) VALUES ('x', 1, 'body')`
+      ),
+      withoutRowidInsert: w(
+        `INSERT INTO bench_probe_worowid (a, b, body) VALUES ('x', 1, 'body')`
+      ),
+      textPkPlusIndexInsert: w(
+        `INSERT INTO bench_probe_indexed (id, tag, other) VALUES ('i1', 't', 'o')`
+      ),
+      updateNotTouchingIndexed: w(
+        `UPDATE bench_probe_indexed SET other = 'o2' WHERE id = 'i1'`
+      ),
+      updateTouchingIndexed: w(
+        `UPDATE bench_probe_indexed SET tag = 't2' WHERE id = 'i1'`
+      ),
+      realStreamOpen: w(
+        `INSERT INTO cf_agents_streams
+           (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
+         VALUES ('probe-s', 'streaming', 'probe-tag', NULL, 0, ?, ?)`,
+        now,
+        now
+      ),
+      realChunkAppend: w(
+        `INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+         VALUES ('probe-s', 0, '"x"', ?)`,
+        now
+      ),
+      realStreamSettle: w(
+        `UPDATE cf_agents_streams
+         SET state = 'completed', error_message = NULL, closed_at = ?,
+             updated_at = ?, chunk_count = 1
+         WHERE stream_id = 'probe-s' AND state = 'streaming'`,
+        now,
+        now
+      )
+    };
+  }
+
+  /**
+   * Sweep read amplification: rows read to decide abandonment for the
+   * streams seeded by the paths above (bench_legacy_* vs cf_agents_streams).
    *
-   * Legacy shape: correlated `max(created_at)` subquery over the chunk table.
-   * New shape: the stream row's own `updated_at`. Both run against data seeded
-   * by the paths above (bench_legacy_* vs cf_agents_streams).
+   * Legacy shape: correlated `max(created_at)` subquery over the chunk table
+   * for every stream. New shape: the two-phase decision the real sweep runs —
+   * one scan of the stream rows (whose `updated_at` is stamped at open and
+   * settle, not per append), then one indexed chunk-tail read for each live
+   * row past the coarse cutoff. A live in-flight stream is seeded so the
+   * phase-2 verification read is part of the measurement.
    */
   async benchSweepReads(): Promise<{
     legacyRowsRead: number;
@@ -166,6 +235,8 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     await this.lifecycle.start();
     const sql = this.ctx.storage.sql;
     const cutoff = Date.now() + 60_000; // classify every seeded stream
+    const writer = await this.streams.open("sweep-live");
+    writer.append(this.#body(0, 120));
     const legacyCursor = sql.exec(
       `SELECT m.id FROM bench_legacy_metadata m
        WHERE coalesce(
@@ -176,14 +247,28 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
       cutoff
     );
     [...legacyCursor];
-    const newCursor = sql.exec(
-      `SELECT stream_id FROM cf_agents_streams WHERE updated_at < ?`,
-      cutoff
-    );
-    [...newCursor];
+    const rowsCursor = sql.exec(`SELECT * FROM cf_agents_streams`);
+    const rows = [...rowsCursor] as Array<{
+      stream_id: string;
+      state: string;
+      updated_at: number;
+    }>;
+    let newRowsRead = Number(rowsCursor.rowsRead);
+    for (const row of rows) {
+      if (row.state !== "streaming" || Number(row.updated_at) >= cutoff) {
+        continue;
+      }
+      const tail = sql.exec(
+        `SELECT seq, created_at FROM cf_agents_stream_chunks
+         WHERE stream_id = ? ORDER BY seq DESC LIMIT 1`,
+        row.stream_id
+      );
+      [...tail];
+      newRowsRead += Number(tail.rowsRead);
+    }
     return {
       legacyRowsRead: Number(legacyCursor.rowsRead),
-      newRowsRead: Number(newCursor.rowsRead)
+      newRowsRead
     };
   }
 }

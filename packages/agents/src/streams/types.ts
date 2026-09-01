@@ -48,9 +48,11 @@ export interface StreamStatus {
   error?: string;
   createdAt: number;
   /**
-   * Last write activity: bumped by every append and by settlement. The
-   * liveness signal retention policies key off — a `streaming` row whose
-   * `updatedAt` is old has a producer that stopped appending.
+   * Last write activity: advances with every append and with settlement.
+   * The liveness signal retention policies key off — a `streaming` stream
+   * whose `updatedAt` is old has a producer that stopped appending. (For a
+   * live stream this is derived from the chunk log's newest entry; the
+   * stored row is only stamped at open and settle.)
    */
   updatedAt: number;
   closedAt?: number;
@@ -121,7 +123,15 @@ export interface StreamListOptions {
   limit?: number;
 }
 
-/** @internal Raw `cf_agents_streams` SQLite row. */
+/**
+ * @internal Raw `cf_agents_streams` SQLite row.
+ *
+ * While `state` is `streaming`, `chunk_count` and `updated_at` are NOT
+ * maintained per append (appends write only the chunk log; the log's tail
+ * is authoritative — see `Streams.#tail`). Both are stamped exact by the
+ * settle UPDATE, so terminal rows read straight through. Consumers of a
+ * live row must derive cursor/liveness rather than trust these columns.
+ */
 export type StreamRow = {
   stream_id: string;
   state: StreamState;
