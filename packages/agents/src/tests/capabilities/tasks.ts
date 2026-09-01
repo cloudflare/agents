@@ -237,6 +237,18 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
             return "recovered";
           }
         );
+      },
+
+      /** Exhausts its durable step budget on a platform transient. */
+      exhaustedPlatformStep: async (_input: undefined, step: TaskStep) => {
+        await step.do(
+          "connection",
+          { retries: { limit: 1 } },
+          ({ attempt }) => {
+            this.stepRuns.push(`exhausted-platform-step:${attempt}`);
+            throw new Error("Network connection lost.");
+          }
+        );
       }
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },

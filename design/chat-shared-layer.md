@@ -182,7 +182,10 @@ Task runs. Initial detection joins by incident identity; stable-state and OOM
 retries enqueue a separate run and express their delay with `step.sleep`. The
 Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
 entry point, which returns at model handoff so a long turn never blocks the
-Lifecycle job loop. The incident record remains the recovery state machine.
+Lifecycle job loop. A platform failure before handoff propagates through the
+current Task or compatibility schedule; after handoff that execution has
+settled, so the detached continuation enqueues exactly one replacement attempt.
+The incident record remains the recovery state machine.
 
 Facets do not yet have routed Task wakes. Dynamic-agent recovery therefore
 keeps the root-owned routed Scheduler transport as a compatibility path until

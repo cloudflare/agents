@@ -522,6 +522,11 @@ export class Tasks<
         id: jobId,
         fn: "wake",
         time: next,
+        // ReplayStep owns the durable step retry budget. If it propagates a
+        // platform failure, retrying this wake inside JobDriver would run past
+        // that budget; reject the alarm and let the run's claim deadline bring
+        // it back in a fresh invocation instead.
+        retry: { maxAttempts: 1 },
         recoveryLoop:
           row !== undefined && this.#isRecoveryLoopDefinition(row.definition)
       });
@@ -532,18 +537,28 @@ export class Tasks<
 
   /** Mirror every non-terminal run into the queue (startup reconcile). */
   async #syncAllWakes(): Promise<void> {
-    const rows = this.#store.sql<{ run_id: string; next_at: number }>`
-      SELECT run_id, next_at FROM cf_agents_task_runs
+    const rows = this.#store.sql<{
+      run_id: string;
+      definition: string;
+      next_at: number;
+    }>`
+      SELECT run_id, definition, next_at FROM cf_agents_task_runs
       WHERE state IN ('pending', 'waiting', 'running')
         AND next_at IS NOT NULL
     `;
     let skipped = false;
-    for (const { run_id, next_at } of rows) {
+    for (const { run_id, definition, next_at } of rows) {
       // On restart the mirror usually survived alongside the run row (same
-      // storage), and a same-values upsert is still a billed row write —
-      // skip it when the durable job already carries this run's deadline.
+      // storage), and a same-values upsert is still a billed row write. The
+      // deadline alone is insufficient: older wakes need the Tasks-owned
+      // one-attempt policy, and internal definitions may need breaker policy.
       const existing = this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${run_id}`);
-      if (existing?.fn === "wake" && existing.time === next_at) {
+      if (
+        existing?.fn === "wake" &&
+        existing.time === next_at &&
+        existing.retry?.maxAttempts === 1 &&
+        existing.recoveryLoop === this.#isRecoveryLoopDefinition(definition)
+      ) {
         skipped = true;
         continue;
       }

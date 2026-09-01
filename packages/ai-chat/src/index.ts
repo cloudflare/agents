@@ -4981,17 +4981,22 @@ export class AIChatAgent<
     // replay-wakes that advance recovery budgets. Dispatch detached, exactly
     // as the legacy fire-and-forget runFiber dispatch did; all incident
     // bookkeeping settles inside the detached body when the turn does.
+    let handedOff = false;
     let handoff: () => void = () => {};
     const reachedTurn = new Promise<void>((resolve) => {
-      handoff = resolve;
+      handoff = () => {
+        handedOff = true;
+        resolve();
+      };
     });
     const dispatch = this._chatRecoveryContinueDetached(data, handoff);
     dispatch.catch((error) => {
+      // Before handoff this rejection still owns the current queue execution:
+      // Promise.race below propagates it so Tasks preserves the run (or the
+      // Scheduler preserves its compatibility row). Only detached work needs
+      // a replacement attempt.
+      if (!handedOff) return;
       if (isPlatformFailure(error)) {
-        // The queue job completed at the turn handoff, so the driver's
-        // platform-failure deferral can no longer apply; re-defer the
-        // dispatch ourselves so the turn re-runs on a fresh invocation
-        // (#1730).
         void this._enqueueChatRecovery(
           "_chatRecoveryContinue",
           data ?? {},
@@ -5437,17 +5442,18 @@ export class AIChatAgent<
     // replay-wakes that advance recovery budgets. Dispatch detached, exactly
     // as the legacy fire-and-forget runFiber dispatch did; all incident
     // bookkeeping settles inside the detached body when the turn does.
+    let handedOff = false;
     let handoff: () => void = () => {};
     const reachedTurn = new Promise<void>((resolve) => {
-      handoff = resolve;
+      handoff = () => {
+        handedOff = true;
+        resolve();
+      };
     });
     const dispatch = this._chatRecoveryRetryDetached(data, handoff);
     dispatch.catch((error) => {
+      if (!handedOff) return;
       if (isPlatformFailure(error)) {
-        // The queue job completed at the turn handoff, so the driver's
-        // platform-failure deferral can no longer apply; re-defer the
-        // dispatch ourselves so the turn re-runs on a fresh invocation
-        // (#1730).
         void this._enqueueChatRecovery(
           "_chatRecoveryRetry",
           data ?? {},

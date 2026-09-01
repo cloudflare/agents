@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
   backdateTaskWake,
@@ -221,6 +225,133 @@ describe("Tasks capability", () => {
             { id: `task:${recovery.runId}`, recovery_loop: 1 }
           ].sort((left, right) => left.id.localeCompare(right.id))
         );
+      }
+    );
+  });
+
+  it("upgrades an existing job table before ordinary and recovery-loop pushes", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const future = Date.now() + 60 * 60 * 1000;
+        state.storage.sql.exec(`
+          CREATE TABLE cf_agents_jobs (
+            id TEXT PRIMARY KEY NOT NULL,
+            capability TEXT NOT NULL,
+            fn TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            payload TEXT,
+            retry_options TEXT,
+            singleflight INTEGER NOT NULL DEFAULT 0,
+            hung_timeout_seconds INTEGER,
+            exclusive INTEGER NOT NULL DEFAULT 0,
+            running INTEGER NOT NULL DEFAULT 0,
+            execution_started_at INTEGER,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
+          ) WITHOUT ROWID
+        `);
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_jobs (id, capability, fn, time)
+           VALUES ('legacy', 'host', 'legacy', ?)`,
+          future
+        );
+
+        await instance.lifecycle.start();
+        await instance.lifecycle.jobs.push({
+          id: "ordinary-upgrade",
+          fn: "ordinary",
+          time: future
+        });
+        const recovery = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+          "oomStepLoop",
+          undefined
+        );
+
+        const rows = state.storage.sql
+          .exec(
+            `SELECT id, recovery_loop FROM cf_agents_jobs
+             WHERE id IN ('legacy', 'ordinary-upgrade', ?)
+             ORDER BY id`,
+            `task:${recovery.runId}`
+          )
+          .toArray();
+        expect(rows).toEqual(
+          [
+            { id: "legacy", recovery_loop: 0 },
+            { id: "ordinary-upgrade", recovery_loop: 0 },
+            { id: `task:${recovery.runId}`, recovery_loop: 1 }
+          ].sort((left, right) => left.id.localeCompare(right.id))
+        );
+
+        await instance.tasks.cancel(recovery.runId);
+        await instance.lifecycle.jobs.cancel("ordinary-upgrade");
+      }
+    );
+
+    // A fresh lifecycle sees the already-upgraded table and must not try to
+    // apply the column migration again.
+    await evictDurableObject(stub);
+    const fresh = env.TaskHarnessObject.getByName(name);
+    await runInDurableObject(
+      fresh,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.jobs.push({
+          id: "post-upgrade",
+          fn: "ordinary",
+          time: Date.now() + 60 * 60 * 1000
+        });
+        const rows = state.storage.sql
+          .exec(
+            `SELECT id, recovery_loop FROM cf_agents_jobs
+             WHERE id IN ('legacy', 'post-upgrade')
+             ORDER BY id`
+          )
+          .toArray();
+        expect(rows).toEqual([
+          { id: "legacy", recovery_loop: 0 },
+          { id: "post-upgrade", recovery_loop: 0 }
+        ]);
+        await instance.lifecycle.jobs.cancel("legacy");
+        await instance.lifecycle.jobs.cancel("post-upgrade");
+      }
+    );
+  });
+
+  it("upgrades an existing Task wake to defer after one job attempt", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "old-wake-policy",
+          definition: "checkpointing",
+          state: "pending",
+          nextAt: Date.now() + 60 * 60 * 1000
+        });
+      }
+    );
+
+    await evictDurableObject(stub);
+    const fresh = env.TaskHarnessObject.getByName(name);
+    await runInDurableObject(
+      fresh,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const rows = state.storage.sql
+          .exec(
+            `SELECT retry_options FROM cf_agents_jobs
+             WHERE id = 'task:old-wake-policy'`
+          )
+          .toArray() as Array<{ retry_options: string | null }>;
+        expect(JSON.parse(rows[0]?.retry_options ?? "null")).toEqual({
+          maxAttempts: 1
+        });
+        await instance.tasks.cancel("old-wake-policy");
       }
     );
   });
@@ -633,6 +764,40 @@ describe("Tasks capability", () => {
         await instance.tasks.cancel("stall-1");
       }
     );
+  });
+
+  it("defers an exhausted platform step to a fresh alarm invocation", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const result = await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+          "exhaustedPlatformStep",
+          undefined
+        );
+        backdateTaskWake(state.storage, receipt.runId);
+        await instance.lifecycle.rearmAlarm();
+
+        let threw = false;
+        try {
+          await (instance as unknown as { alarm(): Promise<void> }).alarm();
+        } catch (error) {
+          threw =
+            error instanceof Error &&
+            error.message.includes("Network connection lost");
+        }
+
+        return {
+          threw,
+          run: await instance.tasks.get(receipt.runId),
+          stepRuns: instance.stepRuns.slice()
+        };
+      }
+    );
+
+    expect(result.threw).toBe(true);
+    expect(result.stepRuns).toEqual(["exhausted-platform-step:1"]);
+    expect(result.run?.state).toBe("running");
   });
 
   it("a platform-class failure never settles the run; replay completes it", async () => {

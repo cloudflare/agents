@@ -45,6 +45,10 @@ interface ChatRecoveryTestStub {
   getRecoveryTransportCountsForTest(
     callback: string
   ): Promise<{ tasks: number; schedules: number }>;
+  testRecoveryDispatchHandoffForTest(options: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    phase: "before" | "after";
+  }): Promise<{ threw: boolean; tasks: number; schedules: number }>;
   getRunFiberCountForTest(): Promise<number>;
   runAlarmForTest(): Promise<void>;
   setSimulateSupersededIsolateForTest(value: boolean): Promise<void>;
@@ -769,6 +773,23 @@ describe("onChatRecovery", () => {
     // miscounted as new progress — otherwise a reconnecting client could reset
     // the no-progress window of a stuck turn forever.
     expect(afterPersist).toBe(afterFlush);
+  });
+
+  it("keeps pre-handoff failure on the current Task and replaces only post-handoff failure", async () => {
+    for (const callback of [
+      "_chatRecoveryContinue",
+      "_chatRecoveryRetry"
+    ] as const) {
+      const before = await (
+        await getTestAgent(`${callback}-before-${crypto.randomUUID()}`)
+      ).testRecoveryDispatchHandoffForTest({ callback, phase: "before" });
+      expect(before).toEqual({ threw: true, tasks: 1, schedules: 0 });
+
+      const after = await (
+        await getTestAgent(`${callback}-after-${crypto.randomUUID()}`)
+      ).testRecoveryDispatchHandoffForTest({ callback, phase: "after" });
+      expect(after).toEqual({ threw: false, tasks: 2, schedules: 0 });
+    }
   });
 
   it("recovers when the continuation alarm fires on a superseded isolate", async () => {

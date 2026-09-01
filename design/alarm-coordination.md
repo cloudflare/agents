@@ -26,8 +26,11 @@ capabilities push jobs instead of contributing wake times.
   an isolate death mid-drive still wakes the object to resume its queue.
 - **Tasks** — the capability for durable replayable execution. Every
   non-terminal run's authoritative `next_at` deadline is mirrored as one queue
-  job per run. Framework definitions may mark sibling runs as one recovery
-  loop; only those disposable wake mirrors carry the queue's recovery flag.
+  job per run. Task wakes use one job-dispatch attempt because ReplayStep owns
+  their durable retry budget; a propagated platform failure must reach a fresh
+  alarm invocation instead of entering JobDriver's generic retry loop.
+  Framework definitions may mark sibling runs as one recovery loop; only those
+  disposable wake mirrors carry the queue's recovery flag.
 
 ## How the alarm is derived
 
@@ -41,7 +44,9 @@ The next physical alarm is a pure SQL computation over the queue:
 
 Re-arm requests are serialized so a later durable-state change cannot be
 overwritten by an earlier calculation, and requests made during startup are
-coalesced and applied after startup completes.
+coalesced and applied after startup completes. JobQueue upgrades existing
+`cf_agents_jobs` tables with new policy columns before any operation references
+them; existing rows receive the policy's safe default.
 
 ## When the alarm fires
 
