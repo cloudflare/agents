@@ -1,19 +1,22 @@
 # Next: chats
 
 The recommended shape for "many chats per user": **one top-level Durable
-Object per chat** (`ChatAgent`), plus **one per-user index DO**
-(`UserAgent`) that every chat pushes its metadata into.
+Object per chat** (`ChatAgent`), owned and routed to by **one per-user hub**
+(`UserAgent`) built on `RoutedAgents` from `agents/routing`.
 
 ```
-UserAgent "alice"                ChatAgent "alice:{chatId}" (one per chat)
-┌───────────────────────┐        ┌──────────────────────────┐
-│ chats                 │ update │ messages                 │
-│  chat_id → title,     │◀───────│  role, text, at          │
-│  last_message,        │  push  │  (own SQLite, own alarms,│
-│  updated_at           │        │   own placement)         │
-└───────────────────────┘        └──────────────────────────┘
-   listChats / searchChats            addMessage / getMessages
-   read ONLY the index                destroy() deletes everything
+UserAgent "alice"                          ChatAgent (one per chat, opaque name)
+┌────────────────────────────────┐         ┌──────────────────────────┐
+│ RoutedAgents route "chats"     │ forward │ messages                 │
+│  id → physical name,           │────────▶│  role, text, at          │
+│       title, lastMessage       │         │  (own SQLite, own alarms,│
+│                                │◀────────│   own placement)         │
+└────────────────────────────────┘  push   └──────────────────────────┘
+   listChats / searchChats / deleteChat       addMessage / getMessages
+   read and write ONLY the hub                 owns its WebSocket
+
+/agents/user-agent/alice                -> the hub
+/agents/user-agent/alice/chats/{id}     -> that chat, suffix preserved
 ```
 
 ## Why not facets (dynamic agents)?
@@ -27,27 +30,23 @@ code the parent _supervises_ — dynamically-loaded or generated code,
 per-run tool agents — reached via `this.dynamicAgents`. See
 `docs/agents/sub-agents.md` for the decision rule.
 
-## What the index buys you
+## What `RoutedAgents` does for the hub
 
-- **Listing** a user's chats reads one DO — no chat wakes up.
-- **Cross-chat search** is a `LIKE` over the pushed metadata, again
-  without waking any chat DO. (This is the usual objection to
-  DO-per-chat — "search across chats is impossible" — and the answer is
-  a push-based mirror index, the same pattern the reference apps use.)
-- **Deletion** is `chat.destroy()` plus one index row — no manual
-  multi-table sweeps.
+- **Creation** allocates a public chat ID and an opaque physical name.
+  The hub then calls `init()` on the new chat once so it knows its owner.
+- **Routing.** Requests and WebSocket upgrades under `/chats/{id}` are
+  forwarded to that chat. The chat answers the upgrade and owns the
+  socket, so chat frames never wake the hub.
+- **Listing and search** read only the hub. Each chat pushes its title
+  and last message back with `recordChatActivity()`, which is one
+  `setMetadata()` call; entries list most recently updated first.
+- **Deletion** is `chats.delete(id)`: the entry is hidden, the chat's
+  storage is destroyed, and the row removed. A push for a deleted chat
+  returns `false`, so delayed activity cannot resurrect it.
 
-The index is derived data pushed on every write; the chats themselves
-stay the source of truth. A push updates only an existing catalog row
-and cannot replace metadata with an older activity timestamp, so delayed
-activity cannot recreate a chat or overwrite newer metadata. The User DO
-also assigns a monotonic activity sequence as a tie-breaker, while the
-Chat-owned activity timestamp remains the primary list order.
-
-This example demonstrates the topology, not guaranteed cross-DO delivery.
-A failed metadata push leaves the derived index temporarily stale and does
-not fail the already-committed chat write. The proposed production protocol
-for idempotency, repair, deletion, and User-gated routing lives in
+The pushed metadata is derived data. A failed push leaves it stale until
+the chat's next message; the chat itself stays the source of truth.
+Idempotency and repair belong to the production design in
 [`design/rfc-user-chat-durable-objects.md`](../../../design/rfc-user-chat-durable-objects.md).
 
 ## Run
@@ -58,8 +57,8 @@ pnpm run start
 ```
 
 The React UI (Vite + Kumo) shows the whole pattern: the sidebar and
-search read only the per-user index DO over one `useAgent` connection,
-and each open chat gets its own WebSocket straight to that chat's DO.
+search use one `useAgent` connection to the hub, and each open chat gets
+its own WebSocket through the hub's route via `basePath`.
 
 ## Test
 

@@ -1,22 +1,24 @@
 import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
+import { RoutedAgents } from "agents/routing";
 
 /**
  * The recommended shape for "many chats per user": one top-level
- * Durable Object per chat, plus one per-user index DO the chats push
- * their metadata into.
+ * Durable Object per chat, owned and routed to by a per-user hub.
+ *
+ * `RoutedAgents` gives the hub a durable catalog of chat IDs mapped to
+ * opaque physical names, and forwards `/chats/{id}/...` requests and
+ * WebSocket upgrades to the right chat. Each chat pushes its metadata
+ * back into the hub so listing, search, and deletion never wake a chat.
  *
  * Contrast with dynamic agents (facets): a chat needs no isolation
  * boundary from its parent, does need its own alarms and placement,
- * and a user accumulates an unbounded number of them — every axis on
- * which an independent DO beats a colocated facet. See
+ * and a user accumulates an unbounded number of them. See
  * docs/agents/sub-agents.md for the decision rule.
  */
 
 type ChatMeta = {
-  chatId: string;
   title: string | null;
   lastMessage: string | null;
-  updatedAt: number;
 };
 
 type ChatMessage = {
@@ -25,12 +27,13 @@ type ChatMessage = {
   at: number;
 };
 
-/**
- * One Durable Object per conversation. The chat's name embeds its
- * owner (`{userId}:{chatId}`) so it can push index updates without any
- * init handshake, and deleting the chat is one `destroy()` — no manual
- * multi-table sweeps.
- */
+/** Recorded once by the owning UserAgent right after the entry is created. */
+type ChatOwner = {
+  userId: string;
+  chatId: string;
+};
+
+/** One Durable Object per conversation, reached only through its owner. */
 export class ChatAgent extends Agent<Env> {
   onStart(): void {
     this.sql`
@@ -43,17 +46,8 @@ export class ChatAgent extends Agent<Env> {
     `;
   }
 
-  #ids(): { userId: string; chatId: string } {
-    const separator = this.name.lastIndexOf(":");
-    if (separator === -1) {
-      throw new Error(
-        `ChatAgent name "${this.name}" must be "{userId}:{chatId}"`
-      );
-    }
-    return {
-      userId: this.name.slice(0, separator),
-      chatId: this.name.slice(separator + 1)
-    };
+  init(owner: ChatOwner): Promise<void> {
+    return this.ctx.storage.put("owner", owner);
   }
 
   @callable()
@@ -66,23 +60,24 @@ export class ChatAgent extends Agent<Env> {
       SELECT COUNT(*) AS n FROM messages
     `;
 
-    // Push metadata to the per-user index so listing and search never
-    // wake this DO. The index is derived data: it can always be
-    // rebuilt from the chats themselves.
-    const { userId, chatId } = this.#ids();
+    // Push the latest snapshot to the owner so listing and search never
+    // wake this DO. The owner's copy is derived data: a failed push
+    // leaves it stale until the next message, and a push for a deleted
+    // chat is refused, so nothing can resurrect a deleted entry.
+    const owner = await this.ctx.storage.get<ChatOwner>("owner");
     const [first] = this.sql<{ text: string }>`
       SELECT text FROM messages WHERE role = 'user' ORDER BY id ASC LIMIT 1
     `;
-    try {
-      const user = await getAgentByName(this.env.UserAgent, userId);
-      await user.recordChatActivity({
-        chatId,
-        title: first ? first.text.slice(0, 80) : null,
-        lastMessage: text.slice(0, 120),
-        updatedAt: at
-      });
-    } catch (error) {
-      console.warn("[ChatAgent] User index update failed", error);
+    if (owner) {
+      try {
+        const user = await getAgentByName(this.env.UserAgent, owner.userId);
+        await user.recordChatActivity(owner.chatId, {
+          title: first ? first.text.slice(0, 80) : null,
+          lastMessage: text.slice(0, 120)
+        });
+      } catch (error) {
+        console.warn("[ChatAgent] owner update failed", error);
+      }
     }
 
     return n;
@@ -94,129 +89,73 @@ export class ChatAgent extends Agent<Env> {
       SELECT role, text, at FROM messages ORDER BY id ASC
     `;
   }
+
+  /** HTTP surface, reached as `/agents/user-agent/{user}/chats/{id}/messages`. */
+  override async onRequest(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname !== "/messages") {
+      return new Response("Not found", { status: 404 });
+    }
+    if (request.method === "POST") {
+      const { role, text } =
+        await request.json<Pick<ChatMessage, "role" | "text">>();
+      await this.addMessage(role, text);
+    }
+    return Response.json(this.getMessages());
+  }
 }
 
 /**
- * The per-user index: a push-based mirror of every chat's metadata.
- * Listing, ordering, and cross-chat search read only this DO — no
- * fan-out to the chat DOs.
+ * The per-user hub. It owns the set of chats, routes to them, and holds
+ * the pushed metadata that the sidebar and search read.
  */
 export class UserAgent extends Agent<Env> {
-  onStart(): void {
-    this.sql`
-      CREATE TABLE IF NOT EXISTS chats (
-        chat_id TEXT PRIMARY KEY,
-        title TEXT,
-        last_message TEXT,
-        updated_at INTEGER NOT NULL,
-        activity_sequence INTEGER NOT NULL DEFAULT 0
-      )
-    `;
-    const columns = this.sql<{ name: string }>`PRAGMA table_info(chats)`;
-    if (!columns.some((column) => column.name === "activity_sequence")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE chats ADD COLUMN activity_sequence INTEGER NOT NULL DEFAULT 0"
-      );
-    }
-    this.sql`
-      CREATE TABLE IF NOT EXISTS chat_index_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        next_activity_sequence INTEGER NOT NULL
-      )
-    `;
-    this.sql`
-      INSERT OR IGNORE INTO chat_index_state (id, next_activity_sequence)
-      SELECT 1, COALESCE(MAX(activity_sequence), 0) FROM chats
-    `;
-  }
+  readonly chats = new RoutedAgents<ChatAgent, ChatMeta>({
+    namespace: this.env.ChatAgent,
+    route: "chats"
+  });
 
-  #nextActivitySequence(): number {
-    const [row] = this.sql<{ value: number }>`
-      UPDATE chat_index_state
-      SET next_activity_sequence = next_activity_sequence + 1
-      WHERE id = 1
-      RETURNING next_activity_sequence AS value
-    `;
-    if (!row) throw new Error("Chat index sequence row is missing.");
-    return row.value;
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.chats);
   }
 
   @callable()
   async createChat(): Promise<string> {
-    const chatId = crypto.randomUUID();
-    this.sql`
-      INSERT INTO chats (
-        chat_id,
-        title,
-        last_message,
-        updated_at,
-        activity_sequence
+    const { id } = await this.chats.create({
+      metadata: { title: null, lastMessage: null }
+    });
+    const chat = await this.chats.get(id);
+    if (!chat) throw new Error(`Chat ${id} vanished during creation`);
+    await chat.init({ userId: this.name, chatId: id });
+    return id;
+  }
+
+  /** DO-RPC target for ChatAgent pushes. False once the chat is deleted. */
+  recordChatActivity(chatId: string, meta: ChatMeta): Promise<boolean> {
+    return this.chats.setMetadata(chatId, meta);
+  }
+
+  /** Most recent activity first; reads only this DO. */
+  @callable()
+  listChats() {
+    return this.chats.list();
+  }
+
+  /** Cross-chat search over the pushed metadata; no chat wakes up. */
+  @callable()
+  async searchChats(query: string) {
+    const needle = query.toLowerCase();
+    return (await this.chats.list()).filter(({ metadata }) =>
+      [metadata?.title, metadata?.lastMessage].some((value) =>
+        value?.toLowerCase().includes(needle)
       )
-      VALUES (
-        ${chatId},
-        NULL,
-        NULL,
-        ${Date.now()},
-        ${this.#nextActivitySequence()}
-      )
-    `;
-    return chatId;
-  }
-
-  /** Internal DO-RPC target for ChatAgent metadata updates. */
-  recordChatActivity(meta: ChatMeta): boolean {
-    const activitySequence = this.#nextActivitySequence();
-    const rows = this.sql<{ chatId: string }>`
-      UPDATE chats SET
-        title = ${meta.title},
-        last_message = ${meta.lastMessage},
-        updated_at = ${meta.updatedAt},
-        activity_sequence = ${activitySequence}
-      WHERE chat_id = ${meta.chatId}
-        AND updated_at <= ${meta.updatedAt}
-      RETURNING chat_id AS chatId
-    `;
-    return rows.length > 0;
-  }
-
-  @callable()
-  listChats(): ChatMeta[] {
-    return this.sql<ChatMeta>`
-      SELECT chat_id AS chatId, title, last_message AS lastMessage,
-             updated_at AS updatedAt
-      FROM chats
-      ORDER BY updated_at DESC, activity_sequence DESC, chat_id ASC
-    `;
-  }
-
-  /**
-   * Cross-chat search over the pushed metadata. No chat DO wakes up
-   * for this — the cost of search is one read of the user's own index.
-   */
-  @callable()
-  searchChats(query: string): ChatMeta[] {
-    const like = `%${query}%`;
-    return this.sql<ChatMeta>`
-      SELECT chat_id AS chatId, title, last_message AS lastMessage,
-             updated_at AS updatedAt
-      FROM chats
-      WHERE title LIKE ${like} OR last_message LIKE ${like}
-      ORDER BY updated_at DESC, activity_sequence DESC, chat_id ASC
-    `;
-  }
-
-  /**
-   * Deleting a chat is the whole payoff of per-chat DOs: destroy the
-   * chat's own storage in one call, remove one index row, done.
-   */
-  @callable()
-  async deleteChat(chatId: string): Promise<void> {
-    const chat = await getAgentByName(
-      this.env.ChatAgent,
-      `${this.name}:${chatId}`
     );
-    await chat.destroy();
-    this.sql`DELETE FROM chats WHERE chat_id = ${chatId}`;
+  }
+
+  /** Destroys the chat's own storage and removes it from the catalog. */
+  @callable()
+  deleteChat(chatId: string): Promise<boolean> {
+    return this.chats.delete(chatId);
   }
 }
 
