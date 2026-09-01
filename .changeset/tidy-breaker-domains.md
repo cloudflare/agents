@@ -26,4 +26,6 @@ Removed accordingly: `Agent.onAlarmMemoryLimit`'s relay implementation, the
 methods, `Scheduler.applyMemoryLimitPolicy`, and
 `setLifecycleAlarmMemoryLimitStrikes`. `AIChatAgent` and `Think` flag their
 recovery schedules via `chatRecoverySchedulePolicy` and seal in-flight
-incidents from their own protected `onAlarmMemoryLimit` hooks.
+incidents from their own protected `onAlarmMemoryLimit` hooks; both now
+require `agents >= 0.23.0` (they consume new `agents/chat` exports and no
+longer implement the old template-method breaker hooks).
