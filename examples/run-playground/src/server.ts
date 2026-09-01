@@ -12,6 +12,8 @@ export interface RunApiResponse {
   ok: boolean;
   /** Formatted display string of the returned value (success only). */
   value?: string;
+  /** Pretty-printed JSON of the returned value (success only). */
+  raw?: string;
   /** Stable RunError code (failure only). */
   code?: string;
   message?: string;
@@ -117,6 +119,24 @@ function formatRunValue(value: unknown, seen = new Set<unknown>()): string {
   }
 }
 
+/**
+ * Pretty-printed JSON of a run value. JSON cannot represent everything RPC
+ * carries, so BigInt renders with an `n` suffix and Map/Set as their entries.
+ */
+function formatRawValue(value: unknown): string {
+  const raw = JSON.stringify(
+    value,
+    (_key, entry: unknown) => {
+      if (typeof entry === "bigint") return `${entry}n`;
+      if (entry instanceof Map) return Object.fromEntries(entry);
+      if (entry instanceof Set) return [...entry];
+      return entry;
+    },
+    2
+  );
+  return raw ?? "undefined";
+}
+
 /** Parse and bound the request body; returns undefined when malformed. */
 function parseRunRequestBody(value: unknown): RunRequestBody | undefined {
   if (typeof value !== "object" || value === null) return undefined;
@@ -182,6 +202,7 @@ async function handleRun(request: Request, env: Env): Promise<Response> {
     const response: RunApiResponse = {
       ok: true,
       value: formatRunValue(result.value).slice(0, DISPLAY_VALUE_MAX_CHARS),
+      raw: formatRawValue(result.value).slice(0, DISPLAY_VALUE_MAX_CHARS),
       logs: result.logs,
       durationMs: Date.now() - started
     };

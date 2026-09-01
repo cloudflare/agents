@@ -2,9 +2,9 @@ import "./styles.css";
 import {
   Badge,
   Button,
-  Input,
   PoweredByCloudflare,
   Surface,
+  Switch,
   Text,
   Textarea
 } from "@cloudflare/kumo";
@@ -24,8 +24,20 @@ interface Preset {
   label: string;
   note: string;
   source: string;
-  limits?: { timeoutMs?: number; cpuMs?: number; maxLogBytes?: number };
+  limits?: Partial<Limits>;
 }
+
+interface Limits {
+  timeoutMs: number;
+  cpuMs: number;
+  maxLogBytes: number;
+}
+
+const DEFAULT_LIMITS: Limits = {
+  timeoutMs: 30_000,
+  cpuMs: 5_000,
+  maxLogBytes: 262_144
+};
 
 const EXAMPLE_PRESETS: Preset[] = [
   {
@@ -81,7 +93,7 @@ const BREAK_PRESETS: Preset[] = [
   {
     id: "cpu-burn",
     label: "Burn CPU",
-    note: "Deployed, the platform meters real CPU and kills this with RUN_RESOURCE_LIMIT once cpuMs is spent. Local dev does not enforce CPU budgets, so here it just takes a few seconds.",
+    note: "Deployed, the platform meters real CPU and kills this with RUN_RESOURCE_LIMIT once cpuMs is spent. Local dev does not enforce CPU budgets, so there it just takes a few seconds.",
     source: `// Heavy synchronous work against a 500ms CPU budget.
 let x = 0;
 for (let i = 0; i < 3_000_000_000; i++) {
@@ -129,7 +141,7 @@ return stepOne();
 }
 return "done logging";
 `,
-    limits: { maxLogBytes: 2048 }
+    limits: { maxLogBytes: 2_048 }
   },
   {
     id: "timeout",
@@ -144,6 +156,18 @@ return "you should never see this";
 ];
 
 const ALL_PRESETS = [...EXAMPLE_PRESETS, ...BREAK_PRESETS];
+
+/** Keep in sync with the hostFunctions passed to run() in server.ts. */
+const HOST_FUNCTIONS = [
+  {
+    signature: "demo.customers()",
+    description: "Six demo customer records. Runs in the parent Worker."
+  },
+  {
+    signature: "demo.wait(ms)",
+    description: "Signal-aware sleep in the parent; cancellation reaches it."
+  }
+];
 
 interface RunHistoryEntry {
   durationMs: number;
@@ -174,17 +198,58 @@ function ModeToggle() {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-kumo-inactive">
+    <p className="mb-1.5 text-xs font-semibold text-kumo-inactive">
       {children}
     </p>
   );
 }
 
-function LimitLabel({ children }: { children: React.ReactNode }) {
+function formatMilliseconds(value: number): string {
+  return `${value.toLocaleString("en-US")} ms`;
+}
+
+function formatBytes(value: number): string {
+  return value >= 1024
+    ? `${(value / 1024).toLocaleString("en-US")} KiB`
+    : `${value.toLocaleString("en-US")} B`;
+}
+
+function LimitSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  format,
+  onChange
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  format: (value: number) => string;
+  onChange: (value: number) => void;
+}) {
   return (
-    <p className="mb-1.5 font-mono text-[11px] font-semibold text-kumo-inactive">
-      {children}
-    </p>
+    <div>
+      <div className="mb-1 flex items-baseline justify-between">
+        <span className="font-mono text-xs text-kumo-inactive">{label}</span>
+        <span className="font-mono text-xs font-medium text-kumo-default">
+          {format(value)}
+        </span>
+      </div>
+      <input
+        type="range"
+        aria-label={label}
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        className="w-full accent-kumo-accent"
+      />
+    </div>
   );
 }
 
@@ -209,7 +274,7 @@ function LatencyCard({ history }: { history: RunHistoryEntry[] }) {
   const height = 44;
 
   return (
-    <Surface className="rounded-xl p-4 ring ring-kumo-line">
+    <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
       <SectionLabel>
         Fresh isolate per run — server-side latency, last {history.length} run
         {history.length === 1 ? "" : "s"}
@@ -244,7 +309,7 @@ function LatencyCard({ history }: { history: RunHistoryEntry[] }) {
         </svg>
         <div className="flex gap-6">
           <div>
-            <p className="font-mono text-lg font-semibold text-kumo-default">
+            <p className="font-mono text-sm font-semibold text-kumo-default">
               {median}ms
             </p>
             <Text size="xs" variant="secondary">
@@ -252,7 +317,7 @@ function LatencyCard({ history }: { history: RunHistoryEntry[] }) {
             </Text>
           </div>
           <div>
-            <p className="font-mono text-lg font-semibold text-kumo-default">
+            <p className="font-mono text-sm font-semibold text-kumo-default">
               {p95}ms
             </p>
             <Text size="xs" variant="secondary">
@@ -283,7 +348,7 @@ function StackTrace({
           return (
             <pre
               key={key}
-              className="font-mono text-[11px] text-kumo-inactive whitespace-pre-wrap break-words"
+              className="font-mono text-xs text-kumo-inactive whitespace-pre-wrap break-words"
             >
               {line}
             </pre>
@@ -296,7 +361,7 @@ function StackTrace({
             type="button"
             onClick={() => onJumpToLine(sourceLine)}
             title={`Jump to line ${sourceLine}`}
-            className="block w-full cursor-pointer rounded px-1 text-left font-mono text-[11px] text-kumo-accent underline decoration-dotted underline-offset-2 whitespace-pre-wrap break-words hover:bg-kumo-elevated"
+            className="block w-full cursor-pointer rounded px-1 text-left font-mono text-xs text-kumo-accent underline decoration-dotted underline-offset-2 whitespace-pre-wrap break-words hover:bg-kumo-elevated"
           >
             {line}
           </button>
@@ -318,11 +383,10 @@ export function App() {
   const initialPreset = EXAMPLE_PRESETS[0];
   const [source, setSource] = useState(initialPreset?.source ?? "");
   const [presetId, setPresetId] = useState(initialPreset?.id);
-  const [timeoutMs, setTimeoutMs] = useState("");
-  const [cpuMs, setCpuMs] = useState("");
-  const [maxLogBytes, setMaxLogBytes] = useState("");
+  const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<RunApiResponse>();
+  const [showRaw, setShowRaw] = useState(false);
   const [history, setHistory] = useState<RunHistoryEntry[]>([]);
   const editorRef = useRef<HTMLTextAreaElement>(null);
 
@@ -331,9 +395,7 @@ export function App() {
   function applyPreset(preset: Preset) {
     setPresetId(preset.id);
     setSource(preset.source);
-    setTimeoutMs(preset.limits?.timeoutMs?.toString() ?? "");
-    setCpuMs(preset.limits?.cpuMs?.toString() ?? "");
-    setMaxLogBytes(preset.limits?.maxLogBytes?.toString() ?? "");
+    setLimits({ ...DEFAULT_LIMITS, ...preset.limits });
     setResult(undefined);
   }
 
@@ -352,18 +414,11 @@ export function App() {
   async function handleRun() {
     setRunning(true);
     setResult(undefined);
-    const limits: Record<string, number> = {};
-    if (timeoutMs !== "") limits.timeoutMs = Number(timeoutMs);
-    if (cpuMs !== "") limits.cpuMs = Number(cpuMs);
-    if (maxLogBytes !== "") limits.maxLogBytes = Number(maxLogBytes);
     try {
       const response = await fetch("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source,
-          ...(Object.keys(limits).length === 0 ? {} : { limits })
-        })
+        body: JSON.stringify({ source, limits })
       });
       const body = (await response.json()) as RunApiResponse;
       setResult(body);
@@ -403,40 +458,38 @@ export function App() {
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <PlayIcon size={20} weight="fill" className="text-kumo-accent" />
-          <h1 className="text-lg font-semibold text-kumo-default">
+          <h1 className="text-base font-semibold text-kumo-default">
             Run Playground
           </h1>
-          <Badge variant="secondary">@cloudflare/run</Badge>
+          <Badge variant="secondary">
+            <span className="font-mono text-[0.9em]">@cloudflare/run</span>
+          </Badge>
         </div>
         <ModeToggle />
       </header>
 
-      <Surface className="rounded-xl p-4 ring ring-kumo-line">
-        <div className="flex gap-3">
-          <InfoIcon
-            size={20}
-            weight="bold"
-            className="mt-0.5 shrink-0 text-kumo-accent"
-          />
-          <div>
+      <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
+        <div className="flex items-start gap-3">
+          <span className="h-lh flex items-center">
+            <InfoIcon size={20} weight="bold" className="text-kumo-accent" />
+          </span>
+          <div className="grid gap-1">
             <Text size="sm" bold>
               Untrusted code, fresh isolate, explicit authority
             </Text>
-            <span className="mt-1 block">
-              <Text size="xs" variant="secondary">
-                Everything you type here executes in a brand-new Dynamic Worker
-                with no bindings, no imports, and no network. Its only authority
-                is the demo.* host functions the server passes in. Pick a preset
-                — especially the hostile ones — and watch each escape attempt
-                come back as a clean, typed RunError.
-              </Text>
-            </span>
+            <Text size="xs" variant="secondary">
+              Everything you type here executes in a brand-new Dynamic Worker
+              with no bindings, no imports, and no network. Its only authority
+              is the demo.* host functions the server passes in. Pick a preset —
+              especially the hostile ones — and watch each escape attempt come
+              back as a clean, typed RunError.
+            </Text>
           </div>
         </div>
       </Surface>
 
       <div className="grid flex-1 gap-4 lg:grid-cols-2">
-        <Surface className="flex flex-col gap-3 rounded-xl p-4 ring ring-kumo-line">
+        <Surface className="flex flex-col gap-3 rounded-xl px-4 py-3 ring ring-kumo-line">
           <div>
             <SectionLabel>Examples</SectionLabel>
             <div className="flex flex-wrap gap-1.5">
@@ -470,7 +523,9 @@ export function App() {
 
           {activePreset !== undefined && (
             <div className="flex items-start gap-1.5 text-kumo-inactive">
-              <ArrowElbowDownRightIcon size={14} className="mt-0.5 shrink-0" />
+              <span className="h-lh flex items-center">
+                <ArrowElbowDownRightIcon size={14} className="shrink-0" />
+              </span>
               <Text size="xs" variant="secondary">
                 {activePreset.note}
               </Text>
@@ -484,62 +539,96 @@ export function App() {
             onKeyDown={handleEditorKeyDown}
             spellCheck={false}
             aria-label="Source editor"
-            className="min-h-[300px] flex-1 resize-none font-mono text-[13px]"
+            className="min-h-[260px] flex-1 resize-none font-mono text-[13px]"
           />
 
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="w-28">
-              <LimitLabel>timeoutMs</LimitLabel>
-              <Input
-                type="number"
-                value={timeoutMs}
-                placeholder="30000"
-                onValueChange={setTimeoutMs}
-                aria-label="Wall timeout in milliseconds"
-              />
-            </div>
-            <div className="w-28">
-              <LimitLabel>cpuMs</LimitLabel>
-              <Input
-                type="number"
-                value={cpuMs}
-                placeholder="5000"
-                onValueChange={setCpuMs}
-                aria-label="CPU budget in milliseconds"
-              />
-            </div>
-            <div className="w-28">
-              <LimitLabel>maxLogBytes</LimitLabel>
-              <Input
-                type="number"
-                value={maxLogBytes}
-                placeholder="262144"
-                onValueChange={setMaxLogBytes}
-                aria-label="Maximum retained log bytes"
-              />
-            </div>
-            <div className="ml-auto">
-              <Button
-                variant="primary"
-                loading={running}
-                onClick={handleRun}
-                icon={<PlayIcon size={14} weight="fill" />}
-              >
-                Run
-              </Button>
+          <div>
+            <SectionLabel>Host functions available to this code</SectionLabel>
+            <div className="grid gap-1">
+              {HOST_FUNCTIONS.map((hostFunction) => (
+                <div
+                  key={hostFunction.signature}
+                  className="flex flex-wrap items-baseline gap-x-2"
+                >
+                  <code className="rounded bg-kumo-elevated px-1 font-mono text-xs text-kumo-default">
+                    {hostFunction.signature}
+                  </code>
+                  <Text size="xs" variant="secondary">
+                    {hostFunction.description}
+                  </Text>
+                </div>
+              ))}
             </div>
           </div>
+
+          <div>
+            <SectionLabel>Limits</SectionLabel>
+            <div className="grid gap-2.5 sm:grid-cols-3">
+              <LimitSlider
+                label="timeoutMs"
+                value={limits.timeoutMs}
+                min={500}
+                max={30_000}
+                step={500}
+                format={formatMilliseconds}
+                onChange={(timeoutMs) =>
+                  setLimits((previous) => ({ ...previous, timeoutMs }))
+                }
+              />
+              <LimitSlider
+                label="cpuMs"
+                value={limits.cpuMs}
+                min={100}
+                max={5_000}
+                step={100}
+                format={formatMilliseconds}
+                onChange={(cpuMs) =>
+                  setLimits((previous) => ({ ...previous, cpuMs }))
+                }
+              />
+              <LimitSlider
+                label="maxLogBytes"
+                value={limits.maxLogBytes}
+                min={1_024}
+                max={262_144}
+                step={1_024}
+                format={formatBytes}
+                onChange={(maxLogBytes) =>
+                  setLimits((previous) => ({ ...previous, maxLogBytes }))
+                }
+              />
+            </div>
+          </div>
+
+          <Button
+            variant="primary"
+            loading={running}
+            onClick={handleRun}
+            icon={<PlayIcon size={14} weight="fill" />}
+          >
+            Run
+          </Button>
         </Surface>
 
         <div className="flex flex-col gap-4">
-          <Surface className="flex-1 rounded-xl p-4 ring ring-kumo-line">
+          <Surface className="flex-1 rounded-xl px-4 py-3 ring ring-kumo-line">
             <div className="mb-2 flex items-center justify-between">
               <SectionLabel>Result</SectionLabel>
-              {result !== undefined && (
-                <span className="font-mono text-[11px] text-kumo-inactive">
-                  {result.durationMs}ms
-                </span>
-              )}
+              <div className="flex items-center gap-3">
+                {result?.ok === true && (
+                  <Switch
+                    size="sm"
+                    label="Raw"
+                    checked={showRaw}
+                    onCheckedChange={setShowRaw}
+                  />
+                )}
+                {result !== undefined && (
+                  <span className="font-mono text-xs text-kumo-inactive">
+                    {result.durationMs}ms
+                  </span>
+                )}
+              </div>
             </div>
 
             {result === undefined && !running && (
@@ -557,7 +646,7 @@ export function App() {
               <div>
                 <Badge variant="success">completed</Badge>
                 <pre className="mt-2 rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-status-success whitespace-pre-wrap break-words">
-                  {result.value}
+                  {showRaw ? result.raw : result.value}
                 </pre>
               </div>
             )}
@@ -585,7 +674,7 @@ export function App() {
                     <pre
                       // biome-ignore lint: log order is the identity
                       key={index}
-                      className={`font-mono text-[11px] whitespace-pre-wrap break-words ${LOG_LEVEL_CLASSES[log.level] ?? "text-kumo-default"}`}
+                      className={`font-mono text-xs whitespace-pre-wrap break-words ${LOG_LEVEL_CLASSES[log.level] ?? "text-kumo-default"}`}
                     >
                       <span className="text-kumo-inactive">[{log.level}] </span>
                       {log.message}
