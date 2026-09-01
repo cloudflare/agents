@@ -1257,6 +1257,135 @@ describe("schedule operations", () => {
     });
   });
 
+  describe("legacy schedule migration keeps breaker membership (#1825)", () => {
+    // Same shape as the breaker suite's helper: drive one OOM strike and let
+    // the deferred isolate reset land before the next stub call.
+    async function driveOomStrike(name: string, message: string) {
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const result = await stub.runOneShotThrowingForTest(message);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return result;
+    }
+
+    // Rows migrated from the legacy cf_agents_schedules table predate the
+    // job queue's recovery_loop flag. Chat-recovery rows must come out of the
+    // migration flagged — an unflagged survivor would escape the alarm
+    // memory-limit breaker and could re-trigger the doomed loop it drives.
+    it("flags migrated chat-recovery rows and drives them through backoff and seal", async () => {
+      const name = "legacy-migration-recovery-loop";
+      const oom =
+        "Durable Object's isolate exceeded its memory limit and was reset.";
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      await runInDurableObject(stub, async (_instance, ctx) => {
+        ctx.storage.sql.exec(`
+          CREATE TABLE cf_agents_schedules (
+            id TEXT PRIMARY KEY,
+            callback TEXT,
+            payload TEXT,
+            type TEXT,
+            time INTEGER,
+            delayInSeconds INTEGER
+          )
+        `);
+        const nowSec = Math.floor(Date.now() / 1000);
+        ctx.storage.sql.exec(
+          `INSERT INTO cf_agents_schedules
+             (id, callback, payload, type, time, delayInSeconds)
+           VALUES
+             ('legacy-rec-near', '_chatRecoveryContinue', '{"incidentId":"i1"}', 'delayed', ?, 2),
+             ('legacy-rec-far', '_chatRecoveryRetry', '{"incidentId":"i2"}', 'delayed', ?, 3600),
+             ('legacy-plain', 'testCallback', '"x"', 'delayed', ?, 3600)`,
+          nowSec + 2,
+          nowSec + 3600,
+          nowSec + 3600
+        );
+        await ctx.storage.delete("cf_agents:schedules_schema_version");
+      });
+      await evictDurableObject(stub);
+
+      // Any RPC restarts the object; startup runs the migration.
+      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const flags = await runInDurableObject(
+        fresh,
+        async (instance: TestScheduleAgent) =>
+          instance.sql<{ id: string; recovery_loop: number }>`
+            SELECT id, recovery_loop FROM cf_agents_jobs
+            WHERE id IN ('legacy-rec-near', 'legacy-rec-far', 'legacy-plain')
+            ORDER BY id
+          `
+      );
+      expect(flags).toEqual([
+        { id: "legacy-plain", recovery_loop: 0 },
+        { id: "legacy-rec-far", recovery_loop: 1 },
+        { id: "legacy-rec-near", recovery_loop: 1 }
+      ]);
+
+      // Strike 1 (unsealed): the near migrated row is backed off past the
+      // strike's ~30s backoff wake instead of re-triggering the loop.
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      let survivor = await getAgentByName(env.TestScheduleAgent, name);
+      const near = await runInDurableObject(
+        survivor,
+        async (instance: TestScheduleAgent) =>
+          instance.sql<{ time: number }>`
+            SELECT time FROM cf_agents_jobs WHERE id = 'legacy-rec-near'
+          `
+      );
+      expect(near[0].time).toBeGreaterThan(Date.now() + 20_000);
+
+      // Strikes 2 and 3: sealing purges both migrated recovery rows while
+      // the unrelated migrated schedule survives.
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 0
+      });
+      survivor = await getAgentByName(env.TestScheduleAgent, name);
+      const after = await runInDurableObject(
+        survivor,
+        async (instance: TestScheduleAgent) =>
+          instance.sql<{ id: string }>`
+            SELECT id FROM cf_agents_jobs
+            WHERE id IN ('legacy-rec-near', 'legacy-rec-far', 'legacy-plain')
+          `
+      );
+      expect(after.map((row) => row.id)).toEqual(["legacy-plain"]);
+    });
+
+    it("an idempotent recovery re-schedule restores membership on an unflagged row", async () => {
+      // The deploy-storm dedup path: an initial recovery schedule dedupes
+      // onto an existing matching row. When that row lost its flag (legacy
+      // migration ran before this fix, or any historical write), the dedup
+      // hit must restore breaker membership rather than return it unflagged
+      // forever.
+      const stub = await getAgentByName(
+        env.TestScheduleAgent,
+        "dedup-restores-recovery-flag"
+      );
+      await runInDurableObject(stub, async (instance: TestScheduleAgent) => {
+        const first = await instance.schedule(60, "testCallback", "seed", {
+          idempotent: true
+        });
+        const second = await instance.schedule(60, "testCallback", "seed", {
+          idempotent: true,
+          recoveryLoop: true
+        });
+        expect(second.id).toBe(first.id);
+        const rows = instance.sql<{ recovery_loop: number }>`
+          SELECT recovery_loop FROM cf_agents_jobs WHERE id = ${first.id}
+        `;
+        expect(rows[0].recovery_loop).toBe(1);
+        await instance.cancelSchedule(first.id);
+      });
+    });
+  });
+
   describe("one-shot defer on retry exhaustion of a platform transient (#1730)", () => {
     // A deploy-reset window outlasts the in-process retry schedule by design
     // (all attempts land inside the same few-seconds storage-unavailable

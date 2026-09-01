@@ -74,6 +74,19 @@ const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
 /** Version 2: schedule rows live in the Lifecycle job queue. */
 const CURRENT_SCHEDULE_SCHEMA_VERSION = 2;
 
+/**
+ * Legacy schedule callbacks whose rows drive chat recovery loops from before
+ * the job queue carried breaker membership. The migration is the one place
+ * allowed to know legacy names (it already drops `_cf_keepAliveHeartbeat`
+ * rows by name): a recovery row migrated without its `recoveryLoop` flag
+ * would escape the alarm memory-limit breaker (#1825) and could re-trigger
+ * a doomed loop on an upgraded object.
+ */
+const LEGACY_RECOVERY_LOOP_CALLBACKS = new Set([
+  "_chatRecoveryContinue",
+  "_chatRecoveryRetry"
+]);
+
 const DEFAULT_RETRY: Required<RetryOptions> = {
   maxAttempts: 3,
   baseDelayMs: 100,
@@ -268,7 +281,8 @@ export class Scheduler<
         } satisfies SchedulerJobPayload,
         retry: resolveRetryConfig(retry, this.#retryDefaults),
         singleflight: row.type === "interval",
-        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds
+        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+        recoveryLoop: LEGACY_RECOVERY_LOOP_CALLBACKS.has(row.callback)
       });
     }
     storage.sql.exec("DROP TABLE cf_agents_schedules");
@@ -793,6 +807,23 @@ export class Scheduler<
         JSON.stringify(payload)
       );
       if (existing) {
+        // A dedup hit onto a row without breaker membership the caller asks
+        // for (a row migrated from the legacy schedule table) re-pushes the
+        // same durable intent in place with the flag — otherwise the row
+        // would escape the alarm memory-limit breaker (#1825) forever.
+        if (options?.recoveryLoop && !existing.job.recoveryLoop) {
+          await this.lifecycle.jobs.push({
+            id: existing.job.id,
+            fn: existing.job.fn,
+            time: existing.job.time,
+            payload: existing.job.payload,
+            retry: existing.job.retry,
+            singleflight: existing.job.singleflight,
+            exclusive: existing.job.exclusive,
+            hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+            recoveryLoop: true
+          });
+        }
         // A dedup hit still re-arms so a lost physical alarm recovers, as
         // idempotent re-scheduling on startup historically guaranteed.
         await this.lifecycle.jobs.rearm();
