@@ -6,6 +6,7 @@
  */
 
 import type { StoredAttachment } from "./attachments";
+import type { ContextBlock, ContextConfig } from "./context";
 
 /**
  * Minimal message part shape used by Sessions internals.
@@ -38,7 +39,7 @@ export interface SessionMessage {
   id: string;
   role: string;
   parts: SessionMessagePart[];
-  metadata?: Record<string, unknown>;
+  metadata?: unknown;
   createdAt?: Date;
 }
 
@@ -291,13 +292,17 @@ export interface AppendOptions {
   source?: "client" | "server";
 }
 
+/** Context block options accepted by {@link Session.withContext}. */
+export type SessionContextOptions = Omit<ContextConfig, "label">;
+
+/** Input passed to a custom session token counter. */
 export interface SessionTokenCounterInput {
   /** Messages returned by `session.getHistory()` for the active branch. */
   messages: SessionMessage[];
   /** Frozen system prompt managed by the session context system. */
   systemPrompt: string;
   /** Loaded context blocks that were used to build `systemPrompt`. */
-  contextBlocks: unknown[];
+  contextBlocks: ContextBlock[];
 }
 
 export type SessionTokenCounter = (

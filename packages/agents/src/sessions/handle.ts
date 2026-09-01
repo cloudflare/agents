@@ -8,13 +8,17 @@
  * replatform with call-site renames, not logic changes.
  */
 
-import type { UIMessage } from "ai";
+import type { ToolSet, UIMessage } from "ai";
 import { enforceRowSizeLimit, sanitizeMessage } from "../chat/sanitize";
+import { COMPACTION_PREFIX, type CompactResult } from "./compaction-helpers";
 import {
-  COMPACTION_PREFIX,
-  type CompactResult
-} from "../experimental/memory/utils/compaction-helpers";
+  ContextBlocks,
+  type ContextBlock,
+  type ContextConfig,
+  type WritableContextProvider
+} from "./context";
 import type { SessionsCore } from "./core";
+import { estimateStringTokens } from "./tokens";
 import type {
   AppendOptions,
   AppendResult,
@@ -25,6 +29,7 @@ import type {
   HistoryReadOptions,
   RecentHistoryResult,
   SearchResult,
+  SessionContextOptions,
   SessionMessage,
   SessionRowStat,
   SessionStats,
@@ -37,11 +42,25 @@ export type CompactionFunction = (
   context?: CompactContext
 ) => Promise<CompactResult | null>;
 
+type PendingContext = {
+  label: string;
+  options: SessionContextOptions;
+};
+
 export class Session {
   readonly sessionId: string;
-  readonly #core: SessionsCore;
+  readonly #coreProvider: () => SessionsCore;
   readonly #ready: () => Promise<void>;
 
+  get #core(): SessionsCore {
+    return this.#coreProvider();
+  }
+
+  readonly #pendingContexts: PendingContext[] = [];
+  #cachedPrompt: WritableContextProvider | true | undefined;
+  #context: ContextBlocks | undefined;
+  #restorePromise: Promise<void> | undefined;
+  #skillScanRan = false;
   #compactionFn: CompactionFunction | null = null;
   #tokenThreshold: number | undefined;
   #tokenCounter: SessionTokenCounter | undefined;
@@ -51,15 +70,37 @@ export class Session {
   /** @internal Constructed by the Sessions capability only. */
   constructor(
     sessionId: string,
-    core: SessionsCore,
+    core: () => SessionsCore,
     ready: () => Promise<void>
   ) {
     this.sessionId = sessionId;
-    this.#core = core;
+    this.#coreProvider = core;
     this.#ready = ready;
   }
 
   // ── Builder (chainable, mirrors the legacy Session builder) ─────────────
+
+  /** Register a context block before first use. */
+  withContext(label: string, options: SessionContextOptions = {}): this {
+    if (this.#context) {
+      throw new Error(
+        `Context is already initialized; use addContext(${JSON.stringify(label)}) for runtime registration.`
+      );
+    }
+    this.#pendingContexts.push({ label, options });
+    return this;
+  }
+
+  /** Persist and reuse the frozen system prompt. */
+  withCachedPrompt(provider?: WritableContextProvider): this {
+    if (this.#context) {
+      throw new Error(
+        "Context is already initialized; withCachedPrompt() must be configured before first use."
+      );
+    }
+    this.#cachedPrompt = provider ?? true;
+    return this;
+  }
 
   /**
    * Register a compaction function. Called by `compact()` to compress
@@ -102,7 +143,7 @@ export class Session {
   async *history(
     options: HistoryReadOptions = {}
   ): AsyncGenerator<SessionMessage, void, undefined> {
-    await this.#ready();
+    await this.#ensureRestored();
     yield* this.#core.streamHistory(
       this.sessionId,
       options,
@@ -153,7 +194,7 @@ export class Session {
   async getHistory(
     options: HistoryReadOptions = {}
   ): Promise<SessionMessage[]> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.getHistory(
       this.sessionId,
       options,
@@ -172,7 +213,7 @@ export class Session {
     minRecentMessages = 1,
     options: Pick<HistoryReadOptions, "reconstruct" | "leafId"> = {}
   ): Promise<RecentHistoryResult> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.getRecentHistory(
       this.sessionId,
       maxContentBytes,
@@ -187,7 +228,7 @@ export class Session {
    * path (root → leaf) WITHOUT loading message content.
    */
   async getHistoryRowStats(leafId?: string | null): Promise<SessionRowStat[]> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.pathRowStats(this.sessionId, leafId);
   }
 
@@ -195,7 +236,7 @@ export class Session {
     id: string,
     options: Pick<HistoryReadOptions, "reconstruct"> = {}
   ): Promise<SessionMessage | null> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.getMessage(
       this.sessionId,
       id,
@@ -204,23 +245,23 @@ export class Session {
   }
 
   async getLatestLeaf(): Promise<SessionMessage | null> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.getLatestLeaf(this.sessionId);
   }
 
   async getBranches(messageId: string): Promise<SessionMessage[]> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.getBranches(this.sessionId, messageId);
   }
 
   async getPathLength(leafId?: string | null): Promise<number> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.getPathLength(this.sessionId, leafId);
   }
 
   /** O(1)-maintained aggregate stats for the active branch path. */
   async stats(): Promise<SessionStats> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.stats(this.sessionId);
   }
 
@@ -230,7 +271,7 @@ export class Session {
     message: SessionMessage,
     options: AppendOptions = {}
   ): Promise<AppendResult> {
-    await this.#ready();
+    await this.#ensureRestored();
     const existing = this.#core.getMessageRaw(this.sessionId, message.id);
     if (existing) {
       await this.#core.notify({
@@ -301,7 +342,7 @@ export class Session {
   }
 
   async updateMessage(message: SessionMessage): Promise<SessionMessage> {
-    await this.#ready();
+    await this.#ensureRestored();
     const prepared = await this.#prepare(message, undefined);
     await this.#core.update(
       this.sessionId,
@@ -320,7 +361,7 @@ export class Session {
     message: SessionMessage,
     options: AppendOptions = {}
   ): Promise<AppendResult> {
-    await this.#ready();
+    await this.#ensureRestored();
     const existing = this.#core.getMessageRaw(this.sessionId, message.id);
     if (existing) {
       const stored = await this.updateMessage(message);
@@ -330,7 +371,7 @@ export class Session {
   }
 
   async deleteMessages(messageIds: string[]): Promise<void> {
-    await this.#ready();
+    await this.#ensureRestored();
     await this.#core.deleteMessages(this.sessionId, messageIds);
     await this.#core.notify({
       type: "delete",
@@ -340,7 +381,7 @@ export class Session {
   }
 
   async clearMessages(): Promise<void> {
-    await this.#ready();
+    await this.#ensureRestored();
     await this.#core.clearMessages(this.sessionId);
     await this.#afterClear();
     await this.#core.notify({ type: "clear", sessionId: this.sessionId });
@@ -354,7 +395,7 @@ export class Session {
   async fork(
     options: { atMessageId?: string; toSessionId?: string } = {}
   ): Promise<{ sessionId: string; leafId: string | null }> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.fork(
       this.sessionId,
       options.toSessionId ?? crypto.randomUUID(),
@@ -369,7 +410,7 @@ export class Session {
     fromMessageId: string,
     toMessageId: string
   ): Promise<StoredCompaction> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.addCompaction(
       this.sessionId,
       summary,
@@ -379,7 +420,7 @@ export class Session {
   }
 
   async getCompactions(): Promise<StoredCompaction[]> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.getCompactions(this.sessionId);
   }
 
@@ -392,7 +433,7 @@ export class Session {
    * never inlined into a summarization pass.
    */
   async compact(leafId?: string | null): Promise<CompactResult | null> {
-    await this.#ready();
+    await this.#ensureRestored();
     if (!this.#compactionFn) {
       throw new Error(
         "No compaction function registered. Call onCompaction() first."
@@ -445,17 +486,240 @@ export class Session {
     return { ...result, fromMessageId: fromId };
   }
 
+  // ── Context blocks and skills ───────────────────────────────────────────
+
+  /** Return one loaded context block, or null before it has loaded. */
+  getContextBlock(label: string): ContextBlock | null {
+    return this.#ensureContext().getBlock(label);
+  }
+
+  /** Return the context blocks currently loaded in this isolate. */
+  getContextBlocks(): ContextBlock[] {
+    return this.#ensureContext().getBlocks();
+  }
+
+  /** Replace one writable context block without refreshing the frozen prompt. */
+  async replaceContextBlock(
+    label: string,
+    content: string
+  ): Promise<ContextBlock> {
+    await this.#ensureRestored();
+    return this.#ensureContext().setBlock(label, content);
+  }
+
+  /** Append text to one writable context block. */
+  async appendContextBlock(
+    label: string,
+    content: string
+  ): Promise<ContextBlock> {
+    await this.#ensureRestored();
+    return this.#ensureContext().appendToBlock(label, content);
+  }
+
+  /** Register and load a context block after the handle has initialized. */
+  async addContext(
+    label: string,
+    options: SessionContextOptions = {}
+  ): Promise<ContextBlock> {
+    await this.#ensureRestored();
+    const provider =
+      options.provider ?? this.#sqliteContextProvider(this.#contextKey(label));
+    const block = await this.#ensureContext().addBlock({
+      label,
+      description: options.description,
+      maxTokens: options.maxTokens,
+      provider
+    });
+    if (block.isSkill && !this.#skillScanRan) {
+      await this.#scanHistoryForLoadedSkills();
+    }
+    return block;
+  }
+
+  /** Remove a runtime-registered context block. */
+  removeContext(label: string): boolean {
+    return this.#ensureContext().removeBlock(label);
+  }
+
+  /**
+   * Unload a skill and replace its stored tool result with a short marker.
+   */
+  async unloadSkill(label: string, key: string): Promise<boolean> {
+    await this.#ensureRestored();
+    return this.#ensureContext().unloadSkill(label, key);
+  }
+
+  /** Return loaded skill identifiers as `label:key` strings. */
+  async getLoadedSkillKeys(): Promise<Set<string>> {
+    await this.#ensureRestored();
+    return this.#ensureContext().getLoadedSkillKeys();
+  }
+
+  /** Load or return the persisted frozen system prompt. */
+  async freezeSystemPrompt(): Promise<string> {
+    await this.#ensureRestored();
+    return this.#ensureContext().freezeSystemPrompt();
+  }
+
+  /** Reload context providers and replace the persisted frozen prompt. */
+  async refreshSystemPrompt(): Promise<string> {
+    await this.#ensureRestored();
+    return this.#ensureContext().refreshSystemPrompt();
+  }
+
+  /** Build the AI SDK tools implied by configured context providers. */
+  async tools(): Promise<ToolSet> {
+    await this.#ensureRestored();
+    return this.#ensureContext().tools();
+  }
+
   // ── Search ───────────────────────────────────────────────────────────────
 
   async search(
     query: string,
     options?: { limit?: number }
   ): Promise<SearchResult[]> {
-    await this.#ready();
+    await this.#ensureRestored();
     return this.#core.search(this.sessionId, query, options?.limit ?? 20);
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────
+
+  async #ensureRestored(): Promise<void> {
+    await this.#ready();
+    const context = this.#ensureContext();
+    if (!this.#restorePromise) {
+      this.#restorePromise = this.#restoreLoadedSkills(context).catch(
+        (error) => {
+          this.#core.io.emit("session:skill-restore:failed", {
+            sessionId: this.sessionId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      );
+    }
+    await this.#restorePromise;
+  }
+
+  #ensureContext(): ContextBlocks {
+    if (this.#context) return this.#context;
+    const configs: ContextConfig[] = this.#pendingContexts.map(
+      ({ label, options }) => ({
+        label,
+        description: options.description,
+        maxTokens: options.maxTokens,
+        provider:
+          options.provider ??
+          this.#sqliteContextProvider(this.#contextKey(label))
+      })
+    );
+    let promptStore: WritableContextProvider | undefined;
+    if (this.#cachedPrompt === true) {
+      promptStore = this.#sqliteContextProvider(
+        this.#contextKey("_system_prompt")
+      );
+    } else if (this.#cachedPrompt) {
+      promptStore = this.#cachedPrompt;
+    }
+    const context = new ContextBlocks(configs, promptStore);
+    context.setUnloadCallback(async (label, key) => {
+      try {
+        await this.#reclaimLoadedSkill(label, key);
+      } catch (error) {
+        this.#core.io.emit("session:skill-unload:failed", {
+          sessionId: this.sessionId,
+          label,
+          key,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        throw error;
+      }
+    });
+    this.#context = context;
+    return context;
+  }
+
+  #contextKey(label: string): string {
+    return this.sessionId ? `${label}_${this.sessionId}` : label;
+  }
+
+  #sqliteContextProvider(label: string): WritableContextProvider {
+    return {
+      get: async () => this.#core.getContextValue(label),
+      set: async (content) => this.#core.setContextValue(label, content)
+    };
+  }
+
+  async #restoreLoadedSkills(context: ContextBlocks): Promise<void> {
+    if (!context.hasSkillCapableConfigs()) return;
+    await this.#scanHistoryForLoadedSkills();
+  }
+
+  async #scanHistoryForLoadedSkills(): Promise<void> {
+    this.#skillScanRan = true;
+    const loaded = new Set<string>();
+    for (const row of this.#core.pathRowStats(this.sessionId)) {
+      if (row.role !== "assistant") continue;
+      const message = this.#core.getMessageRaw(this.sessionId, row.id);
+      if (!message) continue;
+      for (const part of message.parts) {
+        const input = this.#skillInput(part.input);
+        if (!input || part.state !== "output-available") continue;
+        const id = `${input.label}:${input.key}`;
+        if (part.toolName === "load_context") {
+          if (
+            typeof part.output === "string" &&
+            part.output.startsWith("[skill unloaded:")
+          ) {
+            loaded.delete(id);
+          } else {
+            loaded.add(id);
+          }
+        } else if (part.toolName === "unload_context") {
+          loaded.delete(id);
+        }
+      }
+    }
+    this.#ensureContext().restoreLoadedSkills(loaded);
+  }
+
+  #skillInput(input: unknown): { label: string; key: string } | null {
+    if (typeof input !== "object" || input === null) return null;
+    if (!("label" in input) || !("key" in input)) return null;
+    const label = input.label;
+    const key = input.key;
+    return typeof label === "string" && typeof key === "string"
+      ? { label, key }
+      : null;
+  }
+
+  async #reclaimLoadedSkill(label: string, key: string): Promise<void> {
+    const rows = this.#core.pathRowStats(this.sessionId);
+    for (let index = rows.length - 1; index >= 0; index--) {
+      const row = rows[index];
+      if (row.role !== "assistant") continue;
+      const message = this.#core.getMessageRaw(this.sessionId, row.id);
+      if (!message) continue;
+      let changed = false;
+      const parts = message.parts.map((part) => {
+        const input = this.#skillInput(part.input);
+        if (
+          part.toolName === "load_context" &&
+          part.state === "output-available" &&
+          input?.label === label &&
+          input.key === key
+        ) {
+          changed = true;
+          return { ...part, output: `[skill unloaded: ${key}]` };
+        }
+        return part;
+      });
+      if (changed) {
+        await this.updateMessage({ ...message, parts });
+        return;
+      }
+    }
+  }
 
   /**
    * The shared write pipeline: sanitize provider metadata, strip reserved
@@ -567,21 +831,25 @@ export class Session {
     });
   }
 
-  // Context-system seams, overridden when the context module attaches
-  // (system prompt and blocks feed the token counter's input).
   async #systemPromptForEstimate(): Promise<string> {
-    return "";
+    return this.#ensureContext().getSystemPromptForEstimate();
   }
 
-  #contextBlocksForEstimate(): unknown[] {
-    return [];
+  #contextBlocksForEstimate(): ContextBlock[] {
+    return this.#ensureContext().getBlocks();
   }
 
   async #extraTokenEstimate(): Promise<number> {
-    return 0;
+    return estimateStringTokens(await this.#systemPromptForEstimate());
   }
 
-  async #refreshPromptAfterCompaction(): Promise<void> {}
+  async #refreshPromptAfterCompaction(): Promise<void> {
+    await this.#ensureContext().refreshSystemPrompt();
+  }
 
-  async #afterClear(): Promise<void> {}
+  async #afterClear(): Promise<void> {
+    const context = this.#ensureContext();
+    context.clearSkillState();
+    await context.refreshSystemPrompt();
+  }
 }

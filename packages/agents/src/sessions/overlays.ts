@@ -6,7 +6,7 @@
  * wins; its span is skipped and later overlaps inside the span never apply.
  */
 
-import { COMPACTION_PREFIX } from "../experimental/memory/utils/compaction-helpers";
+import { COMPACTION_PREFIX } from "./compaction-helpers";
 import type { SessionMessage, StoredCompaction } from "./types";
 
 /** One planned overlay span over path indexes (inclusive). */

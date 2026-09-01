@@ -12,10 +12,7 @@
  * from stamped per-row estimates), never maintained in counter rows.
  */
 
-import {
-  estimateMessageTokens,
-  estimateStringTokens
-} from "../experimental/memory/utils/tokens";
+import { estimateMessageTokens, estimateStringTokens } from "./tokens";
 import {
   AttachmentEngine,
   ATTACHMENT_URL_PREFIX,
@@ -174,6 +171,13 @@ export class SessionsCore {
         key TEXT NOT NULL,
         value TEXT NOT NULL,
         PRIMARY KEY (session_id, key)
+      )
+    `);
+    this.io.rawSql(`
+      CREATE TABLE IF NOT EXISTS cf_agents_context_blocks (
+        label TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
     // Created unconditionally so migration lifts and later flag flips work;
@@ -663,10 +667,17 @@ export class SessionsCore {
   }
 
   stripReservedMetadata(message: SessionMessage): SessionMessage {
-    if (this.#reservedMetadataKeys.length === 0 || !message.metadata) {
+    if (
+      this.#reservedMetadataKeys.length === 0 ||
+      typeof message.metadata !== "object" ||
+      message.metadata === null ||
+      Array.isArray(message.metadata)
+    ) {
       return message;
     }
-    const metadata = { ...message.metadata };
+    const metadata: Record<string, unknown> = {
+      ...message.metadata
+    };
     let changed = false;
     for (const key of this.#reservedMetadataKeys) {
       if (key in metadata) {
@@ -675,12 +686,9 @@ export class SessionsCore {
       }
     }
     if (!changed) return message;
-    return Object.keys(metadata).length > 0
-      ? { ...message, metadata }
-      : (() => {
-          const { metadata: _dropped, ...rest } = message;
-          return rest as SessionMessage;
-        })();
+    if (Object.keys(metadata).length > 0) return { ...message, metadata };
+    const { metadata: _dropped, ...withoutMetadata } = message;
+    return withoutMetadata;
   }
 
   /** Stamped row estimate: part heuristic plus attachment weights. */
@@ -1130,7 +1138,26 @@ export class SessionsCore {
     return result;
   }
 
-  // ── Config (legacy lift) ─────────────────────────────────────────────────
+  // ── Context and lifted config ────────────────────────────────────────────
+
+  getContextValue(label: string): string | null {
+    const rows = this.io.sql<{ content: string }>(
+      "SELECT content FROM cf_agents_context_blocks WHERE label = ?",
+      [label]
+    );
+    return rows[0]?.content ?? null;
+  }
+
+  setContextValue(label: string, content: string): void {
+    this.io.sqlWrite(
+      `INSERT INTO cf_agents_context_blocks (label, content)
+       VALUES (?, ?)
+       ON CONFLICT(label) DO UPDATE SET
+         content = excluded.content,
+         updated_at = CURRENT_TIMESTAMP`,
+      [label, content]
+    );
+  }
 
   getConfigValue(sessionId: string, key: string): string | null {
     const rows = this.io.sql<{ value: string }>(

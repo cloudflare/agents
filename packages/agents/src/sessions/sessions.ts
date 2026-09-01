@@ -136,8 +136,10 @@ export class Sessions extends LifecycleCapability {
   session(sessionId: string = DEFAULT_SESSION_ID): Session {
     const existing = this.#handles.get(sessionId);
     if (existing) return existing;
-    const handle = new Session(sessionId, this.#getCore(), () =>
-      this.lifecycle.ready()
+    const handle = new Session(
+      sessionId,
+      () => this.#getCore(),
+      () => this.lifecycle.ready()
     );
     this.#handles.set(sessionId, handle);
     return handle;

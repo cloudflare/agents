@@ -1,10 +1,13 @@
+import type { UIMessage } from "ai";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
   Sessions,
+  createCompactFunction,
   inlineReconstructor,
   pointerReconstructor,
   type AppendResult,
+  type ContextProvider,
   type SessionAttachmentStore,
   type SessionMessage,
   type SessionStats
@@ -31,7 +34,16 @@ class ConversationObject extends DurableObject {
 declare const object: ConversationObject;
 object.sessions satisfies DurableObjectCapability;
 
-const session = object.sessions.session();
+const soul: ContextProvider = {
+  get: async () => "You are helpful."
+};
+const session = object.sessions
+  .session()
+  .withContext("soul", { provider: soul })
+  .withContext("memory", { maxTokens: 1_100 })
+  .withCachedPrompt()
+  .onCompaction(createCompactFunction({ summarize: async () => "summary" }))
+  .compactAfter(100_000);
 session.sessionId satisfies string;
 
 const message: SessionMessage = {
@@ -41,6 +53,8 @@ const message: SessionMessage = {
 };
 
 session.appendMessage(message) satisfies Promise<AppendResult>;
+declare const aiMessage: UIMessage;
+session.appendMessage(aiMessage) satisfies Promise<AppendResult>;
 session.updateMessage(message) satisfies Promise<SessionMessage>;
 session.getMessage(message.id) satisfies Promise<SessionMessage | null>;
 session.getHistory() satisfies Promise<SessionMessage[]>;
@@ -50,6 +64,14 @@ session.getRecentHistory(1024, 2) satisfies Promise<{
   totalContentBytes: number;
 }>;
 session.stats() satisfies Promise<SessionStats>;
+session.freezeSystemPrompt() satisfies Promise<string>;
+session.refreshSystemPrompt() satisfies Promise<string>;
+session.getContextBlocks() satisfies Array<{
+  label: string;
+  content: string;
+  tokens: number;
+}>;
+session.tools() satisfies Promise<Record<string, unknown>>;
 object.sessions.listSessions() satisfies Promise<
   Array<{ sessionId: string; messageCount: number; lastMessageAt: number }>
 >;

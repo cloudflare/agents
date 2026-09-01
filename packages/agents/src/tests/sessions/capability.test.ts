@@ -11,7 +11,8 @@ import {
   SessionMessageNotFoundError,
   SessionSearchDisabledError,
   type SessionChangeEvent,
-  type SessionMessage
+  type SessionMessage,
+  type SkillProvider
 } from "../../sessions";
 import { estimateStringTokens } from "../../experimental/memory/utils/tokens";
 
@@ -595,6 +596,106 @@ describe("Sessions capability", () => {
         // Images charge a flat estimate instead of the legacy zero.
         const rows = await session.getHistoryRowStats();
         expect(rows[0].tokenEstimate).toBeGreaterThanOrEqual(1600);
+      });
+    });
+  });
+
+  describe("context and skills", () => {
+    it("auto-wires durable context and a namespaced frozen prompt", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const first = instance.sessions
+          .session("first")
+          .withContext("memory", { maxTokens: 100 })
+          .withCachedPrompt();
+        const second = instance.sessions
+          .session("second")
+          .withContext("memory", { maxTokens: 100 })
+          .withCachedPrompt();
+
+        await first.replaceContextBlock("memory", "first fact");
+        await second.replaceContextBlock("memory", "second fact");
+        expect(await first.freezeSystemPrompt()).toContain("first fact");
+        expect(await second.freezeSystemPrompt()).toContain("second fact");
+
+        await first.replaceContextBlock("memory", "changed after freeze");
+        expect(await first.freezeSystemPrompt()).toContain("first fact");
+        expect(await first.refreshSystemPrompt()).toContain(
+          "changed after freeze"
+        );
+      });
+    });
+
+    it("registers and removes runtime context blocks", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const block = await session.addContext("extension-memory");
+        expect(block.writable).toBe(true);
+        await session.replaceContextBlock("extension-memory", "remember this");
+        expect(session.getContextBlock("extension-memory")?.content).toBe(
+          "remember this"
+        );
+        expect(session.removeContext("extension-memory")).toBe(true);
+        expect(session.getContextBlock("extension-memory")).toBeNull();
+      });
+    });
+
+    it("restores loaded skills and reclaims their stored output on unload", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const skills: SkillProvider = {
+          get: async () => "- guide: Project guide",
+          load: async () => "full guide"
+        };
+        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
+        sync.ensureTables();
+        sync.appendMessage("", {
+          id: "skill-result",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-load_context",
+              toolName: "load_context",
+              toolCallId: "load-1",
+              state: "output-available",
+              input: { label: "skills", key: "guide" },
+              output: "full guide"
+            }
+          ]
+        });
+        const session = instance.sessions
+          .session()
+          .withContext("skills", { provider: skills });
+
+        expect(await session.getLoadedSkillKeys()).toEqual(
+          new Set(["skills:guide"])
+        );
+        expect(await session.unloadSkill("skills", "guide")).toBe(true);
+        const stored = await session.getMessage("skill-result", {
+          reconstruct: "pointer"
+        });
+        expect(stored?.parts[0].output).toBe("[skill unloaded: guide]");
+      });
+    });
+
+    it("includes context in the cheap auto-compaction trigger", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        let compactions = 0;
+        const session = instance.sessions
+          .session()
+          .withContext("soul", {
+            provider: { get: async () => "context ".repeat(200) }
+          })
+          .onCompaction(async () => {
+            compactions++;
+            return null;
+          })
+          .compactAfter(100);
+
+        await session.appendMessage(text("context-trigger", "short"));
+        expect(compactions).toBe(1);
       });
     });
   });
