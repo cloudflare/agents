@@ -89,6 +89,7 @@ import {
 } from "agents/chat";
 import {
   resolveChatRecoveryConfig,
+  chatRecoveryRedeferPolicy,
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
@@ -5026,7 +5027,8 @@ export class AIChatAgent<
         void this.schedule(
           CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
           "_chatRecoveryContinue",
-          data
+          data,
+          chatRecoveryRedeferPolicy()
         ).catch(() => {});
         return;
       }
@@ -5325,21 +5327,26 @@ export class AIChatAgent<
    *    unlikely.
    */
   /**
-   * Recovery continuation callbacks the alarm-boundary OOM circuit breaker may
-   * back off / purge (#1825). See `Agent._cf_handleAlarmMemoryLimitReset`.
+   * Host memory-limit policy hook (#1825), dispatched structurally by
+   * Lifecycle's circuit breaker — protected because it is framework
+   * machinery, not part of the public chat API. The breaker has already
+   * backed off / purged the `recoveryLoop`-flagged schedule rows (see
+   * `chatRecoverySchedulePolicy`); at the strike budget this seals
+   * in-flight recovery via {@link _cf_sealMemoryLimitedRecovery}.
    */
-  protected override _cf_recoveryAlarmCallbacks(): string[] {
-    return ["_chatRecoveryContinue", "_chatRecoveryRetry"];
+  protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
+    if (!context.sealed) return;
+    await this._cf_sealMemoryLimitedRecovery();
   }
 
   /**
-   * Seal any still-live recovery incident as an out-of-memory exhaustion when
-   * the alarm circuit breaker trips at its strike budget (#1825). Runs at the
-   * outermost alarm frame (post-unwind), so the terminal banner / `onExhausted`
-   * and the sealed-incident write can land where mid-turn writes OOMed. Reuses
-   * the shared give-up spine via the recovery engine.
+   * Seal any still-live recovery incident as an out-of-memory exhaustion
+   * when the alarm circuit breaker trips at its strike budget (#1825). Runs
+   * at the outermost alarm frame (post-unwind), so the terminal banner /
+   * `onExhausted` and the sealed-incident write can land where mid-turn
+   * writes OOMed. Reuses the shared give-up spine via the recovery engine.
    */
-  protected override async _cf_sealMemoryLimitedRecovery(): Promise<void> {
+  private async _cf_sealMemoryLimitedRecovery(): Promise<void> {
     const active = await listActiveChatRecoveryIncidents(this.ctx.storage);
     for (const { incident } of active) {
       const callback: ChatRecoveryScheduleCallback =
@@ -5476,7 +5483,8 @@ export class AIChatAgent<
         void this.schedule(
           CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
           "_chatRecoveryRetry",
-          data
+          data,
+          chatRecoveryRedeferPolicy()
         ).catch(() => {});
         return;
       }

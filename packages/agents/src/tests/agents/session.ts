@@ -46,6 +46,14 @@ export class TestSessionAgent extends Agent {
     this
       .sql`insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
       values ('c1', 'legacy-stream', ${JSON.stringify(['{"type":"text-delta","delta":"b"}', '{"type":"text-delta","delta":"c"}'])}, 1, ${Date.now()})`;
+    // A completed legacy stream too: a terminal row is never settle-stamped
+    // later, so the migration itself must carry its exact cursor.
+    this
+      .sql`insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
+      values ('legacy-done', 'legacy-done-req', 'completed', ${Date.now()}, ${Date.now()})`;
+    this
+      .sql`insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+      values ('d0', 'legacy-done', ${'{"type":"text-delta","delta":"z"}'}, 0, ${Date.now()})`;
   }
 
   /**
@@ -105,6 +113,8 @@ export class TestSessionAgent extends Agent {
     remainingLegacyTables: string[];
     migratedStatus: { status: string; request_id: string } | null;
     migratedChunkBodies: string[];
+    migratedLiveCursor: number | null;
+    migratedCompletedCursor: number | null;
     legacyMessageId: string | null;
     restoredActiveStreamId: string | null;
     startThrew: boolean;
@@ -129,6 +139,13 @@ export class TestSessionAgent extends Agent {
     const migratedChunkBodies = stream
       .getStreamChunks("legacy-stream")
       .map((chunk) => chunk.body);
+    // The migrated cursors: the live row's is derived from the imported
+    // chunk log; the completed row's is the count importStream stamped
+    // (nothing ever settle-stamps an imported terminal row).
+    const migratedLiveCursor =
+      (await this.streams.status("legacy-stream"))?.cursor ?? null;
+    const migratedCompletedCursor =
+      (await this.streams.status("legacy-done"))?.cursor ?? null;
     // The legacy schema predates message-id tracking: guarded → null.
     const legacyMessageId = stream.getStreamMessageId("legacy-stream");
     // Construction ran restore(), which must adopt the migrated in-flight row.
@@ -154,6 +171,8 @@ export class TestSessionAgent extends Agent {
       remainingLegacyTables,
       migratedStatus,
       migratedChunkBodies,
+      migratedLiveCursor,
+      migratedCompletedCursor,
       legacyMessageId,
       restoredActiveStreamId,
       startThrew,

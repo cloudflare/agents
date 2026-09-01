@@ -26,7 +26,7 @@ import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions
 } from "../";
-import { ResumableStream } from "agents/chat";
+import { ResumableStream, chatRecoverySchedulePolicy } from "agents/chat";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -3264,6 +3264,55 @@ type AgentToolInput = {
 };
 
 export class AIChatAgentToolChild extends AIChatAgent<Env> {
+  /**
+   * Test-only routed recovery callback that deterministically reaches the
+   * root alarm's memory-limit breaker.
+   */
+  async facetRecoveryOomForTest(): Promise<void> {
+    throw new Error(
+      "Durable Object's isolate exceeded its memory limit and was reset."
+    );
+  }
+
+  /** Seed one active incident and its root-owned routed recovery schedule. */
+  async seedFacetRecoveryOomForTest(incidentId: string): Promise<string> {
+    const now = Date.now();
+    await this.ctx.storage.put(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`,
+      {
+        incidentId,
+        requestId: incidentId,
+        recoveryRootRequestId: incidentId,
+        recoveryKind: "continue",
+        attempt: 1,
+        maxAttempts: 10,
+        status: "scheduled",
+        firstSeenAt: now,
+        lastAttemptAt: now
+      }
+    );
+    const schedule = await this.schedule(
+      60,
+      "facetRecoveryOomForTest",
+      { incidentId },
+      {
+        ...chatRecoverySchedulePolicy("initial"),
+        retry: { maxAttempts: 1 }
+      }
+    );
+    return schedule.id;
+  }
+
+  /** Read the persisted status of a test recovery incident. */
+  async facetRecoveryIncidentStatusForTest(
+    incidentId: string
+  ): Promise<string | null> {
+    const incident = await this.ctx.storage.get<{ status: string }>(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`
+    );
+    return incident?.status ?? null;
+  }
+
   override formatAgentToolInput(
     input: AgentToolInput,
     request: { runId: string }
@@ -3850,6 +3899,55 @@ export class AIChatAgentToolParent extends Agent<Env> {
   private finishes: AgentToolFinishForTest[] = [];
   private finishRunIdsToThrow = new Set<string>();
   private lifecycleOrder: string[] = [];
+
+  /**
+   * Drive the root alarm straight to sealing for one routed child recovery
+   * row. The root is deliberately a plain Agent: only the child owns the
+   * active chat-recovery incident and terminal policy.
+   */
+  async driveFacetRecoveryOomSealForTest(
+    executing: { childName: string; incidentId: string },
+    pending: { childName: string; incidentId: string }
+  ): Promise<string[]> {
+    const pendingChild = await this.subAgent(
+      AIChatAgentToolChild,
+      pending.childName
+    );
+    const pendingScheduleId = await pendingChild.seedFacetRecoveryOomForTest(
+      pending.incidentId
+    );
+    const executingChild = await this.subAgent(
+      AIChatAgentToolChild,
+      executing.childName
+    );
+    const executingScheduleId =
+      await executingChild.seedFacetRecoveryOomForTest(executing.incidentId);
+    this.sql`
+      UPDATE cf_agents_jobs
+      SET time = ${Date.now() - 1_000}
+      WHERE id = ${executingScheduleId}
+    `;
+    await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 2);
+    await this.alarm();
+    return [executingScheduleId, pendingScheduleId];
+  }
+
+  /** Read a child facet's durable recovery incident after root sealing. */
+  async facetRecoveryIncidentStatusForTest(
+    childName: string,
+    incidentId: string
+  ): Promise<string | null> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    return child.facetRecoveryIncidentStatusForTest(incidentId);
+  }
+
+  /** Whether a root-owned schedule row still exists. */
+  rootHasScheduleForTest(scheduleId: string): boolean {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_jobs WHERE id = ${scheduleId}
+    `;
+    return (rows[0]?.count ?? 0) > 0;
+  }
 
   override broadcast(
     msg: string | ArrayBuffer | ArrayBufferView,

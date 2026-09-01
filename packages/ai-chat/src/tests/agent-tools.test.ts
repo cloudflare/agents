@@ -241,6 +241,15 @@ type ParentStub = DurableObjectStub & {
     abortedAfter: boolean;
     childStatus: string | null;
   }>;
+  driveFacetRecoveryOomSealForTest(
+    executing: { childName: string; incidentId: string },
+    pending: { childName: string; incidentId: string }
+  ): Promise<string[]>;
+  facetRecoveryIncidentStatusForTest(
+    childName: string,
+    incidentId: string
+  ): Promise<string | null>;
+  rootHasScheduleForTest(scheduleId: string): Promise<boolean>;
 };
 
 function getParent(name = crypto.randomUUID()) {
@@ -251,6 +260,41 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
+  it("seals affected facet recovery incidents when the plain root alarm breaker seals", async () => {
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-oom-${crypto.randomUUID()}`
+    };
+    const pending = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-pending-${crypto.randomUUID()}`
+    };
+
+    const scheduleIds = await parent.driveFacetRecoveryOomSealForTest(
+      executing,
+      pending
+    );
+    // The breaker resets the alarm-owning root after its writes settle. Read
+    // through a fresh stub so the assertion does not race the condemned RPC
+    // session.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const freshParent = await getParent(parentName);
+
+    for (const scheduleId of scheduleIds) {
+      expect(await freshParent.rootHasScheduleForTest(scheduleId)).toBe(false);
+    }
+    for (const recovery of [executing, pending]) {
+      expect(
+        await freshParent.facetRecoveryIncidentStatusForTest(
+          recovery.childName,
+          recovery.incidentId
+        )
+      ).toBe("exhausted");
+    }
+  });
+
   it("runs an AIChatAgent child and returns summary, output, events, and chunks", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();

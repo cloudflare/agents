@@ -20,6 +20,8 @@ export {
 } from "./current-agent";
 export {
   Lifecycle,
+  type LifecycleOptions,
+  type MemoryLimitContext,
   type LifecycleJobContext,
   type LifecycleJobs,
   type LifecycleJob,

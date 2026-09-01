@@ -377,6 +377,38 @@ describe("Streams capability", () => {
     });
   });
 
+  it("keeps same-millisecond rows in insertion order, newest first", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      // Three same-tag rows sharing one created_at: the retried-turn shape
+      // where "newest" must mean insertion order, not a random-id tiebreak
+      // (stream ids are nanoids — sorting by id would shuffle recovery's
+      // pick of the latest turn).
+      const sync = instance.streams.__DO_NOT_USE_WILL_BREAK__sync();
+      const at = Date.now();
+      for (const streamId of ["tie-a", "tie-b", "tie-c"]) {
+        sync.importStream({
+          streamId,
+          state: "streaming",
+          tag: "tie-tag",
+          metadata: undefined,
+          chunkCount: 0,
+          createdAt: at,
+          updatedAt: at,
+          closedAt: null
+        });
+      }
+      const byTag = sync.rowsByTag("tie-tag").map((row) => row.stream_id);
+      expect(byTag).toEqual(["tie-c", "tie-b", "tie-a"]);
+      const listed = sync
+        .listRows()
+        .filter((row) => row.tag === "tie-tag")
+        .map((row) => row.stream_id);
+      expect(listed).toEqual(["tie-c", "tie-b", "tie-a"]);
+    });
+  });
+
   it("serves a stream over SSE with Last-Event-ID resume and terminal events", async () => {
     const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {

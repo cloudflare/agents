@@ -747,6 +747,9 @@ export class ThinkTestAgent extends Think {
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
+  private _beforeStepGate: Promise<void> | null = null;
+  private _releaseBeforeStepGate: (() => void) | null = null;
+  private _beforeStepGateEntered = false;
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
@@ -906,6 +909,10 @@ export class ThinkTestAgent extends Think {
     if (this._beforeStepAsyncDelayMs > 0) {
       await new Promise((r) => setTimeout(r, this._beforeStepAsyncDelayMs));
     }
+    if (this._beforeStepGate) {
+      this._beforeStepGateEntered = true;
+      await this._beforeStepGate;
+    }
     if (this._stepConfigOverride) return this._stepConfigOverride;
   }
 
@@ -919,6 +926,31 @@ export class ThinkTestAgent extends Think {
 
   async setBeforeStepAsyncDelay(ms: number): Promise<void> {
     this._beforeStepAsyncDelayMs = ms;
+  }
+
+  /**
+   * Arm a promise gate that parks the next `beforeStep` until released. Tests
+   * use it to hold a turn deterministically in flight — instead of racing a
+   * wall-clock delay — while they reset or cancel from outside the turn.
+   */
+  async holdBeforeStepForTest(): Promise<void> {
+    this._beforeStepGateEntered = false;
+    this._beforeStepGate = new Promise((resolve) => {
+      this._releaseBeforeStepGate = resolve;
+    });
+  }
+
+  /** Whether a turn is currently parked inside the armed `beforeStep` gate. */
+  async hasEnteredBeforeStepForTest(): Promise<boolean> {
+    return this._beforeStepGateEntered;
+  }
+
+  /** Release the parked turn (and disarm the gate for later steps). */
+  async releaseBeforeStepForTest(): Promise<void> {
+    const release = this._releaseBeforeStepGate;
+    this._beforeStepGate = null;
+    this._releaseBeforeStepGate = null;
+    release?.();
   }
 
   async resetTurnStateForTest(): Promise<void> {
@@ -4807,19 +4839,37 @@ export class ThinkToolsTestAgent extends Think {
     `;
   }
 
-  async triggerFiberRecovery(): Promise<void> {
+  async triggerFiberRecovery(): Promise<{
+    scheduledContinueCount: number;
+    scheduledRetryCount: number;
+  }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+    // Recovery arms ZERO-delay schedules whose alarms the workers test pool
+    // can fire as soon as this RPC releases the DO, consuming the job rows.
+    // Read the counts synchronously inside the same invocation so callers can
+    // assert on them without racing that alarm.
+    return {
+      scheduledContinueCount: this._countScheduledChatRecovery(
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount:
+        this._countScheduledChatRecovery("_chatRecoveryRetry")
+    };
+  }
+
+  private _countScheduledChatRecovery(callback: string): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler' AND fn = ${callback}
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler' AND fn = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+    return this._countScheduledChatRecovery(callback);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
@@ -5544,8 +5594,11 @@ export class ThinkProgrammaticTestAgent extends Think {
       const submission = await this.testSubmitMessages("alarm owned", {
         submissionId
       });
-      for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      // The drain is delivered by a platform-scheduled alarm whose firing
+      // latency is not bounded by our timer ticks — give it a generous (~5s)
+      // deadline; the happy path still exits on the first tick after it fires.
+      for (let attempt = 0; attempt < 200 && alarmDrainCalls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
       return { alarmDrainCalls, inlineDrainCalls, submission };
     } finally {
@@ -7714,12 +7767,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count
-      FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+    return this._countScheduledChatRecovery(callback);
   }
 
   /** Insert a stream-metadata row aged `ageMs` in the past (for cleanup tests). */
@@ -7830,10 +7878,33 @@ export class ThinkRecoveryTestAgent extends Think {
     `;
   }
 
-  async triggerFiberRecovery(): Promise<void> {
+  async triggerFiberRecovery(): Promise<{
+    scheduledContinueCount: number;
+    scheduledRetryCount: number;
+  }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+    // Recovery arms ZERO-delay schedules whose alarms the workers test pool
+    // can fire as soon as this RPC releases the DO, consuming the job rows.
+    // Read the counts synchronously inside the same invocation so callers can
+    // assert on them without racing that alarm.
+    return {
+      scheduledContinueCount: this._countScheduledChatRecovery(
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount:
+        this._countScheduledChatRecovery("_chatRecoveryRetry")
+    };
+  }
+
+  private _countScheduledChatRecovery(callback: string): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {

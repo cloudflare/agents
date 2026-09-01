@@ -57,10 +57,11 @@ const EXPECTED_SCHEMA_DDL = [
         singleflight INTEGER NOT NULL DEFAULT 0,
         hung_timeout_seconds INTEGER,
         exclusive INTEGER NOT NULL DEFAULT 0,
+        recovery_loop INTEGER NOT NULL DEFAULT 0,
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
-      )`,
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_mcp_servers (
       id TEXT PRIMARY KEY NOT NULL,
       name TEXT NOT NULL,
@@ -114,7 +115,7 @@ const EXPECTED_SCHEMA_DDL = [
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
         settled_at INTEGER
-      )`,
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_steps (
         run_id TEXT NOT NULL,
         step_name TEXT NOT NULL,
@@ -132,7 +133,7 @@ const EXPECTED_SCHEMA_DDL = [
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
         PRIMARY KEY (run_id, step_name)
-      )`,
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_workflows (
           id TEXT PRIMARY KEY NOT NULL,
           workflow_id TEXT NOT NULL UNIQUE,

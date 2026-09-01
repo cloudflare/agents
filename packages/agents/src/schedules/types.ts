@@ -99,6 +99,20 @@ export type ScheduleOptions = {
   idempotent?: boolean;
 };
 
+/**
+ * @internal Chat-recovery scaffolding, deliberately NOT part of
+ * {@link ScheduleOptions}: schedules only shape future work — a row that
+ * drives an OOM-prone loop belongs in the Tasks capability, whose runs
+ * carry their own memory-limit policy. Until chat recovery migrates onto
+ * Tasks, its schedules ride the alarm memory-limit breaker (#1825) through
+ * this option; the Scheduler passes it through to the Lifecycle job row
+ * untouched (`LifecycleJobPushOptions.recoveryLoop`). Removed with that
+ * migration — do not use it for new work.
+ */
+export type RecoveryLoopScheduleOptions = ScheduleOptions & {
+  recoveryLoop: true;
+};
+
 /** Filters accepted by `getSchedules()` and `listSchedules()`. */
 export type ScheduleCriteria = {
   id?: string;

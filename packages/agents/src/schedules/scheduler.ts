@@ -12,6 +12,7 @@ import {
   type LifecycleRouteAddress,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
+import type { MemoryLimitContext } from "../lifecycle/capability-runner";
 import type {
   LifecycleJob,
   LifecycleJobContext,
@@ -34,6 +35,7 @@ import {
   type ScheduleTiming
 } from "./schedule-timing";
 import type {
+  RecoveryLoopScheduleOptions,
   Schedule,
   ScheduleCriteria,
   ScheduleOptions,
@@ -56,6 +58,11 @@ const schedulerCallbackResolvers = new WeakMap<
   (name: string) => ResolvedSchedulerCallback | undefined
 >();
 
+const schedulerRoutedMemoryLimitHandlers = new WeakMap<
+  object,
+  (context: MemoryLimitContext) => void | Promise<void>
+>();
+
 /**
  * @internal Supply a composition-root fallback for callback names outside the
  * registered map. Agent uses this to keep its historical name-based
@@ -70,9 +77,36 @@ export function setSchedulerCallbackResolver(
   schedulerCallbackResolvers.set(scheduler, resolver);
 }
 
+/**
+ * @internal Temporary compatibility bridge for chat-recovery schedules owned
+ * by a routed dynamic agent. The root owns the physical alarm and queue row;
+ * this handler lets Scheduler deliver a sealed memory-limit strike to the
+ * routed host that owns the incident. Delete with the recovery-on-Tasks
+ * migration, when the owning Tasks capability terminalizes its own run.
+ */
+export function setSchedulerRoutedMemoryLimitHandler(
+  scheduler: Scheduler<never>,
+  handler: (context: MemoryLimitContext) => void | Promise<void>
+): void {
+  schedulerRoutedMemoryLimitHandlers.set(scheduler, handler);
+}
+
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
 /** Version 2: schedule rows live in the Lifecycle job queue. */
 const CURRENT_SCHEDULE_SCHEMA_VERSION = 2;
+
+/**
+ * Legacy schedule callbacks whose rows drive chat recovery loops from before
+ * the job queue carried breaker membership. The migration is the one place
+ * allowed to know legacy names (it already drops `_cf_keepAliveHeartbeat`
+ * rows by name): a recovery row migrated without its `recoveryLoop` flag
+ * would escape the alarm memory-limit breaker (#1825) and could re-trigger
+ * a doomed loop on an upgraded object.
+ */
+const LEGACY_RECOVERY_LOOP_CALLBACKS = new Set([
+  "_chatRecoveryContinue",
+  "_chatRecoveryRetry"
+]);
 
 const DEFAULT_RETRY: Required<RetryOptions> = {
   maxAttempts: 3,
@@ -122,6 +156,11 @@ type SchedulerRouteMessage =
       readonly fn: string;
       readonly job: SchedulerJobPayload;
       readonly retry?: RetryOptions;
+    }
+  | {
+      /** @internal Removed with routed chat recovery's Tasks migration. */
+      readonly type: "memoryLimit";
+      readonly context: MemoryLimitContext;
     };
 
 type InsertResult<T> = {
@@ -268,7 +307,8 @@ export class Scheduler<
         } satisfies SchedulerJobPayload,
         retry: resolveRetryConfig(retry, this.#retryDefaults),
         singleflight: row.type === "interval",
-        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds
+        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+        recoveryLoop: LEGACY_RECOVERY_LOOP_CALLBACKS.has(row.callback)
       });
     }
     storage.sql.exec("DROP TABLE cf_agents_schedules");
@@ -354,6 +394,57 @@ export class Scheduler<
     return this.#recurrenceOutcome(timing);
   }
 
+  /**
+   * Deliver a sealed strike to each routed owner whose recovery row was
+   * purged. The queue already broke the loop; this only lets those dynamic
+   * agents persist their terminal chat state. Tasks will move that policy into
+   * the owning capability and delete this bridge.
+   */
+  async onMemoryLimit(context: MemoryLimitContext): Promise<void> {
+    if (!context.sealed) return;
+
+    const candidates = [
+      ...(context.purgedRecoveryLoopJobs ?? []),
+      ...(context.executing ? [context.executing] : [])
+    ];
+    const targets = new Map<string, LifecycleRouteAddress>();
+    for (const job of candidates) {
+      if (
+        job.capability !== this.capabilityId ||
+        !job.recoveryLoop ||
+        !isSchedulerJobPayload(job.payload) ||
+        !job.payload.owner_path
+      ) {
+        continue;
+      }
+      const target = {
+        key: job.payload.owner_path_key ?? job.payload.owner_path,
+        data: job.payload.owner_path
+      };
+      targets.set(target.key, target);
+    }
+
+    const routedContext: MemoryLimitContext = {
+      sealed: true,
+      executing: context.executing
+    };
+    for (const target of targets.values()) {
+      try {
+        await this.lifecycle.routes.to(target, {
+          type: "memoryLimit",
+          context: routedContext
+        } satisfies SchedulerRouteMessage);
+      } catch (error) {
+        // One deleted or broken dynamic agent must not prevent the remaining
+        // owners from terminalizing after their queue rows were purged.
+        console.error(
+          `Failed to route sealed recovery policy to ${target.key}`,
+          error
+        );
+      }
+    }
+  }
+
   /** Observe one schedule's terminal application failure. */
   async onJobError(
     context: LifecycleJobContext,
@@ -429,6 +520,12 @@ export class Scheduler<
           message.retry
         );
         return true;
+      case "memoryLimit": {
+        const handler = schedulerRoutedMemoryLimitHandlers.get(this);
+        if (!handler) return false;
+        await this.lifecycle.runInHostContext(() => handler(message.context));
+        return true;
+      }
       default:
         throw new Error("Unknown routed Scheduler message");
     }
@@ -663,36 +760,6 @@ export class Scheduler<
     }
   }
 
-  /**
-   * @internal Apply the alarm memory-limit breaker's policy to this
-   * Scheduler's recovery schedules (#1825). The host names the callbacks
-   * whose jobs drive a recovery loop; sealed purges them, otherwise they are
-   * delayed to `nextTime` (epoch ms) so the next attempt runs on a fresh
-   * isolate after a backoff. Lifecycle handles the job that was executing.
-   */
-  async applyMemoryLimitPolicy(options: {
-    readonly callbacks: ReadonlyArray<string>;
-    readonly sealed: boolean;
-    readonly nextTime?: number;
-  }): Promise<void> {
-    const callbacks = new Set(options.callbacks);
-    for (const { job } of this.#ownedJobs()) {
-      if (!callbacks.has(job.fn)) continue;
-      try {
-        if (options.sealed) {
-          await this.lifecycle.jobs.cancel(job.id);
-        } else if (
-          options.nextTime !== undefined &&
-          job.time <= options.nextTime
-        ) {
-          await this.lifecycle.jobs.reschedule(job.id, options.nextTime);
-        }
-      } catch {
-        // best-effort at a host failure boundary
-      }
-    }
-  }
-
   // ── Validation ───────────────────────────────────────────────────────────
 
   #validateSchedule(
@@ -814,6 +881,12 @@ export class Scheduler<
     const idempotent = isRecurring(timing)
       ? options?.idempotent !== false
       : Boolean(options?.idempotent);
+    // Not part of the public ScheduleOptions vocabulary — chat-recovery
+    // scaffolding passed through to the job row until recovery migrates
+    // onto Tasks. See {@link RecoveryLoopScheduleOptions}.
+    const recoveryLoop = (
+      options as Partial<RecoveryLoopScheduleOptions> | undefined
+    )?.recoveryLoop;
 
     if (idempotent) {
       const existing = this.#findMatchingJob(
@@ -823,6 +896,23 @@ export class Scheduler<
         JSON.stringify(payload)
       );
       if (existing) {
+        // A dedup hit onto a row without breaker membership the caller asks
+        // for (a row migrated from the legacy schedule table) re-pushes the
+        // same durable intent in place with the flag — otherwise the row
+        // would escape the alarm memory-limit breaker (#1825) forever.
+        if (recoveryLoop && !existing.job.recoveryLoop) {
+          await this.lifecycle.jobs.push({
+            id: existing.job.id,
+            fn: existing.job.fn,
+            time: existing.job.time,
+            payload: existing.job.payload,
+            retry: existing.job.retry,
+            singleflight: existing.job.singleflight,
+            exclusive: existing.job.exclusive,
+            hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+            recoveryLoop: true
+          });
+        }
         // A dedup hit still re-arms so a lost physical alarm recovers, as
         // idempotent re-scheduling on startup historically guaranteed.
         await this.lifecycle.jobs.rearm();
@@ -851,7 +941,8 @@ export class Scheduler<
       payload: jobPayload,
       retry: resolveRetryConfig(options?.retry, this.#retryDefaults),
       singleflight: timing.type === "interval",
-      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds
+      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+      recoveryLoop
     });
 
     return {
