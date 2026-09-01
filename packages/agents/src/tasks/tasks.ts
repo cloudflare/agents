@@ -891,8 +891,7 @@ export class Tasks<
       );
       if (settled) {
         this.#emit("task:completed", { runId, definition: row.definition });
-        if (row.retain === 0) this.#store.deleteRun(runId);
-        await this.#syncWake(runId);
+        await this.#finishTerminalSettlement(runId, row);
       }
       // Fence rejected: a newer generation owns the run, and every deadline
       // mutation it makes funnels through its own #syncWake — a push here
@@ -1052,14 +1051,14 @@ export class Tasks<
       );
       settled = written > 0;
     }
-    if (settled) {
-      const row = this.#store.getRun(runId);
+    const row = settled ? this.#store.getRun(runId) : undefined;
+    if (row) {
       this.#emit("task:cancelled", {
         runId,
-        definition: row?.definition ?? null,
+        definition: row.definition,
         reason: reason ?? null
       });
-      await this.#syncWake(runId);
+      await this.#finishTerminalSettlement(runId, row);
     }
   }
 
@@ -1096,16 +1095,25 @@ export class Tasks<
       );
       settled = written > 0;
     }
-    if (settled) {
-      const row = this.#store.getRun(runId);
+    const row = settled ? this.#store.getRun(runId) : undefined;
+    if (row) {
       this.#emit("task:failed", {
         runId,
-        definition: row?.definition ?? null,
+        definition: row.definition,
         error: error.name
       });
-      await this.#syncWake(runId);
+      await this.#finishTerminalSettlement(runId, row);
     }
     return settled;
+  }
+
+  /** Apply terminal retention policy, then remove the run's wake mirror. */
+  async #finishTerminalSettlement(
+    runId: string,
+    row: TaskRunRow | undefined
+  ): Promise<void> {
+    if (row?.retain === 0) this.#store.deleteRun(runId);
+    await this.#syncWake(runId);
   }
 
   /** Make deadlines sane after a fresh isolate: interrupted work wakes now. */

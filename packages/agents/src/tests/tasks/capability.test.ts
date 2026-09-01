@@ -691,6 +691,24 @@ describe("Tasks capability", () => {
     });
   });
 
+  it("removes non-retained records after cancellation", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "sleeper",
+        { ms: 60_000 },
+        { retain: false }
+      );
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+      expect(
+        await instance.tasks.cancel(receipt.runId, "no longer needed")
+      ).toBe(true);
+      await waitFor(
+        async () => (await instance.tasks.get(receipt.runId)) === null
+      );
+    });
+  });
+
   it("deletes retained terminal runs on request", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

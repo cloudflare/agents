@@ -1,7 +1,11 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { seedTaskRun, type TaskHarnessObject } from "../capabilities/tasks";
+import {
+  seedTaskRun,
+  seedTaskStep,
+  type TaskHarnessObject
+} from "../capabilities/tasks";
 
 /**
  * Alarm memory-limit breaker (#1825) applied to Tasks runs.
@@ -40,7 +44,18 @@ async function seedDoomedRun(
 /** Fire the alarm and let the breaker's deferred isolate reset land. */
 async function driveOomWake(name: string) {
   const stub = env.TaskHarnessObject.getByName(name);
-  await runDurableObjectAlarm(stub);
+  try {
+    await runDurableObjectAlarm(stub);
+  } catch (error) {
+    // workerd may surface the intentional breaker reset to the test caller.
+    // The durable strike/backoff writes landed before this reset was armed.
+    if (
+      !(error instanceof Error) ||
+      !error.message.includes("Alarm memory-limit strike")
+    ) {
+      throw error;
+    }
+  }
   await new Promise((resolve) => setTimeout(resolve, 100));
 }
 
@@ -90,7 +105,7 @@ async function readBreakerView(name: string, runId: string) {
 
 describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
   it("a strike demotes the doomed run to the backoff wake — reconciliation must not resurrect it", async () => {
-    const name = "tasks-oom-strike-backoff";
+    const name = `tasks-oom-strike-backoff-${crypto.randomUUID()}`;
     await seedDoomedRun(name, "oom-1", 5);
 
     await driveOomWake(name);
@@ -190,8 +205,62 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     expect(view.wake?.time).toBe(nextTime);
   });
 
+  it("sealing removes a non-retained recovery run, its journal, and its idempotency key", async () => {
+    const name = `tasks-oom-non-retained-${crypto.randomUUID()}`;
+    const runId = "oom-non-retained";
+    const key = "recovery-key";
+    const stub = env.TaskHarnessObject.getByName(name);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId,
+          definition: "oomStepLoop",
+          state: "pending",
+          nextAt: Date.now() - 1_000,
+          recoveryLoop: true,
+          retain: false,
+          idempotencyKey: key
+        });
+        seedTaskStep(state.storage, {
+          runId,
+          name: "oom-step",
+          kind: "do",
+          state: "running",
+          attempt: 1
+        });
+        await instance.tasks.onMemoryLimit({ sealed: true });
+
+        const runs = state.storage.sql
+          .exec(
+            "SELECT run_id FROM cf_agents_task_runs WHERE run_id = ?",
+            runId
+          )
+          .toArray();
+        const steps = state.storage.sql
+          .exec(
+            "SELECT run_id FROM cf_agents_task_steps WHERE run_id = ?",
+            runId
+          )
+          .toArray();
+        const wakes = state.storage.sql
+          .exec("SELECT id FROM cf_agents_jobs WHERE id = ?", `task:${runId}`)
+          .toArray();
+        expect(runs).toEqual([]);
+        expect(steps).toEqual([]);
+        expect(wakes).toEqual([]);
+
+        const retried = await instance.tasks.run("oomStepLoop", undefined, {
+          idempotencyKey: key
+        });
+        expect(retried.accepted).toBe(true);
+      }
+    );
+  });
+
   it("sealing at the strike budget terminally fails the run and ends the loop", async () => {
-    const name = "tasks-oom-seal";
+    const name = `tasks-oom-seal-${crypto.randomUUID()}`;
     await seedDoomedRun(name, "oom-2", 10);
 
     await driveOomWake(name);

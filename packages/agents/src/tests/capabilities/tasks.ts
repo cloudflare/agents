@@ -325,14 +325,16 @@ export function seedTaskRun(
     readonly attempt?: number;
     readonly nextAt: number;
     readonly recoveryLoop?: boolean;
+    readonly retain?: boolean;
+    readonly idempotencyKey?: string;
   }
 ): void {
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_agents_task_runs
        (run_id, definition, input, state, generation, attempt, next_at,
-        retain, cancel_requested, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+        idempotency_key, retain, cancel_requested, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     options.runId,
     options.definition,
     options.input === undefined ? null : JSON.stringify(options.input),
@@ -340,6 +342,8 @@ export function seedTaskRun(
     options.generation ?? null,
     options.attempt ?? 0,
     options.nextAt,
+    options.idempotencyKey ?? null,
+    options.retain === false ? 0 : 1,
     now,
     now
   );

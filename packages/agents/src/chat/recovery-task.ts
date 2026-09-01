@@ -3,7 +3,7 @@
  *
  * Each continuation attempt is one short Task run. The Task waits for any
  * requested backoff, dispatches the bounded host callback through model
- * handoff, then disappears after successful completion. The durable recovery
+ * handoff, then disappears after terminal settlement. The durable recovery
  * incident remains the source of truth for attempt and work budgets.
  *
  * @internal Sibling-package support for AI Chat and Think.
@@ -77,7 +77,7 @@ function parseChatRecoveryTaskInput(input: unknown): ChatRecoveryTaskInput {
  * Initial detection joins an existing in-flight attempt for the same incident
  * and callback. Chained retries are intentionally unkeyed because they are
  * enqueued while the preceding run still exists. Non-retention releases the
- * initial key when its callback completes.
+ * initial key when the run settles.
  */
 export function chatRecoveryTaskRunOptions(
   input: ChatRecoveryTaskInput,
