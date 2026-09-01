@@ -72,8 +72,14 @@ export interface StreamsSyncInternal {
     tag: string | null,
     metadata: Record<string, StreamJson> | undefined
   ): void;
-  /** The fenced append: count bump, chunk insert, reader wakeup. */
+  /** The read-fenced append: one chunk insert at the log tail, reader wakeup. */
   append(streamId: string, chunk: StreamJson): number;
+  /**
+   * The newest chunk's timestamp, or null for an empty log. One PK-served
+   * read — the per-append liveness signal retention sweeps verify against
+   * (a live row's `updated_at` is set at open and not bumped by appends).
+   */
+  lastChunkAt(streamId: string): number | null;
   /** Idempotent settlement with events and reader wakeup. */
   settle(
     streamId: string,
@@ -109,8 +115,10 @@ export interface StreamsSyncInternal {
     closedAt: number | null;
   }): void;
   /**
-   * Import one historical chunk at the stream's current cursor, bumping the
-   * count and setting `updated_at` to the chunk's own timestamp.
+   * Import one historical chunk at the log's tail: one INSERT, nothing else.
+   * The stream row is not touched — importers pass the final `chunkCount`
+   * and `updatedAt` to {@link importStream}, so the row is exact at rest
+   * without a per-chunk row write.
    */
   importChunk(streamId: string, chunk: StreamJson, createdAt: number): void;
 }
@@ -246,7 +254,7 @@ export class Streams extends LifecycleCapability {
     let next = Math.max(0, options.from ?? 0);
     let signaledUpToDate = false;
 
-    if (!this.#getStream(streamId)) {
+    if (this.#state(streamId) === undefined) {
       throw new StreamNotFoundError(streamId);
     }
 
@@ -282,10 +290,17 @@ export class Streams extends LifecycleCapability {
         continue;
       }
 
-      const stream = this.#getStream(streamId);
-      if (!stream) return; // deleted mid-read: nothing further to yield
-      if (stream.state !== "streaming" && stream.chunk_count <= next) return;
-      if (stream.state !== "streaming") continue; // drain the rest first
+      const state = this.#state(streamId);
+      if (state === undefined) return; // deleted mid-read: nothing further
+      if (state !== "streaming") {
+        // Terminal. Appends happen-before settlement (the append fence
+        // rejects a settled stream), so a poll that returned zero rows in
+        // this same synchronous block proves every durable chunk has been
+        // yielded; a non-empty short batch yielded (a suspension point),
+        // so re-poll to drain the remainder first.
+        if (rows.length === 0) return;
+        continue;
+      }
 
       // Live tail: wait for the next append or settlement, then re-poll.
       // Wakeups carry no data, so there is nothing to buffer or dedupe.
@@ -385,6 +400,7 @@ export class Streams extends LifecycleCapability {
         this.#emit("stream:opened", { streamId });
       },
       append: (streamId, chunk) => this.#append(streamId, chunk),
+      lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
       settle: (streamId, state, reason) =>
         this.#settle(streamId, state, reason),
       deleteUnchecked: (streamId) => {
@@ -450,15 +466,10 @@ export class Streams extends LifecycleCapability {
           chunk,
           `chunk for stream "${streamId}"`
         );
-        const seq = this.#getStream(streamId)?.chunk_count ?? 0;
+        const seq = this.#tail(streamId).nextSeq;
         this.#sql`
           INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
           VALUES (${streamId}, ${seq}, ${chunkJson}, ${createdAt})
-        `;
-        this.#sql`
-          UPDATE cf_agents_streams
-          SET chunk_count = chunk_count + 1, updated_at = ${createdAt}
-          WHERE stream_id = ${streamId}
         `;
       }
     };
@@ -471,7 +482,7 @@ export class Streams extends LifecycleCapability {
     return {
       streamId,
       get cursor(): number {
-        return capability.#getStream(streamId)?.chunk_count ?? 0;
+        return capability.#tail(streamId).nextSeq;
       },
       append: (chunk) => this.#append(streamId, chunk),
       close: () => this.#settle(streamId, "completed", null),
@@ -480,6 +491,8 @@ export class Streams extends LifecycleCapability {
   }
 
   #append(streamId: string, chunk: StreamJson): number {
+    // Serialization runs BEFORE the fence read: JSON.stringify can execute
+    // user toJSON() methods, which may synchronously re-enter this stream.
     const chunkJson = this.#serialize(chunk, `chunk for stream "${streamId}"`);
     if (chunkJson === null) {
       throw new StreamSerializationError(
@@ -487,23 +500,21 @@ export class Streams extends LifecycleCapability {
         "chunks must not be undefined"
       );
     }
-    // The count bump is the write fence: it only succeeds while the stream
-    // is live, and the pre-bump count is the appended chunk's sequence.
-    const bumped = this.#sqlWrite(
-      `UPDATE cf_agents_streams
-       SET chunk_count = chunk_count + 1, updated_at = ?
-       WHERE stream_id = ? AND state = 'streaming'`,
-      [Date.now(), streamId]
-    );
-    if (bumped === 0) {
-      const row = this.#getStream(streamId);
+    // The fence is a read, and its atomicity lives in the isolate's
+    // threading model: a Durable Object executes one synchronous block at
+    // a time, so the state check, tail read, and INSERT below cannot
+    // interleave with a settle, delete, or another append. Nothing between
+    // here and the INSERT may await or call user code — either would
+    // reintroduce the lost-update races the old guarded-UPDATE fence
+    // prevented, at the cost of one stream-row write per append.
+    const state = this.#state(streamId);
+    if (state !== "streaming") {
       throw new StreamClosedError(
         streamId,
-        row ? `already settled as ${row.state}` : "it was deleted"
+        state !== undefined ? `already settled as ${state}` : "it was deleted"
       );
     }
-    const row = this.#getStream(streamId);
-    const seq = (row?.chunk_count ?? 1) - 1;
+    const seq = this.#tail(streamId).nextSeq;
     this.#sql`
       INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
       VALUES (${streamId}, ${seq}, ${chunkJson}, ${Date.now()})
@@ -517,11 +528,18 @@ export class Streams extends LifecycleCapability {
     state: Extract<StreamState, "completed" | "errored">,
     reason: string | null
   ): void {
+    // Settlement is the moment the stream row becomes exact at rest: the
+    // one UPDATE that ends the stream also stamps the final cursor, read
+    // from the chunk log's tail in the same synchronous block. While the
+    // stream was live, appends wrote only the chunk log — the row's
+    // chunk_count and updated_at were not maintained per append.
+    const finalCursor = this.#tail(streamId).nextSeq;
     const settled = this.#sqlWrite(
       `UPDATE cf_agents_streams
-       SET state = ?, error_message = ?, closed_at = ?, updated_at = ?
+       SET state = ?, error_message = ?, closed_at = ?, updated_at = ?,
+           chunk_count = ?
        WHERE stream_id = ? AND state = 'streaming'`,
-      [state, reason, Date.now(), Date.now(), streamId]
+      [state, reason, Date.now(), Date.now(), finalCursor, streamId]
     );
     if (settled > 0) {
       this.#emit(state === "completed" ? "stream:closed" : "stream:errored", {
@@ -638,11 +656,55 @@ export class Streams extends LifecycleCapability {
     return rows[0];
   }
 
+  /**
+   * One stream's state alone — the narrow read for the append fence and the
+   * reader loop's liveness checks, which need neither the metadata column
+   * nor the (live-stale) counters of the full row.
+   */
+  #state(streamId: string): StreamState | undefined {
+    const rows = this.#sql<{ state: StreamState }>`
+      SELECT state FROM cf_agents_streams WHERE stream_id = ${streamId}
+    `;
+    return rows[0]?.state;
+  }
+
+  /**
+   * The chunk log's tail: the next append sequence and the newest chunk's
+   * timestamp. One PK-served read (`ORDER BY seq DESC LIMIT 1`), and the
+   * single derivation point for every cursor and per-append-liveness
+   * consumer — while a stream is live, the chunk log is authoritative and
+   * the stream row's `chunk_count`/`updated_at` are not maintained.
+   */
+  #tail(streamId: string): { nextSeq: number; lastChunkAt: number | null } {
+    const rows = this.#sql<{ seq: number; created_at: number }>`
+      SELECT seq, created_at FROM cf_agents_stream_chunks
+      WHERE stream_id = ${streamId}
+      ORDER BY seq DESC
+      LIMIT 1
+    `;
+    const tail = rows[0];
+    return tail
+      ? { nextSeq: tail.seq + 1, lastChunkAt: tail.created_at }
+      : { nextSeq: 0, lastChunkAt: null };
+  }
+
   #rowToStatus(row: StreamRow): StreamStatus {
+    // A live row's stored counters are stale by design (appends write only
+    // the chunk log), so cursor and updatedAt are derived from the tail;
+    // terminal rows were stamped exact at settle and read straight through.
+    let cursor = row.chunk_count;
+    let updatedAt = row.updated_at;
+    if (row.state === "streaming") {
+      const tail = this.#tail(row.stream_id);
+      cursor = tail.nextSeq;
+      if (tail.lastChunkAt !== null && tail.lastChunkAt > updatedAt) {
+        updatedAt = tail.lastChunkAt;
+      }
+    }
     return {
       streamId: row.stream_id,
       state: row.state,
-      cursor: row.chunk_count,
+      cursor,
       ...(row.tag !== null ? { tag: row.tag } : {}),
       ...(row.metadata !== null
         ? {
@@ -651,7 +713,7 @@ export class Streams extends LifecycleCapability {
         : {}),
       ...(row.error_message !== null ? { error: row.error_message } : {}),
       createdAt: row.created_at,
-      updatedAt: row.updated_at,
+      updatedAt,
       ...(row.closed_at !== null ? { closedAt: row.closed_at } : {})
     };
   }

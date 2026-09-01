@@ -22,6 +22,8 @@ interface LegacyMigrationStub {
     remainingLegacyTables: string[];
     migratedStatus: { status: string; request_id: string } | null;
     migratedChunkBodies: string[];
+    migratedLiveCursor: number | null;
+    migratedCompletedCursor: number | null;
     legacyMessageId: string | null;
     restoredActiveStreamId: string | null;
     startThrew: boolean;
@@ -67,6 +69,12 @@ describe("ResumableStream — legacy table migration", () => {
       '{"type":"text-delta","delta":"b"}',
       '{"type":"text-delta","delta":"c"}'
     ]);
+
+    // Both migrated cursors are exact in stored segments (not unpacked
+    // bodies): the live row's derived from the imported chunk log, the
+    // completed row's stamped at import — nothing settle-stamps it later.
+    expect(result.migratedLiveCursor).toBe(2);
+    expect(result.migratedCompletedCursor).toBe(1);
 
     // Reading the post-#1691 field off a pre-#1691 row: guarded → null.
     expect(result.legacyMessageId).toBeNull();

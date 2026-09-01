@@ -111,6 +111,9 @@ export interface TaskStepEngine {
   /** Insert a new step row claimed at attempt 1. */
   insertStep(name: string, kind: "do" | "sleep", wakeAt: number | null): void;
 
+  /** Journal an already-elapsed sleep born-completed, in one row write. */
+  insertCompletedSleep(name: string): void;
+
   /** Claim the next attempt of an existing step. Returns the new attempt. */
   claimStepAttempt(name: string): number;
 
@@ -352,8 +355,7 @@ export class ReplayStep implements TaskStep {
       this.#live = true;
       const wakeAt = wakeTime();
       if (wakeAt <= Date.now()) {
-        this.#engine.insertStep(name, "sleep", null);
-        this.#engine.completeStep(name, undefined);
+        this.#engine.insertCompletedSleep(name);
         return;
       }
       this.#engine.insertStep(name, "sleep", wakeAt);

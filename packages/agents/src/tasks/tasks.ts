@@ -405,14 +405,26 @@ export class Tasks<
 
   /** Mirror every non-terminal run into the queue (startup reconcile). */
   async #syncAllWakes(): Promise<void> {
-    const rows = this.#store.sql<{ run_id: string }>`
-      SELECT run_id FROM cf_agents_task_runs
+    const rows = this.#store.sql<{ run_id: string; next_at: number }>`
+      SELECT run_id, next_at FROM cf_agents_task_runs
       WHERE state IN ('pending', 'waiting', 'running')
         AND next_at IS NOT NULL
     `;
-    for (const { run_id } of rows) {
+    let skipped = false;
+    for (const { run_id, next_at } of rows) {
+      // On restart the mirror usually survived alongside the run row (same
+      // storage), and a same-values upsert is still a billed row write —
+      // skip it when the durable job already carries this run's deadline.
+      const existing = this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${run_id}`);
+      if (existing?.fn === "wake" && existing.time === next_at) {
+        skipped = true;
+        continue;
+      }
       await this.#syncWake(run_id);
     }
+    // Pushes re-arm the physical alarm as a side effect; a fully (or
+    // partly) skipped reconcile must recover a lost alarm explicitly.
+    if (skipped) await this.lifecycle.jobs.rearm();
   }
 
   // ── Inspection and control ───────────────────────────────────────────────
@@ -474,19 +486,23 @@ export class Tasks<
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return false;
 
-    const now = Date.now();
-    this.#store.sql`
-      UPDATE cf_agents_task_runs
-      SET cancel_requested = 1, cancel_reason = ${reason ?? null},
-          next_at = ${now}, updated_at = ${now}
-      WHERE run_id = ${runId}
-    `;
     const active = this.#active.get(runId);
     if (active) {
+      const now = Date.now();
+      this.#store.sql`
+        UPDATE cf_agents_task_runs
+        SET cancel_requested = 1, cancel_reason = ${reason ?? null},
+            next_at = ${now}, updated_at = ${now}
+        WHERE run_id = ${runId}
+      `;
       active.controller.abort(new TaskCancellation(reason));
       await this.#syncWake(runId);
       return true;
     }
+    // A parked run settles in one write: #settleCancelled's UPDATE records
+    // the request bits itself, so a separate request write would touch the
+    // same row twice in the same synchronous block (one durable commit
+    // either way — the split bought no crash evidence).
     await this.#settleCancelled(runId, null, reason);
     return true;
   }
@@ -693,7 +709,8 @@ export class Tasks<
       generation,
       attempt,
       controller,
-      interrupted
+      interrupted,
+      now
     );
     this.#active.set(runId, { generation, controller, promise });
     try {
@@ -710,7 +727,8 @@ export class Tasks<
     generation: string,
     attempt: number,
     controller: AbortController,
-    interrupted: { name: string; attempt: number } | null
+    interrupted: { name: string; attempt: number } | null,
+    claimedAtMs: number
   ): Promise<void> {
     const runId = row.run_id;
     const input = deserializeTaskValue(row.input);
@@ -718,7 +736,8 @@ export class Tasks<
       runId,
       row.definition,
       generation,
-      controller
+      controller,
+      claimedAtMs
     );
     const step = new ReplayStep(engine, {
       startsLive: attempt === 1,
@@ -745,8 +764,11 @@ export class Tasks<
       if (settled) {
         this.#emit("task:completed", { runId, definition: row.definition });
         if (row.retain === 0) this.#store.deleteRun(runId);
+        await this.#syncWake(runId);
       }
-      await this.#syncWake(runId);
+      // Fence rejected: a newer generation owns the run, and every deadline
+      // mutation it makes funnels through its own #syncWake — a push here
+      // would be a redundant job-row write.
     } catch (thrown) {
       await this.#settleThrown(row, generation, thrown);
     }
@@ -807,8 +829,8 @@ export class Tasks<
           reason: thrown.reason,
           wakeAt: thrown.wakeAt
         });
+        await this.#syncWake(runId);
       }
-      await this.#syncWake(runId);
       return;
     }
 
@@ -839,7 +861,8 @@ export class Tasks<
     runId: string,
     definition: string,
     generation: string,
-    controller: AbortController
+    controller: AbortController,
+    claimedAtMs: number
   ): TaskStepEngine {
     return createTaskStepEngine({
       store: this.#store,
@@ -847,6 +870,8 @@ export class Tasks<
       generation,
       signal: controller.signal,
       claimTimeoutMs: () => this.#claimTimeoutMs(),
+      claimedAtMs,
+      claimRefreshAfterMs: CLAIM_SLACK_MS / 2,
       defaults: this.#stepDefaults,
       emit: (type, payload) =>
         this.#emit(type as TaskEventType, { runId, definition, ...payload })
@@ -906,8 +931,8 @@ export class Tasks<
         definition: row?.definition ?? null,
         reason: reason ?? null
       });
+      await this.#syncWake(runId);
     }
-    await this.#syncWake(runId);
   }
 
   /**
@@ -950,8 +975,8 @@ export class Tasks<
         definition: row?.definition ?? null,
         error: error.name
       });
+      await this.#syncWake(runId);
     }
-    await this.#syncWake(runId);
     return settled;
   }
 
