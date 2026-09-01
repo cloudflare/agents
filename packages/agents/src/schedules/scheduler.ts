@@ -663,36 +663,6 @@ export class Scheduler<
     }
   }
 
-  /**
-   * @internal Apply the alarm memory-limit breaker's policy to this
-   * Scheduler's recovery schedules (#1825). The host names the callbacks
-   * whose jobs drive a recovery loop; sealed purges them, otherwise they are
-   * delayed to `nextTime` (epoch ms) so the next attempt runs on a fresh
-   * isolate after a backoff. Lifecycle handles the job that was executing.
-   */
-  async applyMemoryLimitPolicy(options: {
-    readonly callbacks: ReadonlyArray<string>;
-    readonly sealed: boolean;
-    readonly nextTime?: number;
-  }): Promise<void> {
-    const callbacks = new Set(options.callbacks);
-    for (const { job } of this.#ownedJobs()) {
-      if (!callbacks.has(job.fn)) continue;
-      try {
-        if (options.sealed) {
-          await this.lifecycle.jobs.cancel(job.id);
-        } else if (
-          options.nextTime !== undefined &&
-          job.time <= options.nextTime
-        ) {
-          await this.lifecycle.jobs.reschedule(job.id, options.nextTime);
-        }
-      } catch {
-        // best-effort at a host failure boundary
-      }
-    }
-  }
-
   // ── Validation ───────────────────────────────────────────────────────────
 
   #validateSchedule(
@@ -851,7 +821,8 @@ export class Scheduler<
       payload: jobPayload,
       retry: resolveRetryConfig(options?.retry, this.#retryDefaults),
       singleflight: timing.type === "interval",
-      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds
+      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+      recoveryLoop: options?.recoveryLoop
     });
 
     return {

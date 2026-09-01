@@ -97,6 +97,13 @@ export type ScheduleOptions = {
    * one-shot schedules.
    */
   idempotent?: boolean;
+  /**
+   * Mark this schedule as driving a recovery loop that can deterministically
+   * exhaust memory. The alarm memory-limit circuit breaker (#1825) backs
+   * flagged schedules off on a strike and purges them when it seals at the
+   * strike budget, without disturbing unrelated schedules.
+   */
+  recoveryLoop?: boolean;
 };
 
 /** Filters accepted by `getSchedules()` and `listSchedules()`. */

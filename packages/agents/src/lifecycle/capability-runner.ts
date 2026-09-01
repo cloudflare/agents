@@ -39,6 +39,17 @@ export type CapabilityWebSocketUpgradeContext = {
 };
 
 /**
+ * Context supplied when the alarm memory-limit circuit breaker records a
+ * strike (#1825), to capabilities and the host alike.
+ */
+export type MemoryLimitContext = {
+  /** Whether the breaker hit its strike budget and sealed recovery work. */
+  readonly sealed: boolean;
+  /** The backoff wake time (epoch ms) armed for an unsealed strike. */
+  readonly nextTime?: number;
+};
+
+/**
  * A capability installed into a Durable Object lifecycle.
  *
  * Capabilities extending `LifecycleCapability` receive the standard storage,
@@ -144,6 +155,15 @@ export interface DurableObjectCapability<Props extends object = object> {
     context: LifecycleJobContext,
     error: unknown
   ): MaybePromise<LifecycleJobOutcome | void>;
+
+  /**
+   * Apply domain policy after the alarm memory-limit circuit breaker
+   * records a strike (#1825). Lifecycle has already handled the queue: the
+   * executing job and every `recoveryLoop`-flagged job are backed off (or
+   * purged when `sealed`). Runs at the outermost alarm frame, post-unwind,
+   * best-effort — the isolate resets right after, so keep writes small.
+   */
+  onMemoryLimit?(context: MemoryLimitContext): MaybePromise<void>;
 
   /** Handle one message routed to this capability identity. */
   onRoute?(context: LifecycleRouteContext): MaybePromise<unknown>;
@@ -314,6 +334,24 @@ export class CapabilityRunner<Props extends object = object> {
       );
     }
     return capability.onRoute(context);
+  }
+
+  /**
+   * Offer a memory-limit strike to every capability, best-effort.
+   *
+   * Deliberately not gated on startup: a strike can land while startup
+   * itself is the work that exceeded the memory limit, and the breaker's
+   * policy must still reach capabilities. One capability's failure does not
+   * stop the next — the isolate is about to reset either way.
+   */
+  async memoryLimit(context: MemoryLimitContext): Promise<void> {
+    for (const capability of this.#getCapabilities()) {
+      try {
+        await capability.onMemoryLimit?.(context);
+      } catch (error) {
+        console.error("Lifecycle capability memory-limit policy failed", error);
+      }
+    }
   }
 
   /** Dispose installed capabilities in reverse registration order. */

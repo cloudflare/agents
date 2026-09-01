@@ -289,6 +289,21 @@ export class TestScheduleAgent extends Agent {
     return schedule.id;
   }
 
+  // A schedule flagged as part of an OOM-prone recovery loop (#1825): the
+  // alarm memory-limit breaker backs it off on a strike and purges it at seal.
+  @callable()
+  async createRecoveryLoopSchedule(delaySeconds: number): Promise<string> {
+    const schedule = await this.schedule(
+      delaySeconds,
+      "testCallback",
+      undefined,
+      {
+        recoveryLoop: true
+      }
+    );
+    return schedule.id;
+  }
+
   @callable()
   async createIntervalSchedule(intervalSeconds: number): Promise<string> {
     const schedule = await this.scheduleEvery(

@@ -74,18 +74,21 @@ export type RecoveryPartial = {
 export type ChatStreamStatus = "streaming" | "completed" | "error";
 
 /**
- * Resolve the `schedule()` idempotency option for a recovery schedule. Single
- * source of truth for both packages; see {@link ChatRecoveryScheduleReason} for
- * the rationale behind each case.
+ * Resolve the `schedule()` options for a recovery schedule. Single source of
+ * truth for both packages; see {@link ChatRecoveryScheduleReason} for the
+ * rationale behind each idempotency case. Every recovery schedule is flagged
+ * `recoveryLoop` so the alarm memory-limit circuit breaker (#1825) backs the
+ * loop off on a strike and purges it when it seals.
  *
- * This is a cutover invariant: flipping either case silently breaks deploy-storm
- * dedup (initial) or stalls stable-timeout retries (reschedule), and neither is
- * caught by a type error — only by the recovery suites.
+ * This is a cutover invariant: flipping either idempotency case silently
+ * breaks deploy-storm dedup (initial) or stalls stable-timeout retries
+ * (reschedule), and neither is caught by a type error — only by the recovery
+ * suites.
  */
 export function chatRecoverySchedulePolicy(
   reason: ChatRecoveryScheduleReason
-): { idempotent: boolean } {
-  return { idempotent: reason === "initial" };
+): { idempotent: boolean; recoveryLoop: true } {
+  return { idempotent: reason === "initial", recoveryLoop: true };
 }
 
 /** Identity + context for opening (or re-evaluating) a recovery incident. */

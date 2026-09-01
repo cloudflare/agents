@@ -1156,6 +1156,45 @@ describe("schedule operations", () => {
       expect(await fresh.getAlarmStrikesForTest()).toBe(0);
     });
 
+    it("backs off pending recovery-loop schedules with the strike and purges them at seal", async () => {
+      const name = "oom-breaker-recovery-loop-pack";
+      const oom =
+        "Durable Object's isolate exceeded its memory limit and was reset.";
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      // A flagged sibling row that would fire before the backoff wake, and an
+      // unflagged control the breaker must never touch.
+      const flaggedId = await stub.createRecoveryLoopSchedule(1);
+      const controlId = await stub.createSchedule(3600);
+
+      // Strike 1: the flagged row travels with the strike — backed off past
+      // the ~30s backoff wake instead of re-triggering the doomed loop.
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      let fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const backedOff = await fresh.getStoredScheduleById(flaggedId);
+      expect(backedOff).toBeDefined();
+      expect((backedOff?.time ?? 0) * 1000).toBeGreaterThan(
+        Date.now() + 20_000
+      );
+
+      // Strikes 2 and 3: sealing purges every flagged row…
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 0
+      });
+      fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getStoredScheduleById(flaggedId)).toBeUndefined();
+      // …while unrelated schedules survive untouched.
+      expect(await fresh.getStoredScheduleById(controlId)).toBeDefined();
+      await fresh.cancelScheduleById(controlId);
+    });
+
     it("a memory-limit reset during startup hydration is broken by the breaker", async () => {
       // The exact #1825 boot-hydration case: the reset is thrown before any
       // job runs. Initialization runs inside the breaker, so the alarm must
