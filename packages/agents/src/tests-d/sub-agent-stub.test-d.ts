@@ -123,3 +123,24 @@ null! as ChildStub["search"] satisfies (query: string) => Promise<string[]>;
 
 // MiddleAgent method IS present (not excluded — only keyof Agent is)
 null! as ChildStub["onChat"] satisfies (_msg: string) => Promise<void>;
+
+// ── Agent.dynamicAgents is public and preserves child typing ─────────
+
+class ParentAgent extends Agent {
+  async exerciseDynamicAgents(): Promise<void> {
+    const child = await this.dynamicAgents.get(TestSubAgent, "child");
+    child.syncMethod satisfies () => Promise<string>;
+    child.methodWithArgs satisfies (a: string, b: number) => Promise<boolean>;
+
+    this.dynamicAgents.has(TestSubAgent, "child") satisfies boolean;
+    this.dynamicAgents.list(TestSubAgent) satisfies Array<{
+      className: string;
+      name: string;
+      createdAt: number;
+    }>;
+    this.dynamicAgents.abort(TestSubAgent, "child");
+    await this.dynamicAgents.delete(TestSubAgent, "child");
+  }
+}
+
+void ParentAgent;

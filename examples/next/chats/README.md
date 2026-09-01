@@ -7,7 +7,7 @@ Object per chat** (`ChatAgent`), plus **one per-user index DO**
 ```
 UserAgent "alice"                ChatAgent "alice:{chatId}" (one per chat)
 ┌───────────────────────┐        ┌──────────────────────────┐
-│ chats                 │ upsert │ messages                 │
+│ chats                 │ update │ messages                 │
 │  chat_id → title,     │◀───────│  role, text, at          │
 │  last_message,        │  push  │  (own SQLite, own alarms,│
 │  updated_at           │        │   own placement)         │
@@ -21,7 +21,7 @@ UserAgent "alice"                ChatAgent "alice:{chatId}" (one per chat)
 A chat fails the facet test on every axis: it needs no isolation
 boundary from a parent, it wants its own alarms (facets cannot set
 alarms), a user accumulates an unbounded number of them (a facet tree is
-pinned to one machine and shares the parent DO's storage budget), and
+pinned to one machine and stored as one logical root object), and
 every WebSocket frame to a facet wakes the root parent. Facets are for
 code the parent _supervises_ — dynamically-loaded or generated code,
 per-run tool agents — reached via `this.dynamicAgents`. See
@@ -38,7 +38,10 @@ per-run tool agents — reached via `this.dynamicAgents`. See
   multi-table sweeps.
 
 The index is derived data pushed on every write; the chats themselves
-stay the source of truth.
+stay the source of truth. A push updates only an existing catalog row,
+so delayed activity cannot recreate a chat after deletion. The User DO
+also assigns a monotonic activity sequence, avoiding timestamp ties
+between independently running Chat DOs.
 
 ## Run
 

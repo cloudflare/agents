@@ -95,7 +95,7 @@ export type DynamicAgentWebSocketEndpoint = {
 
 /**
  * Constructor type for a dynamic agent (facet-backed child) class.
- * Used by {@link Agent.dynamicAgent} to reference the child class
+ * Used by {@link Agent.dynamicAgents} to reference the child class
  * via `ctx.exports`.
  *
  * The class name (`cls.name`) must match the export name in the

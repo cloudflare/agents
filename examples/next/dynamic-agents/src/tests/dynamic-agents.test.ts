@@ -49,6 +49,22 @@ describe("supervised dynamic code in facets", () => {
     expect(await supervisor.supervisorTables()).not.toContain("hits");
   });
 
+  it("returns the selected gadget's current source", async () => {
+    const supervisor = await getAgentByName(env.Supervisor, uniqueName());
+    await supervisor.createGadget("editable");
+
+    expect((await supervisor.getGadget("editable")).code).toContain(
+      'version: "v1"'
+    );
+
+    await supervisor.updateGadgetCode("editable", V2_CODE);
+    expect(await supervisor.getGadget("editable")).toMatchObject({
+      name: "editable",
+      code: V2_CODE,
+      version: 2
+    });
+  });
+
   it("upgrades gadget code over the same storage", async () => {
     const supervisor = await getAgentByName(env.Supervisor, uniqueName());
     await supervisor.createGadget("upgradeable");

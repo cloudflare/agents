@@ -95,7 +95,7 @@ The resulting URL for the child connection is `/agents/supervisor/{userId}/sub/j
 Dynamic agents are backed by workerd **facets**. The properties below are what the runtime actually provides — several of them are the reason this is an isolation primitive rather than a scale-out primitive:
 
 - **Separate isolate, same machine.** Each facet runs in its own isolate (its own JS heap), colocated with the parent for cheap RPC. The whole tree shares the parent's physical placement and moves or dies with it — facets never scatter across the edge.
-- **Own SQLite database.** Each facet's storage is invisible to its siblings and to the parent's SQL. The facet databases are part of the parent Durable Object's overall storage, so the per-DO storage limit covers the whole tree.
+- **Own SQLite database.** Each facet's storage is invisible to its siblings and to the parent's SQL. The runtime stores the databases together as one logical root object; do not treat a facet as an independently placed top-level storage object.
 - **No independent alarms.** Facets cannot set a physical alarm; the top-level parent owns the one alarm slot and the SDK routes scheduled callbacks back into children (see [Scheduling](#scheduling)).
 - **Supervised lifecycle.** The parent can abort a child transitively (storage survives), delete it (storage wiped), and restart the same storage under a _different class_ — a code upgrade on stable state. A broken facet breaks the whole actor, except when the parent itself aborted it.
 - **Independent hibernation.** A facet hibernates and restarts independently of its parent, but cannot outlive the root Durable Object's placement.
@@ -455,13 +455,13 @@ One top-level Durable Object per chat, plus a per-user index DO the chats push t
 ```typescript
 // ChatAgent (one DO per chat) pushes on every write:
 const user = await getAgentByName(this.env.UserAgent, userId);
-await user.upsertChat({ chatId, title, lastMessage, updatedAt });
+await user.recordChatActivity({ chatId, title, lastMessage, updatedAt });
 
 // UserAgent (per-user index) answers listing and cross-chat search
 // from its own SQLite — no chat DO wakes up.
 ```
 
-Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the complete pattern with tests.
+Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. The proposed production topology, including a long-lived User-agent connection alongside the active Chat-agent connection, is in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
 
 ## Examples
 

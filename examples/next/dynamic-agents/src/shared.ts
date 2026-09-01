@@ -5,6 +5,9 @@
 
 export type GadgetInfo = { name: string; version: number };
 
+/** Full editor payload for one stored gadget. */
+export type GadgetDetails = GadgetInfo & { code: string };
+
 /**
  * The default gadget: a Durable Object class that counts invocations
  * in its own private SQLite. The named `Sandbox` export is required —

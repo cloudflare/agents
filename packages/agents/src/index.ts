@@ -49,17 +49,12 @@ import {
   CF_SUB_AGENT_TAGS_KEY,
   SUB_AGENT_OUTER_URL_HEADER
 } from "./dynamic-agents/dynamic-agents";
-import {
-  logicalNameFromPathV2Identity,
-  type SubAgentIdentityVersion
-} from "./dynamic-agents/identity";
-import type { DynamicAgentRegistry } from "./dynamic-agents/registry";
+import { logicalNameFromPathV2Identity } from "./dynamic-agents/identity";
 import { DynamicAgentsInternal } from "./dynamic-agents/dynamic-agents";
 import { DynamicAgents as DynamicAgentsApi } from "./dynamic-agents/api";
 import type { DynamicAgentHostPort } from "./dynamic-agents/host";
 import type {
   FacetCapableCtx,
-  FacetRunStorageRow,
   RootFacetRpcSurface,
   DynamicAgentClass as SubAgentClass,
   DynamicAgentConnectionMeta as SubAgentConnectionMeta,
@@ -3481,12 +3476,6 @@ export class Agent<
       }));
   }
 
-  private _facetRunRowsForPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): FacetRunStorageRow[] {
-    return this._dynamicAgents.runRowsForPrefix(ownerPath);
-  }
-
   private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
     return this._dynamicAgents.lifecycleRouteAddress();
   }
@@ -3516,10 +3505,6 @@ export class Agent<
     return this._dynamicAgents.rootAlarmOwner();
   }
 
-  private _cf_rootResolvesToSelf(): boolean {
-    return this._dynamicAgents.rootResolvesToSelf();
-  }
-
   // ── Scheduling (delegates to agents/schedules) ─────────────────────────
 
   /**
@@ -3540,8 +3525,8 @@ export class Agent<
 
   /**
    * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
-   * Facets share the root isolate but cannot set their own physical
-   * alarm, so this lets facet work use the root alarm heartbeat.
+   * Facets run in separate colocated isolates but cannot set their own
+   * physical alarm, so this lets facet work use the root alarm heartbeat.
    * @internal
    */
   _cf_acquireFacetKeepAlive(
@@ -5268,9 +5253,9 @@ export class Agent<
    * Response, the framework resolves the facet and hands the
    * request off.
    *
-   * After a WebSocket upgrade completes, subsequent frames route
-   * directly to the child — the parent is only on the path for the
-   * initial request.
+   * The parent owns an upgraded WebSocket for its lifetime. Subsequent
+   * frames wake the root parent, which forwards them to the child over
+   * RPC and routes replies back to the native socket.
    *
    * @experimental The API surface may change before stabilizing.
    */
@@ -8420,37 +8405,6 @@ export class Agent<
 
   // ── Sub-agent registry (backs `hasSubAgent` / `listSubAgents`) ──────────
 
-  /** @internal */
-  private get _subAgentRegistry(): DynamicAgentRegistry {
-    return this._dynamicAgents.registry;
-  }
-
-  /** @internal */
-  private _recordSubAgent(
-    className: string,
-    name: string,
-    identity: { version: SubAgentIdentityVersion; name: string }
-  ): void {
-    this._subAgentRegistry.record(className, name, identity);
-  }
-
-  private async _cf_subAgentIdentity(
-    className: string,
-    name: string,
-    childPath: ReadonlyArray<AgentPathStep>
-  ): Promise<{
-    version: SubAgentIdentityVersion;
-    name: string;
-    existing: boolean;
-  }> {
-    return this._subAgentRegistry.identity(className, name, childPath);
-  }
-
-  /** @internal */
-  private _forgetSubAgent(className: string, name: string): void {
-    this._subAgentRegistry.forget(className, name);
-  }
-
   /**
    * Whether this agent has previously spawned (and not deleted) a
    * sub-agent of the given class and name. Backed by an
@@ -8475,7 +8429,9 @@ export class Agent<
   hasSubAgent<T extends Agent>(cls: SubAgentClass<T>, name: string): boolean;
   hasSubAgent(className: string, name: string): boolean;
   hasSubAgent(classOrName: SubAgentClass | string, name: string): boolean {
-    return this.dynamicAgents.has(classOrName as SubAgentClass & string, name);
+    return typeof classOrName === "string"
+      ? this.dynamicAgents.has(classOrName, name)
+      : this.dynamicAgents.has(classOrName, name);
   }
 
   /**
@@ -8496,7 +8452,10 @@ export class Agent<
   listSubAgents(
     classOrName?: SubAgentClass | string
   ): Array<{ className: string; name: string; createdAt: number }> {
-    return this.dynamicAgents.list(classOrName as SubAgentClass & string);
+    if (typeof classOrName === "string" || classOrName === undefined) {
+      return this.dynamicAgents.list(classOrName);
+    }
+    return this.dynamicAgents.list(classOrName);
   }
 
   /**

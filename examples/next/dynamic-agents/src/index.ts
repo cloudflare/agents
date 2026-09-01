@@ -149,6 +149,12 @@ export class Supervisor extends Agent<Env> {
     this.sql`DELETE FROM gadgets WHERE name = ${name}`;
   }
 
+  /** Load one gadget's source into the browser editor. */
+  @callable()
+  getGadget(name: string): GadgetRow {
+    return this.#gadget(name);
+  }
+
   @callable()
   listGadgets(): Array<{ name: string; version: number }> {
     return this.sql<{ name: string; version: number }>`

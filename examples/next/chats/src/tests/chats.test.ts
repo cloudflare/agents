@@ -60,6 +60,58 @@ describe("one DO per chat + per-user index", () => {
     ]);
   });
 
+  it("uses User-agent activity order when wall-clock timestamps tie", async () => {
+    const user = await getAgentByName(env.UserAgent, uniqueUser());
+    const first = await user.createChat();
+    const second = await user.createChat();
+    const updatedAt = 123;
+
+    await user.recordChatActivity({
+      chatId: first,
+      title: "first",
+      lastMessage: "first activity",
+      updatedAt
+    });
+    await user.recordChatActivity({
+      chatId: second,
+      title: "second",
+      lastMessage: "second activity",
+      updatedAt
+    });
+
+    expect((await user.listChats()).map((chat) => chat.chatId)).toEqual([
+      second,
+      first
+    ]);
+
+    await user.recordChatActivity({
+      chatId: first,
+      title: "first",
+      lastMessage: "latest activity",
+      updatedAt
+    });
+    expect((await user.listChats()).map((chat) => chat.chatId)).toEqual([
+      first,
+      second
+    ]);
+  });
+
+  it("does not recreate a deleted catalog row from delayed activity", async () => {
+    const user = await getAgentByName(env.UserAgent, uniqueUser());
+    const chatId = await user.createChat();
+    await user.deleteChat(chatId);
+
+    expect(
+      await user.recordChatActivity({
+        chatId,
+        title: "stale",
+        lastMessage: "late completion",
+        updatedAt: Date.now()
+      })
+    ).toBe(false);
+    expect(await user.listChats()).toEqual([]);
+  });
+
   it("searches across chats via the index only", async () => {
     const userId = uniqueUser();
     const user = await getAgentByName(env.UserAgent, userId);

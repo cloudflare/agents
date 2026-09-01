@@ -18,10 +18,14 @@ import {
   SunIcon,
   TrashIcon
 } from "@phosphor-icons/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
-import { DEFAULT_GADGET_CODE, type GadgetInfo } from "./shared";
+import {
+  DEFAULT_GADGET_CODE,
+  type GadgetDetails,
+  type GadgetInfo
+} from "./shared";
 import "./styles.css";
 
 const INSTANCE_KEY = "next-dynamic-agents-instance";
@@ -59,6 +63,8 @@ function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [code, setCode] = useState(DEFAULT_GADGET_CODE);
+  const [codeLoading, setCodeLoading] = useState(false);
+  const selectionRequest = useRef(0);
   const [path, setPath] = useState("/counter");
   const [log, setLog] = useState<LogEntry[]>([]);
   const [busy, setBusy] = useState(false);
@@ -101,13 +107,43 @@ function App() {
     [append, refresh]
   );
 
+  const selectGadget = useCallback(
+    async (name: string) => {
+      const request = ++selectionRequest.current;
+      setSelected(name);
+      setCodeLoading(true);
+      try {
+        const details = (await supervisor.call("getGadget", [
+          name
+        ])) as GadgetDetails;
+        if (selectionRequest.current === request) {
+          setCode(details.code);
+        }
+      } catch (error) {
+        if (selectionRequest.current === request) {
+          setSelected(null);
+          setCode(DEFAULT_GADGET_CODE);
+          append(
+            `load ${name} failed`,
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      } finally {
+        if (selectionRequest.current === request) {
+          setCodeLoading(false);
+        }
+      }
+    },
+    [append, supervisor]
+  );
+
   const createGadget = () => {
     const name = newName.trim();
     if (!name) return;
     void run(`create ${name}`, async () => {
       const created = await supervisor.call("createGadget", [name]);
-      setSelected(name);
       setNewName("");
+      await selectGadget(name);
       return created;
     });
   };
@@ -157,7 +193,7 @@ function App() {
                 <button
                   type="button"
                   key={gadget.name}
-                  onClick={() => setSelected(gadget.name)}
+                  onClick={() => void selectGadget(gadget.name)}
                   className={`flex w-full items-center justify-between px-4 py-3 text-left hover:bg-kumo-elevated ${
                     selected === gadget.name ? "bg-kumo-elevated" : ""
                   }`}
@@ -191,7 +227,7 @@ function App() {
                   <div className="flex items-center gap-2">
                     <Button
                       size="sm"
-                      disabled={busy}
+                      disabled={busy || codeLoading}
                       onClick={() =>
                         void run(`deploy ${selected}`, () =>
                           supervisor.call("updateGadgetCode", [selected, code])
@@ -222,7 +258,9 @@ function App() {
                         void run(`delete ${selected}`, () =>
                           supervisor.call("deleteGadget", [selected])
                         );
+                        selectionRequest.current++;
                         setSelected(null);
+                        setCode(DEFAULT_GADGET_CODE);
                       }}
                       icon={<TrashIcon size={14} />}
                     >
@@ -233,6 +271,7 @@ function App() {
                 <Textarea
                   value={code}
                   onChange={(event) => setCode(event.currentTarget.value)}
+                  disabled={codeLoading}
                   spellCheck={false}
                   className="min-h-0 flex-1 resize-none rounded-none border-0 font-mono text-xs"
                 />

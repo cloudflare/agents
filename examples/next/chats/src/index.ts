@@ -74,7 +74,7 @@ export class ChatAgent extends Agent<Env> {
       SELECT text FROM messages WHERE role = 'user' ORDER BY id ASC LIMIT 1
     `;
     const user = await getAgentByName(this.env.UserAgent, userId);
-    await user.upsertChat({
+    await user.recordChatActivity({
       chatId,
       title: first ? first.text.slice(0, 80) : null,
       lastMessage: text.slice(0, 120),
@@ -104,32 +104,74 @@ export class UserAgent extends Agent<Env> {
         chat_id TEXT PRIMARY KEY,
         title TEXT,
         last_message TEXT,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        activity_sequence INTEGER NOT NULL DEFAULT 0
       )
     `;
+    const columns = this.sql<{ name: string }>`PRAGMA table_info(chats)`;
+    if (!columns.some((column) => column.name === "activity_sequence")) {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE chats ADD COLUMN activity_sequence INTEGER NOT NULL DEFAULT 0"
+      );
+    }
+    this.sql`
+      CREATE TABLE IF NOT EXISTS chat_index_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        next_activity_sequence INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      INSERT OR IGNORE INTO chat_index_state (id, next_activity_sequence)
+      SELECT 1, COALESCE(MAX(activity_sequence), 0) FROM chats
+    `;
+  }
+
+  #nextActivitySequence(): number {
+    const [row] = this.sql<{ value: number }>`
+      UPDATE chat_index_state
+      SET next_activity_sequence = next_activity_sequence + 1
+      WHERE id = 1
+      RETURNING next_activity_sequence AS value
+    `;
+    if (!row) throw new Error("Chat index sequence row is missing.");
+    return row.value;
   }
 
   @callable()
   async createChat(): Promise<string> {
     const chatId = crypto.randomUUID();
     this.sql`
-      INSERT INTO chats (chat_id, title, last_message, updated_at)
-      VALUES (${chatId}, NULL, NULL, ${Date.now()})
+      INSERT INTO chats (
+        chat_id,
+        title,
+        last_message,
+        updated_at,
+        activity_sequence
+      )
+      VALUES (
+        ${chatId},
+        NULL,
+        NULL,
+        ${Date.now()},
+        ${this.#nextActivitySequence()}
+      )
     `;
     return chatId;
   }
 
-  /** Push target for ChatAgent metadata updates. */
-  @callable()
-  upsertChat(meta: ChatMeta): void {
-    this.sql`
-      INSERT INTO chats (chat_id, title, last_message, updated_at)
-      VALUES (${meta.chatId}, ${meta.title}, ${meta.lastMessage}, ${meta.updatedAt})
-      ON CONFLICT (chat_id) DO UPDATE SET
-        title = excluded.title,
-        last_message = excluded.last_message,
-        updated_at = excluded.updated_at
+  /** Internal DO-RPC target for ChatAgent metadata updates. */
+  recordChatActivity(meta: ChatMeta): boolean {
+    const activitySequence = this.#nextActivitySequence();
+    const rows = this.sql<{ chatId: string }>`
+      UPDATE chats SET
+        title = ${meta.title},
+        last_message = ${meta.lastMessage},
+        updated_at = ${meta.updatedAt},
+        activity_sequence = ${activitySequence}
+      WHERE chat_id = ${meta.chatId}
+      RETURNING chat_id AS chatId
     `;
+    return rows.length > 0;
   }
 
   @callable()
@@ -137,7 +179,8 @@ export class UserAgent extends Agent<Env> {
     return this.sql<ChatMeta>`
       SELECT chat_id AS chatId, title, last_message AS lastMessage,
              updated_at AS updatedAt
-      FROM chats ORDER BY updated_at DESC
+      FROM chats
+      ORDER BY activity_sequence DESC, updated_at DESC, chat_id ASC
     `;
   }
 
@@ -153,7 +196,7 @@ export class UserAgent extends Agent<Env> {
              updated_at AS updatedAt
       FROM chats
       WHERE title LIKE ${like} OR last_message LIKE ${like}
-      ORDER BY updated_at DESC
+      ORDER BY activity_sequence DESC, updated_at DESC, chat_id ASC
     `;
   }
 
