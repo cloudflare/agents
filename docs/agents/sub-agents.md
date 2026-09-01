@@ -97,7 +97,7 @@ Dynamic agents are backed by workerd **facets**. The properties below are what t
 - **Separate isolate, same machine.** Each facet runs in its own isolate (its own JS heap), colocated with the parent for cheap RPC. The whole tree shares the parent's physical placement and moves or dies with it — facets never scatter across the edge.
 - **Own SQLite database.** Each facet's storage is invisible to its siblings and to the parent's SQL. The facet databases are part of the parent Durable Object's overall storage, so the per-DO storage limit covers the whole tree.
 - **No independent alarms.** Facets cannot set a physical alarm; the top-level parent owns the one alarm slot and the SDK routes scheduled callbacks back into children (see [Scheduling](#scheduling)).
-- **Supervised lifecycle.** The parent can abort a child transitively (storage survives), delete it (storage wiped), and restart the same storage under a *different class* — a code upgrade on stable state. A broken facet breaks the whole actor, except when the parent itself aborted it.
+- **Supervised lifecycle.** The parent can abort a child transitively (storage survives), delete it (storage wiped), and restart the same storage under a _different class_ — a code upgrade on stable state. A broken facet breaks the whole actor, except when the parent itself aborted it.
 - **Independent hibernation.** A facet hibernates and restarts independently of its parent, but cannot outlive the root Durable Object's placement.
 - **Private addressability.** A facet is reachable only through its parent; siblings cannot see each other unless the parent passes references.
 - **Bounded nesting.** Facet trees are limited in depth (currently four levels including the root).
@@ -146,13 +146,13 @@ Dynamic agents know who their parent is via `this.parentPath` (root-first ancest
 
 The capability lives at `this.dynamicAgents`. The legacy method names delegate to it and remain supported:
 
-| Legacy (deprecated)             | Capability                            |
-| ------------------------------- | ------------------------------------- |
-| `this.subAgent(Cls, name)`      | `this.dynamicAgents.get(Cls, name)`   |
-| `this.abortSubAgent(Cls, name)` | `this.dynamicAgents.abort(Cls, name)` |
-| `this.deleteSubAgent(Cls, name)`| `this.dynamicAgents.delete(Cls, name)`|
-| `this.hasSubAgent(Cls, name)`   | `this.dynamicAgents.has(Cls, name)`   |
-| `this.listSubAgents(Cls?)`      | `this.dynamicAgents.list(Cls?)`       |
+| Legacy (deprecated)              | Capability                             |
+| -------------------------------- | -------------------------------------- |
+| `this.subAgent(Cls, name)`       | `this.dynamicAgents.get(Cls, name)`    |
+| `this.abortSubAgent(Cls, name)`  | `this.dynamicAgents.abort(Cls, name)`  |
+| `this.deleteSubAgent(Cls, name)` | `this.dynamicAgents.delete(Cls, name)` |
+| `this.hasSubAgent(Cls, name)`    | `this.dynamicAgents.has(Cls, name)`    |
+| `this.listSubAgents(Cls?)`       | `this.dynamicAgents.list(Cls?)`        |
 
 ### `this.dynamicAgents.get(Cls, name)`
 
@@ -437,8 +437,8 @@ The top-level parent still owns the physical alarm because facets do not have in
 
 The decision rule: **a facet is a child whose code or lifecycle the parent supervises and which must live inside the parent; an independent peer you address by name should be its own top-level Durable Object.**
 
-| Situation                                                                       | Dynamic agents?                                        |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Situation                                                                        | Dynamic agents?                                        |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------ |
 | Dynamically-loaded or AI-generated code needs durable, isolated storage          | Yes — the only way; there is no binding to give it     |
 | Per-run tool agents with isolated scratch state, supervised abort, and cleanup   | Yes (see [Agent Tools](./agent-tools.md))              |
 | A component needs isolated storage + independent abort, colocated with the agent | Yes (codemode runtimes, sandboxes, connector wrappers) |
