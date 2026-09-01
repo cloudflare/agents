@@ -120,11 +120,6 @@ describe("Sessions legacy migration", () => {
       const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
       expect(sync.getConfigValue("", "prompt")).toBe("frozen prompt");
       expect(
-        await instance.kvGet<Array<{ id: string; name: string }>>(
-          "cf_agents:sessions_legacy_registry"
-        )
-      ).toMatchObject([{ id: "chat-one", name: "Chat one" }]);
-      expect(
         await instance.kvGet<number>("cf_agents:sessions_schema_version")
       ).toBe(1);
 
@@ -133,6 +128,9 @@ describe("Sessions legacy migration", () => {
       expect(tables).toContain("assistant_compactions__lifted_v1");
       expect(tables).toContain("assistant_config__lifted_v1");
       expect(tables).toContain("assistant_sessions__lifted_v1");
+      expect(instance.readLegacySessionTombstone()).toEqual([
+        { id: "chat-one", name: "Chat one" }
+      ]);
       expect(tables).toContain("assistant_fts__lifted_v1");
       expect(tables).not.toContain("assistant_messages");
       expect(tables).not.toContain("assistant_fts");

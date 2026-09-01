@@ -1,5 +1,4 @@
 import { DurableObject } from "cloudflare:workers";
-import { Workspace } from "@cloudflare/shell";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
 import {
@@ -58,17 +57,11 @@ function historyResponse(
 
 /** A plain Durable Object with durable conversation history and attachments. */
 export class SessionObject extends DurableObject<Env> {
-  readonly workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    r2: this.env.ATTACHMENTS,
-    inlineThreshold: 1_500_000,
-    name: () => this.lifecycle.name
-  });
-
   readonly sessions = new Sessions({
     attachments: {
-      store: this.workspace,
-      inlineThresholdBytes: 32 * 1024
+      r2: this.env.ATTACHMENTS,
+      inlineThresholdBytes: 32 * 1024,
+      r2ThresholdBytes: 1_500_000
     },
     searchIndexing: true
   });

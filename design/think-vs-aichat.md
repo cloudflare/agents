@@ -37,16 +37,16 @@ Related:
 
 ### Storage and data model
 
-| Concept                | AIChatAgent                                           | Think                                                                                                                                   |
-| ---------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| **Messages**           | `this.messages` — mutable field, flat SQL table       | `this.messages` — getter from Session tree (always fresh from SQLite)                                                                   |
-| **Storage**            | Flat `cf_ai_chat_agent_messages` table                | Session: `assistant_messages` (tree with `parent_id`), `assistant_compactions`, `assistant_fts`; Think-private config in `think_config` |
-| **Regeneration**       | Destructive — `_deleteStaleRows` removes old response | Non-destructive — new response branches from same parent, old preserved                                                                 |
-| **Message pruning**    | `maxPersistedMessages` (deletes oldest)               | Compaction (non-destructive summaries via overlays)                                                                                     |
-| **Search**             | Not available                                         | FTS5 full-text search (per-session and cross-session)                                                                                   |
-| **Context blocks**     | Not available                                         | `configureSession()` with writable blocks, skills, search providers                                                                     |
-| **Multi-session**      | One conversation per DO                               | `SessionManager` for multiple conversations per DO                                                                                      |
-| **Config persistence** | Not available                                         | `configure(config)` / `getConfig()` with generic `Config` type                                                                          |
+| Concept                | AIChatAgent                                                                   | Think                                                                                                          |
+| ---------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **Messages**           | `this.messages` — mutable field over a linear Sessions chain                  | `this.messages` — in-isolate projection of a branched Sessions path                                            |
+| **Storage**            | `agents/sessions` default handle in linear mode; legacy flat table auto-lifts | `agents/sessions` tree, compaction overlays, opt-in attachment storage; Think-private config in `think_config` |
+| **Regeneration**       | Destructive — `_deleteStaleRows` removes old response                         | Non-destructive — new response branches from same parent, old preserved                                        |
+| **Message pruning**    | `maxPersistedMessages` (deletes oldest)                                       | Compaction (non-destructive summaries via overlays)                                                            |
+| **Search**             | Not available                                                                 | FTS5 full-text search (per-session and cross-session)                                                          |
+| **Context blocks**     | Not available                                                                 | `configureSession()` with writable blocks, skills, search providers                                            |
+| **Multi-session**      | One conversation per DO                                                       | One conversation per DO behind a parent directory; named handles remain available                              |
+| **Config persistence** | Not available                                                                 | `configure(config)` / `getConfig()` with generic `Config` type                                                 |
 
 ### Turn execution
 
@@ -167,7 +167,7 @@ configureSession(session: Session) {
 
 ### 4. You need conversation search
 
-FTS5 full-text search across message history. Per-session `session.search(query)` and cross-session `SessionManager.search(query)`. The model can search its own history via `search_context` tool.
+Think enables Sessions FTS5 for per-conversation message search. Search across conversations belongs in the parent directory or another application-owned index. The model can also search configured context through the `search_context` tool.
 
 ### 5. You need regeneration with version history
 
@@ -254,18 +254,18 @@ These are structural differences that come from the Session-backed architecture.
 
 Think's `onChatMessage` override gives the same level of control as AIChatAgent — you can ignore all the opinionated defaults and do everything manually. If Think is mature and tested enough, AIChatAgent becomes a legacy API maintained for backward compatibility.
 
-### Shared Session layer
+### Shared Sessions layer
 
-AIChatAgent could adopt Session as its storage layer — getting tree messages, compaction, and search without the opinionated framework layer. Session was designed to be reusable.
+AIChatAgent and Think now both install `agents/sessions`. AIChatAgent uses a linear chain and keeps its lower-level protocol behavior; Think uses branching, compaction, context, and search.
 
 ### Think-specific client features
 
 `useAgentChat` works with Think today, but Think-specific features could get first-class client support:
 
 - **Branch navigation** — `regenerate()` + `getBranches()` for "v1 / v2 / v3" UI
-- **Session status** — compaction progress, token usage from `CF_AGENT_SESSION` broadcasts
-- **Context block UI** — display memory contents, token budgets
-- **Conversation list** — `SessionManager.list()` for conversation sidebars
+- **Session status** — compaction progress and token estimates from capability diagnostics
+- **Context block UI** — display memory contents and token budgets
+- **Conversation list** — query the parent directory Durable Object that owns chat routing
 
 ### Multi-agent orchestration
 

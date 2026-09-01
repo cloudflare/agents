@@ -9,8 +9,11 @@
  */
 
 import type { ToolSet, UIMessage } from "ai";
-import { enforceRowSizeLimit, sanitizeMessage } from "../chat/sanitize";
-import { decodeDataUrl } from "./attachments";
+import {
+  byteLength,
+  enforceRowSizeLimit,
+  sanitizeMessage
+} from "../chat/sanitize";
 import { COMPACTION_PREFIX, type CompactResult } from "./compaction-helpers";
 import {
   ContextBlocks,
@@ -22,6 +25,7 @@ import type { SessionsCore } from "./core";
 import {
   dropLargeFileParts,
   evictToolOutputStrings,
+  hasEvictableMedia,
   type ToolOutputEvictionResult
 } from "./eviction";
 import { estimateStringTokens } from "./tokens";
@@ -179,9 +183,7 @@ export class Session {
     let batchBytes = 0;
 
     for await (const message of this.history(options)) {
-      const bytes = new TextEncoder().encode(
-        JSON.stringify(message)
-      ).byteLength;
+      const bytes = byteLength(JSON.stringify(message));
       if (
         batch.length > 0 &&
         (batch.length >= batchSize || batchBytes + bytes > maxBatchBytes)
@@ -298,12 +300,18 @@ export class Session {
     }
 
     const prepared = await this.#prepare(message, options.source);
-    const { inserted } = this.#core.append(
-      this.sessionId,
-      prepared.message,
-      options.parentId,
-      prepared.attachments
-    );
+    let inserted: boolean;
+    try {
+      ({ inserted } = this.#core.append(
+        this.sessionId,
+        prepared.message,
+        options.parentId,
+        prepared.attachments
+      ));
+    } catch (error) {
+      await this.#core.attachments.discardUnreferenced(prepared.attachments);
+      throw error;
+    }
     if (!inserted) {
       await this.#core.attachments.discardUnreferenced(prepared.attachments);
       const stored =
@@ -362,11 +370,20 @@ export class Session {
   ): Promise<SessionMessage> {
     await this.#ensureRestored();
     const prepared = await this.#prepare(message, options.source);
-    await this.#core.update(
-      this.sessionId,
-      prepared.message,
-      prepared.attachments
-    );
+    let updated: boolean;
+    try {
+      updated = await this.#core.update(
+        this.sessionId,
+        prepared.message,
+        prepared.attachments
+      );
+    } catch (error) {
+      await this.#core.attachments.discardUnreferenced(prepared.attachments);
+      throw error;
+    }
+    if (!updated) {
+      await this.#core.attachments.discardUnreferenced(prepared.attachments);
+    }
     await this.#core.notify({
       type: "update",
       sessionId: this.sessionId,
@@ -691,10 +708,10 @@ export class Session {
   async #scanHistoryForLoadedSkills(): Promise<void> {
     this.#skillScanRan = true;
     const loaded = new Set<string>();
-    for (const row of this.#core.pathRowStats(this.sessionId)) {
-      if (row.role !== "assistant") continue;
-      const message = this.#core.getMessageRaw(this.sessionId, row.id);
-      if (!message) continue;
+    const rows = this.#core
+      .pathRowStats(this.sessionId)
+      .filter((row) => row.role === "assistant");
+    for (const message of this.#core.rawMessagesByStats(this.sessionId, rows)) {
       for (const part of message.parts) {
         const input = this.#skillInput(part.input);
         if (!input || part.state !== "output-available") continue;
@@ -727,12 +744,14 @@ export class Session {
   }
 
   async #reclaimLoadedSkill(label: string, key: string): Promise<void> {
-    const rows = this.#core.pathRowStats(this.sessionId);
-    for (let index = rows.length - 1; index >= 0; index--) {
-      const row = rows[index];
-      if (row.role !== "assistant") continue;
-      const message = this.#core.getMessageRaw(this.sessionId, row.id);
-      if (!message) continue;
+    const rows = this.#core
+      .pathRowStats(this.sessionId)
+      .filter((row) => row.role === "assistant");
+    for (const message of this.#core.rawMessagesByStats(
+      this.sessionId,
+      rows,
+      true
+    )) {
       let changed = false;
       const parts = message.parts.map((part) => {
         const input = this.#skillInput(part.input);
@@ -780,8 +799,9 @@ export class Session {
     ) {
       return;
     }
-    const bytes = new TextEncoder().encode(JSON.stringify(message)).byteLength;
-    if (bytes >= this.#core.attachments.evictionThresholdBytes) {
+    if (
+      hasEvictableMedia(message, this.#core.attachments.evictionThresholdBytes)
+    ) {
       this.#evictionObservedOversized = true;
     }
   }
@@ -825,14 +845,8 @@ export class Session {
           fileExtraction.message,
           threshold,
           preserve
-            ? async (value, mediaType) => {
-                const decoded = decodeDataUrl(value);
-                const stored = await this.#core.attachments.put(
-                  decoded?.bytes ?? value,
-                  { mediaType: decoded?.mediaType ?? mediaType }
-                );
-                return stored.attachment;
-              }
+            ? (value, mediaType) =>
+                this.#core.attachments.putEvictedString(value, mediaType)
             : null
         );
         const attachments = [
@@ -840,10 +854,11 @@ export class Session {
           ...toolEviction.attachments
         ];
         if (!fileExtraction.changed && !toolEviction.changed) {
-          this.#core.markMediaChecked(
+          this.#core.markMediaCandidate(
             this.sessionId,
             candidate.message.id,
-            candidate.content
+            candidate.content,
+            0
           );
           continue;
         }
@@ -865,16 +880,12 @@ export class Session {
         });
       }
 
-      totals.backlogRemains =
-        this.#core.mediaMaintenanceCandidates(
-          this.sessionId,
-          agedIds,
-          threshold,
-          1
-        ).length > 0;
-      this.#evictionObservedOversized = stats.some(
-        (row) => row.bytes >= threshold
+      totals.backlogRemains = this.#core.hasMediaMaintenanceCandidate(
+        this.sessionId,
+        agedIds,
+        threshold
       );
+      this.#evictionObservedOversized = totals.backlogRemains;
       if (totals.messages > 0) {
         this.#core.io.emit("session:media:evicted", {
           sessionId: this.sessionId,
@@ -914,7 +925,7 @@ export class Session {
           typeof part.url === "string" &&
           part.url.startsWith("data:")
         ) {
-          bytes += new TextEncoder().encode(part.url).byteLength;
+          bytes += byteLength(part.url);
         }
       }
     }

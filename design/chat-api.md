@@ -692,7 +692,7 @@ This complexity is mostly internal and doesn't leak to users (the `resume: true`
 > **Updated:** The analysis below was written before Session integration. See [think-roadmap.md](./think-roadmap.md) for the current plan. Key changes:
 >
 > - Session solves S3 (message access helpers — `getMessage`, `getLatestLeaf`, `getBranches`, `getPathLength`)
-> - Session solves X2 (conversation management — `SessionManager` provides create/list/delete/rename/fork/search)
+> - The parent-directory plus one-conversation-Durable-Object pattern solves X2; Sessions deliberately does not own the directory
 > - Context blocks provide structured system prompt composition — beyond what `getSystemPrompt()` alone offers
 > - Compaction provides conversation length management — replacing `maxPersistedMessages`
 > - Branching provides non-destructive regeneration — better than AIChatAgent's delete-and-rerun
@@ -730,7 +730,7 @@ See [think-vs-aichat.md](./think-vs-aichat.md) for the full gap analysis. The hi
 
 4. **Branching and regeneration.** Session's tree-structured messages provide non-destructive regeneration (alternatives preserved via branches) — strictly better than AIChatAgent's delete-and-rerun approach.
 
-5. **Multi-session and search.** `SessionManager` provides conversation lifecycle, cross-session FTS5 search, usage tracking, and forking — none of which AIChatAgent has.
+5. **Conversation directories and search.** User-facing conversation lifecycle and cross-conversation search belong in a parent directory Durable Object. Sessions provides per-conversation FTS and path forking without embedding a global registry.
 
 6. **Dynamic configuration (`configure()` / `getConfig()`).** This is a cleaner pattern than `body` persistence for agent-level settings. It should coexist with `body` (per-request context) rather than replacing it.
 

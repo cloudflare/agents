@@ -57,14 +57,6 @@ export class SharedWorkspace implements WorkspaceFsLike {
     return (await this.parent()).writeFileBytes(path, content, mimeType);
   }
 
-  async readFileStream(path: string) {
-    return (await this.parent()).readFileStream(path);
-  }
-
-  async deleteFile(path: string) {
-    return (await this.parent()).deleteFile(path);
-  }
-
   async appendFile(
     path: string,
     content: string,

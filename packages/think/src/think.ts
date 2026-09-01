@@ -124,7 +124,11 @@ import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
 import * as skills from "agents/skills";
 import { SkillRegistry } from "agents/skills";
-import type { SkillScriptRunner, SkillSource } from "agents/skills";
+import type {
+  SkillScriptRunner,
+  SkillSource,
+  SkillWorkspaceSeedOptions
+} from "agents/skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -138,7 +142,11 @@ export type {
   TypedToolResult
 } from "ai";
 export { skills };
-export type { SkillRunContext, SkillSource } from "agents/skills";
+export type {
+  SkillRunContext,
+  SkillSource,
+  SkillWorkspaceSeedOptions
+} from "agents/skills";
 import {
   Agent,
   callable,
@@ -259,7 +267,8 @@ import {
   Session,
   Sessions,
   truncateOlderMessages,
-  type SessionMessage
+  type SessionMessage,
+  type SessionsAttachmentOptions
 } from "agents/sessions";
 
 /**
@@ -1152,7 +1161,10 @@ export interface MediaEvictionConfig {
   keepRecentMessages?: number;
   /** Minimum payload bytes to evict. Default 32 KiB. */
   minPartBytes?: number;
-  /** Preserve evicted payloads in the workspace. Default true. */
+  /**
+   * Preserve evicted payloads in Sessions attachment storage. The legacy
+   * option name remains for source compatibility. Default true.
+   */
   externalizeToWorkspace?: boolean;
   /** Maximum aged rows rewritten by one maintenance pass. Default 64. */
   maxRowsPerPass?: number;
@@ -2746,6 +2758,13 @@ export class Think<
   /** Store tool input/output on `execute_tool` spans. */
   storeTools = false;
 
+  /**
+   * Project `getSkills()` into the active workspace. Computer workspaces use
+   * `/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`. Existing
+   * edits are preserved. Set `false` to keep source-only skill loading.
+   */
+  skillWorkspace: false | SkillWorkspaceSeedOptions = {};
+
   private _skillRegistry: SkillRegistry | null = null;
   private _loggedSkillWarnings = new Set<string>();
   private _loggedProtocolWarnings = new Set<string>();
@@ -2789,13 +2808,28 @@ export class Think<
   hydrationByteBudget: number = 24 * 1024 * 1024;
 
   /**
-   * Configure lossless file offload and aged tool-output eviction. File
-   * payloads move into `workspace`; SQLite message rows retain content-addressed
-   * pointers. `false` keeps media inline and disables aged maintenance.
+   * Configure lossless file offload and aged tool-output eviction. Sessions
+   * owns attachment bytes in chunked SQLite or the optional R2 tier; message
+   * rows retain content-addressed pointers. `false` keeps media inline and
+   * disables aged maintenance.
    *
    * @default true
    */
   mediaEviction: MediaEvictionConfig | boolean = true;
+
+  /**
+   * Optional R2 and reconstruction policy for Sessions-owned attachments.
+   * Small attachments remain in this Durable Object's SQLite storage.
+   */
+  sessionAttachments: Pick<
+    SessionsAttachmentOptions,
+    | "r2"
+    | "r2ThresholdBytes"
+    | "r2Prefix"
+    | "maxAttachmentBytes"
+    | "basePath"
+    | "reconstruct"
+  > = {};
 
   /**
    * Durable chat recovery configuration. Every chat turn runs in `runFiber`,
@@ -2814,8 +2848,8 @@ export class Think<
 
   /** Durable conversation history installed on this Agent's Lifecycle. */
   readonly sessions = new Sessions({
-    attachments: {
-      store: () => this.workspace,
+    attachments: () => ({
+      ...this.sessionAttachments,
       inlineThresholdBytes: () => {
         if (
           this.mediaEviction === false ||
@@ -2848,7 +2882,7 @@ export class Think<
         this.mediaEviction === true || this.mediaEviction === false
           ? true
           : (this.mediaEviction.externalizeToWorkspace ?? true)
-    },
+    }),
     reservedMetadataKeys: RESERVED_MESSAGE_METADATA_KEYS,
     searchIndexing: true,
     missingUpdate: "ignore"
@@ -4873,6 +4907,8 @@ export class Think<
       this._logSkillWarnings(registry);
       this._skillRegistry = registry;
 
+      await this._configureSkillWorkspace(registry);
+
       await this.session.addContext(registry.contextLabel, {
         description: "Think skills: available skill catalog",
         provider: {
@@ -4888,6 +4924,35 @@ export class Think<
     } catch (error) {
       console.warn(
         `[think] Failed to initialize skills; continuing without them: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  private async _configureSkillWorkspace(
+    registry: SkillRegistry
+  ): Promise<void> {
+    if (this.skillWorkspace === false) return;
+    try {
+      const key = "skillsWorkspaceFingerprint";
+      if (this._configGet(key) === registry.fingerprint) {
+        await registry.useWorkspace(this.workspace, this.skillWorkspace);
+        return;
+      }
+      const seeded = await registry.seedWorkspace(
+        this.workspace,
+        this.skillWorkspace
+      );
+      for (const warning of seeded.warnings) {
+        if (this._loggedSkillWarnings.has(warning)) continue;
+        this._loggedSkillWarnings.add(warning);
+        console.warn(`[think] ${warning}`);
+      }
+      if (seeded.skipped === 0) {
+        this._configSet(key, registry.fingerprint);
+      }
+    } catch (error) {
+      console.warn(
+        `[think] Failed to seed skills into the workspace; source-backed skill tools remain available: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
@@ -4923,6 +4988,7 @@ export class Think<
     try {
       await this._skillRegistry.refresh();
       this._logSkillWarnings(this._skillRegistry);
+      await this._configureSkillWorkspace(this._skillRegistry);
       const previous = this._configGet("skillsFingerprint");
       if (previous !== this._skillRegistry.fingerprint) {
         await this.session.refreshSystemPrompt();

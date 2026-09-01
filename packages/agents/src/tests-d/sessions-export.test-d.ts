@@ -9,24 +9,18 @@ import {
   pointerReconstructor,
   type AppendResult,
   type ContextProvider,
-  type SessionAttachmentStore,
+  type SessionAttachmentBucket,
   type SessionEvictionResult,
   type SessionMessage,
   type SessionStats
 } from "../sessions";
 
 class ConversationObject extends DurableObject {
-  readonly attachmentStore: SessionAttachmentStore = {
-    writeFileBytes: async () => {},
-    readFileBytes: async () => null,
-    readFileStream: async () => null,
-    deleteFile: async () => false,
-    stat: async () => null
-  };
+  readonly attachmentBucket: SessionAttachmentBucket | undefined;
 
   readonly sessions = new Sessions({
     attachments: {
-      store: () => this.attachmentStore,
+      r2: () => this.attachmentBucket,
       reconstruct: inlineReconstructor
     }
   });
@@ -115,6 +109,7 @@ object.sessions.attachments.get("ab".repeat(32)) satisfies Promise<{
 object.sessions.attachments.open("ab".repeat(32)) satisfies Promise<
   ReadableStream<Uint8Array>
 >;
+object.sessions.attachments.delete("ab".repeat(32)) satisfies Promise<boolean>;
 attachmentResponse(
   object.sessions,
   "ab".repeat(32)
@@ -129,12 +124,11 @@ pointerReconstructor satisfies {
 
 new Sessions({
   attachments: {
-    // @ts-expect-error attachment stores must provide streaming reads.
-    store: {
-      writeFileBytes: async () => {},
-      readFileBytes: async () => null,
-      deleteFile: async () => false,
-      stat: async () => null
+    r2: {
+      // @ts-expect-error attachment R2 adapters must provide streaming bodies.
+      get: async () => ({ body: "not a stream" }),
+      put: async () => undefined,
+      delete: async () => undefined
     }
   }
 });

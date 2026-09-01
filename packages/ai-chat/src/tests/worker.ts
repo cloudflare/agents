@@ -141,10 +141,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
   // Store captured requestId from onChatMessage options for testing
   private _capturedRequestId: string | undefined = undefined;
   private _chatMessageCallCount = 0;
-  private _attachmentFiles = new Map<
-    string,
-    { bytes: Uint8Array; mediaType: string }
-  >();
 
   async onChatMessage(
     _onFinish: GenerateTextOnFinishCallback<ToolSet>,
@@ -530,46 +526,18 @@ export class TestChatAgent extends AIChatAgent<Env> {
   enableAttachmentsForTest(): void {
     this.sessionAttachments = {
       inlineThresholdBytes: 1,
-      evictAged: false,
-      store: {
-        writeFileBytes: async (
-          path,
-          data,
-          mediaType = "application/octet-stream"
-        ) => {
-          const bytes =
-            data instanceof Uint8Array ? data : new Uint8Array(data);
-          this._attachmentFiles.set(path, {
-            bytes: new Uint8Array(bytes),
-            mediaType
-          });
-        },
-        readFileBytes: async (path) => {
-          const file = this._attachmentFiles.get(path);
-          return file ? new Uint8Array(file.bytes) : null;
-        },
-        readFileStream: async (path) => {
-          const file = this._attachmentFiles.get(path);
-          if (!file) return null;
-          const bytes = new Uint8Array(file.bytes);
-          return new ReadableStream({
-            start(controller) {
-              controller.enqueue(bytes);
-              controller.close();
-            }
-          });
-        },
-        deleteFile: async (path) => this._attachmentFiles.delete(path),
-        stat: async (path) => {
-          const file = this._attachmentFiles.get(path);
-          return file ? { size: file.bytes.byteLength } : null;
-        }
-      }
+      evictAged: false
     };
   }
 
   getAttachmentFileCountForTest(): number {
-    return this._attachmentFiles.size;
+    return Number(
+      this.ctx.storage.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM cf_agents_session_attachment_blobs"
+        )
+        .one().count
+    );
   }
 
   async clearSessionForTest(): Promise<void> {
@@ -994,7 +962,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this.sql`
       INSERT INTO cf_agents_session_messages
         (id, session_id, parent_id, role, content, token_estimate,
-         media_checked, created_at)
+         media_candidate_bytes, created_at)
       VALUES (${rowId}, '', ${parentId}, 'user', ${rawJson}, 0, 0, ${Date.now()})
     `;
   }

@@ -115,7 +115,7 @@ describe("aged tool-output eviction", () => {
         {
           type: "file",
           mediaType: "image/png",
-          url: `data:image/png;base64,${"A".repeat(1000)}`
+          url: `data:image/png;base64,${btoa("A".repeat(1200))}`
         }
       ]
     };

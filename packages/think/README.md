@@ -261,6 +261,21 @@ plain `@cloudflare/ai-chat` `onChatMessage`, can build a `SkillRegistry`);
 `@cloudflare/think` re-exports it as `skills` and wires `getSkills()` into the
 turn automatically.
 
+Think also projects each resolved `SKILL.md` into the active workspace. Computer
+uses `/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`. Existing
+workspace edits are preserved and affect later activation. Resources copy into
+the workspace on first use rather than at startup. Think records a durable
+source fingerprint, so unchanged cold wakes do not stat or rewrite every skill
+file.
+
+Disable projection or override its path with:
+
+```ts
+skillWorkspace = false;
+// or, for a custom Computer proxy that presents legacy direct methods:
+skillWorkspace = { root: "/workspace/.agents/skills" };
+```
+
 The imported directory should contain one child directory per skill:
 
 ```text
@@ -349,6 +364,7 @@ Script execution requires a Worker Loader binding:
 | `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
 | `configureSession()`       | identity                           | Add context blocks, compaction, search, skills                                                                                                                                                                               |
 | `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                                                                                             |
+| `skillWorkspace`           | `{}`                               | Project skills into Computer or legacy Shell; `false` disables projection                                                                                                                                                    |
 | `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
@@ -766,7 +782,7 @@ providers only when you need generic `load_context` / `unload_context`
 management instead of Think's skills workflow.
 
 ```ts
-import { R2SkillProvider } from "agents/experimental/memory/session";
+import { R2SkillProvider } from "agents/sessions";
 
 configureSession(session: Session) {
   return session

@@ -16,6 +16,7 @@ import { SqlError } from "../sql-error";
 import { SessionAttachmentMissingError } from "./errors";
 import { parseAttachmentUrl, type StoredAttachment } from "./attachments";
 import { SessionsCore } from "./core";
+import type { AttachmentSqlParam } from "./attachment-storage";
 import { Session } from "./handle";
 import type {
   SessionChangeListener,
@@ -79,12 +80,17 @@ export interface SessionsAttachments {
    */
   put(
     data: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | string,
-    options: { mediaType: string; filename?: string }
+    options: { mediaType: string; filename?: string; bytes?: number }
   ): Promise<{ part: SessionMessagePart; attachment: StoredAttachment }>;
   /** Return metadata for one stored payload, when known. */
   get(hashOrUrl: string): Promise<StoredAttachment | null>;
   /** Open one stored payload by pointer hash or `attachment:` URL. */
   open(hashOrUrl: string): Promise<ReadableStream<Uint8Array>>;
+  /**
+   * Delete a standalone payload. Returns false when it does not exist or a
+   * stored message still references it.
+   */
+  delete(hashOrUrl: string): Promise<boolean>;
 }
 
 /**
@@ -184,6 +190,10 @@ export class Sessions extends LifecycleCapability {
       open: async (hashOrUrl) => {
         await this.lifecycle.ready();
         return core.attachments.open(resolveHash(hashOrUrl));
+      },
+      delete: async (hashOrUrl) => {
+        await this.lifecycle.ready();
+        return core.attachments.delete(resolveHash(hashOrUrl));
       }
     };
   }
@@ -231,7 +241,7 @@ export class Sessions extends LifecycleCapability {
   #getCore(): SessionsCore {
     if (this.#core) return this.#core;
     const lifecycle = this.lifecycle;
-    const exec = (query: string, params: (string | number | null)[]) => {
+    const exec = (query: string, params: AttachmentSqlParam[]) => {
       try {
         return lifecycle.storage.sql.exec(query, ...params);
       } catch (cause) {
@@ -241,7 +251,7 @@ export class Sessions extends LifecycleCapability {
     this.#core = new SessionsCore(this.#options, {
       // SAFETY: Sessions queries select from its own schema; T describes the
       // projected columns of the accompanying query text.
-      sql: <T>(query: string, params: (string | number | null)[]) =>
+      sql: <T>(query: string, params: AttachmentSqlParam[]) =>
         [...exec(query, params)] as T[],
       sqlWrite: (query, params) => exec(query, params).rowsWritten,
       rawSql: (query) => {
@@ -251,7 +261,17 @@ export class Sessions extends LifecycleCapability {
           throw new SqlError(query, cause);
         }
       },
-      putKv: (key, value) => lifecycle.storage.put(key, value),
+      transaction: (fn) => lifecycle.storage.transactionSync(fn),
+      chunk: (storageId, index) =>
+        lifecycle.storage.sql
+          .exec<{ bytes: ArrayBuffer }>(
+            `SELECT bytes
+             FROM cf_agents_session_attachment_chunks
+             WHERE storage_id = ? AND idx = ?`,
+            storageId,
+            index
+          )
+          .toArray()[0] ?? null,
       emit: (type, payload) => lifecycle.events.emit(type, payload)
     });
     return this.#core;

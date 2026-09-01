@@ -402,8 +402,9 @@ export class AIChatAgent<
   private _abortRegistry: AbortRegistry;
 
   /**
-   * Optional attachment storage for persisted messages. Omit to preserve
-   * ai-chat's existing inline-file behavior.
+   * Optional Sessions attachment policy. When present, Sessions moves large
+   * inline file parts into its own chunked SQLite storage or configured R2
+   * tier. Omit it to preserve AIChatAgent's inline-file behavior.
    */
   sessionAttachments: SessionsAttachmentOptions | undefined = undefined;
 

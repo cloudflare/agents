@@ -1,8 +1,8 @@
 # Next: sessions
 
-A server-only example of `Sessions` on a plain Durable Object. It demonstrates streamed history reads, branches, compaction overlays, and Workspace-backed file attachments.
+A server-only example of `Sessions` on a plain Durable Object. It demonstrates streamed history reads, branches, compaction overlays, and Sessions-owned file attachments.
 
-Message JSON stays in Durable Object SQLite. File parts larger than 32 KiB become content-addressed pointers. The Workspace keeps files below 1.5 MiB in its SQLite table and spills larger files to R2, so small attachments avoid R2 requests while large images and PDFs stay out of message rows.
+Message JSON stays in Durable Object SQLite. File parts larger than 32 KiB become content-addressed pointers. Sessions stores payloads below 1,500,000 bytes in 1.5 MiB SQLite windows and streams larger payloads to R2, so small attachments avoid R2 requests while large images and PDFs stay out of message rows.
 
 ## Run
 

@@ -7,7 +7,12 @@
  * the caller attempts its compare-and-swap message rewrite.
  */
 
-import { attachmentUrl, type StoredAttachment } from "./attachments";
+import { byteLength } from "../chat/sanitize";
+import {
+  attachmentUrl,
+  estimatedDataUrlBytes,
+  type StoredAttachment
+} from "./attachments";
 import type { SessionMessage, SessionMessagePart } from "./types";
 
 const MAX_WALK_DEPTH = 8;
@@ -39,6 +44,40 @@ type WalkState = {
   parts: number;
   bytes: number;
 };
+
+/**
+ * Largest payload aged maintenance could rewrite in one stored message.
+ * Storing this threshold-independent number lets hosts change policy without
+ * rescanning rows that contain no file or tool-output payloads.
+ */
+export function maxEvictableMediaBytes(message: SessionMessage): number {
+  let maximum = 0;
+  for (const part of message.parts) {
+    if (
+      part.type === "file" &&
+      typeof part.url === "string" &&
+      part.url.startsWith("data:")
+    ) {
+      maximum = Math.max(maximum, estimatedDataUrlBytes(part.url));
+      continue;
+    }
+    if (
+      (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
+      part.output !== undefined
+    ) {
+      maximum = Math.max(maximum, maxNestedStringBytes(part.output, 0));
+    }
+  }
+  return maximum;
+}
+
+/** Whether a message has an externalizable payload at the current threshold. */
+export function hasEvictableMedia(
+  message: SessionMessage,
+  minBytes: number
+): boolean {
+  return maxEvictableMediaBytes(message) >= Math.max(1, Math.floor(minBytes));
+}
 
 /**
  * Externalize large strings nested in tool outputs.
@@ -86,13 +125,25 @@ export async function evictToolOutputStrings(
   };
 }
 
+function maxNestedStringBytes(value: unknown, depth: number): number {
+  if (typeof value === "string") return byteLength(value);
+  if (value === null || typeof value !== "object" || depth >= MAX_WALK_DEPTH) {
+    return 0;
+  }
+  let maximum = 0;
+  for (const item of Array.isArray(value) ? value : Object.values(value)) {
+    maximum = Math.max(maximum, maxNestedStringBytes(item, depth + 1));
+  }
+  return maximum;
+}
+
 async function walkAndEvict(
   state: WalkState,
   value: unknown,
   depth: number
 ): Promise<unknown> {
   if (typeof value === "string") {
-    const bytes = new TextEncoder().encode(value).byteLength;
+    const bytes = byteLength(value);
     if (bytes < state.minBytes) return value;
     const mediaType = dataUrlMediaType(value);
     state.parts++;
@@ -145,15 +196,16 @@ export function dropLargeFileParts(
     ) {
       return part;
     }
-    const size = new TextEncoder().encode(part.url).byteLength;
-    if (size < threshold) return part;
+    const payloadBytes = estimatedDataUrlBytes(part.url);
+    if (payloadBytes < threshold) return part;
+    const storedBytes = byteLength(part.url);
     changed = true;
     count++;
-    bytes += size;
+    bytes += storedBytes;
     return {
       type: "text",
       text: evictionMarker(
-        size,
+        storedBytes,
         part.mediaType ?? dataUrlMediaType(part.url),
         null
       )

@@ -405,6 +405,7 @@ path.
 | `sendReasoning`            | `true`                           | Send reasoning chunks to chat clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `configureSession()`       | identity                         | Add context blocks, compaction, search, skills — see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md)                                                                                                                                                                                                                                                                                                                                                                                     |
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `skillWorkspace`           | `{}`                             | Project skills into Computer or legacy Shell; set `false` to disable                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `workspaceBash`            | `true`                           | Include or configure the default workspace `bash` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `fetchTools`               | `false`                          | Opt-in allowlisted, read-only HTTP fetch tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                                                                                                                                                                                                                                                                                                            |
@@ -485,6 +486,17 @@ The skills engine lives in `agents/skills` and is framework-agnostic, so any
 agent (including a plain `@cloudflare/ai-chat` `onChatMessage`) can build a
 `SkillRegistry`; `@cloudflare/think` re-exports it as `skills` and wires
 `getSkills()` into the turn automatically.
+
+Think projects each resolved `SKILL.md` into the active workspace. Computer uses
+`/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`. Existing
+workspace edits are preserved and affect later activation. Resources copy into
+the workspace when first requested rather than at startup. A durable source
+fingerprint lets unchanged cold wakes attach to the existing projection without
+statting or rewriting every file.
+
+Set `skillWorkspace = false` to keep source-only loading. Set
+`skillWorkspace = { root: "/workspace/.agents/skills" }` when a custom Computer
+proxy presents Think's legacy direct-method shape.
 
 Sources are applied in order; the first source to register a skill name wins,
 and later duplicates (or a source that fails to load) are skipped with a logged

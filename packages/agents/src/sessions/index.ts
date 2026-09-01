@@ -63,7 +63,6 @@ export {
 export {
   SessionAttachmentMissingError,
   SessionAttachmentStoreError,
-  SessionAttachmentStoreMissingError,
   SessionAttachmentTooLargeError,
   SessionMessageNotFoundError,
   SessionSearchDisabledError,
@@ -83,7 +82,8 @@ export type {
   RecentHistoryResult,
   ResolvedAttachment,
   SearchResult,
-  SessionAttachmentStore,
+  SessionAttachmentBucket,
+  SessionAttachmentObject,
   SessionChangeEvent,
   SessionChangeListener,
   SessionContextOptions,

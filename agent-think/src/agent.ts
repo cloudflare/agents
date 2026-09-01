@@ -167,6 +167,10 @@ export class ThinkAgent extends ThinkBase {
    */
   override workspaceBash = false;
 
+  // This proxy presents Think's legacy direct-method shape even though the
+  // remote owner is Computer. Keep skills in Computer's mounted tree.
+  override skillWorkspace = { root: "/workspace/.agents/skills" };
+
   readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
   #workspaceReady: Promise<RemoteWorkspace> | null = null;
   #context: RunContext | null = null;
@@ -826,26 +830,6 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
         if (isEnoent(err)) return null;
         throw err;
       }
-    },
-    async readFileStream(
-      path: string
-    ): Promise<ReadableStream<Uint8Array> | null> {
-      try {
-        return await (await fs()).readFile(path);
-      } catch (err) {
-        if (isEnoent(err)) return null;
-        throw err;
-      }
-    },
-    async deleteFile(path: string): Promise<boolean> {
-      try {
-        await (await fs()).stat(path);
-      } catch (err) {
-        if (isEnoent(err)) return false;
-        throw err;
-      }
-      await (await fs()).rm(path, { force: true });
-      return true;
     },
     // Think's built-in find/grep tools call glob with model-supplied
     // patterns. ws.fs.find matches a glob relative to a base directory, so

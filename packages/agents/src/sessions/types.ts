@@ -68,6 +68,8 @@ export interface SessionRowStat {
   bytes: number;
   /** Token estimate stamped when the row was written. */
   tokenEstimate: number;
+  /** Largest payload eligible for aged media maintenance. */
+  mediaCandidateBytes: number;
 }
 
 /** Result of a byte-budgeted history read. */
@@ -189,6 +191,7 @@ export type ReconstructMode = "inline" | "pointer" | AttachmentReconstructor;
 /** A stored attachment resolved for reconstruction. */
 export interface ResolvedAttachment {
   hash: string;
+  /** Logical Sessions locator. This is not a Workspace filesystem path. */
   path: string;
   mediaType: string;
   bytes: number;
@@ -220,33 +223,43 @@ export interface AttachmentReconstructor {
   ): SessionMessagePart | Promise<SessionMessagePart>;
 }
 
-/**
- * Structural seam for attachment byte storage. A `Workspace` from
- * `@cloudflare/shell` satisfies it with zero adapters; `agents` deliberately
- * does not depend on shell.
- */
-export interface SessionAttachmentStore {
-  writeFileBytes(
-    path: string,
-    data: Uint8Array | ArrayBuffer,
-    mimeType?: string
-  ): Promise<void>;
-  readFileBytes(path: string): Promise<Uint8Array | null>;
-  readFileStream(path: string): Promise<ReadableStream<Uint8Array> | null>;
-  deleteFile(path: string): Promise<boolean>;
-  stat(path: string): Promise<{ size: number } | null>;
+/** R2 object body needed by the Sessions attachment adapter. */
+export interface SessionAttachmentObject {
+  readonly body: ReadableStream<Uint8Array>;
 }
 
-/** Attachment policy and store seam. */
+/**
+ * Narrow R2 port used by Sessions-owned attachment storage. A Cloudflare
+ * `R2Bucket` satisfies this interface. Sessions owns object keys, metadata,
+ * deduplication, and garbage collection.
+ */
+export interface SessionAttachmentBucket {
+  get(key: string): Promise<SessionAttachmentObject | null>;
+  put(
+    key: string,
+    value: ReadableStream<Uint8Array>,
+    options?: { httpMetadata?: { contentType?: string } }
+  ): Promise<unknown>;
+  delete(key: string | string[]): Promise<void>;
+}
+
+/** Attachment extraction, storage-tier, and reconstruction policy. */
 export interface SessionsAttachmentOptions {
   /**
-   * Where offloaded bytes live. A thunk defers resolution to first use, for
-   * hosts whose store is constructed after the capability (e.g. a subclass
-   * field or an `onStart` step).
+   * Optional large-object tier. Without R2, Sessions stores every offloaded
+   * payload in chunked Durable Object SQLite. A thunk supports late-bound
+   * Worker bindings on Agent subclasses.
    */
-  readonly store:
-    | SessionAttachmentStore
-    | (() => SessionAttachmentStore | undefined);
+  readonly r2?:
+    | SessionAttachmentBucket
+    | (() => SessionAttachmentBucket | undefined);
+  /**
+   * Payloads at or above this size use R2 when configured. Smaller payloads
+   * stay in Sessions-owned SQLite chunks. Default 1,500,000 bytes.
+   */
+  readonly r2ThresholdBytes?: number | (() => number);
+  /** Private R2 object-key prefix. Default `cf-agents/sessions/attachments`. */
+  readonly r2Prefix?: string;
   /**
    * File parts whose decoded payload is at least this many bytes are
    * offloaded at append time. Default 32 KiB.
@@ -254,7 +267,7 @@ export interface SessionsAttachmentOptions {
   readonly inlineThresholdBytes?: number | (() => number);
   /** Aged-row payload threshold. Defaults to `inlineThresholdBytes`. */
   readonly evictionThresholdBytes?: number | (() => number);
-  /** Directory inside the store. Default "/attachments". */
+  /** Logical locator prefix exposed to reconstructors. Default "/attachments". */
   readonly basePath?: string;
   /** Ceiling for one attachment accepted by `attachments.put`. Default 8 MiB. */
   readonly maxAttachmentBytes?: number;

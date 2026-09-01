@@ -324,16 +324,6 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
     return this.workspace.writeFileBytes(path, content, mimeType);
   }
 
-  async readFileStream(
-    path: string
-  ): Promise<ReadableStream<Uint8Array> | null> {
-    return this.workspace.readFileStream(path);
-  }
-
-  async deleteFile(path: string): Promise<boolean> {
-    return this.workspace.deleteFile(path);
-  }
-
   async appendFile(
     path: string,
     content: string,

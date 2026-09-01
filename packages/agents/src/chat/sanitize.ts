@@ -10,13 +10,42 @@ import type { ProviderMetadata, ReasoningUIPart, UIMessage } from "ai";
 import { truncateToolOutput } from "./tool-output-truncation";
 
 const textEncoder = new TextEncoder();
+const BYTE_LENGTH_BUFFER_BYTES = 16 * 1024;
+const BYTE_LENGTH_WINDOW_CHARS = 16 * 1024;
 
 /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
 export const ROW_MAX_BYTES = 1_800_000;
 
-/** Measure UTF-8 byte length of a string. */
+/**
+ * Measure UTF-8 byte length without allocating a complete encoded copy.
+ * Memory stays bounded by a 16 KiB buffer even for near-row-limit strings.
+ */
 export function byteLength(s: string): number {
-  return textEncoder.encode(s).byteLength;
+  const buffer = new Uint8Array(BYTE_LENGTH_BUFFER_BYTES);
+  let offset = 0;
+  let bytes = 0;
+  while (offset < s.length) {
+    let end = Math.min(s.length, offset + BYTE_LENGTH_WINDOW_CHARS);
+    if (
+      end < s.length &&
+      end > offset &&
+      isHighSurrogate(s.charCodeAt(end - 1))
+    ) {
+      end--;
+    }
+    const { read, written } = textEncoder.encodeInto(
+      s.slice(offset, end),
+      buffer
+    );
+    if (read === 0) break;
+    offset += read;
+    bytes += written;
+  }
+  return bytes;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
 }
 
 /**

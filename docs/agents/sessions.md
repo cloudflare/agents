@@ -1,1024 +1,476 @@
-# Sessions (Experimental)
+# Sessions
 
-The Session API provides persistent conversation storage for agents, with tree-structured messages, context blocks, compaction, full-text search, and AI-controllable tools. By default it uses Durable Object SQLite; external Postgres storage is also available for apps that need shared database access, analytics, or cross-DO queries.
+> **Experimental.** Everything exported from `agents/sessions` may change between releases while the API stabilizes.
 
-> **Experimental.** The Session API is under `agents/experimental/memory/session`. The API surface is stable but may evolve before graduating to the main package.
+`agents/sessions` stores durable conversation history in a [Lifecycle Object](./lifecycle.md). It provides tree-structured messages, streamed and byte-budgeted reads, compaction overlays, optional full-text search, context blocks, and file attachment offload.
 
-## Quick Start
+`Think` and `AIChatAgent` use this capability for message persistence. You can also install it on a plain Durable Object.
 
-```typescript
-import { Agent } from "agents";
-import { Session } from "agents/experimental/memory/session";
+## Install the capability
 
-class MyAgent extends Agent {
-  session = Session.create(this)
-    .withContext("soul", {
-      provider: { get: async () => "You are a helpful assistant." }
-    })
-    .withContext("memory", {
-      description: "Learned facts about the user",
-      maxTokens: 1100
-    })
-    .withCachedPrompt();
+```ts
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import { Sessions } from "agents/sessions";
 
-  async onMessage(message) {
-    await this.session.appendMessage(message);
-    const history = await this.session.getHistory();
-    const system = await this.session.freezeSystemPrompt();
-    const tools = await this.session.tools();
-    // Pass history, system prompt, and tools to your LLM
+export class ConversationObject extends DurableObject<Env> {
+  readonly sessions = new Sessions();
+  readonly lifecycle = Lifecycle.install(this).use(this.sessions);
+  readonly session = this.sessions.session();
+}
+```
+
+On an `Agent`, install it in the constructor:
+
+```ts
+import { Agent, type AgentContext } from "agents";
+import { Sessions } from "agents/sessions";
+
+export class ConversationAgent extends Agent<Env> {
+  readonly sessions = new Sessions();
+  readonly session = this.sessions.session();
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.sessions);
   }
 }
 ```
 
-## Session
+The default session ID is an empty string. This is the primary path when one Durable Object owns one conversation.
 
-`Session` manages a single conversation's messages, context blocks, and compaction state.
+## Write messages
 
-### Creating a Session
+`UIMessage` from the AI SDK is structurally compatible with `SessionMessage`.
 
-There are two ways to create a Session:
+```ts
+const result = await this.session.appendMessage({
+  id: crypto.randomUUID(),
+  role: "user",
+  parts: [{ type: "text", text: "Hello" }]
+});
 
-**Builder API (recommended)** — uses `Session.create(agent)` with a chainable builder. Context providers without an explicit `provider` option are auto-wired to SQLite.
-
-```typescript
-const session = Session.create(this)
-  .withContext("soul", { provider: { get: async () => "You are helpful." } })
-  .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
-  .withCachedPrompt()
-  .onCompaction(myCompactFn)
-  .compactAfter(100_000);
+result.inserted; // false when this ID already existed
+result.message; // exact stored form
 ```
 
-**Direct constructor** — takes a `SessionProvider` and options directly. Used when you want full control over providers.
+An append without `parentId` attaches to the active leaf. Pass `null` to create a root or pass a message ID to create a branch:
 
-```typescript
-import {
-  AgentSessionProvider,
-  AgentContextProvider
-} from "agents/experimental/memory/session";
-
-const session = new Session(new AgentSessionProvider(this), {
-  context: [
-    {
-      label: "memory",
-      description: "Notes",
-      maxTokens: 500,
-      provider: new AgentContextProvider(this, "memory")
-    },
-    { label: "soul", provider: { get: async () => "You are helpful." } }
-  ]
+```ts
+await this.session.appendMessage(alternativeReply, {
+  parentId: userMessage.id
 });
 ```
 
-### Builder Methods
+Writes run the same storage hygiene used by the chat packages. Sessions removes ephemeral provider metadata, enforces the SQLite row ceiling, and replaces configured file payloads with pointers before committing the row.
 
-All builder methods return `this` for chaining. Order does not matter — providers are resolved lazily on first use.
+Mark untrusted input with `source: "client"`:
 
-| Method                                    | Description                                                                                                                                                   |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Session.create(agent)`                   | Static factory. `agent` is any object with a `sql` tagged template method (i.e. your Agent/DO).                                                               |
-| `.forSession(sessionId)`                  | Namespace this session by ID. Required for multi-session isolation when not using SessionManager. Context provider keys and storage are scoped to this ID.    |
-| `.withContext(label, options?)`           | Add a context block. See [Context Blocks](#context-blocks).                                                                                                   |
-| `.withCachedPrompt(provider?)`            | Enable system prompt persistence. The prompt is frozen on first use and survives DO hibernation/eviction. Without an explicit provider, auto-wires to SQLite. |
-| `.onCompaction(fn)`                       | Register a compaction function. See [Compaction](#compaction).                                                                                                |
-| `.compactAfter(tokenThreshold, options?)` | Auto-compact when estimated token count exceeds the threshold. Checked after each `appendMessage()`. Requires `.onCompaction()`.                              |
-| `.onCompactionError(handler)`             | Handle errors from automatic compaction. Handler failures are swallowed so message writes remain non-fatal.                                                   |
+```ts
+const sessions = new Sessions({
+  reservedMetadataKeys: ["channel", "turnMetadata"]
+});
 
-### Messages
+await sessions.session().appendMessage(clientMessage, {
+  source: "client"
+});
+```
 
-Messages use the `SessionMessage` type — a minimal shape with `id`, `role`, `parts`, and optional `createdAt`. The Vercel AI SDK's `UIMessage` is structurally compatible and can be passed directly without conversion. The session stores messages in a tree structure via `parent_id`, enabling branching conversations.
+This strips reserved metadata and rejects attachment pointers that the client cannot legitimately echo from the same session.
 
-```typescript
-// Append — auto-parents to the latest leaf unless parentId is specified
-await session.appendMessage(message);
-await session.appendMessage(message, parentId);
+Other writes:
 
-// Update an existing message (matched by message.id)
+```ts
 await session.updateMessage(message);
-
-// Delete specific messages
-await session.deleteMessages(["msg-1", "msg-2"]);
-
-// Clear all messages and skill state
+await session.upsertMessage(message);
+await session.appendMany(messages);
+await session.deleteMessages([messageId]);
 await session.clearMessages();
 ```
 
-> **Note:** Session methods are async. SQLite-backed sessions are usually fast, but external providers may perform network I/O, and `appendMessage()` may also trigger auto-compaction.
+Deleting a message splices its children to its parent. Removing a message in the middle of a chain does not make older history unreachable.
 
-#### Reading History
+## Read history
 
-```typescript
-// Linear history from root to the latest leaf
+Prefer streamed reads for unbounded history:
+
+```ts
+for await (const message of session.history()) {
+  await consume(message);
+}
+```
+
+The capability first reads a content-free path of IDs and row sizes. It then fetches content in queries bounded to 50 rows and 4 MiB. Earlier chunks are not retained by the iterator.
+
+Use `historyBatches()` when each downstream operation has a fixed cost:
+
+```ts
+for await (const batch of session.historyBatches({
+  batchSize: 25,
+  maxBatchBytes: 2 * 1024 * 1024
+})) {
+  await sendBatch(batch);
+}
+```
+
+Use a byte-budgeted recent window during Durable Object startup:
+
+```ts
+const recent = await session.getRecentHistory(8 * 1024 * 1024, 4);
+
+recent.messages;
+recent.truncated;
+recent.totalContentBytes;
+```
+
+The second argument is a minimum number of recent messages. The minimum can exceed the byte budget, so choose it deliberately.
+
+`getHistory()` materializes the selected path and exists for consumers that require an array:
+
+```ts
 const messages = await session.getHistory();
-
-// History to a specific leaf (for branching)
-const branch = await session.getHistory(leafId);
-
-// Get a single message
-const msg = await session.getMessage("msg-1");
-
-// Get the newest message
-const latest = await session.getLatestLeaf();
-
-// Count messages in path
-const count = await session.getPathLength();
 ```
 
-#### Branching
+Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`.
 
-Messages form a tree. When you `appendMessage` with a `parentId` that already has children, you create a branch. Use `getBranches()` to get all child messages branching from a given point:
+Other reads:
 
-```typescript
-// Get all child messages that branch from messageId (e.g. multiple responses to a user message)
-const branches = await session.getBranches(messageId);
+```ts
+await session.getMessage(id);
+await session.getLatestLeaf();
+await session.getBranches(parentId);
+await session.getPathLength();
+await session.getHistoryRowStats();
+await session.stats();
 ```
 
-This powers features like response regeneration — pass the user message ID to get both the original and regenerated responses. `getHistory(leafId)` walks the chosen path.
+`getHistoryRowStats()` does not load message content. `stats()` derives path length, stored content bytes, attachment bytes, and a heuristic token estimate.
 
-### Search
+## Branches and forks
 
-Full-text search over the conversation history. SQLite-backed sessions use FTS5; Postgres-backed sessions use the provider's Postgres full-text index.
+A message can have multiple children. Read one root-to-leaf path by selecting its leaf:
 
-```typescript
-const results = await session.search("deployment Friday", { limit: 10 });
-// Returns: Array<{ id, role, content, createdAt? }>
+```ts
+const branch = await session.getHistory({ leafId: alternativeReply.id });
+const alternatives = await session.getBranches(userMessage.id);
 ```
 
-Uses porter stemming and unicode tokenization. The search covers all messages in the session.
+Fork a path into another session in the same Durable Object:
 
-> **Note:** `search()` throws if the session provider does not support search. The built-in `AgentSessionProvider` and `PostgresSessionProvider` support it.
-
-### WebSocket Broadcasts
-
-When the Session's `agent` object has a `broadcast()` method (all `Agent` subclasses do), the Session automatically broadcasts status events over WebSocket after each write operation:
-
-- **`CF_AGENT_SESSION`** — phase (`"idle"` or `"compacting"`), `tokenEstimate`, `tokenThreshold`
-- **`CF_AGENT_SESSION_ERROR`** — emitted on compaction failure
-
-This allows connected clients to display real-time token usage and compaction status.
-
----
-
-## Context Blocks
-
-Context blocks are persistent key-value sections injected into the system prompt. Each block has a **label**, optional **description**, and a **provider** that determines its behavior.
-
-### Provider Types
-
-There are four provider types, detected by duck-typing:
-
-| Provider                    | Interface                       | Behavior                                                                                         | AI Tool                                         |
-| --------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
-| **ContextProvider**         | `get()`                         | Read-only block in system prompt                                                                 | —                                               |
-| **WritableContextProvider** | `get()` + `set()`               | Writable via AI                                                                                  | `set_context`                                   |
-| **SkillProvider**           | `get()` + `load()` + `set?()`   | On-demand keyed documents. `get()` returns a metadata listing; `load(key)` fetches full content. | `load_context`, `unload_context`, `set_context` |
-| **SearchProvider**          | `get()` + `search()` + `set?()` | Full-text searchable entries. `get()` returns a summary; `search(query)` runs FTS5.              | `search_context`, `set_context`                 |
-
-All providers also support an optional `init(label)` method, called before first use with the block's label.
-
-### Built-in Providers
-
-**`AgentContextProvider`** — SQLite-backed writable context. This is what you get by default when using the builder without an explicit provider.
-
-```typescript
-import { AgentContextProvider } from "agents/experimental/memory/session";
-
-// Explicit usage — key determines the SQLite row
-new AgentContextProvider(this, "memory");
-```
-
-**`R2SkillProvider`** — Cloudflare R2 bucket for on-demand document loading. Skills are listed in the system prompt as metadata; the model loads full content on demand via `load_context`.
-
-```typescript
-import { R2SkillProvider } from "agents/experimental/memory/session";
-
-Session.create(this).withContext("skills", {
-  provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
+```ts
+const fork = await session.fork({
+  atMessageId: alternativeReply.id,
+  toSessionId: "draft-copy"
 });
 ```
 
-Descriptions are stored in R2 custom metadata (`description` key).
+Forked messages receive new IDs. Content-addressed attachment blobs are shared through new reference rows rather than copied.
 
-**`AgentSearchProvider`** — SQLite FTS5 searchable context. Entries are indexed and searchable by the model via `search_context`.
-
-```typescript
-import { AgentSearchProvider } from "agents/experimental/memory/session";
-
-Session.create(this).withContext("knowledge", {
-  description: "Searchable knowledge base",
-  provider: new AgentSearchProvider(this)
-});
-```
-
-### Adding and Removing Context at Runtime
-
-Blocks can be added and removed dynamically after initialization — useful for extensions:
-
-```typescript
-// Add a new block (auto-wires to SQLite if no provider given)
-await session.addContext("extension-notes", {
-  description: "From extension X",
-  maxTokens: 500
-});
-
-// Remove it
-session.removeContext("extension-notes");
-
-// Rebuild the system prompt to reflect changes
-await session.refreshSystemPrompt();
-```
-
-> **Note:** `addContext` and `removeContext` do NOT automatically update the frozen system prompt. You must call `refreshSystemPrompt()` afterward.
-
-### Reading Context Blocks
-
-```typescript
-// Single block
-const block = session.getContextBlock("memory");
-// block: { label, description?, content, tokens, maxTokens?, writable, isSkill, isSearchable }
-
-// All blocks
-const blocks = session.getContextBlocks();
-```
-
-### Writing to Context Blocks
-
-```typescript
-// Replace content entirely
-await session.replaceContextBlock("memory", "User likes coffee.");
-
-// Append content
-await session.appendContextBlock("memory", "\nUser prefers dark roast.");
-```
-
-> **Note:** Writing to a context block updates the provider immediately but does NOT update the frozen system prompt snapshot. This is intentional — it preserves the LLM prefix cache. Call `refreshSystemPrompt()` when you want changes reflected in the prompt.
-
-### System Prompt
-
-The system prompt is built from all context blocks with headers and metadata:
-
-```
-══════════════════════════════════════════════
-SOUL (Identity) [readonly]
-══════════════════════════════════════════════
-You are a helpful assistant.
-
-══════════════════════════════════════════════
-MEMORY (Learned facts) [45% — 495/1100 tokens]
-══════════════════════════════════════════════
-User likes coffee.
-User prefers dark roast.
-```
-
-```typescript
-// Freeze — first call renders and persists, subsequent calls return the cached value
-const prompt = await session.freezeSystemPrompt();
-
-// Refresh — re-render from current block state and persist
-const updated = await session.refreshSystemPrompt();
-```
-
-The frozen prompt survives DO hibernation and eviction when `withCachedPrompt()` is enabled. After eviction, the next `freezeSystemPrompt()` call loads from the configured prompt store rather than re-rendering.
-
-### Skills (Load/Unload)
-
-Skills are on-demand documents stored in a `SkillProvider` (e.g. R2). The model sees a metadata listing in the system prompt and can load full content on demand:
-
-```typescript
-// Unload a skill to free context space (rewrites the tool result in history)
-await session.unloadSkill("skills", "api-reference");
-
-// Check what's currently loaded
-const loaded = await session.getLoadedSkillKeys(); // Set<"skills:api-reference">
-```
-
-After hibernation/eviction, loaded skills are reconstructed by scanning conversation history for `load_context` tool results. This means skill state survives restarts without additional storage.
-
-> **Gotcha:** Skill restoration scans the entire conversation history looking for `load_context` tool invocations in assistant messages with `state: "output-available"`. When you unload a skill, it does not delete the tool result — it rewrites the `output` field to `"[skill unloaded: key]"` in-place. This means the original loaded content is permanently lost from history after unload.
-
----
-
-## AI Tools
-
-Session automatically generates tools based on the provider types of your context blocks. Pass these to your LLM alongside your own tools.
-
-```typescript
-const tools = await session.tools();
-// Merge with your own tools:
-const allTools = { ...tools, ...myTools };
-```
-
-### `set_context`
-
-Generated when any writable block exists. Writes to regular blocks, skill blocks (keyed), or search blocks (keyed).
-
-- For regular blocks: `{ label, content, action: "replace" | "append" }`
-- For skill blocks: `{ label, content, metadata?: { title, description } }`
-- For search blocks: `{ label, content, metadata?: { title } }`
-
-Enforces `maxTokens` limits. Returns a usage string like `"Written to memory. Usage: 45% (495/1100 tokens)"`.
-
-For keyed blocks, `metadata.title` becomes the stable entry key. If title is omitted, the key is generated from the content plus a short deterministic hash to avoid silent collisions; provide a title when you want later writes to update the same entry.
-
-### `load_context`
-
-Generated when any skill block exists. Loads full content by key from a `SkillProvider`.
-
-- Input: `{ label, key }`
-- Returns the document content, or `"Not found: key"`
-
-### `unload_context`
-
-Generated alongside `load_context`. Frees context space by unloading a previously loaded skill.
-
-- Input: `{ label, key }`
-- Rewrites the tool result in conversation history to a short marker
-- The skill remains available for re-loading
-
-The tool's description dynamically lists currently loaded skills.
-
-### `search_context`
-
-Generated when any search block exists. Full-text search within a searchable context block.
-
-- Input: `{ label, query }`
-- Returns top 10 results by FTS5 rank, or `"No results found."`
-
-### `session_search`
-
-Available on `SessionManager` only (not on individual sessions). Searches across all sessions.
-
-- Input: `{ query }`
-- Returns results from all sessions, or `"No results found."`
-
-Use `{ ...sessionTools, ...manager.tools() }` to give the model both per-session and cross-session tools.
-
----
+For one-Durable-Object-per-conversation applications, keep the conversation directory in a parent or router Durable Object. Export the source with `history({ reconstruct: "pointer" })`, import through the internal migration seam or an application RPC, and copy blobs only when the two objects do not share an attachment namespace.
 
 ## Compaction
 
-Compaction summarizes older messages to keep conversations within token limits. Original messages are preserved in the underlying message store — the summary is a non-destructive overlay applied at read time.
+Compaction overlays replace a range at read time without deleting the original rows:
 
-### Setup
+```ts
+import { createCompactFunction } from "agents/sessions";
 
-```typescript
-import { createCompactFunction } from "agents/experimental/memory/utils/compaction-helpers";
-
-const session = Session.create(this)
-  .withContext("memory", { maxTokens: 1100 })
+session
   .onCompaction(
     createCompactFunction({
-      summarize: (prompt) =>
-        generateText({ model: myModel, prompt }).then((r) => r.text),
-      protectHead: 3, // Keep first 3 messages (default: 3)
-      tailTokenBudget: 20000, // Protect ~20K tokens at the tail (default: 20000)
-      minTailMessages: 2, // Always keep at least 2 tail messages (default: 2)
-      tokenCounter: async (messages) => estimateWithYourTokenizer({ messages })
+      summarize: async (prompt) => summarize(prompt),
+      tailTokenBudget: 20_000,
+      minTailMessages: 2
     })
   )
-  .compactAfter(100_000); // Auto-compact at 100K estimated tokens
+  .compactAfter(80_000);
 ```
 
-### How It Works
+Run it explicitly:
 
-1. **Protect head** — first N messages are never compacted (default 3)
-2. **Protect tail** — walk backward from the end, accumulating tokens up to a budget (default 20K tokens)
-3. **Align boundaries** — shift boundaries to avoid splitting tool call/result pairs
-4. **Summarize middle** — send the middle section to an LLM with a structured format (Topic, Key Points, Current State, Open Items)
-5. **Store overlay** — saved in `assistant_compactions` table, keyed by `fromMessageId` and `toMessageId`
-6. **Iterative** — on subsequent compactions, the existing summary is passed to the LLM to update rather than replace
-
-When `getHistory()` is called, compaction overlays are applied transparently — the compacted range is replaced by a synthetic message with id `compaction_<id>`.
-
-### Manual Compaction
-
-```typescript
-// Run registered compaction function
-const result = await session.compact();
-
-// Or manage overlays directly
-await session.addCompaction("Summary of messages 1-50", "msg-1", "msg-50");
-const overlays = await session.getCompactions();
+```ts
+await session.compact();
 ```
 
-### Auto-Compaction
+Or store an already-produced summary:
 
-When `.compactAfter(threshold)` is set, `appendMessage()` checks the estimated token count after each write. If it exceeds the threshold, `compact()` is called automatically. Auto-compaction failure is non-fatal — the message is already saved.
-
-> Auto-compaction is checked **between turns** (on each `appendMessage()`), not within a turn. A single long, tool-heavy turn can grow past the model's context window mid-flight, before the next check. `@cloudflare/think` adds opt-in mid-turn recovery on top of this — see [Context-window overflow recovery](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#context-window-overflow-recovery).
-
-By default, the estimate includes stored message parts plus the Session-managed frozen system prompt. That means context blocks and cached prompts managed by `Session` contribute to the threshold. The estimate does not include framework-specific prompt additions or tool schema serialization that happen outside `Session`, such as Think's final capability prompt and tool catalog.
-
-There are two token-counting decisions:
-
-- `.compactAfter(threshold, { tokenCounter })` controls when automatic compaction is triggered after writes. It can include the frozen system prompt and context blocks.
-- `createCompactFunction({ tokenCounter })` controls which tail messages are protected from summarization. Use this when tool-heavy histories are much larger than the Workers-safe heuristic can estimate.
-
-You usually only need to configure one counter. The `.compactAfter()` counter now also flows into `createCompactFunction`'s boundary walk (via `CompactContext`) when no explicit `createCompactFunction({ tokenCounter })` is given, so a single counter drives both "should we compact?" and "what should we compact?". Without this, a fire-only counter plus the under-counting heuristic could make compaction trigger every turn but silently no-op on tool-heavy histories (fixed in [#1593](https://github.com/cloudflare/agents/issues/1593)).
-
-Caveat: the flowed counter is invoked **per message** during the boundary walk. A tokenizer-style counter budgets accurately; a usage-only counter that returns a fixed whole-prompt total (e.g. `usage.inputTokens` regardless of which messages are passed) degrades the tail budget to `minTailMessages` — compaction still runs and context stays bounded, but the byte budget is effectively ignored. Pass an explicit per-message `createCompactFunction({ tokenCounter })` for precise tail budgeting.
-
-Use a custom counter when you have model-reported usage or your own tokenizer:
-
-```typescript
-const session = Session.create(this)
-  .onCompaction(myCompactFn)
-  .compactAfter(100_000, {
-    tokenCounter: async ({ messages, systemPrompt, contextBlocks }) => {
-      return estimateWithYourTokenizer({
-        messages,
-        systemPrompt,
-        contextBlocks
-      });
-    }
-  })
-  .onCompactionError((err) => {
-    console.warn("Auto-compaction failed", err);
-  });
+```ts
+await session.addCompaction(summary, fromMessageId, toMessageId);
 ```
 
-> **Note:** The default token estimation is heuristic (not tiktoken). It uses `max(chars/4, words*1.3)` with 4 tokens per-message overhead, and also applies the string heuristic to the Session-managed system prompt. This is intentional — tiktoken would add 80-120MB heap overhead, which exceeds Cloudflare Workers' 128MB limit.
+Sessions stamps each message with a token estimate. The automatic threshold checks that aggregate without loading message content. A custom `tokenCounter` is consulted only after the cheap estimate crosses the threshold.
 
-> **Gotcha:** Compaction is iterative but single-overlay. Each new compaction extends from the earliest existing compaction's `fromMessageId` to the new end. So you always have at most one active compaction overlay per session, and it keeps growing. The previous compaction rows remain in the database but are superseded by the latest one (which covers a wider range). `getCompactions()` returns all of them, but `getHistory()` applies the latest one.
+## Store attachments outside message rows
 
----
+File parts can contain data URLs:
 
-## SessionManager
-
-`SessionManager` is a registry for multiple named sessions within a single Durable Object. It provides lifecycle management, convenience methods, and cross-session search.
-
-### Creating a SessionManager
-
-```typescript
-import { SessionManager } from "agents/experimental/memory/session";
-
-const manager = SessionManager.create(this)
-  .withContext("soul", { provider: { get: async () => "You are helpful." } })
-  .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
-  .withCachedPrompt()
-  .onCompaction(myCompactFn)
-  .compactAfter(100_000)
-  .withSearchableHistory("history");
+```ts
+{
+  type: "file",
+  mediaType: "image/png",
+  filename: "screen.png",
+  url: "data:image/png;base64,..."
+}
 ```
 
-Context blocks, prompt caching, and compaction settings are propagated to all sessions created through the manager. Provider keys are automatically namespaced by session ID (e.g. `memory_<sessionId>`).
+Enable attachment extraction to replace payloads above a threshold with `attachment:sha256:<hash>`:
 
-### Builder Methods
+```ts
+import { Sessions } from "agents/sessions";
 
-| Method                                    | Description                                                                                                              |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `SessionManager.create(agent)`            | Static factory.                                                                                                          |
-| `.withContext(label, options?)`           | Add context block template for all sessions.                                                                             |
-| `.withCachedPrompt(provider?)`            | Enable prompt persistence for all sessions.                                                                              |
-| `.onCompaction(fn)`                       | Register compaction function for all sessions.                                                                           |
-| `.compactAfter(tokenThreshold, options?)` | Auto-compact threshold for all sessions. Supports the same `tokenCounter` option as `Session`.                           |
-| `.onCompactionError(handler)`             | Handle automatic compaction errors for managed sessions.                                                                 |
-| `.withSearchableHistory(label)`           | Add a cross-session searchable history block to every session. The model can search past conversations from any session. |
+readonly sessions = new Sessions({
+  attachments: {
+    inlineThresholdBytes: 32 * 1024,
+    r2: () => this.env.ATTACHMENTS,
+    r2ThresholdBytes: 1_500_000
+  }
+});
+```
 
-### Session Lifecycle
+Sessions owns the payload tables, private R2 keys, message references, deduplication, and deletion. Workspace is not part of attachment durability.
 
-```typescript
-// Create a new session
-const info = manager.create("My Chat");
-// info: { id, name, parent_session_id, model, source, input_tokens, output_tokens, estimated_cost, end_reason, created_at, updated_at }
+Without R2, Sessions stores every extracted payload in Durable Object SQLite. With R2, payloads below `r2ThresholdBytes` stay in SQLite and larger payloads use one private R2 object.
 
-// Create with metadata
-const info2 = manager.create("My Chat", {
-  parentSessionId: "parent-id",
-  model: "claude-sonnet-4-20250514",
-  source: "web"
+SQLite payloads are split into 1.5 MiB rows. Each read pulls one row by `(storage_id, chunk_index)`. The final row can be shorter.
+
+The write order is:
+
+1. Decode and hash the payload incrementally.
+2. Reuse an existing whole-file hash or write a new payload.
+3. Commit the message, optional FTS row, and attachment references in one SQLite transaction.
+
+A committed pointer therefore has durable bytes behind it.
+
+### Upload a stream
+
+`attachments.put()` accepts a `ReadableStream`, `Uint8Array`, `ArrayBuffer`, or string:
+
+```ts
+const contentLength = request.headers.get("content-length");
+const { part } = await sessions.attachments.put(request.body!, {
+  mediaType: request.headers.get("content-type") ?? "application/octet-stream",
+  filename: "document.pdf",
+  ...(contentLength ? { bytes: Number(contentLength) } : {})
+});
+```
+
+Pass `bytes` when the stream length is known. A large declared-length stream goes directly to R2 through a fixed-length stream while Sessions hashes it. An unknown-length stream is staged in 1.5 MiB SQLite windows until Sessions knows its hash and placement.
+
+The returned pointer is a durable standalone resource. Sessions does not delete it merely because no message references it yet. The caller owns inserting `part` into a message. If it is no longer needed, delete it explicitly:
+
+```ts
+await sessions.attachments.delete(part.url);
+```
+
+`delete()` returns `false` while any stored message still references the hash.
+
+Sessions does not run an age-based unreferenced-blob sweep. Coupled message writes clean up payloads they created when the message write fails or loses a race. They never infer that a pre-existing standalone payload is abandoned.
+
+Serialize low-level `attachments.delete(pointer)` against inserting that same standalone pointer. Think and AIChatAgent already serialize their chat mutations.
+
+### Storage operations
+
+For a new small attachment that fits one SQLite window, an append changes:
+
+- one whole-file blob row
+- one payload chunk row
+- one message row
+- one message-reference row
+
+Each additional 1.5 MiB payload window adds one row. A new R2-backed attachment uses one R2 PUT and stores blob, message, and reference metadata in SQLite. A replayable duplicate performs no payload write or R2 PUT.
+
+A declared-length one-shot stream cannot be deduplicated until its hash is known. If its bytes already exist, Sessions deletes the newly uploaded private object and reuses the stored hash.
+
+## Reconstruct attachments
+
+History reads support three modes.
+
+### Inline
+
+The default restores an AI SDK data-URL file part:
+
+```ts
+for await (const message of session.history({ reconstruct: "inline" })) {
+  // AI SDK-compatible file parts
+}
+```
+
+Sessions base64-encodes the attachment stream incrementally, carrying at most two bytes between input chunks. The final data URL is still one JavaScript string. Use inline reconstruction only for a bounded message range.
+
+### Pointer
+
+Pointer mode performs no attachment reads:
+
+```ts
+for await (const message of session.history({ reconstruct: "pointer" })) {
+  // file.url remains attachment:sha256:<hash>
+}
+```
+
+Use pointer mode for exports, indexing, maintenance, and cross-Durable-Object transfer.
+
+### Custom reconstruction
+
+A reconstructor receives lazy byte access:
+
+```ts
+const publicUrlReconstructor = {
+  part(attachment) {
+    return {
+      type: "file",
+      mediaType: attachment.mediaType,
+      filename: attachment.filename,
+      url: `https://files.example.com/${attachment.hash}`
+    };
+  }
+};
+
+await session.getRecentHistory(4 * 1024 * 1024, 4, {
+  reconstruct: publicUrlReconstructor
+});
+```
+
+The attachment object provides `data()`, `dataUrl()`, and `stream()`. `data()` deliberately materializes all bytes. `stream()` returns one SQLite window at a time or the R2 object body. `attachment.path` is a logical Sessions locator, not a Workspace path.
+
+Missing payloads become a short marker part. They do not make the rest of the transcript unreadable.
+
+## Serve attachments over HTTP
+
+```ts
+import { attachmentResponse } from "agents/sessions";
+
+async onRequest(request: Request) {
+  const hash = new URL(request.url).pathname.split("/").at(-1)!;
+  return attachmentResponse(this.sessions, hash);
+}
+```
+
+The response streams from Sessions storage and sets content type, content length, and content disposition headers from stored metadata.
+
+## Aged media maintenance
+
+Aged maintenance handles inline media written by older releases and large strings nested in tool outputs:
+
+```ts
+const sessions = new Sessions({
+  attachments: {
+    keepRecentMessages: 8,
+    maxEvictionRowsPerPass: 64,
+    evictionThresholdBytes: 32 * 1024
+  }
 });
 
-// Get session metadata (null if not found)
-const session = manager.get(sessionId);
-
-// List all sessions (ordered by updated_at DESC)
-const sessions = manager.list();
-
-// Rename
-manager.rename(sessionId, "New Name");
-
-// Delete (clears messages too)
-await manager.delete(sessionId);
+await sessions.session().evictAgedMedia();
 ```
 
-### Accessing Sessions
+Each message stores the largest payload that maintenance could rewrite. The value does not depend on the current threshold, so lowering the threshold later still finds older candidates. Rows with no media candidates never enter the maintenance content query.
 
-```typescript
-// Get or create the Session instance for an ID
-// Lazy — creates on first access, caches for subsequent calls
-const session = manager.getSession(sessionId);
+The pass reads a bounded number of candidates, writes payloads before changing messages, and uses content compare-and-swap. A backlog probe reads only an ID rather than another large message.
+
+Set `preserveEvicted: false` only when permanent data loss is intentional. The default preserves bytes in Sessions storage.
+
+## Full-text search
+
+Message search is opt-in because FTS adds writes to every append:
+
+```ts
+const sessions = new Sessions({ searchIndexing: true });
+const results = await sessions.session().search("deployment failed");
 ```
 
-### Message Convenience Methods
+With indexing disabled, `search()` throws `SessionSearchDisabledError`.
 
-These delegate to the underlying Session but also update the session's `updated_at` timestamp:
+Search indexes text parts only. File contents, reasoning, and tool payloads are not indexed automatically.
 
-```typescript
-// Append a single message
-await manager.append(sessionId, message, parentId?);
+## Context blocks and skills
 
-// Add or update (upsert)
-await manager.upsert(sessionId, message, parentId?);
+The Session handle includes the context API used by Think:
 
-// Batch append (auto-chains parent IDs)
-await manager.appendAll(sessionId, messages, parentId?);
+```ts
+const session = sessions
+  .session()
+  .withContext("soul", {
+    provider: { get: async () => "You are a helpful assistant." }
+  })
+  .withContext("memory", {
+    description: "Facts learned about the user",
+    maxTokens: 1_100
+  })
+  .withCachedPrompt();
 
-// Read history
-const history = await manager.getHistory(sessionId, leafId?);
-
-// Message count
-const count = await manager.getMessageCount(sessionId);
-
-// Clear messages
-await manager.clearMessages(sessionId);
-
-// Delete specific messages
-await manager.deleteMessages(sessionId, ["msg-1"]);
+const tools = await session.tools();
+const system = await session.freezeSystemPrompt();
 ```
 
-### Forking
+A provider with `get()` is read-only. Add `set()` for writable context, `load()` for lower-level loadable context, or `search()` for searchable context. `R2SkillProvider`, `AgentContextProvider`, and `AgentSearchProvider` are exported from `agents/sessions`.
 
-Fork a session at a specific message — copies history up to that point into a new session:
+First-class Agent Skills live in `agents/skills`. Think projects each resolved `SKILL.md` into the active workspace by default:
 
-```typescript
-const forked = await manager.fork(sessionId, atMessageId, "Forked Chat");
-// forked.parent_session_id === sessionId
-```
+- Computer: `/workspace/.agents/skills/<name>/SKILL.md`
+- legacy Shell: `/.agents/skills/<name>/SKILL.md`
 
-> **Gotcha:** Fork copies messages with new UUIDs, not the original IDs. This means message IDs in the forked session will not match the original. The fork also does not copy compaction overlays — the forked session starts clean with the materialized history.
+Workspace edits affect later activation and resource reads. Think records a durable source fingerprint, so an unchanged cold wake does not stat or rewrite every skill file. Skill resources copy into the workspace on first use rather than during startup. Set `skillWorkspace = false` to keep source-only loading, or set `skillWorkspace.root` for a custom proxy path.
 
-### Compaction
+## Observe changes
 
-```typescript
-// Add a compaction overlay
-await manager.addCompaction(sessionId, summary, fromId, toId);
+`Sessions.subscribe()` reports ordered writes in the active isolate:
 
-// Get overlays
-const compactions = await manager.getCompactions(sessionId);
-
-// Compact and split — marks old session as ended, creates a continuation
-const continuation = await manager.compactAndSplit(
-  sessionId,
-  summary,
-  "Continued Chat"
-);
-// continuation.parent_session_id === sessionId
-// Old session gets end_reason = "compaction"
-```
-
-`compactAndSplit` is different from regular compaction — it creates a new session with a summary message instead of an in-place overlay. The original session is marked with `end_reason: "compaction"`.
-
-### Usage Tracking
-
-```typescript
-manager.addUsage(sessionId, inputTokens, outputTokens, cost);
-// Increments input_tokens, output_tokens, and estimated_cost on the session row
-```
-
-### Cross-Session Search
-
-```typescript
-// Search across all sessions (FTS5)
-const results = manager.search("deployment Friday", { limit: 20 });
-// Returns: Array<{ id, role, content, createdAt }>
-
-// Get tools for the model (includes session_search)
-const tools = manager.tools();
-```
-
-> **Note:** `manager.search()` uses a separate FTS5 index (`assistant_fts`) from per-session search. Messages are indexed into this table by the `AgentSessionProvider` when appended. The `session_search` tool limits results to 10.
-
-> **Gotcha:** `manager.search()` silently returns an empty array on FTS5 query errors (malformed queries, etc.) rather than throwing.
-
----
-
-## Storage
-
-By default, storage is in Durable Object SQLite and tables are created lazily on first use. Postgres-backed sessions use the external tables shown in the Postgres section below.
-
-### Tables
-
-**`assistant_messages`** — Tree-structured messages.
-
-| Column       | Type     | Notes                                                  |
-| ------------ | -------- | ------------------------------------------------------ |
-| `id`         | TEXT     | Message ID                                             |
-| `session_id` | TEXT     | Empty string for single-session; set for multi-session |
-| `parent_id`  | TEXT     | Parent message ID (null for roots)                     |
-| `role`       | TEXT     | `user`, `assistant`, `system`                          |
-| `content`    | TEXT     | JSON-serialized `SessionMessage`                       |
-| `created_at` | DATETIME | Auto-set                                               |
-
-For Postgres, messages use `PRIMARY KEY (session_id, id)` so caller-provided IDs only need to be unique within a session.
-
-**`assistant_compactions`** — Compaction overlays.
-
-| Column            | Type     | Notes                    |
-| ----------------- | -------- | ------------------------ |
-| `id`              | TEXT PK  | Random UUID              |
-| `session_id`      | TEXT     | Scoped to session        |
-| `summary`         | TEXT     | LLM-generated summary    |
-| `from_message_id` | TEXT     | Start of compacted range |
-| `to_message_id`   | TEXT     | End of compacted range   |
-| `created_at`      | DATETIME | Auto-set                 |
-
-**`assistant_fts`** — FTS5 virtual table for message search. Tokenizer: `porter unicode61`.
-
-**`assistant_sessions`** — Session registry (SessionManager only).
-
-| Column              | Type     | Notes                      |
-| ------------------- | -------- | -------------------------- |
-| `id`                | TEXT PK  | Random UUID                |
-| `name`              | TEXT     | Display name               |
-| `parent_session_id` | TEXT     | For forks/splits           |
-| `model`             | TEXT     | Optional model identifier  |
-| `source`            | TEXT     | Optional source identifier |
-| `input_tokens`      | INTEGER  | Cumulative input tokens    |
-| `output_tokens`     | INTEGER  | Cumulative output tokens   |
-| `estimated_cost`    | REAL     | Cumulative cost            |
-| `end_reason`        | TEXT     | `"compaction"` when split  |
-| `created_at`        | DATETIME | Auto-set                   |
-| `updated_at`        | DATETIME | Updated on message ops     |
-
-**`cf_agents_context_blocks`** — Persistent context block storage (`AgentContextProvider`).
-
-**`cf_agents_search_entries`** + **`cf_agents_search_fts`** — Searchable context entries and FTS5 index (`AgentSearchProvider`).
-
----
-
-## Custom Providers
-
-You can implement any of the four provider interfaces to plug in your own storage:
-
-```typescript
-// Read-only context
-const myProvider: ContextProvider = {
-  get: async () => "Static content here"
-};
-
-// Writable context (enables set_context tool)
-const myWritable: WritableContextProvider = {
-  get: async () => fetchFromMyDB(),
-  set: async (content) => saveToMyDB(content)
-};
-
-// Skill provider (enables load_context tool)
-const mySkills: SkillProvider = {
-  get: async () => "- api-ref: API Reference\n- guide: User Guide",
-  load: async (key) => fetchDocument(key),
-  set: async (key, content, description) =>
-    saveDocument(key, content, description) // optional
-};
-
-// Search provider (enables search_context tool)
-const mySearch: SearchProvider = {
-  get: async () => "42 entries indexed",
-  search: async (query) => searchMyIndex(query),
-  set: async (key, content) => indexContent(key, content) // optional
-};
-```
-
-You can also implement `SessionProvider` to replace the SQLite storage entirely:
-
-```typescript
-const myStorage: SessionProvider = {
-  getMessage(id) { ... },
-  getHistory(leafId?) { ... },
-  getLatestLeaf() { ... },
-  getBranches(messageId) { ... },
-  getPathLength(leafId?) { ... },
-  appendMessage(message, parentId?) { ... },
-  updateMessage(message) { ... },
-  deleteMessages(messageIds) { ... },
-  clearMessages() { ... },
-  addCompaction(summary, fromId, toId) { ... },
-  getCompactions() { ... },
-  searchMessages(query, limit) { ... } // optional
-};
-```
-
----
-
-## Postgres (External Database)
-
-The default providers use Durable Object SQLite. If you need session data in an external Postgres database — for cross-DO queries, analytics, or shared state — use `PostgresSessionProvider`, `PostgresContextProvider`, and `PostgresSearchProvider`.
-
-These work with any Postgres-compatible database (Neon, Supabase, PlanetScale, etc.) via [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/) for connection pooling.
-
-### Setup
-
-#### 1. Create a Postgres database
-
-Use any Postgres provider and copy the connection string.
-
-#### 2. Create a Hyperdrive config
-
-```bash
-npx wrangler hyperdrive create my-session-db \
-  --connection-string="postgresql://user:password@host:port/dbname"
-```
-
-Copy the returned Hyperdrive ID.
-
-#### 3. Create the tables
-
-The Postgres user might not have `CREATE TABLE` permissions. Run this once in your database console:
-
-```sql
-CREATE TABLE IF NOT EXISTS assistant_messages (
-  id TEXT NOT NULL,
-  session_id TEXT NOT NULL DEFAULT '',
-  parent_id TEXT,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  text_content TEXT NOT NULL DEFAULT '',
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', text_content)) STORED,
-  PRIMARY KEY (session_id, id)
-);
-CREATE INDEX IF NOT EXISTS idx_assistant_msg_parent ON assistant_messages (parent_id);
-CREATE INDEX IF NOT EXISTS idx_assistant_msg_session ON assistant_messages (session_id);
-CREATE INDEX IF NOT EXISTS idx_assistant_msg_fts ON assistant_messages USING GIN (content_tsv);
-
-CREATE TABLE IF NOT EXISTS assistant_compactions (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL DEFAULT '',
-  summary TEXT NOT NULL,
-  from_message_id TEXT NOT NULL,
-  to_message_id TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS cf_agents_context_blocks (
-  label TEXT PRIMARY KEY,
-  content TEXT NOT NULL,
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS cf_agents_search_entries (
-  label TEXT NOT NULL,
-  key TEXT NOT NULL,
-  content TEXT NOT NULL,
-  content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (label, key)
-);
-CREATE INDEX IF NOT EXISTS idx_search_entries_fts ON cf_agents_search_entries USING GIN (content_tsv);
-```
-
-#### 4. Configure wrangler
-
-```jsonc
-{
-  "compatibility_flags": ["nodejs_compat"],
-  "hyperdrive": [
-    {
-      "binding": "HYPERDRIVE",
-      "id": "<your-hyperdrive-id>"
-    }
-  ],
-  "placement": {
-    "region": "aws:us-east-1" // match your database region
+```ts
+const unsubscribe = sessions.subscribe(async (event) => {
+  if (event.sessionId !== "") return;
+  switch (event.type) {
+    case "append":
+    case "update":
+    case "maintenance-rewrite":
+      await updateLocalProjection(event.message);
+      break;
+    case "delete":
+    case "clear":
+    case "compact":
+      await refreshProjection();
+      break;
   }
-}
+});
 ```
 
-#### 5. Wire it up
+This is a local cache-coherence feed, not a cross-object event log. Capability diagnostics are also emitted through Lifecycle observability.
 
-```typescript
-import { Agent, callable } from "agents";
-import {
-  Session,
-  PostgresSessionProvider,
-  PostgresContextProvider,
-  PostgresSearchProvider
-} from "agents/experimental/memory/session";
-import { Client } from "pg";
+## Multiple sessions
 
-class MyAgent extends Agent<Env> {
-  private _session?: Session;
-  private _pgClient?: Client;
+Multiple handles can share one Durable Object:
 
-  /**
-   * Initialize Hyperdrive and Session when the Durable Object starts.
-   * The providers take the raw pg.Client directly — no wrapper needed.
-   */
-  async onStart(): Promise<void> {
-    const client = new Client({
-      connectionString: this.env.HYPERDRIVE.connectionString
-    });
-    await client.connect();
-    this._pgClient = client;
-
-    const sessionId = this.ctx.id.toString();
-    this._session = Session.create(
-      new PostgresSessionProvider(client, sessionId)
-    )
-      .withContext("soul", {
-        provider: {
-          get: async () => "You are a helpful assistant."
-        }
-      })
-      .withContext("memory", {
-        description: "Short facts",
-        maxTokens: 1100,
-        provider: new PostgresContextProvider(client, `memory_${sessionId}`)
-      })
-      .withContext("knowledge", {
-        description: "Searchable knowledge base",
-        provider: new PostgresSearchProvider(client)
-      })
-      .withCachedPrompt(
-        new PostgresContextProvider(client, `_prompt_${sessionId}`)
-      );
-  }
-}
+```ts
+const support = sessions.session("support");
+const sales = sessions.session("sales");
 ```
 
-### How it works
+`listSessions()` derives summaries from message rows. There is no SessionManager registry.
 
-When `Session.create()` receives a `SessionProvider` instead of a `SqlProvider`, it skips all SQLite auto-wiring. This means:
+For user-facing chat applications, prefer one Durable Object per conversation. This isolates storage and failure domains and allows conversations to hibernate independently. Use multiple handles inside one object for local branches, drafts, or application-specific namespaces.
 
-- **Context blocks need explicit providers.** No auto-wiring to SQLite — each `withContext()` call needs a `provider` option, or the block will be read-only with no storage.
-- **`withCachedPrompt()` needs an explicit provider.** Pass a `PostgresContextProvider` to persist the frozen system prompt.
-- **Broadcaster is skipped.** WebSocket status broadcasts (`CF_AGENT_SESSION` events) only work with `SqlProvider`-based sessions.
-- **All Session methods are async.** `getHistory()`, `getMessage()`, etc. return Promises since the underlying storage is async.
+## Chat hosts
 
-### System prompt lifecycle
+`Think` and `AIChatAgent` use Sessions internally.
 
-- **`freezeSystemPrompt()`** — returns the cached prompt from the store. On first call (cache miss), loads blocks from providers, renders, and persists. Subsequent calls return the stored value without re-rendering. This preserves LLM prefix cache hits.
-- **`refreshSystemPrompt()`** — force reloads blocks from providers, re-renders, and updates the store. Call this to invalidate the cached prompt (e.g. after `clearMessages`).
+- Think uses branches, compaction, context blocks, search, Sessions-owned attachment storage, workspace-projected Agent Skills, and the change feed.
+- AIChatAgent uses the default handle as a linear chain. Its existing destructive regeneration, mutable `messages` array, retention option, and wire protocol remain unchanged. Attachment storage is opt-in through `sessionAttachments`.
 
-### Connection types
+Existing `assistant_*` Session tables and `cf_ai_chat_agent_messages` are lifted automatically. Legacy tables are renamed to `*__lifted_v1` tombstones for one release so rollback remains possible.
 
-The Postgres providers accept either of:
+## Memory boundaries and future streaming
 
-- A raw `pg.Client` (or any object with a compatible `query(text, values)` method) — the recommended path for Hyperdrive.
-- Any object implementing `PostgresConnection` — useful for tests or custom drivers.
+The capability streams history and attachments, but some consumers still require arrays.
 
-```typescript
-// For tests or custom drivers
-interface PostgresConnection {
-  execute(
-    query: string,
-    args?: (string | number | boolean | null)[]
-  ): Promise<{ rows: Record<string, unknown>[] }>;
-}
-```
+| Operation                                 | Current shape                                 | Future direction                                                                                 |
+| ----------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| History export, indexing, maintenance     | Stream or bounded batches                     | Already streamable                                                                               |
+| Tool-call lookup and reconciliation scans | Host-specific arrays in current chat packages | Can scan batches and stop early                                                                  |
+| Model request input                       | AI SDK message array                          | Must materialize a bounded model window                                                          |
+| Compaction summarizer input               | Message array                                 | Must materialize a bounded compaction range                                                      |
+| Legacy full-transcript client snapshots   | Message array                                 | Can move to paginated history plus live deltas                                                   |
+| Attachment delivery                       | `ReadableStream`                              | Already streamable                                                                               |
+| Attachment hashing on write               | Incremental stream                            | Declared-length large streams go directly to R2; unknown lengths stage in bounded SQLite windows |
 
-Internally the providers use `?` placeholders; when a `pg`-style client is passed, those are rewritten to `$1, $2, …` automatically.
+The chat packages retain their current public arrays and wire behavior in this release. Moving reconciliation and client history protocols to streaming requires separate protocol work.
 
-### Search
-
-Two levels of search are available:
-
-- **Message search** — `PostgresSessionProvider.searchMessages()` searches conversation history via the `content_tsv` column on `assistant_messages`.
-- **Knowledge search** — `PostgresSearchProvider` provides a searchable context block backed by `cf_agents_search_entries`. The LLM can index content via `set_context` and query it via `search_context`. Uses `tsvector` + GIN index with English stemming and `ts_rank` for relevance ranking.
-
-The migration SQL above includes both tables with tsvector columns and GIN indexes — search works out of the box.
-
----
-
-## Utilities
-
-Exported from `agents/experimental/memory/utils`:
-
-### Token Estimation
-
-```typescript
-import {
-  estimateStringTokens,
-  estimateMessageTokens
-} from "agents/experimental/memory/utils/tokens";
-
-estimateStringTokens("Hello world"); // heuristic: max(chars/4, words*1.3)
-estimateMessageTokens(messages); // sum with 4 tokens per-message overhead
-```
-
-### Compaction Helpers
-
-```typescript
-import {
-  createCompactFunction,
-  isCompactionMessage,
-  sanitizeToolPairs,
-  alignBoundaryForward,
-  alignBoundaryBackward,
-  findTailCutByTokens,
-  computeSummaryBudget,
-  buildSummaryPrompt,
-  COMPACTION_PREFIX
-} from "agents/experimental/memory/utils/compaction-helpers";
-```
-
-- `createCompactFunction(options)` — Full compaction implementation. See [Compaction](#compaction).
-- `isCompactionMessage(msg)` — Check if a message is a compaction overlay (id starts with `compaction_`).
-- `sanitizeToolPairs(messages)` — Fix orphaned tool call/result pairs after compaction. Removes orphaned results and adds stub results for calls whose results were dropped.
-- `alignBoundaryForward/Backward(messages, idx)` — Shift a boundary index to avoid splitting tool call/result groups.
-- `findTailCutByTokens(messages, headEnd, budget, minMessages)` — Find where to stop compressing using a token budget.
-- `computeSummaryBudget(messages)` — 20% of compressed content tokens (minimum 100).
-- `buildSummaryPrompt(messages, previousSummary, budget)` — Structured prompt for LLM summarization.
-
----
-
-## Exports
-
-Everything is exported from `agents/experimental/memory/session`:
-
-```typescript
-import {
-  // Core
-  Session,
-  SessionManager,
-
-  // Providers
-  AgentSessionProvider,
-  AgentContextProvider,
-  AgentSearchProvider,
-  R2SkillProvider,
-  PostgresSessionProvider,
-  PostgresContextProvider,
-  PostgresSearchProvider,
-
-  // Type guards
-  isWritableProvider,
-  isSkillProvider,
-  isSearchProvider,
-
-  // Types
-  type SessionMessage,
-  type SessionMessagePart,
-  type SessionContextOptions,
-  type SessionInfo,
-  type SessionManagerOptions,
-  type SessionOptions,
-  type ContextBlock,
-  type ContextConfig,
-  type ContextProvider,
-  type WritableContextProvider,
-  type SkillProvider,
-  type SearchProvider,
-  type SearchResult,
-  type SessionProvider,
-  type StoredCompaction,
-  type SqlProvider,
-  type PostgresConnection
-} from "agents/experimental/memory/session";
-```
-
-Compaction utilities from `agents/experimental/memory/utils/compaction-helpers`:
-
-```typescript
-import {
-  createCompactFunction,
-  isCompactionMessage,
-  sanitizeToolPairs,
-  COMPACTION_PREFIX,
-  type CompactResult,
-  type CompactOptions
-} from "agents/experimental/memory/utils/compaction-helpers";
-```
-
-Token utilities from `agents/experimental/memory/utils/tokens`:
-
-```typescript
-import {
-  estimateStringTokens,
-  estimateMessageTokens
-} from "agents/experimental/memory/utils/tokens";
-```
-
----
-
-## Gotchas and Quirks
-
-Things that might surprise you:
-
-1. **Lazy initialization.** Sessions created with the builder do not initialize until first use. The first call to any method (e.g. `getHistory()`) triggers `_ensureReady()`, which creates SQLite tables or initializes the configured provider, resolves providers, loads context blocks, and restores skill state from history. This means the first operation is slower than subsequent ones.
-
-2. **Snapshot freezing is sticky.** `freezeSystemPrompt()` caches the result. Writing to a context block does NOT update the cached snapshot — you must explicitly call `refreshSystemPrompt()`. This is deliberate (LLM prefix cache optimization), but easy to miss.
-
-3. **Session methods are async.** Always `await` reads and writes. SQLite-backed storage is local and fast, but external providers may perform network I/O, and `appendMessage` can trigger auto-compaction.
-
-4. **Skills survive hibernation via history scanning.** On initialization, the session scans the entire conversation history looking for `load_context` tool results to reconstruct which skills are loaded. This is clever but means initialization cost scales with conversation length.
-
-5. **Compaction overlays are superseding, not stacking.** Each compaction extends from the earliest existing `fromMessageId`. So you always have one effective overlay that keeps growing. Old compaction rows remain in the database but are unused. `getCompactions()` returns all rows, which can be confusing.
-
-6. **Search is silently absent.** `session.search()` throws if the provider does not support search, but `manager.search()` swallows FTS5 errors and returns `[]`. The `searchMessages` method on `SessionProvider` is optional (`searchMessages?`).
-
-7. **Fork copies with new IDs.** When forking via `SessionManager.fork()`, all messages get new UUIDs. If you are storing message IDs externally (e.g. for bookmarks), they will not survive a fork.
-
-8. **`removeContext` does not fire skill unload callbacks.** If you remove a context block that had loaded skills, the skill tracking is cleaned up but the conversation history is NOT rewritten. The tool results from those skills remain in history with their full content.
-
-9. **FTS5 query sanitization.** Both `AgentSearchProvider.search()` and `SessionManager.search()` quote individual words to prevent FTS5 syntax injection. This means you cannot use FTS5 operators like `OR`, `NOT`, or `NEAR` — they will be treated as literal search terms.
-
-10. **Auto-compaction failure is silent.** When `compactAfter` triggers and the compaction function throws, the error is emitted via WebSocket broadcast but the `appendMessage` call still succeeds. The message is saved; only the compaction is skipped.
-
-## Acknowledgments
-
-- Session's tree-structured messages are inspired by [Pi](https://pi.dev).
-- Context blocks are inspired by [Letta AI memory blocks](https://www.letta.com/blog/memory-blocks).
-- Formatting of blocks is inspired by [Hermes Agent](https://github.com/nousresearch/hermes-agent).
+See `examples/next/sessions` for a runnable server-only example.

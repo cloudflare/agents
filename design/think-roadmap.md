@@ -606,7 +606,7 @@ When `session` is swapped based on `options.body.sessionId`, the existing WebSoc
 
 ### Should Session be promoted from experimental?
 
-Session is currently in `agents/experimental/memory/session`. If Think depends on it, Think inherits the "experimental" designation. Options:
+Session graduated to the experimental `agents/sessions` entrypoint and Think now installs it as a Lifecycle capability. The earlier packaging options were resolved as follows:
 
 - **Promote Session** to `agents/memory/session` (or `agents/session`) — stable API, changeset required for changes.
 - **Keep experimental** — Think is already `@experimental`, so inheriting experimental Session is consistent.

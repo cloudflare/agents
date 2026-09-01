@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-next-sessions-example",
-  "description": "Next: durable Sessions with streamed history and Workspace-backed attachments",
+  "description": "Next: durable Sessions with streamed history and owned attachment storage",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -11,7 +11,6 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/shell": "*",
     "agents": "*"
   },
   "devDependencies": {

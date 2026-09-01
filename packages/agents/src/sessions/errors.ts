@@ -53,22 +53,6 @@ export class SessionSearchDisabledError extends Error {
 }
 
 /**
- * Thrown when an attachment operation needs a store but none is configured.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export class SessionAttachmentStoreMissingError extends Error {
-  constructor(operation: string) {
-    super(
-      `${operation} requires an attachment store. Construct the Sessions ` +
-        "capability with { attachments: { store } } (a @cloudflare/shell " +
-        "Workspace satisfies the store interface)."
-    );
-    this.name = "SessionAttachmentStoreMissingError";
-  }
-}
-
-/**
  * Thrown by the `attachments` API when a pointer's payload is missing from
  * the store. History reads never throw this — they degrade the part to a
  * marker instead.
@@ -78,15 +62,19 @@ export class SessionAttachmentStoreMissingError extends Error {
 export class SessionAttachmentMissingError extends Error {
   readonly hash: string;
 
-  constructor(hash: string, path: string) {
-    super(`Attachment sha256:${hash} is missing from the store at ${path}.`);
+  constructor(hash: string, location?: string) {
+    super(
+      location
+        ? `Attachment sha256:${hash} is missing from Sessions storage at ${location}.`
+        : `Attachment sha256:${hash} is missing from Sessions storage.`
+    );
     this.name = "SessionAttachmentMissingError";
     this.hash = hash;
   }
 }
 
 /**
- * Thrown before storage when one attachment exceeds the configured memory
+ * Thrown before commit when one attachment exceeds the configured size
  * ceiling.
  *
  * @experimental The API surface may change before stabilizing.
