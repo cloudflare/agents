@@ -467,7 +467,7 @@ await user.applyChatSnapshot({
 // from its own SQLite — no chat DO wakes up.
 ```
 
-Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. Chat writes are idempotent by message id, snapshots carry a monotonic chat revision, and the User DO can repair a stale projection by pulling the latest snapshot. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. The proposed production topology, including a long-lived User-agent connection alongside the active Chat-agent connection, is in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
+Each chat gets its own alarms, placement, and storage budget, while "search across all my chats" reads only the index. Chat writes are idempotent by message id, snapshots carry a monotonic chat revision, and the User DO can repair a stale projection by pulling the latest snapshot. Browser connections use User-gated routes rather than physical Agent names; deletion marks a catalog row inactive before destroying the Chat DO, so reconnects and stale-socket writes are refused. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the basic pattern with tests. The proposed production topology, including a long-lived User-agent connection alongside the active Chat-agent connection, is in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
 
 ## Examples
 

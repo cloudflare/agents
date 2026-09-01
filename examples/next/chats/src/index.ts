@@ -1,4 +1,4 @@
-import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
+import { Agent, callable, getAgentByName } from "agents";
 
 /**
  * The recommended shape for "many chats per user": one top-level
@@ -28,6 +28,10 @@ type ChatMessage = {
   text: string;
   at: number;
 };
+
+type AddMessageResult =
+  | { status: "accepted"; revision: number }
+  | { status: "inactive" };
 
 /**
  * One Durable Object per conversation. The chat's name embeds its
@@ -85,9 +89,17 @@ export class ChatAgent extends Agent<Env> {
     messageId: string,
     role: "user" | "assistant",
     text: string
-  ): Promise<number> {
+  ): Promise<AddMessageResult> {
     if (messageId.trim() === "") {
       throw new Error("messageId must not be empty");
+    }
+
+    // Check admission before committing locally. A stale socket remains open
+    // only until its next command, which the User catalog rejects after delete.
+    const { userId, chatId } = this.#ids();
+    const user = await getAgentByName(this.env.UserAgent, userId);
+    if (!(await user.isChatActive(chatId))) {
+      return { status: "inactive" };
     }
 
     const result = this.ctx.storage.transactionSync(() => {
@@ -130,9 +142,7 @@ export class ChatAgent extends Agent<Env> {
     // The message is authoritative and already committed. Updating the User
     // index is an idempotent projection: a temporary cross-DO failure may leave
     // the list stale, but it must not make the accepted message look failed.
-    const { userId } = this.#ids();
     try {
-      const user = await getAgentByName(this.env.UserAgent, userId);
       await user.applyChatSnapshot(result.snapshot);
     } catch (error) {
       console.warn(
@@ -145,7 +155,7 @@ export class ChatAgent extends Agent<Env> {
       );
     }
 
-    return result.messageRevision;
+    return { status: "accepted", revision: result.messageRevision };
   }
 
   /** Authoritative metadata projection used by UserAgent repair. */
@@ -175,7 +185,8 @@ export class UserAgent extends Agent<Env> {
         last_message TEXT,
         updated_at INTEGER NOT NULL,
         activity_sequence INTEGER NOT NULL DEFAULT 0,
-        indexed_revision INTEGER NOT NULL DEFAULT 0
+        indexed_revision INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL CHECK (status IN ('active', 'deleting'))
       )
     `;
     this.sql`
@@ -211,7 +222,8 @@ export class UserAgent extends Agent<Env> {
         last_message,
         updated_at,
         activity_sequence,
-        indexed_revision
+        indexed_revision,
+        status
       )
       VALUES (
         ${chatId},
@@ -219,7 +231,8 @@ export class UserAgent extends Agent<Env> {
         NULL,
         ${Date.now()},
         ${this.#nextActivitySequence()},
-        0
+        0,
+        'active'
       )
     `;
     return chatId;
@@ -230,7 +243,7 @@ export class UserAgent extends Agent<Env> {
     return this.ctx.storage.transactionSync(() => {
       const [current] = this.sql<{ indexedRevision: number }>`
         SELECT indexed_revision AS indexedRevision FROM chats
-        WHERE chat_id = ${snapshot.chatId}
+        WHERE chat_id = ${snapshot.chatId} AND status = 'active'
       `;
       if (!current) return false;
       if (current.indexedRevision >= snapshot.revision) return true;
@@ -244,6 +257,7 @@ export class UserAgent extends Agent<Env> {
           activity_sequence = ${activitySequence},
           indexed_revision = ${snapshot.revision}
         WHERE chat_id = ${snapshot.chatId}
+          AND status = 'active'
           AND indexed_revision < ${snapshot.revision}
         RETURNING chat_id AS chatId
       `;
@@ -251,27 +265,41 @@ export class UserAgent extends Agent<Env> {
     });
   }
 
-  /** Pull the authoritative metadata snapshot for one known chat. */
-  async repairChat(chatId: string): Promise<boolean> {
-    const [known] = this.sql<{ chatId: string }>`
-      SELECT chat_id AS chatId FROM chats WHERE chat_id = ${chatId}
-    `;
-    if (!known) return false;
+  /** Whether the catalog currently admits commands for this chat. */
+  isChatActive(chatId: string): boolean {
+    return this.resolveChatAgentName(chatId) !== null;
+  }
 
-    const chat = await getAgentByName(
-      this.env.ChatAgent,
-      `${this.name}:${chatId}`
-    );
+  /** Resolve the physical ChatAgent name for one active catalog row. */
+  resolveChatAgentName(chatId: string): string | null {
+    const [known] = this.sql<{ chatId: string }>`
+      SELECT chat_id AS chatId FROM chats
+      WHERE chat_id = ${chatId} AND status = 'active'
+    `;
+    return known ? `${this.name}:${chatId}` : null;
+  }
+
+  /** Pull the authoritative metadata snapshot for one active chat. */
+  async repairChat(chatId: string): Promise<boolean> {
+    const agentName = this.resolveChatAgentName(chatId);
+    if (!agentName) return false;
+
+    const chat = await getAgentByName(this.env.ChatAgent, agentName);
     const snapshot = await chat.getIndexSnapshot();
     return snapshot ? this.applyChatSnapshot(snapshot) : true;
   }
 
+  /**
+   * Sort by Chat-owned activity time. The User sequence only breaks timestamp
+   * ties; delayed delivery of old activity must not make that chat look recent.
+   */
   @callable()
   listChats(): ChatMeta[] {
     return this.sql<ChatMeta>`
       SELECT chat_id AS chatId, title, last_message AS lastMessage,
              updated_at AS updatedAt
       FROM chats
+      WHERE status = 'active'
       ORDER BY updated_at DESC, activity_sequence DESC, chat_id ASC
     `;
   }
@@ -279,6 +307,7 @@ export class UserAgent extends Agent<Env> {
   /**
    * Cross-chat search over the pushed metadata. No chat DO wakes up
    * for this — the cost of search is one read of the user's own index.
+   * Results use the same authoritative activity ordering as listChats().
    */
   @callable()
   searchChats(query: string): ChatMeta[] {
@@ -287,7 +316,8 @@ export class UserAgent extends Agent<Env> {
       SELECT chat_id AS chatId, title, last_message AS lastMessage,
              updated_at AS updatedAt
       FROM chats
-      WHERE title LIKE ${like} OR last_message LIKE ${like}
+      WHERE status = 'active'
+        AND (title LIKE ${like} OR last_message LIKE ${like})
       ORDER BY updated_at DESC, activity_sequence DESC, chat_id ASC
     `;
   }
@@ -298,20 +328,56 @@ export class UserAgent extends Agent<Env> {
    */
   @callable()
   async deleteChat(chatId: string): Promise<void> {
-    const chat = await getAgentByName(
-      this.env.ChatAgent,
-      `${this.name}:${chatId}`
-    );
+    const agentName = this.ctx.storage.transactionSync(() => {
+      const [row] = this.sql<{ chatId: string }>`
+        SELECT chat_id AS chatId FROM chats WHERE chat_id = ${chatId}
+      `;
+      if (!row) return null;
+      this.sql`
+        UPDATE chats SET status = 'deleting' WHERE chat_id = ${chatId}
+      `;
+      return `${this.name}:${chatId}`;
+    });
+    if (!agentName) return;
+
+    const chat = await getAgentByName(this.env.ChatAgent, agentName);
     await chat.destroy();
     this.sql`DELETE FROM chats WHERE chat_id = ${chatId}`;
   }
 }
 
+function decodePathSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    return (
-      (await routeAgentRequest(request, env)) ??
-      new Response("Not found", { status: 404 })
-    );
+    const segments = new URL(request.url).pathname.split("/").filter(Boolean);
+    if (segments[0] !== "users" || !segments[1]) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    const userId = decodePathSegment(segments[1]);
+    if (!userId) return new Response("Bad request", { status: 400 });
+    const user = await getAgentByName(env.UserAgent, userId);
+
+    if (segments.length === 2) {
+      return user.fetch(request);
+    }
+    if (segments[2] !== "chats" || !segments[3] || segments.length !== 4) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    const chatId = decodePathSegment(segments[3]);
+    if (!chatId) return new Response("Bad request", { status: 400 });
+    const agentName = await user.resolveChatAgentName(chatId);
+    if (!agentName) return new Response("Chat not found", { status: 404 });
+
+    const chat = await getAgentByName(env.ChatAgent, agentName);
+    return chat.fetch(request);
   }
 } satisfies ExportedHandler<Env>;

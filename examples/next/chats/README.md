@@ -34,8 +34,9 @@ per-run tool agents — reached via `this.dynamicAgents`. See
   without waking any chat DO. (This is the usual objection to
   DO-per-chat — "search across chats is impossible" — and the answer is
   a push-based mirror index, the same pattern the reference apps use.)
-- **Deletion** is `chat.destroy()` plus one index row — no manual
-  multi-table sweeps.
+- **Deletion** marks the catalog row `deleting`, destroys the Chat DO,
+  then removes one index row. New routes and stale-socket writes are
+  rejected as soon as deletion starts.
 
 The index is a derived projection; each Chat DO remains authoritative.
 Messages use caller-supplied ids, so retrying a request cannot duplicate
@@ -49,6 +50,13 @@ A failed projection does not make the accepted message fail. The index may
 be temporarily stale, and `UserAgent.repairChat(chatId)` pulls the latest
 authoritative snapshot from that Chat DO. This keeps the example free of
 callback objects, background queues, and dual-write races.
+
+The browser cannot address physical Agent routes. It connects to
+`/users/{userId}` for the User DO and `/users/{userId}/chats/{chatId}` for
+the active Chat DO. The Worker asks the User catalog to resolve only active
+chats, then returns the Chat DO's WebSocket upgrade. The Chat DO owns frames
+after that upgrade; each write rechecks catalog admission so an already-open
+stale socket cannot write after deletion starts.
 
 ## Run
 

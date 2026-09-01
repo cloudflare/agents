@@ -336,15 +336,18 @@ an unconstrained upsert. This prevents:
 The method returns whether it matched an active row. A `false` result tells the
 Chat agent to stop retrying that projection.
 
-### Order activity at the User agent
+### Order activity without confusing delivery with activity
 
-Chat clocks and delivery order are not catalog order. When the User agent
-accepts an activity update, it allocates a per-user monotonic
-`activitySequence` and records its own `updatedAt`. Listing orders by
-`activitySequence DESC`, with `chatId` only as a deterministic final tie-breaker.
+Each Chat snapshot carries the Chat-owned `updatedAt` for the committed
+activity. The User agent also allocates a per-user monotonic
+`activitySequence` when it accepts a newer revision. Listing orders by
+`updatedAt DESC`, then `activitySequence DESC`, then `chatId`.
 
-This handles two chats finishing in the same millisecond and delayed delivery
-from independently executing Chat agents.
+The sequence makes equal timestamps deterministic. It is not the primary order:
+a delayed repair of genuinely old activity must not move that chat above newer
+activity merely because the User agent observed the projection later. A product
+that needs a stronger cross-object order must assign that order before dispatch,
+not infer it from eventual projection delivery.
 
 ### Projection failure and repair
 

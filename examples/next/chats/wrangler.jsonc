@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*"]
+    "run_worker_first": ["/users/*"]
   },
   "durable_objects": {
     "bindings": [

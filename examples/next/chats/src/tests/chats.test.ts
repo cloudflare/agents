@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 
@@ -15,8 +15,15 @@ async function addMessage(
   role: "user" | "assistant",
   text: string,
   messageId: string = crypto.randomUUID()
-): Promise<number> {
+) {
   return chat.addMessage(messageId, role, text);
+}
+
+async function fetchWorker(
+  path: string,
+  init?: RequestInit
+): Promise<Response> {
+  return workerExports.default.fetch(`http://example.com${path}`, init);
 }
 
 describe("one DO per chat + per-user index", () => {
@@ -117,6 +124,35 @@ describe("one DO per chat + per-user index", () => {
     expect((await user.listChats())[0]?.lastMessage).toBe("latest activity");
   });
 
+  it("does not treat delayed old activity as newer", async () => {
+    const user = await getAgentByName(env.UserAgent, uniqueUser());
+    const recent = await user.createChat();
+    const delayed = await user.createChat();
+
+    await user.applyChatSnapshot({
+      chatId: recent,
+      revision: 1,
+      title: "match recent",
+      lastMessage: "newer activity",
+      updatedAt: 200
+    });
+    await user.applyChatSnapshot({
+      chatId: delayed,
+      revision: 1,
+      title: "match delayed",
+      lastMessage: "older activity delivered later",
+      updatedAt: 100
+    });
+
+    expect((await user.listChats()).map((chat) => chat.chatId)).toEqual([
+      recent,
+      delayed
+    ]);
+    expect(
+      (await user.searchChats("match")).map((chat) => chat.chatId)
+    ).toEqual([recent, delayed]);
+  });
+
   it("does not recreate a deleted catalog row from delayed activity", async () => {
     const user = await getAgentByName(env.UserAgent, uniqueUser());
     const chatId = await user.createChat();
@@ -144,7 +180,7 @@ describe("one DO per chat + per-user index", () => {
 
     await expect(
       chat.addMessage("message-1", "user", "survives delivery failure")
-    ).resolves.toBe(1);
+    ).resolves.toEqual({ status: "accepted", revision: 1 });
     expect((await user.listChats())[0]?.lastMessage).toBeNull();
 
     await user.setProjectionDeliveryBlocked(false);
@@ -157,7 +193,7 @@ describe("one DO per chat + per-user index", () => {
     await user.setProjectionDeliveryBlocked(true);
     await expect(
       chat.addMessage("message-1", "user", "survives delivery failure")
-    ).resolves.toBe(1);
+    ).resolves.toEqual({ status: "accepted", revision: 1 });
     expect(await chat.getMessages()).toHaveLength(2);
     expect((await user.listChats())[0]?.lastMessage).toBe("a newer message");
   });
@@ -174,6 +210,47 @@ describe("one DO per chat + per-user index", () => {
     const hits = await user.searchChats("offsite");
     expect(hits.map((c) => c.chatId)).toEqual([a]);
     expect(await user.searchChats("nothing-matches")).toEqual([]);
+  });
+
+  it("routes active chats through the User catalog and hides physical routes", async () => {
+    const userId = uniqueUser();
+    const user = await getAgentByName(env.UserAgent, userId);
+    const chatId = await user.createChat();
+
+    const response = await fetchWorker(
+      `/users/${encodeURIComponent(userId)}/chats/${encodeURIComponent(chatId)}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    response.webSocket?.accept();
+    response.webSocket?.close(1000, "test complete");
+
+    const direct = await fetchWorker(
+      `/agents/chat-agent/${encodeURIComponent(`${userId}:${chatId}`)}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(direct.status).toBe(404);
+  });
+
+  it("deleteChat rejects reconnects and writes from stale chat handles", async () => {
+    const userId = uniqueUser();
+    const user = await getAgentByName(env.UserAgent, userId);
+    const chatId = await user.createChat();
+    await addMessage(await chatFor(userId, chatId), "user", "before delete");
+
+    await user.deleteChat(chatId);
+
+    const reconnect = await fetchWorker(
+      `/users/${encodeURIComponent(userId)}/chats/${encodeURIComponent(chatId)}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(reconnect.status).toBe(404);
+
+    const revived = await chatFor(userId, chatId);
+    await expect(
+      revived.addMessage("stale-message", "user", "after delete")
+    ).resolves.toEqual({ status: "inactive" });
+    expect(await revived.getMessages()).toEqual([]);
   });
 
   it("deleteChat removes the index row and wipes the chat's storage", async () => {

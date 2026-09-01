@@ -39,6 +39,10 @@ type ChatMessage = {
   at: number;
 };
 
+type AddMessageResult =
+  | { status: "accepted"; revision: number }
+  | { status: "inactive" };
+
 function ModeToggle() {
   const [mode, setMode] = useState(
     () => localStorage.getItem("theme") ?? "light"
@@ -68,9 +72,12 @@ function ChatPane({
   chatId: string;
   onActivity: () => void;
 }) {
-  // One WebSocket per open chat, straight to that chat's own DO — the
-  // user index is not on the message path at all.
-  const chat = useAgent({ agent: "chat-agent", name: `${userId}:${chatId}` });
+  // One WebSocket per open chat. The Worker resolves this user-relative
+  // route through the User catalog, then the Chat DO owns the connection.
+  const chat = useAgent({
+    agent: "chat-agent",
+    basePath: `users/${encodeURIComponent(userId)}/chats/${encodeURIComponent(chatId)}`
+  });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -91,14 +98,27 @@ function ChatPane({
       setBusy(true);
       setDraft("");
       try {
-        await chat.call("addMessage", [crypto.randomUUID(), "user", text]);
+        const submitted = (await chat.call("addMessage", [
+          crypto.randomUUID(),
+          "user",
+          text
+        ])) as AddMessageResult;
+        if (submitted.status === "inactive") {
+          onActivity();
+          return;
+        }
+
         // No model is wired into this example — the "assistant" reply
         // just proves both roles land in the chat's own SQLite.
-        await chat.call("addMessage", [
+        const replied = (await chat.call("addMessage", [
           crypto.randomUUID(),
           "assistant",
           `Echo from ${chatId.slice(0, 8)}: ${text}`
-        ]);
+        ])) as AddMessageResult;
+        if (replied.status === "inactive") {
+          onActivity();
+          return;
+        }
         await refresh();
         onActivity();
       } finally {
@@ -160,7 +180,10 @@ function ChatPane({
 function App() {
   // One connection to the per-user index DO. Listing and search read
   // only this object — no chat DO wakes up for the sidebar.
-  const user = useAgent({ agent: "user-agent", name: userId });
+  const user = useAgent({
+    agent: "user-agent",
+    basePath: `users/${encodeURIComponent(userId)}`
+  });
   const [chats, setChats] = useState<ChatMeta[]>([]);
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
