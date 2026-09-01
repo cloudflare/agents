@@ -15,8 +15,8 @@
     "@cloudflare/kumo": "^2.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.48.0",
@@ -29,7 +29,7 @@
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "vitest": "^4.1.10",
+    "vitest": "4.1.10",
     "wrangler": "^4.115.0"
   }
 }

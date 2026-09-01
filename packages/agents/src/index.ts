@@ -50,7 +50,6 @@ import {
   SUB_AGENT_OUTER_URL_HEADER
 } from "./dynamic-agents/dynamic-agents";
 import {
-  isValidParentPath,
   logicalNameFromPathV2Identity,
   type SubAgentIdentityVersion
 } from "./dynamic-agents/identity";
