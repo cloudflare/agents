@@ -77,11 +77,11 @@ import {
 } from "cloudflare:workers";
 import {
   type LifecycleJobContext,
+  type MemoryLimitContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
   type LifecycleJobOutcome,
-  setLifecycleAlarmMemoryLimitStrikes,
   setLifecycleEventSink,
   setLifecycleHostInvoker,
   setLifecycleRouteTransport,
@@ -154,11 +154,23 @@ import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
-import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
+import {
+  Scheduler,
+  setSchedulerCallbackResolver,
+  setSchedulerRoutedMemoryLimitHandler
+} from "./schedules/scheduler";
 import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
 import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
-import type { Schedule, ScheduleCriteria } from "./schedules/types";
-export type { Schedule, ScheduleCriteria } from "./schedules/types";
+import type {
+  Schedule,
+  ScheduleCriteria,
+  ScheduleOptions
+} from "./schedules/types";
+export type {
+  Schedule,
+  ScheduleCriteria,
+  ScheduleOptions
+} from "./schedules/types";
 export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
@@ -1143,7 +1155,9 @@ export class Agent<
    *
    * @experimental The API surface may change before stabilizing.
    */
-  readonly lifecycle = Lifecycle.install<Env, Props>(this);
+  readonly lifecycle = Lifecycle.install<Env, Props>(this, {
+    maxAlarmMemoryLimitStrikes: this._resolvedOptions.maxAlarmMemoryLimitStrikes
+  });
 
   /**
    * WebSocket connection subsystem. Constructed as a field initializer
@@ -1938,11 +1952,6 @@ export class Agent<
       )
     );
 
-    setLifecycleAlarmMemoryLimitStrikes(
-      this.lifecycle,
-      this._resolvedOptions.maxAlarmMemoryLimitStrikes
-    );
-
     this.scheduler = new Scheduler({
       retry: this._resolvedOptions.retry,
       hungScheduleTimeoutSeconds:
@@ -1970,6 +1979,19 @@ export class Agent<
         (
           method as (payload: unknown, schedule: Schedule<unknown>) => unknown
         ).call(this, payload, schedule);
+    });
+
+    // Temporary bridge for a legacy routed chat-recovery schedule: the queue
+    // and physical alarm live on the root Agent, but the incident and sealing
+    // hook live on each owning dynamic agent. Scheduler routes a sealed strike
+    // to owners whose flagged rows were purged. Recovery-on-Tasks removes this.
+    setSchedulerRoutedMemoryLimitHandler(this.scheduler, (context) => {
+      const hook = (
+        this as unknown as {
+          onAlarmMemoryLimit?: (value: typeof context) => void | Promise<void>;
+        }
+      ).onAlarmMemoryLimit;
+      return hook?.call(this, context);
     });
 
     this.tasks = new Tasks({
@@ -3594,7 +3616,7 @@ export class Agent<
     when: Date | string | number,
     callback: keyof this,
     payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
+    options?: ScheduleOptions
   ): Promise<Schedule<T>> {
     // SAFETY: Agent's historical generic promises Schedule<T>; the untyped
     // scheduler default carries Schedule<unknown> for name-based calls.
@@ -5167,42 +5189,36 @@ export class Agent<
   }
 
   /**
-   * Apply Agent's domain policy when the Lifecycle alarm memory-limit
-   * circuit breaker records a strike (#1825). Lifecycle already handled the
-   * item that was executing; this backs off or purges the recovery-loop
-   * schedules named by {@link _cf_recoveryAlarmCallbacks} and, at the strike
-   * budget, seals in-flight recovery via {@link _cf_sealMemoryLimitedRecovery}.
+   * Apply host policy after the alarm memory-limit breaker records a strike.
+   *
+   * New chat hosts override this hook directly. The sealed-only fallback keeps
+   * `agents` 0.23 compatible with already-published chat packages whose peer
+   * ranges accept it but which implement only the former
+   * `_cf_sealMemoryLimitedRecovery` template method. Queue membership remains
+   * job-row policy; this invokes terminalization only and can be removed once
+   * old chat releases no longer accept the current `agents` range.
+   *
    * @internal
    */
-  async onAlarmMemoryLimit(context: {
-    readonly sealed: boolean;
-    readonly nextTime?: number;
-  }): Promise<void> {
-    const callbacks = this._cf_recoveryAlarmCallbacks();
-    try {
-      await this.scheduler.applyMemoryLimitPolicy({
-        callbacks,
-        sealed: context.sealed,
-        nextTime: context.nextTime
-      });
-    } catch {
-      // best-effort at a host failure boundary
-    }
-    if (context.sealed) {
-      try {
-        await this._cf_sealMemoryLimitedRecovery();
-      } catch {
-        // best-effort terminalization; the purge above already broke the loop
+  protected async onAlarmMemoryLimit(
+    context: MemoryLimitContext
+  ): Promise<void> {
+    if (!context.sealed) return;
+    const legacySeal = (
+      this as unknown as {
+        _cf_sealMemoryLimitedRecovery?: () => void | Promise<void>;
       }
-    }
+    )._cf_sealMemoryLimitedRecovery;
+    await legacySeal?.call(this);
   }
 
   /**
    * Run Lifecycle's alarm event loop after the pending-destroy preamble.
    *
    * The alarm memory-limit circuit breaker (#1825) lives inside
-   * `Lifecycle.alarm()`; Agent contributes domain policy through
-   * {@link onAlarmMemoryLimit}.
+   * `Lifecycle.alarm()`; capabilities and hosts opt into extra domain
+   * policy via their `onMemoryLimit` / `onAlarmMemoryLimit` hooks and the
+   * `recoveryLoop` schedule option.
    *
    * @remarks Use `this.schedule()` for named Agent callbacks. Reusable durable
    * work belongs in a capability that pushes jobs and implements `onJob()`.
@@ -5222,26 +5238,6 @@ export class Agent<
 
     await this.lifecycle.alarm();
   }
-
-  /**
-   * The schedule-callback names whose jobs drive a recovery loop that can
-   * deterministically OOM. The base agent has none; chat hosts (`Think`,
-   * `AIChatAgent`) override this to return their recovery continuation callbacks
-   * so the circuit breaker can surgically back them off / purge them WITHOUT
-   * disturbing unrelated scheduled tasks. See {@link onAlarmMemoryLimit}.
-   */
-  protected _cf_recoveryAlarmCallbacks(): string[] {
-    return [];
-  }
-
-  /**
-   * Hook for a host to terminalize ("seal") any in-flight recovery work as an
-   * out-of-memory exhaustion when the alarm circuit breaker trips at its strike
-   * budget (#1825). Runs at the outermost alarm frame (post-unwind, so writes
-   * can land). Default: no-op. Chat hosts override to fire `onExhausted` + the
-   * terminal banner and persist the sealed incident.
-   */
-  protected async _cf_sealMemoryLimitedRecovery(): Promise<void> {}
 
   // ── Sub-agent routing (external addressability for facets) ──────────────
 

@@ -21,6 +21,16 @@ export type TaskStepEngineDeps = {
   generation: string;
   signal: AbortSignal;
   claimTimeoutMs: () => number;
+  /** When the attempt's claim write persisted its `next_at` backstop. */
+  claimedAtMs: number;
+  /**
+   * Minimum wall time between claim writes. Sized to half the claim slack:
+   * every claim write lands `step timeout + slack` ahead, so a refresh
+   * skipped this recently still leaves a full step timeout plus half the
+   * slack of headroom — no policy-respecting step can outlive the claim,
+   * and a burst of fast steps pays zero claim-refresh row writes.
+   */
+  claimRefreshAfterMs: number;
   defaults: ResolvedStepPolicy;
   emit: (type: string, payload: Record<string, unknown>) => void;
 };
@@ -28,6 +38,13 @@ export type TaskStepEngineDeps = {
 /** @internal Build the engine port for one claimed attempt. */
 export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
   const { runId, generation } = deps;
+  // The newest claim deadline known durable. The queue's own backstop push
+  // (a due wake observing the live attempt) only ever moves `next_at`
+  // forward, so this stays a conservative lower bound.
+  let lastClaimWriteAt = deps.claimedAtMs;
+  // The last status message known durable — persisting an identical one
+  // again would be a pure row-write duplicate.
+  let lastStatusMessage: string | undefined;
   const assertCurrent = (): void => {
     const row = deps.store.getRun(runId);
     if (!row || row.generation !== generation) {
@@ -60,6 +77,22 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
              ${kind === "do" ? "running" : wakeAt === null ? "running" : "waiting"},
              ${kind === "do" ? 1 : 0}, ${wakeAt},
              ${now}, ${kind === "do" ? now : null}, ${now})
+        `;
+    },
+    insertCompletedSleep: (name) => {
+      assertCurrent();
+      const now = Date.now();
+      // An already-elapsed sleep is journaled born-completed: one INSERT,
+      // where insert-then-complete would write the same row twice in the
+      // same synchronous block (one durable commit either way, so the
+      // split bought no crash evidence).
+      deps.store.sql`
+          INSERT INTO cf_agents_task_steps
+            (run_id, step_name, kind, state, attempt, next_at, created_at,
+             completed_at, updated_at)
+          VALUES
+            (${runId}, ${name}, 'sleep', 'completed', 0, NULL, ${now},
+             ${now}, ${now})
         `;
     },
     claimStepAttempt: (name) => {
@@ -111,22 +144,27 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
         `;
     },
     refreshClaim: () => {
-      deps.store.fencedWrite(
+      const now = Date.now();
+      if (now - lastClaimWriteAt < deps.claimRefreshAfterMs) return;
+      const written = deps.store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs SET next_at = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND state = 'running'`,
-        [Date.now() + deps.claimTimeoutMs(), Date.now()]
+        [now + deps.claimTimeoutMs(), now]
       );
+      if (written) lastClaimWriteAt = now;
     },
     writeStatus: (message) => {
-      deps.store.fencedWrite(
+      if (message === lastStatusMessage) return;
+      const written = deps.store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs SET status_message = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND state = 'running'`,
         [message, Date.now()]
       );
+      if (written) lastStatusMessage = message;
     },
     cancellationRequested: () => {
       const row = deps.store.getRun(runId);

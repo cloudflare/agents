@@ -4280,9 +4280,6 @@ importers:
       '@ai-sdk/react':
         specifier: ^3.0.0 || ^4.0.0
         version: 4.0.19(react@19.2.7)(zod@4.5.4)
-      agents:
-        specifier: '>=0.17.1 <1.0.0'
-        version: link:../agents
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -4293,6 +4290,9 @@ importers:
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17
+      agents:
+        specifier: workspace:*
+        version: link:../agents
       ai:
         specifier: ^7.0.0
         version: 7.0.18(zod@4.5.4)

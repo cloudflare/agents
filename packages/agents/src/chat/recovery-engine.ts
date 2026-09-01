@@ -10,6 +10,7 @@
  */
 
 import type { FiberRecoveryContext } from "../index";
+import type { RecoveryLoopScheduleOptions } from "../schedules/types";
 import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
@@ -74,18 +75,31 @@ export type RecoveryPartial = {
 export type ChatStreamStatus = "streaming" | "completed" | "error";
 
 /**
- * Resolve the `schedule()` idempotency option for a recovery schedule. Single
- * source of truth for both packages; see {@link ChatRecoveryScheduleReason} for
- * the rationale behind each case.
+ * Resolve the `schedule()` options for a recovery schedule. Single source of
+ * truth for both packages; see {@link ChatRecoveryScheduleReason} for the
+ * rationale behind each idempotency case. Every recovery schedule is flagged
+ * `recoveryLoop` so the alarm memory-limit circuit breaker (#1825) backs the
+ * loop off on a strike and purges it when it seals.
  *
- * This is a cutover invariant: flipping either case silently breaks deploy-storm
- * dedup (initial) or stalls stable-timeout retries (reschedule), and neither is
- * caught by a type error — only by the recovery suites.
+ * This is a cutover invariant: flipping either idempotency case silently
+ * breaks deploy-storm dedup (initial) or stalls stable-timeout retries
+ * (reschedule), and neither is caught by a type error — only by the recovery
+ * suites.
  */
 export function chatRecoverySchedulePolicy(
   reason: ChatRecoveryScheduleReason
-): { idempotent: boolean } {
-  return { idempotent: reason === "initial" };
+): RecoveryLoopScheduleOptions {
+  return { idempotent: reason === "initial", recoveryLoop: true };
+}
+
+/**
+ * Options for a manual post-handoff re-defer of a recovery continuation
+ * (#1730): non-idempotent like every reschedule, and flagged for the alarm
+ * memory-limit breaker like every recovery schedule — the flag is internal
+ * scaffolding, so call sites route through here rather than writing it.
+ */
+export function chatRecoveryRedeferPolicy(): RecoveryLoopScheduleOptions {
+  return { idempotent: false, recoveryLoop: true };
 }
 
 /** Identity + context for opening (or re-evaluating) a recovery incident. */

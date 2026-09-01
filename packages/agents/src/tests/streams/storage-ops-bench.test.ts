@@ -15,7 +15,7 @@ const CHUNKS = 100;
 const BYTES = 120;
 
 describe("Streams storage-ops benchmark", () => {
-  it("packed adapter writes stay within 2× the legacy pattern and ~10× under per-chunk appends", async () => {
+  it("packed adapter writes match the legacy pattern exactly and stay ~8× under per-chunk appends", async () => {
     const stub = env.StreamBenchObject.getByName("bench");
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {
       const legacy = await instance.benchLegacySimulation(TURNS, CHUNKS, BYTES);
@@ -31,13 +31,18 @@ describe("Streams storage-ops benchmark", () => {
           `  sweep reads       : legacy=${sweep.legacyRowsRead} new=${sweep.newRowsRead}`
       );
 
-      // The packed adapter pays at most the legacy pattern plus one fence
-      // write per segment (and start() no longer pre-creates two tables).
-      expect(adapter.rowsWritten).toBeLessThanOrEqual(2 * legacy.rowsWritten);
-      // Packing is the point: an order of magnitude under naive per-chunk.
+      // The fence is a read, so the packed adapter writes exactly the
+      // legacy pattern's rows per turn: one stream-row insert, one chunk
+      // insert per 10-chunk segment, one settle update — 12 for this
+      // workload. Any regression that adds a write to the streaming hot
+      // path breaks this equality.
+      expect(adapter.rowsWritten).toBe(legacy.rowsWritten);
+      // Packing is the point: an order of magnitude under naive per-chunk
+      // (12 vs 102 rows per turn here, ~8.5×).
       expect(adapter.rowsWritten * 5).toBeLessThan(perChunk.rowsWritten);
-      // The new sweep reads only stream rows; the legacy shape scanned the
-      // chunk table through a correlated subquery.
+      // The two-phase sweep reads the stream rows plus at most one indexed
+      // chunk-tail row per stale live candidate; the legacy shape scanned
+      // the whole chunk table through a correlated subquery.
       expect(sweep.newRowsRead).toBeLessThan(sweep.legacyRowsRead);
     });
   });
