@@ -22,7 +22,7 @@ import type { WorkflowEvent } from "cloudflare:workers";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { z } from "zod";
-import { Session } from "agents/experimental/memory/session";
+import { Session } from "agents/sessions";
 import type { ObservabilityEvent } from "agents/observability";
 import {
   action,

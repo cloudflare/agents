@@ -163,8 +163,10 @@ export type WorkspaceFsLike = Pick<
   Workspace,
   | "readFile"
   | "readFileBytes"
+  | "readFileStream"
   | "writeFile"
   | "writeFileBytes"
+  | "deleteFile"
   | "appendFile"
   | "exists"
   | "stat"

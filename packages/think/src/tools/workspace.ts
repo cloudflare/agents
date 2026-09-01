@@ -26,7 +26,10 @@ export type WorkspaceLike = Pick<
   Workspace,
   | "readFile"
   | "readFileBytes"
+  | "readFileStream"
   | "writeFile"
+  | "writeFileBytes"
+  | "deleteFile"
   | "readDir"
   | "rm"
   | "glob"

@@ -53,7 +53,11 @@ import {
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
-import { Session } from "agents/experimental/memory/session";
+import {
+  Session,
+  type SessionEvictionResult,
+  type StoredAttachment
+} from "agents/sessions";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────
@@ -8190,9 +8194,9 @@ export class ThinkOnStartHydrationFailureAgent extends Think {
       throw new Error("SQL query failed: out of memory: SQLITE_NOMEM");
     };
     const originalHistory = session.getHistory.bind(session);
-    session.getHistory = async (leafId?: string | null) => {
+    session.getHistory = async (options) => {
       failFirstRead();
-      return originalHistory(leafId);
+      return originalHistory(options);
     };
     const originalRecent = session.getRecentHistory.bind(session);
     session.getRecentHistory = async (
@@ -8324,7 +8328,7 @@ export class ThinkWindowedHydrationAgent extends Think {
 
 // ── Media eviction agents (#1710, step 3) ───────────────────────
 
-const BIG_MEDIA_CHARS = 12_000;
+const BIG_MEDIA_CHARS = 16_000;
 
 /**
  * Eviction disabled by default so tests can seed deterministically, then
@@ -8341,36 +8345,6 @@ export class ThinkMediaEvictionAgent extends Think {
     config: MediaEvictionConfig | boolean
   ): Promise<void> {
     this.mediaEviction = config;
-  }
-
-  /**
-   * Frames broadcast by Session status updates (`cf_agent_session`) — the
-   * side effect of a PUBLIC `updateMessage`. Eviction rewrites rows via the
-   * silent maintenance path (`internal_rewriteMessage`), which must NOT add
-   * to this count (each status emit also runs a full-history token
-   * estimate, reintroducing the memory pressure eviction removes).
-   */
-  private _sessionStatusBroadcasts = 0;
-
-  override broadcast(
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void {
-    if (typeof message === "string") {
-      try {
-        const parsed = JSON.parse(message) as { type?: string };
-        if (parsed.type === "cf_agent_session") {
-          this._sessionStatusBroadcasts++;
-        }
-      } catch {
-        // non-JSON frame — not a session status broadcast
-      }
-    }
-    super.broadcast(message, without);
-  }
-
-  async getSessionStatusBroadcastsForTest(): Promise<number> {
-    return this._sessionStatusBroadcasts;
   }
 
   /**
@@ -8424,21 +8398,37 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
-  async runEvictionForTest(): Promise<{
-    messages: number;
-    parts: number;
-    bytes: number;
-    externalizedBytes: number;
-  } | null> {
-    return this._evictAgedMediaBestEffort();
+  async runEvictionForTest(): Promise<SessionEvictionResult | null> {
+    return this.session.evictAgedMedia();
   }
 
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
+    return (await this.session.getMessage(id, {
+      reconstruct: "pointer"
+    })) as UIMessage | null;
+  }
+
+  async getInlinedMessageForTest(id: string): Promise<UIMessage | null> {
     return (await this.session.getMessage(id)) as UIMessage | null;
   }
 
-  async readWorkspaceFileForTest(path: string): Promise<string | null> {
-    return this.workspace.readFile(path);
+  async getAttachmentForTest(
+    pointer: string
+  ): Promise<StoredAttachment | null> {
+    return this.sessions.attachments.get(pointer);
+  }
+
+  async readAttachmentForTest(pointer: string): Promise<Uint8Array> {
+    const stream = await this.sessions.attachments.open(pointer);
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async getAttachmentReferenceCountForTest(): Promise<number> {
+    return (
+      this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_session_attachments
+    `[0]?.count ?? 0
+    );
   }
 }
 

@@ -23,8 +23,7 @@ import type {
   Session,
   ThinkSubmissionStatus,
   ToolCallResultContext,
-  TurnContext,
-  WorkspaceLike as ThinkWorkspaceLike
+  TurnContext
 } from "@cloudflare/think";
 import { skills, Think } from "@cloudflare/think";
 import type { WorkspaceAgent } from "./workspace-agent";
@@ -191,9 +190,7 @@ export class ThinkAgent extends ThinkBase {
     );
     // Do not call getWorkspace here: dispatch must submit without attaching a
     // container. The first durable turn operation resolves it lazily.
-    this.workspace = adaptToThinkWorkspace(() =>
-      this.#getWorkspace()
-    ) as unknown as ThinkWorkspaceLike;
+    this.workspace = adaptToThinkWorkspace(() => this.#getWorkspace());
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.#context =
@@ -756,6 +753,14 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
     async writeFile(path: string, content: string): Promise<void> {
       await (await fs()).writeFile(path, new TextEncoder().encode(content));
     },
+    async writeFileBytes(
+      path: string,
+      content: Uint8Array | ArrayBuffer
+    ): Promise<void> {
+      const bytes =
+        content instanceof Uint8Array ? content : new Uint8Array(content);
+      await (await fs()).writeFile(path, bytes);
+    },
     async mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> {
       await (
         await fs()
@@ -779,10 +784,12 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
           path,
           name: path.split("/").pop() ?? path,
           type: s.isDirectory ? ("directory" as const) : ("file" as const),
+          mimeType: s.isDirectory
+            ? "inode/directory"
+            : "application/octet-stream",
           size: s.size,
-          modifiedAt: new Date(s.mtime),
-          isDirectory: s.isDirectory,
-          isFile: s.isFile
+          createdAt: s.mtime,
+          updatedAt: s.mtime
         };
       } catch (err) {
         if (isEnoent(err)) return null;
@@ -795,10 +802,12 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
         path: `${dir}/${e.name}`,
         name: e.name,
         type: e.isDirectory ? ("directory" as const) : ("file" as const),
+        mimeType: e.isDirectory
+          ? "inode/directory"
+          : "application/octet-stream",
         size: 0,
-        modifiedAt: new Date(0),
-        isDirectory: e.isDirectory,
-        isFile: e.isFile
+        createdAt: 0,
+        updatedAt: 0
       }));
     },
     async readFileBytes(path: string): Promise<Uint8Array | null> {
@@ -817,6 +826,26 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
         if (isEnoent(err)) return null;
         throw err;
       }
+    },
+    async readFileStream(
+      path: string
+    ): Promise<ReadableStream<Uint8Array> | null> {
+      try {
+        return await (await fs()).readFile(path);
+      } catch (err) {
+        if (isEnoent(err)) return null;
+        throw err;
+      }
+    },
+    async deleteFile(path: string): Promise<boolean> {
+      try {
+        await (await fs()).stat(path);
+      } catch (err) {
+        if (isEnoent(err)) return false;
+        throw err;
+      }
+      await (await fs()).rm(path, { force: true });
+      return true;
     },
     // Think's built-in find/grep tools call glob with model-supplied
     // patterns. ws.fs.find matches a glob relative to a base directory, so
@@ -842,10 +871,10 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
         path,
         name: path.split("/").pop() ?? path,
         type: isDirectory ? ("directory" as const) : ("file" as const),
+        mimeType: isDirectory ? "inode/directory" : "application/octet-stream",
         size,
-        modifiedAt: new Date(mtime),
-        isDirectory,
-        isFile: !isDirectory
+        createdAt: mtime,
+        updatedAt: mtime
       });
       try {
         if (rest.length === 0) {

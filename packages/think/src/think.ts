@@ -255,15 +255,12 @@ import type {
   ChatFiberSnapshot,
   OrphanPersistStore
 } from "agents/chat";
-import { Session } from "agents/experimental/memory/session";
-import type { SessionMessage } from "agents/experimental/memory/session";
-import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import {
-  evictLargeMediaFromMessage,
-  resolveMediaEvictionConfig,
-  type MediaEvictionConfig,
-  type ResolvedMediaEvictionConfig
-} from "./media-eviction";
+  Session,
+  Sessions,
+  truncateOlderMessages,
+  type SessionMessage
+} from "agents/sessions";
 
 /**
  * The recent-message span the model sees at FULL fidelity each turn —
@@ -323,12 +320,13 @@ export type {
   ThinkChannels
 } from "./channels";
 export type { DeliveryKind, DeliveryTag } from "./messengers";
-export { Session } from "agents/experimental/memory/session";
-export type { SessionMessage } from "agents/experimental/memory/session";
+export { Session } from "agents/sessions";
+export type { SessionMessage } from "agents/sessions";
 export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 export type { WorkspaceLike } from "./tools/workspace";
 import type { WorkspaceLike } from "./tools/workspace";
+
 export type {
   CreateFetchToolsOptions,
   FetchBindingTarget,
@@ -1148,7 +1146,17 @@ export interface OnStartDegradation {
   error: unknown;
 }
 
-export type { MediaEvictionConfig } from "./media-eviction";
+/** Policy for lossless attachment offload and aged media maintenance. */
+export interface MediaEvictionConfig {
+  /** Messages at the active-path tail that remain untouched. Default 8. */
+  keepRecentMessages?: number;
+  /** Minimum payload bytes to evict. Default 32 KiB. */
+  minPartBytes?: number;
+  /** Preserve evicted payloads in the workspace. Default true. */
+  externalizeToWorkspace?: boolean;
+  /** Maximum aged rows rewritten by one maintenance pass. Default 64. */
+  maxRowsPerPass?: number;
+}
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -2781,31 +2789,9 @@ export class Think<
   hydrationByteBudget: number = 24 * 1024 * 1024;
 
   /**
-   * Bound the PERSISTED transcript footprint by evicting oversized inline
-   * media (base64 data-URL attachments, large strings inside tool outputs)
-   * from messages that have aged out of the recent window.
-   *
-   * Read-time truncation already hides aged media from the model, but the
-   * bytes stay in storage forever and are rehydrated on every wake — the
-   * boot footprint grows with every image a session ever produced until
-   * SQLite's allocator fails with `SQLITE_NOMEM` (#1710). Eviction passes
-   * run in the background after the agent starts and as the conversation
-   * grows; each pass processes a bounded number of oversized rows.
-   *
-   * By default evicted values are preserved as workspace files under
-   * `/attachments/evicted/` (same Durable Object storage, but outside the
-   * hydration path) and the in-message marker records the file path.
-   * Pass a {@link MediaEvictionConfig} with `externalizeToWorkspace: false`
-   * to drop the bytes instead of preserving them. Set this field to
-   * `false` to disable eviction entirely.
-   *
-   * `keepRecentMessages` is clamped to at least the recent window the model
-   * replays at full fidelity (4 messages), so eviction can never rewrite
-   * content the model still sees.
-   *
-   * Requires a SessionProvider that implements `getHistoryRowStats`
-   * (the default DO SQLite provider does); otherwise eviction is a no-op
-   * and a warning is logged once.
+   * Configure lossless file offload and aged tool-output eviction. File
+   * payloads move into `workspace`; SQLite message rows retain content-addressed
+   * pointers. `false` keeps media inline and disables aged maintenance.
    *
    * @default true
    */
@@ -2826,17 +2812,54 @@ export class Think<
 
   static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
 
-  /**
-   * The conversation session — messages, context, compaction, search.
-   *
-   * Direct message writes are observed and mirrored into Think's live cache.
-   * Prefer the history helpers below when writing UI messages from subclasses;
-   * they sanitize content and enforce row-size limits before delegating here.
-   */
+  /** Durable conversation history installed on this Agent's Lifecycle. */
+  readonly sessions = new Sessions({
+    attachments: {
+      store: () => this.workspace,
+      inlineThresholdBytes: () => {
+        if (
+          this.mediaEviction === false ||
+          (this.mediaEviction !== true &&
+            this.mediaEviction.externalizeToWorkspace === false)
+        ) {
+          return Number.MAX_SAFE_INTEGER;
+        }
+        return this.mediaEviction === true
+          ? 32 * 1024
+          : (this.mediaEviction.minPartBytes ?? 32 * 1024);
+      },
+      evictionThresholdBytes: () =>
+        this.mediaEviction === true || this.mediaEviction === false
+          ? 32 * 1024
+          : (this.mediaEviction.minPartBytes ?? 32 * 1024),
+      keepRecentMessages: () => {
+        const configured =
+          this.mediaEviction === true || this.mediaEviction === false
+            ? 8
+            : (this.mediaEviction.keepRecentMessages ?? 8);
+        return Math.max(MODEL_RECENT_WINDOW, configured);
+      },
+      maxEvictionRowsPerPass: () =>
+        this.mediaEviction === true || this.mediaEviction === false
+          ? 64
+          : (this.mediaEviction.maxRowsPerPass ?? 64),
+      evictAged: () => this.mediaEviction !== false,
+      preserveEvicted: () =>
+        this.mediaEviction === true || this.mediaEviction === false
+          ? true
+          : (this.mediaEviction.externalizeToWorkspace ?? true)
+    },
+    reservedMetadataKeys: RESERVED_MESSAGE_METADATA_KEYS,
+    searchIndexing: true,
+    missingUpdate: "ignore"
+  });
+
+  /** The default conversation handle configured by `configureSession()`. */
   session!: Session;
 
-  /** Cached messages — kept in sync with session storage. */
+  /** Cached messages, kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
+  private _unsubscribeSessionChanges: (() => void) | undefined;
 
   /**
    * Internal onStart steps that failed on this wake and were skipped so the
@@ -2955,6 +2978,7 @@ export class Think<
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
+    this.lifecycle.use(this.sessions);
     this.lifecycle.use(this.streams);
     this._registerChatTurnTaskDefinition();
     this._registerMessengerReplyTaskDefinition();
@@ -2978,37 +3002,47 @@ export class Think<
             });
           }
 
-          // 2. Session configuration (builder phase — context blocks, compaction, skills)
-          const baseSession = Session.create(this);
-          this.session = await this.configureSession(baseSession);
-          this.session.internal_onMessagesChanged(async (event) => {
-            switch (event.type) {
-              case "append":
-                if (!event.inserted || event.parentId !== undefined) {
+          // 2. Session configuration (builder phase: context, compaction, skills)
+          this.session = await this.configureSession(this.sessions.session());
+          this._unsubscribeSessionChanges?.();
+          this._unsubscribeSessionChanges = this.sessions.subscribe(
+            async (event) => {
+              if (event.sessionId !== this.session.sessionId) return;
+              switch (event.type) {
+                case "append":
+                  if (!event.inserted || event.parentId !== undefined) {
+                    await this._syncMessages();
+                  } else {
+                    this._upsertCachedMessage(
+                      await this._messageForCache(event.message)
+                    );
+                  }
+                  break;
+                case "update":
+                case "maintenance-rewrite":
+                  if (
+                    this._cachedMessages.some(
+                      (message) => message.id === event.message.id
+                    )
+                  ) {
+                    this._patchCachedMessage(
+                      await this._messageForCache(event.message)
+                    );
+                  }
+                  break;
+                case "clear":
+                  this._replaceCachedMessages([]);
+                  break;
+                case "delete":
+                case "compact":
                   await this._syncMessages();
-                } else {
-                  this._upsertCachedMessage(event.message as UIMessage);
-                }
-                // The conversation grew — older messages may have aged out of
-                // the keep-recent window. Only schedule the maintenance scan once
-                // this session has actually observed oversized media; otherwise a
-                // normal text-only chat would pay a row-stat read after every turn.
-                this._scheduleMediaEvictionAfterAppend(
-                  event.message as UIMessage
-                );
-                break;
-              case "update":
-                this._patchCachedMessage(event.message as UIMessage);
-                break;
-              case "clear":
-                this._replaceCachedMessages([]);
-                break;
-              case "delete":
-              case "compact":
-                await this._syncMessages();
-                break;
+                  break;
+                case "eviction":
+                  this._emit("chat:media:evicted", { ...event.result });
+                  break;
+              }
             }
-          });
+          );
 
           await this._initializeSkills();
         }
@@ -3043,7 +3077,6 @@ export class Think<
           if (!hydrated) {
             this._replaceCachedMessages([]);
           }
-          this._refreshMediaEvictionSignalFromCache();
         }
       );
 
@@ -3125,13 +3158,6 @@ export class Think<
               "this wake; the next successful wake will recover them."
           )
       );
-
-      // 11. Background bound on the persisted transcript: if hydration was
-      // windowed, evict aged inline media so the footprint can converge down
-      // (#1710). Runs after `blockConcurrencyWhile` releases — no boot cost.
-      if (this._lastHydration?.truncated) {
-        this._scheduleMediaEvictionPass({ force: true });
-      }
 
       update({
         "cloudflare.agents.hydration.messages":
@@ -3298,7 +3324,7 @@ export class Think<
         (candidate) => candidate.id === message.id
       );
       if (original && original.parts !== message.parts) {
-        await this.session.updateMessage(sanitizeMessage(message));
+        await this.session.updateMessage(message);
       }
     }
 
@@ -3345,174 +3371,6 @@ export class Think<
         error: error instanceof Error ? error.message : String(error)
       });
       return false;
-    }
-  }
-
-  private _mediaEvictionRunning = false;
-  private _mediaEvictionScheduled = false;
-  private _mediaEvictionObservedOversized = false;
-
-  /**
-   * Schedule a background media-eviction pass (see `mediaEviction`).
-   * Coalesces repeated requests; the timer fires after the current
-   * event-loop work (and after `onStart`'s `blockConcurrencyWhile`), so
-   * boot and turn latency are unaffected.
-   */
-  private _scheduleMediaEvictionPass(options?: { force?: boolean }): void {
-    if (this._mediaEvictionScheduled || this._mediaEvictionRunning) return;
-    const config = resolveMediaEvictionConfig(this.mediaEviction);
-    if (!config) return;
-    if (!options?.force && !this._mediaEvictionObservedOversized) return;
-    this._mediaEvictionScheduled = true;
-    setTimeout(() => {
-      this._mediaEvictionScheduled = false;
-      void this._evictAgedMediaBestEffort();
-    }, 0);
-  }
-
-  private _scheduleMediaEvictionAfterAppend(message: UIMessage): void {
-    const config = resolveMediaEvictionConfig(this.mediaEviction);
-    if (!config) return;
-    if (!this._mediaEvictionObservedOversized) {
-      this._mediaEvictionObservedOversized = this._messageMayNeedMediaEviction(
-        message,
-        config
-      );
-    }
-    if (!this._mediaEvictionObservedOversized) return;
-
-    const keepRecent = Math.max(config.keepRecentMessages, MODEL_RECENT_WINDOW);
-    if (this._cachedMessages.length > keepRecent) {
-      this._scheduleMediaEvictionPass({ force: true });
-    }
-  }
-
-  private _refreshMediaEvictionSignalFromCache(): void {
-    const config = resolveMediaEvictionConfig(this.mediaEviction);
-    if (!config) {
-      this._mediaEvictionObservedOversized = false;
-      return;
-    }
-    this._mediaEvictionObservedOversized = this._cachedMessages.some(
-      (message) => this._messageMayNeedMediaEviction(message, config)
-    );
-  }
-
-  private _messageMayNeedMediaEviction(
-    message: UIMessage,
-    config: ResolvedMediaEvictionConfig
-  ): boolean {
-    return JSON.stringify(message).length >= config.minPartBytes;
-  }
-
-  private _warnedEvictionUnsupported = false;
-
-  /**
-   * Evict oversized inline media from aged stored messages (#1710).
-   *
-   * Memory-bounded by design: row sizes come from `getHistoryRowStats()`
-   * (no content loaded), only rows large enough to contain an evictable
-   * part are parsed, and they are processed one at a time via
-   * `session.internal_rewriteMessage` — the maintenance write path that
-   * skips the full-history token-estimate broadcast a public
-   * `updateMessage` performs per row. Evicted values are written to the
-   * workspace BEFORE the row is rewritten, so a failed pass never loses
-   * data. Best-effort: failures are logged and the next pass retries.
-   *
-   * The aged cutoff is `keepRecentMessages` clamped to at least
-   * `MODEL_RECENT_WINDOW`: messages the model still replays at full
-   * fidelity each turn are never rewritten, regardless of configuration.
-   *
-   * When a pass stops at `maxRowsPerPass` with eligible rows remaining,
-   * another pass is scheduled automatically so a large backlog drains
-   * without waiting for new appends. Termination is guaranteed: every
-   * rewritten row drops below `minPartBytes` and is skipped by later
-   * passes, so the eligible set strictly shrinks.
-   *
-   * Returns the pass totals, or `null` when eviction is disabled, already
-   * running, or the provider cannot enumerate row sizes (warned once).
-   */
-  protected async _evictAgedMediaBestEffort(): Promise<{
-    messages: number;
-    parts: number;
-    bytes: number;
-    externalizedBytes: number;
-  } | null> {
-    if (this._mediaEvictionRunning) return null;
-    const config = resolveMediaEvictionConfig(this.mediaEviction);
-    if (!config) return null;
-    this._mediaEvictionRunning = true;
-    let backlogRemains = false;
-    try {
-      const stats = await this.session.getHistoryRowStats();
-      if (!stats) {
-        if (!this._warnedEvictionUnsupported) {
-          this._warnedEvictionUnsupported = true;
-          console.warn(
-            "[Think] mediaEviction is enabled but the configured " +
-              "SessionProvider does not implement getHistoryRowStats; " +
-              "media eviction is a no-op for this agent."
-          );
-        }
-        return null;
-      }
-      const keepRecent = Math.max(
-        config.keepRecentMessages,
-        MODEL_RECENT_WINDOW
-      );
-      const aged = stats.slice(0, Math.max(0, stats.length - keepRecent));
-
-      let processed = 0;
-      const totals = { messages: 0, parts: 0, bytes: 0, externalizedBytes: 0 };
-      for (const row of aged) {
-        // A row smaller than the part threshold cannot contain an
-        // evictable value — skip without parsing. Rewritten rows shrink
-        // below the threshold, so later passes skip them here too.
-        if (row.bytes < config.minPartBytes) continue;
-        if (processed >= config.maxRowsPerPass) {
-          backlogRemains = true;
-          break;
-        }
-        processed++;
-
-        const message = (await this.session.getMessage(
-          row.id
-        )) as UIMessage | null;
-        if (!message) continue;
-
-        const result = evictLargeMediaFromMessage(message, {
-          minPartBytes: config.minPartBytes,
-          externalize: config.externalizeToWorkspace,
-          pathFor: (index, extension) =>
-            `/attachments/evicted/${message.id}-${index}.${extension}`
-        });
-        if (!result.changed) continue;
-
-        for (const blob of result.blobs) {
-          await this.workspace.writeFile(blob.path, blob.data);
-          totals.externalizedBytes += blob.data.length;
-        }
-        await this.session.internal_rewriteMessage(
-          sanitizeMessage(result.message)
-        );
-        totals.messages++;
-        totals.parts += result.parts;
-        totals.bytes += result.bytes;
-      }
-
-      if (totals.messages > 0) {
-        this._emit("chat:media:evicted", totals);
-      }
-      return totals;
-    } catch (error) {
-      console.error(
-        "[Think] media eviction pass failed; a later pass will retry.",
-        error
-      );
-      return null;
-    } finally {
-      this._mediaEvictionRunning = false;
-      if (backlogRemains) this._scheduleMediaEvictionPass({ force: true });
     }
   }
 
@@ -3604,6 +3462,18 @@ export class Think<
     return this._replaceCachedMessages(recent.messages as UIMessage[]);
   }
 
+  /** Reconstruct a pointer-bearing stored row before it enters the live cache. */
+  private async _messageForCache(message: SessionMessage): Promise<UIMessage> {
+    const hasPointer = message.parts.some(
+      (part) =>
+        part.type === "file" &&
+        typeof part.url === "string" &&
+        part.url.startsWith("attachment:sha256:")
+    );
+    if (!hasPointer) return message as UIMessage;
+    return (await this.session.getMessage(message.id)) as UIMessage;
+  }
+
   /** Patch or append one message in the live cache after a durable write. */
   private _upsertCachedMessage(message: UIMessage): void {
     const index = this._cachedMessages.findIndex((m) => m.id === message.id);
@@ -3622,61 +3492,43 @@ export class Think<
     }
   }
 
-  /** Sanitize + row-size-compact a message before it touches storage. */
-  private _rowSafe(message: UIMessage): UIMessage {
-    return enforceRowSizeLimit(sanitizeMessage(message), {
-      warn: (m) => console.warn(`[Think] ${m}`)
-    });
-  }
-
   private async _appendMessageToHistory(
     message: UIMessage,
     parentId?: string | null
   ): Promise<UIMessage> {
-    const safe = this._rowSafe(message);
-    await this.session.appendMessage(safe, parentId);
-    return safe;
+    const result = await this.session.appendMessage(message, { parentId });
+    return result.message as UIMessage;
   }
 
   private async _updateMessageInHistory(
     message: UIMessage
   ): Promise<UIMessage> {
-    const safe = this._rowSafe(message);
-    await this.session.updateMessage(safe);
-    return safe;
+    return (await this.session.updateMessage(message)) as UIMessage;
   }
 
   private async _upsertMessageInHistory(
     message: UIMessage,
-    parentId?: string | null
+    parentId?: string | null,
+    source: "client" | "server" = "server"
   ): Promise<UIMessage> {
-    const safe = this._rowSafe(message);
-    const existing = await this.session.getMessage(safe.id);
-    if (existing) {
-      await this.session.updateMessage(safe);
-    } else {
-      await this.session.appendMessage(safe, parentId);
-    }
-    return safe;
+    const result = await this.session.upsertMessage(message, {
+      parentId,
+      source
+    });
+    return result.message as UIMessage;
   }
 
-  /**
-   * The orphan-persist store adapter — orphan-persist steps **(c)/(d)** route
-   * their write through this shared `OrphanPersistStore` seam (the
-   * `SessionProvider` write-subset). Delegates to `this.session` with `_rowSafe`
-   * applied at the write boundary (sanitize + row-size cap), exactly as Think's
-   * other Session call sites do. The `SessionMessage → UIMessage` read cast is
-   * confined here, matching those call sites.
-   * @internal
-   */
+  /** Session-backed orphan persistence with Think's default branch. */
   protected _orphanStore(): OrphanPersistStore {
     return {
       getMessage: async (id) =>
         (await this.session.getMessage(id)) as UIMessage | null,
-      appendMessage: (message, parentId) =>
-        this.session.appendMessage(this._rowSafe(message), parentId),
-      updateMessage: (message) =>
-        this.session.updateMessage(this._rowSafe(message))
+      appendMessage: async (message, parentId) => {
+        await this.session.appendMessage(message, { parentId });
+      },
+      updateMessage: async (message) => {
+        await this.session.updateMessage(message);
+      }
     };
   }
 
@@ -3952,27 +3804,46 @@ export class Think<
   #configTableReady = false;
 
   protected _migrateLegacyConfigToThinkTable(): void {
-    const rows = this.ctx.storage.sql
-      .exec(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='assistant_config'"
-      )
-      .toArray() as Array<{ sql?: unknown }>;
-    if (rows.length === 0) return;
+    const tables = new Set(
+      this.ctx.storage.sql
+        .exec(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table'
+             AND name IN (
+               'cf_agents_session_config',
+               'assistant_config',
+               'assistant_config__lifted_v1'
+             )`
+        )
+        .toArray()
+        .map((row) => String(row.name))
+    );
+    const source = tables.has("cf_agents_session_config")
+      ? "cf_agents_session_config"
+      : tables.has("assistant_config")
+        ? "assistant_config"
+        : tables.has("assistant_config__lifted_v1")
+          ? "assistant_config__lifted_v1"
+          : null;
+    if (!source) return;
 
-    const ddl = String(rows[0].sql ?? "");
-    if (!ddl.includes("session_id")) return;
-
-    // Older Think builds stored private config in Session's shared
-    // `assistant_config(session_id, key, value)` table, even though
-    // Think always used the empty session id. Copy only the Think-owned
-    // keys into the dedicated `think_config` table and leave the shared
-    // Session table untouched.
     for (const key of Think.CONFIG_KEYS) {
-      const legacyRows = this.sql<{ value: string }>`
-        SELECT value FROM assistant_config
-        WHERE session_id = '' AND key = ${key}
-      `;
-      const value = legacyRows[0]?.value;
+      const rows =
+        source === "cf_agents_session_config"
+          ? this.sql<{ value: string }>`
+              SELECT value FROM cf_agents_session_config
+              WHERE session_id = '' AND key = ${key}
+            `
+          : source === "assistant_config"
+            ? this.sql<{ value: string }>`
+                SELECT value FROM assistant_config
+                WHERE session_id = '' AND key = ${key}
+              `
+            : this.sql<{ value: string }>`
+                SELECT value FROM assistant_config__lifted_v1
+                WHERE session_id = '' AND key = ${key}
+              `;
+      const value = rows[0]?.value;
       if (value !== undefined) {
         this.sql`
           INSERT OR IGNORE INTO think_config (key, value)
@@ -9924,7 +9795,13 @@ export class Think<
   }
 
   private _serializeSubmissionMessages(messages: UIMessage[]): string {
-    return JSON.stringify(messages.map((message) => this._rowSafe(message)));
+    return JSON.stringify(
+      messages.map((message) =>
+        enforceRowSizeLimit(sanitizeMessage(message), {
+          warn: (warning) => console.warn(`[Think] ${warning}`)
+        })
+      )
+    );
   }
 
   private _serializeMetadata(
@@ -10980,8 +10857,8 @@ export class Think<
       }
     }
 
-    // The live cache is kept coherent automatically by the Session change
-    // listener wired in `onStart` (`internal_onMessagesChanged`), which handles
+    // The live cache is kept coherent automatically by the Sessions change
+    // listener wired in `onStart`, which handles
     // both linear appends and branches (an explicit `parentId` triggers a full
     // resync). So `addMessages` only owns the broadcast — and suppresses it
     // mid-turn: pushing a full `MSG_CHAT_MESSAGES` snapshot while a turn streams
@@ -13211,33 +13088,9 @@ export class Think<
     msg: UIMessage,
     serverMessages: readonly UIMessage[]
   ): Promise<void> {
-    const sanitized = this._stripReservedMessageMetadata(msg);
     const resolved =
-      sanitized.role === "assistant"
-        ? resolveToolMergeId(sanitized, serverMessages)
-        : sanitized;
-    await this._upsertMessageInHistory(resolved);
-  }
-
-  /**
-   * Strip {@link RESERVED_MESSAGE_METADATA_KEYS} from a client-supplied message
-   * at intake. Those keys are server-written turn context (stamped by
-   * `_stampChannel`) that hooks and recovery re-resolve and trust, so a client
-   * must never be able to forge them.
-   */
-  private _stripReservedMessageMetadata(msg: UIMessage): UIMessage {
-    const metadata = msg.metadata as Record<string, unknown> | undefined;
-    if (
-      !metadata ||
-      !RESERVED_MESSAGE_METADATA_KEYS.some((key) => key in metadata)
-    ) {
-      return msg;
-    }
-    const rest = { ...metadata };
-    for (const key of RESERVED_MESSAGE_METADATA_KEYS) {
-      delete rest[key];
-    }
-    return { ...msg, metadata: rest };
+      msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
+    await this._upsertMessageInHistory(resolved, undefined, "client");
   }
 
   private _persistClientTools(): void {
