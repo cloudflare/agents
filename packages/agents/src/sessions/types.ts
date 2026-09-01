@@ -289,7 +289,9 @@ export interface SessionEvictionResult {
 /** Policy for a Sessions capability. */
 export interface SessionsOptions {
   /** Attachment offload. Omitted → file parts stay inline (legacy behavior). */
-  readonly attachments?: SessionsAttachmentOptions;
+  readonly attachments?:
+    | SessionsAttachmentOptions
+    | (() => SessionsAttachmentOptions | undefined);
   /**
    * Message-metadata keys reserved for server-side writers. Stripped from
    * writes marked `source: "client"`. Default: none.

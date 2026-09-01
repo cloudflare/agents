@@ -201,60 +201,72 @@ export interface ExtractionResult {
  * materialize (the reconstructor plugin).
  */
 export class AttachmentEngine {
-  readonly #options: SessionsAttachmentOptions | undefined;
+  readonly #optionsInput:
+    | SessionsAttachmentOptions
+    | (() => SessionsAttachmentOptions | undefined)
+    | undefined;
   readonly #io: AttachmentEngineIo;
   readonly #knownBlobs = new Map<string, StoredAttachment>();
   #store: SessionAttachmentStore | undefined;
   #warnedNoStore = false;
 
   constructor(
-    options: SessionsAttachmentOptions | undefined,
+    options:
+      | SessionsAttachmentOptions
+      | (() => SessionsAttachmentOptions | undefined)
+      | undefined,
     io: AttachmentEngineIo
   ) {
-    this.#options = options;
+    this.#optionsInput = options;
     this.#io = io;
   }
 
+  #options(): SessionsAttachmentOptions | undefined {
+    return typeof this.#optionsInput === "function"
+      ? this.#optionsInput()
+      : this.#optionsInput;
+  }
+
   get configured(): boolean {
-    return this.#options !== undefined;
+    return this.#options() !== undefined;
   }
 
   get inlineThresholdBytes(): number {
-    const threshold = this.#options?.inlineThresholdBytes;
+    const threshold = this.#options()?.inlineThresholdBytes;
     const resolved = typeof threshold === "function" ? threshold() : threshold;
     return Math.max(1, resolved ?? DEFAULT_INLINE_THRESHOLD_BYTES);
   }
 
   get evictionThresholdBytes(): number {
-    const threshold = this.#options?.evictionThresholdBytes;
+    const threshold = this.#options()?.evictionThresholdBytes;
     const resolved = typeof threshold === "function" ? threshold() : threshold;
     return Math.max(1, resolved ?? this.inlineThresholdBytes);
   }
 
   get keepRecentMessages(): number {
-    const keep = this.#options?.keepRecentMessages;
+    const keep = this.#options()?.keepRecentMessages;
     const resolved = typeof keep === "function" ? keep() : keep;
     return Math.max(1, resolved ?? DEFAULT_KEEP_RECENT_MESSAGES);
   }
 
   get maxEvictionRowsPerPass(): number {
-    const maximum = this.#options?.maxEvictionRowsPerPass;
+    const maximum = this.#options()?.maxEvictionRowsPerPass;
     const resolved = typeof maximum === "function" ? maximum() : maximum;
     return Math.max(1, resolved ?? 64);
   }
 
   get agedEvictionEnabled(): boolean {
-    const enabled = this.#options?.evictAged;
+    const enabled = this.#options()?.evictAged;
     return (typeof enabled === "function" ? enabled() : enabled) ?? true;
   }
 
   get preserveEvicted(): boolean {
-    const preserve = this.#options?.preserveEvicted;
+    const preserve = this.#options()?.preserveEvicted;
     return (typeof preserve === "function" ? preserve() : preserve) ?? true;
   }
 
   get defaultReconstructor(): AttachmentReconstructor {
-    return this.#options?.reconstruct ?? inlineReconstructor;
+    return this.#options()?.reconstruct ?? inlineReconstructor;
   }
 
   resolveReconstructor(
@@ -271,7 +283,7 @@ export class AttachmentEngine {
 
   #resolveStore(): SessionAttachmentStore | undefined {
     if (this.#store) return this.#store;
-    const store = this.#options?.store;
+    const store = this.#options()?.store;
     this.#store = typeof store === "function" ? store() : store;
     return this.#store;
   }
@@ -283,7 +295,7 @@ export class AttachmentEngine {
   }
 
   #path(hash: string): string {
-    const base = this.#options?.basePath ?? DEFAULT_BASE_PATH;
+    const base = this.#options()?.basePath ?? DEFAULT_BASE_PATH;
     return `${base.replace(/\/+$/, "")}/sha256/${hash}`;
   }
 
@@ -351,7 +363,7 @@ export class AttachmentEngine {
     data: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | string
   ): Promise<Uint8Array> {
     const max =
-      this.#options?.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
+      this.#options()?.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
     let bytes: Uint8Array;
     if (typeof data === "string") {
       bytes = new TextEncoder().encode(data);

@@ -34,6 +34,17 @@ type TestToolCallPart = Extract<
   { type: `tool-${string}` }
 >;
 
+function persistedMessages(agent: AIChatAgent): ChatMessage[] {
+  return agent.sessions
+    .__DO_NOT_USE_WILL_BREAK__sync()
+    .readAll("")
+    .map((row) => row.message as ChatMessage);
+}
+
+function persistedMessageCount(agent: AIChatAgent): number {
+  return agent.sessions.__DO_NOT_USE_WILL_BREAK__sync().readAll("").length;
+}
+
 function makeSSEChunkResponse(chunks: ReadonlyArray<Record<string, unknown>>) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -130,6 +141,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
   // Store captured requestId from onChatMessage options for testing
   private _capturedRequestId: string | undefined = undefined;
   private _chatMessageCallCount = 0;
+  private _attachmentFiles = new Map<
+    string,
+    { bytes: Uint8Array; mediaType: string }
+  >();
 
   async onChatMessage(
     _onFinish: GenerateTextOnFinishCallback<ToolSet>,
@@ -505,17 +520,98 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
-    return rawMessages;
+    return persistedMessages(this);
   }
 
   getMessagesForTest(): ChatMessage[] {
     return this.messages as ChatMessage[];
+  }
+
+  enableAttachmentsForTest(): void {
+    this.sessionAttachments = {
+      inlineThresholdBytes: 1,
+      evictAged: false,
+      store: {
+        writeFileBytes: async (
+          path,
+          data,
+          mediaType = "application/octet-stream"
+        ) => {
+          const bytes =
+            data instanceof Uint8Array ? data : new Uint8Array(data);
+          this._attachmentFiles.set(path, {
+            bytes: new Uint8Array(bytes),
+            mediaType
+          });
+        },
+        readFileBytes: async (path) => {
+          const file = this._attachmentFiles.get(path);
+          return file ? new Uint8Array(file.bytes) : null;
+        },
+        readFileStream: async (path) => {
+          const file = this._attachmentFiles.get(path);
+          if (!file) return null;
+          const bytes = new Uint8Array(file.bytes);
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(bytes);
+              controller.close();
+            }
+          });
+        },
+        deleteFile: async (path) => this._attachmentFiles.delete(path),
+        stat: async (path) => {
+          const file = this._attachmentFiles.get(path);
+          return file ? { size: file.bytes.byteLength } : null;
+        }
+      }
+    };
+  }
+
+  getAttachmentFileCountForTest(): number {
+    return this._attachmentFiles.size;
+  }
+
+  async clearSessionForTest(): Promise<void> {
+    await this.sessions.session().clearMessages();
+    this.messages = [];
+  }
+
+  seedLegacyMessagesForTest(): void {
+    this.sql`
+      CREATE TABLE cf_ai_chat_agent_messages (
+        id TEXT PRIMARY KEY,
+        message TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_messages (id, message, created_at)
+      VALUES (
+        'legacy-v4',
+        ${JSON.stringify({ id: "legacy-v4", role: "user", content: "old format" })},
+        '2026-01-01 00:00:00'
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_messages (id, message, created_at)
+      VALUES (
+        'legacy-v5',
+        ${JSON.stringify({ id: "legacy-v5", role: "assistant", parts: [{ type: "text", text: "new format" }] })},
+        '2026-01-01 00:00:01'
+      )
+    `;
+  }
+
+  legacyMessageTableNamesForTest(): string[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name LIKE 'cf_ai_chat_agent_messages%'
+         ORDER BY name`
+      )
+      .toArray()
+      .map((row) => String(row.name));
   }
 
   /**
@@ -893,9 +989,13 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * Used to test validation of malformed/corrupt messages.
    */
   insertRawMessage(rowId: string, rawJson: string): void {
+    const sync = this.sessions.__DO_NOT_USE_WILL_BREAK__sync();
+    const parentId = sync.latestLeafId("");
     this.sql`
-      insert into cf_ai_chat_agent_messages (id, message)
-      values (${rowId}, ${rawJson})
+      INSERT INTO cf_agents_session_messages
+        (id, session_id, parent_id, role, content, token_estimate,
+         media_checked, created_at)
+      VALUES (${rowId}, '', ${parentId}, 'user', ${rawJson}, 0, 0, ${Date.now()})
     `;
   }
 
@@ -904,10 +1004,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   getMessageCount(): number {
-    const result = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_ai_chat_agent_messages
-    `;
-    return result?.[0]?.cnt ?? 0;
+    return persistedMessageCount(this);
   }
 
   /**
@@ -957,13 +1054,7 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
-    return rawMessages;
+    return persistedMessages(this);
   }
 }
 
@@ -1100,13 +1191,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
-    return rawMessages;
+    return persistedMessages(this);
   }
 
   getRequestStartTime(requestId: string): number | null {
@@ -1373,10 +1458,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   getMessageCount(): number {
-    const result = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_ai_chat_agent_messages
-    `;
-    return result?.[0]?.cnt ?? 0;
+    return persistedMessageCount(this);
   }
 }
 
@@ -1488,10 +1570,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+    return persistedMessages(this);
   }
 }
 
@@ -1520,10 +1599,7 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+    return persistedMessages(this);
   }
 }
 
@@ -1567,10 +1643,7 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+    return persistedMessages(this);
   }
 }
 
@@ -1620,10 +1693,7 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+    return persistedMessages(this);
   }
 }
 
@@ -2634,10 +2704,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+    return persistedMessages(this);
   }
 
   getPartialText(streamId?: string) {
@@ -2976,10 +3043,7 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+    return persistedMessages(this);
   }
 
   getOnChatMessageCallCount(): number {
@@ -3038,10 +3102,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   }
 
   getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+    return persistedMessages(this);
   }
 
   getActiveFibers(): Array<{ id: string; name: string }> {

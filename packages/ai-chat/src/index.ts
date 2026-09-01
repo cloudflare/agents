@@ -66,12 +66,16 @@ import {
   STREAM_CLEANUP_DELAY_SECONDS
 } from "agents/chat";
 import type { Streams } from "agents/streams";
+import {
+  Sessions,
+  type Session,
+  type SessionsAttachmentOptions
+} from "agents/sessions";
 import { createChatTurnTaskDefinition } from "agents/chat";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   isPlatformFailure
 } from "agents/chat";
-import { MAX_BOUND_PARAMS, buildInClauseStrings } from "agents/chat";
 import {
   ContinuationState,
   PreStreamTurns,
@@ -396,6 +400,21 @@ export class AIChatAgent<
    * Used to propagate cancellation signals for any external calls made by the agent.
    */
   private _abortRegistry: AbortRegistry;
+
+  /**
+   * Optional attachment storage for persisted messages. Omit to preserve
+   * ai-chat's existing inline-file behavior.
+   */
+  sessionAttachments: SessionsAttachmentOptions | undefined = undefined;
+
+  /** Durable chat history for this Agent. */
+  readonly sessions = new Sessions({
+    attachments: () => this.sessionAttachments,
+    missingUpdate: "ignore"
+  });
+
+  /** The default linear conversation handle. */
+  readonly #session: Session = this.sessions.session();
 
   /**
    * The Streams capability backing `_resumableStream`: chat's in-flight
@@ -880,6 +899,7 @@ export class AIChatAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
+    this.lifecycle.use(this.sessions);
     this.lifecycle.use(this.streams);
     this._registerChatTurnTaskDefinition();
     withAgentSpan(
@@ -894,11 +914,8 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this.sql`create table if not exists cf_ai_chat_agent_messages (
-              id text primary key,
-              message text not null,
-              created_at datetime default current_timestamp
-            )`;
+            this.sessions.__DO_NOT_USE_WILL_BREAK__sync().ensureTables();
+            this._migrateLegacyMessages();
 
             // Key-value table for request context that must survive hibernation
             // (e.g., custom body fields, client tools from the last chat request).
@@ -951,6 +968,15 @@ export class AIChatAgent<
         });
       }
     );
+
+    const _onStart = this.onStart.bind(this);
+    this.onStart = async (props?: Props) => {
+      if (this.sessionAttachments) {
+        const history = (await this.#session.getHistory()) as UIMessage[];
+        this.messages = autoTransformMessages(history);
+      }
+      return _onStart(props);
+    };
 
     this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
@@ -1362,7 +1388,7 @@ export class AIChatAgent<
         // Handle clear chat
         if (event.type === "clear") {
           this.resetTurnState();
-          this.sql`delete from cf_ai_chat_agent_messages`;
+          await this.#session.clearMessages();
           // Drop any pending terminal record (#1645) so a stale exhaustion
           // can't replay onto a freshly-cleared (empty) conversation when a
           // client reconnects and runs the resume probe.
@@ -1516,7 +1542,10 @@ export class AIChatAgent<
       return this._tryCatchChat(async () => {
         const url = new URL(request.url);
         if (url.pathname.split("/").pop() === "get-messages") {
-          return Response.json(this._loadMessagesFromDb());
+          const messages = this.sessionAttachments
+            ? ((await this.#session.getHistory()) as UIMessage[])
+            : this._loadMessagesFromDb();
+          return Response.json(autoTransformMessages(messages));
         }
         return _onRequest(request);
       });
@@ -1847,9 +1876,8 @@ export class AIChatAgent<
    *     `Think` and the client reducer use), replacing a hand-rolled chunk
    *     switch; it owns the `start` / `finish` / `message-metadata` handling;
    *   - (b) {@link _resolveOrphanTargetId} — the id to persist under (#1691);
-   *   - (c)+(d) upsert-by-id over the flat array, the `SessionProvider`-subset
-   *     store-write shape (`getMessage` → `updateMessage` / `appendMessage`)
-   *     that `Think._upsertMessageInHistory` implements over a Session tree.
+   *   - (c)+(d) upsert-by-id through the shared `OrphanPersistStore` shape
+   *     (`getMessage` → `updateMessage` / `appendMessage`).
    *     When a row already owns the id, the shared `reconcileOrphanPartial`
    *     merge preserves an in-place tool result rather than letting a replayed
    *     chunk re-advance it (ai-chat has an early tool-approval persist; hosts
@@ -1928,9 +1956,9 @@ export class AIChatAgent<
   }
 
   /**
-   * The orphan-persist store adapter — orphan-persist steps **(c)/(d)** route
-   * their write through this shared `OrphanPersistStore` seam (the
-   * `SessionProvider` write-subset). Backed by ai-chat's flat `this.messages`
+   * The orphan-persist store adapter. Orphan-persist steps **(c)/(d)** route
+   * through the shared `OrphanPersistStore` seam, backed by ai-chat's
+   * `this.messages`
    * array + the existing `persistMessages` whole-array write path, so
    * reconcile/sanitize/row-size/broadcast all stay intact. Each mutating call
    * is exactly one `persistMessages` invocation; `parentId` is unused (a flat
@@ -2117,41 +2145,100 @@ export class AIChatAgent<
     });
   }
 
-  private _loadMessagesFromDb(): UIMessage[] {
-    const rows =
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      [];
+  /** Lift ai-chat's legacy flat table into the default Sessions chain. */
+  private _migrateLegacyMessages(): void {
+    const tables = new Set(
+      this.ctx.storage.sql
+        .exec(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table'
+             AND name IN (
+               'cf_ai_chat_agent_messages',
+               'cf_ai_chat_agent_messages__lifted_v1'
+             )`
+        )
+        .toArray()
+        .map((row) => String(row.name))
+    );
+    if (!tables.has("cf_ai_chat_agent_messages")) return;
 
-    // Populate the persistence cache from DB so incremental persistence
-    // can skip SQL writes for messages already stored.
+    const sync = this.sessions.__DO_NOT_USE_WILL_BREAK__sync();
+    const rows = this.sql<{
+      id: string;
+      message: string;
+      created_at: string | number | null;
+    }>`
+      SELECT id, message, created_at FROM cf_ai_chat_agent_messages
+      ORDER BY created_at ASC, rowid ASC
+    `;
+    let parentId: string | null = null;
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
+      try {
+        const parsed: unknown = JSON.parse(row.message);
+        const message = autoTransformMessages([parsed])[0];
+        if (!message || !isValidMessageStructure(message)) {
+          console.warn(
+            `[AIChatAgent] Skipping invalid legacy message ${row.id}: ` +
+              "missing or malformed id, role, or parts"
+          );
+          continue;
+        }
+        const parsedTime =
+          typeof row.created_at === "number"
+            ? row.created_at
+            : Date.parse(String(row.created_at ?? ""));
+        sync.importMessage("", message, {
+          parentId,
+          createdAt: Number.isFinite(parsedTime) ? parsedTime : index
+        });
+        parentId = message.id;
+      } catch (error) {
+        console.error(`Failed to migrate message ${row.id}:`, error);
+      }
+    }
+
+    if (tables.has("cf_ai_chat_agent_messages__lifted_v1")) {
+      this.ctx.storage.sql.exec("DROP TABLE cf_ai_chat_agent_messages");
+    } else {
+      this.ctx.storage.sql.exec(
+        `ALTER TABLE cf_ai_chat_agent_messages
+         RENAME TO cf_ai_chat_agent_messages__lifted_v1`
+      );
+    }
+  }
+
+  async #projectMessage(
+    input: UIMessage,
+    stored: UIMessage
+  ): Promise<UIMessage> {
+    const attachments = this.sessionAttachments;
+    if (!attachments) return stored;
+    if (!attachments.reconstruct) return input;
+    return (
+      ((await this.#session.getMessage(stored.id)) as UIMessage | null) ??
+      stored
+    );
+  }
+
+  private _loadMessagesFromDb(): UIMessage[] {
+    const rows = this.sessions.__DO_NOT_USE_WILL_BREAK__sync().readAll("");
     this._persistedMessageCache.clear();
 
-    return rows
-      .map((row) => {
-        try {
-          const messageStr = row.message as string;
-          const parsed = JSON.parse(messageStr) as UIMessage;
-
-          // Structural validation: ensure required fields exist and have
-          // the correct types. This catches corrupted rows, manual tampering,
-          // or schema drift from older versions without crashing the agent.
-          if (!isValidMessageStructure(parsed)) {
-            console.warn(
-              `[AIChatAgent] Skipping invalid message ${row.id}: ` +
-                "missing or malformed id, role, or parts"
-            );
-            return null;
-          }
-
-          // Cache the raw JSON keyed by message ID
-          this._persistedMessageCache.set(parsed.id, messageStr);
-          return parsed;
-        } catch (error) {
-          console.error(`Failed to parse message ${row.id}:`, error);
-          return null;
-        }
-      })
-      .filter((msg): msg is UIMessage => msg !== null);
+    const messages: UIMessage[] = [];
+    for (const row of rows) {
+      const message = row.message as UIMessage;
+      if (!isValidMessageStructure(message)) {
+        console.warn(
+          `[AIChatAgent] Skipping invalid message ${row.id}: ` +
+            "missing or malformed id, role, or parts"
+        );
+        continue;
+      }
+      this._persistedMessageCache.set(message.id, JSON.stringify(message));
+      messages.push(message);
+    }
+    return messages;
   }
 
   private async _tryCatchChat<T>(fn: () => T | Promise<T>) {
@@ -5530,62 +5617,70 @@ export class AIChatAgent<
     const mergedMessages = reconcileMessages(messages, this.messages, (msg) =>
       this._sanitizeMessageForPersistence(msg)
     );
+    let nextMessages = [...this.messages];
+    const indexById = new Map(
+      nextMessages.map((message, index) => [message.id, index])
+    );
 
-    // Persist only new or changed messages (incremental persistence).
-    // Compares serialized JSON against a cache of last-persisted versions.
     for (const message of mergedMessages) {
       const sanitizedMessage = this._sanitizeMessageForPersistence(message);
       const resolved = resolveToolMergeId(sanitizedMessage, this.messages);
       const safe = this._enforceRowSizeLimit(resolved);
       const json = JSON.stringify(safe);
-
-      // Skip SQL write if the message is identical to what's already persisted
-      if (this._persistedMessageCache.get(safe.id) === json) {
-        continue;
+      let stored = safe;
+      if (this._persistedMessageCache.get(safe.id) !== json) {
+        const result = await this.#session.upsertMessage(safe);
+        stored = result.message as UIMessage;
+        this._persistedMessageCache.set(stored.id, JSON.stringify(stored));
       }
+      const projected = await this.#projectMessage(safe, stored);
 
-      this.sql`
-        insert into cf_ai_chat_agent_messages (id, message)
-        values (${safe.id}, ${json})
-        on conflict(id) do update set message = excluded.message
-      `;
-      this._persistedMessageCache.set(safe.id, json);
+      // A cache hit skips storage, not projection maintenance. Early approval
+      // persistence seeds the cache before the completed streaming message has
+      // entered `this.messages`; replacing it here preserves the old reload's
+      // behavior without an O(history) database read.
+      const existingIndex = indexById.get(projected.id);
+      if (existingIndex === undefined) {
+        indexById.set(projected.id, nextMessages.length);
+        nextMessages.push(projected);
+      } else {
+        nextMessages[existingIndex] = projected;
+      }
     }
 
-    // Reconcile: delete DB rows not present in the incoming message set.
-    // Only safe when the incoming set is a subset of the server state
-    // (e.g. regenerate() trims the last assistant message). When the
-    // client appends new messages (IDs unknown to the server), it may
-    // not have the full history, so deleting "missing" rows would
-    // destroy server-generated assistant messages the client hasn't
-    // seen yet.
-    // This MUST use mergedMessages (post-merge IDs) because
-    // reconcileMessages can remap client IDs to server IDs.
+    // Regeneration can submit a strict subset of the server transcript. Keep
+    // the old subset guard, but delete through Sessions so descendants splice
+    // to their grandparent instead of breaking the active path.
     if (options?._deleteStaleRows) {
-      const serverIds = new Set(this.messages.map((m) => m.id));
-      const isSubsetOfServer = mergedMessages.every((m) => serverIds.has(m.id));
-
+      const serverIds = new Set(this.messages.map((message) => message.id));
+      const isSubsetOfServer = mergedMessages.every((message) =>
+        serverIds.has(message.id)
+      );
       if (isSubsetOfServer) {
-        const keepIds = new Set(mergedMessages.map((m) => m.id));
-        const allDbRows =
-          this.sql<{ id: string }>`
-            select id from cf_ai_chat_agent_messages
-          ` || [];
-        const staleIds = allDbRows
-          .map((row) => row.id)
+        const keepIds = new Set(mergedMessages.map((message) => message.id));
+        const staleIds = nextMessages
+          .map((message) => message.id)
           .filter((id) => !keepIds.has(id));
-        this._deleteMessagesByIds(staleIds);
+        await this._deleteMessagesByIds(staleIds);
+        nextMessages = nextMessages.filter((message) =>
+          keepIds.has(message.id)
+        );
       }
     }
 
-    // Enforce maxPersistedMessages: delete oldest messages if over the limit
-    if (this.maxPersistedMessages != null) {
-      this._enforceMaxPersistedMessages();
+    if (
+      this.maxPersistedMessages != null &&
+      nextMessages.length > this.maxPersistedMessages
+    ) {
+      const excess = nextMessages.length - this.maxPersistedMessages;
+      const staleIds = nextMessages
+        .slice(0, excess)
+        .map((message) => message.id);
+      await this._deleteMessagesByIds(staleIds);
+      nextMessages = nextMessages.slice(excess);
     }
 
-    // refresh in-memory messages
-    const persisted = this._loadMessagesFromDb();
-    this.messages = autoTransformMessages(persisted);
+    this.messages = autoTransformMessages(nextMessages);
     this._broadcastChatMessage(
       {
         messages: mergedMessages,
@@ -5781,53 +5876,11 @@ export class AIChatAgent<
     return key.startsWith(PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX);
   }
 
-  /**
-   * Delete the given message rows from SQLite in batched `IN (...)` queries
-   * and evict them from the persistence cache. Batches stay within the SQLite
-   * 100 bound-parameter limit. No-op for an empty list.
-   * @internal
-   */
-  private _deleteMessagesByIds(ids: string[]) {
-    for (let i = 0; i < ids.length; i += MAX_BOUND_PARAMS) {
-      const batch = ids.slice(i, i + MAX_BOUND_PARAMS);
-      const strings = buildInClauseStrings(
-        "delete from cf_ai_chat_agent_messages where id in ",
-        batch.length
-      );
-      this.sql(strings, ...batch);
-      for (const id of batch) {
-        this._persistedMessageCache.delete(id);
-      }
-    }
-  }
-
-  /**
-   * Deletes oldest messages from SQLite when the count exceeds maxPersistedMessages.
-   * Called after each persist to keep storage bounded.
-   */
-  private _enforceMaxPersistedMessages() {
-    if (this.maxPersistedMessages == null) return;
-
-    const countResult = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_ai_chat_agent_messages
-    `;
-    const count = countResult?.[0]?.cnt ?? 0;
-
-    if (count <= this.maxPersistedMessages) return;
-
-    const excess = count - this.maxPersistedMessages;
-
-    // Delete the oldest messages (by created_at)
-    // Also remove them from the persistence cache
-    const toDelete = this.sql<{ id: string }>`
-      select id from cf_ai_chat_agent_messages 
-      order by created_at asc 
-      limit ${excess}
-    `;
-
-    if (toDelete && toDelete.length > 0) {
-      this._deleteMessagesByIds(toDelete.map((row) => row.id));
-    }
+  /** Delete message rows through Sessions and evict persistence-cache entries. */
+  private async _deleteMessagesByIds(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await this.#session.deleteMessages(ids);
+    for (const id of ids) this._persistedMessageCache.delete(id);
   }
 
   /**
@@ -5970,17 +6023,15 @@ export class AIChatAgent<
           parts: updatedParts
         });
         const safe = this._enforceRowSizeLimit(updatedMessage);
-        const json = JSON.stringify(safe);
-
-        this.sql`
-          update cf_ai_chat_agent_messages 
-          set message = ${json}
-          where id = ${message.id}
-        `;
-        this._persistedMessageCache.set(message.id, json);
-
-        const persisted = this._loadMessagesFromDb();
-        this.messages = autoTransformMessages(persisted);
+        const stored = (await this.#session.updateMessage(safe)) as UIMessage;
+        this._persistedMessageCache.set(stored.id, JSON.stringify(stored));
+        const index = this.messages.findIndex(
+          (candidate) => candidate.id === stored.id
+        );
+        if (index !== -1) {
+          const projected = await this.#projectMessage(safe, stored);
+          this.messages[index] = autoTransformMessages([projected])[0];
+        }
       }
     }
 
@@ -6394,15 +6445,14 @@ export class AIChatAgent<
                 parts: [...this._streamingMessage.parts]
               };
               const sanitized = this._sanitizeMessageForPersistence(snapshot);
-              const json = JSON.stringify(sanitized);
-              this.sql`
-                INSERT INTO cf_ai_chat_agent_messages (id, message)
-                VALUES (${sanitized.id}, ${json})
-                ON CONFLICT(id) DO UPDATE SET message = excluded.message
-              `;
+              const stored = await this.#session.upsertMessage(sanitized);
+              this._persistedMessageCache.set(
+                stored.message.id,
+                JSON.stringify(stored.message)
+              );
               // Track that we persisted early so stream completion can update
               // in place rather than appending a duplicate.
-              this._approvalPersistedMessageId = sanitized.id;
+              this._approvalPersistedMessageId = stored.message.id;
             }
 
             // Cross-message tool output fallback:
