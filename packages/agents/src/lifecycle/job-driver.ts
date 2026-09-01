@@ -16,12 +16,14 @@ import {
   isPlatformFailure,
   tryN
 } from "../retries";
+import type { MemoryLimitContext } from "./capability-runner";
 import {
   hungTimeoutMs,
   isHungRow,
   jobFromRow,
   type JobQueue,
   type JobStorageRow,
+  type LifecycleJob,
   type LifecycleJobContext,
   type LifecycleJobOutcome
 } from "./job-queue";
@@ -69,11 +71,8 @@ export type JobDriverOptions = {
   readonly resolveDispatch: (owner: string) => Promise<JobDispatch | undefined>;
   /** Consecutive memory-limit strikes tolerated before sealing (#1825). */
   readonly maxMemoryLimitStrikes: () => number | undefined;
-  /** Host domain policy applied on each memory-limit strike. */
-  readonly onMemoryLimit: (context: {
-    readonly sealed: boolean;
-    readonly nextTime?: number;
-  }) => void | Promise<void>;
+  /** Capability and host domain policy applied on each memory-limit strike. */
+  readonly onMemoryLimit: (context: MemoryLimitContext) => void | Promise<void>;
   /** Best-effort lifecycle telemetry. */
   readonly emit: (type: string, payload: unknown) => void;
   /** Recompute the physical alarm from queue state. */
@@ -312,9 +311,10 @@ export class JobDriver {
    * Alarm-boundary circuit breaker for Durable Object memory-limit resets
    * (#1825). Unhandled, the platform would auto-retry the alarm forever,
    * re-running the doomed work each cycle. A durable strike counter
-   * tolerates a few consecutive resets — backing off the executing job so
-   * the retry is not a hot loop — then seals: the executing job is purged
-   * and the host's memory-limit policy hook runs. Each step is best-effort:
+   * tolerates a few consecutive resets — backing off the executing job and
+   * every pending recovery-loop job so the retry is not a hot loop — then
+   * seals: those jobs are purged and the capability + host memory-limit
+   * policy hooks run. Each step is best-effort:
    * even these small writes can OOM, but swallowing still halts the
    * platform's auto-retry, and a later wake re-arms legitimate work.
    */
@@ -346,6 +346,15 @@ export class JobDriver {
     const nextTime = sealed
       ? undefined
       : Date.now() + Math.min(300, 30 * strikes) * 1000;
+    // Capture routed ownership before sealing deletes the rows. Domain policy
+    // runs afterward, when the loop is already broken, and uses this snapshot
+    // only to terminalize durable state owned outside the alarm host.
+    let purgedRecoveryLoopJobs: LifecycleJob[] | undefined;
+    try {
+      if (sealed) purgedRecoveryLoopJobs = queue.recoveryLoopJobs();
+    } catch {
+      // best-effort at a failure boundary
+    }
 
     try {
       if (executing) {
@@ -355,12 +364,25 @@ export class JobDriver {
           queue.retime(executing.id, nextTime);
         }
       }
+      // Recovery-loop rows travel as a pack: a doomed loop's sibling rows
+      // would re-trigger it on the next wake, so they back off (or purge)
+      // together with the row that struck.
+      if (sealed) {
+        queue.purgeRecoveryLoopJobs();
+      } else if (nextTime !== undefined) {
+        queue.delayRecoveryLoopJobs(nextTime);
+      }
     } catch {
       // best-effort at a failure boundary
     }
 
     try {
-      await this.#options.onMemoryLimit({ sealed, nextTime });
+      await this.#options.onMemoryLimit({
+        sealed,
+        nextTime,
+        executing: executing ? jobFromRow(executing) : undefined,
+        purgedRecoveryLoopJobs
+      });
     } catch {
       // best-effort domain policy; the purge above already broke the loop
     }

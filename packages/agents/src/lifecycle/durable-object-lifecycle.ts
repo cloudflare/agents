@@ -36,7 +36,8 @@ export {
   type CapabilityWebSocketUpgradeContext,
   type LifecycleEvent,
   type CapabilityStartContext,
-  type DurableObjectCapability
+  type DurableObjectCapability,
+  type MemoryLimitContext
 } from "./capability-runner";
 export {
   type LifecycleJobContext,
@@ -139,19 +140,15 @@ export function setLifecycleEventSink<
   lifecycleEventSinks.set(lifecycle, sink);
 }
 
-const lifecycleMemoryLimitStrikeBudgets = new WeakMap<object, number>();
-
-/**
- * @internal Set the consecutive alarm memory-limit strikes tolerated before
- * the Lifecycle circuit breaker seals recovery work (#1825). Composition
- * roots (Agent) supply their configured budget; the default is 3.
- */
-export function setLifecycleAlarmMemoryLimitStrikes<
-  Env extends object,
-  Props extends Record<string, unknown>
->(lifecycle: Lifecycle<Env, Props>, maxStrikes: number): void {
-  lifecycleMemoryLimitStrikeBudgets.set(lifecycle, maxStrikes);
-}
+/** Configuration accepted when constructing a {@link Lifecycle}. */
+export type LifecycleOptions = {
+  /**
+   * Consecutive alarm invocations that may end in a Durable Object
+   * memory-limit reset before the circuit breaker (#1825) seals recovery
+   * work instead of backing it off. Default: 3.
+   */
+  readonly maxAlarmMemoryLimitStrikes?: number;
+};
 
 /**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
@@ -193,8 +190,11 @@ export class Lifecycle<
   static install<
     Env extends object,
     Props extends Record<string, unknown> = Record<string, unknown>
-  >(host: DurableObject<Env>): Lifecycle<Env, Props> {
-    const lifecycle = new Lifecycle<Env, Props>(host);
+  >(
+    host: DurableObject<Env>,
+    options?: LifecycleOptions
+  ): Lifecycle<Env, Props> {
+    const lifecycle = new Lifecycle<Env, Props>(host, options);
     lifecycle.installHandlers();
     return lifecycle;
   }
@@ -203,8 +203,9 @@ export class Lifecycle<
    * Bind a lifecycle to a Durable Object instance without mutating its handlers.
    *
    * @param host - The Durable Object whose runtime lifecycle this object owns.
+   * @param options - Policy configuration for this lifecycle.
    */
-  constructor(host: DurableObject<Env>) {
+  constructor(host: DurableObject<Env>, options?: LifecycleOptions) {
     // SAFETY: DurableObject exposes ctx as protected to subclasses. The
     // lifecycle is constructed by that subclass with `this`, so this boundary
     // accesses the same runtime-owned context without exposing it publicly.
@@ -217,11 +218,15 @@ export class Lifecycle<
       storage: this.#ctx.storage,
       disabled: () => this.#alarmsDisabled,
       resolveDispatch: (owner) => this.#resolveJobDispatch(owner),
-      maxMemoryLimitStrikes: () => lifecycleMemoryLimitStrikeBudgets.get(this),
-      onMemoryLimit: (context) =>
-        runInLifecycleHostContext({ host: this.#host }, () =>
+      maxMemoryLimitStrikes: () => options?.maxAlarmMemoryLimitStrikes,
+      onMemoryLimit: async (context) => {
+        // Capabilities first (each best-effort inside the runner), then the
+        // host hook — a failed capability policy must not silence the host's.
+        await this.#capabilityRunner.memoryLimit(context);
+        await runInLifecycleHostContext({ host: this.#host }, () =>
           this.#host.onAlarmMemoryLimit?.(context)
-        ),
+        );
+      },
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
       rearm: () => this.rearmAlarm(),

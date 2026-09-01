@@ -44,12 +44,16 @@ import {
  */
 describe("chatRecoverySchedulePolicy", () => {
   it("makes the initial recovery schedule idempotent (deploy-storm dedup)", () => {
-    expect(chatRecoverySchedulePolicy("initial")).toEqual({ idempotent: true });
+    expect(chatRecoverySchedulePolicy("initial")).toEqual({
+      idempotent: true,
+      recoveryLoop: true
+    });
   });
 
   it("makes the stable-timeout reschedule non-idempotent (survives row deletion)", () => {
     expect(chatRecoverySchedulePolicy("stable_timeout_retry")).toEqual({
-      idempotent: false
+      idempotent: false,
+      recoveryLoop: true
     });
   });
 
@@ -69,7 +73,7 @@ describe("recovery scheduling seam (fake scheduler)", () => {
   type ScheduleCall = {
     delaySeconds: number;
     callback: ChatRecoveryScheduleCallback;
-    options: { idempotent: boolean };
+    options: { idempotent?: boolean; recoveryLoop?: boolean };
   };
 
   function makeFakeScheduler() {
@@ -78,7 +82,7 @@ describe("recovery scheduling seam (fake scheduler)", () => {
       delaySeconds: number,
       callback: ChatRecoveryScheduleCallback,
       _data: Record<string, unknown>,
-      options: { idempotent: boolean }
+      options: { idempotent?: boolean; recoveryLoop?: boolean }
     ): Promise<void> => {
       calls.push({ delaySeconds, callback, options });
       return Promise.resolve();
@@ -96,7 +100,10 @@ describe("recovery scheduling seam (fake scheduler)", () => {
       chatRecoverySchedulePolicy("initial")
     );
     expect(scheduler.calls).toHaveLength(1);
-    expect(scheduler.calls[0]?.options).toEqual({ idempotent: true });
+    expect(scheduler.calls[0]?.options).toEqual({
+      idempotent: true,
+      recoveryLoop: true
+    });
   });
 
   it("passes idempotent:false when a package reschedules after a stable timeout", async () => {
@@ -109,7 +116,10 @@ describe("recovery scheduling seam (fake scheduler)", () => {
       chatRecoverySchedulePolicy("stable_timeout_retry")
     );
     expect(scheduler.calls).toHaveLength(1);
-    expect(scheduler.calls[0]?.options).toEqual({ idempotent: false });
+    expect(scheduler.calls[0]?.options).toEqual({
+      idempotent: false,
+      recoveryLoop: true
+    });
   });
 });
 

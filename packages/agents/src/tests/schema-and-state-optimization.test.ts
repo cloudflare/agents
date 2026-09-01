@@ -57,6 +57,7 @@ const EXPECTED_SCHEMA_DDL = [
         singleflight INTEGER NOT NULL DEFAULT 0,
         hung_timeout_seconds INTEGER,
         exclusive INTEGER NOT NULL DEFAULT 0,
+        recovery_loop INTEGER NOT NULL DEFAULT 0,
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
