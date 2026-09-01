@@ -5,7 +5,10 @@ import type {
   LifecycleRouteEnvelope,
   WSMessage
 } from "../lifecycle/durable-object-lifecycle";
-import type { LifecycleRouteAddress } from "../lifecycle/capability";
+import {
+  LifecycleCapability,
+  type LifecycleRouteAddress
+} from "../lifecycle/capability";
 import {
   SUB_PREFIX,
   parseSubAgentPath,
@@ -53,8 +56,19 @@ export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
 
 /**
  * The facet-backed dynamic-agent machinery, extracted from the Agent
- * class. One instance per Agent; the host port documents exactly which
- * Agent internals it touches.
+ * class. One instance per Agent, installed as a Lifecycle capability
+ * (`capabilityId: "dynamic-agents"`); the host port documents exactly
+ * which Agent internals it touches.
+ *
+ * The capability claims no runner hooks — four integration points are
+ * deliberately wired directly through the Agent composition root
+ * instead, because the runner's dispatch contract cannot express them:
+ * the `/sub/` upgrade path rewrites the request and *continues* into
+ * `lifecycle.fetch` (onRequest can only claim), forwarded WS frames run
+ * inside the host's onMessage wrapper *after* the WebSockets capability
+ * has claimed the wake, this module *implements* the lifecycle route
+ * transport rather than consuming it, and facet-context restore has
+ * load-bearing startup ordering inside the host's startup span.
  *
  * Nothing here renames any wire- or storage-visible identifier: the
  * `cf_agents_facet_runs` table, `_cf_*` RPC method names, and route
@@ -62,7 +76,7 @@ export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
  *
  * @internal
  */
-export class DynamicAgents {
+export class DynamicAgentsInternal extends LifecycleCapability {
   #host: DynamicAgentHostPort;
 
   /** The parent-side registry of spawned dynamic agents. */
@@ -92,6 +106,7 @@ export class DynamicAgents {
   #broadcastOperationTail?: Promise<void>;
 
   constructor(host: DynamicAgentHostPort) {
+    super("dynamic-agents");
     this.#host = host;
     this.registry = new DynamicAgentRegistry({
       sql: host.sql.bind(host),

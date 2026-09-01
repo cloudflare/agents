@@ -55,7 +55,8 @@ import {
   type SubAgentIdentityVersion
 } from "./dynamic-agents/identity";
 import type { DynamicAgentRegistry } from "./dynamic-agents/registry";
-import { DynamicAgents } from "./dynamic-agents/dynamic-agents";
+import { DynamicAgentsInternal } from "./dynamic-agents/dynamic-agents";
+import { DynamicAgents as DynamicAgentsApi } from "./dynamic-agents/api";
 import type { DynamicAgentHostPort } from "./dynamic-agents/host";
 import type {
   FacetCapableCtx,
@@ -1278,14 +1279,41 @@ export class Agent<
   _keepAliveRefs = 0;
 
   /** @internal The extracted dynamic-agent (facet) machinery. */
-  private _dynamicAgentsInstance: DynamicAgents | undefined;
+  private _dynamicAgentsInstance: DynamicAgentsInternal | undefined;
 
   /** @internal */
-  private get _dynamicAgents(): DynamicAgents {
-    this._dynamicAgentsInstance ??= new DynamicAgents(
+  private get _dynamicAgents(): DynamicAgentsInternal {
+    this._dynamicAgentsInstance ??= new DynamicAgentsInternal(
       this as unknown as DynamicAgentHostPort
     );
     return this._dynamicAgentsInstance;
+  }
+
+  /** @internal */
+  private _dynamicAgentsApi: DynamicAgentsApi | undefined;
+
+  /**
+   * The dynamic-agents capability: facet-backed child agents that run
+   * in their own isolate with their own SQLite database, colocated
+   * with — and supervised by — this agent.
+   *
+   * Use dynamic agents for code whose class or lifecycle this agent
+   * owns: dynamically-loaded or AI-generated code, per-run tool
+   * agents, sandboxed components. For independent peers (for example
+   * one Durable Object per chat), use `getAgentByName` instead.
+   *
+   * ```ts
+   * const child = await this.dynamicAgents.get(Researcher, id);
+   * await child.doWork();
+   * this.dynamicAgents.abort(Researcher, id, reason);
+   * await this.dynamicAgents.delete(Researcher, id);
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  get dynamicAgents(): DynamicAgentsApi {
+    this._dynamicAgentsApi ??= new DynamicAgentsApi(this._dynamicAgents);
+    return this._dynamicAgentsApi;
   }
 
   /** @internal In-memory set of fiber IDs running in this process. */
@@ -2014,7 +2042,10 @@ export class Agent<
       .use(this.scheduler)
       .use(this.mcp)
       .use(this._webSockets)
-      .use(this.tasks);
+      .use(this.tasks)
+      // Registered for capability identity/services; its hot paths are
+      // wired directly (see the DynamicAgentsInternal class doc).
+      .use(this._dynamicAgents);
 
     // MCP starts before Agent restores facet routing state. Defer its initial
     // publication until broadcasts can be routed to the correct owner.
@@ -5501,7 +5532,7 @@ export class Agent<
    * class Inbox extends Agent {
    *   override async onBeforeSubAgent(req, { className, name }) {
    *     // Strict registry gate
-   *     if (!this.hasSubAgent(className, name)) {
+   *     if (!this.dynamicAgents.has(className, name)) {
    *       return new Response("Not found", { status: 404 });
    *     }
    *   }
@@ -5843,6 +5874,8 @@ export class Agent<
    * const searcher = await this.subAgent(SearchAgent, "main-search");
    * const results = await searcher.search("cloudflare agents");
    * ```
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.get()} instead.
    */
   async subAgent<T extends Agent>(
     cls: SubAgentClass<T>,
@@ -8364,6 +8397,8 @@ export class Agent<
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to abort
    * @param reason Error thrown to pending/future RPC callers
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.abort()} instead.
    */
   abortSubAgent(cls: SubAgentClass, name: string, reason?: unknown): void {
     this._dynamicAgents.abort(cls.name, name, reason);
@@ -8377,6 +8412,8 @@ export class Agent<
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to delete
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.delete()} instead.
    */
   deleteSubAgent(cls: SubAgentClass, name: string): Promise<void> {
     return this._dynamicAgents.delete(cls.name, name);
@@ -8433,6 +8470,8 @@ export class Agent<
    *   }
    * }
    * ```
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.has()} instead.
    */
   hasSubAgent<T extends Agent>(cls: SubAgentClass<T>, name: string): boolean;
   hasSubAgent(className: string, name: string): boolean;
@@ -8448,6 +8487,8 @@ export class Agent<
    * {@link deleteSubAgent}.
    *
    * @experimental The API surface may change before stabilizing.
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.list()} instead.
    */
   listSubAgents<T extends Agent>(
     cls: SubAgentClass<T>
