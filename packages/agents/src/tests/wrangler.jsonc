@@ -61,6 +61,10 @@
         "name": "PlainMcpClientObject"
       },
       {
+        "class_name": "PiHarnessObject",
+        "name": "PiHarnessObject"
+      },
+      {
         "class_name": "TestMcpAgent",
         "name": "MCP_OBJECT"
       },
@@ -399,6 +403,7 @@
         "TaskStreamComposeObject",
         "StreamBenchObject",
         "PlainMcpClientObject",
+        "PiHarnessObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
         "TestEmailAgent",

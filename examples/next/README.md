@@ -14,6 +14,7 @@ lands.
 | [`mcp-client`](./mcp-client)         | Available | `MCPClientManager` installed as a reusable lifecycle capability                                                      |
 | [`chats`](./chats)                   | This PR   | One DO per chat + a per-user push-based index — the recommended many-chats pattern                                   |
 | [`dynamic-agents`](./dynamic-agents) | This PR   | A supervisor runs user-submitted code as facets: isolated storage, supervised abort, code upgrades over stable state |
+| [`harness/pi`](./harness/pi)         | This PR   | Pi `AgentHarness`, Workers AI, and dynamic tools in a Lifecycle Object                                               |
 
 Each example is an independent workspace package and should stay focused on one
 capability. Once the APIs are stable, move the examples into the main examples

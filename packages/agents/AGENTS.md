@@ -11,6 +11,8 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
 | `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
 | `agents/lifecycle`           | `src/lifecycle/index.ts`     | Composable Durable Object lifecycle and hibernating connections              |
+| `agents/harness`             | `src/harness/index.ts`       | Experimental pi AgentHarness capability with Durable Object SQLite storage   |
+| `agents/providers/pi`        | `src/providers/pi/index.ts`  | Provider adapters that construct pi model registries                         |
 | `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
 | `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                |
@@ -58,6 +60,18 @@ src/
     current-agent.ts    # LifecycleObject host context and getCurrentAgent()
     durable-object-lifecycle.ts # Runtime handlers and capabilities
     connection.ts       # Hibernating WebSocket connection management
+
+  harness/              # Experimental pi AgentHarness capability
+    index.ts            # Public agents/harness surface
+    pi-harness.ts       # Lifecycle jobs + pi operation attachment/drive
+    do-sqlite.ts        # Durable Object SQLite adapter and namespaced schema
+    messages.ts         # Stable chat-message projection over pi transcript entries
+    partial-json.ts     # Worker-safe ESM adaptation used by pi's streaming parser
+    types.ts            # Stable narrow types hiding the pinned upstream build
+
+  providers/pi/         # Provider adapters for pi
+    index.ts            # Public agents/providers/pi surface
+    workers-ai.ts       # Workers AI binding adapter
 
   chat/                 # Shared chat toolkit (mostly for sibling packages)
     index.ts            # Barrel for shared chat primitives
@@ -259,6 +273,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 - **Lifecycle owns the job queue and the physical alarm** — capabilities and the host push jobs (`capability` + `fn` + due time + payload) into the `cf_agents_jobs` table; Lifecycle drives due jobs as an alarm event loop with retry, deferral, and the memory-limit circuit breaker, and derives the physical alarm from queue state. Queue mutations re-arm automatically. Each capability keeps its own durable state rather than depending on Scheduler.
 - **Scheduling uses cron-schedule** — `Scheduler` is the vocabulary over the job queue: it validates schedules, resolves named callbacks, and pushes jobs whose `fn` is the callback name. `Agent` installs the same primitive and delegates `this.schedule()` and related APIs to it. Schedules persist in SQLite and survive hibernation.
 - **MCP has separate package boundaries** — `mcp/server/index.ts` is the Stateless Worker wrapper; `mcp/client/index.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/server/legacy-agent.ts`.
+- **PiHarness composes rather than reimplements pi** — pi owns transcript, model/tool effect state, retries, and recovery in namespaced Durable Object SQLite tables. Lifecycle jobs only provide durable wakes. The build pins and bundles the completed pi `dev` harness until upstream publishes it; consumers do not install the vendored build inputs.
 - **Telemetry has an independent schema version** — `instrumentation_scope.version` is hardcoded to `"1"`; it is not the package version. Notify Workers Observability and any other downstream consumers before bumping it.
 
 ## Boundaries

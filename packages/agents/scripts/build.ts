@@ -1,6 +1,7 @@
 import { build } from "tsdown";
 import { globSync } from "glob";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
@@ -64,6 +65,29 @@ function injectSkillsTypeReference(): void {
   }
 }
 
+const piSourceAliases = {
+  "partial-json": resolve("src/harness/partial-json.ts"),
+  "@earendil-works/chord/context": resolve(
+    "node_modules/chord-dev/dist/context/index.js"
+  ),
+  "@earendil-works/chord": resolve("node_modules/chord-dev/dist/index.js"),
+  "@earendil-works/pi-agent-core": resolve(
+    "node_modules/pi-agent-core-dev/dist/index.js"
+  ),
+  "@earendil-works/pi-ai/utils/uuid": resolve(
+    "node_modules/pi-ai-dev/dist/utils/uuid.js"
+  ),
+  "@earendil-works/pi-ai": resolve("node_modules/pi-ai-dev/dist/index.js"),
+  "@earendil-works/pi-telemetry": resolve(
+    "node_modules/pi-telemetry-dev/dist/index.js"
+  )
+};
+
+const bundledPiSources = [
+  /^(?:chord-dev|pi-agent-core-dev|pi-ai-dev|pi-sqlite-dev|pi-telemetry-dev)(?:\/|$)/,
+  /^@earendil-works\/(?:chord|pi-agent-core|pi-ai|pi-telemetry)(?:\/|$)/
+];
+
 async function main() {
   await build({
     clean: true,
@@ -73,6 +97,31 @@ async function main() {
     deps: {
       skipNodeModulesBundle: true,
       neverBundle: ["cloudflare:workers", "cloudflare:email"]
+    },
+    format: "esm",
+    sourcemap: true,
+    fixedExtension: false
+  });
+
+  // The upstream durable harness is implemented on pi-mono/dev but has not
+  // shipped to npm yet. Bundle the exact pinned source revision into the pi
+  // entries so consumers do not need an unpublished or source-only dependency.
+  await build({
+    clean: false,
+    dts: true,
+    target: "es2021",
+    platform: "neutral",
+    entry: {
+      "harness/index": "src/harness/index.ts",
+      "harness/testing": "src/harness/testing.ts",
+      "providers/pi/index": "src/providers/pi/index.ts"
+    },
+    alias: piSourceAliases,
+    deps: {
+      alwaysBundle: bundledPiSources,
+      neverBundle: ["agents/lifecycle"],
+      onlyBundle: false,
+      dts: { neverBundle: [...bundledPiSources, "agents/lifecycle"] }
     },
     format: "esm",
     sourcemap: true,

@@ -1,5 +1,23 @@
 {
   "extends": "agents/tsconfig",
+  "compilerOptions": {
+    "paths": {
+      "@earendil-works/chord": ["./node_modules/chord-dev/dist/index.d.ts"],
+      "@earendil-works/chord/context": [
+        "./node_modules/chord-dev/dist/context/index.d.ts"
+      ],
+      "@earendil-works/pi-agent-core": [
+        "./node_modules/pi-agent-core-dev/dist/index.d.ts"
+      ],
+      "@earendil-works/pi-ai": ["./node_modules/pi-ai-dev/dist/index.d.ts"],
+      "@earendil-works/pi-ai/utils/uuid": [
+        "./node_modules/pi-ai-dev/dist/utils/uuid.d.ts"
+      ],
+      "@earendil-works/pi-telemetry": [
+        "./node_modules/pi-telemetry-dev/dist/index.d.ts"
+      ]
+    }
+  },
   "exclude": [
     "src/tests/**/*.ts",
     "src/react-tests/**/*.ts",

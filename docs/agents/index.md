@@ -77,6 +77,7 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Chat Agents](./chat-agents.md) - `AIChatAgent` class and `useAgentChat` React hook
 - [Chat & Fiber Recovery](./chat-agents.md#stream-recovery) - Recover LLM turns after Durable Object eviction
 - [Agent Tools](./agent-tools.md) - Run chat-capable sub-agents as tools with streaming child timelines
+- [Pi Harness Capability](./pi-harness.md) - Run pi's durable agent harness and tools in a Lifecycle Durable Object (experimental)
 - [Server-Driven Messages](./server-driven-messages.md) - Autonomous agent workflows: scheduled follow-ups, queue processing, webhooks, chained reasoning
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
@@ -141,6 +142,7 @@ The differentiator is not "we have durable state" — it is what happens when a 
 ## Reference
 
 - [Durable Object Lifecycle](./lifecycle.md) - Compose reusable durable components outside the Agent base class
+- [Pi Harness Capability](./pi-harness.md) - Durable pi model and tool execution as a Lifecycle capability (experimental)
 - [Tasks](./tasks.md) - Durable, replayable background work with journaled steps and durable sleeps (experimental)
 - [Streams](./streams.md) - Durable incremental output: chunk log, cursor, replay-then-tail reads (experimental)
 - TODO: [API Reference](./api-reference.md) - Complete API documentation

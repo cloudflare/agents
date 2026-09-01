@@ -12,6 +12,22 @@ This project incorporates code from the following open-source projects.
 - **Full License**: [licenses/isc-partyserver.txt](licenses/isc-partyserver.txt)
 - **Vendored from**: [cloudflare/partykit@f0a2e97d](https://github.com/cloudflare/partykit/commit/f0a2e97d233f24545b2648aec2ed6a191e11074e)
 
+### pi
+
+- **License**: MIT License
+- **Repository**: https://github.com/earendil-works/pi
+- **Copyright**: Copyright (c) 2025 Mario Zechner
+- **Full License**: [licenses/mit-earendil-pi.txt](licenses/mit-earendil-pi.txt)
+- **Vendored from**: [earendil-works/pi@c4b0e35a](https://github.com/earendil-works/pi/commit/c4b0e35abe631bc830190fa6cafbe81b098b97d7)
+
+### partial-json
+
+- **License**: MIT License
+- **Repository**: https://github.com/promplate/partial-json-parser-js
+- **Copyright**: Copyright (c) 2023 Promplate Dev Team
+- **Full License**: [licenses/mit-partial-json.txt](licenses/mit-partial-json.txt)
+- **Adapted from**: partial-json 0.1.7
+
 ### Anthropic MCP TS SDK
 
 - **License**: Apache License 2.0

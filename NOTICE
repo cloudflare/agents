@@ -34,6 +34,18 @@ This project incorporates code and inspiration from the following open source pr
    - Copyright: 2024 Sunil Pai <spai@cloudflare.com>
    - Note: The Agents SDK vendors and adapts PartyServer's Durable Object server implementation.
 
+7. pi
+   - License: MIT License
+   - Repository: https://github.com/earendil-works/pi
+   - Copyright: 2025 Mario Zechner
+   - Note: agents/harness bundles the pi AgentHarness runtime from commit c4b0e35abe631bc830190fa6cafbe81b098b97d7.
+
+8. partial-json
+   - License: MIT License
+   - Repository: https://github.com/promplate/partial-json-parser-js
+   - Copyright: 2023 Promplate Dev Team
+   - Note: agents/harness includes an ESM adaptation of the partial JSON parser used by pi.
+
 The original licenses and copyright notices from these projects are preserved and should be included with any distribution of this software.
 
 For a complete list of third-party licenses, see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
