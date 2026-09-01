@@ -11,6 +11,7 @@ export {
   type SessionsSyncInternal
 } from "./sessions";
 export { Session, type CompactionFunction } from "./handle";
+export { attachmentResponse, type AttachmentResponseOptions } from "./http";
 export type {
   ContextBlock,
   ContextConfig,
@@ -63,6 +64,7 @@ export {
   SessionAttachmentMissingError,
   SessionAttachmentStoreError,
   SessionAttachmentStoreMissingError,
+  SessionAttachmentTooLargeError,
   SessionMessageNotFoundError,
   SessionSearchDisabledError,
   SessionSerializationError
@@ -83,8 +85,9 @@ export type {
   SearchResult,
   SessionAttachmentStore,
   SessionChangeEvent,
-  SessionContextOptions,
   SessionChangeListener,
+  SessionContextOptions,
+  SessionEvictionResult,
   SessionMessage,
   SessionMessagePart,
   SessionRowStat,

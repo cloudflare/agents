@@ -255,8 +255,22 @@ export interface SessionsAttachmentOptions {
    * defers to first use for hosts with late-bound policy fields.
    */
   readonly keepRecentMessages?: number | (() => number);
+  /** Maximum aged rows rewritten by one maintenance pass. Default 64. */
+  readonly maxEvictionRowsPerPass?: number;
   /** Read-side materialization default. Default: inline `data:` URLs. */
   readonly reconstruct?: AttachmentReconstructor;
+}
+
+/** Totals from one bounded aged-media maintenance pass. */
+export interface SessionEvictionResult {
+  /** Stored message rows rewritten by the pass. */
+  messages: number;
+  /** Individual file parts or nested tool-output strings externalized. */
+  parts: number;
+  /** Raw payload bytes removed from SQLite rows. */
+  bytes: number;
+  /** True when another eligible row remains after this bounded pass. */
+  backlogRemains: boolean;
 }
 
 /** Policy for a Sessions capability. */

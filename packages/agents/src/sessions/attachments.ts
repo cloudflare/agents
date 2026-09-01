@@ -18,7 +18,8 @@
 import {
   SessionAttachmentMissingError,
   SessionAttachmentStoreError,
-  SessionAttachmentStoreMissingError
+  SessionAttachmentStoreMissingError,
+  SessionAttachmentTooLargeError
 } from "./errors";
 import type {
   AttachmentReconstructor,
@@ -230,6 +231,10 @@ export class AttachmentEngine {
     return Math.max(1, resolved ?? DEFAULT_KEEP_RECENT_MESSAGES);
   }
 
+  get maxEvictionRowsPerPass(): number {
+    return Math.max(1, this.#options?.maxEvictionRowsPerPass ?? 64);
+  }
+
   get defaultReconstructor(): AttachmentReconstructor {
     return this.#options?.reconstruct ?? inlineReconstructor;
   }
@@ -289,10 +294,31 @@ export class AttachmentEngine {
     };
   }
 
+  /** Return stored metadata for one hash, when known. */
+  get(hash: string): StoredAttachment | null {
+    const known = this.#knownBlobs.get(hash);
+    if (known) return known;
+    const row = this.#io.sql<AttachmentRow>(
+      `SELECT * FROM cf_agents_session_attachments
+       WHERE hash = ? LIMIT 1`,
+      [hash]
+    )[0];
+    if (!row) return null;
+    const attachment: StoredAttachment = {
+      hash: row.hash,
+      path: row.path,
+      mediaType: row.media_type,
+      bytes: row.bytes,
+      ...(row.filename !== null ? { filename: row.filename } : {})
+    };
+    this.#knownBlobs.set(hash, attachment);
+    return attachment;
+  }
+
   /** Open one stored payload by pointer hash. */
   async open(hash: string): Promise<ReadableStream<Uint8Array>> {
     const store = this.#requireStore("attachments.open()");
-    const path = this.#path(hash);
+    const path = this.get(hash)?.path ?? this.#path(hash);
     let stream: ReadableStream<Uint8Array> | null;
     try {
       stream = await store.readFileStream(path);
@@ -323,9 +349,7 @@ export class AttachmentEngine {
       for await (const part of data) {
         total += part.byteLength;
         if (total > max) {
-          throw new Error(
-            `Attachment exceeds the ${max}-byte limit after ${total} bytes`
-          );
+          throw new SessionAttachmentTooLargeError(total, max);
         }
         parts.push(part);
       }
@@ -337,9 +361,7 @@ export class AttachmentEngine {
       }
     }
     if (bytes.byteLength > max) {
-      throw new Error(
-        `Attachment of ${bytes.byteLength} bytes exceeds the ${max}-byte limit`
-      );
+      throw new SessionAttachmentTooLargeError(bytes.byteLength, max);
     }
     return bytes;
   }
@@ -468,6 +490,7 @@ export class AttachmentEngine {
     }
 
     let totalBytes = 0;
+    const referenced = new Set<string>();
     message.parts.forEach((part, index) => {
       const hash = parseAttachmentUrl(part.url);
       if (!hash) return;
@@ -489,8 +512,35 @@ export class AttachmentEngine {
           now
         ]
       );
+      referenced.add(hash);
       totalBytes += bytes;
     });
+
+    // Tool-output eviction leaves a marker inside the existing part rather
+    // than changing its shape to a file part. Negative indexes retain those
+    // blob references for GC without colliding with real message-part indexes.
+    let syntheticPartIndex = -1;
+    for (const attachment of known) {
+      if (referenced.has(attachment.hash)) continue;
+      this.#io.sqlWrite(
+        `INSERT OR IGNORE INTO cf_agents_session_attachments
+           (hash, message_id, part_index, session_id, path, media_type, bytes, filename, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          attachment.hash,
+          message.id,
+          syntheticPartIndex--,
+          sessionId,
+          attachment.path,
+          attachment.mediaType,
+          attachment.bytes,
+          attachment.filename ?? null,
+          now
+        ]
+      );
+      referenced.add(attachment.hash);
+      totalBytes += attachment.bytes;
+    }
     return totalBytes;
   }
 

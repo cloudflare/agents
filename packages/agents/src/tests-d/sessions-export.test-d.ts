@@ -3,12 +3,14 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
   Sessions,
+  attachmentResponse,
   createCompactFunction,
   inlineReconstructor,
   pointerReconstructor,
   type AppendResult,
   type ContextProvider,
   type SessionAttachmentStore,
+  type SessionEvictionResult,
   type SessionMessage,
   type SessionStats
 } from "../sessions";
@@ -64,6 +66,7 @@ session.getRecentHistory(1024, 2) satisfies Promise<{
   totalContentBytes: number;
 }>;
 session.stats() satisfies Promise<SessionStats>;
+session.evictAgedMedia() satisfies Promise<SessionEvictionResult | null>;
 session.freezeSystemPrompt() satisfies Promise<string>;
 session.refreshSystemPrompt() satisfies Promise<string>;
 session.getContextBlocks() satisfies Array<{
@@ -102,9 +105,20 @@ object.sessions.attachments.put("document", {
     filename?: string;
   };
 }>;
+object.sessions.attachments.get("ab".repeat(32)) satisfies Promise<{
+  hash: string;
+  path: string;
+  mediaType: string;
+  bytes: number;
+  filename?: string;
+} | null>;
 object.sessions.attachments.open("ab".repeat(32)) satisfies Promise<
   ReadableStream<Uint8Array>
 >;
+attachmentResponse(
+  object.sessions,
+  "ab".repeat(32)
+) satisfies Promise<Response>;
 
 inlineReconstructor satisfies {
   part: (...args: never[]) => unknown;

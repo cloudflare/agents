@@ -138,6 +138,7 @@ export class SessionsCore {
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         token_estimate INTEGER NOT NULL DEFAULT 0,
+        media_checked INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
       )
     `);
@@ -211,9 +212,9 @@ export class SessionsCore {
     if (legacy("assistant_messages")) {
       this.io.rawSql(`
         INSERT OR IGNORE INTO cf_agents_session_messages
-          (id, session_id, parent_id, role, content, token_estimate, created_at)
+          (id, session_id, parent_id, role, content, token_estimate, media_checked, created_at)
         SELECT id, session_id, parent_id, role, content,
-          CAST(LENGTH(CAST(content AS BLOB)) / 4 AS INTEGER),
+          CAST(LENGTH(CAST(content AS BLOB)) / 4 AS INTEGER), 0,
           COALESCE(CAST(strftime('%s', created_at) AS INTEGER), 0) * 1000
         FROM assistant_messages ORDER BY created_at ASC, rowid ASC
       `);
@@ -291,11 +292,20 @@ export class SessionsCore {
   // ── Reads ────────────────────────────────────────────────────────────────
 
   getMessageRaw(sessionId: string, id: string): SessionMessage | null {
+    return this.getMessageRecord(sessionId, id)?.message ?? null;
+  }
+
+  getMessageRecord(
+    sessionId: string,
+    id: string
+  ): { content: string; message: SessionMessage } | null {
     const rows = this.io.sql<{ content: string }>(
       "SELECT content FROM cf_agents_session_messages WHERE id = ? AND session_id = ?",
       [id, sessionId]
     );
-    return rows.length > 0 ? this.#parse(rows[0].content) : null;
+    if (rows.length === 0) return null;
+    const message = this.#parse(rows[0].content);
+    return message ? { content: rows[0].content, message } : null;
   }
 
   async getMessage(
@@ -762,8 +772,8 @@ export class SessionsCore {
     const now = Date.now();
     this.io.sqlWrite(
       `INSERT INTO cf_agents_session_messages
-        (id, session_id, parent_id, role, content, token_estimate, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (id, session_id, parent_id, role, content, token_estimate, media_checked, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
       [message.id, sessionId, parent, message.role, json, tokenEstimate, now]
     );
     if (this.#searchIndexing) this.#indexFts(sessionId, message);
@@ -826,7 +836,7 @@ export class SessionsCore {
     const tokenEstimate = this.estimateRowTokens(message, extracted);
     this.io.sqlWrite(
       `UPDATE cf_agents_session_messages
-       SET role = ?, content = ?, token_estimate = ?
+       SET role = ?, content = ?, token_estimate = ?, media_checked = 0
        WHERE id = ? AND session_id = ?`,
       [message.role, json, tokenEstimate, message.id, sessionId]
     );
@@ -861,6 +871,99 @@ export class SessionsCore {
       messageId: message.id
     });
     return cleanup;
+  }
+
+  /**
+   * Select unexamined aged rows for a bounded media pass. Content enters JS
+   * only for these rows; the active path and age cutoff were derived from
+   * content-free stats first.
+   */
+  mediaMaintenanceCandidates(
+    sessionId: string,
+    messageIds: readonly string[],
+    minBytes: number,
+    limit: number
+  ): Array<{ content: string; message: SessionMessage }> {
+    if (messageIds.length === 0) return [];
+    const rows = this.io.sql<{ id: string; content: string }>(
+      `SELECT id, content FROM cf_agents_session_messages
+       WHERE session_id = ?
+         AND media_checked = 0
+         AND LENGTH(CAST(content AS BLOB)) >= ?
+         AND id IN (SELECT value FROM json_each(?))
+       ORDER BY rowid ASC
+       LIMIT ?`,
+      [sessionId, minBytes, JSON.stringify(messageIds), limit]
+    );
+    const candidates: Array<{ content: string; message: SessionMessage }> = [];
+    for (const row of rows) {
+      const message = this.#parse(row.content);
+      if (message) {
+        candidates.push({ content: row.content, message });
+      } else {
+        this.markMediaChecked(sessionId, row.id, row.content);
+      }
+    }
+    return candidates;
+  }
+
+  /** Mark an unchanged maintenance candidate so later passes make progress. */
+  markMediaChecked(
+    sessionId: string,
+    messageId: string,
+    expectedContent: string
+  ): void {
+    this.io.sqlWrite(
+      `UPDATE cf_agents_session_messages SET media_checked = 1
+       WHERE id = ? AND session_id = ? AND content = ?`,
+      [messageId, sessionId, expectedContent]
+    );
+  }
+
+  /**
+   * Compare-and-swap rewrite used by bounded maintenance passes. Blob writes
+   * happen before this call; a changed source row rejects the rewrite and
+   * discards any now-unreferenced blobs instead of overwriting a live turn.
+   */
+  async rewriteForMaintenance(
+    sessionId: string,
+    expectedContent: string,
+    message: SessionMessage,
+    attachments: readonly StoredAttachment[]
+  ): Promise<boolean> {
+    const json = this.#serialize(message);
+    const tokenEstimate = this.estimateRowTokens(message, []);
+    const updated = this.io.sqlWrite(
+      `UPDATE cf_agents_session_messages
+       SET role = ?, content = ?, token_estimate = ?, media_checked = 1
+       WHERE id = ? AND session_id = ? AND content = ?`,
+      [
+        message.role,
+        json,
+        tokenEstimate,
+        message.id,
+        sessionId,
+        expectedContent
+      ]
+    );
+    if (updated === 0) {
+      await this.attachments.discardUnreferenced(attachments);
+      return false;
+    }
+
+    if (this.#searchIndexing) this.#indexFts(sessionId, message);
+    await this.attachments.replaceReferences(
+      sessionId,
+      message,
+      attachments,
+      Date.now()
+    );
+    this.#statsCache.delete(sessionId);
+    this.io.emit("session:message:maintenance-rewritten", {
+      sessionId,
+      messageId: message.id
+    });
+    return true;
   }
 
   /**
@@ -1048,8 +1151,8 @@ export class SessionsCore {
         const copied = { ...message, id: newId };
         this.io.sqlWrite(
           `INSERT INTO cf_agents_session_messages
-            (id, session_id, parent_id, role, content, token_estimate, created_at)
-           SELECT ?, ?, ?, role, ?, token_estimate, created_at
+            (id, session_id, parent_id, role, content, token_estimate, media_checked, created_at)
+           SELECT ?, ?, ?, role, ?, token_estimate, media_checked, created_at
            FROM cf_agents_session_messages WHERE id = ? AND session_id = ?`,
           [
             newId,
@@ -1088,8 +1191,8 @@ export class SessionsCore {
     const json = this.#serialize(message);
     const inserted = this.io.sqlWrite(
       `INSERT OR IGNORE INTO cf_agents_session_messages
-        (id, session_id, parent_id, role, content, token_estimate, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (id, session_id, parent_id, role, content, token_estimate, media_checked, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
       [
         message.id,
         sessionId,

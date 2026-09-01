@@ -10,6 +10,7 @@
 
 import type { ToolSet, UIMessage } from "ai";
 import { enforceRowSizeLimit, sanitizeMessage } from "../chat/sanitize";
+import { decodeDataUrl } from "./attachments";
 import { COMPACTION_PREFIX, type CompactResult } from "./compaction-helpers";
 import {
   ContextBlocks,
@@ -18,6 +19,7 @@ import {
   type WritableContextProvider
 } from "./context";
 import type { SessionsCore } from "./core";
+import { evictToolOutputStrings } from "./eviction";
 import { estimateStringTokens } from "./tokens";
 import type {
   AppendOptions,
@@ -30,6 +32,7 @@ import type {
   RecentHistoryResult,
   SearchResult,
   SessionContextOptions,
+  SessionEvictionResult,
   SessionMessage,
   SessionRowStat,
   SessionStats,
@@ -61,6 +64,8 @@ export class Session {
   #context: ContextBlocks | undefined;
   #restorePromise: Promise<void> | undefined;
   #skillScanRan = false;
+  #evictionRunning = false;
+  #evictionObservedOversized = false;
   #compactionFn: CompactionFunction | null = null;
   #tokenThreshold: number | undefined;
   #tokenCounter: SessionTokenCounter | undefined;
@@ -319,6 +324,10 @@ export class Session {
         inserted: true
       });
     }
+    this.#observeEvictionCandidate(prepared.message);
+    if (this.#evictionObservedOversized) {
+      await this.#evictAgedMedia({ maxRows: 1 });
+    }
     return {
       inserted: true,
       message: prepared.message,
@@ -385,6 +394,17 @@ export class Session {
     await this.#core.clearMessages(this.sessionId);
     await this.#afterClear();
     await this.#core.notify({ type: "clear", sessionId: this.sessionId });
+  }
+
+  /**
+   * Rewrite a bounded set of aged inline media and large tool-output strings
+   * to attachment pointers. Recent messages stay untouched.
+   */
+  async evictAgedMedia(): Promise<SessionEvictionResult | null> {
+    await this.#ensureRestored();
+    return this.#evictAgedMedia({
+      maxRows: this.#core.attachments.maxEvictionRowsPerPass
+    });
   }
 
   /**
@@ -718,6 +738,129 @@ export class Session {
         await this.updateMessage({ ...message, parts });
         return;
       }
+    }
+  }
+
+  #observeEvictionCandidate(message: SessionMessage): void {
+    if (!this.#core.attachments.configured) return;
+    const bytes = new TextEncoder().encode(JSON.stringify(message)).byteLength;
+    if (bytes >= this.#core.attachments.inlineThresholdBytes) {
+      this.#evictionObservedOversized = true;
+    }
+  }
+
+  async #evictAgedMedia(options: {
+    maxRows: number;
+  }): Promise<SessionEvictionResult | null> {
+    if (this.#evictionRunning || !this.#core.attachments.configured) {
+      return null;
+    }
+    this.#evictionRunning = true;
+    try {
+      const stats = this.#core.pathRowStats(this.sessionId);
+      const keepRecent = this.#core.attachments.keepRecentMessages;
+      const aged = stats.slice(0, Math.max(0, stats.length - keepRecent));
+      const threshold = this.#core.attachments.inlineThresholdBytes;
+      const agedIds = aged.map((row) => row.id);
+      const candidates = this.#core.mediaMaintenanceCandidates(
+        this.sessionId,
+        agedIds,
+        threshold,
+        Math.max(1, Math.floor(options.maxRows))
+      );
+      const totals: SessionEvictionResult = {
+        messages: 0,
+        parts: 0,
+        bytes: 0,
+        backlogRemains: false
+      };
+
+      for (const candidate of candidates) {
+        const fileExtraction = await this.#core.attachments.extract(
+          candidate.message
+        );
+        let fileBytes = 0;
+        if (fileExtraction.changed) {
+          for (const part of candidate.message.parts) {
+            if (
+              part.type === "file" &&
+              typeof part.url === "string" &&
+              part.url.startsWith("data:")
+            ) {
+              fileBytes += new TextEncoder().encode(part.url).byteLength;
+            }
+          }
+        }
+        const toolEviction = await evictToolOutputStrings(
+          fileExtraction.message,
+          threshold,
+          async (value, mediaType) => {
+            const decoded = decodeDataUrl(value);
+            const stored = await this.#core.attachments.put(
+              decoded?.bytes ?? value,
+              { mediaType: decoded?.mediaType ?? mediaType }
+            );
+            return stored.attachment;
+          }
+        );
+        const attachments = [
+          ...fileExtraction.attachments,
+          ...toolEviction.attachments
+        ];
+        if (!fileExtraction.changed && !toolEviction.changed) {
+          this.#core.markMediaChecked(
+            this.sessionId,
+            candidate.message.id,
+            candidate.content
+          );
+          continue;
+        }
+
+        const rewritten = await this.#core.rewriteForMaintenance(
+          this.sessionId,
+          candidate.content,
+          toolEviction.message,
+          attachments
+        );
+        if (!rewritten) continue;
+        totals.messages++;
+        totals.parts += fileExtraction.attachments.length + toolEviction.parts;
+        totals.bytes += fileBytes + toolEviction.bytes;
+        await this.#core.notify({
+          type: "maintenance-rewrite",
+          sessionId: this.sessionId,
+          message: toolEviction.message
+        });
+      }
+
+      totals.backlogRemains =
+        this.#core.mediaMaintenanceCandidates(
+          this.sessionId,
+          agedIds,
+          threshold,
+          1
+        ).length > 0;
+      this.#evictionObservedOversized = stats.some(
+        (row) => row.bytes >= threshold
+      );
+      if (totals.messages > 0) {
+        this.#core.io.emit("session:media:evicted", {
+          sessionId: this.sessionId,
+          messages: totals.messages,
+          parts: totals.parts,
+          bytes: totals.bytes,
+          backlogRemains: totals.backlogRemains
+        });
+      }
+      return totals;
+    } catch (error) {
+      this.#core.io.emit("session:media:eviction-failed", {
+        sessionId: this.sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    } finally {
+      this.#evictionRunning = false;
     }
   }
 

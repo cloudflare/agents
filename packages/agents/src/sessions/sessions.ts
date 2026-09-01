@@ -81,6 +81,8 @@ export interface SessionsAttachments {
     data: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | string,
     options: { mediaType: string; filename?: string }
   ): Promise<{ part: SessionMessagePart; attachment: StoredAttachment }>;
+  /** Return metadata for one stored payload, when known. */
+  get(hashOrUrl: string): Promise<StoredAttachment | null>;
   /** Open one stored payload by pointer hash or `attachment:` URL. */
   open(hashOrUrl: string): Promise<ReadableStream<Uint8Array>>;
 }
@@ -163,14 +165,25 @@ export class Sessions extends LifecycleCapability {
   /** Content-addressed attachment storage shared by every session. */
   get attachments(): SessionsAttachments {
     const core = this.#getCore();
+    const resolveHash = (hashOrUrl: string): string => {
+      const hash = parseAttachmentUrl(hashOrUrl) ?? hashOrUrl;
+      if (!/^[0-9a-f]{64}$/.test(hash)) {
+        throw new SessionAttachmentMissingError(hash, hashOrUrl);
+      }
+      return hash;
+    };
     return {
-      put: (data, options) => core.attachments.put(data, options),
-      open: (hashOrUrl) => {
-        const hash = parseAttachmentUrl(hashOrUrl) ?? hashOrUrl;
-        if (!/^[0-9a-f]{64}$/.test(hash)) {
-          throw new SessionAttachmentMissingError(hash, hashOrUrl);
-        }
-        return core.attachments.open(hash);
+      put: async (data, options) => {
+        await this.lifecycle.ready();
+        return core.attachments.put(data, options);
+      },
+      get: async (hashOrUrl) => {
+        await this.lifecycle.ready();
+        return core.attachments.get(resolveHash(hashOrUrl));
+      },
+      open: async (hashOrUrl) => {
+        await this.lifecycle.ready();
+        return core.attachments.open(resolveHash(hashOrUrl));
       }
     };
   }

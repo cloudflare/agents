@@ -86,6 +86,24 @@ export class SessionAttachmentMissingError extends Error {
 }
 
 /**
+ * Thrown before storage when one attachment exceeds the configured memory
+ * ceiling.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class SessionAttachmentTooLargeError extends Error {
+  readonly bytes: number;
+  readonly maxBytes: number;
+
+  constructor(bytes: number, maxBytes: number) {
+    super(`Attachment is ${bytes} bytes; the configured limit is ${maxBytes}.`);
+    this.name = "SessionAttachmentTooLargeError";
+    this.bytes = bytes;
+    this.maxBytes = maxBytes;
+  }
+}
+
+/**
  * Wraps a failure from the configured attachment store with path context.
  *
  * @experimental The API surface may change before stabilizing.

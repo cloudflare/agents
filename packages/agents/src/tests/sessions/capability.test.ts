@@ -6,8 +6,10 @@ import type {
   SessionSearchHarnessObject
 } from "../capabilities/sessions";
 import {
+  attachmentResponse,
   attachmentUrl,
   parseAttachmentUrl,
+  SessionAttachmentTooLargeError,
   SessionMessageNotFoundError,
   SessionSearchDisabledError,
   type SessionChangeEvent,
@@ -583,6 +585,166 @@ describe("Sessions capability", () => {
         const stream = await instance.sessions.attachments.open(part.url ?? "");
         const read = new Uint8Array(await new Response(stream).arrayBuffer());
         expect(new TextDecoder().decode(read)).toBe("streamed attachment body");
+      });
+    });
+
+    it("losslessly externalizes file parts after they age out", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const original = imageMessage("aged-image", 4096);
+        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
+        sync.ensureTables();
+        sync.appendMessage("", original);
+
+        const session = instance.sessions.session();
+        await session.appendMessage(text("recent-1", "one"));
+        await session.appendMessage(text("recent-2", "two"));
+        const result = await session.evictAgedMedia();
+
+        expect(result).toMatchObject({
+          messages: 1,
+          parts: 1,
+          backlogRemains: false
+        });
+        const pointer = await session.getMessage("aged-image", {
+          reconstruct: "pointer"
+        });
+        expect(parseAttachmentUrl(pointer?.parts[1].url)).toBeTruthy();
+        expect((await session.getMessage("aged-image"))?.parts[1].url).toBe(
+          original.parts[1].url
+        );
+        expect(instance.attachmentStore.writes).toBe(1);
+      });
+    });
+
+    it("externalizes aged tool strings without changing output shape", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
+        sync.ensureTables();
+        sync.appendMessage("", {
+          id: "aged-tool",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-screenshot",
+              toolName: "screenshot",
+              toolCallId: "shot-1",
+              state: "output-available",
+              input: { page: 1 },
+              output: {
+                note: "kept",
+                frames: [{ image: "z".repeat(4096) }]
+              }
+            }
+          ]
+        });
+        const session = instance.sessions.session();
+        await session.appendMessage(text("recent-tool-1", "one"));
+        await session.appendMessage(text("recent-tool-2", "two"));
+
+        const result = await session.evictAgedMedia();
+        expect(result).toMatchObject({ messages: 1, parts: 1 });
+        const stored = await session.getMessage("aged-tool", {
+          reconstruct: "pointer"
+        });
+        const output = stored?.parts[0].output as
+          | { note: string; frames: Array<{ image: string }> }
+          | undefined;
+        expect(output?.note).toBe("kept");
+        expect(output?.frames[0].image).toContain("attachment:sha256:");
+        expect((await session.stats()).attachmentBytes).toBe(4096);
+      });
+    });
+
+    it("uses compare-and-swap so maintenance cannot overwrite a live rewrite", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
+        sync.ensureTables();
+        sync.appendMessage("", {
+          id: "racy",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-dump",
+              toolName: "dump",
+              state: "output-available",
+              output: "x".repeat(4096)
+            }
+          ]
+        });
+        const session = instance.sessions.session();
+        await session.appendMessage(text("race-recent-1", "one"));
+        await session.appendMessage(text("race-recent-2", "two"));
+
+        instance.attachmentStore.onWrite = () => {
+          instance.attachmentStore.onWrite = undefined;
+          sync.updateMessage("", text("racy", "live rewrite"));
+        };
+        const result = await session.evictAgedMedia();
+
+        expect(result?.messages).toBe(0);
+        expect((await session.getMessage("racy"))?.parts[0].text).toBe(
+          "live rewrite"
+        );
+        expect(instance.attachmentStore.files.size).toBe(0);
+      });
+    });
+
+    it("marks large non-media rows checked so bounded passes make progress", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
+        sync.ensureTables();
+        sync.appendMessage("", text("large-text", "plain ".repeat(1000)));
+        const session = instance.sessions.session();
+        await session.appendMessage(text("plain-recent-1", "one"));
+        await session.appendMessage(text("plain-recent-2", "two"));
+
+        expect(await session.evictAgedMedia()).toMatchObject({
+          messages: 0,
+          backlogRemains: false
+        });
+        expect(await session.evictAgedMedia()).toMatchObject({
+          messages: 0,
+          backlogRemains: false
+        });
+      });
+    });
+
+    it("rejects attachments above the configured memory ceiling", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        await expect(
+          instance.sessions.attachments.put(
+            new Uint8Array(8 * 1024 * 1024 + 1),
+            { mediaType: "application/octet-stream" }
+          )
+        ).rejects.toBeInstanceOf(SessionAttachmentTooLargeError);
+        expect(instance.attachmentStore.writes).toBe(0);
+      });
+    });
+
+    it("serves attachment responses without buffering the payload", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const appended = await instance.sessions
+          .session()
+          .appendMessage(imageMessage("served", 4096));
+        const pointer = appended.message.parts[1].url ?? "";
+
+        const response = await attachmentResponse(instance.sessions, pointer);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toBe("image/png");
+        expect(response.headers.get("content-length")).toBe("4096");
+        expect(new Uint8Array(await response.arrayBuffer())).toHaveLength(4096);
+
+        const missing = await attachmentResponse(
+          instance.sessions,
+          "ef".repeat(32)
+        );
+        expect(missing.status).toBe(404);
       });
     });
 

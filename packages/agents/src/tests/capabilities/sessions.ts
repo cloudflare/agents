@@ -12,6 +12,7 @@ export class MemoryAttachmentStore implements SessionAttachmentStore {
   writes = 0;
   deletes = 0;
   stats = 0;
+  onWrite: (() => void | Promise<void>) | undefined;
 
   async writeFileBytes(
     path: string,
@@ -21,6 +22,7 @@ export class MemoryAttachmentStore implements SessionAttachmentStore {
     this.writes++;
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     this.files.set(path, { bytes: new Uint8Array(bytes), mimeType });
+    await this.onWrite?.();
   }
 
   async readFileBytes(path: string): Promise<Uint8Array | null> {
@@ -67,7 +69,9 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly sessions = new Sessions({
     attachments: {
       store: () => this.attachmentStore,
-      inlineThresholdBytes: 1024
+      inlineThresholdBytes: 1024,
+      keepRecentMessages: 2,
+      maxEvictionRowsPerPass: 2
     },
     reservedMetadataKeys: ["channel", "turnMetadata"]
   });
