@@ -65,29 +65,16 @@ describe("Lifecycle startup", () => {
     });
   });
 
-  it("positions capabilities relative to installed capability IDs", async () => {
+  it("dispatches fallback capabilities after later-installed ones", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const order: string[] = [];
-      const { lifecycle } = install(
-        new OrderedStartCapability("middle", order)
-      );
+      const { lifecycle } = install(new OrderedStartCapability("first", order));
       lifecycle
-        .use(new OrderedStartCapability("first", order), { before: "middle" })
-        .use(new OrderedStartCapability("last", order), { after: "middle" });
+        .use(new OrderedStartCapability("fallback", order), { fallback: true })
+        .use(new OrderedStartCapability("second", order));
 
       await lifecycle.start();
-      expect(order).toEqual(["first", "middle", "last"]);
-    });
-  });
-
-  it("rejects positioning relative to an unknown capability", async () => {
-    await withCapabilityHarness(({ install }) => {
-      const { lifecycle } = install(new ServiceProbeCapability());
-      expect(() =>
-        lifecycle.use(new ServiceProbeCapability("other"), {
-          before: "missing"
-        })
-      ).toThrow('Lifecycle capability "missing" is not installed');
+      expect(order).toEqual(["first", "second", "fallback"]);
     });
   });
 

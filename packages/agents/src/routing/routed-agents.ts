@@ -75,9 +75,8 @@ export class RoutedAgents<
   readonly #route: string;
 
   /**
-   * @param options - Target binding and the route segment this namespace
-   * claims. Install with the protected `Agent.use()` helper, or with
-   * `Lifecycle.use()` on a plain Durable Object.
+   * @param options - Target binding and the route segment this capability
+   * claims. Install with `this.lifecycle.use()` before startup.
    */
   constructor(options: RoutedAgentsOptions<TAgent>) {
     const route = options.route.replace(/^\/+|\/+$/g, "");

@@ -80,7 +80,6 @@ import {
 import {
   type LifecycleJobContext,
   type MemoryLimitContext,
-  type DurableObjectCapability,
   type Connection,
   type ConnectionContext,
   Lifecycle,
@@ -1190,25 +1189,6 @@ export class Agent<
       this.getConnectionTags(connection, ctx)
   });
 
-  /**
-   * Install an application capability before the Agent WebSocket fallback.
-   *
-   * Capabilities are otherwise dispatched in registration order. Agent's own
-   * WebSocket capability is installed during `super()`, before subclass fields
-   * run, so this method gives subclass field initializers an explicit way to
-   * register request or upgrade middleware ahead of it.
-   *
-   * @experimental The API surface may change before stabilizing.
-   * @param capability - The capability to install.
-   * @returns The same capability for assignment to a class field.
-   */
-  protected use<Capability extends DurableObjectCapability<Props>>(
-    capability: Capability
-  ): Capability {
-    this.lifecycle.use(capability, { before: "websockets" });
-    return capability;
-  }
-
   /** Run user initialization after lifecycle components have started. */
   onStart(_props?: Props): void | Promise<void> {}
 
@@ -2079,7 +2059,7 @@ export class Agent<
     this.lifecycle
       .use(this.scheduler)
       .use(this.mcp)
-      .use(this._webSockets)
+      .use(this._webSockets, { fallback: true })
       .use(this.tasks)
       // Registered for capability identity/services; its hot paths are
       // wired directly (see the DynamicAgentsInternal class doc).

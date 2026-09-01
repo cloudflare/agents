@@ -53,14 +53,17 @@ export class RoutedChatAgent extends Agent<Cloudflare.Env> {
   }
 }
 
-/** Agent with one routed namespace of independent chat Agents. */
+/** Agent that owns and routes to independent chat Agents. */
 export class RoutingOwnerAgent extends Agent<Cloudflare.Env> {
-  readonly chats = this.use(
-    new RoutedAgents<RoutedChatAgent, RoutedChatMetadata>({
-      namespace: this.env.RoutedChatAgent,
-      route: "chats"
-    })
-  );
+  readonly chats = new RoutedAgents<RoutedChatAgent, RoutedChatMetadata>({
+    namespace: this.env.RoutedChatAgent,
+    route: "chats"
+  });
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.chats);
+  }
 
   createChat(title: string) {
     return this.chats.create({ metadata: { title } });

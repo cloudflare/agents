@@ -88,9 +88,9 @@ export type MemoryLimitContext = {
  *
  * Dispatch contract, hook by hook:
  * - `onRequest` and `onWebSocketUpgrade` are offered in declaration
- *   order; the first capability to return a `Response` claims the
- *   request, and a claimed upgrade's socket belongs to that capability
- *   for its whole lifetime.
+ *   order, fallbacks last; the first capability to return a `Response`
+ *   claims the request, and a claimed upgrade's socket belongs to that
+ *   capability for its whole lifetime.
  * - `onWebSocketMessage`/`onWebSocketClose`/`onWebSocketError` are
  *   platform wakes, offered in declaration order; return `true` to
  *   consume one. Socket ownership is the capability's to determine —

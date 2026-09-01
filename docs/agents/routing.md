@@ -614,12 +614,15 @@ export class ChatAgent extends Agent<Env> {
 }
 
 export class UserAgent extends Agent<Env> {
-  readonly chats = this.use(
-    new RoutedAgents<ChatAgent, { title: string }>({
-      namespace: this.env.ChatAgent,
-      route: "chats"
-    })
-  );
+  readonly chats = new RoutedAgents<ChatAgent, { title: string }>({
+    namespace: this.env.ChatAgent,
+    route: "chats"
+  });
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.chats);
+  }
 
   @callable()
   createChat(title: string) {
