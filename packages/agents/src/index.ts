@@ -36,6 +36,45 @@ export type {
   BuildAgentPathOptions,
   SubAgentPathMatch
 } from "./sub-routing";
+import {
+  isClosedWebSocketSendError,
+  registerFacetStreamingDelivery,
+  RootDynamicAgentConnectionBridge as RootSubAgentConnectionBridge,
+  sendFacetRpcResponseIfOpen,
+  sendFacetStreamingResponse,
+  DynamicAgentConnectionBridge as SubAgentConnectionBridge,
+  dynamicAgentRpcReplyContext as subAgentRpcReplyContext,
+  type DynamicAgentRpcReplyInvocationContext as SubAgentRpcReplyInvocationContext,
+  waitForFacetStreamingResponseDeliveries
+} from "./dynamic-agents/bridges";
+import {
+  agentPathKey,
+  isValidParentPath,
+  logicalNameFromPathV2Identity,
+  pathV2IdentityName,
+  sha256Hex,
+  SUB_AGENT_IDENTITY_VERSION_LEGACY,
+  SUB_AGENT_IDENTITY_VERSION_PATH_V2,
+  type SubAgentIdentityVersion
+} from "./dynamic-agents/identity";
+import type {
+  FacetCapableCtx,
+  FacetRunStorageRow,
+  RootFacetRpcSurface,
+  StoredDynamicAgentConnection as StoredSubAgentConnection,
+  DynamicAgentBridgeInvocationContext as SubAgentBridgeInvocationContext,
+  DynamicAgentClass as SubAgentClass,
+  DynamicAgentConnectionBridgeLike as SubAgentConnectionBridgeLike,
+  DynamicAgentConnectionMeta as SubAgentConnectionMeta,
+  DynamicAgentConnectionOperationName as SubAgentConnectionOperationName,
+  DynamicAgentPathInvokeEndpoint as SubAgentPathInvokeEndpoint,
+  DynamicAgentStub as SubAgentStub,
+  DynamicAgentWebSocketEndpoint as SubAgentWebSocketEndpoint
+} from "./dynamic-agents/types";
+export type {
+  DynamicAgentClass as SubAgentClass,
+  DynamicAgentStub as SubAgentStub
+} from "./dynamic-agents/types";
 import { signAgentHeaders, type SendEmailOptions } from "./email";
 import { sendAgentEmail } from "./email-send";
 export type { EmailSendBinding, SendEmailOptions } from "./email";
@@ -247,13 +286,6 @@ function runInInvocation<T>(
   return agentContext.run(store, () => withInvocationScope(body, options));
 }
 
-function isClosedWebSocketSendError(error: unknown): boolean {
-  return (
-    error instanceof TypeError &&
-    error.message.includes("WebSocket send() after close")
-  );
-}
-
 function sendRpcResponseIfOpen(
   connection: Connection,
   response: RPCResponse
@@ -264,92 +296,6 @@ function sendRpcResponseIfOpen(
   } catch (error) {
     if (isClosedWebSocketSendError(error)) return false;
     throw error;
-  }
-}
-
-type RPCReplyTarget = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
-};
-
-type FacetRPCResponseDelivery = {
-  sent: boolean;
-  completion: Promise<void>;
-};
-
-type SubAgentRpcReplyInvocationContext = {
-  bridge?: SubAgentConnectionBridge;
-};
-
-const subAgentRpcReplyContext =
-  new AsyncLocalStorage<SubAgentRpcReplyInvocationContext>();
-
-function sendFacetRpcResponseIfOpen(
-  target: RPCReplyTarget,
-  response: RPCResponse
-): FacetRPCResponseDelivery {
-  try {
-    const completion = Promise.resolve(
-      target.send(JSON.stringify(response))
-    ).catch((error: unknown) => {
-      if (!isClosedWebSocketSendError(error)) {
-        console.error("[Agent] Facet RPC response delivery failed:", error);
-      }
-    });
-    return { sent: true, completion };
-  } catch (error) {
-    if (isClosedWebSocketSendError(error)) {
-      return { sent: false, completion: Promise.resolve() };
-    }
-    throw error;
-  }
-}
-
-type FacetStreamingResponseDeliveryState = {
-  replyTarget: RPCReplyTarget;
-  pending: Set<Promise<void>>;
-};
-
-const facetStreamingResponseDeliveryStates = new WeakMap<
-  StreamingResponse,
-  FacetStreamingResponseDeliveryState
->();
-
-function createStreamingResponse(
-  connection: Connection,
-  id: string,
-  facetReplyTarget?: RPCReplyTarget
-): StreamingResponse {
-  const stream = new StreamingResponse(connection, id);
-  if (facetReplyTarget) {
-    facetStreamingResponseDeliveryStates.set(stream, {
-      replyTarget: facetReplyTarget,
-      pending: new Set()
-    });
-  }
-  return stream;
-}
-
-function trackFacetStreamingResponseDelivery(
-  stream: StreamingResponse,
-  completion: Promise<void>
-): void {
-  const state = facetStreamingResponseDeliveryStates.get(stream);
-  if (!state) return;
-
-  state.pending.add(completion);
-  void completion.finally(() => state.pending.delete(completion));
-}
-
-async function waitForFacetStreamingResponseDeliveries(
-  stream: StreamingResponse
-): Promise<void> {
-  const state = facetStreamingResponseDeliveryStates.get(stream);
-  if (!state) return;
-
-  try {
-    await Promise.all(state.pending);
-  } finally {
-    facetStreamingResponseDeliveryStates.delete(stream);
   }
 }
 
@@ -399,218 +345,12 @@ import {
 
 export { SqlError } from "./sql-error";
 
-// ── Sub-agent (facet) types ──────────────────────────────────────────
-
-/**
- * Internal narrowing of `DurableObjectState` to the parts the facet
- * bootstrap path uses. We only need this because `ctx.exports` in the
- * real types (`Cloudflare.Exports`) is keyed by the *consumer's*
- * worker MainModule, which is invisible from inside this library —
- * so we widen it to a generic Record indexed by class name.
- *
- * @internal
- */
-interface FacetCapableCtx {
-  facets: DurableObjectFacets;
-  /**
-   * Worker exports keyed by class export name. For facet creation, the
-   * runtime only needs the exported Durable Object class. Top-level
-   * Durable Object bindings may also expose namespace helpers here, but
-   * facet-only classes do not need to.
-   */
-  exports: Record<
-    string,
-    | (DurableObjectClass & Partial<Pick<DurableObjectNamespace, "idFromName">>)
-    | undefined
-  >;
-}
-
-type SubAgentPathInvokeEndpoint = {
-  _cf_invokeSubAgentPath(
-    path: ReadonlyArray<{ className: string; name: string }>,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown>;
-};
-
-type SubAgentConnectionMeta = {
-  id: string;
-  uri: string | null;
-  tags: string[];
-  state: unknown;
-  requestHeaders?: [string, string][];
-};
-
-type SubAgentConnectionBridgeLike = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
-  close(code?: number, reason?: string): void | Promise<void>;
-  setState(state: unknown): unknown | Promise<unknown>;
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void | Promise<void>;
-};
-
-type SubAgentConnectionOperationName = "send" | "setState" | "close";
-
-type StoredSubAgentConnection = {
-  meta: SubAgentConnectionMeta;
-  connection?: Connection;
-};
-
-type SubAgentBridgeInvocationContext = {
-  bridge?: SubAgentConnectionBridgeLike;
-  connectionId: string;
-};
-
-type SubAgentWebSocketEndpoint = {
-  _cf_handleSubAgentWebSocketConnect(
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
-  ): Promise<void>;
-  _cf_handleSubAgentWebSocketMessage(
-    message: WSMessage,
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta,
-    replyBridge?: SubAgentConnectionBridge
-  ): Promise<void>;
-  _cf_handleSubAgentWebSocketClose(
-    code: number,
-    reason: string,
-    wasClean: boolean,
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
-  ): Promise<void>;
-};
-
-class SubAgentConnectionBridge
-  extends RpcTarget
-  implements SubAgentConnectionBridgeLike
-{
-  #connection: Connection;
-  #broadcast?: (
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ) => void | Promise<void>;
-
-  constructor(
-    connection: Connection,
-    broadcast?: (
-      ownerPath: ReadonlyArray<{ className: string; name: string }>,
-      message: string | ArrayBuffer | ArrayBufferView,
-      without?: string[]
-    ) => void | Promise<void>
-  ) {
-    super();
-    this.#connection = connection;
-    this.#broadcast = broadcast;
-  }
-
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
-    this.#connection.send(message);
-  }
-
-  close(code?: number, reason?: string): void {
-    this.#connection.close(code, reason);
-  }
-
-  setState(state: unknown): unknown {
-    return this.#connection.setState(state);
-  }
-
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void | Promise<void> {
-    return this.#broadcast?.(ownerPath, message, without);
-  }
-}
-
-class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
-  #root: RootFacetRpcSurface;
-  #connectionId: string;
-
-  constructor(root: RootFacetRpcSurface, connectionId: string) {
-    this.#root = root;
-    this.#connectionId = connectionId;
-  }
-
-  send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
-    return this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
-  }
-
-  close(code?: number, reason?: string): Promise<void> {
-    return this.#root._cf_closeSubAgentConnection(
-      this.#connectionId,
-      code,
-      reason
-    );
-  }
-
-  setState(state: unknown): Promise<unknown> {
-    return this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
-  }
-
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void> {
-    return this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
-  }
-}
-
-/**
- * Constructor type for a sub-agent class.
- * Used by {@link Agent.subAgent} to reference the child class
- * via `ctx.exports`.
- *
- * The class name (`cls.name`) must match the export name in the
- * worker entry point — re-exports under a different name
- * (e.g. `export { Foo as Bar }`) are not supported.
- */
-export type SubAgentClass<T extends Agent = Agent> = {
-  new (ctx: DurableObjectState, env: never): T;
-};
-
-/**
- * Wraps `T` in a `Promise` unless it already is one.
- */
-type Promisify<T> = T extends Promise<unknown> ? T : Promise<T>;
-
-/**
- * A typed RPC stub for a sub-agent. Exposes all public instance methods
- * as callable RPC methods with Promise-wrapped return types.
- *
- * Methods owned by `Agent`, its lifecycle, or `DurableObject` internals
- * are excluded — only user-defined methods on the subclass are exposed.
- */
-export type SubAgentStub<T extends Agent> = {
-  [K in keyof T as K extends keyof Agent
-    ? never
-    : T[K] extends (...args: never[]) => unknown
-      ? K
-      : never]: T[K] extends (...args: infer A) => infer R
-    ? (...args: A) => Promisify<R>
-    : never;
-};
-
 export type QueueItem<T = string> = {
   id: string;
   payload: T;
   callback: keyof Agent<Cloudflare.Env>;
   created_at: number;
   retry?: RetryOptions;
-};
-
-type FacetRunStorageRow = {
-  owner_path: string;
-  owner_path_key: string;
-  run_id: string;
-  created_at: number;
 };
 
 type AgentToolRunStorageRow = {
@@ -644,69 +384,6 @@ type AgentToolRunStorageRow = {
 
 type DeferredAgentToolFinish = () => Promise<void>;
 type DetachedReconcilePayload = { cadenceIndex?: number };
-
-function agentPathKey(
-  path: ReadonlyArray<AgentPathStep> | null
-): string | null {
-  if (!path) return null;
-  return path
-    .map(
-      (step) =>
-        `${encodeURIComponent(step.className)}:${encodeURIComponent(step.name)}`
-    )
-    .join("/");
-}
-
-/**
- * Internal RPC surface exposed by the root agent for facets to
- * delegate alarm-owning operations (schedules + facet teardown).
- * @internal
- */
-type RootFacetRpcSurface = {
-  _cf_routeLifecycle(
-    target: LifecycleRouteAddress | undefined,
-    envelope: LifecycleRouteEnvelope
-  ): Promise<unknown>;
-  _cf_cleanupFacetPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void>;
-  _cf_destroyDescendantFacet(
-    targetPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void>;
-  _cf_acquireFacetKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string>;
-  _cf_releaseFacetKeepAlive(token: string): Promise<void>;
-  _cf_registerFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
-  _cf_unregisterFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
-  _cf_broadcastToSubAgent(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void>;
-  _cf_subAgentConnectionMetas(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<SubAgentConnectionMeta[]>;
-  _cf_sendToSubAgentConnection(
-    connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
-  ): Promise<void>;
-  _cf_closeSubAgentConnection(
-    connectionId: string,
-    code?: number,
-    reason?: string
-  ): Promise<void>;
-  _cf_setSubAgentConnectionState(
-    connectionId: string,
-    state: unknown
-  ): Promise<unknown>;
-};
 
 /**
  * Context passed to the `runFiber` callback. Provides checkpoint
@@ -1058,14 +735,6 @@ const DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
 // receive `detached: { notify: true }` completions. Resolved by name so the
 // base Agent stays decoupled from the chat layer.
 const DETACHED_NOTIFY_CALLBACK = "_cfDetachedNotifyFinish";
-const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
-const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
-const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
-
-type SubAgentIdentityVersion =
-  | typeof SUB_AGENT_IDENTITY_VERSION_LEGACY
-  | typeof SUB_AGENT_IDENTITY_VERSION_PATH_V2;
-
 type AgentToolRecoveryInspection =
   | {
       status: "inspected";
@@ -1090,50 +759,6 @@ const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
-
-async function sha256Hex(value: string): Promise<string> {
-  const bytes = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function pathV2IdentityName(logicalName: string, digest: string): string {
-  return `${SUB_AGENT_IDENTITY_PATH_V2_PREFIX}${encodeURIComponent(logicalName)}:${digest}`;
-}
-
-function logicalNameFromPathV2Identity(identityName: string): string | null {
-  if (!identityName.startsWith(SUB_AGENT_IDENTITY_PATH_V2_PREFIX)) {
-    return null;
-  }
-  const rest = identityName.slice(SUB_AGENT_IDENTITY_PATH_V2_PREFIX.length);
-  const separator = rest.lastIndexOf(":");
-  if (separator === -1) return null;
-
-  try {
-    return decodeURIComponent(rest.slice(0, separator));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Validate that a stored `parentPath` has the expected shape. Used
- * when restoring from DO storage to guard against corrupted data.
- */
-function isValidParentPath(
-  value: unknown
-): value is Array<{ className: string; name: string }> {
-  if (!Array.isArray(value)) return false;
-  return value.every(
-    (entry) =>
-      entry != null &&
-      typeof entry === "object" &&
-      typeof (entry as { className?: unknown }).className === "string" &&
-      typeof (entry as { name?: unknown }).name === "string"
-  );
-}
 
 /**
  * Internal key used to store the readonly flag in connection state.
@@ -2572,11 +2197,10 @@ export class Agent<
 
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
-                const stream = createStreamingResponse(
-                  connection,
-                  id,
-                  replyBridge
-                );
+                const stream = new StreamingResponse(connection, id);
+                if (replyBridge) {
+                  registerFacetStreamingDelivery(stream, replyBridge);
+                }
 
                 this._emit("rpc", { method, streaming: true });
 
@@ -12074,14 +11698,9 @@ export class StreamingResponse {
   }
 
   private _send(response: RPCResponse): boolean {
-    const state = facetStreamingResponseDeliveryStates.get(this);
-    if (!state) {
-      return sendRpcResponseIfOpen(this._connection, response);
-    }
-
-    const delivery = sendFacetRpcResponseIfOpen(state.replyTarget, response);
-    trackFacetStreamingResponseDelivery(this, delivery.completion);
-    return delivery.sent;
+    const facetSent = sendFacetStreamingResponse(this, response);
+    if (facetSent !== null) return facetSent;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 
   /**
