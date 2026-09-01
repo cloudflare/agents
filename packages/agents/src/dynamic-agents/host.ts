@@ -45,4 +45,14 @@ export interface DynamicAgentHostPort {
   readonly scheduler: {
     __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
   };
+  /** Local (non-facet-index) durable fiber recovery pass. */
+  _checkRunFibers(): Promise<void>;
+  /** Ensure constructor-time async initialization has completed. */
+  __unsafe_ensureInitialized(): Promise<void>;
+  /**
+   * Run `body` in a fresh invocation scope with no native request/
+   * connection context attached, so a child-facet RPC never sees
+   * parent-owned I/O handles.
+   */
+  _runFacetInitInvocation<T>(body: () => Promise<T>): Promise<T>;
 }
