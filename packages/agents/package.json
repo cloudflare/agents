@@ -123,6 +123,11 @@
       "import": "./dist/streams/index.js",
       "require": "./dist/streams/index.js"
     },
+    "./sessions": {
+      "types": "./dist/sessions/index.d.ts",
+      "import": "./dist/sessions/index.js",
+      "require": "./dist/sessions/index.js"
+    },
     "./tasks": {
       "types": "./dist/tasks/index.d.ts",
       "import": "./dist/tasks/index.js",

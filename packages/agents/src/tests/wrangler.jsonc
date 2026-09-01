@@ -57,6 +57,18 @@
         "name": "StreamBenchObject"
       },
       {
+        "class_name": "SessionHarnessObject",
+        "name": "SessionHarnessObject"
+      },
+      {
+        "class_name": "SessionSearchHarnessObject",
+        "name": "SessionSearchHarnessObject"
+      },
+      {
+        "class_name": "SessionBenchObject",
+        "name": "SessionBenchObject"
+      },
+      {
         "class_name": "PlainMcpClientObject",
         "name": "PlainMcpClientObject"
       },
@@ -398,6 +410,9 @@
         "StreamHarnessObject",
         "TaskStreamComposeObject",
         "StreamBenchObject",
+        "SessionHarnessObject",
+        "SessionSearchHarnessObject",
+        "SessionBenchObject",
         "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
