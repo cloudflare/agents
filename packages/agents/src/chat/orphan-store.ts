@@ -2,18 +2,15 @@
  * OrphanPersistStore — the minimal message store the orphan-persist write
  * (steps (c)/(d) of the chat-recovery orphan path) goes through.
  *
- * It is the **write subset** of the `SessionProvider` interface
- * (`experimental/memory/session`): `getMessage` + `appendMessage` +
- * `updateMessage`. Target-id resolution (step (b)) stays a per-host hook, so
- * `getLatestLeaf` is intentionally omitted here.
+ * It contains only `getMessage`, `appendMessage`, and `updateMessage`.
+ * Target-id resolution (step (b)) stays a per-host hook, so `getLatestLeaf` is
+ * intentionally omitted here.
  *
- * Parameterized over the host's message type `M` so the seam itself is **not**
- * AI-SDK-specific — mirroring how `SessionProvider` is typed over its own
- * minimal `SessionMessage` rather than the AI SDK's `UIMessage`. The two
- * AI-SDK chat hosts (`@cloudflare/ai-chat`, `@cloudflare/think`) instantiate it
- * at the `UIMessage` default (their orphan reconstruction via
- * `StreamAccumulator.toMessage()` already yields `UIMessage`); `SessionProvider`
- * satisfies it at `SessionMessage`. The AI-SDK-specific *merge* primitive
+ * Parameterized over the host's message type `M` so the seam itself is not
+ * AI-SDK-specific. The two AI-SDK chat hosts (`@cloudflare/ai-chat` and
+ * `@cloudflare/think`) instantiate it at the `UIMessage` default because their
+ * orphan reconstruction via `StreamAccumulator.toMessage()` already yields
+ * `UIMessage`. The AI-SDK-specific merge primitive
  * (`reconcileOrphanPartial`) stays typed on `UIMessage` — the store (where
  * messages live) is neutral, the merge (how AI-SDK partials combine) is not.
  *

@@ -1,0 +1,22 @@
+{
+  "name": "@cloudflare/agents-next-sessions-example",
+  "description": "Next: durable Sessions with streamed history and Workspace-backed attachments",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/shell": "*",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.115.0"
+  }
+}

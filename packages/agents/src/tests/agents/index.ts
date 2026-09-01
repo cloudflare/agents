@@ -49,12 +49,7 @@ export { TestRaceAgent } from "./race";
 export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
 export { TestKeepAliveAgent } from "./keep-alive";
 export { TestMigrationAgent } from "./migration";
-export {
-  TestSessionAgent,
-  TestSessionAgentWithContext,
-  TestSearchAgent
-} from "./session";
-export { TestMultiSessionAgent } from "./multi-session";
+export { TestSessionAgent } from "./session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
 export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
 export {

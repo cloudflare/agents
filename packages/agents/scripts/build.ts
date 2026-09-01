@@ -28,8 +28,6 @@ const entries = [
   "src/sessions/index.ts",
   "src/websockets/index.ts",
   "src/codemode/ai.ts",
-  "src/experimental/memory/session/index.ts",
-  "src/experimental/memory/utils/index.ts",
   "src/browser/index.ts",
   "src/browser/ai.ts",
   "src/browser/tanstack-ai.ts",

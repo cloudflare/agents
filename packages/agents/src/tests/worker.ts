@@ -103,9 +103,6 @@ export {
   TestKeepAliveAgent,
   TestMigrationAgent,
   TestSessionAgent,
-  TestSessionAgentWithContext,
-  TestSearchAgent,
-  TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestSubAgentParent,
   CustomBoundSubAgentParent,
@@ -189,9 +186,6 @@ import type {
   TestKeepAliveAgent,
   TestMigrationAgent,
   TestSessionAgent,
-  TestSessionAgentWithContext,
-  TestSearchAgent,
-  TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestSubAgentParent,
   CustomBoundSubAgentParent,
@@ -259,9 +253,6 @@ export type Env = {
   TestKeepAliveAgent: DurableObjectNamespace<TestKeepAliveAgent>;
   TestMigrationAgent: DurableObjectNamespace<TestMigrationAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
-  TestSessionAgentWithContext: DurableObjectNamespace<TestSessionAgentWithContext>;
-  TestSearchAgent: DurableObjectNamespace<TestSearchAgent>;
-  TestMultiSessionAgent: DurableObjectNamespace<TestMultiSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
   CUSTOM_BOUND_SUB_AGENT_PARENT: DurableObjectNamespace<CustomBoundSubAgentParent>;

@@ -208,16 +208,6 @@
       "import": "./dist/workflows.js",
       "require": "./dist/workflows.js"
     },
-    "./experimental/memory/session": {
-      "types": "./dist/experimental/memory/session/index.d.ts",
-      "import": "./dist/experimental/memory/session/index.js",
-      "require": "./dist/experimental/memory/session/index.js"
-    },
-    "./experimental/memory/utils": {
-      "types": "./dist/experimental/memory/utils/index.d.ts",
-      "import": "./dist/experimental/memory/utils/index.js",
-      "require": "./dist/experimental/memory/utils/index.js"
-    },
     "./experimental/webmcp": {
       "types": "./dist/experimental/webmcp.d.ts",
       "import": "./dist/experimental/webmcp.js",
