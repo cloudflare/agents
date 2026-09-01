@@ -1,0 +1,35 @@
+{
+  "name": "@cloudflare/agents-next-chats-example",
+  "description": "Next: one Durable Object per chat plus a per-user push-based index — the recommended many-chats pattern",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest --run --config src/tests/vitest.config.ts"
+  },
+  "dependencies": {
+    "@cloudflare/kumo": "^2.6.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.48.0",
+    "@cloudflare/vitest-pool-workers": "^0.19.1",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@tailwindcss/vite": "^4",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0",
+    "vitest": "4.1.10",
+    "wrangler": "^4.115.0"
+  }
+}

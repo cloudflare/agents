@@ -1296,6 +1296,42 @@ export class TestSubAgentParent extends Agent {
     return child.get(counterId);
   }
 
+  // ── this.dynamicAgents facade (the new public capability surface) ──
+
+  async dynamicAgentsIncrement(
+    subAgentName: string,
+    counterId: string
+  ): Promise<number> {
+    const child = await this.dynamicAgents.get(CounterSubAgent, subAgentName);
+    return child.increment(counterId);
+  }
+
+  dynamicAgentsHas(subAgentName: string): { facade: boolean; legacy: boolean } {
+    return {
+      facade: this.dynamicAgents.has(CounterSubAgent, subAgentName),
+      legacy: this.hasSubAgent(CounterSubAgent, subAgentName)
+    };
+  }
+
+  dynamicAgentsListNames(): { facade: string[]; legacy: string[] } {
+    return {
+      facade: this.dynamicAgents.list(CounterSubAgent).map((e) => e.name),
+      legacy: this.listSubAgents(CounterSubAgent).map((e) => e.name)
+    };
+  }
+
+  dynamicAgentsAbort(subAgentName: string): void {
+    this.dynamicAgents.abort(
+      CounterSubAgent,
+      subAgentName,
+      new Error("test abort")
+    );
+  }
+
+  async dynamicAgentsDelete(subAgentName: string): Promise<void> {
+    await this.dynamicAgents.delete(CounterSubAgent, subAgentName);
+  }
+
   async subAgentAbort(subAgentName: string): Promise<void> {
     this.abortSubAgent(CounterSubAgent, subAgentName, new Error("test abort"));
   }
