@@ -272,11 +272,19 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         );
       },
 
-      /** Settles successfully after Tasks detaches from JobDriver. */
+      /** Settles successfully after Tasks' five-second job handoff. */
       lateSuccess: async (_input: undefined, step: TaskStep) => {
         return step.do("late-success-step", { timeout: 10_000 }, async () => {
           await new Promise((resolve) => setTimeout(resolve, 5_250));
           return "late-success";
+        });
+      },
+
+      /** Clean sibling that remains active when the same alarm starts an OOM. */
+      alarmSiblingSuccess: async (_input: undefined, step: TaskStep) => {
+        return step.do("alarm-sibling", async () => {
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+          return "alarm-sibling-success";
         });
       }
     },

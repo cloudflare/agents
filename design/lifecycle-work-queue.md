@@ -67,6 +67,9 @@ type LifecycleJobs = {
   list(): LifecycleJob[]; // sync SQL read
   rearm(): Promise<void>; // recover a lost alarm for existing jobs
 };
+
+// Available on Lifecycle and every capability's LifecycleServices:
+trackAlarmWork(work: Promise<unknown>): boolean; // current alarm only
 ```
 
 Every queue mutation re-arms the physical alarm automatically (deferred and
@@ -105,7 +108,9 @@ Four named rules define what a job owner can and cannot rely on:
    durable evidence, return) rather than awaiting it in the hook. The
    driver cannot safely abandon owner code, so the rule is enforced by
    visibility: a dispatch that outlives the job's `hungTimeoutSeconds`
-   (default 30s) logs a warning and emits `job:slow_dispatch`.
+   (default 30s) logs a warning and emits `job:slow_dispatch`. Work that must
+   continue after a bounded handoff registers its promise with
+   `trackAlarmWork()` so it remains part of the current alarm's breaker domain.
 3. **Newer pushes win over drive results.** Every dispatched job carries
    a durable in-flight marker; a same-id `push()` or `reschedule()` made
    while the job executes clears it, and `applyOutcome` only applies a
@@ -156,12 +161,17 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
      complete);
    - the drive result is applied: delete, retime, or leave due.
 4. Run host `onAlarm()`.
-5. Re-arm the physical alarm from queue state.
+5. Await the promises registered through `trackAlarmWork()` as one bounded
+   alarm batch. The deadman remains armed while they settle.
+6. Re-arm the physical alarm from queue state.
 
-Startup and steps 3–4 run inside the alarm memory-limit circuit breaker
+Startup and steps 3–5 run inside the alarm memory-limit circuit breaker
 (initialization included because a severe reset can be thrown during boot
 hydration, before any job runs — the original #1825 case), moved here from
-`Agent.alarm()`: the durable strike counter (`cf_agents:oom_alarm_strikes`)
+`Agent.alarm()`. Registered work is aggregated at this boundary: all of it must
+settle without a memory reset before the alarm clears prior strikes; any memory
+reset enters the breaker once for the whole alarm. The durable strike counter
+(`cf_agents:oom_alarm_strikes`)
 tolerates `maxAlarmMemoryLimitStrikes` consecutive resets (composition-root
 aperture; default 3), backs off the executing job, then seals — purging the
 executing job and invoking the host's `onAlarmMemoryLimit()` hook. After a

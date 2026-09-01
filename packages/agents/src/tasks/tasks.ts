@@ -14,12 +14,11 @@
 import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
 import type { MemoryLimitContext } from "../lifecycle/capability-runner";
-import {
-  detachedLifecycleJobOutcome,
-  type LifecycleJobContext,
-  type LifecycleJobOutcome
+import type {
+  LifecycleJobContext,
+  LifecycleJobOutcome
 } from "../lifecycle/job-queue";
-import { isDurableObjectMemoryLimitReset, isPlatformFailure } from "../retries";
+import { isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
 import { TaskStore } from "./store";
 import { createTaskStepEngine } from "./engine-port";
@@ -123,15 +122,6 @@ const WAKE_JOB_PREFIX = "task:";
 /** Normal Task deadline dispatch. */
 const WAKE_JOB_FN = "wake";
 /**
- * Durable bridge for an OOM that surfaced after queue dispatch detached.
- * The next alarm rethrows the signal inside JobDriver's breaker boundary.
- */
-const LATE_MEMORY_LIMIT_JOB_FN = "late-memory-limit";
-/** Clean alarm boundary after work previously detached from an alarm. */
-const LATE_SETTLED_JOB_FN = "late-settled";
-const MEMORY_LIMIT_RESET_MESSAGE =
-  "Durable Object's isolate exceeded its memory limit and was reset.";
-/**
  * How long one queue-driven attempt may hold the serial dispatch loop
  * before detaching. Correctness never depends on the inline await — the
  * claim backstop owns the durable wake — so this only trades a prompt
@@ -187,8 +177,6 @@ export class Tasks<
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
   readonly #active = new Map<string, ActiveAttempt>();
-  readonly #detached = new Set<string>();
-  readonly #detachedByAlarm = new Set<string>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
@@ -342,28 +330,6 @@ export class Tasks<
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
     const runId = context.job.id.slice(WAKE_JOB_PREFIX.length);
-    if (context.job.fn === LATE_SETTLED_JOB_FN) {
-      // Restore the authoritative run wake if the detached attempt parked;
-      // terminal attempts have no deadline, so this simply removes the marker.
-      await this.#syncWake(runId);
-      return this.#wakeOutcome(runId);
-    }
-    if (context.job.fn === LATE_MEMORY_LIMIT_JOB_FN) {
-      const row = this.#store.getRun(runId);
-      if (!row || TERMINAL_STATES.has(row.state)) return;
-      const payload = context.job.payload;
-      const detail =
-        typeof payload === "object" &&
-        payload !== null &&
-        "message" in payload &&
-        typeof payload.message === "string"
-          ? payload.message
-          : "unknown detached Task failure";
-      // Classification may originally have come from a nested `cause`. Persist
-      // the detail for operators, but restore a canonical platform signal so
-      // serialization cannot turn the marker into an application failure.
-      throw new Error(`${MEMORY_LIMIT_RESET_MESSAGE} ${detail}`);
-    }
     const active = this.#active.get(runId);
     if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
@@ -373,9 +339,8 @@ export class Tasks<
         SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
         WHERE run_id = ${runId} AND state = 'running'
       `;
-      this.#detachedByAlarm.add(runId);
-      this.#observeDetachedAttempt(runId, active.promise);
-      return this.#detachedWakeOutcome(runId);
+      this.lifecycle.trackAlarmWork(active.promise);
+      return this.#wakeOutcome(runId);
     }
     // Dispatch is bounded: the queue drives jobs serially, so this attempt
     // may not hold the loop for its full step budget. Short attempts (the
@@ -396,13 +361,8 @@ export class Tasks<
       // the driver's deferral path unchanged.
       const winner = await Promise.race([attempt, budget]);
       if (winner === "budget") {
-        // Detached platform transients re-enter through the claim backstop.
-        // A late memory reset is different: no alarm frame remains to observe
-        // it, so the attempt observer below persists an immediate marker that
-        // the next alarm rethrows inside JobDriver's breaker boundary.
-        this.#detachedByAlarm.add(runId);
-        this.#observeDetachedAttempt(runId, runAttempt);
-        return this.#detachedWakeOutcome(runId);
+        this.lifecycle.trackAlarmWork(runAttempt);
+        return this.#wakeOutcome(runId);
       }
     } finally {
       clearTimeout(budgetTimer);
@@ -542,73 +502,6 @@ export class Tasks<
     return typeof next === "number" ? { rescheduleAt: next } : undefined;
   }
 
-  /** Return the run's wake while telling JobDriver work remains detached. */
-  #detachedWakeOutcome(runId: string): LifecycleJobOutcome {
-    const outcome = this.#wakeOutcome(runId);
-    return typeof outcome === "object"
-      ? detachedLifecycleJobOutcome(outcome)
-      : outcome;
-  }
-
-  /** Observe one attempt from the point its caller stops awaiting it. */
-  #observeDetachedAttempt(runId: string, attempt: Promise<void>): void {
-    if (this.#detached.has(runId)) return;
-    this.#detached.add(runId);
-    void attempt.then(
-      () => {
-        if (this.#detachedByAlarm.has(runId)) {
-          this.#recordLateSettlement(runId);
-        }
-        this.#detached.delete(runId);
-        this.#detachedByAlarm.delete(runId);
-      },
-      (error) => {
-        if (isDurableObjectMemoryLimitReset(error)) {
-          this.#recordLateMemoryLimit(runId, error);
-        } else if (this.#detachedByAlarm.has(runId)) {
-          this.#recordLateSettlement(runId);
-        }
-        this.#detached.delete(runId);
-        this.#detachedByAlarm.delete(runId);
-      }
-    );
-  }
-
-  /** Schedule the clean alarm boundary missing after detached work settles. */
-  #recordLateSettlement(runId: string): void {
-    void this.lifecycle.jobs
-      .push({
-        id: `${WAKE_JOB_PREFIX}${runId}`,
-        fn: LATE_SETTLED_JOB_FN,
-        time: Date.now(),
-        retry: { maxAttempts: 1 }
-      })
-      .catch(() => {});
-  }
-
-  /** Persist a late OOM for the next alarm-boundary breaker pass. */
-  #recordLateMemoryLimit(runId: string, error: unknown): void {
-    try {
-      const row = this.#store.getRun(runId);
-      if (!row || TERMINAL_STATES.has(row.state)) return;
-      void this.lifecycle.jobs
-        .push({
-          id: `${WAKE_JOB_PREFIX}${runId}`,
-          fn: LATE_MEMORY_LIMIT_JOB_FN,
-          time: Date.now(),
-          payload: {
-            message: error instanceof Error ? error.message : String(error)
-          },
-          retry: { maxAttempts: 1 },
-          recoveryLoop: this.#isRecoveryLoopDefinition(row.definition)
-        })
-        .catch(() => {});
-    } catch {
-      // The run's ordinary claim backstop remains if this best-effort write
-      // also fails under memory pressure.
-    }
-  }
-
   /**
    * Mirror one run's authoritative deadline into the Lifecycle job queue:
    * a non-terminal run with a `next_at` gets one job (id = `task:` plus the
@@ -666,12 +559,10 @@ export class Tasks<
       // one-attempt policy, and internal definitions may need breaker policy.
       const existing = this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${run_id}`);
       if (
-        existing?.fn === LATE_MEMORY_LIMIT_JOB_FN ||
-        existing?.fn === LATE_SETTLED_JOB_FN ||
-        (existing?.fn === WAKE_JOB_FN &&
-          existing.time === next_at &&
-          existing.retry?.maxAttempts === 1 &&
-          existing.recoveryLoop === this.#isRecoveryLoopDefinition(definition))
+        existing?.fn === WAKE_JOB_FN &&
+        existing.time === next_at &&
+        existing.retry?.maxAttempts === 1 &&
+        existing.recoveryLoop === this.#isRecoveryLoopDefinition(definition)
       ) {
         skipped = true;
         continue;
@@ -889,8 +780,7 @@ export class Tasks<
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
     if (startMode === "warm" && !this.lifecycle.starting()) {
-      const warmAttempt = this.#executeRun(runId);
-      this.#observeDetachedAttempt(runId, warmAttempt);
+      void this.#executeRun(runId).catch(() => {});
     }
 
     return {

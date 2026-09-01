@@ -19,7 +19,6 @@ import {
 import type { MemoryLimitContext } from "./capability-runner";
 import {
   hungTimeoutMs,
-  isDetachedLifecycleJobOutcome,
   isHungRow,
   jobFromRow,
   type JobQueue,
@@ -87,11 +86,66 @@ export type JobDriverOptions = {
   readonly reset: (reason: string) => void;
 };
 
+type AlarmWorkSettlement =
+  | { readonly _tag: "clean" }
+  | {
+      readonly _tag: "memoryLimit";
+      readonly error: unknown;
+      readonly executing: JobStorageRow | undefined;
+    };
+
+/** One alarm's dynamically growing set of work returned at bounded handoffs. */
+class AlarmWorkBatch {
+  #pending = 1;
+  #memoryLimit:
+    | Extract<AlarmWorkSettlement, { _tag: "memoryLimit" }>
+    | undefined;
+  #closed = false;
+  readonly #settlement: Promise<AlarmWorkSettlement>;
+  #resolve: (settlement: AlarmWorkSettlement) => void = () => {};
+
+  constructor() {
+    this.#settlement = new Promise((resolve) => {
+      this.#resolve = resolve;
+    });
+  }
+
+  track(work: Promise<unknown>, executing: JobStorageRow | undefined): boolean {
+    if (this.#closed) return false;
+    this.#pending++;
+    void work.then(
+      () => this.#settleOne(),
+      (error) =>
+        this.#settleOne(
+          isDurableObjectMemoryLimitReset(error)
+            ? { _tag: "memoryLimit", error, executing }
+            : undefined
+        )
+    );
+    return true;
+  }
+
+  close(): Promise<AlarmWorkSettlement> {
+    this.#settleOne();
+    return this.#settlement;
+  }
+
+  #settleOne(
+    memoryLimit?: Extract<AlarmWorkSettlement, { _tag: "memoryLimit" }>
+  ): void {
+    this.#memoryLimit ??= memoryLimit;
+    this.#pending--;
+    if (this.#pending !== 0) return;
+    this.#closed = true;
+    this.#resolve(this.#memoryLimit ?? { _tag: "clean" });
+  }
+}
+
 /** @internal Drives the job queue when the Durable Object alarm fires. */
 export class JobDriver {
   readonly #options: JobDriverOptions;
   #executingRow: JobStorageRow | undefined;
-  #detachedDispatch = false;
+  #alarmWork: AlarmWorkBatch | undefined;
 
   constructor(options: JobDriverOptions) {
     this.#options = options;
@@ -113,21 +167,45 @@ export class JobDriver {
     initialize: () => Promise<void>,
     runHostAlarm: () => Promise<void>
   ): Promise<void> {
-    this.#detachedDispatch = false;
+    const alarmWork = new AlarmWorkBatch();
+    this.#alarmWork = alarmWork;
     try {
       await initialize();
       await this.#driveDueJobs();
       await runHostAlarm();
-      // An owner that returned at a bounded handoff still has work whose late
-      // platform failure belongs to this alarm chain. A later fully settled
-      // alarm is the clean boundary that resets prior strikes.
-      if (!this.#detachedDispatch) await this.#clearMemoryLimitStrikes();
+
+      // The deadman alarm was armed before the due batch. Jobs may return at a
+      // bounded handoff so the batch keeps moving; join that dynamically growing
+      // work set here, while the whole alarm remains in one breaker boundary.
+      const settlement = await alarmWork.close();
+      this.#alarmWork = undefined;
+      if (settlement._tag === "memoryLimit") {
+        await this.#handleMemoryLimitReset(
+          settlement.error,
+          settlement.executing
+        );
+        return;
+      }
+
+      await this.#clearMemoryLimitStrikes();
     } catch (error) {
       if (!isDurableObjectMemoryLimitReset(error)) throw error;
-      await this.#handleMemoryLimitReset(error);
+      const executing = this.#executingRow;
+      this.#executingRow = undefined;
+      await this.#handleMemoryLimitReset(error, executing);
       return;
+    } finally {
+      this.#alarmWork = undefined;
     }
     await this.#options.rearm();
+  }
+
+  /**
+   * Keep work started by the current alarm in its breaker domain after a job
+   * returns at a bounded handoff. Returns false outside an alarm invocation.
+   */
+  trackAlarmWork(work: Promise<unknown>): boolean {
+    return this.#alarmWork?.track(work, this.#executingRow) ?? false;
   }
 
   /** Drive every due job once, in due-time order. */
@@ -274,9 +352,6 @@ export class JobDriver {
     }
 
     if (disabled()) return;
-    if (isDetachedLifecycleJobOutcome(outcome)) {
-      this.#detachedDispatch = true;
-    }
     queue.applyOutcome(row.id, outcome ?? undefined);
     this.#executingRow = undefined;
   }
@@ -332,10 +407,11 @@ export class JobDriver {
    * even these small writes can OOM, but swallowing still halts the
    * platform's auto-retry, and a later wake re-arms legitimate work.
    */
-  async #handleMemoryLimitReset(error: unknown): Promise<void> {
+  async #handleMemoryLimitReset(
+    error: unknown,
+    executing: JobStorageRow | undefined
+  ): Promise<void> {
     const { queue, storage } = this.#options;
-    const executing = this.#executingRow;
-    this.#executingRow = undefined;
 
     let strikes = 1;
     try {

@@ -15143,6 +15143,9 @@ export class Think<
       };
     });
     const dispatch = this._chatRecoveryRetryDetached(data, handoff);
+    const trackedTurn = reachedTurn.then(() => {
+      this.lifecycle.trackAlarmWork(dispatch);
+    });
     dispatch.catch((error) => {
       // Before handoff this rejection still owns the current queue execution:
       // Promise.race below propagates it so Tasks preserves the run (or the
@@ -15164,7 +15167,7 @@ export class Think<
     });
     // A platform transient thrown before the turn starts must reach the
     // queue so the job defers and retries (#1730).
-    await Promise.race([dispatch, reachedTurn]);
+    await Promise.race([dispatch, trackedTurn]);
   }
 
   protected async _chatRecoveryRetryDetached(
@@ -15430,6 +15433,9 @@ export class Think<
       };
     });
     const dispatch = this._chatRecoveryContinueDetached(data, handoff);
+    const trackedTurn = reachedTurn.then(() => {
+      this.lifecycle.trackAlarmWork(dispatch);
+    });
     dispatch.catch((error) => {
       if (!handedOff) return;
       if (isPlatformFailure(error)) {
@@ -15447,7 +15453,7 @@ export class Think<
     });
     // A platform transient thrown before the turn starts must reach the
     // queue so the job defers and retries (#1730).
-    await Promise.race([dispatch, reachedTurn]);
+    await Promise.race([dispatch, trackedTurn]);
   }
 
   protected async _chatRecoveryContinueDetached(
