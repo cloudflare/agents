@@ -441,19 +441,19 @@ export class Streams extends LifecycleCapability {
         LIMIT ${limit}
       `,
       listRows: () => this.#sql<StreamRow>`
-        SELECT * FROM cf_agents_streams ORDER BY created_at DESC, stream_id DESC
+        SELECT * FROM cf_agents_streams ORDER BY created_at DESC, rowid DESC
       `,
       rowsByTag: (tag, state) =>
         state
           ? this.#sql<StreamRow>`
               SELECT * FROM cf_agents_streams
               WHERE tag = ${tag} AND state = ${state}
-              ORDER BY created_at DESC, stream_id DESC
+              ORDER BY created_at DESC, rowid DESC
             `
           : this.#sql<StreamRow>`
               SELECT * FROM cf_agents_streams
               WHERE tag = ${tag}
-              ORDER BY created_at DESC, stream_id DESC
+              ORDER BY created_at DESC, rowid DESC
             `,
       importStream: (row) => {
         this.#validateStreamId(row.streamId);
@@ -736,11 +736,16 @@ export class Streams extends LifecycleCapability {
         throw new SqlError(query, cause);
       }
     };
-    // Both tables are WITHOUT ROWID: Cloudflare bills index maintenance as
-    // rows written, and an ordinary rowid table maintains a hidden UNIQUE
-    // index for its PRIMARY KEY — one extra billed row on every INSERT and
-    // DELETE. WITHOUT ROWID makes the PK the table itself, so a chunk
-    // append bills exactly one row (see the write-accounting test).
+    // The chunk table is WITHOUT ROWID: Cloudflare bills index maintenance
+    // as rows written, and an ordinary rowid table maintains a hidden
+    // UNIQUE index for its PRIMARY KEY — one extra billed row on every
+    // INSERT and DELETE. WITHOUT ROWID makes the PK the table itself, so a
+    // chunk append bills exactly one row (see the write-accounting test).
+    // The stream metadata table deliberately stays a rowid table: rowid is
+    // the insertion-order tiebreak that keeps "newest first" deterministic
+    // when rows share a created_at millisecond (stream ids are random),
+    // and it costs one billed row per stream open — per turn, never per
+    // chunk.
     rawSql(`
       CREATE TABLE IF NOT EXISTS cf_agents_streams (
         stream_id TEXT PRIMARY KEY,
@@ -754,7 +759,7 @@ export class Streams extends LifecycleCapability {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         closed_at INTEGER
-      ) WITHOUT ROWID`);
+      )`);
     rawSql(`
       CREATE INDEX IF NOT EXISTS idx_cf_agents_streams_tag
       ON cf_agents_streams(tag, created_at)

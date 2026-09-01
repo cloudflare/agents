@@ -125,9 +125,9 @@ and retention sweeps read the stream rows plus at most one indexed
 chunk-tail row per stale live candidate — down ~6× from the legacy
 correlated-subquery shape and no longer proportional to stored chunks.
 In _billed_ terms the gap is wider still: Cloudflare counts index
-maintenance in `rowsWritten`, the tables are WITHOUT ROWID so a chunk
+maintenance in `rowsWritten`, the chunk table is WITHOUT ROWID so a chunk
 append bills exactly one row, and the legacy schema's per-chunk hidden-PK
-and stream indexes billed three per chunk insert (13 vs 33 billed rows
+and stream indexes billed three per chunk insert (14 vs 33 billed rows
 for a 100-chunk turn — pinned by the write-accounting test).
 
 ## How the design evolved
@@ -164,9 +164,14 @@ cursor })` and a `recover` callback read `status()` as evidence. When
    benchmark's metric) reported 1. WITHOUT ROWID makes the PK the table:
    a chunk append bills exactly one row, pinned by the write-accounting
    test. The same treatment covers the task run/step and job-queue
-   tables, and the task runs table dropped its `(state, next_at)` index —
-   a per-write tax on every claim, refresh, and settle, paid only to
-   speed the startup reconcile's one scan.
+   tables. The stream _metadata_ table is the deliberate exception: it
+   stays a rowid table because rowid is the insertion-order tiebreak that
+   keeps "newest first" deterministic when same-tag rows share a
+   created_at millisecond (ids are random nanoids), and its hidden-index
+   cost lands once per stream open, never per chunk. The task runs table
+   dropped its `(state, next_at)` index — a per-write tax on every claim,
+   refresh, and settle, paid only to speed the startup reconcile's one
+   scan.
 
 ## Alternatives considered
 
