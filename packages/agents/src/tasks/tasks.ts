@@ -4,15 +4,22 @@
  * acceptance, generation-fenced claiming, and due-run processing.
  *
  * Tasks consumes only the standard capability services: storage, the job
- * queue, the host invocation boundary, and events. Every non-terminal run's
- * deadline is mirrored as one Lifecycle queue job while Lifecycle owns the
- * physical alarm, and definition handlers run through Lifecycle's host
- * invocation boundary. Interrupted work replays: completed steps return
- * journaled results and handlers resume from durable evidence.
+ * queue, the host invocation boundary, events, and routing. A run's storage
+ * and step journal always live where it was accepted; only its deadline
+ * mirrors as one Lifecycle queue job, routed to the root Lifecycle when
+ * accepted on a routed sub-agent, since only the root owns the physical
+ * alarm. Definition handlers run through Lifecycle's host invocation
+ * boundary. Interrupted work replays: completed steps return journaled
+ * results and handlers resume from durable evidence.
  */
 
 import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
+import type {
+  LifecycleRouteAddress,
+  LifecycleRouteContext
+} from "../lifecycle/capability";
+import type { MemoryLimitContext } from "../lifecycle/capability-runner";
 import type {
   LifecycleJobContext,
   LifecycleJobOutcome
@@ -76,6 +83,25 @@ export function setTaskDefinitionResolver(
   taskDefinitionResolvers.set(tasks, resolver);
 }
 
+const taskRoutedMemoryLimitHandlers = new WeakMap<
+  object,
+  (context: MemoryLimitContext) => void | Promise<void>
+>();
+
+/**
+ * @internal Supply a composition-root bridge from a routed run's sealed
+ * strike to the owning host's own `onAlarmMemoryLimit` hook. A root's own
+ * local runs already reach that hook through Lifecycle's alarm dispatch on
+ * the same Durable Object; a routed run's owner is a different instance,
+ * whose Lifecycle never observes the root's alarm directly.
+ */
+export function setTaskRoutedMemoryLimitHandler(
+  tasks: Tasks<never>,
+  handler: (context: MemoryLimitContext) => void | Promise<void>
+): void {
+  taskRoutedMemoryLimitHandlers.set(tasks, handler);
+}
+
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
 const CURRENT_FIBER_SCHEMA_VERSION = 1;
 
@@ -101,6 +127,19 @@ const MAX_DEFINITION_NAME_LENGTH = 256;
  * job id space.
  */
 const WAKE_JOB_PREFIX = "task:";
+/** Normal Task deadline dispatch. */
+const WAKE_JOB_FN = "wake";
+/**
+ * A platform failure that escapes an attempt (ReplayStep rethrows once the
+ * step's own retry budget is spent) leaves the run claimed with a future
+ * `next_at`. An in-driver retry would not re-run the step — `#executeRun`
+ * returns at its claim guard — it would only read the claim back as a clean
+ * `{ rescheduleAt }`, hiding the failure from the alarm boundary. One
+ * attempt keeps JobDriver's platform-failure contract: the wake rejects, the
+ * job row is preserved, and the platform re-runs the alarm on a fresh
+ * invocation while the claim deadline stays the durable wake.
+ */
+const WAKE_JOB_RETRY = { maxAttempts: 1 } as const;
 /**
  * How long one queue-driven attempt may hold the serial dispatch loop
  * before detaching. Correctness never depends on the inline await — the
@@ -114,6 +153,46 @@ const TERMINAL_STATES: ReadonlySet<TaskRunState> = new Set([
   "failed",
   "cancelled"
 ]);
+
+/**
+ * A wake job's payload. Owner fields are set only for a routed run's mirror
+ * on the root Lifecycle — the run row and step journal stay on the owning
+ * facet, which is where `dispatch` and `memoryLimit` route back to.
+ */
+type TaskWakeJobPayload = {
+  readonly runId: string;
+  readonly owner_path?: string | null;
+  readonly owner_path_key?: string | null;
+};
+
+function isTaskWakeJobPayload(value: unknown): value is TaskWakeJobPayload {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as TaskWakeJobPayload).runId === "string"
+  );
+}
+
+/** Tasks protocol messages routed between a facet and the root Lifecycle. */
+type TaskRouteMessage =
+  | {
+      readonly type: "syncWake";
+      readonly runId: string;
+      readonly next: number | null;
+    }
+  | { readonly type: "dispatch"; readonly runId: string }
+  | {
+      readonly type: "memoryLimit";
+      readonly runId: string;
+      readonly context: MemoryLimitContext;
+    };
+
+/**
+ * Who drives an accepted run's first attempt: `warm` starts it detached in
+ * the caller's invocation (the public `run()` behaviour), `queued` leaves it
+ * to the durable wake, and `attached` lets the caller drive and await it.
+ */
+type TaskStartMode = "warm" | "queued" | "attached";
 
 /** One live execution attempt in this isolate. */
 type ActiveAttempt = {
@@ -153,6 +232,7 @@ export class Tasks<
   Handlers extends TaskHandlers = TaskCallbacks
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
+  readonly #registered = new Map<string, TaskCallbacks[string]>();
   readonly #active = new Map<string, ActiveAttempt>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
@@ -204,6 +284,7 @@ export class Tasks<
     // values passed at dispatch were parsed from rows this definition's name
     // was persisted with.
     return (this.#definitions[name] ??
+      this.#registered.get(name) ??
       taskDefinitionResolvers.get(this)?.(name)) as
       | TaskCallbacks[string]
       | undefined;
@@ -233,6 +314,45 @@ export class Tasks<
         `Unknown Task definition "${name}": not declared on this Tasks`
       );
     }
+  }
+
+  /**
+   * @internal Framework aperture: register one reserved (`__cf`-prefixed)
+   * Task definition directly on this instance, bypassing the constructor's
+   * `definitions` map so a host's own subclass layers can each declare their
+   * own `definitions` / `taskDefinitions` field without colliding with — or
+   * being silently clobbered by — a framework's internal names. Call once per
+   * name from the owning host's own constructor, unconditionally, so the
+   * definition is rebuilt identically on every Durable Object wake: an
+   * in-flight run resolves the same handler for its persisted definition name
+   * every time, or it cannot resume.
+   *
+   * Throws if `name` does not carry the reserved `__cf` prefix — this is not
+   * a general-purpose registration path; declare ordinary definitions in the
+   * constructor's `definitions` map instead — or if `name` is already
+   * registered, which is always a real conflict: this method runs exactly
+   * once per name per Tasks construction.
+   */
+  register(name: string, definition: TaskCallbacks[string]): void {
+    if (typeof name !== "string" || name.length === 0) {
+      throw new Error("Task definition names must be non-empty strings");
+    }
+    if (name.length > MAX_DEFINITION_NAME_LENGTH) {
+      throw new Error(
+        `Task definition name exceeds ${MAX_DEFINITION_NAME_LENGTH} characters`
+      );
+    }
+    if (!name.startsWith("__cf")) {
+      throw new Error(
+        `register() requires a "__cf"-prefixed reserved definition name, got "${name}"`
+      );
+    }
+    if (Object.hasOwn(this.#definitions, name) || this.#registered.has(name)) {
+      throw new Error(
+        `Task definition "${name}" is already registered on this Tasks capability`
+      );
+    }
+    this.#registered.set(name, definition);
   }
 
   // ── Starting runs ────────────────────────────────────────────────────────
@@ -301,15 +421,81 @@ export class Tasks<
   async onJob(
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
-    const runId = context.job.id.slice(WAKE_JOB_PREFIX.length);
-    if (this.#active.has(runId)) {
+    const timing = isTaskWakeJobPayload(context.job.payload)
+      ? context.job.payload
+      : undefined;
+    const runId = timing?.runId ?? context.job.id.slice(WAKE_JOB_PREFIX.length);
+
+    if (timing?.owner_path) {
+      // This root mirrors a routed facet's wake; the run and its step
+      // journal live on the owning facet, so dispatch routes back there.
+      // The facet fully awaits its own dispatch — no local budget to race,
+      // since this root now races its own await of the call and, on
+      // budget, keeps the still-pending call tracked against this alarm's
+      // memory-limit breaker domain instead of discarding it. Verified
+      // against a deployed repro: a callee's real memory-limit reset mid
+      // RPC rejects the caller's pending call with the platform's own
+      // "exceeded its memory limit" text, exactly what the breaker already
+      // matches on — so a late failure on the facet is attributed here
+      // just like a local detached attempt would be.
+      const target = {
+        key: timing.owner_path_key ?? timing.owner_path,
+        data: timing.owner_path
+      };
+      const call = this.lifecycle.routes.to(target, {
+        type: "dispatch",
+        runId
+      } satisfies TaskRouteMessage);
+      let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+      const budget = new Promise<"budget">((resolve) => {
+        budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
+      });
+      try {
+        const winner = await Promise.race([
+          call.then((outcome) => ({ outcome })),
+          budget
+        ]);
+        if (winner === "budget") {
+          this.lifecycle.trackAlarmWork(call);
+          // The facet's own routed #syncWake, made whenever it eventually
+          // settles, supersedes whatever this returns (newer pushes win
+          // over drive results), same as the local path below.
+          return undefined;
+        }
+        return winner.outcome as LifecycleJobOutcome;
+      } catch (error) {
+        if (isPlatformFailure(error)) throw error;
+        console.error(`error dispatching routed Task run "${runId}"`, error);
+        return "yield";
+      } finally {
+        clearTimeout(budgetTimer);
+      }
+    }
+
+    return this.#dispatchRun(runId);
+  }
+
+  /** Push a live attempt's durable claim deadline forward one claim window. */
+  #refreshClaim(runId: string): void {
+    this.#store.sql`
+      UPDATE cf_agents_task_runs
+      SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
+      WHERE run_id = ${runId} AND state = 'running'
+    `;
+  }
+
+  /**
+   * Drive one local due run to its next durable boundary, bounded by the
+   * dispatch budget, and return the wake outcome for this capability's own
+   * queue job.
+   */
+  async #dispatchRun(runId: string): Promise<LifecycleJobOutcome> {
+    const active = this.#active.get(runId);
+    if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
       // the due job does not hot-loop the alarm while it works.
-      this.#store.sql`
-        UPDATE cf_agents_task_runs
-        SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
-        WHERE run_id = ${runId} AND state = 'running'
-      `;
+      this.#refreshClaim(runId);
+      this.lifecycle.trackAlarmWork(active.promise);
       return this.#wakeOutcome(runId);
     }
     // Dispatch is bounded: the queue drives jobs serially, so this attempt
@@ -324,14 +510,20 @@ export class Tasks<
     const budget = new Promise<"budget">((resolve) => {
       budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
     });
-    const attempt = this.#executeRun(runId).then(() => "settled" as const);
+    const runAttempt = this.#executeRun(runId);
+    const attempt = runAttempt.then(() => "settled" as const);
     try {
       // A platform failure inside the budget rejects the race and re-enters
       // the driver's deferral path unchanged.
       const winner = await Promise.race([attempt, budget]);
       if (winner === "budget") {
-        // Detached: a later failure re-enters through the claim backstop.
-        attempt.catch(() => {});
+        // Hand off the attempt's canonical promise — the one a later
+        // claim-backstop wake finds in #active — so re-tracking is the
+        // driver's documented no-op. The wrapper only unwinds it.
+        this.lifecycle.trackAlarmWork(
+          this.#active.get(runId)?.promise ?? runAttempt
+        );
+        return this.#wakeOutcome(runId);
       }
     } finally {
       clearTimeout(budgetTimer);
@@ -340,26 +532,161 @@ export class Tasks<
   }
 
   /**
+   * Drive one routed dispatch to completion on this owning facet. There is
+   * no local budget to race here: the root that sent this message races
+   * its own await of the call instead, so a full await is safe regardless
+   * of how long the attempt takes — the call keeps running on this facet
+   * either way. An already-active attempt only needs its claim refreshed:
+   * it is already tracked against whichever alarm's breaker domain
+   * originally dispatched it (a root's pending routed call, or this
+   * facet's own local alarm).
+   */
+  async #dispatchRoutedRun(runId: string): Promise<LifecycleJobOutcome> {
+    const active = this.#active.get(runId);
+    if (active) {
+      this.#refreshClaim(runId);
+      return this.#wakeOutcome(runId);
+    }
+    await this.#executeRun(runId);
+    return this.#wakeOutcome(runId);
+  }
+
+  /**
+   * Alarm memory-limit breaker policy (#1825) for the run whose wake struck.
+   *
+   * The run row is the durable source of truth: startup reconciliation
+   * re-derives due-now wakes from it, so the breaker's queue-row backoff
+   * and purge alone cannot contain a run whose attempt deterministically
+   * exhausts memory — a fresh isolate would resurrect it immediately. On a
+   * strike the run's claim is stripped and its deadline pushed to the
+   * backoff wake: the row keeps its state, so a struck `running` row still
+   * reads as an interrupted attempt (`step.interrupted`) when it is
+   * reclaimed, while reconciliation leaves the claimless row alone instead
+   * of flooring its deadline to now. When the breaker seals, the run
+   * terminally fails with an observable `task:failed` outcome.
+   */
+  async onMemoryLimit(context: MemoryLimitContext): Promise<void> {
+    const job = context.executing;
+    if (job?.capability !== this.capabilityId) return;
+    const timing = isTaskWakeJobPayload(job.payload) ? job.payload : undefined;
+    const runId = timing?.runId ?? job.id.slice(WAKE_JOB_PREFIX.length);
+
+    if (timing?.owner_path) {
+      // The struck job was this root's mirror of a routed facet's wake; the
+      // run row and its claim live on the facet, so the strike is forwarded
+      // there to apply the same policy locally — clearing the claim and
+      // backing off (or terminally failing, when sealed). Forwarding a
+      // non-sealed strike too matters: this root's own mirror job backs off
+      // on its own, but the facet's run row would otherwise keep its old
+      // claim, and any facet startup before the backoff elapses would read
+      // that claim as an interrupted attempt and reconcile it due again now
+      // — resurrecting the run through the breaker.
+      try {
+        await this.lifecycle.routes.to(
+          {
+            key: timing.owner_path_key ?? timing.owner_path,
+            data: timing.owner_path
+          },
+          { type: "memoryLimit", runId, context } satisfies TaskRouteMessage
+        );
+      } catch (error) {
+        console.error(
+          `Failed to route memory-limit policy for Task run "${runId}"`,
+          error
+        );
+      }
+      return;
+    }
+    await this.#applyMemoryLimit(runId, context);
+  }
+
+  /**
+   * Apply the alarm memory-limit breaker policy (#1825) to one run, local to
+   * whichever Lifecycle owns its storage — the root for an unrouted run, or
+   * the owning facet when {@link onMemoryLimit} forwarded a routed strike.
+   */
+  async #applyMemoryLimit(
+    runId: string,
+    context: MemoryLimitContext
+  ): Promise<void> {
+    if (context.sealed) {
+      await this.#settleFailed(runId, null, {
+        name: "TaskMemoryLimitSealed",
+        message:
+          "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
+          "consecutive Durable Object memory-limit resets."
+      });
+      return;
+    }
+    if (context.nextTime === undefined) return;
+    const now = Date.now();
+    this.#store.write(
+      `UPDATE cf_agents_task_runs
+       SET generation = NULL,
+           next_at = CASE
+             WHEN next_at IS NULL OR next_at < ? THEN ?
+             ELSE next_at
+           END,
+           updated_at = ?
+       WHERE run_id = ?
+         AND state IN ('pending', 'waiting', 'running')`,
+      [context.nextTime, context.nextTime, now, runId]
+    );
+    await this.#syncWake(runId);
+  }
+
+  /**
    * @internal Framework aperture: durably accept one run — reserved
    * (`__cf`-prefixed) definition names included, which the public `run()`
-   * refuses so users cannot start framework runs — and execute it to its
-   * next durable boundary before returning. The receipt's run may already be
-   * terminal when this resolves; callers that need the outcome read it from
-   * their own channel (the run handler settles it) or from the snapshot.
+   * refuses so users cannot start framework runs — and drive its first
+   * attempt in the caller's invocation, resolving when that attempt reaches
+   * its next durable boundary. The receipt's run may already be terminal
+   * when this resolves; callers that need the outcome read it from their own
+   * channel (the run handler settles it) or from the snapshot.
    */
   async __DO_NOT_USE_WILL_BREAK__runAttached(
     definition: string,
     input: unknown,
     options?: TaskRunOptions
   ): Promise<TaskReceipt> {
+    const receipt = await this.#acceptReserved(
+      definition,
+      input,
+      options,
+      "attached"
+    );
+    if (receipt.accepted) await this.#executeRun(receipt.runId);
+    return receipt;
+  }
+
+  /**
+   * @internal Framework aperture: durably accept one run — reserved names
+   * included — and leave its first attempt to the durable queue wake instead
+   * of warm-starting it in the caller's invocation. Chat recovery uses this
+   * so a continuation always runs under an alarm, where `trackAlarmWork`
+   * keeps its model turn inside the memory-limit breaker domain.
+   */
+  async __DO_NOT_USE_WILL_BREAK__enqueue(
+    definition: string,
+    input: unknown,
+    options?: TaskRunOptions
+  ): Promise<TaskReceipt> {
+    return this.#acceptReserved(definition, input, options, "queued");
+  }
+
+  /** Accept a run of any resolvable definition, reserved names included. */
+  async #acceptReserved(
+    definition: string,
+    input: unknown,
+    options: TaskRunOptions | undefined,
+    startMode: TaskStartMode
+  ): Promise<TaskReceipt> {
     if (!this.#hasDefinition(definition)) {
       throw new Error(
         `Unknown Task definition "${definition}": not declared on this Tasks`
       );
     }
-    const receipt = await this.#accept(definition, input, options);
-    if (receipt.accepted) await this.#executeRun(receipt.runId);
-    return receipt;
+    return this.#accept(definition, input, options, startMode);
   }
 
   /**
@@ -387,44 +714,152 @@ export class Tasks<
    * mirror. The prefix keeps caller-selected run IDs inside Tasks' own job
    * namespace. Every durable mutation of a run's deadline or state funnels
    * through here.
+   *
+   * @returns False when the queue already carried exactly this wake and
+   * nothing was written — a same-values upsert is still a billed row write.
    */
-  async #syncWake(runId: string): Promise<void> {
+  async #syncWake(runId: string): Promise<boolean> {
     const rows = this.#store.sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
     `;
-    const next = rows[0]?.next_at;
+    const next = rows[0]?.next_at ?? null;
+
+    if (this.lifecycle.routes.source) {
+      // The run row stays here; only its deadline mirrors to the root that
+      // owns the physical alarm.
+      return (await this.lifecycle.routes.toRoot({
+        type: "syncWake",
+        runId,
+        next
+      } satisfies TaskRouteMessage)) as boolean;
+    }
+
     const jobId = `${WAKE_JOB_PREFIX}${runId}`;
-    if (typeof next === "number") {
-      await this.lifecycle.jobs.push({ id: jobId, fn: "wake", time: next });
-    } else {
+    if (next === null) {
       await this.lifecycle.jobs.cancel(jobId);
+      return true;
+    }
+    const existing = this.lifecycle.jobs.get(jobId);
+    if (
+      existing?.fn === WAKE_JOB_FN &&
+      existing.time === next &&
+      existing.retry?.maxAttempts === WAKE_JOB_RETRY.maxAttempts
+    ) {
+      return false;
+    }
+    await this.lifecycle.jobs.push({
+      id: jobId,
+      fn: WAKE_JOB_FN,
+      time: next,
+      payload: { runId } satisfies TaskWakeJobPayload,
+      retry: WAKE_JOB_RETRY
+    });
+    return true;
+  }
+
+  /** Handle Tasks protocol messages routed by another Lifecycle. */
+  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
+    const message = context.payload as TaskRouteMessage;
+    switch (message.type) {
+      case "syncWake": {
+        const owner = context.source;
+        if (!owner) throw new Error("Routed Tasks message missing source");
+        return this.#syncRoutedWake(owner, message.runId, message.next);
+      }
+      case "dispatch":
+        return this.#dispatchRoutedRun(message.runId);
+      case "memoryLimit": {
+        await this.#applyMemoryLimit(message.runId, message.context);
+        // The owner's own Lifecycle never observes the root's alarm; this
+        // is its only path to the same `onAlarmMemoryLimit` host hook a
+        // root's own local strike reaches through Lifecycle's alarm
+        // dispatch.
+        const handler = taskRoutedMemoryLimitHandlers.get(this);
+        if (handler) {
+          await this.lifecycle.runInHostContext(() => handler(message.context));
+        }
+        return true;
+      }
+      default:
+        throw new Error("Unknown routed Tasks message");
+    }
+  }
+
+  /** Mirror a routed facet's run deadline into this root's job queue. */
+  async #syncRoutedWake(
+    owner: LifecycleRouteAddress,
+    runId: string,
+    next: number | null
+  ): Promise<boolean> {
+    const jobId = `${WAKE_JOB_PREFIX}${owner.key}:${runId}`;
+    if (next === null) {
+      await this.lifecycle.jobs.cancel(jobId);
+      return true;
+    }
+    const existing = this.lifecycle.jobs.get(jobId);
+    if (
+      existing?.fn === WAKE_JOB_FN &&
+      existing.time === next &&
+      existing.retry?.maxAttempts === WAKE_JOB_RETRY.maxAttempts
+    ) {
+      return false;
+    }
+    await this.lifecycle.jobs.push({
+      id: jobId,
+      fn: WAKE_JOB_FN,
+      time: next,
+      payload: {
+        runId,
+        owner_path: owner.data,
+        owner_path_key: owner.key
+      } satisfies TaskWakeJobPayload,
+      retry: WAKE_JOB_RETRY
+    });
+    return true;
+  }
+
+  /**
+   * @internal Framework aperture: bulk-cancel this root's routed wake
+   * mirrors for every run owned by a deleted facet subtree. The runs and
+   * their step journals live on the deleted facets' own storage and are
+   * wiped with them; only this root's mirror job needs an explicit cancel,
+   * or it stays due forever, retrying a dispatch to a facet that is gone.
+   */
+  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
+    prefix: string
+  ): Promise<void> {
+    for (const job of this.lifecycle.jobs.list()) {
+      const timing = isTaskWakeJobPayload(job.payload)
+        ? job.payload
+        : undefined;
+      const ownerKey = timing?.owner_path_key ?? timing?.owner_path;
+      if (!timing?.owner_path || ownerKey === null || ownerKey === undefined) {
+        continue;
+      }
+      if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
+      await this.lifecycle.jobs.cancel(job.id);
     }
   }
 
   /** Mirror every non-terminal run into the queue (startup reconcile). */
   async #syncAllWakes(): Promise<void> {
-    const rows = this.#store.sql<{ run_id: string; next_at: number }>`
-      SELECT run_id, next_at FROM cf_agents_task_runs
+    const rows = this.#store.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
       WHERE state IN ('pending', 'waiting', 'running')
         AND next_at IS NOT NULL
     `;
-    let skipped = false;
-    for (const { run_id, next_at } of rows) {
-      // On restart the mirror usually survived alongside the run row (same
-      // storage), and a same-values upsert is still a billed row write —
-      // skip it when the durable job already carries this run's deadline.
-      const existing = this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${run_id}`);
-      if (existing?.fn === "wake" && existing.time === next_at) {
-        skipped = true;
-        continue;
-      }
-      await this.#syncWake(run_id);
+    // On restart the mirror usually survived alongside the run row (same
+    // storage), so most rows write nothing; wakes from before the one-attempt
+    // policy are rewritten once.
+    let pushed = false;
+    for (const { run_id } of rows) {
+      if (await this.#syncWake(run_id)) pushed = true;
     }
-    // Pushes re-arm the physical alarm as a side effect; a fully (or
-    // partly) skipped reconcile must recover a lost alarm explicitly.
-    if (skipped) await this.lifecycle.jobs.rearm();
+    // Pushes re-arm the physical alarm as a side effect; a reconcile that
+    // wrote nothing must recover a lost alarm explicitly.
+    if (rows.length > 0 && !pushed) await this.lifecycle.jobs.rearm();
   }
 
   // ── Inspection and control ───────────────────────────────────────────────
@@ -545,15 +980,10 @@ export class Tasks<
   async #accept(
     definition: string,
     input: unknown,
-    options: TaskRunOptions = {}
+    options: TaskRunOptions = {},
+    startMode: TaskStartMode = "warm"
   ): Promise<TaskReceipt> {
     await this.lifecycle.ready();
-    if (this.lifecycle.routes.source) {
-      throw new Error(
-        "Tasks is not yet supported on routed sub-agents: runs must be " +
-          "accepted by the Lifecycle that owns the physical alarm"
-      );
-    }
     if (options.runId !== undefined && options.runId.length === 0) {
       throw new Error("runId must be a non-empty string when provided");
     }
@@ -606,6 +1036,19 @@ export class Tasks<
             `refusing to join it with conflicting key "${options.idempotencyKey}"`
         );
       }
+      // A prior accept can throw after already durably inserting this row —
+      // most likely here, on the wake mirror, rather than on the insert
+      // itself — so a caller retrying the same runId or idempotencyKey
+      // after a failure needs this join to repair a missing or stale
+      // mirror, not just report accepted:false against a row nothing will
+      // ever wake.
+      // A prior accept can throw after already durably inserting this row —
+      // most likely here, on the wake mirror, rather than on the insert
+      // itself — so a caller retrying the same runId or idempotencyKey
+      // after a failure needs this join to repair a missing or stale
+      // mirror, not just report accepted:false against a row nothing will
+      // ever wake.
+      await this.#syncWake(existing.run_id);
       return {
         runId: existing.run_id,
         definition,
@@ -631,7 +1074,7 @@ export class Tasks<
 
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
-    if (!this.lifecycle.starting()) {
+    if (startMode === "warm" && !this.lifecycle.starting()) {
       void this.#executeRun(runId).catch(() => {});
     }
 
@@ -694,6 +1137,12 @@ export class Tasks<
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
     `;
+    // Mirror the claim deadline before the handler runs, not after: a
+    // routed run's root has no other way to learn it, and a push here
+    // clears the queue row's in-flight marker, so it durably wins over a
+    // root dispatch that later returns a stale outcome past its own
+    // budget (job-queue's own "newer pushes win" guard on that marker).
+    await this.#syncWake(runId);
 
     const controller = new AbortController();
     // Emitted before the handler starts: invocation is synchronous up to the
@@ -763,8 +1212,7 @@ export class Tasks<
       );
       if (settled) {
         this.#emit("task:completed", { runId, definition: row.definition });
-        if (row.retain === 0) this.#store.deleteRun(runId);
-        await this.#syncWake(runId);
+        await this.#finishTerminalSettlement(runId, row);
       }
       // Fence rejected: a newer generation owns the run, and every deadline
       // mutation it makes funnels through its own #syncWake — a push here
@@ -924,14 +1372,14 @@ export class Tasks<
       );
       settled = written > 0;
     }
-    if (settled) {
-      const row = this.#store.getRun(runId);
+    const row = settled ? this.#store.getRun(runId) : undefined;
+    if (row) {
       this.#emit("task:cancelled", {
         runId,
-        definition: row?.definition ?? null,
+        definition: row.definition,
         reason: reason ?? null
       });
-      await this.#syncWake(runId);
+      await this.#finishTerminalSettlement(runId, row);
     }
   }
 
@@ -968,16 +1416,25 @@ export class Tasks<
       );
       settled = written > 0;
     }
-    if (settled) {
-      const row = this.#store.getRun(runId);
+    const row = settled ? this.#store.getRun(runId) : undefined;
+    if (row) {
       this.#emit("task:failed", {
         runId,
-        definition: row?.definition ?? null,
+        definition: row.definition,
         error: error.name
       });
-      await this.#syncWake(runId);
+      await this.#finishTerminalSettlement(runId, row);
     }
     return settled;
+  }
+
+  /** Apply terminal retention policy, then remove the run's wake mirror. */
+  async #finishTerminalSettlement(
+    runId: string,
+    row: TaskRunRow | undefined
+  ): Promise<void> {
+    if (row?.retain === 0) this.#store.deleteRun(runId);
+    await this.#syncWake(runId);
   }
 
   /** Make deadlines sane after a fresh isolate: interrupted work wakes now. */

@@ -82,6 +82,12 @@ export type LifecycleServices = {
    */
   readonly jobs: LifecycleJobs;
   /**
+   * Keep work this capability hands off at a bounded `onJob` return inside
+   * the current alarm's memory-limit breaker domain (#1825). Returns false,
+   * tracking nothing, outside an alarm invocation.
+   */
+  readonly trackAlarmWork: (work: Promise<unknown>) => boolean;
+  /**
    * Run a capability-held user callback inside the host invocation context.
    * Capability hooks run outside host context; this is the one boundary for
    * entering it, and a host composition root may substitute its own wrapper

@@ -54,6 +54,9 @@ export interface DynamicAgentHostPort {
   readonly scheduler: {
     __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
   };
+  readonly tasks: {
+    __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
+  };
   /** Local (non-facet-index) durable fiber recovery pass. */
   _checkRunFibers(): Promise<void>;
   /** Overridable RPC entry points — call via the host so subclass overrides intercept. */

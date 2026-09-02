@@ -2281,6 +2281,33 @@ describe("Think — body persistence", () => {
 // ── chatRecovery ────────────────────────────────────────
 
 describe("Think — chatRecovery", () => {
+  it("keeps pre-handoff failure on the current Task and replaces only post-handoff failure", async () => {
+    for (const callback of [
+      "_chatRecoveryContinue",
+      "_chatRecoveryRetry"
+    ] as const) {
+      const before = await freshRecoveryAgent(
+        `${callback}-before-${crypto.randomUUID()}`
+      ).then((agent) =>
+        agent.testRecoveryDispatchHandoffForTest({
+          callback,
+          phase: "before"
+        })
+      );
+      expect(before).toEqual({ threw: true, tasks: 1, schedules: 0 });
+
+      const after = await freshRecoveryAgent(
+        `${callback}-after-${crypto.randomUUID()}`
+      ).then((agent) =>
+        agent.testRecoveryDispatchHandoffForTest({
+          callback,
+          phase: "after"
+        })
+      );
+      expect(after).toEqual({ threw: false, tasks: 2, schedules: 0 });
+    }
+  });
+
   it("chat turn with recovery=true works normally and cleans up fibers", async () => {
     const agent = await freshRecoveryAgent("recovery-basic");
 
