@@ -24,14 +24,15 @@ describe("StateManager capability", () => {
 
   it("persists state before lifecycle startup", async () => {
     await withCapabilityHarness(async ({ install }) => {
-      const { capability, lifecycle } = install(new StateManager<number>());
+      const first = install(new StateManager<number>());
 
-      capability.set(1);
-      expect(capability.get()).toBe(1);
+      first.capability.set(1);
+      expect(first.capability.get()).toBe(1);
 
-      await lifecycle.start();
-      capability.__resetCacheForTesting();
-      expect(capability.get()).toBe(1);
+      await first.lifecycle.start();
+      const second = install(new StateManager<number>());
+      await second.lifecycle.start();
+      expect(second.capability.get()).toBe(1);
     });
   });
 

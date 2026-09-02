@@ -108,9 +108,6 @@ class ServiceCapability extends LifecycleCapability {
       Record<string, string | number | boolean | null>[]
     >();
     expectTypeOf(this.lifecycle.starting()).toEqualTypeOf<boolean>();
-    expectTypeOf(
-      this.lifecycle.waitUntil(Promise.resolve())
-    ).toEqualTypeOf<void>();
     expectTypeOf(this.lifecycle.jobs).toEqualTypeOf<LifecycleJobs>();
     expectTypeOf(
       this.lifecycle.jobs.push({ fn: "tick", time: Date.now() })

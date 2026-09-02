@@ -48,11 +48,8 @@ export class TestProtocolMessagesAgent extends Agent<
   }
 
   @callable()
-  async resetStateForLazyInitTest() {
+  async deleteStateForLazyInitTest() {
     this.sql`DELETE FROM cf_agents_state WHERE id = ${"cf_state_row_id"}`;
-    // Drop the StateManager's in-memory cache so the next `state` read
-    // reloads from storage and re-seeds initialState (the lazy-init path).
-    this._state.__resetCacheForTesting();
   }
 
   @callable()

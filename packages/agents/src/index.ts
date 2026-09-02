@@ -2636,7 +2636,7 @@ export class Agent<
   private _handleStateChanged(
     nextState: State,
     source: Connection | "server"
-  ): Promise<void> {
+  ): void {
     // Broadcast state to protocol-enabled connections, excluding the source
     this._broadcastProtocol(
       JSON.stringify({
@@ -2647,27 +2647,31 @@ export class Agent<
     );
 
     // Notification hook (non-gating). Run after broadcast and do not block.
-    // StateManager registers the returned task with Lifecycle.
+    // Use waitUntil for reliability after the handler returns.
     const { connection, request, email } = agentContext.getStore() || {};
-    return (async () => {
-      try {
-        await runInInvocation(
-          { agent: this, connection, request, email },
-          async () => {
-            this._emit("state:update");
-            await this._callStatePersistenceHook(nextState, source);
-          },
-          { detached: true }
-        );
-      } catch (e) {
-        // onStateChanged/onStateUpdate errors should not affect state or broadcasts
+    this.ctx.waitUntil(
+      (async () => {
         try {
-          await this.onError(e);
-        } catch {
-          // swallow
+          await runInInvocation(
+            { agent: this, connection, request, email },
+            async () => {
+              this._emit("state:update");
+              await this._callStatePersistenceHook(nextState, source);
+            },
+            // Runs past the handler that set the state, on waitUntil's own
+            // extension of the invocation.
+            { detached: true }
+          );
+        } catch (e) {
+          // onStateChanged/onStateUpdate errors should not affect state or broadcasts
+          try {
+            await this.onError(e);
+          } catch {
+            // swallow
+          }
         }
-      }
-    })();
+      })()
+    );
   }
 
   /**

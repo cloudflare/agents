@@ -76,16 +76,6 @@ export class StateManager<State = unknown> extends LifecycleCapability {
     this._tableEnsured = true;
   }
 
-  /**
-   * Drop the in-memory cache so the next {@link get} reloads from storage
-   * (and re-seeds the initial state if the row is absent). Mirrors what a
-   * hibernation wake-up does to the cache; intended for host-internal use and
-   * tests that exercise the lazy-load path in a single live instance.
-   */
-  __resetCacheForTesting(): void {
-    this._state = DEFAULT_STATE as State;
-  }
-
   // ── State access ───────────────────────────────────────────────────────────
 
   /**
@@ -179,11 +169,11 @@ export class StateManager<State = unknown> extends LifecycleCapability {
     }
 
     if (pending) {
-      this.lifecycle.waitUntil(
-        pending.catch((error) => {
-          console.error("StateManager onChanged hook failed:", error);
-        })
-      );
+      // Durable Objects remain active for pending I/O without waitUntil. Keep
+      // set() synchronous while ensuring asynchronous failures are observed.
+      void pending.catch((error) => {
+        console.error("StateManager onChanged hook failed:", error);
+      });
     }
   }
 }

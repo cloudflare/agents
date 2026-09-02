@@ -80,14 +80,6 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     );
   }
 
-  // Access state and check if it recovered to initialState
-  getStateAfterCorruption(): TestState {
-    // Reset the in-memory cache so the getter re-reads from DB
-    this._state.__resetCacheForTesting();
-    // This should trigger the try-catch and fallback to initialState
-    return this.state;
-  }
-
   // Get the current schema version from cf_agents_state
   getSchemaVersion(): number {
     const rows = this.ctx.storage.sql
@@ -176,8 +168,6 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
       value
     );
-    // Reset in-memory cache to sentinel so getter re-reads from DB
-    this._state.__resetCacheForTesting();
   }
 
   // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
@@ -189,7 +179,6 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
     );
-    this._state.__resetCacheForTesting();
   }
 }
 
@@ -239,20 +228,12 @@ export class TestStateAgentNoInitial extends Agent {
     );
   }
 
-  // Reset in-memory cache and read from DB
-  getStateAfterCorruption() {
-    this._state.__resetCacheForTesting();
-    return this.state;
-  }
-
   // Set state to a falsy value directly in the DB
   insertFalsyState(value: string) {
     this.ctx.storage.sql.exec(
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
       value
     );
-    // Reset in-memory cache to sentinel so getter re-reads from DB
-    this._state.__resetCacheForTesting();
   }
 
   // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
@@ -264,7 +245,6 @@ export class TestStateAgentNoInitial extends Agent {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
     );
-    this._state.__resetCacheForTesting();
   }
 
   // Simulate legacy state row without wasChanged: old SDK version that only wrote
@@ -277,7 +257,6 @@ export class TestStateAgentNoInitial extends Agent {
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
       value
     );
-    this._state.__resetCacheForTesting();
   }
 
   // Reset schema version to 0 (simulates a pre-versioning DO)

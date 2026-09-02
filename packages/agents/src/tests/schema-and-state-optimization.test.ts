@@ -14,6 +14,7 @@
  */
 
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
 
@@ -465,7 +466,7 @@ describe("single-row state optimization", () => {
       await agent.insertCorruptedState();
 
       // Access state — should trigger parse error and recover
-      const state = await agent.getStateAfterCorruption();
+      const state = await agent.getState();
 
       expect(state).toEqual({
         count: 0,
@@ -484,7 +485,7 @@ describe("single-row state optimization", () => {
       await agent.insertCorruptedState();
 
       // Access state — should return undefined and clear the corrupted row
-      const state = await agent.getStateAfterCorruption();
+      const state = await agent.getState();
       expect(state).toBeUndefined();
 
       // Corrupted row should be cleaned up
@@ -497,9 +498,10 @@ describe("single-row state optimization", () => {
       const agent = await getAgentByName(env.TestStateAgent, name);
 
       await agent.insertCorruptedState();
-      await agent.getStateAfterCorruption();
+      await agent.getState();
+      await evictDurableObject(agent);
 
-      // Get new stub — should read the recovered state, not corrupted data
+      // A fresh instance should read the recovered state, not corrupted data.
       const agent2 = await getAgentByName(env.TestStateAgent, name);
       const state = await agent2.getState();
 
