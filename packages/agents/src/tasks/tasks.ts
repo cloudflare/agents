@@ -175,6 +175,7 @@ export class Tasks<
   Handlers extends TaskHandlers = TaskCallbacks
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
+  readonly #registered = new Map<string, TaskCallbacks[string]>();
   readonly #active = new Map<string, ActiveAttempt>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
@@ -226,6 +227,7 @@ export class Tasks<
     // values passed at dispatch were parsed from rows this definition's name
     // was persisted with.
     return (this.#definitions[name] ??
+      this.#registered.get(name) ??
       taskDefinitionResolvers.get(this)?.(name)) as
       | TaskCallbacks[string]
       | undefined;
@@ -255,6 +257,45 @@ export class Tasks<
         `Unknown Task definition "${name}": not declared on this Tasks`
       );
     }
+  }
+
+  /**
+   * @internal Framework aperture: register one reserved (`__cf`-prefixed)
+   * Task definition directly on this instance, bypassing the constructor's
+   * `definitions` map so a host's own subclass layers can each declare their
+   * own `definitions` / `taskDefinitions` field without colliding with — or
+   * being silently clobbered by — a framework's internal names. Call once per
+   * name from the owning host's own constructor, unconditionally, so the
+   * definition is rebuilt identically on every Durable Object wake: an
+   * in-flight run resolves the same handler for its persisted definition name
+   * every time, or it cannot resume.
+   *
+   * Throws if `name` does not carry the reserved `__cf` prefix — this is not
+   * a general-purpose registration path; declare ordinary definitions in the
+   * constructor's `definitions` map instead — or if `name` is already
+   * registered, which is always a real conflict: this method runs exactly
+   * once per name per Tasks construction.
+   */
+  register(name: string, definition: TaskCallbacks[string]): void {
+    if (typeof name !== "string" || name.length === 0) {
+      throw new Error("Task definition names must be non-empty strings");
+    }
+    if (name.length > MAX_DEFINITION_NAME_LENGTH) {
+      throw new Error(
+        `Task definition name exceeds ${MAX_DEFINITION_NAME_LENGTH} characters`
+      );
+    }
+    if (!name.startsWith("__cf")) {
+      throw new Error(
+        `register() requires a "__cf"-prefixed reserved definition name, got "${name}"`
+      );
+    }
+    if (Object.hasOwn(this.#definitions, name) || this.#registered.has(name)) {
+      throw new Error(
+        `Task definition "${name}" is already registered on this Tasks capability`
+      );
+    }
+    this.#registered.set(name, definition);
   }
 
   // ── Starting runs ────────────────────────────────────────────────────────

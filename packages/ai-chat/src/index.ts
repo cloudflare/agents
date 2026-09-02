@@ -701,7 +701,7 @@ export class AIChatAgent<
   private _registerChatTurnTaskDefinition(): void {
     const chatFiberName = (this.constructor as typeof AIChatAgent)
       .CHAT_FIBER_NAME;
-    this._registerInternalTaskDefinition(
+    this.tasks.register(
       chatFiberName,
       createChatTurnTaskDefinition({
         definitionName: chatFiberName,
@@ -721,7 +721,7 @@ export class AIChatAgent<
     // SAFETY: the recovery engine is the sole producer of each callback's
     // payload and the Task persists it verbatim, so the callback name selects
     // the matching host input type.
-    this._registerInternalTaskDefinition(
+    this.tasks.register(
       CHAT_RECOVERY_TASK_NAME,
       createChatRecoveryTaskDefinition({
         _chatRecoveryContinue: (data) =>

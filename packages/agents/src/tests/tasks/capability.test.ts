@@ -64,6 +64,70 @@ async function waitFor(
   }
 }
 
+describe("Tasks#register", () => {
+  it("rejects a name without the reserved __cf prefix", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(() =>
+        instance.tasks.register("not-reserved", async () => undefined)
+      ).toThrow(/"__cf"-prefixed reserved definition name/);
+    });
+  });
+
+  it("rejects an empty name", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(() => instance.tasks.register("", async () => undefined)).toThrow(
+        /non-empty strings/
+      );
+    });
+  });
+
+  it("rejects a duplicate registration of the same name", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      instance.tasks.register("__cf_test_dup", async () => "first");
+      expect(() =>
+        instance.tasks.register("__cf_test_dup", async () => "second")
+      ).toThrow(/already registered/);
+    });
+  });
+
+  it("rejects a name that collides with a constructor-declared definition", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      // "pipeline" is declared in TaskHarnessObject's constructor `definitions`
+      // map — not `__cf`-prefixed, so this hits the prefix check first, which
+      // is fine: either failure mode correctly refuses the collision.
+      expect(() =>
+        instance.tasks.register("pipeline", async () => "shadowed")
+      ).toThrow();
+    });
+  });
+
+  it("dispatches a registered reserved definition through the internal aperture", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      instance.tasks.register("__cf_test_registered", async () => "ran");
+      const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+        "__cf_test_registered",
+        undefined
+      );
+      expect(receipt.accepted).toBe(true);
+      expect((await instance.tasks.get(receipt.runId))?.state).toBe(
+        "completed"
+      );
+      // The reserved name stays unreachable through the public surface.
+      await expect(
+        instance.tasks.run(
+          "__cf_test_registered" as unknown as "pipeline",
+          undefined as never
+        )
+      ).rejects.toThrow(/reserved "__cf" prefix/);
+    });
+  });
+});
+
 describe("Tasks capability", () => {
   it("accepts runs durably and deduplicates acceptance", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());

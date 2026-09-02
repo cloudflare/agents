@@ -1766,16 +1766,6 @@ export class Agent<
    */
   declare readonly taskDefinitions?: TaskHandlers;
 
-  /**
-   * Framework-internal Task definitions (chat turns, messenger replies),
-   * consulted before {@link taskDefinitions}. Their `__cf`-prefixed names
-   * cannot be started through the public `tasks.run()`.
-   */
-  private readonly _internalTaskDefinitions = new Map<
-    string,
-    TaskCallbacks[string]
-  >();
-
   readonly mcp: MCPClientManager;
 
   /**
@@ -2377,19 +2367,21 @@ export class Agent<
       onError: (error) => this.onError(error)
     });
 
-    // Agent's definitions live on the class, not in the capability
-    // constructor: framework-internal definitions first (registered by
-    // subclasses like Think through `_registerInternalTaskDefinition`),
-    // then the subclass's overridable `taskDefinitions` field. Both are
-    // resolved lazily, so field initialization order never matters.
-    setTaskDefinitionResolver(this.tasks, (name) => {
-      // SAFETY: declared definitions carry concrete input types; the
-      // resolver surface is the input-erased `TaskCallbacks` form — the
-      // same erasure the Tasks constructor map performs. One cast, here.
-      const definition =
-        this._internalTaskDefinitions.get(name) ?? this.taskDefinitions?.[name];
-      return definition as TaskCallbacks[string] | undefined;
-    });
+    // Framework-internal reserved (`__cf`-prefixed) definitions — chat
+    // turns, chat recovery, messenger replies — register eagerly through
+    // `this.tasks.register()` from each host subclass's own constructor
+    // (AIChatAgent, Think), which runs after `this.tasks` exists here.
+    // What remains for Agent to bridge is only the end user's own
+    // overridable `taskDefinitions` field, which cannot be read yet: a
+    // further-downstream subclass's field initializer runs only after
+    // every constructor body up this chain (this one included) returns.
+    // The resolver stays lazy for exactly that reason; nothing else needs
+    // it any more.
+    setTaskDefinitionResolver(
+      this.tasks,
+      (name) =>
+        this.taskDefinitions?.[name] as TaskCallbacks[string] | undefined
+    );
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -5245,21 +5237,6 @@ export class Agent<
       throw new Error("stash() called outside a fiber");
     }
     ctx.stash(data);
-  }
-
-  /**
-   * Register one framework-internal Task definition on this Agent's
-   * `tasks` capability. Subclasses (Think, AIChatAgent) call this from
-   * their constructors so the definition is rebuilt on every wake; names use
-   * the reserved `__cf` prefix so users cannot start them through the public
-   * `tasks.run()`.
-   * @internal
-   */
-  protected _registerInternalTaskDefinition(
-    name: string,
-    definition: TaskCallbacks[string]
-  ): void {
-    this._internalTaskDefinitions.set(name, definition);
   }
 
   /**
