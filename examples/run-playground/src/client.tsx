@@ -5,16 +5,19 @@ import {
   Button,
   LayerCard,
   PoweredByCloudflare,
+  Sidebar,
   Switch,
-  Tabs,
   Text,
   Textarea
 } from "@cloudflare/kumo";
 import {
   ArrowElbowDownRightIcon,
+  CloudIcon,
+  GithubLogoIcon,
   MoonIcon,
   PlayIcon,
-  SunIcon
+  SunIcon,
+  TerminalWindowIcon
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -170,6 +173,20 @@ const HOST_FUNCTIONS = [
   }
 ];
 
+/**
+ * Left-hand navigation entries. Each demo gets a row here; adding a second
+ * demo means adding an entry and rendering its main content when selected.
+ */
+const DEMOS = [
+  {
+    id: "playground",
+    label: "Run playground",
+    icon: TerminalWindowIcon
+  }
+] as const;
+
+type DemoId = (typeof DEMOS)[number]["id"];
+
 interface RunHistoryEntry {
   durationMs: number;
   ok: boolean;
@@ -194,6 +211,74 @@ function ModeToggle() {
       onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
       icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
     />
+  );
+}
+
+/**
+ * Left navigation sidebar, matching the Cloudflare dashboard's SidebarNav:
+ * the same Kumo Sidebar component with the dash's background and active-item
+ * CSS variable overrides, grouped sections with uppercase labels, and
+ * icon-led menu buttons.
+ */
+function DemoSidebar({
+  demo,
+  onSelect
+}: {
+  demo: DemoId;
+  onSelect: (demo: DemoId) => void;
+}) {
+  return (
+    <Sidebar className="sticky top-0 h-svh [--sidebar-active-bg:var(--color-kumo-recessed)] [--sidebar-bg:var(--color-kumo-base)] dark:[--sidebar-active-bg:var(--color-kumo-control)]">
+      <Sidebar.Header>
+        <div className="flex items-center gap-2 px-2 py-1.5">
+          <CloudIcon
+            size={20}
+            weight="fill"
+            className="shrink-0 text-[#f6821f]"
+          />
+          <span className="truncate font-mono text-sm font-medium text-kumo-default">
+            @cloudflare/run
+          </span>
+        </div>
+      </Sidebar.Header>
+      <Sidebar.Content>
+        <Sidebar.Group>
+          <Sidebar.GroupLabel>Demos</Sidebar.GroupLabel>
+          <Sidebar.Menu>
+            {DEMOS.map((entry) => (
+              <Sidebar.MenuItem key={entry.id}>
+                <Sidebar.MenuButton
+                  icon={entry.icon}
+                  active={demo === entry.id}
+                  onClick={() => onSelect(entry.id)}
+                >
+                  {entry.label}
+                </Sidebar.MenuButton>
+              </Sidebar.MenuItem>
+            ))}
+          </Sidebar.Menu>
+        </Sidebar.Group>
+        <Sidebar.Group>
+          <Sidebar.GroupLabel>Resources</Sidebar.GroupLabel>
+          <Sidebar.Menu>
+            <Sidebar.MenuItem>
+              <Sidebar.MenuButton
+                icon={GithubLogoIcon}
+                href="https://github.com/cloudflare/agents"
+                target="_blank"
+              >
+                cloudflare/agents
+              </Sidebar.MenuButton>
+            </Sidebar.MenuItem>
+          </Sidebar.Menu>
+        </Sidebar.Group>
+      </Sidebar.Content>
+      <Sidebar.Footer>
+        <div className="px-2 pb-1">
+          <PoweredByCloudflare />
+        </div>
+      </Sidebar.Footer>
+    </Sidebar>
   );
 }
 
@@ -304,7 +389,7 @@ function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function MetricsTab({ history }: { history: RunHistoryEntry[] }) {
+function MetricsCard({ history }: { history: RunHistoryEntry[] }) {
   const durations = history.map((entry) => entry.durationMs);
   const failures = history.filter((entry) => !entry.ok).length;
   const median = percentile(durations, 0.5);
@@ -322,8 +407,8 @@ function MetricsTab({ history }: { history: RunHistoryEntry[] }) {
       {history.length === 0 ? (
         <div className="px-4 py-8">
           <Text size="sm" variant="secondary">
-            No runs yet. Run some code on the Playground tab and the server-side
-            duration of each fresh isolate shows up here.
+            No runs yet. Run some code above and the server-side duration of
+            each fresh isolate shows up here.
           </Text>
         </div>
       ) : (
@@ -374,13 +459,18 @@ function MetricsTab({ history }: { history: RunHistoryEntry[] }) {
   );
 }
 
-function AboutTab() {
+/**
+ * Right-hand info column, matching the dashboard's service-overview aside
+ * ("Domains and routes" / "Next steps"): a narrow sticky stack of compact
+ * layered cards.
+ */
+function AboutAside() {
   return (
-    <div className="grid gap-5">
+    <>
       <Card title="How it works">
         <div className="grid gap-3 p-4">
           <Text size="sm">
-            Everything you type on the Playground tab executes in a brand-new{" "}
+            Everything you run here executes in a brand-new{" "}
             <span className="font-mono text-[0.9em]">Dynamic Worker</span> via{" "}
             <span className="font-mono text-[0.9em]">@cloudflare/run</span> — no
             bindings, no imports, and no network. Its only authority is the{" "}
@@ -400,9 +490,9 @@ function AboutTab() {
           {HOST_FUNCTIONS.map((hostFunction) => (
             <div
               key={hostFunction.signature}
-              className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-kumo-line px-4 py-3 last:border-b-0"
+              className="grid gap-1 border-b border-kumo-line px-4 py-3 last:border-b-0"
             >
-              <code className="rounded bg-kumo-elevated px-1.5 py-0.5 font-mono text-xs text-kumo-default">
+              <code className="w-fit rounded bg-kumo-elevated px-1.5 py-0.5 font-mono text-xs text-kumo-default">
                 {hostFunction.signature}
               </code>
               <Text size="sm" variant="secondary">
@@ -435,7 +525,7 @@ function AboutTab() {
           ].map(([label, description]) => (
             <div
               key={label}
-              className="grid gap-x-6 gap-y-1 border-b border-kumo-line px-4 py-3 last:border-b-0 sm:grid-cols-[8rem_1fr]"
+              className="grid gap-1 border-b border-kumo-line px-4 py-3 last:border-b-0"
             >
               <Text size="sm" bold>
                 {label}
@@ -447,7 +537,7 @@ function AboutTab() {
           ))}
         </div>
       </Card>
-    </div>
+    </>
   );
 }
 
@@ -502,7 +592,7 @@ const LOG_LEVEL_CLASSES: Record<string, string> = {
 
 export function App() {
   const initialPreset = EXAMPLE_PRESETS[0];
-  const [tab, setTab] = useState("playground");
+  const [demo, setDemo] = useState<DemoId>("playground");
   const [source, setSource] = useState(initialPreset?.source ?? "");
   const [presetId, setPresetId] = useState(initialPreset?.id);
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
@@ -594,248 +684,239 @@ export function App() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-kumo-canvas">
-      {/* Breadcrumb header row, like the dashboard's global chrome. */}
-      <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-kumo-line bg-kumo-base px-4 md:px-6">
-        <Breadcrumbs size="sm">
-          <Breadcrumbs.Link href="https://github.com/cloudflare/agents">
-            <span className="font-mono">@cloudflare/run</span>
-          </Breadcrumbs.Link>
-          <Breadcrumbs.Separator />
-          <Breadcrumbs.Current>run-playground</Breadcrumbs.Current>
-        </Breadcrumbs>
-        <ModeToggle />
-      </header>
+    <Sidebar.Provider>
+      <DemoSidebar demo={demo} onSelect={setDemo} />
 
-      {/* Sticky navbar with segmented tabs, like the worker service view. */}
-      <nav className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-3 border-b border-kumo-line bg-kumo-canvas px-4 md:px-6">
-        <Tabs
-          variant="segmented"
-          tabs={[
-            { value: "playground", label: "Playground" },
-            { value: "metrics", label: "Metrics" },
-            { value: "about", label: "About" }
-          ]}
-          value={tab}
-          onValueChange={setTab}
-        />
-        <div className="ml-auto hidden items-center sm:flex">
-          <Text size="sm" variant="secondary">
-            Untrusted code, fresh isolate per run
-          </Text>
-        </div>
-      </nav>
-
-      <main className="mx-auto grid w-full max-w-[1200px] grow auto-rows-min gap-5 px-4 pt-8 pb-6 md:px-8">
-        {tab === "playground" && (
-          <div className="grid gap-5">
-            <Card
-              title="Code"
-              meta={
-                <Button
-                  variant="primary"
-                  size="sm"
-                  loading={running}
-                  onClick={handleRun}
-                  icon={<PlayIcon size={14} weight="fill" />}
-                >
-                  Run
-                </Button>
-              }
-            >
-              <div className="grid gap-3 p-4">
-                <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
-                  <div>
-                    <SectionLabel>Examples</SectionLabel>
-                    {renderPresetButtons(EXAMPLE_PRESETS)}
-                  </div>
-                  <div>
-                    <SectionLabel>Try to break it</SectionLabel>
-                    {renderPresetButtons(BREAK_PRESETS)}
-                  </div>
-                </div>
-
-                {activePreset !== undefined && (
-                  <div className="flex items-start gap-1.5 text-kumo-subtle">
-                    <span className="h-lh flex items-center">
-                      <ArrowElbowDownRightIcon size={14} className="shrink-0" />
-                    </span>
-                    <Text size="xs" variant="secondary">
-                      {activePreset.note}
-                    </Text>
-                  </div>
-                )}
-
-                <Textarea
-                  ref={editorRef}
-                  value={source}
-                  onChange={(event) => setSource(event.currentTarget.value)}
-                  onKeyDown={handleEditorKeyDown}
-                  spellCheck={false}
-                  aria-label="Source editor"
-                  className="min-h-[240px] resize-y font-mono text-[13px]"
-                />
-
-                <div className="flex flex-wrap gap-x-6 gap-y-1">
-                  {HOST_FUNCTIONS.map((hostFunction) => (
-                    <div
-                      key={hostFunction.signature}
-                      className="flex items-baseline gap-2"
-                    >
-                      <code className="rounded bg-kumo-elevated px-1 font-mono text-xs text-kumo-default">
-                        {hostFunction.signature}
-                      </code>
-                      <Text size="xs" variant="secondary">
-                        {hostFunction.description}
-                      </Text>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="border-t border-kumo-line p-4">
-                <SectionLabel>Limits</SectionLabel>
-                <div className="grid gap-2.5 sm:grid-cols-3">
-                  <LimitSlider
-                    label="timeoutMs"
-                    value={limits.timeoutMs}
-                    min={500}
-                    max={30_000}
-                    step={500}
-                    format={formatMilliseconds}
-                    onChange={(timeoutMs) =>
-                      setLimits((previous) => ({ ...previous, timeoutMs }))
-                    }
-                  />
-                  <LimitSlider
-                    label="cpuMs"
-                    value={limits.cpuMs}
-                    min={100}
-                    max={5_000}
-                    step={100}
-                    format={formatMilliseconds}
-                    onChange={(cpuMs) =>
-                      setLimits((previous) => ({ ...previous, cpuMs }))
-                    }
-                  />
-                  <LimitSlider
-                    label="maxLogBytes"
-                    value={limits.maxLogBytes}
-                    min={1_024}
-                    max={262_144}
-                    step={1_024}
-                    format={formatBytes}
-                    onChange={(maxLogBytes) =>
-                      setLimits((previous) => ({ ...previous, maxLogBytes }))
-                    }
-                  />
-                </div>
-              </div>
-            </Card>
-
-            <Card
-              title="Result"
-              meta={
-                <>
-                  {result?.ok === true && (
-                    <Switch
-                      size="sm"
-                      label="Raw"
-                      checked={showRaw}
-                      onCheckedChange={setShowRaw}
-                    />
-                  )}
-                  {result !== undefined && (
-                    <span
-                      className="font-mono text-xs text-kumo-subtle"
-                      title="time spent inside run() on the server"
-                    >
-                      {result.durationMs}ms
-                    </span>
-                  )}
-                  {result?.ok === true && (
-                    <Badge variant="success">completed</Badge>
-                  )}
-                  {result?.ok === false && (
-                    <Badge variant="destructive">{result.code}</Badge>
-                  )}
-                </>
-              }
-            >
-              <div className="p-4">
-                {result === undefined && !running && (
-                  <Text size="sm" variant="secondary">
-                    Run some code to see its result, logs, and errors here.
-                  </Text>
-                )}
-                {running && (
-                  <Text size="sm" variant="secondary">
-                    Loading a fresh isolate…
-                  </Text>
-                )}
-
-                {result?.ok === true && (
-                  <div>
-                    <pre className="rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-status-success whitespace-pre-wrap break-words">
-                      {showRaw ? result.raw : result.value}
-                    </pre>
-                    {showRaw && (
-                      <p className="mt-1.5 font-mono text-xs text-kumo-subtle">
-                        The full run result object — status, value, and captured
-                        logs.
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {result?.ok === false && (
-                  <div>
-                    <pre className="font-mono text-xs text-status-error whitespace-pre-wrap break-words">
-                      {result.message}
-                    </pre>
-                    {result.stack !== undefined && (
-                      <StackTrace
-                        stack={result.stack}
-                        onJumpToLine={jumpToLine}
-                      />
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {result !== undefined && result.logs.length > 0 && !showRaw && (
-                <div className="border-t border-kumo-line p-4">
-                  <SectionLabel>
-                    Console ({result.logs.length} entr
-                    {result.logs.length === 1 ? "y" : "ies"})
-                  </SectionLabel>
-                  <div className="max-h-64 overflow-y-auto rounded-md bg-kumo-elevated p-2.5">
-                    {result.logs.map((log, index) => (
-                      <pre
-                        // biome-ignore lint: log order is the identity
-                        key={index}
-                        className={`font-mono text-xs whitespace-pre-wrap break-words ${LOG_LEVEL_CLASSES[log.level] ?? "text-kumo-default"}`}
-                      >
-                        <span className="text-kumo-subtle">[{log.level}] </span>
-                        {log.message}
-                      </pre>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </Card>
+      <div className="flex min-h-svh min-w-0 flex-1 flex-col bg-kumo-canvas">
+        {/* Breadcrumb header row, like the dashboard's global chrome. */}
+        <header className="sticky top-0 z-30 flex h-12 shrink-0 items-center justify-between gap-3 border-b border-kumo-line bg-kumo-base px-4 md:px-6">
+          <div className="flex min-w-0 items-center gap-2">
+            <Sidebar.Trigger />
+            <Breadcrumbs size="sm">
+              <Breadcrumbs.Link href="https://github.com/cloudflare/agents">
+                <span className="font-mono">@cloudflare/run</span>
+              </Breadcrumbs.Link>
+              <Breadcrumbs.Separator />
+              <Breadcrumbs.Current>run-playground</Breadcrumbs.Current>
+            </Breadcrumbs>
           </div>
-        )}
+          <div className="flex shrink-0 items-center gap-3">
+            <div className="hidden items-center lg:flex">
+              <Text size="sm" variant="secondary">
+                Untrusted code, fresh isolate per run
+              </Text>
+            </div>
+            <ModeToggle />
+          </div>
+        </header>
 
-        {tab === "metrics" && <MetricsTab history={history} />}
+        <main className="mx-auto w-full max-w-[1600px] grow px-4 pt-8 pb-6 md:px-8">
+          {demo === "playground" && (
+            /* Main + aside columns, like the dashboard's PageColumns. */
+            <div className="flex flex-col gap-6 xl:flex-row">
+              <div className="flex min-w-0 grow flex-col gap-5">
+                <Card
+                  title="Code"
+                  meta={
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      loading={running}
+                      onClick={handleRun}
+                      icon={<PlayIcon size={14} weight="fill" />}
+                    >
+                      Run
+                    </Button>
+                  }
+                >
+                  <div className="grid gap-3 p-4">
+                    <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
+                      <div>
+                        <SectionLabel>Examples</SectionLabel>
+                        {renderPresetButtons(EXAMPLE_PRESETS)}
+                      </div>
+                      <div>
+                        <SectionLabel>Try to break it</SectionLabel>
+                        {renderPresetButtons(BREAK_PRESETS)}
+                      </div>
+                    </div>
 
-        {tab === "about" && <AboutTab />}
+                    {activePreset !== undefined && (
+                      <div className="flex items-start gap-1.5 text-kumo-subtle">
+                        <span className="h-lh flex items-center">
+                          <ArrowElbowDownRightIcon
+                            size={14}
+                            className="shrink-0"
+                          />
+                        </span>
+                        <Text size="xs" variant="secondary">
+                          {activePreset.note}
+                        </Text>
+                      </div>
+                    )}
 
-        <footer className="flex justify-center pt-2">
-          <PoweredByCloudflare />
-        </footer>
-      </main>
-    </div>
+                    <Textarea
+                      ref={editorRef}
+                      value={source}
+                      onChange={(event) => setSource(event.currentTarget.value)}
+                      onKeyDown={handleEditorKeyDown}
+                      spellCheck={false}
+                      aria-label="Source editor"
+                      className="min-h-[240px] resize-y font-mono text-[13px]"
+                    />
+                  </div>
+
+                  <div className="border-t border-kumo-line p-4">
+                    <SectionLabel>Limits</SectionLabel>
+                    <div className="grid gap-2.5 sm:grid-cols-3">
+                      <LimitSlider
+                        label="timeoutMs"
+                        value={limits.timeoutMs}
+                        min={500}
+                        max={30_000}
+                        step={500}
+                        format={formatMilliseconds}
+                        onChange={(timeoutMs) =>
+                          setLimits((previous) => ({ ...previous, timeoutMs }))
+                        }
+                      />
+                      <LimitSlider
+                        label="cpuMs"
+                        value={limits.cpuMs}
+                        min={100}
+                        max={5_000}
+                        step={100}
+                        format={formatMilliseconds}
+                        onChange={(cpuMs) =>
+                          setLimits((previous) => ({ ...previous, cpuMs }))
+                        }
+                      />
+                      <LimitSlider
+                        label="maxLogBytes"
+                        value={limits.maxLogBytes}
+                        min={1_024}
+                        max={262_144}
+                        step={1_024}
+                        format={formatBytes}
+                        onChange={(maxLogBytes) =>
+                          setLimits((previous) => ({
+                            ...previous,
+                            maxLogBytes
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+                </Card>
+
+                <Card
+                  title="Result"
+                  meta={
+                    <>
+                      {result?.ok === true && (
+                        <Switch
+                          size="sm"
+                          label="Raw"
+                          checked={showRaw}
+                          onCheckedChange={setShowRaw}
+                        />
+                      )}
+                      {result !== undefined && (
+                        <span
+                          className="font-mono text-xs text-kumo-subtle"
+                          title="time spent inside run() on the server"
+                        >
+                          {result.durationMs}ms
+                        </span>
+                      )}
+                      {result?.ok === true && (
+                        <Badge variant="success">completed</Badge>
+                      )}
+                      {result?.ok === false && (
+                        <Badge variant="destructive">{result.code}</Badge>
+                      )}
+                    </>
+                  }
+                >
+                  <div className="p-4">
+                    {result === undefined && !running && (
+                      <Text size="sm" variant="secondary">
+                        Run some code to see its result, logs, and errors here.
+                      </Text>
+                    )}
+                    {running && (
+                      <Text size="sm" variant="secondary">
+                        Loading a fresh isolate…
+                      </Text>
+                    )}
+
+                    {result?.ok === true && (
+                      <div>
+                        <pre className="rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-status-success whitespace-pre-wrap break-words">
+                          {showRaw ? result.raw : result.value}
+                        </pre>
+                        {showRaw && (
+                          <p className="mt-1.5 font-mono text-xs text-kumo-subtle">
+                            The full run result object — status, value, and
+                            captured logs.
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {result?.ok === false && (
+                      <div>
+                        <pre className="font-mono text-xs text-status-error whitespace-pre-wrap break-words">
+                          {result.message}
+                        </pre>
+                        {result.stack !== undefined && (
+                          <StackTrace
+                            stack={result.stack}
+                            onJumpToLine={jumpToLine}
+                          />
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {result !== undefined &&
+                    result.logs.length > 0 &&
+                    !showRaw && (
+                      <div className="border-t border-kumo-line p-4">
+                        <SectionLabel>
+                          Console ({result.logs.length} entr
+                          {result.logs.length === 1 ? "y" : "ies"})
+                        </SectionLabel>
+                        <div className="max-h-64 overflow-y-auto rounded-md bg-kumo-elevated p-2.5">
+                          {result.logs.map((log, index) => (
+                            <pre
+                              // biome-ignore lint: log order is the identity
+                              key={index}
+                              className={`font-mono text-xs whitespace-pre-wrap break-words ${LOG_LEVEL_CLASSES[log.level] ?? "text-kumo-default"}`}
+                            >
+                              <span className="text-kumo-subtle">
+                                [{log.level}]{" "}
+                              </span>
+                              {log.message}
+                            </pre>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                </Card>
+
+                <MetricsCard history={history} />
+              </div>
+
+              {/* Sticky info aside, like the dashboard's right-hand column. */}
+              <aside className="flex w-full flex-col gap-5 xl:sticky xl:top-[4.25rem] xl:h-fit xl:w-[300px] xl:shrink-0">
+                <AboutAside />
+              </aside>
+            </div>
+          )}
+        </main>
+      </div>
+    </Sidebar.Provider>
   );
 }
 
