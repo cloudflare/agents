@@ -453,17 +453,19 @@ The decision rule: **a facet is a child whose code or lifecycle the parent super
 One top-level Durable Object per chat, plus a per-user index DO the chats push their metadata into:
 
 ```typescript
-// ChatAgent (one DO per chat) pushes on every write:
-const user = await getAgentByName(this.env.UserAgent, userId);
-await user.recordChatActivity({ chatId, title, lastMessage, updatedAt });
+// ChatAgent (one DO per chat) pushes on every write, through whatever
+// RPC surface the hub exposes over its RoutedAgents catalog:
+const user = await getAgentByName(this.env.UserAgent, ownerUserId);
+await user.recordChatActivity(chatId, { title, lastMessage });
 
-// UserAgent (per-user index) answers listing and cross-chat search
-// from its own SQLite — no chat DO wakes up.
+// UserAgent (the hub) answers listing and cross-chat search from its
+// own SQLite — no chat DO wakes up — and applies the push with
+// `this.chats.setMetadata(chatId, meta)`.
 ```
 
 `RoutedAgents` packages the hub side of this pattern: a durable ID-to-Agent catalog plus request and WebSocket forwarding under one route segment. See [Routing to independent Agents](./routing.md#routing-to-independent-agents).
 
-Each chat gets its own alarms, placement, and storage budget; deletion is one `destroy()`; and "search across all my chats" reads only the index. The example treats that index as a best-effort derived projection: a failed push leaves it stale until the next message, and a push for a deleted chat is refused. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the pattern built on `RoutedAgents`, with tests. Idempotency and repair belong to the production design in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
+Each chat gets its own alarms, placement, and storage budget; deletion is one `chats.delete(id)` call; and "search across all my chats" reads only the index. The example treats that index as a best-effort derived projection: a failed push leaves it stale until the next message, and a push for a deleted chat is refused. See [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) for the pattern built on `RoutedAgents`, with tests. Idempotency and repair belong to the production design in [`design/rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md).
 
 ## Examples
 

@@ -63,7 +63,21 @@ function encodeMetadata(value: unknown): string {
  * CRUD without waking any target, and forwards matching HTTP requests and
  * WebSocket upgrades to the selected Agent. After an upgrade the target
  * owns the socket, so ordinary frames never wake the owner. The target
- * Agent needs no matching capability.
+ * Agent needs no matching capability. Destroying the owner condemns every
+ * remaining entry so targets never outlive their catalog.
+ *
+ * Pick a `route` that cannot appear as a literal path segment elsewhere
+ * under the owner (its own name, another route, or a path the owner's own
+ * `onRequest` handles) — forwarding matches every occurrence of the route
+ * segment in the path, so a coincidental match with no active entry
+ * behind it is answered `404` instead of reaching the owner.
+ *
+ * A forwarded suffix is not searched for a `/sub/{class}/{name}` dynamic
+ * agents marker: `Agent.fetch()` resolves that marker against the OWNER's
+ * exported classes before this capability's `onRequest` ever runs, so a
+ * matching marker is served as a facet of the owner, not forwarded to the
+ * target. Address a target's own dynamic agents through a direct
+ * connection to that target, not through the owner's route.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -96,7 +110,7 @@ export class RoutedAgents<
   ): Promise<RoutedAgentEntry<Metadata>> {
     await this.lifecycle.ready();
     const id = crypto.randomUUID();
-    const metadata = options?.metadata ?? null;
+    const encoded = encodeMetadata(options?.metadata ?? null);
     const now = Date.now();
     this.#sql(
       `INSERT INTO ${TABLE} (route, id, agent_name, status, metadata, created_at, updated_at)
@@ -104,11 +118,19 @@ export class RoutedAgents<
       this.#route,
       id,
       crypto.randomUUID(),
-      encodeMetadata(metadata),
+      encoded,
       now,
       now
     );
-    return { id, metadata, createdAt: now, updatedAt: now };
+    // Round-trip through JSON so this agrees with list()'s decoded copy —
+    // returning the caller's object verbatim would diverge for values JSON
+    // can't represent exactly (undefined fields, NaN, non-plain objects).
+    return {
+      id,
+      metadata: JSON.parse(encoded) as Metadata | null,
+      createdAt: now,
+      updatedAt: now
+    };
   }
 
   /** Resolve an active entry to an initialized, typed Agent stub. */
@@ -193,6 +215,36 @@ export class RoutedAgents<
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (route, id)
     ) WITHOUT ROWID`);
+  }
+
+  /**
+   * Condemn every remaining entry when the owner itself is destroyed.
+   *
+   * `Agent.destroy()` disposes capabilities before it wipes its own
+   * storage, so the catalog is still readable here — without this, the
+   * catalog would vanish with the owner while every target it named kept
+   * running and billing storage, unreachable forever. One failed RPC is
+   * logged and does not block condemning the rest.
+   */
+  async dispose(): Promise<void> {
+    const entries = this.#sql<{ agentName: string }>(
+      `SELECT agent_name AS agentName FROM ${TABLE}
+       WHERE route = ? AND status = 'active'`,
+      this.#route
+    );
+    await Promise.all(
+      entries.map(({ agentName }) =>
+        this.#namespace
+          .get(this.#namespace.idFromName(agentName))
+          ._cf_scheduleDestroy()
+          .catch((error) =>
+            console.error(
+              `RoutedAgents "${this.#route}" failed to condemn ${agentName} on owner disposal`,
+              error
+            )
+          )
+      )
+    );
   }
 
   /** Forward a matching HTTP request to the selected Agent. */

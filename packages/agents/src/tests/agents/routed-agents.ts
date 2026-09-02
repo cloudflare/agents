@@ -69,6 +69,11 @@ export class RoutingOwnerAgent extends Agent<Cloudflare.Env> {
     return this.chats.create({ metadata: { title } });
   }
 
+  /** Test-only escape hatch to exercise metadata values RoutedChatMetadata forbids. */
+  createChatRaw(metadata: Record<string, unknown>) {
+    return this.chats.create({ metadata: metadata as RoutedChatMetadata });
+  }
+
   listChats() {
     return this.chats.list();
   }

@@ -79,6 +79,28 @@ describe("user hub routing to one DO per chat", () => {
     expect(await user.searchChats("nothing-matches")).toEqual([]);
   });
 
+  it("rejects a malformed message body with 400 instead of throwing", async () => {
+    const userId = uniqueUser();
+    const user = await getAgentByName(env.UserAgent, userId);
+    const chatId = await user.createChat();
+
+    const badJson = await exports.default.fetch(chatUrl(userId, chatId), {
+      method: "POST",
+      body: "not json"
+    });
+    expect(badJson.status).toBe(400);
+
+    const wrongShape = await exports.default.fetch(chatUrl(userId, chatId), {
+      method: "POST",
+      body: JSON.stringify({ role: "narrator", text: 5 })
+    });
+    expect(wrongShape.status).toBe(400);
+
+    expect(await user.listChats()).toMatchObject([
+      { id: chatId, metadata: { title: null, lastMessage: null } }
+    ]);
+  });
+
   it("deleteChat stops routing and refuses delayed pushes", async () => {
     const userId = uniqueUser();
     const user = await getAgentByName(env.UserAgent, userId);

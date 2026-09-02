@@ -71,6 +71,40 @@ describe("RoutedAgents", () => {
     expect(await owner.listChats()).toEqual([created]);
   });
 
+  it("agrees with list() on the JSON round-trip of metadata create() returns", async () => {
+    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    // NaN only survives JSON as null, so this catches create() returning
+    // the caller's object verbatim instead of the encoded-then-decoded copy.
+    const created = await owner.createChatRaw({
+      title: "x",
+      score: Number.NaN
+    });
+    const expected = { title: "x", score: null };
+    expect(created.metadata).toEqual(expected);
+    expect((await owner.listChats())[0]?.metadata).toEqual(expected);
+  });
+
+  it("condemns every remaining entry when the owner is destroyed", async () => {
+    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const first = await owner.createChat("First");
+    const second = await owner.createChat("Second");
+    const firstName = await owner.physicalName(first.id);
+    const secondName = await owner.physicalName(second.id);
+    if (!firstName || !secondName) throw new Error("Expected physical names");
+
+    await owner.setChatValue(first.id, "message", "persisted");
+    await owner.setChatValue(second.id, "message", "persisted");
+    // destroy() aborts the isolate after completing, so the RPC may reject.
+    await (owner.destroy() as Promise<void>).catch(() => {});
+
+    for (const name of [firstName, secondName]) {
+      await vi.waitFor(async () => {
+        const revived = await getAgentByName(env.RoutedChatAgent, name);
+        expect(await revived.getValue("message")).toBeNull();
+      }, 10_000);
+    }
+  });
+
   it("updates metadata without waking unrelated child Agents", async () => {
     const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
     const first = await owner.createChat("First");
@@ -123,6 +157,27 @@ describe("RoutedAgents", () => {
       name: physicalName,
       path: "/chats/other"
     });
+  });
+
+  // Known limitation, documented on the RoutedAgents class: Agent.fetch()
+  // resolves a `/sub/{class}/{name}` marker against the OWNER's exported
+  // classes before RoutedAgents' onRequest ever runs, so a marker inside a
+  // routed suffix is served as a facet of the owner instead of reaching
+  // the target. This test pins that current behavior rather than hiding
+  // it — it is not the desired outcome, and the routed `name` below is a
+  // facet name on the owner, not the target's physical name.
+  it("does not forward a /sub/ marker inside a routed suffix (known limitation)", async () => {
+    const name = ownerName();
+    const owner = await getAgentByName(env.RoutingOwnerAgent, name);
+    const created = await owner.createChat("Has a sub marker");
+    const physicalName = await owner.physicalName(created.id);
+
+    const response = await exports.default.fetch(
+      `http://example.com${routedPath(name, created.id, "/sub/routed-chat-agent/facet-child/details")}`
+    );
+    const body = await response.json();
+    expect(body).toMatchObject({ name: "facet-child" });
+    expect(body).not.toMatchObject({ name: physicalName });
   });
 
   it("returns a child-owned WebSocket that survives child eviction", async () => {

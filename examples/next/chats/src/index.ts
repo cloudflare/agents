@@ -96,8 +96,23 @@ export class ChatAgent extends Agent<Env> {
       return new Response("Not found", { status: 404 });
     }
     if (request.method === "POST") {
-      const { role, text } =
-        await request.json<Pick<ChatMessage, "role" | "text">>();
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return new Response("Invalid JSON body", { status: 400 });
+      }
+      const { role, text } = body as Partial<ChatMessage>;
+      if (
+        (role !== "user" && role !== "assistant") ||
+        typeof text !== "string" ||
+        text === ""
+      ) {
+        return new Response(
+          'Body must be { "role": "user" | "assistant", "text": string }',
+          { status: 400 }
+        );
+      }
       await this.addMessage(role, text);
     }
     return Response.json(this.getMessages());
@@ -124,9 +139,18 @@ export class UserAgent extends Agent<Env> {
     const { id } = await this.chats.create({
       metadata: { title: null, lastMessage: null }
     });
-    const chat = await this.chats.get(id);
-    if (!chat) throw new Error(`Chat ${id} vanished during creation`);
-    await chat.init({ userId: this.name, chatId: id });
+    try {
+      const chat = await this.chats.get(id);
+      if (!chat) throw new Error(`Chat ${id} vanished during creation`);
+      await chat.init({ userId: this.name, chatId: id });
+    } catch (error) {
+      // The catalog row is uninitialized ownership without a matching
+      // one-time init call, so it would never learn the chat pushes its
+      // activity back into. Remove it rather than leave a chat that looks
+      // created but can never appear as more than "New chat" again.
+      await this.chats.delete(id);
+      throw error;
+    }
     return id;
   }
 
