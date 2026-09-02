@@ -13,3 +13,7 @@ Payload lifetime is derived from message references; the bytes go when the last 
 `getRecentHistory()` loses its `minRecentMessages` argument. The byte budget is now a hard ceiling: a message-count floor admitted rows whatever their size, so a window of media-heavy messages could hydrate far past the limit meant to bound it. The newest message is always returned.
 
 Also fixes two migration faults that could lose data: `AIChatAgent` dropped its legacy table when rows were merely _accounted for_ rather than imported, deleting any row that failed to parse; and Sessions stamped its schema version even when a legacy lift was incomplete, so it never retried. Both lifts are idempotent, so the source now survives until every row has actually landed.
+
+`SessionStats` loses `totalContentBytes` and `pathLength`. Nothing read either, and both measured only the active branch — excluding other branches, other sessions in the object, and the attachment tables — so as a size signal they answered a different question than the one anyone would ask them. The token estimate that gates auto-compaction is what remains.
+
+`appendMessage` now returns the same inlined message whether it inserted or found a duplicate. It previously returned pointer form on the duplicate paths, so hosts saw one shape or the other depending on whether the row already existed, and compensated by scanning every message for a pointer prefix before deciding whether to re-read.

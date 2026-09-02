@@ -96,10 +96,6 @@ export interface SessionStats {
    * estimate only gates cheap triggers.
    */
   tokenEstimate: number;
-  /** Summed stored content bytes of the active path. */
-  totalContentBytes: number;
-  /** Message count of the active path. */
-  pathLength: number;
 }
 
 /** One row of {@link Sessions.listSessions} — derived, never registry-backed. */

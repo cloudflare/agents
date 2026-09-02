@@ -261,7 +261,7 @@ The common path pays nothing for it. A window of messages with no continuations 
 
 Splitting is not a way to shrink the database. Continuation rows live in the same Durable Object as the message they belong to, inside the same 10 GB. Billing counts rows written, not bytes, so a 500 KB message costs the same one billed row as a tiny one, and a 2 MB message costs two.
 
-`SessionRowStat.bytes` and `SessionStats.totalContentBytes` report the whole message — row plus continuations — so a byte budget passed to `getRecentHistory()` bounds the memory a hydration will actually take.
+`SessionRowStat.bytes` and the `totalContentBytes` returned by `getRecentHistory()` report the whole message — row plus continuations — so a byte budget passed to `getRecentHistory()` bounds the memory a hydration will actually take.
 
 ### Files belong in a file store
 

@@ -82,7 +82,7 @@ describe("Sessions capability", () => {
 
       const leaf = await session.getLatestLeaf();
       expect(leaf?.id).toBe("m3");
-      expect((await session.stats()).pathLength).toBe(3);
+      expect(await session.getHistoryRowStats()).toHaveLength(3);
 
       const streamed = await collect(session.history());
       expect(streamed.map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
@@ -101,7 +101,7 @@ describe("Sessions capability", () => {
       });
       const stored = await session.getMessage("dup");
       expect(stored?.parts[0].text).toBe("first");
-      expect((await session.stats()).pathLength).toBe(1);
+      expect(await session.getHistoryRowStats()).toHaveLength(1);
     });
   });
 
@@ -456,10 +456,6 @@ describe("Sessions capability", () => {
         Math.ceil(raw - covered + estimateStringTokens("stats summary"))
       );
       expect(stats.tokenEstimate).toBe(expected);
-      expect(stats.pathLength).toBe(5);
-      expect(stats.totalContentBytes).toBe(
-        rows.reduce((sum, row) => sum + row.bytes, 0)
-      );
     });
   });
 
@@ -707,9 +703,6 @@ describe("Sessions capability", () => {
         const [, bigRow, leafRow] = rows;
         // `bytes` is the whole message, not just the slice the row holds.
         expect(bigRow.bytes).toBeGreaterThan(MAX_INLINE_ROW_BYTES);
-        expect((await session.stats()).totalContentBytes).toBe(
-          rows.reduce((sum, row) => sum + row.bytes, 0)
-        );
 
         // A budget that covers the big row's FULL size reaches it.
         const generous = await session.getRecentHistory(

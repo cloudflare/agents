@@ -198,7 +198,11 @@ export class Session {
     options: AppendOptions = {}
   ): Promise<AppendResult> {
     await this.#ready();
-    const existing = this.#core.getMessageRaw(this.sessionId, message.id);
+    // Inlined, not raw: what a caller and the change feed receive must be the
+    // same shape whether the append inserted or found a duplicate. Handing
+    // back pointer form here is what forced hosts to sniff for
+    // `attachment:sha256:` and re-read.
+    const existing = this.#core.getMessage(this.sessionId, message.id);
     if (existing) {
       await this.#core.notify({
         type: "append",
@@ -219,8 +223,7 @@ export class Session {
     );
     if (!inserted) {
       const stored =
-        this.#core.getMessageRaw(this.sessionId, message.id) ??
-        prepared.message;
+        this.#core.getMessage(this.sessionId, message.id) ?? prepared.message;
       await this.#core.notify({
         type: "append",
         sessionId: this.sessionId,

@@ -12,7 +12,6 @@
  */
 
 import {
-  ATTACHMENT_URL_PREFIX,
   extractAttachments,
   referencedAttachments,
   resolveAttachments
@@ -25,7 +24,6 @@ import {
 } from "./errors";
 import type { SessionsIo } from "./io";
 import { overlayMessage, planOverlays } from "./overlays";
-import { byteLength } from "./sanitize";
 import {
   estimateAttachmentTokens,
   estimatedDataUrlBytes,
@@ -62,7 +60,6 @@ type StatsCache = {
   pathIds: string[];
   pathIdSet: Set<string>;
   rawTokens: number;
-  rawBytes: number;
   /** −(covered span tokens) + (summary tokens) for applicable overlays. */
   overlayAdjustment: number;
 };
@@ -677,9 +674,7 @@ export class SessionsCore {
       tokenEstimate: Math.max(
         0,
         Math.ceil(cache.rawTokens + cache.overlayAdjustment)
-      ),
-      totalContentBytes: cache.rawBytes,
-      pathLength: cache.pathIds.length
+      )
     };
   }
 
@@ -701,7 +696,6 @@ export class SessionsCore {
       pathIds,
       pathIdSet: new Set(pathIds),
       rawTokens: stats.reduce((sum, row) => sum + row.tokenEstimate, 0),
-      rawBytes: stats.reduce((sum, row) => sum + row.bytes, 0),
       overlayAdjustment
     };
     this.#statsCache.set(sessionId, cache);
@@ -882,19 +876,11 @@ export class SessionsCore {
 
     const cache = this.#statsCache.get(sessionId);
     if (cache) {
-      // A message that points at payloads costs more than its serialized
-      // pointer JSON: `pathRowStats` charges the payloads too, because that is
-      // what a read materializes. Rather than duplicate that formula here and
-      // risk the two drifting, drop the cache and let the next `stats()`
-      // derive it. Reads are cheap; a wrong total is not.
-      if (referencedAttachments(staged).length > 0) {
-        this.#statsCache.delete(sessionId);
-      } else if (parent === cache.leafId && previousLeaf === cache.leafId) {
+      if (parent === cache.leafId && previousLeaf === cache.leafId) {
         cache.leafId = message.id;
         cache.pathIds.push(message.id);
         cache.pathIdSet.add(message.id);
         cache.rawTokens += tokenEstimate;
-        cache.rawBytes += byteLength(json);
       } else {
         this.#statsCache.delete(sessionId);
       }
@@ -978,18 +964,7 @@ export class SessionsCore {
 
     const cache = this.#statsCache.get(sessionId);
     if (cache?.pathIdSet.has(message.id)) {
-      // Same reason as append: an attachment-bearing row is charged its
-      // payloads by `pathRowStats`, and the old content may have referenced
-      // payloads this version dropped. Derive rather than track.
-      if (
-        referencedAttachments(staged).length > 0 ||
-        oldContent.includes(ATTACHMENT_URL_PREFIX)
-      ) {
-        this.#statsCache.delete(sessionId);
-      } else {
-        cache.rawTokens += tokenEstimate - old.token_estimate;
-        cache.rawBytes += byteLength(json) - byteLength(oldContent);
-      }
+      cache.rawTokens += tokenEstimate - old.token_estimate;
     }
     this.io.emit("session:message:updated", {
       sessionId,
