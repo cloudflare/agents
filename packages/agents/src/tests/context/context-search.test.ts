@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { ContextBlocks, type ContextProvider } from "../../sessions/context";
-import type { SearchProvider } from "../../sessions/context-search";
+import {
+  ContextBlocks,
+  type ContextProvider,
+  type SearchProvider
+} from "../../context";
 
 // ── In-memory search provider for tests ────────────────────────
 

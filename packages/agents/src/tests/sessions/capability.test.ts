@@ -8,16 +8,16 @@ import type {
 import {
   attachmentResponse,
   attachmentUrl,
+  MAX_INLINE_ROW_BYTES,
   parseAttachmentUrl,
   SessionAttachmentTooLargeError,
-  SessionMessageNotFoundError,
+  SessionMessageTooLargeError,
   SessionSearchDisabledError,
   Sessions,
   estimateStringTokens,
   type SessionAttachmentBucket,
   type SessionChangeEvent,
-  type SessionMessage,
-  type SkillProvider
+  type SessionMessage
 } from "../../sessions";
 import { withCapabilityHarness } from "../shared/capability-harness";
 import { SESSION_ATTACHMENT_CHUNK_BYTES } from "../../sessions/attachment-storage";
@@ -110,7 +110,7 @@ describe("Sessions capability", () => {
 
       const leaf = await session.getLatestLeaf();
       expect(leaf?.id).toBe("m3");
-      expect(await session.getPathLength()).toBe(3);
+      expect((await session.stats()).pathLength).toBe(3);
 
       const streamed = await collect(session.history());
       expect(streamed.map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
@@ -129,7 +129,7 @@ describe("Sessions capability", () => {
       });
       const stored = await session.getMessage("dup");
       expect(stored?.parts[0].text).toBe("first");
-      expect(await session.getPathLength()).toBe(1);
+      expect((await session.stats()).pathLength).toBe(1);
     });
   });
 
@@ -171,17 +171,18 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("updates messages in place and throws for unknown ids", async () => {
+  it("updates messages in place and returns null for unknown ids", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
       await session.appendMessage(text("u1", "before"));
-      await session.updateMessage(text("u1", "after"));
+      const updated = await session.updateMessage(text("u1", "after"));
+      expect(updated?.parts[0].text).toBe("after");
       expect((await session.getMessage("u1"))?.parts[0].text).toBe("after");
 
-      await expect(
-        session.updateMessage(text("missing", "nope"))
-      ).rejects.toBeInstanceOf(SessionMessageNotFoundError);
+      // An absent id is a miss, not a failure: no row, no throw, no event.
+      expect(await session.updateMessage(text("missing", "nope"))).toBeNull();
+      expect(await session.getMessage("missing")).toBeNull();
     });
   });
 
@@ -207,22 +208,6 @@ describe("Sessions capability", () => {
         expect(instance.tableNames()).toContain("cf_agents_session_fts");
       }
     );
-  });
-
-  it("can preserve legacy no-op semantics for missing updates", async () => {
-    await withCapabilityHarness(async ({ install }) => {
-      const { capability, lifecycle } = install(
-        new Sessions({ missingUpdate: "ignore" })
-      );
-      await lifecycle.start();
-
-      await expect(
-        capability.session().updateMessage(text("missing", "ignored"))
-      ).resolves.toMatchObject({ id: "missing" });
-      await expect(
-        capability.session().getMessage("missing")
-      ).resolves.toBeNull();
-    });
   });
 
   it("splices children to the grandparent on mid-chain delete", async () => {
@@ -757,13 +742,10 @@ describe("Sessions capability", () => {
       });
     });
 
-    it("cleans only newly created blobs when an ignored update does not persist", async () => {
+    it("cleans only newly created blobs when an update finds no row", async () => {
       await withCapabilityHarness(async ({ install, storage }) => {
         const { capability, lifecycle } = install(
-          new Sessions({
-            attachments: { inlineThresholdBytes: 1 },
-            missingUpdate: "ignore"
-          })
+          new Sessions({ attachments: { inlineThresholdBytes: 1 } })
         );
         await lifecycle.start();
         const existingUrl = `data:text/plain;base64,${btoa("existing")}`;
@@ -935,182 +917,30 @@ describe("Sessions capability", () => {
       });
     });
 
-    it("retains threshold-independent media hints when policy is lowered", async () => {
-      await withCapabilityHarness(async ({ install }) => {
-        let threshold = 4096;
+    it("rejects attachments above the configured memory ceiling", async () => {
+      await withCapabilityHarness(async ({ install, storage }) => {
+        // The default ceiling is 32 MiB; this pins the policy, not the size.
         const { capability, lifecycle } = install(
-          new Sessions({
-            attachments: {
-              inlineThresholdBytes: Number.MAX_SAFE_INTEGER,
-              evictionThresholdBytes: () => threshold,
-              keepRecentMessages: 2
-            }
-          })
+          new Sessions({ attachments: { maxAttachmentBytes: 4096 } })
         );
         await lifecycle.start();
-        const session = capability.session();
-        const original = imageMessage("threshold-media", 2048);
-        await session.appendMessage(original);
-        await session.appendMessage(text("threshold-recent-1", "one"));
-        await session.appendMessage(text("threshold-recent-2", "two"));
 
-        expect(await session.evictAgedMedia()).toMatchObject({
-          messages: 0,
-          backlogRemains: false
-        });
-        threshold = 1024;
-        expect(await session.evictAgedMedia()).toMatchObject({
-          messages: 1,
-          backlogRemains: false
-        });
-        expect(
-          parseAttachmentUrl(
-            (
-              await session.getMessage("threshold-media", {
-                reconstruct: "pointer"
-              })
-            )?.parts[1].url
-          )
-        ).toBeTruthy();
-      });
-    });
-
-    it("losslessly externalizes file parts after they age out", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const original = imageMessage("aged-image", 4096);
-        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-        sync.ensureTables();
-        sync.appendMessage("", original);
-
-        const session = instance.sessions.session();
-        await session.appendMessage(text("recent-1", "one"));
-        await session.appendMessage(text("recent-2", "two"));
-        const result = await session.evictAgedMedia();
-
-        expect(result).toMatchObject({
-          messages: 1,
-          parts: 1,
-          backlogRemains: false
-        });
-        const pointer = await session.getMessage("aged-image", {
-          reconstruct: "pointer"
-        });
-        expect(parseAttachmentUrl(pointer?.parts[1].url)).toBeTruthy();
-        expect((await session.getMessage("aged-image"))?.parts[1].url).toBe(
-          original.parts[1].url
-        );
-        expect(instance.attachmentBlobCount()).toBe(1);
-      });
-    });
-
-    it("externalizes aged tool strings without changing output shape", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-        sync.ensureTables();
-        sync.appendMessage("", {
-          id: "aged-tool",
-          role: "assistant",
-          parts: [
-            {
-              type: "tool-screenshot",
-              toolName: "screenshot",
-              toolCallId: "shot-1",
-              state: "output-available",
-              input: { page: 1 },
-              output: {
-                note: "kept",
-                frames: [{ image: "z".repeat(4096) }]
-              }
-            }
-          ]
-        });
-        const session = instance.sessions.session();
-        await session.appendMessage(text("recent-tool-1", "one"));
-        await session.appendMessage(text("recent-tool-2", "two"));
-
-        const result = await session.evictAgedMedia();
-        expect(result).toMatchObject({ messages: 1, parts: 1 });
-        const stored = await session.getMessage("aged-tool", {
-          reconstruct: "pointer"
-        });
-        const output = stored?.parts[0].output as
-          | { note: string; frames: Array<{ image: string }> }
-          | undefined;
-        expect(output?.note).toBe("kept");
-        expect(output?.frames[0].image).toContain("attachment:sha256:");
-        expect((await session.stats()).attachmentBytes).toBe(4096);
-      });
-    });
-
-    it("uses compare-and-swap so maintenance cannot overwrite a live rewrite", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-        sync.ensureTables();
-        sync.appendMessage("", {
-          id: "racy",
-          role: "assistant",
-          parts: [
-            {
-              type: "tool-dump",
-              toolName: "dump",
-              state: "output-available",
-              output: "x".repeat(4096)
-            }
-          ]
-        });
-        const session = instance.sessions.session();
-        await session.appendMessage(text("race-recent-1", "one"));
-        await session.appendMessage(text("race-recent-2", "two"));
-
-        instance.onAttachmentStored = () => {
-          instance.onAttachmentStored = undefined;
-          sync.updateMessage("", text("racy", "live rewrite"));
-        };
-        const result = await session.evictAgedMedia();
-
-        expect(result?.messages).toBe(0);
-        expect((await session.getMessage("racy"))?.parts[0].text).toBe(
-          "live rewrite"
-        );
-        expect(instance.attachmentBlobCount()).toBe(0);
-      });
-    });
-
-    it("marks large non-media rows checked so bounded passes make progress", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-        sync.ensureTables();
-        sync.appendMessage("", text("large-text", "plain ".repeat(1000)));
-        const session = instance.sessions.session();
-        await session.appendMessage(text("plain-recent-1", "one"));
-        await session.appendMessage(text("plain-recent-2", "two"));
-
-        expect(await session.evictAgedMedia()).toMatchObject({
-          messages: 0,
-          backlogRemains: false
-        });
-        expect(await session.evictAgedMedia()).toMatchObject({
-          messages: 0,
-          backlogRemains: false
-        });
-      });
-    });
-
-    it("rejects attachments above the configured memory ceiling", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        await expect(
-          instance.sessions.attachments.put(
-            new Uint8Array(8 * 1024 * 1024 + 1),
-            { mediaType: "application/octet-stream" }
-          )
-        ).rejects.toBeInstanceOf(SessionAttachmentTooLargeError);
-        expect(instance.attachmentBlobCount()).toBe(0);
-        expect(instance.attachmentChunkCount()).toBe(0);
+        const error = await capability.attachments
+          .put(new Uint8Array(4097), {
+            mediaType: "application/octet-stream"
+          })
+          .catch((e) => e);
+        expect(error).toBeInstanceOf(SessionAttachmentTooLargeError);
+        expect(error.maxBytes).toBe(4096);
+        for (const table of [
+          "cf_agents_session_attachment_blobs",
+          "cf_agents_session_attachment_chunks"
+        ]) {
+          expect(
+            storage.sql.exec(`SELECT COUNT(*) AS count FROM ${table}`).one()
+              .count
+          ).toBe(0);
+        }
       });
     });
 
@@ -1150,106 +980,6 @@ describe("Sessions capability", () => {
     });
   });
 
-  describe("context and skills", () => {
-    it("auto-wires durable context and a namespaced frozen prompt", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const first = instance.sessions
-          .session("first")
-          .withContext("memory", { maxTokens: 100 })
-          .withCachedPrompt();
-        const second = instance.sessions
-          .session("second")
-          .withContext("memory", { maxTokens: 100 })
-          .withCachedPrompt();
-
-        await first.replaceContextBlock("memory", "first fact");
-        await second.replaceContextBlock("memory", "second fact");
-        expect(await first.freezeSystemPrompt()).toContain("first fact");
-        expect(await second.freezeSystemPrompt()).toContain("second fact");
-
-        await first.replaceContextBlock("memory", "changed after freeze");
-        expect(await first.freezeSystemPrompt()).toContain("first fact");
-        expect(await first.refreshSystemPrompt()).toContain(
-          "changed after freeze"
-        );
-      });
-    });
-
-    it("registers and removes runtime context blocks", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const session = instance.sessions.session();
-        const block = await session.addContext("extension-memory");
-        expect(block.writable).toBe(true);
-        await session.replaceContextBlock("extension-memory", "remember this");
-        expect(session.getContextBlock("extension-memory")?.content).toBe(
-          "remember this"
-        );
-        expect(session.removeContext("extension-memory")).toBe(true);
-        expect(session.getContextBlock("extension-memory")).toBeNull();
-      });
-    });
-
-    it("restores loaded skills and reclaims their stored output on unload", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const skills: SkillProvider = {
-          get: async () => "- guide: Project guide",
-          load: async () => "full guide"
-        };
-        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-        sync.ensureTables();
-        sync.appendMessage("", {
-          id: "skill-result",
-          role: "assistant",
-          parts: [
-            {
-              type: "tool-load_context",
-              toolName: "load_context",
-              toolCallId: "load-1",
-              state: "output-available",
-              input: { label: "skills", key: "guide" },
-              output: "full guide"
-            }
-          ]
-        });
-        const session = instance.sessions
-          .session()
-          .withContext("skills", { provider: skills });
-
-        expect(await session.getLoadedSkillKeys()).toEqual(
-          new Set(["skills:guide"])
-        );
-        expect(await session.unloadSkill("skills", "guide")).toBe(true);
-        const stored = await session.getMessage("skill-result", {
-          reconstruct: "pointer"
-        });
-        expect(stored?.parts[0].output).toBe("[skill unloaded: guide]");
-      });
-    });
-
-    it("includes context in the cheap auto-compaction trigger", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        let compactions = 0;
-        const session = instance.sessions
-          .session()
-          .withContext("soul", {
-            provider: { get: async () => "context ".repeat(200) }
-          })
-          .onCompaction(async () => {
-            compactions++;
-            return null;
-          })
-          .compactAfter(100);
-
-        await session.appendMessage(text("context-trigger", "short"));
-        expect(compactions).toBe(1);
-      });
-    });
-  });
-
   describe("search", () => {
     it("throws a stable error when indexing is disabled", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
@@ -1282,43 +1012,425 @@ describe("Sessions capability", () => {
     });
   });
 
-  describe("sync aperture", () => {
-    it("reads and writes before the lifecycle starts", async () => {
+  describe("verbatim import", () => {
+    it("imports historical messages with an explicit parent and timestamp", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-        sync.ensureTables();
-        expect(sync.appendMessage("", text("pre1", "pre-start"))).toBe(true);
-        expect(sync.appendMessage("", text("pre1", "again"))).toBe(false);
-        expect(sync.latestLeafId("")).toBe("pre1");
-        expect(sync.readAll("")).toHaveLength(1);
-
-        // The lifecycle then starts and the same rows serve the public API.
-        const history = await instance.sessions.session().getHistory();
-        expect(history.map((m) => m.id)).toEqual(["pre1"]);
-      });
-    });
-
-    it("imports historical messages verbatim", async () => {
-      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-        const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-        sync.ensureTables();
-        sync.importMessage("", text("i1", "first"), {
+        const session = instance.sessions.session();
+        await session.importMessage(text("i1", "first"), {
           parentId: null,
           createdAt: 1000
         });
-        sync.importMessage("", text("i2", "second"), {
+        await session.importMessage(text("i2", "second"), {
           parentId: "i1",
           createdAt: 2000
         });
-        sync.importMessage("", text("i1", "duplicate root"), {
+
+        expect((await session.getMessage("i1"))?.parts[0].text).toBe("first");
+        expect((await session.getLatestLeaf())?.id).toBe("i2");
+        expect((await session.getHistory()).map((m) => m.id)).toEqual([
+          "i1",
+          "i2"
+        ]);
+        expect(instance.messageRows("")).toEqual([
+          { id: "i1", seq: 1, type: "message", parent_id: null },
+          { id: "i2", seq: 2, type: "message", parent_id: "i1" }
+        ]);
+      });
+    });
+
+    it("is idempotent on message ids and dispatches no change event", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const events: SessionChangeEvent[] = [];
+        instance.sessions.subscribe((event) => {
+          events.push(event);
+        });
+        const session = instance.sessions.session();
+        await session.importMessage(text("i1", "first"), {
+          parentId: null,
+          createdAt: 1000
+        });
+        await session.importMessage(text("i1", "duplicate root"), {
           parentId: null,
           createdAt: 3000
         });
-        expect(sync.latestLeafId("")).toBe("i2");
-        const history = await instance.sessions.session().getHistory();
-        expect(history.map((m) => m.id)).toEqual(["i1", "i2"]);
+
+        expect((await session.getMessage("i1"))?.parts[0].text).toBe("first");
+        expect((await session.getHistory()).map((m) => m.id)).toEqual(["i1"]);
+        // An import is a migration, not a turn: nothing mirrors it.
+        expect(events).toEqual([]);
+      });
+    });
+
+    it("stores the message verbatim, without offloading payloads", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const original = imageMessage("i-media", 4096);
+        await session.importMessage(original, {
+          parentId: null,
+          createdAt: 1000
+        });
+
+        expect(instance.attachmentBlobCount()).toBe(0);
+        const stored = await session.getMessage("i-media", {
+          reconstruct: "pointer"
+        });
+        expect(stored?.parts[1].url).toBe(original.parts[1].url);
+      });
+    });
+  });
+
+  describe("schema", () => {
+    it("keys every table without a rowid and owns no context table", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        await instance.sessions.session().appendMessage(text("s", "schema"));
+
+        for (const table of [
+          "cf_agents_session_messages",
+          "cf_agents_session_compactions",
+          "cf_agents_session_attachments",
+          "cf_agents_session_config",
+          "cf_agents_session_attachment_blobs",
+          "cf_agents_session_attachment_chunks"
+        ]) {
+          expect(instance.isWithoutRowid(table)).toBe(true);
+        }
+
+        // Ordering is `ORDER BY seq`, never rowid, and rows carry a type.
+        expect(instance.columnNames("cf_agents_session_messages")).toEqual([
+          "session_id",
+          "id",
+          "seq",
+          "parent_id",
+          "type",
+          "role",
+          "content",
+          "token_estimate",
+          "media_candidate_bytes",
+          "created_at"
+        ]);
+        // Attachment references are derived: no path, media type, size, or
+        // filename is duplicated onto the reference row.
+        expect(instance.columnNames("cf_agents_session_attachments")).toEqual([
+          "session_id",
+          "message_id",
+          "hash"
+        ]);
+        // Context blocks belong to `agents/context`, which creates the table
+        // lazily. Sessions must not create it.
+        expect(instance.tableNames()).not.toContain("cf_agents_context_blocks");
+      });
+    });
+
+    it("keys messages by (session_id, id), so ids may repeat across sessions", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const left = instance.sessions.session("left");
+        const right = instance.sessions.session("right");
+        await left.appendMessage(text("shared", "left body"));
+        await right.appendMessage(text("shared", "right body"));
+
+        expect((await left.getMessage("shared"))?.parts[0].text).toBe(
+          "left body"
+        );
+        expect((await right.getMessage("shared"))?.parts[0].text).toBe(
+          "right body"
+        );
+        await right.updateMessage(text("shared", "right rewritten"));
+        expect((await left.getMessage("shared"))?.parts[0].text).toBe(
+          "left body"
+        );
+
+        await left.deleteMessages(["shared"]);
+        expect(await right.getMessage("shared")).not.toBeNull();
+      });
+    });
+  });
+
+  describe("lossless offload", () => {
+    it("offloads an oversized text part and reconstructs it byte for byte", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const body = "t".repeat(2 * 1024 * 1024);
+        const original = text("big-text", body);
+        const result = await session.appendMessage(original);
+
+        expect(result.attachments).toHaveLength(1);
+        const stored = await session.getMessage("big-text", {
+          reconstruct: "pointer"
+        });
+        // Pointer mode never touches the store: the pointer stays as written.
+        expect(stored?.parts[0].text).toBe(
+          attachmentUrl(result.attachments[0].hash)
+        );
+        expect(stored?.parts[0].type).toBe("text");
+
+        const inlined = await session.getMessage("big-text");
+        expect(inlined?.parts[0].text).toBe(body);
+        expect(inlined).toEqual(original);
+      });
+    });
+
+    it("offloads an oversized reasoning part", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const original: SessionMessage = {
+          id: "big-reasoning",
+          role: "assistant",
+          parts: [{ type: "reasoning", text: "r".repeat(2 * 1024 * 1024) }]
+        };
+        await session.appendMessage(original);
+
+        const stored = await session.getMessage("big-reasoning", {
+          reconstruct: "pointer"
+        });
+        expect(parseAttachmentUrl(stored?.parts[0].text)).toBeTruthy();
+        expect(await session.getMessage("big-reasoning")).toEqual(original);
+      });
+    });
+
+    it("offloads a nested tool-output string without truncating it", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const dump = "d".repeat(3 * 1024 * 1024);
+        const original: SessionMessage = {
+          id: "big-tool",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-read",
+              toolName: "read",
+              toolCallId: "call-1",
+              state: "output-available",
+              input: { path: "/big.txt" },
+              output: {
+                path: "/big.txt",
+                totalLines: 3,
+                frames: [{ body: dump }, { body: "small" }]
+              }
+            }
+          ]
+        };
+        await session.appendMessage(original);
+
+        const stored = await session.getMessage("big-tool", {
+          reconstruct: "pointer"
+        });
+        const output = stored?.parts[0].output as {
+          path: string;
+          totalLines: number;
+          frames: Array<{ body: string }>;
+        };
+        // The container shape survives; only the oversized leaf moves.
+        expect(output.path).toBe("/big.txt");
+        expect(output.totalLines).toBe(3);
+        expect(output.frames[1].body).toBe("small");
+        expect(parseAttachmentUrl(output.frames[0].body)).toBeTruthy();
+
+        const inlined = await session.getMessage("big-tool");
+        const restored = inlined?.parts[0].output as typeof output;
+        expect(restored.frames[0].body).toBe(dump);
+        expect(restored.frames[0].body.length).toBe(dump.length);
+        expect(inlined).toEqual(original);
+      });
+    });
+
+    it("rejects a row that cannot fit even after offload", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        // Metadata is not an offloadable payload: there is nothing to move
+        // out, and Sessions refuses to truncate to make the row fit.
+        const oversized: SessionMessage = {
+          ...text("too-large", "hello"),
+          metadata: { blob: "m".repeat(2 * 1024 * 1024) }
+        };
+
+        const error = await session.appendMessage(oversized).catch((e) => e);
+        expect(error).toBeInstanceOf(SessionMessageTooLargeError);
+        expect(error.messageId).toBe("too-large");
+        expect(error.maxBytes).toBe(MAX_INLINE_ROW_BYTES);
+        expect(error.bytes).toBeGreaterThan(MAX_INLINE_ROW_BYTES);
+        expect(await session.getMessage("too-large")).toBeNull();
+        expect(instance.attachmentBlobCount()).toBe(0);
+      });
+    });
+
+    it("round-trips every offloaded media type", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const mediaTypes = [
+          ["application/pdf", "doc.pdf"],
+          ["image/webp", "shot.webp"],
+          ["image/gif", "loop.gif"],
+          ["image/jpeg", "photo.jpg"],
+          ["text/markdown", "notes.md"],
+          ["text/csv", "rows.csv"]
+        ] as const;
+
+        for (const [mediaType, filename] of mediaTypes) {
+          const url = `data:${mediaType};base64,${btoa(
+            `${mediaType}:${"b".repeat(4096)}`
+          )}`;
+          const original: SessionMessage = {
+            id: `media-${filename}`,
+            role: "user",
+            parts: [{ type: "file", mediaType, filename, url }]
+          };
+          const result = await session.appendMessage(original);
+
+          expect(result.attachments[0]).toMatchObject({
+            mediaType,
+            filename
+          });
+          const stored = await session.getMessage(original.id, {
+            reconstruct: "pointer"
+          });
+          expect(parseAttachmentUrl(stored?.parts[0].url)).toBeTruthy();
+          expect(stored?.parts[0].mediaType).toBe(mediaType);
+          expect(await session.getMessage(original.id)).toEqual(original);
+        }
+        expect(instance.attachmentBlobCount()).toBe(mediaTypes.length);
+      });
+    });
+
+    it("fills whole chunk windows exactly at the boundary", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const sizes = [
+          SESSION_ATTACHMENT_CHUNK_BYTES - 1,
+          SESSION_ATTACHMENT_CHUNK_BYTES,
+          SESSION_ATTACHMENT_CHUNK_BYTES + 1
+        ];
+        const chunkRows: number[] = [];
+        let previous = 0;
+        for (const size of sizes) {
+          const bytes = new Uint8Array(size);
+          bytes[size - 1] = size % 251;
+          const { part } = await instance.sessions.attachments.put(bytes, {
+            mediaType: "application/octet-stream"
+          });
+          const total = instance.attachmentChunkCount();
+          chunkRows.push(total - previous);
+          previous = total;
+
+          const opened = new Uint8Array(
+            await new Response(
+              await instance.sessions.attachments.open(part.url ?? "")
+            ).arrayBuffer()
+          );
+          expect(opened.byteLength).toBe(size);
+          expect(opened[size - 1]).toBe(size % 251);
+        }
+        expect(chunkRows).toEqual([1, 1, 2]);
+      });
+    });
+
+    it("moves an unknown-length stream to R2 without leaving chunk rows", async () => {
+      await withCapabilityHarness(async ({ install, storage }) => {
+        const bucket = new FakeAttachmentBucket();
+        const { capability, lifecycle } = install(
+          new Sessions({
+            attachments: { r2: bucket, r2ThresholdBytes: 4096 }
+          })
+        );
+        await lifecycle.start();
+
+        const payload = new Uint8Array(8192);
+        payload[8191] = 9;
+        // No declared length: the write lands in SQLite windows first, then
+        // migrates to R2 once its measured size crosses the threshold.
+        const { part } = await capability.attachments.put(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(payload.subarray(0, 4096));
+              controller.enqueue(payload.subarray(4096));
+              controller.close();
+            }
+          }),
+          { mediaType: "application/octet-stream" }
+        );
+
+        expect(bucket.puts).toBe(1);
+        expect(bucket.objects.size).toBe(1);
+        expect(
+          storage.sql
+            .exec(
+              "SELECT COUNT(*) AS count FROM cf_agents_session_attachment_chunks"
+            )
+            .one().count
+        ).toBe(0);
+        const opened = new Uint8Array(
+          await new Response(
+            await capability.attachments.open(part.url ?? "")
+          ).arrayBuffer()
+        );
+        expect(opened.byteLength).toBe(8192);
+        expect(opened[8191]).toBe(9);
+      });
+    });
+  });
+
+  describe("hydration budget", () => {
+    it("charges attachment bytes against the recent-history budget", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        await session.appendMessage(text("h0", "z".repeat(200)));
+        await session.appendMessage(imageMessage("h1", 4096));
+        await session.appendMessage(text("h2", "z".repeat(200)));
+
+        const rows = await session.getHistoryRowStats();
+        const [, attachmentRow, leafRow] = rows;
+        expect(attachmentRow.attachmentBytes).toBe(4096);
+        // A budget that fits both stored rows with room to spare.
+        const budget = attachmentRow.bytes + leafRow.bytes + 64;
+
+        // Pointer mode reads no payload, so only stored bytes count.
+        const pointer = await session.getRecentHistory(budget, 1, {
+          reconstruct: "pointer"
+        });
+        expect(pointer.messages.map((m) => m.id)).toEqual(["h1", "h2"]);
+
+        // Inlining re-inflates 4096 bytes into memory, so the same budget no
+        // longer covers that row (#1710).
+        const inline = await session.getRecentHistory(budget);
+        expect(inline.messages.map((m) => m.id)).toEqual(["h2"]);
+        expect(inline.truncated).toBe(true);
+        expect(inline.totalContentBytes).toBe(
+          rows.reduce((sum, row) => sum + row.bytes, 0)
+        );
+      });
+    });
+  });
+
+  describe("no-op writes", () => {
+    it("dispatches no change event when an update changes nothing", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        await session.appendMessage(text("noop", "same body"));
+
+        const events: SessionChangeEvent[] = [];
+        instance.sessions.subscribe((event) => {
+          events.push(event);
+        });
+        const before = await session.stats();
+
+        // The stored form is byte-identical, so nothing is written and the
+        // host cache is never invalidated. `storage-ops-bench` pins the
+        // billed cost of this path at zero rows.
+        const result = await session.updateMessage(text("noop", "same body"));
+        expect(result?.parts[0].text).toBe("same body");
+        expect(events).toEqual([]);
+        expect(await session.stats()).toEqual(before);
       });
     });
   });

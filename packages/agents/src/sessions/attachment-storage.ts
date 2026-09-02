@@ -1,29 +1,35 @@
+/**
+ * Sessions-owned immutable attachment byte storage.
+ *
+ * Payloads are content-addressed by their raw SHA-256. Small payloads are
+ * split into fixed 1.5 MiB SQLite rows; payloads at or above the R2
+ * threshold become one private R2 object when a bucket is configured.
+ * Random storage ids and R2 keys stay internal.
+ *
+ * A successful `put` is a valid durable resource before any message points
+ * at it. Failed writes clean up their own bytes. There is no age-based sweep:
+ * a crash at the exact commit boundary can leave unreachable bytes, which is
+ * cheaper than recurring scans or speculative deletes of valid resources.
+ */
+
 import { createHash } from "node:crypto";
 import {
   SessionAttachmentMissingError,
   SessionAttachmentStoreError,
   SessionAttachmentTooLargeError
 } from "./errors";
-import type {
-  SessionAttachmentBucket,
-  SessionsAttachmentOptions
-} from "./types";
+import type { SessionsIo } from "./io";
+import type { SessionAttachmentBucket } from "./types";
 
 /**
- * Fixed SQLite window used for attachment reads and writes. Attachments are
- * immutable, so larger rows save billed writes without Computer's need for
- * 512 KiB partial-file edits. Keep enough headroom below 2 MiB for row keys
+ * Fixed SQLite window for attachment rows. Attachments are immutable, so
+ * larger rows save billed writes; the headroom below 2 MiB covers row keys
  * and SQLite record overhead.
  */
 export const SESSION_ATTACHMENT_CHUNK_BYTES = 1536 * 1024;
 
-const DEFAULT_R2_THRESHOLD_BYTES = 1_500_000;
-const DEFAULT_R2_PREFIX = "cf-agents/sessions/attachments";
-
-/** @internal SQLite binding accepted by attachment storage. */
-export type AttachmentSqlParam = ArrayBuffer | string | number | null;
-
-type AttachmentBlobRow = {
+/** @internal One `cf_agents_session_attachment_blobs` row. */
+export type AttachmentBlobRow = {
   hash: string;
   backend: "sqlite" | "r2";
   storage_id: string;
@@ -33,171 +39,122 @@ type AttachmentBlobRow = {
   filename: string | null;
 };
 
-/** @internal One SQLite attachment chunk row. */
-export type AttachmentChunkRow = {
-  bytes: ArrayBuffer;
-};
-
-/** @internal SQLite and telemetry operations supplied by Sessions. */
-export interface SessionAttachmentStorageIo {
-  sql<T>(query: string, params: AttachmentSqlParam[]): T[];
-  sqlWrite(query: string, params: AttachmentSqlParam[]): number;
-  rawSql(query: string): void;
-  transaction<T>(fn: () => T): T;
-  chunk(storageId: string, index: number): AttachmentChunkRow | null;
-  emit(type: string, payload: Record<string, unknown>): void;
-}
-
-/** @internal Replayable byte input used by data URLs, strings, and buffers. */
-export type ReplayableAttachmentSource = {
+/** @internal Replayable byte input (data URLs, strings, buffers). */
+export type ReplayableSource = {
   readonly kind: "replayable";
   readonly open: () => ReadableStream<Uint8Array>;
 };
 
-/** @internal One-shot byte input used by request and RPC streams. */
-export type StreamingAttachmentSource = {
+/** @internal One-shot byte input (request and RPC streams). */
+export type StreamSource = {
   readonly kind: "stream";
   readonly stream: ReadableStream<Uint8Array>;
   /** Exact stream length, when the caller knows it. */
   readonly bytes?: number;
 };
 
-/** @internal Input accepted by the Sessions-owned attachment byte store. */
-export type AttachmentByteSource =
-  | ReplayableAttachmentSource
-  | StreamingAttachmentSource;
+export type AttachmentByteSource = ReplayableSource | StreamSource;
 
-/** @internal Result of storing one immutable attachment payload. */
-export type StoredAttachmentBlob = {
-  readonly hash: string;
-  readonly bytes: number;
-  readonly backend: "sqlite" | "r2";
-  readonly mediaType: string;
-  readonly filename?: string;
-  /** True only when this call created the whole-file blob. */
-  readonly created: boolean;
-};
-
-type MeasuredSource = {
-  readonly hash: string;
-  readonly bytes: number;
-};
-
-type ResolvedStorageOptions = {
+/** @internal Storage-tier policy with defaults applied. */
+export type BlobStoreOptions = {
   readonly bucket: SessionAttachmentBucket | undefined;
   readonly r2ThresholdBytes: number;
   readonly r2Prefix: string;
   readonly maxAttachmentBytes: number;
 };
 
-/**
- * Sessions-owned immutable attachment byte storage.
- *
- * Small payloads are split into fixed 1.5 MiB SQLite rows. Large payloads use
- * one private R2 object when a bucket is configured. The public identity is
- * always the raw-file SHA-256; random storage IDs and R2 keys stay internal.
- *
- * This store performs no age-based sweep. A successful `put` creates a valid
- * durable resource even before a message references it. Normal failed writes
- * clean up their own staged bytes. A process failure at the exact network or
- * SQLite commit boundary can leave unreachable storage overhead, which is
- * preferable to recurring scans and speculative deletion of valid resources.
- */
-export class SessionAttachmentStorage {
-  readonly #options:
-    | SessionsAttachmentOptions
-    | (() => SessionsAttachmentOptions | undefined)
-    | undefined;
-  readonly #io: SessionAttachmentStorageIo;
-  readonly #knownRows = new Map<string, AttachmentBlobRow>();
-  #tablesEnsured = false;
+type BlobMetadata = { mediaType: string; filename?: string };
+type Measured = { readonly hash: string; readonly bytes: number };
+type Expected = { readonly hash?: string; readonly bytes?: number };
+type PutResult = { row: AttachmentBlobRow; created: boolean };
 
-  constructor(
-    options:
-      | SessionsAttachmentOptions
-      | (() => SessionsAttachmentOptions | undefined)
-      | undefined,
-    io: SessionAttachmentStorageIo
-  ) {
-    this.#options = options;
+export class AttachmentBlobStore {
+  readonly #io: SessionsIo;
+  readonly #options: () => BlobStoreOptions;
+  readonly #rows = new Map<string, AttachmentBlobRow>();
+
+  constructor(io: SessionsIo, options: () => BlobStoreOptions) {
     this.#io = io;
+    this.#options = options;
   }
 
-  /** Create the Sessions-owned whole-file and chunk tables. */
   ensureTables(): void {
-    if (this.#tablesEnsured) return;
-    this.#io.rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_attachment_blobs (
+    this.#io.sqlWrite(
+      `CREATE TABLE IF NOT EXISTS cf_agents_session_attachment_blobs (
         hash TEXT PRIMARY KEY,
         backend TEXT NOT NULL CHECK(backend IN ('sqlite', 'r2')),
         storage_id TEXT NOT NULL,
         r2_key TEXT,
         bytes INTEGER NOT NULL,
         media_type TEXT NOT NULL,
-        filename TEXT,
-        created_at INTEGER NOT NULL
-      )
-    `);
-    this.#io.rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_attachment_chunks (
+        filename TEXT
+      ) WITHOUT ROWID`,
+      []
+    );
+    this.#io.sqlWrite(
+      `CREATE TABLE IF NOT EXISTS cf_agents_session_attachment_chunks (
         storage_id TEXT NOT NULL,
         idx INTEGER NOT NULL,
         bytes BLOB NOT NULL,
         PRIMARY KEY (storage_id, idx)
-      ) WITHOUT ROWID
-    `);
-    this.#tablesEnsured = true;
+      ) WITHOUT ROWID`,
+      []
+    );
   }
 
-  /** Store one immutable payload without materializing a stream. */
+  /** Store one immutable payload without materializing the stream. */
   async put(
     source: AttachmentByteSource,
-    metadata: { mediaType: string; filename?: string }
-  ): Promise<StoredAttachmentBlob> {
-    this.ensureTables();
-    const options = this.#resolvedOptions();
+    metadata: BlobMetadata
+  ): Promise<PutResult> {
+    const options = this.#options();
+    const max = options.maxAttachmentBytes;
+    let stream: ReadableStream<Uint8Array>;
+    let expected: Expected;
+    if (source.kind === "replayable") {
+      const measured = await measureSource(source.open(), max);
+      const existing = this.get(measured.hash);
+      if (existing) return { row: existing, created: false };
+      stream = source.open();
+      expected = measured;
+    } else {
+      if (source.bytes !== undefined && source.bytes > max) {
+        await source.stream.cancel().catch(() => undefined);
+        throw new SessionAttachmentTooLargeError(source.bytes, max);
+      }
+      stream = source.stream;
+      expected = { bytes: source.bytes };
+    }
 
+    const storageId = crypto.randomUUID();
     if (
-      source.kind === "stream" &&
-      source.bytes !== undefined &&
-      source.bytes > options.maxAttachmentBytes
+      options.bucket &&
+      expected.bytes !== undefined &&
+      expected.bytes >= options.r2ThresholdBytes
     ) {
-      await source.stream.cancel().catch(() => undefined);
-      throw new SessionAttachmentTooLargeError(
-        source.bytes,
-        options.maxAttachmentBytes
+      return this.#commitR2(
+        options.bucket,
+        stream,
+        { bytes: expected.bytes, hash: expected.hash },
+        storageId,
+        metadata,
+        options
       );
     }
-
-    if (source.kind === "replayable") {
-      return this.#putReplayable(source, metadata, options);
-    }
-
-    if (
-      source.bytes !== undefined &&
-      source.bytes >= options.r2ThresholdBytes &&
-      options.bucket
-    ) {
-      return this.#putKnownLargeStream(source, source.bytes, metadata, options);
-    }
-
-    return this.#putStagedStream(source, metadata, options);
+    return this.#commitSqlite(stream, expected, storageId, metadata, options);
   }
 
-  /** Return durable whole-file metadata for one hash. */
-  get(hash: string): StoredAttachmentBlob | null {
+  get(hash: string): AttachmentBlobRow | null {
     return this.getMany([hash]).get(hash) ?? null;
   }
 
-  /** Return whole-file metadata for several hashes with one SQLite read. */
-  getMany(hashes: readonly string[]): Map<string, StoredAttachmentBlob> {
-    const unique = [...new Set(hashes)];
-    if (unique.length === 0 || !this.#tablesExist()) return new Map();
-    const result = new Map<string, StoredAttachmentBlob>();
+  /** Resolve several whole-file rows with one SQLite read for cache misses. */
+  getMany(hashes: readonly string[]): Map<string, AttachmentBlobRow> {
+    const result = new Map<string, AttachmentBlobRow>();
     const missing: string[] = [];
-    for (const hash of unique) {
-      const known = this.#knownRows.get(hash);
-      if (known) result.set(hash, resultFromRow(known, false));
+    for (const hash of new Set(hashes)) {
+      const known = this.#rows.get(hash);
+      if (known) result.set(hash, known);
       else missing.push(hash);
     }
     if (missing.length === 0) return result;
@@ -208,23 +165,21 @@ export class SessionAttachmentStorage {
       [JSON.stringify(missing)]
     );
     for (const row of rows) {
-      this.#rememberRow(row);
-      result.set(row.hash, resultFromRow(row, false));
+      this.#remember(row);
+      result.set(row.hash, row);
     }
     return result;
   }
 
   /** Open one payload as a backpressure-aware stream. */
   async open(hash: string): Promise<ReadableStream<Uint8Array>> {
-    const row = this.#blob(hash);
+    const row = this.get(hash);
     if (!row) throw new SessionAttachmentMissingError(hash);
-
-    if (row.backend === "sqlite") return this.#sqliteStream(row);
-
-    const bucket = this.#resolvedOptions().bucket;
-    if (!bucket || !row.r2_key) {
-      throw new SessionAttachmentMissingError(hash);
+    if (row.backend === "sqlite") {
+      return this.#sqliteStream(row.storage_id, hash, row.bytes);
     }
+    const bucket = this.#options().bucket;
+    if (!bucket || !row.r2_key) throw new SessionAttachmentMissingError(hash);
     try {
       const object = await bucket.get(row.r2_key);
       if (!object) throw new SessionAttachmentMissingError(hash);
@@ -236,15 +191,14 @@ export class SessionAttachmentStorage {
   }
 
   /**
-   * Delete one whole-file blob. R2 is deleted before its metadata row. A
-   * failed R2 call leaves the resource addressable so a caller can retry.
+   * Delete one whole-file blob. R2 is deleted before its metadata row so a
+   * failed R2 call leaves the resource addressable for a retry.
    */
   async delete(hash: string): Promise<boolean> {
-    const row = this.#blob(hash);
+    const row = this.get(hash);
     if (!row) return false;
-
     if (row.backend === "r2" && row.r2_key) {
-      const bucket = this.#resolvedOptions().bucket;
+      const bucket = this.#options().bucket;
       if (!bucket) {
         throw new SessionAttachmentStoreError(
           row.r2_key,
@@ -258,7 +212,6 @@ export class SessionAttachmentStorage {
         throw new SessionAttachmentStoreError(row.r2_key, "R2 delete", cause);
       }
     }
-
     this.#io.transaction(() => {
       if (row.backend === "sqlite") this.#deleteChunks(row.storage_id);
       this.#io.sqlWrite(
@@ -266,372 +219,161 @@ export class SessionAttachmentStorage {
         [hash]
       );
     });
-    this.#knownRows.delete(hash);
+    this.#rows.delete(hash);
     return true;
   }
 
-  async #putReplayable(
-    source: ReplayableAttachmentSource,
-    metadata: { mediaType: string; filename?: string },
-    options: ResolvedStorageOptions
-  ): Promise<StoredAttachmentBlob> {
-    const measured = await measureSource(
-      source.open(),
-      options.maxAttachmentBytes
-    );
-    const existing = this.#blob(measured.hash);
-    if (existing) return resultFromRow(existing, false);
-
-    if (
-      measured.bytes >= options.r2ThresholdBytes &&
-      options.bucket !== undefined
-    ) {
-      return this.#writeR2Replayable(source, measured, metadata, options);
-    }
-    return this.#writeSqliteReplayable(source, measured, metadata, options);
-  }
-
-  async #writeSqliteReplayable(
-    source: ReplayableAttachmentSource,
-    measured: MeasuredSource,
-    metadata: { mediaType: string; filename?: string },
-    options: ResolvedStorageOptions
-  ): Promise<StoredAttachmentBlob> {
-    const storageId = crypto.randomUUID();
+  async #commitSqlite(
+    stream: ReadableStream<Uint8Array>,
+    expected: Expected,
+    storageId: string,
+    metadata: BlobMetadata,
+    options: BlobStoreOptions
+  ): Promise<PutResult> {
+    let keep = false;
     try {
-      const written = await writeChunks(
-        source.open(),
+      const measured = await writeChunks(
+        stream,
         options.maxAttachmentBytes,
         (index, bytes) => this.#insertChunk(storageId, index, bytes)
       );
-      if (written.bytes !== measured.bytes || written.hash !== measured.hash) {
-        throw new Error("Replayable attachment changed between reads");
+      assertExpected(measured, expected);
+      const existing = this.get(measured.hash);
+      if (existing) return { row: existing, created: false };
+      if (options.bucket && measured.bytes >= options.r2ThresholdBytes) {
+        return await this.#commitR2(
+          options.bucket,
+          this.#sqliteStream(storageId, measured.hash, measured.bytes),
+          measured,
+          storageId,
+          metadata,
+          options
+        );
       }
-
-      const inserted = this.#insertBlob({
-        hash: measured.hash,
-        backend: "sqlite",
-        storageId,
-        r2Key: null,
-        bytes: measured.bytes,
-        ...metadata
-      });
-      if (!inserted) {
-        this.#deleteChunks(storageId);
-        const raced = this.#blob(measured.hash);
-        if (raced) return resultFromRow(raced, false);
-        throw new Error("Attachment insert lost a race without a stored row");
-      }
-      return storedResult(measured, "sqlite", metadata);
-    } catch (cause) {
-      this.#deleteChunks(storageId);
-      if (
-        cause instanceof SessionAttachmentTooLargeError ||
-        cause instanceof SessionAttachmentStoreError
-      ) {
-        throw cause;
-      }
-      throw new SessionAttachmentStoreError(storageId, "SQLite write", cause);
-    }
-  }
-
-  async #writeR2Replayable(
-    source: ReplayableAttachmentSource,
-    measured: MeasuredSource,
-    metadata: { mediaType: string; filename?: string },
-    options: ResolvedStorageOptions
-  ): Promise<StoredAttachmentBlob> {
-    const bucket = options.bucket;
-    if (!bucket) {
-      return this.#writeSqliteReplayable(source, measured, metadata, options);
-    }
-    const storageId = crypto.randomUUID();
-    const r2Key = this.#r2Key(options.r2Prefix, storageId);
-    let uploaded = false;
-    try {
-      const written = await uploadFixedLength(
-        bucket,
-        r2Key,
-        source.open(),
-        measured.bytes,
-        metadata.mediaType,
-        options.maxAttachmentBytes
+      const result = this.#commitBlob(
+        { ...measured, backend: "sqlite", storageId, r2Key: null },
+        metadata
       );
-      uploaded = true;
-      if (written.hash !== measured.hash) {
-        throw new Error("Replayable attachment changed between reads");
-      }
-
-      const inserted = this.#insertBlob({
-        hash: measured.hash,
-        backend: "r2",
-        storageId,
-        r2Key,
-        bytes: measured.bytes,
-        ...metadata
-      });
-      if (!inserted) {
-        await this.#deleteUploadedObject(bucket, r2Key);
-        uploaded = false;
-        const raced = this.#blob(measured.hash);
-        if (raced) return resultFromRow(raced, false);
-        throw new Error("Attachment insert lost a race without a stored row");
-      }
-      return storedResult(measured, "r2", metadata);
+      keep = result.created;
+      return result;
     } catch (cause) {
-      if (uploaded) await this.#tryDeleteUploadedObject(bucket, r2Key);
-      if (
-        cause instanceof SessionAttachmentTooLargeError ||
-        cause instanceof SessionAttachmentStoreError
-      ) {
-        throw cause;
-      }
-      throw new SessionAttachmentStoreError(r2Key, "R2 put", cause);
+      throw storeError(cause, storageId, "SQLite write");
+    } finally {
+      if (!keep) this.#deleteChunks(storageId);
     }
   }
 
-  async #putKnownLargeStream(
-    source: StreamingAttachmentSource,
-    expectedBytes: number,
-    metadata: { mediaType: string; filename?: string },
-    options: ResolvedStorageOptions
-  ): Promise<StoredAttachmentBlob> {
-    const bucket = options.bucket;
-    if (!bucket) return this.#putStagedStream(source, metadata, options);
-    const storageId = crypto.randomUUID();
-    const r2Key = this.#r2Key(options.r2Prefix, storageId);
-    let uploaded = false;
+  async #commitR2(
+    bucket: SessionAttachmentBucket,
+    stream: ReadableStream<Uint8Array>,
+    expected: { bytes: number; hash?: string },
+    storageId: string,
+    metadata: BlobMetadata,
+    options: BlobStoreOptions
+  ): Promise<PutResult> {
+    const r2Key = `${options.r2Prefix.replace(/\/+$/, "")}/${storageId}`;
+    let keep = false;
     try {
       const measured = await uploadFixedLength(
         bucket,
         r2Key,
-        source.stream,
-        expectedBytes,
+        stream,
+        expected.bytes,
         metadata.mediaType,
         options.maxAttachmentBytes
       );
-      uploaded = true;
-      const inserted = this.#insertBlob({
-        hash: measured.hash,
-        backend: "r2",
-        storageId,
-        r2Key,
-        bytes: measured.bytes,
-        ...metadata
-      });
-      if (!inserted) {
-        await this.#deleteUploadedObject(bucket, r2Key);
-        uploaded = false;
-        const existing = this.#blob(measured.hash);
-        if (existing) return resultFromRow(existing, false);
-        throw new Error("Attachment insert lost a race without a stored row");
+      if (expected.hash !== undefined && measured.hash !== expected.hash) {
+        throw new Error("Replayable attachment changed between reads");
       }
-      return storedResult(measured, "r2", metadata);
-    } catch (cause) {
-      if (uploaded) await this.#tryDeleteUploadedObject(bucket, r2Key);
-      if (
-        cause instanceof SessionAttachmentTooLargeError ||
-        cause instanceof SessionAttachmentStoreError
-      ) {
-        throw cause;
-      }
-      throw new SessionAttachmentStoreError(r2Key, "R2 put", cause);
-    }
-  }
-
-  async #putStagedStream(
-    source: StreamingAttachmentSource,
-    metadata: { mediaType: string; filename?: string },
-    options: ResolvedStorageOptions
-  ): Promise<StoredAttachmentBlob> {
-    const storageId = crypto.randomUUID();
-    try {
-      const measured = await writeChunks(
-        source.stream,
-        options.maxAttachmentBytes,
-        (index, bytes) => this.#insertChunk(storageId, index, bytes)
+      const result = this.#commitBlob(
+        { ...measured, backend: "r2", storageId, r2Key },
+        metadata
       );
-      if (source.bytes !== undefined && source.bytes !== measured.bytes) {
-        throw new Error(
-          `Attachment stream length ${measured.bytes} did not match declared length ${source.bytes}`
-        );
-      }
-
-      const existing = this.#blob(measured.hash);
-      if (existing) {
-        this.#deleteChunks(storageId);
-        return resultFromRow(existing, false);
-      }
-
-      if (
-        measured.bytes >= options.r2ThresholdBytes &&
-        options.bucket !== undefined
-      ) {
-        return this.#moveStagedToR2(storageId, measured, metadata, options);
-      }
-
-      const inserted = this.#insertBlob({
-        hash: measured.hash,
-        backend: "sqlite",
-        storageId,
-        r2Key: null,
-        bytes: measured.bytes,
-        ...metadata
-      });
-      if (!inserted) {
-        this.#deleteChunks(storageId);
-        const raced = this.#blob(measured.hash);
-        if (raced) return resultFromRow(raced, false);
-        throw new Error("Attachment insert lost a race without a stored row");
-      }
-      return storedResult(measured, "sqlite", metadata);
+      keep = result.created;
+      return result;
     } catch (cause) {
-      this.#deleteChunks(storageId);
-      if (
-        cause instanceof SessionAttachmentTooLargeError ||
-        cause instanceof SessionAttachmentStoreError
-      ) {
-        throw cause;
+      throw storeError(cause, r2Key, "R2 put");
+    } finally {
+      if (!keep) {
+        try {
+          await bucket.delete(r2Key);
+        } catch (cause) {
+          this.#io.emit("session:attachment:r2-orphaned", {
+            key: r2Key,
+            error: cause instanceof Error ? cause.message : String(cause)
+          });
+        }
       }
-      throw new SessionAttachmentStoreError(storageId, "stream write", cause);
     }
   }
 
-  async #moveStagedToR2(
-    storageId: string,
-    measured: MeasuredSource,
-    metadata: { mediaType: string; filename?: string },
-    options: ResolvedStorageOptions
-  ): Promise<StoredAttachmentBlob> {
-    const bucket = options.bucket;
-    if (!bucket) throw new Error("R2 storage is not configured");
-    const r2Key = this.#r2Key(options.r2Prefix, storageId);
-    let uploaded = false;
-    try {
-      await uploadFixedLength(
-        bucket,
-        r2Key,
-        this.#sqliteStream({
-          hash: measured.hash,
-          backend: "sqlite",
-          storage_id: storageId,
-          r2_key: null,
-          bytes: measured.bytes,
-          media_type: metadata.mediaType,
-          filename: metadata.filename ?? null
-        }),
-        measured.bytes,
-        metadata.mediaType,
-        options.maxAttachmentBytes
-      );
-      uploaded = true;
-
-      const inserted = this.#insertBlob({
-        hash: measured.hash,
-        backend: "r2",
-        storageId,
-        r2Key,
-        bytes: measured.bytes,
-        ...metadata
-      });
-      if (!inserted) {
-        await this.#deleteUploadedObject(bucket, r2Key);
-        uploaded = false;
-        this.#deleteChunks(storageId);
-        const raced = this.#blob(measured.hash);
-        if (raced) return resultFromRow(raced, false);
-        throw new Error("Attachment insert lost a race without a stored row");
-      }
-      this.#deleteChunks(storageId);
-      return storedResult(measured, "r2", metadata);
-    } catch (cause) {
-      if (uploaded) await this.#tryDeleteUploadedObject(bucket, r2Key);
-      throw cause;
-    }
-  }
-
-  #blob(hash: string): AttachmentBlobRow | null {
-    const known = this.#knownRows.get(hash);
-    if (known) return known;
-    if (!this.#tablesExist()) return null;
-    const row =
-      this.#io.sql<AttachmentBlobRow>(
-        `SELECT hash, backend, storage_id, r2_key, bytes, media_type, filename
-         FROM cf_agents_session_attachment_blobs WHERE hash = ?`,
-        [hash]
-      )[0] ?? null;
-    if (row) this.#rememberRow(row);
-    return row;
-  }
-
-  #tablesExist(): boolean {
-    if (this.#tablesEnsured) return true;
-    const exists =
-      this.#io.sql<{ present: number }>(
-        `SELECT 1 AS present FROM sqlite_master
-         WHERE type = 'table'
-           AND name = 'cf_agents_session_attachment_blobs'
-         LIMIT 1`,
-        []
-      ).length > 0;
-    if (exists) this.#tablesEnsured = true;
-    return exists;
-  }
-
-  #rememberRow(row: AttachmentBlobRow): void {
-    this.#knownRows.set(row.hash, row);
-    if (this.#knownRows.size <= 256) return;
-    const oldest = this.#knownRows.keys().next().value;
-    if (oldest !== undefined) this.#knownRows.delete(oldest);
-  }
-
-  #insertBlob(input: {
-    hash: string;
-    backend: "sqlite" | "r2";
-    storageId: string;
-    r2Key: string | null;
-    bytes: number;
-    mediaType: string;
-    filename?: string;
-  }): boolean {
+  /** The one place that inserts a whole-file row and resolves insert races. */
+  #commitBlob(
+    input: {
+      hash: string;
+      bytes: number;
+      backend: "sqlite" | "r2";
+      storageId: string;
+      r2Key: string | null;
+    },
+    metadata: BlobMetadata
+  ): PutResult {
+    const row: AttachmentBlobRow = {
+      hash: input.hash,
+      backend: input.backend,
+      storage_id: input.storageId,
+      r2_key: input.r2Key,
+      bytes: input.bytes,
+      media_type: metadata.mediaType,
+      filename: metadata.filename ?? null
+    };
     const inserted =
       this.#io.sqlWrite(
         `INSERT OR IGNORE INTO cf_agents_session_attachment_blobs
-           (hash, backend, storage_id, r2_key, bytes, media_type, filename, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (hash, backend, storage_id, r2_key, bytes, media_type, filename)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
-          input.hash,
-          input.backend,
-          input.storageId,
-          input.r2Key,
-          input.bytes,
-          input.mediaType,
-          input.filename ?? null,
-          Date.now()
+          row.hash,
+          row.backend,
+          row.storage_id,
+          row.r2_key,
+          row.bytes,
+          row.media_type,
+          row.filename
         ]
       ) > 0;
     if (inserted) {
-      this.#rememberRow({
-        hash: input.hash,
-        backend: input.backend,
-        storage_id: input.storageId,
-        r2_key: input.r2Key,
-        bytes: input.bytes,
-        media_type: input.mediaType,
-        filename: input.filename ?? null
-      });
+      this.#remember(row);
+      return { row, created: true };
     }
-    return inserted;
+    const raced = this.get(row.hash);
+    if (!raced) {
+      throw new Error("Attachment insert lost a race without a stored row");
+    }
+    return { row: raced, created: false };
+  }
+
+  #remember(row: AttachmentBlobRow): void {
+    this.#rows.set(row.hash, row);
+    if (this.#rows.size <= 256) return;
+    const oldest = this.#rows.keys().next().value;
+    if (oldest !== undefined) this.#rows.delete(oldest);
   }
 
   #insertChunk(storageId: string, index: number, bytes: Uint8Array): void {
-    const copy = new Uint8Array(bytes.byteLength);
-    copy.set(bytes);
     this.#io.sqlWrite(
-      `INSERT INTO cf_agents_session_attachment_chunks
-         (storage_id, idx, bytes)
+      `INSERT INTO cf_agents_session_attachment_chunks (storage_id, idx, bytes)
        VALUES (?, ?, ?)`,
-      [storageId, index, copy.buffer]
+      [
+        storageId,
+        index,
+        (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+          ? bytes.buffer
+          : bytes.buffer.slice(
+              bytes.byteOffset,
+              bytes.byteOffset + bytes.byteLength
+            )) as ArrayBuffer
+      ]
     );
   }
 
@@ -642,132 +384,78 @@ export class SessionAttachmentStorage {
     );
   }
 
-  #sqliteStream(row: AttachmentBlobRow): ReadableStream<Uint8Array> {
+  /** One primary-key row per pull; never a cursor over every chunk. */
+  #sqliteStream(
+    storageId: string,
+    hash: string,
+    totalBytes: number
+  ): ReadableStream<Uint8Array> {
     let index = 0;
     let readBytes = 0;
     const io = this.#io;
     return new ReadableStream<Uint8Array>({
       pull(controller) {
-        if (readBytes === row.bytes) {
+        if (readBytes === totalBytes) {
           controller.close();
           return;
         }
-        const chunk = io.chunk(row.storage_id, index++);
-        if (!chunk) {
-          controller.error(new SessionAttachmentMissingError(row.hash));
-          return;
-        }
-        const bytes = new Uint8Array(chunk.bytes);
+        const chunk = io.sql<{ bytes: ArrayBuffer }>(
+          `SELECT bytes FROM cf_agents_session_attachment_chunks
+           WHERE storage_id = ? AND idx = ?`,
+          [storageId, index++]
+        )[0];
         const expectedBytes = Math.min(
           SESSION_ATTACHMENT_CHUNK_BYTES,
-          row.bytes - readBytes
+          totalBytes - readBytes
         );
-        if (bytes.byteLength !== expectedBytes) {
-          controller.error(new SessionAttachmentMissingError(row.hash));
+        if (!chunk || chunk.bytes.byteLength !== expectedBytes) {
+          controller.error(new SessionAttachmentMissingError(hash));
           return;
         }
-        readBytes += bytes.byteLength;
-        controller.enqueue(bytes);
+        readBytes += expectedBytes;
+        controller.enqueue(new Uint8Array(chunk.bytes));
       }
     });
   }
-
-  #r2Key(prefix: string, storageId: string): string {
-    return `${prefix.replace(/\/+$/, "")}/${storageId}`;
-  }
-
-  async #deleteUploadedObject(
-    bucket: SessionAttachmentBucket,
-    key: string
-  ): Promise<void> {
-    try {
-      await bucket.delete(key);
-    } catch (cause) {
-      this.#io.emit("session:attachment:r2-orphaned", {
-        key,
-        error: cause instanceof Error ? cause.message : String(cause)
-      });
-      throw new SessionAttachmentStoreError(key, "R2 cleanup", cause);
-    }
-  }
-
-  async #tryDeleteUploadedObject(
-    bucket: SessionAttachmentBucket,
-    key: string
-  ): Promise<void> {
-    try {
-      await bucket.delete(key);
-    } catch (cause) {
-      this.#io.emit("session:attachment:r2-orphaned", {
-        key,
-        error: cause instanceof Error ? cause.message : String(cause)
-      });
-    }
-  }
-
-  #resolvedOptions(): ResolvedStorageOptions {
-    const input =
-      typeof this.#options === "function" ? this.#options() : this.#options;
-    const bucketInput = input?.r2;
-    const bucket =
-      typeof bucketInput === "function" ? bucketInput() : bucketInput;
-    const thresholdInput = input?.r2ThresholdBytes;
-    const threshold =
-      typeof thresholdInput === "function" ? thresholdInput() : thresholdInput;
-    return {
-      bucket,
-      r2ThresholdBytes: Math.max(
-        1,
-        Math.floor(threshold ?? DEFAULT_R2_THRESHOLD_BYTES)
-      ),
-      r2Prefix: input?.r2Prefix ?? DEFAULT_R2_PREFIX,
-      maxAttachmentBytes: Math.max(
-        1,
-        Math.floor(input?.maxAttachmentBytes ?? 8 * 1024 * 1024)
-      )
-    };
-  }
 }
 
-function resultFromRow(
-  row: AttachmentBlobRow,
-  created: boolean
-): StoredAttachmentBlob {
-  return {
-    hash: row.hash,
-    bytes: row.bytes,
-    backend: row.backend,
-    mediaType: row.media_type,
-    ...(row.filename !== null ? { filename: row.filename } : {}),
-    created
-  };
+function storeError(cause: unknown, path: string, operation: string): Error {
+  if (
+    cause instanceof SessionAttachmentTooLargeError ||
+    cause instanceof SessionAttachmentStoreError
+  ) {
+    return cause;
+  }
+  return new SessionAttachmentStoreError(path, operation, cause);
 }
 
-function storedResult(
-  measured: MeasuredSource,
-  backend: "sqlite" | "r2",
-  metadata: { mediaType: string; filename?: string }
-): StoredAttachmentBlob {
-  return {
-    ...measured,
-    backend,
-    ...metadata,
-    created: true
-  };
+function assertExpected(measured: Measured, expected: Expected): void {
+  if (expected.bytes !== undefined && expected.bytes !== measured.bytes) {
+    throw new Error(
+      `Attachment stream length ${measured.bytes} did not match declared length ${expected.bytes}`
+    );
+  }
+  if (expected.hash !== undefined && expected.hash !== measured.hash) {
+    throw new Error("Replayable attachment changed between reads");
+  }
 }
 
 async function measureSource(
   stream: ReadableStream<Uint8Array>,
   maxBytes: number
-): Promise<MeasuredSource> {
+): Promise<Measured> {
   return writeChunks(stream, maxBytes, () => undefined);
 }
 
+/**
+ * Hash a stream while handing out fixed windows. At most one window plus the
+ * source chunks needed to fill it are held in memory.
+ */
 async function writeChunks(
   stream: ReadableStream<Uint8Array>,
   maxBytes: number,
   write: (index: number, bytes: Uint8Array) => void | Promise<void>
-): Promise<MeasuredSource> {
+): Promise<Measured> {
   const hash = createHash("sha256");
   const reader = stream.getReader();
   const pending: Uint8Array[] = [];
@@ -786,7 +474,7 @@ async function writeChunks(
       offset += take;
       pendingBytes -= take;
       if (take === part.byteLength) pending.shift();
-      else pending[0] = part.slice(take);
+      else pending[0] = part.subarray(take);
     }
     hash.update(window);
     await write(chunkIndex++, window);
@@ -817,6 +505,7 @@ async function writeChunks(
   return { hash: hash.digest("hex"), bytes: total };
 }
 
+/** Stream a known-length payload straight into R2 while hashing it. */
 async function uploadFixedLength(
   bucket: SessionAttachmentBucket,
   key: string,
@@ -824,7 +513,7 @@ async function uploadFixedLength(
   expectedBytes: number,
   mediaType: string,
   maxBytes: number
-): Promise<MeasuredSource> {
+): Promise<Measured> {
   const hash = createHash("sha256");
   let total = 0;
   const checked = new TransformStream<Uint8Array, Uint8Array>({

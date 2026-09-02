@@ -1007,7 +1007,9 @@ describe("Think — context blocks", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const agent = await getAgentByName(
       env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
-      "skills-system-prompt-warning"
+      // Unique per run: the warning fires once per instance, so a retry
+      // against a warm object would see no call.
+      `skills-system-prompt-warning-${crypto.randomUUID()}`
     );
 
     try {
@@ -1016,7 +1018,7 @@ describe("Think — context blocks", () => {
       });
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining(
-          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured"
+          "getSystemPrompt() is only used as a fallback when no context blocks are configured"
         )
       );
     } finally {

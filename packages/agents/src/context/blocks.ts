@@ -17,8 +17,8 @@
 
 import type { ToolSet } from "ai";
 import { z } from "zod";
-import { estimateStringTokens } from "./tokens";
-import { isSearchProvider, type SearchProvider } from "./context-search";
+import { estimateStringTokens } from "../sessions/tokens";
+import { isSearchProvider, type SearchProvider } from "./search";
 import { isSkillProvider, type SkillProvider } from "./skills";
 
 function slugify(text: string): string {
@@ -138,12 +138,31 @@ export class ContextBlocks {
   private snapshot: string | null = null;
   private loaded = false;
   private promptStore: WritableContextProvider | null;
+  private defaultProvider: ((label: string) => ContextProvider) | null;
   private _loadedSkills = new Set<string>();
   private _onUnloadSkill: SkillUnloadCallback | null = null;
 
-  constructor(configs: ContextConfig[], promptStore?: WritableContextProvider) {
+  /**
+   * @param configs Blocks to load on first use.
+   * @param promptStore Persists the frozen system prompt, keeping the
+   *   provider's prefix cache warm across wakes.
+   * @param defaultProvider Supplies storage for blocks declared without a
+   *   provider, so a host can offer durable writable blocks by label alone.
+   */
+  constructor(
+    configs: ContextConfig[],
+    promptStore?: WritableContextProvider,
+    defaultProvider?: (label: string) => ContextProvider
+  ) {
     this.configs = configs;
     this.promptStore = promptStore ?? null;
+    this.defaultProvider = defaultProvider ?? null;
+  }
+
+  /** Fill in the host's storage for a block declared without a provider. */
+  private withDefaultProvider(config: ContextConfig): ContextConfig {
+    if (config.provider || !this.defaultProvider) return config;
+    return { ...config, provider: this.defaultProvider(config.label) };
   }
 
   /**
@@ -163,6 +182,9 @@ export class ContextBlocks {
    * Called once at session init.
    */
   async load(): Promise<void> {
+    this.configs = this.configs.map((config) =>
+      this.withDefaultProvider(config)
+    );
     for (const config of this.configs) {
       // Pass the label to the provider before first use
       if (config.provider?.init) {
@@ -205,13 +227,14 @@ export class ContextBlocks {
    * initialized and loaded immediately. The snapshot is NOT updated
    * automatically — call `refreshSystemPrompt()` to rebuild.
    */
-  async addBlock(config: ContextConfig): Promise<ContextBlock> {
+  async addBlock(input: ContextConfig): Promise<ContextBlock> {
     if (!this.loaded) await this.load();
 
-    if (this.configs.some((c) => c.label === config.label)) {
-      throw new Error(`Block "${config.label}" already exists`);
+    if (this.configs.some((c) => c.label === input.label)) {
+      throw new Error(`Block "${input.label}" already exists`);
     }
 
+    const config = this.withDefaultProvider(input);
     this.configs.push(config);
 
     if (config.provider?.init) {

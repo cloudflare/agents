@@ -25,8 +25,9 @@ The capability owns:
 - non-destructive compaction overlays
 - attachment payloads and message references
 - optional FTS
-- context blocks and frozen prompts
 - a local change feed for host caches
+
+Prompt assembly is not part of it. Context blocks, frozen prompts, and their providers ship as `agents/context` and compose with a session handle.
 
 The default Session handle represents the common one-conversation-per-object case. Named handles remain available for local namespaces and forks. A parent or router Durable Object owns conversation discovery.
 
@@ -42,7 +43,7 @@ Think and AIChatAgent move onto the capability. Think retains tree behavior. AIC
 
 Use Durable Object SQLite directly. Remove `SessionProvider`, Postgres implementations, and SessionManager.
 
-The message table has no secondary indexes. It stamps a token estimate and a threshold-independent media candidate size. Active-leaf and aggregate caches derive from durable rows and update in memory for linear appends.
+Every table is `WITHOUT ROWID` with a composite primary key and no secondary index, so one row write bills one row. The message table carries `seq` for ordering and `type` for the row kind, and stamps a token estimate plus a threshold-independent offload candidate size. The attachment reference table is `(session_id, message_id, hash)` and nothing else. Active-leaf and aggregate caches derive from durable rows and update in memory for linear appends.
 
 Message, FTS, and attachment-reference mutations commit in one synchronous SQLite transaction. Attachment payload I/O happens outside that transaction.
 
@@ -51,6 +52,8 @@ Path traversal uses a content-free recursive CTE capped at 10,000 rows. Content 
 FTS is opt-in. Search-off objects do not create the virtual table or its shadow tables. Enabling search after messages exist performs one SQL-only backfill.
 
 ## Attachment decision
+
+Offload is always on and lossless, and it covers every oversized payload, not just files: `data:` URL file parts, text and reasoning parts, and strings nested in tool outputs. Reading back reconstructs the payload byte for byte. Sessions never truncates: a row that still exceeds the 1.5 MiB budget after every offloadable string has moved out is rejected with `SessionMessageTooLargeError`, because a silently shortened transcript makes every downstream correctness question unanswerable.
 
 Store this pointer in message JSON:
 
@@ -66,7 +69,7 @@ Use whole-file deduplication. A replayable duplicate requires no new payload wri
 
 Write payload bytes before committing a message pointer and reference rows. If a coupled message write fails, delete only payloads created by that operation. Never infer that a pre-existing standalone blob is abandoned.
 
-`attachments.put()` is an explicit resource-creation API. A successful call returns a durable pointer and may legitimately have zero message references. The caller owns inserting it into a message or explicitly deleting it.
+`attachments.put()` is an explicit resource-creation API. A successful call returns a durable pointer and may legitimately have zero message references. Its bytes survive until either `attachments.delete()` removes them, or a message has referenced them and the last reference's removal reaps them. An upload that never enters a message is the uploader's to delete; one that entered the transcript is collected with the last message pointing at it.
 
 Do not run an age-based unreferenced-blob sweep. Do not maintain a pending-R2 scan table or per-chunk timestamps. Normal failures perform immediate cleanup. A process failure at the exact cross-system commit boundary may leave unreachable storage overhead. That rare leak is preferable to recurring reads, recurring writes, and speculative deletion of valid resources.
 
@@ -82,7 +85,7 @@ Default inline reconstruction still produces a complete data URL for compatibili
 
 ## Skills decision
 
-Keep first-class Agent Skills in `agents/skills`, not in Sessions message storage.
+Keep first-class Agent Skills in `agents/skills`, not in Sessions message storage. Prompt-level loadable context (`R2SkillProvider` and the `load_context` tool) is a separate, smaller thing and lives in `agents/context`.
 
 Think projects resolved `SKILL.md` files into the active workspace so Computer or legacy Shell tools can read and edit them. Computer uses `/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`.
 
@@ -134,4 +137,4 @@ Rejected. One Durable Object per user conversation makes discovery a routing con
 
 ## The decision
 
-Ship `agents/sessions` as an experimental Lifecycle capability. Sessions owns message and attachment durability in SQLite with optional R2. Replatform Think and AIChatAgent without changing their observable chat behavior. Remove the old provider stack. Project Agent Skills into Computer or legacy Shell independently of conversation storage.
+Ship `agents/sessions` as an experimental Lifecycle capability. Sessions owns message and attachment durability in SQLite with optional R2, losslessly. Prompt assembly ships beside it as `agents/context`. Replatform Think and AIChatAgent without changing their observable chat behavior. Remove the old provider stack. Project Agent Skills into Computer or legacy Shell independently of conversation storage.

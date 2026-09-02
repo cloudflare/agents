@@ -1,63 +1,40 @@
 /**
  * Per-session handle returned by `Sessions.session()`. Carries the
- * session-scoped configuration (compaction trigger and handlers) and
- * orchestrates every public write: sanitize → strip/guard client input →
- * offload attachments → cap the row → durable write → change feed.
+ * session-scoped compaction policy and orchestrates every public write:
+ * sanitize → strip/guard client input → offload payloads → durable write →
+ * change feed.
  *
- * Method semantics deliberately mirror the legacy `Session` class so hosts
- * replatform with call-site renames, not logic changes.
+ * The handle stores messages. Prompt assembly (context blocks, frozen
+ * prompts, skills) lives in `agents/context` and composes with this handle
+ * rather than living inside it.
  */
 
-import type { ToolSet, UIMessage } from "ai";
-import {
-  byteLength,
-  enforceRowSizeLimit,
-  sanitizeMessage
-} from "../chat/sanitize";
-import { COMPACTION_PREFIX, type CompactResult } from "./compaction-helpers";
-import {
-  ContextBlocks,
-  type ContextBlock,
-  type ContextConfig,
-  type WritableContextProvider
-} from "./context";
+import type { CompactResult } from "./compaction-helpers";
+import { COMPACTION_PREFIX } from "./compaction-helpers";
+import { MAX_INLINE_ROW_BYTES } from "./attachments";
 import type { SessionsCore } from "./core";
-import {
-  dropLargeFileParts,
-  evictToolOutputStrings,
-  hasEvictableMedia,
-  type ToolOutputEvictionResult
-} from "./eviction";
-import { estimateStringTokens } from "./tokens";
+import { SessionMessageTooLargeError } from "./errors";
+import { runMaintenancePass } from "./maintenance";
+import { byteLength, sanitizeMessage } from "./sanitize";
 import type {
   AppendOptions,
   AppendResult,
-  CompactAfterOptions,
-  CompactContext,
-  CompactionErrorHandler,
   HistoryBatchReadOptions,
   HistoryReadOptions,
   RecentHistoryResult,
   SearchResult,
-  SessionContextOptions,
-  SessionEvictionResult,
+  SessionMaintenanceResult,
   SessionMessage,
   SessionRowStat,
   SessionStats,
-  SessionTokenCounter,
   StoredCompaction,
   WriteOptions
 } from "./types";
 
+/** Summarizes a branch into an overlay. Receives pointer-mode history. */
 export type CompactionFunction = (
-  messages: SessionMessage[],
-  context?: CompactContext
+  messages: SessionMessage[]
 ) => Promise<CompactResult | null>;
-
-type PendingContext = {
-  label: string;
-  options: SessionContextOptions;
-};
 
 export class Session {
   readonly sessionId: string;
@@ -68,19 +45,10 @@ export class Session {
     return this.#coreProvider();
   }
 
-  readonly #pendingContexts: PendingContext[] = [];
-  #cachedPrompt: WritableContextProvider | true | undefined;
-  #context: ContextBlocks | undefined;
-  #restorePromise: Promise<void> | undefined;
-  #skillScanRan = false;
-  #evictionRunning = false;
-  #evictionScheduled = false;
-  #evictionObservedOversized = false;
+  #maintenanceRunning = false;
+  #maintenanceScheduled = false;
   #compactionFn: CompactionFunction | null = null;
   #tokenThreshold: number | undefined;
-  #tokenCounter: SessionTokenCounter | undefined;
-  #compactionErrorHandler: CompactionErrorHandler | undefined;
-  #warnedCompactionNoOp = false;
 
   /** @internal Constructed by the Sessions capability only. */
   constructor(
@@ -93,58 +61,21 @@ export class Session {
     this.#ready = ready;
   }
 
-  // ── Builder (chainable, mirrors the legacy Session builder) ─────────────
+  // ── Builder ──────────────────────────────────────────────────────────────
 
-  /** Register a context block before first use. */
-  withContext(label: string, options: SessionContextOptions = {}): this {
-    if (this.#context) {
-      throw new Error(
-        `Context is already initialized; use addContext(${JSON.stringify(label)}) for runtime registration.`
-      );
-    }
-    this.#pendingContexts.push({ label, options });
-    return this;
-  }
-
-  /** Persist and reuse the frozen system prompt. */
-  withCachedPrompt(provider?: WritableContextProvider): this {
-    if (this.#context) {
-      throw new Error(
-        "Context is already initialized; withCachedPrompt() must be configured before first use."
-      );
-    }
-    this.#cachedPrompt = provider ?? true;
-    return this;
-  }
-
-  /**
-   * Register a compaction function. Called by `compact()` to compress
-   * message history into a summary overlay.
-   */
+  /** Register the function `compact()` calls to summarize a branch. */
   onCompaction(fn: CompactionFunction): this {
     this.#compactionFn = fn;
     return this;
   }
 
   /**
-   * Auto-compact when the estimated token count exceeds the threshold,
-   * checked after each `appendMessage`. Requires `onCompaction()`.
-   *
-   * The trigger is gated by the O(1) stamped-estimate stats — never a
-   * full-history read. A configured `tokenCounter` is consulted to CONFIRM
-   * a trigger after the gate crosses the threshold.
+   * Auto-compact after an append once the estimated token count crosses the
+   * threshold. Requires `onCompaction()`. The trigger reads the O(1) stamped
+   * estimate, never the transcript.
    */
-  compactAfter(tokenThreshold: number, options?: CompactAfterOptions): this {
+  compactAfter(tokenThreshold: number): this {
     this.#tokenThreshold = tokenThreshold;
-    if (options?.tokenCounter) {
-      this.#tokenCounter = options.tokenCounter;
-    }
-    return this;
-  }
-
-  /** Handle failures from the automatic `compactAfter()` trigger. */
-  onCompactionError(handler: CompactionErrorHandler): this {
-    this.#compactionErrorHandler = handler;
     return this;
   }
 
@@ -152,13 +83,13 @@ export class Session {
 
   /**
    * Stream the active branch path root → leaf with compaction overlays
-   * applied. Peak memory is one bounded content chunk, never the whole
+   * applied. Peak memory is one bounded content window, never the whole
    * transcript.
    */
   async *history(
     options: HistoryReadOptions = {}
   ): AsyncGenerator<SessionMessage, void, undefined> {
-    await this.#ensureRestored();
+    await this.#ready();
     yield* this.#core.streamHistory(
       this.sessionId,
       options,
@@ -203,11 +134,15 @@ export class Session {
     if (batch.length > 0) yield batch;
   }
 
-  /** Materialized full-path read (reconciliation, `get-messages`). */
+  /**
+   * Materialize the whole selected path. Prefer `history()` or
+   * `getRecentHistory()` inside a Durable Object: this holds every message
+   * of the branch, with attachments inlined, in memory at once.
+   */
   async getHistory(
     options: HistoryReadOptions = {}
   ): Promise<SessionMessage[]> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.getHistory(
       this.sessionId,
       options,
@@ -216,17 +151,17 @@ export class Session {
   }
 
   /**
-   * Byte-budgeted read of the most recent messages on the active branch
-   * path (always at least the leaf message, and at least
-   * `minRecentMessages` when the path is long enough). Wake-time memory
-   * scales with the budget rather than total session history (#1710).
+   * Byte-budgeted read of the most recent messages on the active branch path
+   * (always at least the leaf, and at least `minRecentMessages` when the path
+   * is long enough). When reconstructing, the budget counts the attachment
+   * bytes each row inflates back, so it bounds hydrated memory (#1710).
    */
   async getRecentHistory(
     maxContentBytes: number,
     minRecentMessages = 1,
     options: Pick<HistoryReadOptions, "reconstruct" | "leafId"> = {}
   ): Promise<RecentHistoryResult> {
-    await this.#ensureRestored();
+    await this.#ready();
     const result = await this.#core.getRecentHistory(
       this.sessionId,
       maxContentBytes,
@@ -234,16 +169,16 @@ export class Session {
       this.#core.attachments.resolveReconstructor(options.reconstruct),
       options.leafId
     );
-    if (result.truncated) this.#scheduleEviction();
+    if (result.truncated) this.#scheduleMaintenance();
     return result;
   }
 
   /**
-   * Per-row stored sizes and stamped token estimates for the active branch
-   * path (root → leaf) WITHOUT loading message content.
+   * Per-row stored sizes, attachment sizes, and stamped token estimates for
+   * the active branch path (root → leaf) WITHOUT loading message content.
    */
   async getHistoryRowStats(leafId?: string | null): Promise<SessionRowStat[]> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.pathRowStats(this.sessionId, leafId);
   }
 
@@ -251,7 +186,7 @@ export class Session {
     id: string,
     options: Pick<HistoryReadOptions, "reconstruct"> = {}
   ): Promise<SessionMessage | null> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.getMessage(
       this.sessionId,
       id,
@@ -260,24 +195,27 @@ export class Session {
   }
 
   async getLatestLeaf(): Promise<SessionMessage | null> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.getLatestLeaf(this.sessionId);
   }
 
   async getBranches(messageId: string): Promise<SessionMessage[]> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.getBranches(this.sessionId, messageId);
-  }
-
-  async getPathLength(leafId?: string | null): Promise<number> {
-    await this.#ensureRestored();
-    return this.#core.getPathLength(this.sessionId, leafId);
   }
 
   /** O(1)-maintained aggregate stats for the active branch path. */
   async stats(): Promise<SessionStats> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.stats(this.sessionId);
+  }
+
+  async search(
+    query: string,
+    options?: { limit?: number }
+  ): Promise<SearchResult[]> {
+    await this.#ready();
+    return this.#core.search(this.sessionId, query, options?.limit ?? 20);
   }
 
   // ── Writes ───────────────────────────────────────────────────────────────
@@ -286,7 +224,7 @@ export class Session {
     message: SessionMessage,
     options: AppendOptions = {}
   ): Promise<AppendResult> {
-    await this.#ensureRestored();
+    await this.#ready();
     const existing = this.#core.getMessageRaw(this.sessionId, message.id);
     if (existing) {
       await this.#core.notify({
@@ -306,7 +244,7 @@ export class Session {
         this.sessionId,
         prepared.message,
         options.parentId,
-        prepared.attachments
+        prepared.tokenEstimate
       ));
     } catch (error) {
       await this.#core.attachments.discardUnreferenced(prepared.attachments);
@@ -340,8 +278,6 @@ export class Session {
         inserted: true
       });
     }
-    this.#observeEvictionCandidate(prepared.message);
-    if (this.#evictionObservedOversized) this.#scheduleEviction();
     return {
       inserted: true,
       message: prepared.message,
@@ -364,25 +300,32 @@ export class Session {
     return lastId;
   }
 
+  /**
+   * Update one stored row. Returns the stored form, or `null` when the id is
+   * not in this session. An unchanged message writes nothing and dispatches
+   * no event.
+   */
   async updateMessage(
     message: SessionMessage,
     options: WriteOptions = {}
-  ): Promise<SessionMessage> {
-    await this.#ensureRestored();
+  ): Promise<SessionMessage | null> {
+    await this.#ready();
     const prepared = await this.#prepare(message, options.source);
-    let updated: boolean;
+    let outcome: Awaited<ReturnType<SessionsCore["update"]>>;
     try {
-      updated = await this.#core.update(
+      outcome = await this.#core.update(
         this.sessionId,
         prepared.message,
-        prepared.attachments
+        prepared.tokenEstimate
       );
     } catch (error) {
       await this.#core.attachments.discardUnreferenced(prepared.attachments);
       throw error;
     }
-    if (!updated) {
+    if (outcome !== "updated") {
       await this.#core.attachments.discardUnreferenced(prepared.attachments);
+      if (outcome === "missing") return null;
+      return prepared.message;
     }
     await this.#core.notify({
       type: "update",
@@ -396,19 +339,34 @@ export class Session {
     message: SessionMessage,
     options: AppendOptions = {}
   ): Promise<AppendResult> {
-    await this.#ensureRestored();
-    const existing = this.#core.getMessageRaw(this.sessionId, message.id);
-    if (existing) {
-      const stored = await this.updateMessage(message, {
-        source: options.source
-      });
-      return { inserted: false, message: stored, attachments: [] };
+    await this.#ready();
+    if (!this.#core.getMessageRaw(this.sessionId, message.id)) {
+      return this.appendMessage(message, options);
     }
-    return this.appendMessage(message, options);
+    const stored = await this.updateMessage(message, {
+      source: options.source
+    });
+    return {
+      inserted: false,
+      message: stored ?? message,
+      attachments: []
+    };
+  }
+
+  /**
+   * Import one historical message verbatim (migrations, cross-object moves):
+   * explicit parent and timestamp, no offload, no change-feed event.
+   */
+  async importMessage(
+    message: SessionMessage,
+    options: { parentId: string | null; createdAt: number }
+  ): Promise<void> {
+    await this.#ready();
+    this.#core.importMessage(this.sessionId, message, options);
   }
 
   async deleteMessages(messageIds: string[]): Promise<void> {
-    await this.#ensureRestored();
+    await this.#ready();
     await this.#core.deleteMessages(this.sessionId, messageIds);
     await this.#core.notify({
       type: "delete",
@@ -418,39 +376,36 @@ export class Session {
   }
 
   async clearMessages(): Promise<void> {
-    await this.#ensureRestored();
+    await this.#ready();
     await this.#core.clearMessages(this.sessionId);
-    await this.#afterClear();
     await this.#core.notify({ type: "clear", sessionId: this.sessionId });
-  }
-
-  /**
-   * Rewrite a bounded set of aged inline media and large tool-output strings
-   * to attachment pointers. Recent messages stay untouched.
-   */
-  async evictAgedMedia(): Promise<SessionEvictionResult | null> {
-    await this.#ensureRestored();
-    const result = await this.#evictAgedMedia({
-      maxRows: this.#core.attachments.maxEvictionRowsPerPass
-    });
-    if (result?.backlogRemains) this.#scheduleEviction();
-    return result;
   }
 
   /**
    * Copy the path ending at `atMessageId` (default: the active leaf) into a
    * new session. Message rows get fresh ids; attachment blobs are shared,
-   * never copied.
+   * never copied. Compaction overlays are not copied.
    */
   async fork(
     options: { atMessageId?: string; toSessionId?: string } = {}
   ): Promise<{ sessionId: string; leafId: string | null }> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.fork(
       this.sessionId,
       options.toSessionId ?? crypto.randomUUID(),
       options.atMessageId
     );
+  }
+
+  /**
+   * Move inline payloads of aged rows into attachment storage — legacy rows,
+   * rows written under a looser policy, and large tool outputs. Recent rows
+   * are untouched. Bounded per pass; reschedules itself while a backlog
+   * remains.
+   */
+  async runMaintenance(): Promise<SessionMaintenanceResult | null> {
+    await this.#ready();
+    return this.#runMaintenance();
   }
 
   // ── Compaction ───────────────────────────────────────────────────────────
@@ -460,7 +415,7 @@ export class Session {
     fromMessageId: string,
     toMessageId: string
   ): Promise<StoredCompaction> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.addCompaction(
       this.sessionId,
       summary,
@@ -470,21 +425,22 @@ export class Session {
   }
 
   async getCompactions(): Promise<StoredCompaction[]> {
-    await this.#ensureRestored();
+    await this.#ready();
     return this.#core.getCompactions(this.sessionId);
   }
 
   /**
    * Run the registered compaction function and store the result as an
-   * overlay. When `leafId` is provided, compact that root-to-leaf branch
-   * instead of the active branch. Requires `onCompaction()`.
+   * overlay. When `leafId` is given, compact that root-to-leaf branch instead
+   * of the active branch. Requires `onCompaction()`.
    *
-   * The function receives pointer-mode history: attachment payloads are
-   * never inlined into a summarization pass.
+   * The function receives pointer-mode history: attachment payloads are never
+   * inlined into a summarization pass.
    */
   async compact(leafId?: string | null): Promise<CompactResult | null> {
-    await this.#ensureRestored();
-    if (!this.#compactionFn) {
+    await this.#ready();
+    const fn = this.#compactionFn;
+    if (!fn) {
       throw new Error(
         "No compaction function registered. Call onCompaction() first."
       );
@@ -497,12 +453,7 @@ export class Session {
 
     let result: CompactResult | null;
     try {
-      // Share the session's authoritative token counter so the compaction
-      // function's boundary logic uses the same accounting as the
-      // fire/no-fire decision.
-      result = await this.#compactionFn(history, {
-        tokenCounter: this.#tokenCounter
-      });
+      result = await fn(history);
     } catch (error) {
       this.#core.io.emit("session:error", {
         sessionId: this.sessionId,
@@ -531,418 +482,18 @@ export class Session {
       fromId,
       result.toMessageId
     );
-    await this.#refreshPromptAfterCompaction();
     await this.#core.notify({ type: "compact", sessionId: this.sessionId });
     return { ...result, fromMessageId: fromId };
   }
 
-  // ── Context blocks and skills ───────────────────────────────────────────
-
-  /** Return one loaded context block, or null before it has loaded. */
-  getContextBlock(label: string): ContextBlock | null {
-    return this.#ensureContext().getBlock(label);
-  }
-
-  /** Return the context blocks currently loaded in this isolate. */
-  getContextBlocks(): ContextBlock[] {
-    return this.#ensureContext().getBlocks();
-  }
-
-  /** Replace one writable context block without refreshing the frozen prompt. */
-  async replaceContextBlock(
-    label: string,
-    content: string
-  ): Promise<ContextBlock> {
-    await this.#ensureRestored();
-    return this.#ensureContext().setBlock(label, content);
-  }
-
-  /** Append text to one writable context block. */
-  async appendContextBlock(
-    label: string,
-    content: string
-  ): Promise<ContextBlock> {
-    await this.#ensureRestored();
-    return this.#ensureContext().appendToBlock(label, content);
-  }
-
-  /** Register and load a context block after the handle has initialized. */
-  async addContext(
-    label: string,
-    options: SessionContextOptions = {}
-  ): Promise<ContextBlock> {
-    await this.#ensureRestored();
-    const provider =
-      options.provider ?? this.#sqliteContextProvider(this.#contextKey(label));
-    const block = await this.#ensureContext().addBlock({
-      label,
-      description: options.description,
-      maxTokens: options.maxTokens,
-      provider
-    });
-    if (block.isSkill && !this.#skillScanRan) {
-      await this.#scanHistoryForLoadedSkills();
-    }
-    return block;
-  }
-
-  /** Remove a runtime-registered context block. */
-  removeContext(label: string): boolean {
-    return this.#ensureContext().removeBlock(label);
-  }
-
-  /**
-   * Unload a skill and replace its stored tool result with a short marker.
-   */
-  async unloadSkill(label: string, key: string): Promise<boolean> {
-    await this.#ensureRestored();
-    return this.#ensureContext().unloadSkill(label, key);
-  }
-
-  /** Return loaded skill identifiers as `label:key` strings. */
-  async getLoadedSkillKeys(): Promise<Set<string>> {
-    await this.#ensureRestored();
-    return this.#ensureContext().getLoadedSkillKeys();
-  }
-
-  /** Load or return the persisted frozen system prompt. */
-  async freezeSystemPrompt(): Promise<string> {
-    await this.#ensureRestored();
-    return this.#ensureContext().freezeSystemPrompt();
-  }
-
-  /** Reload context providers and replace the persisted frozen prompt. */
-  async refreshSystemPrompt(): Promise<string> {
-    await this.#ensureRestored();
-    return this.#ensureContext().refreshSystemPrompt();
-  }
-
-  /** Build the AI SDK tools implied by configured context providers. */
-  async tools(): Promise<ToolSet> {
-    await this.#ensureRestored();
-    return this.#ensureContext().tools();
-  }
-
-  // ── Search ───────────────────────────────────────────────────────────────
-
-  async search(
-    query: string,
-    options?: { limit?: number }
-  ): Promise<SearchResult[]> {
-    await this.#ensureRestored();
-    return this.#core.search(this.sessionId, query, options?.limit ?? 20);
-  }
-
   // ── Internal ─────────────────────────────────────────────────────────────
-
-  async #ensureRestored(): Promise<void> {
-    await this.#ready();
-    const context = this.#ensureContext();
-    if (!this.#restorePromise) {
-      this.#restorePromise = this.#restoreLoadedSkills(context).catch(
-        (error) => {
-          this.#core.io.emit("session:skill-restore:failed", {
-            sessionId: this.sessionId,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-      );
-    }
-    await this.#restorePromise;
-  }
-
-  #ensureContext(): ContextBlocks {
-    if (this.#context) return this.#context;
-    const configs: ContextConfig[] = this.#pendingContexts.map(
-      ({ label, options }) => ({
-        label,
-        description: options.description,
-        maxTokens: options.maxTokens,
-        provider:
-          options.provider ??
-          this.#sqliteContextProvider(this.#contextKey(label))
-      })
-    );
-    let promptStore: WritableContextProvider | undefined;
-    if (this.#cachedPrompt === true) {
-      promptStore = this.#sqliteContextProvider(
-        this.#contextKey("_system_prompt")
-      );
-    } else if (this.#cachedPrompt) {
-      promptStore = this.#cachedPrompt;
-    }
-    const context = new ContextBlocks(configs, promptStore);
-    context.setUnloadCallback(async (label, key) => {
-      try {
-        await this.#reclaimLoadedSkill(label, key);
-      } catch (error) {
-        this.#core.io.emit("session:skill-unload:failed", {
-          sessionId: this.sessionId,
-          label,
-          key,
-          error: error instanceof Error ? error.message : String(error)
-        });
-        throw error;
-      }
-    });
-    this.#context = context;
-    return context;
-  }
-
-  #contextKey(label: string): string {
-    return this.sessionId ? `${label}_${this.sessionId}` : label;
-  }
-
-  #sqliteContextProvider(label: string): WritableContextProvider {
-    return {
-      get: async () => this.#core.getContextValue(label),
-      set: async (content) => this.#core.setContextValue(label, content)
-    };
-  }
-
-  async #restoreLoadedSkills(context: ContextBlocks): Promise<void> {
-    if (!context.hasSkillCapableConfigs()) return;
-    await this.#scanHistoryForLoadedSkills();
-  }
-
-  async #scanHistoryForLoadedSkills(): Promise<void> {
-    this.#skillScanRan = true;
-    const loaded = new Set<string>();
-    const rows = this.#core
-      .pathRowStats(this.sessionId)
-      .filter((row) => row.role === "assistant");
-    for (const message of this.#core.rawMessagesByStats(this.sessionId, rows)) {
-      for (const part of message.parts) {
-        const input = this.#skillInput(part.input);
-        if (!input || part.state !== "output-available") continue;
-        const id = `${input.label}:${input.key}`;
-        if (part.toolName === "load_context") {
-          if (
-            typeof part.output === "string" &&
-            part.output.startsWith("[skill unloaded:")
-          ) {
-            loaded.delete(id);
-          } else {
-            loaded.add(id);
-          }
-        } else if (part.toolName === "unload_context") {
-          loaded.delete(id);
-        }
-      }
-    }
-    this.#ensureContext().restoreLoadedSkills(loaded);
-  }
-
-  #skillInput(input: unknown): { label: string; key: string } | null {
-    if (typeof input !== "object" || input === null) return null;
-    if (!("label" in input) || !("key" in input)) return null;
-    const label = input.label;
-    const key = input.key;
-    return typeof label === "string" && typeof key === "string"
-      ? { label, key }
-      : null;
-  }
-
-  async #reclaimLoadedSkill(label: string, key: string): Promise<void> {
-    const rows = this.#core
-      .pathRowStats(this.sessionId)
-      .filter((row) => row.role === "assistant");
-    for (const message of this.#core.rawMessagesByStats(
-      this.sessionId,
-      rows,
-      true
-    )) {
-      let changed = false;
-      const parts = message.parts.map((part) => {
-        const input = this.#skillInput(part.input);
-        if (
-          part.toolName === "load_context" &&
-          part.state === "output-available" &&
-          input?.label === label &&
-          input.key === key
-        ) {
-          changed = true;
-          return { ...part, output: `[skill unloaded: ${key}]` };
-        }
-        return part;
-      });
-      if (changed) {
-        await this.updateMessage({ ...message, parts });
-        return;
-      }
-    }
-  }
-
-  #scheduleEviction(): void {
-    if (
-      this.#evictionScheduled ||
-      this.#evictionRunning ||
-      !this.#core.attachments.agedEvictionEnabled
-    ) {
-      return;
-    }
-    this.#evictionScheduled = true;
-    setTimeout(() => {
-      this.#evictionScheduled = false;
-      void this.#evictAgedMedia({
-        maxRows: this.#core.attachments.maxEvictionRowsPerPass
-      }).then((result) => {
-        if (result?.backlogRemains) this.#scheduleEviction();
-      });
-    }, 0);
-  }
-
-  #observeEvictionCandidate(message: SessionMessage): void {
-    if (
-      !this.#core.attachments.configured ||
-      !this.#core.attachments.agedEvictionEnabled
-    ) {
-      return;
-    }
-    if (
-      hasEvictableMedia(message, this.#core.attachments.evictionThresholdBytes)
-    ) {
-      this.#evictionObservedOversized = true;
-    }
-  }
-
-  async #evictAgedMedia(options: {
-    maxRows: number;
-  }): Promise<SessionEvictionResult | null> {
-    if (
-      this.#evictionRunning ||
-      !this.#core.attachments.configured ||
-      !this.#core.attachments.agedEvictionEnabled
-    ) {
-      return null;
-    }
-    this.#evictionRunning = true;
-    try {
-      const stats = this.#core.pathRowStats(this.sessionId);
-      const keepRecent = this.#core.attachments.keepRecentMessages;
-      const aged = stats.slice(0, Math.max(0, stats.length - keepRecent));
-      const threshold = this.#core.attachments.evictionThresholdBytes;
-      const agedIds = aged.map((row) => row.id);
-      const candidates = this.#core.mediaMaintenanceCandidates(
-        this.sessionId,
-        agedIds,
-        threshold,
-        Math.max(1, Math.floor(options.maxRows))
-      );
-      const totals: SessionEvictionResult = {
-        messages: 0,
-        parts: 0,
-        bytes: 0,
-        backlogRemains: false
-      };
-
-      for (const candidate of candidates) {
-        const preserve = this.#core.attachments.preserveEvicted;
-        const fileExtraction: ToolOutputEvictionResult = preserve
-          ? await this.#extractAgedFileParts(candidate.message, threshold)
-          : dropLargeFileParts(candidate.message, threshold);
-        const toolEviction = await evictToolOutputStrings(
-          fileExtraction.message,
-          threshold,
-          preserve
-            ? (value, mediaType) =>
-                this.#core.attachments.putEvictedString(value, mediaType)
-            : null
-        );
-        const attachments = [
-          ...fileExtraction.attachments,
-          ...toolEviction.attachments
-        ];
-        if (!fileExtraction.changed && !toolEviction.changed) {
-          this.#core.markMediaCandidate(
-            this.sessionId,
-            candidate.message.id,
-            candidate.content,
-            0
-          );
-          continue;
-        }
-
-        const rewritten = await this.#core.rewriteForMaintenance(
-          this.sessionId,
-          candidate.content,
-          toolEviction.message,
-          attachments
-        );
-        if (!rewritten) continue;
-        totals.messages++;
-        totals.parts += fileExtraction.parts + toolEviction.parts;
-        totals.bytes += fileExtraction.bytes + toolEviction.bytes;
-        await this.#core.notify({
-          type: "maintenance-rewrite",
-          sessionId: this.sessionId,
-          message: toolEviction.message
-        });
-      }
-
-      totals.backlogRemains = this.#core.hasMediaMaintenanceCandidate(
-        this.sessionId,
-        agedIds,
-        threshold
-      );
-      this.#evictionObservedOversized = totals.backlogRemains;
-      if (totals.messages > 0) {
-        this.#core.io.emit("session:media:evicted", {
-          sessionId: this.sessionId,
-          messages: totals.messages,
-          parts: totals.parts,
-          bytes: totals.bytes,
-          backlogRemains: totals.backlogRemains
-        });
-        await this.#core.notify({
-          type: "eviction",
-          sessionId: this.sessionId,
-          result: totals
-        });
-      }
-      return totals;
-    } catch (error) {
-      this.#core.io.emit("session:media:eviction-failed", {
-        sessionId: this.sessionId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return null;
-    } finally {
-      this.#evictionRunning = false;
-    }
-  }
-
-  async #extractAgedFileParts(
-    message: SessionMessage,
-    threshold: number
-  ): Promise<ToolOutputEvictionResult> {
-    const extraction = await this.#core.attachments.extract(message, threshold);
-    let bytes = 0;
-    if (extraction.changed) {
-      for (const part of message.parts) {
-        if (
-          part.type === "file" &&
-          typeof part.url === "string" &&
-          part.url.startsWith("data:")
-        ) {
-          bytes += byteLength(part.url);
-        }
-      }
-    }
-    return {
-      message: extraction.message,
-      changed: extraction.changed,
-      parts: extraction.attachments.length,
-      bytes,
-      attachments: extraction.attachments
-    };
-  }
 
   /**
    * The shared write pipeline: sanitize provider metadata, strip reserved
-   * metadata and guard pointers on client-source input, offload oversized
-   * inline media (async, BEFORE the durable write so a stored pointer
-   * always has bytes behind it), then cap the row.
+   * metadata and guard pointers on client-source input, then move payloads
+   * out of the row (async, BEFORE the durable write, so a stored pointer
+   * always has bytes behind it). Content is never truncated: a row that
+   * cannot fit its budget after offload is rejected.
    */
   async #prepare(
     message: SessionMessage,
@@ -950,123 +501,93 @@ export class Session {
   ): Promise<{
     message: SessionMessage;
     attachments: AppendResult["attachments"];
+    tokenEstimate: number;
   }> {
-    // SAFETY: SessionMessage is structurally a UIMessage superset for the
-    // fields sanitize/cap touch (parts, metadata).
-    let prepared = sanitizeMessage(
-      message as unknown as UIMessage
-    ) as unknown as SessionMessage;
+    let prepared = sanitizeMessage(message);
     if (source === "client") {
       prepared = this.#core.stripReservedMetadata(prepared);
-      prepared = this.#core.attachments.guardClientPointers(
-        this.sessionId,
-        prepared
+      prepared = await this.#core.attachments.guardClientPointers(prepared);
+    }
+    const threshold = this.#core.attachments.options.inlineThresholdBytes;
+    const offloaded = await this.#core.attachments.offload(prepared, {
+      mediaThresholdBytes: threshold,
+      rowBudgetBytes: MAX_INLINE_ROW_BYTES
+    });
+    if (
+      offloaded.rowBytes !== undefined &&
+      offloaded.rowBytes > MAX_INLINE_ROW_BYTES
+    ) {
+      await this.#core.attachments.discardUnreferenced(offloaded.attachments);
+      throw new SessionMessageTooLargeError(
+        message.id,
+        offloaded.rowBytes,
+        MAX_INLINE_ROW_BYTES
       );
     }
-    const extraction = await this.#core.attachments.extract(prepared);
-    const capped = enforceRowSizeLimit(
-      extraction.message as unknown as UIMessage,
-      {
-        warn: (text) => console.warn(`[Sessions] ${text}`)
-      }
-    ) as unknown as SessionMessage;
-    return { message: capped, attachments: extraction.attachments };
+    return {
+      message: offloaded.message,
+      attachments: offloaded.attachments,
+      tokenEstimate: this.#core.estimateRowTokens(offloaded.message)
+    };
   }
 
-  /** Gate → confirm → compact. Failures are non-fatal (message is stored). */
+  /** Gate on the stamped estimate, then compact. Failures are non-fatal. */
   async #maybeAutoCompact(): Promise<boolean> {
     const threshold = this.#tokenThreshold;
-    const fn = this.#compactionFn;
-    if (threshold == null || !fn) return false;
-
-    const gateEstimate =
-      this.#core.stats(this.sessionId).tokenEstimate +
-      (await this.#extraTokenEstimate());
-    if (gateEstimate <= threshold) return false;
-
-    let estimate = gateEstimate;
-    if (this.#tokenCounter) {
-      try {
-        const counted = await this.#tokenCounter({
-          messages: await this.#core.getHistory(this.sessionId, {}, null),
-          systemPrompt: await this.#systemPromptForEstimate(),
-          contextBlocks: this.#contextBlocksForEstimate()
-        });
-        estimate = Number.isFinite(counted)
-          ? Math.max(0, Math.ceil(counted))
-          : 0;
-      } catch (error) {
-        await this.#handleAutoCompactionError(error);
-        return false;
-      }
-      if (estimate <= threshold) return false;
+    if (threshold == null || !this.#compactionFn) return false;
+    if (this.#core.stats(this.sessionId).tokenEstimate <= threshold) {
+      return false;
     }
-
     try {
-      const compacted = Boolean(await this.compact());
-      if (!compacted && !this.#warnedCompactionNoOp) {
-        // Over threshold but the compaction function returned null — history
-        // was not shortened, so this fires again next turn. Surface it once
-        // instead of looping silently.
-        this.#warnedCompactionNoOp = true;
-        console.warn(
-          `[Sessions] Auto-compaction fired (~${estimate} tokens > ${threshold}) but the compaction function returned null, so history was not shortened. ` +
-            (this.#tokenCounter
-              ? "A tokenCounter is configured and flows to the boundary logic, but it is invoked per-message there — a whole-prompt/usage counter degrades the tail budget and can still no-op. Pass a per-message CompactOptions.tokenCounter for precise tail budgeting."
-              : "If your history is tool-heavy, configure a tokenCounter on compactAfter() — it flows to createCompactFunction's boundary logic automatically.")
-        );
-      } else if (compacted) {
-        this.#warnedCompactionNoOp = false;
-      }
-      return compacted;
+      return Boolean(await this.compact());
     } catch (error) {
-      await this.#handleAutoCompactionError(error);
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`[Sessions] auto-compaction failed: ${detail}`);
+      this.#core.io.emit("session:error", {
+        sessionId: this.sessionId,
+        error: detail
+      });
       return false;
     }
   }
 
-  async #handleAutoCompactionError(error: unknown): Promise<void> {
-    const message = error instanceof Error ? error.message : String(error);
-    if (this.#compactionErrorHandler) {
-      try {
-        await this.#compactionErrorHandler(error);
-      } catch (handlerError) {
-        console.warn(
-          `[Sessions] auto-compaction error handler failed: ${
-            handlerError instanceof Error
-              ? handlerError.message
-              : String(handlerError)
-          }`
-        );
-      }
-    } else {
-      console.warn(`[Sessions] auto-compaction failed: ${message}`);
+  #scheduleMaintenance(): void {
+    if (
+      this.#maintenanceScheduled ||
+      this.#maintenanceRunning ||
+      !this.#core.attachments.options.maintenance
+    ) {
+      return;
     }
-    this.#core.io.emit("session:error", {
-      sessionId: this.sessionId,
-      error: message
-    });
+    this.#maintenanceScheduled = true;
+    setTimeout(() => {
+      this.#maintenanceScheduled = false;
+      void this.#runMaintenance();
+    }, 0);
   }
 
-  async #systemPromptForEstimate(): Promise<string> {
-    return this.#ensureContext().getSystemPromptForEstimate();
-  }
-
-  #contextBlocksForEstimate(): ContextBlock[] {
-    return this.#ensureContext().getBlocks();
-  }
-
-  async #extraTokenEstimate(): Promise<number> {
-    return estimateStringTokens(await this.#systemPromptForEstimate());
-  }
-
-  async #refreshPromptAfterCompaction(): Promise<void> {
-    await this.#ensureContext().refreshSystemPrompt();
-  }
-
-  async #afterClear(): Promise<void> {
-    const context = this.#ensureContext();
-    context.clearSkillState();
-    await context.refreshSystemPrompt();
+  async #runMaintenance(): Promise<SessionMaintenanceResult | null> {
+    if (
+      this.#maintenanceRunning ||
+      !this.#core.attachments.options.maintenance
+    ) {
+      return null;
+    }
+    this.#maintenanceRunning = true;
+    let result: SessionMaintenanceResult | null = null;
+    try {
+      result = await runMaintenancePass(this.#core, this.sessionId);
+    } catch (error) {
+      this.#core.io.emit("session:maintenance:failed", {
+        sessionId: this.sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      this.#maintenanceRunning = false;
+    }
+    // Chain the next pass only after clearing the running flag, which
+    // `#scheduleMaintenance` treats as "already covered".
+    if (result?.backlogRemains) this.#scheduleMaintenance();
+    return result;
   }
 }

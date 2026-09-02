@@ -39,7 +39,11 @@ export async function attachmentResponse(
         : "";
       headers.set("content-disposition", `${disposition}${filename}`);
     }
-    return new Response(body, { headers });
+    // A plain JS stream loses `content-length` in workerd; the fixed-length
+    // pipe keeps the declared size on both the SQLite and R2 tiers.
+    const fixed = new FixedLengthStream(attachment.bytes);
+    void body.pipeTo(fixed.writable).catch(() => undefined);
+    return new Response(fixed.readable, { headers });
   } catch (error) {
     if (error instanceof SessionAttachmentMissingError) {
       return new Response("Attachment not found", { status: 404 });

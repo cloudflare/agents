@@ -34,15 +34,42 @@ type TestToolCallPart = Extract<
   { type: `tool-${string}` }
 >;
 
-function persistedMessages(agent: AIChatAgent): ChatMessage[] {
-  return agent.sessions
-    .__DO_NOT_USE_WILL_BREAK__sync()
-    .readAll("")
-    .map((row) => row.message as ChatMessage);
+/** The STORED rows: attachment pointers stay as written, never inlined. */
+async function persistedMessages(agent: AIChatAgent): Promise<ChatMessage[]> {
+  const history = await agent.sessions
+    .session()
+    .getHistory({ reconstruct: "pointer" });
+  return history as ChatMessage[];
 }
 
-function persistedMessageCount(agent: AIChatAgent): number {
-  return agent.sessions.__DO_NOT_USE_WILL_BREAK__sync().readAll("").length;
+/** The stored rows with attachment payloads reconstructed byte-for-byte. */
+async function reconstructedMessages(
+  agent: AIChatAgent
+): Promise<ChatMessage[]> {
+  const history = await agent.sessions.session().getHistory();
+  return history as ChatMessage[];
+}
+
+const sessionChangeCounters = new WeakMap<AIChatAgent, { count: number }>();
+
+/**
+ * Count of Sessions change-feed events seen by this instance. Arming is lazy
+ * and idempotent: the first read subscribes and returns 0.
+ */
+function sessionChangeEventCount(agent: AIChatAgent): number {
+  const existing = sessionChangeCounters.get(agent);
+  if (existing) return existing.count;
+  const counter = { count: 0 };
+  sessionChangeCounters.set(agent, counter);
+  agent.sessions.subscribe(() => {
+    counter.count++;
+  });
+  return counter.count;
+}
+
+async function persistedMessageCount(agent: AIChatAgent): Promise<number> {
+  return (await agent.sessions.session().getHistory({ reconstruct: "pointer" }))
+    .length;
 }
 
 function makeSSEChunkResponse(chunks: ReadonlyArray<Record<string, unknown>>) {
@@ -119,6 +146,7 @@ export type Env = {
   AIChatAgentToolParent: DurableObjectNamespace<AIChatAgentToolParent>;
   AIChatAgentToolChild: DurableObjectNamespace<AIChatAgentToolChild>;
   StuckAgentToolChild: DurableObjectNamespace<StuckAgentToolChild>;
+  AttachmentChatAgent: DurableObjectNamespace<AttachmentChatAgent>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -515,18 +543,34 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 
-  getMessagesForTest(): ChatMessage[] {
+  async getMessagesForTest(): Promise<ChatMessage[]> {
+    // `this.messages` hydrates in `onStart`; native RPC bypasses fetch, so a
+    // freshly woken object has to start the lifecycle before reading it.
+    await this.__unsafe_ensureInitialized();
     return this.messages as ChatMessage[];
+  }
+
+  /** Stored rows with attachment payloads reconstructed byte-for-byte. */
+  reconstructedMessagesForTest(): Promise<ChatMessage[]> {
+    return reconstructedMessages(this);
+  }
+
+  /**
+   * Count of Sessions change-feed events. An unchanged row writes nothing and
+   * dispatches no event, so this is the observable no-op signal.
+   */
+  sessionChangeEventCountForTest(): number {
+    return sessionChangeEventCount(this);
   }
 
   enableAttachmentsForTest(): void {
     this.sessionAttachments = {
       inlineThresholdBytes: 1,
-      evictAged: false
+      maintenance: false
     };
   }
 
@@ -956,14 +1000,19 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * Insert a raw JSON string as a message directly into SQLite.
    * Used to test validation of malformed/corrupt messages.
    */
-  insertRawMessage(rowId: string, rawJson: string): void {
-    const sync = this.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-    const parentId = sync.latestLeafId("");
+  async insertRawMessage(rowId: string, rawJson: string): Promise<void> {
+    const parentId =
+      (await this.sessions.session().getLatestLeaf())?.id ?? null;
     this.sql`
       INSERT INTO cf_agents_session_messages
-        (id, session_id, parent_id, role, content, token_estimate,
+        (id, session_id, seq, parent_id, role, content, token_estimate,
          media_candidate_bytes, created_at)
-      VALUES (${rowId}, '', ${parentId}, 'user', ${rawJson}, 0, 0, ${Date.now()})
+      VALUES (
+        ${rowId}, '',
+        (SELECT COALESCE(MAX(seq), 0) + 1
+         FROM cf_agents_session_messages WHERE session_id = ''),
+        ${parentId}, 'user', ${rawJson}, 0, 0, ${Date.now()}
+      )
     `;
   }
 
@@ -971,7 +1020,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this.maxPersistedMessages = max ?? undefined;
   }
 
-  getMessageCount(): number {
+  getMessageCount(): Promise<number> {
     return persistedMessageCount(this);
   }
 
@@ -1021,7 +1070,7 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
     };
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 }
@@ -1158,7 +1207,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return [...this._startedRequestIds];
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 
@@ -1355,8 +1404,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     ]);
   }
 
-  getPersistedUserTexts(): string[] {
-    return this.getPersistedMessages()
+  async getPersistedUserTexts(): Promise<string[]> {
+    return (await this.getPersistedMessages())
       .filter((message) => message.role === "user")
       .flatMap((message) =>
         message.parts.flatMap((part) =>
@@ -1425,7 +1474,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     ]);
   }
 
-  getMessageCount(): number {
+  getMessageCount(): Promise<number> {
     return persistedMessageCount(this);
   }
 }
@@ -1537,7 +1586,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
     await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 }
@@ -1566,7 +1615,7 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
     return [...this._responseResults];
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 }
@@ -1610,7 +1659,7 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
     return this._streamCompleted;
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 }
@@ -1660,7 +1709,7 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
     await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 }
@@ -2671,7 +2720,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.messages = this.messages.filter((m) => m.role !== "assistant");
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 
@@ -3010,7 +3059,7 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this.recoveryContexts;
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 
@@ -3069,7 +3118,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
     return this.onChatMessageCallCount;
   }
 
-  getPersistedMessages(): ChatMessage[] {
+  getPersistedMessages(): Promise<ChatMessage[]> {
     return persistedMessages(this);
   }
 
@@ -4766,6 +4815,36 @@ export class AIChatAgentToolParent extends Agent<Env> {
     );
 
     return this.events;
+  }
+}
+
+/**
+ * Attachment policy declared as a class field, so it survives a Durable
+ * Object eviction the way a real subclass's policy does.
+ */
+export class AttachmentChatAgent extends AIChatAgent<Env> {
+  override sessionAttachments = {
+    inlineThresholdBytes: 1,
+    maintenance: false
+  };
+
+  async getMessagesForTest(): Promise<ChatMessage[]> {
+    await this.__unsafe_ensureInitialized();
+    return this.messages as ChatMessage[];
+  }
+
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
+  }
+
+  getAttachmentFileCountForTest(): number {
+    return Number(
+      this.ctx.storage.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM cf_agents_session_attachment_blobs"
+        )
+        .one().count
+    );
   }
 }
 

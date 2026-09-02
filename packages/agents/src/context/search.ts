@@ -7,8 +7,8 @@
  * Duck-typed: if a provider has a `search` method, it's a SearchProvider.
  */
 
-import type { ContextProvider } from "./context";
-import type { SqlProvider } from "./sqlite-context";
+import type { ContextProvider } from "./blocks";
+import type { SqlProvider } from "./sqlite-provider";
 
 /**
  * Storage interface for searchable context.
@@ -45,15 +45,14 @@ export function isSearchProvider(
  * - `search(query)` full-text search using FTS5
  * - `set(key, content)` indexes or replaces content under a key
  *
- * Each instance uses a namespaced FTS5 table to avoid collisions
- * with the session message search.
+ * Entries live in one namespaced FTS5 table, separate from the session
+ * message index.
  *
  * @example
  * ```ts
- * Session.create(this)
- *   .withContext("knowledge", {
- *     provider: new AgentSearchProvider(this)
- *   })
+ * const context = new ContextBlocks([
+ *   { label: "knowledge", provider: new AgentSearchProvider(this) }
+ * ]);
  * ```
  */
 export class AgentSearchProvider implements SearchProvider {
@@ -71,16 +70,9 @@ export class AgentSearchProvider implements SearchProvider {
 
   private ensureTable(): void {
     if (this.initialized) return;
-    this.agent.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_search_entries (
-        label TEXT NOT NULL,
-        key TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (label, key)
-      )
-    `;
+    // The FTS table is the only store: a mirror row table would double the
+    // billed writes of every indexed entry to serve a count and a lookup the
+    // index already answers.
     this.agent.sql`
       CREATE VIRTUAL TABLE IF NOT EXISTS cf_agents_search_fts
       USING fts5(
@@ -90,13 +82,14 @@ export class AgentSearchProvider implements SearchProvider {
         tokenize='porter unicode61'
       )
     `;
+    this.agent.sql`DROP TABLE IF EXISTS cf_agents_search_entries`;
     this.initialized = true;
   }
 
   async get(): Promise<string | null> {
     this.ensureTable();
     const rows = this.agent.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_search_entries
+      SELECT COUNT(*) as count FROM cf_agents_search_fts
       WHERE label = ${this.label}
     `;
     const count = rows[0]?.count ?? 0;
@@ -136,34 +129,13 @@ export class AgentSearchProvider implements SearchProvider {
 
   async set(key: string, content: string): Promise<void> {
     this.ensureTable();
-
-    // Delete old FTS entry if exists
-    this.deleteFTS(key);
-
-    // Upsert the entry
     this.agent.sql`
-      INSERT INTO cf_agents_search_entries (label, key, content)
-      VALUES (${this.label}, ${key}, ${content})
-      ON CONFLICT(label, key) DO UPDATE SET
-        content = ${content},
-        updated_at = CURRENT_TIMESTAMP
+      DELETE FROM cf_agents_search_fts
+      WHERE label = ${this.label} AND key = ${key}
     `;
-
-    // Index in FTS
     this.agent.sql`
       INSERT INTO cf_agents_search_fts (label, key, content)
       VALUES (${this.label}, ${key}, ${content})
     `;
-  }
-
-  private deleteFTS(key: string): void {
-    const rows = this.agent.sql<{ rowid: number }>`
-      SELECT rowid FROM cf_agents_search_fts
-      WHERE key = ${key} AND label = ${this.label}
-    `;
-    for (const row of rows) {
-      this.agent
-        .sql`DELETE FROM cf_agents_search_fts WHERE rowid = ${row.rowid}`;
-    }
   }
 }

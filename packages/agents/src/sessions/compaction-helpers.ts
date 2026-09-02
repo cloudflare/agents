@@ -6,17 +6,18 @@
  * for custom CompactFunction implementations.
  */
 
-import type { CompactContext, SessionMessage } from "./types";
+import type { SessionMessage } from "./types";
 import { estimateMessageTokens } from "./tokens";
-
-export type CompactTokenCounter = (
-  messages: SessionMessage[]
-) => number | Promise<number>;
 
 // ── Compaction ID constants ─────────────────────────────────────────
 
 /** Prefix for all compaction messages (overlays and summaries) */
 export const COMPACTION_PREFIX = "compaction_";
+
+/** Head messages kept verbatim so the conversation's opening survives. */
+const PROTECT_HEAD = 3;
+/** Tail messages kept verbatim regardless of the token budget. */
+const MIN_TAIL_MESSAGES = 2;
 
 /** Check if a message is a compaction message */
 export function isCompactionMessage(msg: SessionMessage): boolean {
@@ -160,156 +161,6 @@ export function findTailCutByTokens(
   return alignBoundaryBackward(messages, cutIdx);
 }
 
-async function findTailCutByTokensWithCounter(
-  messages: SessionMessage[],
-  headEnd: number,
-  tokenCounter: CompactTokenCounter,
-  tailTokenBudget = 20000,
-  minTailMessages = 2
-): Promise<number> {
-  const n = messages.length;
-  let accumulated = 0;
-  let tokenCut = n;
-
-  for (let i = n - 1; i >= headEnd; i--) {
-    const msgTokens = await tokenCounter([messages[i]]);
-
-    if (accumulated + msgTokens > tailTokenBudget && tokenCut < n) {
-      break;
-    }
-    accumulated += msgTokens;
-    tokenCut = i;
-  }
-
-  const minCut = n - minTailMessages;
-  const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
-  return alignBoundaryBackward(messages, cutIdx);
-}
-
-// ── Tool Pair Sanitization ───────────────────────────────────────────
-
-/**
- * Fix orphaned tool call/result pairs after compaction.
- *
- * Two failure modes:
- * 1. Tool result references a call_id whose assistant tool_call was removed
- *    → Remove the orphaned result
- * 2. Assistant has tool_calls whose results were dropped
- *    → Add stub results so the API doesn't error
- *
- * @param messages Messages after compaction
- * @returns Sanitized messages with no orphaned pairs
- */
-export function sanitizeToolPairs(
-  messages: SessionMessage[]
-): SessionMessage[] {
-  // Build set of surviving tool call IDs (from assistant messages)
-  const survivingCallIds = new Set<string>();
-  for (const msg of messages) {
-    if (msg.role === "assistant") {
-      for (const id of getToolCallIds(msg)) {
-        survivingCallIds.add(id);
-      }
-    }
-  }
-
-  // Build set of tool result IDs
-  const resultCallIds = new Set<string>();
-  for (const msg of messages) {
-    for (const part of msg.parts) {
-      if (
-        (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
-        "toolCallId" in part &&
-        "output" in part
-      ) {
-        resultCallIds.add((part as { toolCallId: string }).toolCallId);
-      }
-    }
-  }
-
-  // Remove orphaned results (results whose calls were dropped)
-  const orphanedResults = new Set<string>();
-  for (const id of resultCallIds) {
-    if (!survivingCallIds.has(id)) {
-      orphanedResults.add(id);
-    }
-  }
-
-  let result = messages;
-  if (orphanedResults.size > 0) {
-    result = result.map((msg) => {
-      const filteredParts = msg.parts.filter((part) => {
-        if (
-          (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
-          "toolCallId" in part &&
-          "output" in part
-        ) {
-          return !orphanedResults.has(
-            (part as { toolCallId: string }).toolCallId
-          );
-        }
-        return true;
-      });
-      if (filteredParts.length !== msg.parts.length) {
-        return { ...msg, parts: filteredParts } as SessionMessage;
-      }
-      return msg;
-    });
-  }
-
-  // Add stub results for calls whose results were dropped
-  const missingResults = new Set<string>();
-  for (const id of survivingCallIds) {
-    if (!resultCallIds.has(id) && !orphanedResults.has(id)) {
-      missingResults.add(id);
-    }
-  }
-
-  if (missingResults.size > 0) {
-    const patched: SessionMessage[] = [];
-    for (const msg of result) {
-      patched.push(msg);
-      if (msg.role === "assistant") {
-        for (const id of getToolCallIds(msg)) {
-          if (missingResults.has(id)) {
-            // Find the tool name from the call
-            const callPart = msg.parts.find(
-              (p) =>
-                "toolCallId" in p &&
-                (p as { toolCallId: string }).toolCallId === id
-            ) as { toolName?: string } | undefined;
-
-            patched.push({
-              id: `stub-${id}`,
-              role: "assistant",
-              parts: [
-                {
-                  type: "tool-result" as const,
-                  toolCallId: id,
-                  toolName: callPart?.toolName ?? "unknown",
-                  result:
-                    "[Result from earlier conversation — see context summary above]"
-                } as unknown as SessionMessage["parts"][number]
-              ],
-              createdAt: new Date()
-            } as SessionMessage);
-          }
-        }
-      }
-    }
-    result = patched;
-  }
-
-  // Remove empty messages (all parts filtered out)
-  return result.filter((msg) => msg.parts.length > 0);
-}
-
-// ── Summary Budget ───────────────────────────────────────────────────
-
-/**
- * Compute a summary token budget based on the content being compressed.
- * 20% of the compressed content, clamped to 2K-8K tokens.
- */
 export function computeSummaryBudget(messages: SessionMessage[]): number {
   const contentTokens = estimateMessageTokens(messages);
   // Summary is ~20% of the content being compressed.
@@ -425,27 +276,13 @@ export interface CompactResult {
 }
 
 export interface CompactOptions {
-  /**
-   * Function to call the LLM for summarization.
-   * Takes a user prompt string, returns the LLM's text response.
-   */
+  /** Calls the model to summarize; receives a prompt, returns its text. */
   summarize: (prompt: string) => Promise<string>;
-
-  /** Number of head messages to protect (default: 2) */
-  protectHead?: number;
-
-  /** Token budget for tail protection (default: 20000) */
-  tailTokenBudget?: number;
-
-  /** Minimum tail messages to protect (default: 2) */
-  minTailMessages?: number;
-
   /**
-   * Optional counter for tail-budget decisions. Use this when a tokenizer or
-   * model-reported accounting is available; otherwise the Workers-safe
-   * heuristic is used.
+   * Token budget for the recent tail kept verbatim. Older messages above the
+   * protected head are summarized into one overlay. Default 20,000.
    */
-  tokenCounter?: CompactTokenCounter;
+  keepRecentTokens?: number;
 }
 
 /**
@@ -456,82 +293,36 @@ export interface CompactOptions {
  * 2. Protect tail by token budget (walk backward)
  * 3. Align boundaries to tool call groups
  * 4. Summarize middle section with LLM (structured format)
- * 5. Sanitize orphaned tool pairs
- * 6. Iterative summary updates on subsequent compactions
+ * 5. Iterative summary updates on subsequent compactions
  *
  * @example
  * ```typescript
  * import { createCompactFunction } from "agents/sessions";
  *
- * const session = new Session(provider, {
- *   compaction: {
- *     tokenThreshold: 100000,
- *     fn: createCompactFunction({
- *       summarize: (prompt) => generateText({ model, prompt }).then(r => r.text)
+ * sessions
+ *   .session()
+ *   .onCompaction(
+ *     createCompactFunction({
+ *       summarize: (prompt) => generateText({ model, prompt }).then((r) => r.text)
  *     })
- *   }
- * });
+ *   )
+ *   .compactAfter(100_000);
  * ```
  */
 export function createCompactFunction(opts: CompactOptions) {
-  const protectHead = opts.protectHead ?? 3;
-  const tailTokenBudget = opts.tailTokenBudget ?? 20000;
-  const minTailMessages = opts.minTailMessages ?? 2;
+  const keepRecentTokens = opts.keepRecentTokens ?? 20_000;
 
-  return async (
-    messages: SessionMessage[],
-    context?: CompactContext
-  ): Promise<CompactResult | null> => {
-    if (messages.length <= protectHead + minTailMessages) {
-      return null;
-    }
-
-    // Prefer an explicit counter; otherwise adapt the Session's counter (flowed
-    // via CompactContext) so a single `tokenCounter` on `compactAfter` drives
-    // the boundary cut too — without it, a fire counter + the default heuristic
-    // under-counting a tool-heavy history makes compaction fire every turn but
-    // never shorten anything. The session counter is whole-prompt shaped; for
-    // the tail walk we feed it individual messages with empty system/context.
-    //
-    // Caveat: this counter is invoked once PER MESSAGE. A tokenizer-style
-    // counter yields accurate per-message tokens; a counter that returns a
-    // fixed whole-prompt total (e.g. `usage.inputTokens`) returns the same
-    // value for every message, which degrades `tailTokenBudget` to
-    // `minTailMessages` — compaction still runs and context stays bounded, but
-    // the byte budget is effectively ignored. It is also called O(n) times per
-    // compaction, so an async/remote counter (e.g. a `count_tokens` API) will
-    // be slow. For precise tail budgeting with such counters, pass an explicit
-    // per-message `CompactOptions.tokenCounter` instead.
-    const sessionCounter = context?.tokenCounter;
-    const tailCounter: CompactTokenCounter | undefined =
-      opts.tokenCounter ??
-      (sessionCounter
-        ? (msgs) =>
-            sessionCounter({
-              messages: msgs,
-              systemPrompt: "",
-              contextBlocks: []
-            })
-        : undefined);
+  return async (messages: SessionMessage[]): Promise<CompactResult | null> => {
+    if (messages.length <= PROTECT_HEAD + MIN_TAIL_MESSAGES) return null;
 
     // 1. Find compression boundaries
-    let compressStart = protectHead;
-    compressStart = alignBoundaryForward(messages, compressStart);
-
-    let compressEnd = tailCounter
-      ? await findTailCutByTokensWithCounter(
-          messages,
-          compressStart,
-          tailCounter,
-          tailTokenBudget,
-          minTailMessages
-        )
-      : findTailCutByTokens(
-          messages,
-          compressStart,
-          tailTokenBudget,
-          minTailMessages
-        );
+    const compressStart = alignBoundaryForward(messages, PROTECT_HEAD);
+    const compressEnd = findTailCutByTokens(
+      messages,
+      compressStart,
+      keepRecentTokens,
+      MIN_TAIL_MESSAGES
+    );
 
     if (compressEnd <= compressStart) {
       return null;

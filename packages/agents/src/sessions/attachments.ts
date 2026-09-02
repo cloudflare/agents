@@ -1,68 +1,119 @@
 /**
  * Attachment offload for the Sessions capability.
  *
- * Large file parts are stored as content-addressed blobs in Sessions-owned
- * chunked SQLite or an optional private R2 tier. The message row keeps a small
- * pointer part, still structurally a valid AI SDK `FileUIPart`, with an
- * `attachment:sha256:<hex>` URL. Reconstruction is a read-side plugin: the
- * default materializes the original `data:` URL; a custom
- * {@link AttachmentReconstructor} can seed a Workspace or emit a hosted URL.
+ * One mechanism moves every kind of large payload out of a message row and
+ * back: data-URL file parts, text and reasoning parts, and strings nested in
+ * tool outputs. The stored form keeps the part's shape and replaces the
+ * payload with an `attachment:sha256:<hex>` pointer; bytes live in
+ * content-addressed storage (chunked SQLite or R2). Reading back inlines the
+ * payload again by default, so a round-trip is exact. Nothing is truncated.
  *
  * Ordering: blob writes complete BEFORE the message row commits, so a stored
- * pointer always has durable bytes behind it. A crash in between can leave a
- * staged SQLite upload or private R2 object; bounded later maintenance reaps
- * it. Whole-file hashes deduplicate successful retries.
+ * pointer always has durable bytes behind it. Whole-file hashes deduplicate
+ * retries, and attachment lifetime is derived from message references.
  */
 
-import { SessionAttachmentMissingError } from "./errors";
 import {
+  AttachmentBlobStore,
   SESSION_ATTACHMENT_CHUNK_BYTES,
-  SessionAttachmentStorage,
-  type AttachmentByteSource,
-  type SessionAttachmentStorageIo
+  type AttachmentBlobRow,
+  type AttachmentByteSource
 } from "./attachment-storage";
+import { SessionAttachmentMissingError } from "./errors";
+import type { SessionsIo } from "./io";
+import { byteLength } from "./sanitize";
 import type {
   AttachmentReconstructor,
   ReconstructMode,
   ResolvedAttachment,
   SessionMessage,
   SessionMessagePart,
-  SessionsAttachmentOptions
+  SessionsAttachmentOptions,
+  SessionsOptions
 } from "./types";
 
 export const ATTACHMENT_URL_PREFIX = "attachment:sha256:";
 
+/**
+ * Serialized ceiling for one message row. Anything larger is offloaded
+ * largest-string-first until it fits; it is never truncated.
+ */
+export const MAX_INLINE_ROW_BYTES = SESSION_ATTACHMENT_CHUNK_BYTES;
+
 const DEFAULT_INLINE_THRESHOLD_BYTES = 32 * 1024;
+const DEFAULT_R2_THRESHOLD_BYTES = 1_500_000;
+const DEFAULT_R2_PREFIX = "cf-agents/sessions/attachments";
+const DEFAULT_MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 const DEFAULT_BASE_PATH = "/attachments";
+const DEFAULT_KEEP_RECENT_MESSAGES = 8;
+const DEFAULT_MAX_MAINTENANCE_ROWS = 64;
 const STRING_STREAM_CHARS = 256 * 1024;
 const BASE64_STREAM_CHARS = (SESSION_ATTACHMENT_CHUNK_BYTES / 3) * 4;
-export const DEFAULT_KEEP_RECENT_MESSAGES = 8;
+const TEXT_MEDIA_TYPE = "text/plain";
+/** Nested tool-output walks stop here so hostile output cannot recurse forever. */
+const MAX_WALK_DEPTH = 8;
 
 /** One offloaded blob referenced from a stored message. */
 export interface StoredAttachment {
   /** sha-256 hex of the raw payload — the content address. */
   hash: string;
-  /** Store path: `<basePath>/sha256/<hash>`. */
+  /** Logical locator: `<basePath>/sha256/<hash>`. */
   path: string;
   mediaType: string;
   bytes: number;
   filename?: string;
 }
 
-/** @internal Raw `cf_agents_session_attachments` SQLite row. */
-export type AttachmentRow = {
-  hash: string;
-  message_id: string;
-  part_index: number;
-  session_id: string;
-  path: string;
-  media_type: string;
-  bytes: number;
-  filename: string | null;
-  created_at: number;
-};
+/** Attachment policy with defaults applied. */
+export interface ResolvedAttachmentOptions {
+  readonly bucket: SessionsAttachmentOptions["r2"];
+  readonly r2ThresholdBytes: number;
+  readonly r2Prefix: string;
+  readonly maxAttachmentBytes: number;
+  readonly inlineThresholdBytes: number;
+  readonly basePath: string;
+  readonly keepRecentMessages: number;
+  readonly maxMaintenanceRowsPerPass: number;
+  readonly maintenance: boolean;
+  readonly reconstruct: AttachmentReconstructor;
+}
 
-/** The hash referenced by an `attachment:` pointer URL, or null. */
+/**
+ * What one offload pass moves out of a message row.
+ *
+ * Media and prose are treated differently on purpose. Media is opaque bytes
+ * the row should never carry, so it leaves at a fixed threshold. Prose is the
+ * conversation itself, so it stays in the row until the row cannot hold it.
+ */
+export interface OffloadPolicy {
+  /**
+   * Media at or above this decoded size becomes a pointer: `data:` URL file
+   * parts, and `data:` URL strings nested in tool output (a screenshot is
+   * media wherever a tool put it).
+   */
+  mediaThresholdBytes: number;
+  /**
+   * Serialized row ceiling. Whatever is left is offloaded largest-first,
+   * prose included, until the row fits. Content is never truncated.
+   */
+  rowBudgetBytes: number;
+}
+
+/** Result of one offload pass. */
+export interface OffloadResult {
+  /** Rewritten message, or the original reference when nothing moved. */
+  message: SessionMessage;
+  /** Blobs written for this message (existing blobs are reused, not listed twice). */
+  attachments: StoredAttachment[];
+  /** File parts and strings replaced by pointers. */
+  parts: number;
+  /** Payload bytes removed from the row. */
+  bytes: number;
+  /** Serialized row size after offload, when a finite row budget was applied. */
+  rowBytes?: number;
+}
+
+/** The hash referenced by an `attachment:` pointer, or null. */
 export function parseAttachmentUrl(url: string | undefined): string | null {
   if (!url || !url.startsWith(ATTACHMENT_URL_PREFIX)) return null;
   const hash = url.slice(ATTACHMENT_URL_PREFIX.length);
@@ -73,23 +124,174 @@ export function attachmentUrl(hash: string): string {
   return `${ATTACHMENT_URL_PREFIX}${hash}`;
 }
 
-/** Marker part emitted when a pointer's payload cannot be materialized. */
-function missingAttachmentPart(
-  mediaType: string,
-  filename: string | undefined
-): SessionMessagePart {
+type DataUrl = { mediaType: string; base64: boolean; payload: string };
+
+function parseDataUrl(url: string): DataUrl | null {
+  if (!url.startsWith("data:")) return null;
+  const comma = url.indexOf(",");
+  if (comma < 0) return null;
+  const header = url.slice(5, comma);
+  const base64 = header.endsWith(";base64");
+  const mediaType =
+    (base64 ? header.slice(0, -7) : header).split(";")[0] ||
+    "application/octet-stream";
+  return { mediaType, base64, payload: url.slice(comma + 1) };
+}
+
+/** Approximate decoded size of a `data:` URL without decoding it. */
+export function estimatedDataUrlBytes(url: string): number {
+  const parsed = parseDataUrl(url);
+  if (!parsed) return 0;
+  return parsed.base64
+    ? Math.floor((parsed.payload.length * 3) / 4)
+    : parsed.payload.length;
+}
+
+function isInlineFilePart(
+  part: SessionMessagePart
+): part is SessionMessagePart & {
+  url: string;
+} {
+  return (
+    part.type === "file" &&
+    typeof part.url === "string" &&
+    part.url.startsWith("data:")
+  );
+}
+
+function isToolPart(part: SessionMessagePart): boolean {
+  return part.type.startsWith("tool-") || part.type === "dynamic-tool";
+}
+
+function hasText(
+  part: SessionMessagePart
+): part is SessionMessagePart & { text: string } {
+  return (
+    (part.type === "text" || part.type === "reasoning") &&
+    typeof part.text === "string"
+  );
+}
+
+/** Marker used when a pointer's payload cannot be materialized. */
+function missingText(mediaType: string, filename?: string): string {
   const name = filename ? ` ${JSON.stringify(filename)}` : "";
+  return `[attachment${name} (${mediaType}) is no longer available]`;
+}
+
+function missingFilePart(part: SessionMessagePart): SessionMessagePart {
   return {
     type: "text",
-    text: `[attachment${name} (${mediaType}) is no longer available]`
+    text: missingText(
+      part.mediaType ?? "application/octet-stream",
+      part.filename
+    )
   };
 }
 
-function decodeBase64(data: string): Uint8Array {
-  const binary = atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+// ── Byte sources ────────────────────────────────────────────────────────────
+
+function byteArrayStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  let sent = false;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!sent && bytes.byteLength > 0) {
+        sent = true;
+        controller.enqueue(bytes);
+      }
+      controller.close();
+    }
+  });
+}
+
+function stringStream(value: string): ReadableStream<Uint8Array> {
+  let offset = 0;
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset >= value.length) {
+        controller.close();
+        return;
+      }
+      let end = Math.min(value.length, offset + STRING_STREAM_CHARS);
+      const code = value.charCodeAt(end - 1);
+      if (end < value.length && code >= 0xd800 && code <= 0xdbff) end--;
+      controller.enqueue(encoder.encode(value.slice(offset, end)));
+      offset = end;
+    }
+  });
+}
+
+/** Decode base64 in bounded windows so a large data URL never doubles in memory. */
+function base64Stream(payload: string): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset >= payload.length) {
+        controller.close();
+        return;
+      }
+      let end = Math.min(payload.length, offset + BASE64_STREAM_CHARS);
+      if (end < payload.length) end -= (end - offset) % 4;
+      const binary = atob(payload.slice(offset, end));
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index++) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      offset = end;
+      controller.enqueue(bytes);
+    }
+  });
+}
+
+function dataUrlSource(
+  url: string
+): { source: AttachmentByteSource; mediaType: string } | null {
+  const parsed = parseDataUrl(url);
+  if (!parsed) return null;
+  if (!parsed.base64) {
+    try {
+      const bytes = new TextEncoder().encode(
+        decodeURIComponent(parsed.payload)
+      );
+      return {
+        mediaType: parsed.mediaType,
+        source: { kind: "replayable", open: () => byteArrayStream(bytes) }
+      };
+    } catch {
+      return null;
+    }
+  }
+  const payload = /[\t\n\f\r ]/.test(parsed.payload)
+    ? parsed.payload.replace(/[\t\n\f\r ]/g, "")
+    : parsed.payload;
+  if (payload.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) {
+    return null;
+  }
+  return {
+    mediaType: parsed.mediaType,
+    source: { kind: "replayable", open: () => base64Stream(payload) }
+  };
+}
+
+function bytesSource(
+  data: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | string,
+  bytes: number | undefined
+): AttachmentByteSource {
+  if (typeof data === "string") {
+    return { kind: "replayable", open: () => stringStream(data) };
+  }
+  if (data instanceof Uint8Array) {
+    return { kind: "replayable", open: () => byteArrayStream(data) };
+  }
+  if (data instanceof ArrayBuffer) {
+    const view = new Uint8Array(data);
+    return { kind: "replayable", open: () => byteArrayStream(view) };
+  }
+  return {
+    kind: "stream",
+    stream: data,
+    ...(bytes !== undefined ? { bytes } : {})
+  };
 }
 
 function encodeBase64(bytes: Uint8Array): string {
@@ -101,6 +303,7 @@ function encodeBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/** Build a data URL from a stream, carrying at most two bytes between reads. */
 async function streamDataUrl(
   stream: ReadableStream<Uint8Array>,
   mediaType: string
@@ -136,167 +339,7 @@ async function streamDataUrl(
   }
 }
 
-/** Decode a `data:` URL into bytes plus its media type, or null. */
-export function decodeDataUrl(
-  url: string
-): { bytes: Uint8Array; mediaType: string } | null {
-  if (!url.startsWith("data:")) return null;
-  const comma = url.indexOf(",");
-  if (comma < 0) return null;
-  const header = url.slice(5, comma);
-  const payload = url.slice(comma + 1);
-  const isBase64 = header.endsWith(";base64");
-  const mediaType =
-    (isBase64 ? header.slice(0, -7) : header).split(";")[0] ||
-    "application/octet-stream";
-  try {
-    const bytes = isBase64
-      ? decodeBase64(payload)
-      : new TextEncoder().encode(decodeURIComponent(payload));
-    return { bytes, mediaType };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Approximate decoded size of a `data:` URL without decoding it — used to
- * gate offload so below-threshold parts never pay a decode.
- */
-export function estimatedDataUrlBytes(url: string): number {
-  const comma = url.indexOf(",");
-  if (comma < 0) return 0;
-  const payloadLength = url.length - comma - 1;
-  return url.lastIndexOf(";base64,", comma) >= 0
-    ? Math.floor((payloadLength * 3) / 4)
-    : payloadLength;
-}
-
-function byteArrayStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  let sent = false;
-  return new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (!sent && bytes.byteLength > 0) {
-        sent = true;
-        controller.enqueue(bytes);
-      }
-      controller.close();
-    }
-  });
-}
-
-function stringStream(value: string): ReadableStream<Uint8Array> {
-  let offset = 0;
-  const encoder = new TextEncoder();
-  return new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (offset >= value.length) {
-        controller.close();
-        return;
-      }
-      let end = Math.min(value.length, offset + STRING_STREAM_CHARS);
-      if (
-        end < value.length &&
-        end > offset &&
-        value.charCodeAt(end - 1) >= 0xd800 &&
-        value.charCodeAt(end - 1) <= 0xdbff
-      ) {
-        end--;
-      }
-      controller.enqueue(encoder.encode(value.slice(offset, end)));
-      offset = end;
-    }
-  });
-}
-
-function attachmentSource(
-  data: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | string,
-  bytes: number | undefined
-): AttachmentByteSource {
-  if (typeof data === "string") {
-    return { kind: "replayable", open: () => stringStream(data) };
-  }
-  if (data instanceof Uint8Array) {
-    return { kind: "replayable", open: () => byteArrayStream(data) };
-  }
-  if (data instanceof ArrayBuffer) {
-    const view = new Uint8Array(data);
-    return { kind: "replayable", open: () => byteArrayStream(view) };
-  }
-  return {
-    kind: "stream",
-    stream: data,
-    ...(bytes !== undefined ? { bytes } : {})
-  };
-}
-
-function normalizeBase64Payload(payload: string): string | null {
-  const normalized = /[\t\n\f\r ]/.test(payload)
-    ? payload.replace(/[\t\n\f\r ]/g, "")
-    : payload;
-  if (normalized.length % 4 === 1) return null;
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) return null;
-  return normalized;
-}
-
-function base64Stream(payload: string): ReadableStream<Uint8Array> {
-  let offset = 0;
-  return new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (offset >= payload.length) {
-        controller.close();
-        return;
-      }
-      let end = Math.min(payload.length, offset + BASE64_STREAM_CHARS);
-      if (end < payload.length) end -= (end - offset) % 4;
-      const binary = atob(payload.slice(offset, end));
-      const bytes = new Uint8Array(binary.length);
-      for (let index = 0; index < binary.length; index++) {
-        bytes[index] = binary.charCodeAt(index);
-      }
-      offset = end;
-      controller.enqueue(bytes);
-    }
-  });
-}
-
-function dataUrlSource(url: string): {
-  source: AttachmentByteSource;
-  mediaType: string;
-} | null {
-  if (!url.startsWith("data:")) return null;
-  const comma = url.indexOf(",");
-  if (comma < 0) return null;
-  const header = url.slice(5, comma);
-  const payload = url.slice(comma + 1);
-  const base64 = header.endsWith(";base64");
-  const mediaType =
-    (base64 ? header.slice(0, -7) : header).split(";")[0] ||
-    "application/octet-stream";
-
-  if (!base64) {
-    const decoded = decodeDataUrl(url);
-    return decoded
-      ? {
-          mediaType: decoded.mediaType,
-          source: {
-            kind: "replayable",
-            open: () => byteArrayStream(decoded.bytes)
-          }
-        }
-      : null;
-  }
-
-  const normalized = normalizeBase64Payload(payload);
-  if (normalized === null) return null;
-  return {
-    mediaType,
-    source: {
-      kind: "replayable",
-      open: () => base64Stream(normalized)
-    }
-  };
-}
+// ── Reconstructors ──────────────────────────────────────────────────────────
 
 /** Default read-side plugin: inline the payload as a `data:` URL again. */
 export const inlineReconstructor: AttachmentReconstructor = {
@@ -314,8 +357,7 @@ export const inlineReconstructor: AttachmentReconstructor = {
 
 /**
  * Zero-IO plugin: replace the pointer with a short text marker naming its
- * logical Sessions locator. This does not claim the attachment is a Workspace
- * file; use a custom reconstructor to seed one when a tool needs a file path.
+ * logical Sessions locator.
  */
 export const pointerReconstructor: AttachmentReconstructor = {
   part(attachment) {
@@ -329,133 +371,309 @@ export const pointerReconstructor: AttachmentReconstructor = {
   }
 };
 
-/** @internal SQL and telemetry the engine borrows from the capability. */
-export interface AttachmentEngineIo extends SessionAttachmentStorageIo {}
+// ── String leaves ───────────────────────────────────────────────────────────
 
-/** Result of extracting oversized inline media from one message. */
-export interface ExtractionResult {
-  message: SessionMessage;
-  attachments: StoredAttachment[];
-  /** True when at least one part was rewritten. */
-  changed: boolean;
+type Leaf = {
+  partIndex: number;
+  kind: "file" | "text" | "output";
+  keys: (string | number)[];
+  bytes: number;
+  /** A file part or a `data:` URL string: opaque bytes, not conversation. */
+  media: boolean;
+};
+
+function collectLeaves(parts: readonly SessionMessagePart[]): Leaf[] {
+  const leaves: Leaf[] = [];
+  parts.forEach((part, partIndex) => {
+    if (isInlineFilePart(part)) {
+      leaves.push({
+        partIndex,
+        kind: "file",
+        keys: [],
+        bytes: estimatedDataUrlBytes(part.url),
+        media: true
+      });
+    } else if (hasText(part) && !parseAttachmentUrl(part.text)) {
+      leaves.push({
+        partIndex,
+        kind: "text",
+        keys: [],
+        bytes: byteLength(part.text),
+        media: false
+      });
+    } else if (isToolPart(part) && part.output !== undefined) {
+      collectStringLeaves(part.output, [], 0, (keys, bytes, media) =>
+        leaves.push({ partIndex, kind: "output", keys, bytes, media })
+      );
+    }
+  });
+  return leaves;
+}
+
+function collectStringLeaves(
+  value: unknown,
+  keys: (string | number)[],
+  depth: number,
+  found: (keys: (string | number)[], bytes: number, media: boolean) => void
+): void {
+  if (typeof value === "string") {
+    if (parseAttachmentUrl(value)) return;
+    const media = value.startsWith("data:");
+    found(
+      keys,
+      media ? estimatedDataUrlBytes(value) : byteLength(value),
+      media
+    );
+    return;
+  }
+  if (value === null || typeof value !== "object" || depth >= MAX_WALK_DEPTH) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      collectStringLeaves(item, [...keys, index], depth + 1, found)
+    );
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    collectStringLeaves(item, [...keys, key], depth + 1, found);
+  }
+}
+
+function readAt(value: unknown, keys: readonly (string | number)[]): unknown {
+  let current = value;
+  for (const key of keys) {
+    if (current === null || typeof current !== "object") return undefined;
+    current = (current as Record<string | number, unknown>)[key];
+  }
+  return current;
+}
+
+function writeAt(
+  value: unknown,
+  keys: readonly (string | number)[],
+  replacement: unknown
+): unknown {
+  if (keys.length === 0) return replacement;
+  const [head, ...rest] = keys;
+  if (Array.isArray(value)) {
+    const copy = value.slice();
+    copy[head as number] = writeAt(value[head as number], rest, replacement);
+    return copy;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    ...record,
+    [head]: writeAt(record[head as string], rest, replacement)
+  };
 }
 
 /**
- * @internal Per-capability attachment machinery. Owns the pointer contract,
- * durable byte storage, reference tracking, and read-side reconstruction.
+ * Bytes a later maintenance pass could still move out of this row, which is
+ * what the stamped hint has to mean for bounded passes to terminate: media
+ * always, and everything else only while the row is over budget. A row whose
+ * hint is 0 is one maintenance would not change, so it never becomes a
+ * candidate again.
+ */
+export function maintenanceCandidateBytes(
+  message: SessionMessage,
+  rowBytes: number
+): number {
+  const overBudget = rowBytes > MAX_INLINE_ROW_BYTES;
+  let maximum = 0;
+  for (const leaf of collectLeaves(message.parts)) {
+    if (leaf.media || overBudget) maximum = Math.max(maximum, leaf.bytes);
+  }
+  return maximum;
+}
+
+/** Walk every string leaf of a tool output, replacing through `visit`. */
+async function mapStrings(
+  value: unknown,
+  depth: number,
+  visit: (value: string) => Promise<string>
+): Promise<unknown> {
+  if (typeof value === "string") return visit(value);
+  if (value === null || typeof value !== "object" || depth >= MAX_WALK_DEPTH) {
+    return value;
+  }
+  let changed = false;
+  if (Array.isArray(value)) {
+    const output: unknown[] = [];
+    for (const item of value) {
+      const next = await mapStrings(item, depth + 1, visit);
+      if (next !== item) changed = true;
+      output.push(next);
+    }
+    return changed ? output : value;
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const next = await mapStrings(item, depth + 1, visit);
+    if (next !== item) changed = true;
+    output[key] = next;
+  }
+  return changed ? output : value;
+}
+
+/** Rewrite every pointer in a message through per-kind visitors. */
+async function mapPointers(
+  message: SessionMessage,
+  visit: {
+    file(
+      part: SessionMessagePart,
+      hash: string,
+      index: number
+    ): Promise<SessionMessagePart>;
+    text(hash: string): Promise<string>;
+  }
+): Promise<SessionMessage> {
+  let changed = false;
+  const parts: SessionMessagePart[] = [];
+  for (let index = 0; index < message.parts.length; index++) {
+    const part = message.parts[index];
+    let next = part;
+    if (part.type === "file") {
+      const hash = parseAttachmentUrl(part.url);
+      if (hash) next = await visit.file(part, hash, index);
+    } else if (hasText(part)) {
+      const hash = parseAttachmentUrl(part.text);
+      if (hash) next = { ...part, text: await visit.text(hash) };
+    } else if (isToolPart(part) && part.output !== undefined) {
+      const output = await mapStrings(part.output, 0, async (value) => {
+        const hash = parseAttachmentUrl(value);
+        return hash ? visit.text(hash) : value;
+      });
+      if (output !== part.output) next = { ...part, output };
+    }
+    if (next !== part) changed = true;
+    parts.push(next);
+  }
+  return changed ? { ...message, parts } : message;
+}
+
+/** Every pointer hash a message carries (file parts, text, nested strings). */
+export function pointerHashes(message: SessionMessage): string[] {
+  const hashes = new Set<string>();
+  for (const part of message.parts) {
+    if (part.type === "file") {
+      const hash = parseAttachmentUrl(part.url);
+      if (hash) hashes.add(hash);
+    } else if (hasText(part)) {
+      const hash = parseAttachmentUrl(part.text);
+      if (hash) hashes.add(hash);
+    } else if (isToolPart(part) && part.output !== undefined) {
+      collectPointerStrings(part.output, 0, hashes);
+    }
+  }
+  return [...hashes];
+}
+
+function collectPointerStrings(
+  value: unknown,
+  depth: number,
+  hashes: Set<string>
+): void {
+  if (typeof value === "string") {
+    const hash = parseAttachmentUrl(value);
+    if (hash) hashes.add(hash);
+    return;
+  }
+  if (value === null || typeof value !== "object" || depth >= MAX_WALK_DEPTH) {
+    return;
+  }
+  for (const item of Array.isArray(value) ? value : Object.values(value)) {
+    collectPointerStrings(item, depth + 1, hashes);
+  }
+}
+
+// ── Engine ──────────────────────────────────────────────────────────────────
+
+/**
+ * @internal Per-capability attachment machinery: policy, durable byte
+ * storage, the pointer contract, reference tracking, and read-side
+ * reconstruction.
  */
 export class AttachmentEngine {
-  readonly #optionsInput:
-    | SessionsAttachmentOptions
-    | (() => SessionsAttachmentOptions | undefined)
-    | undefined;
-  readonly #io: AttachmentEngineIo;
-  readonly #storage: SessionAttachmentStorage;
-  readonly #knownBlobs = new Map<string, StoredAttachment>();
-  readonly #createdAttachments = new WeakSet<StoredAttachment>();
+  readonly #io: SessionsIo;
+  readonly #input: SessionsOptions["attachments"];
+  readonly store: AttachmentBlobStore;
+  readonly #created = new WeakSet<StoredAttachment>();
 
-  constructor(
-    options:
-      | SessionsAttachmentOptions
-      | (() => SessionsAttachmentOptions | undefined)
-      | undefined,
-    io: AttachmentEngineIo
-  ) {
-    this.#optionsInput = options;
+  constructor(options: SessionsOptions["attachments"], io: SessionsIo) {
     this.#io = io;
-    this.#storage = new SessionAttachmentStorage(options, io);
+    this.#input = options;
+    this.store = new AttachmentBlobStore(io, () => this.options);
   }
 
-  #options(): SessionsAttachmentOptions | undefined {
-    return typeof this.#optionsInput === "function"
-      ? this.#optionsInput()
-      : this.#optionsInput;
+  /** Policy with defaults applied; re-read on every access. */
+  get options(): ResolvedAttachmentOptions {
+    const input =
+      typeof this.#input === "function" ? this.#input() : this.#input;
+    return {
+      bucket: input?.r2,
+      r2ThresholdBytes: positive(
+        input?.r2ThresholdBytes,
+        DEFAULT_R2_THRESHOLD_BYTES
+      ),
+      r2Prefix: input?.r2Prefix ?? DEFAULT_R2_PREFIX,
+      maxAttachmentBytes: positive(
+        input?.maxAttachmentBytes,
+        DEFAULT_MAX_ATTACHMENT_BYTES
+      ),
+      inlineThresholdBytes: positive(
+        input?.inlineThresholdBytes,
+        DEFAULT_INLINE_THRESHOLD_BYTES
+      ),
+      basePath: input?.basePath ?? DEFAULT_BASE_PATH,
+      keepRecentMessages: positive(
+        input?.keepRecentMessages,
+        DEFAULT_KEEP_RECENT_MESSAGES
+      ),
+      maxMaintenanceRowsPerPass: positive(
+        input?.maxMaintenanceRowsPerPass,
+        DEFAULT_MAX_MAINTENANCE_ROWS
+      ),
+      maintenance: input?.maintenance ?? true,
+      reconstruct: input?.reconstruct ?? inlineReconstructor
+    };
   }
 
-  get configured(): boolean {
-    return this.#options() !== undefined;
-  }
-
-  get inlineThresholdBytes(): number {
-    const threshold = this.#options()?.inlineThresholdBytes;
-    const resolved = typeof threshold === "function" ? threshold() : threshold;
-    return Math.max(1, resolved ?? DEFAULT_INLINE_THRESHOLD_BYTES);
-  }
-
-  get evictionThresholdBytes(): number {
-    const threshold = this.#options()?.evictionThresholdBytes;
-    const resolved = typeof threshold === "function" ? threshold() : threshold;
-    return Math.max(1, resolved ?? this.inlineThresholdBytes);
-  }
-
-  get keepRecentMessages(): number {
-    const keep = this.#options()?.keepRecentMessages;
-    const resolved = typeof keep === "function" ? keep() : keep;
-    return Math.max(1, resolved ?? DEFAULT_KEEP_RECENT_MESSAGES);
-  }
-
-  get maxEvictionRowsPerPass(): number {
-    const maximum = this.#options()?.maxEvictionRowsPerPass;
-    const resolved = typeof maximum === "function" ? maximum() : maximum;
-    return Math.max(1, resolved ?? 64);
-  }
-
-  get agedEvictionEnabled(): boolean {
-    const enabled = this.#options()?.evictAged;
-    return (typeof enabled === "function" ? enabled() : enabled) ?? true;
-  }
-
-  get preserveEvicted(): boolean {
-    const preserve = this.#options()?.preserveEvicted;
-    return (typeof preserve === "function" ? preserve() : preserve) ?? true;
-  }
-
-  get defaultReconstructor(): AttachmentReconstructor {
-    return this.#options()?.reconstruct ?? inlineReconstructor;
+  ensureTables(): void {
+    this.store.ensureTables();
   }
 
   resolveReconstructor(
     mode: ReconstructMode | undefined
   ): AttachmentReconstructor | null {
     if (mode === "pointer") return null;
-    if (mode === undefined || mode === "inline") {
-      return mode === "inline"
-        ? inlineReconstructor
-        : this.defaultReconstructor;
-    }
-    return mode;
-  }
-
-  /** Ensure the Sessions-owned attachment byte tables exist. */
-  ensureTables(): void {
-    this.#storage.ensureTables();
+    if (mode === "inline") return inlineReconstructor;
+    return mode ?? this.options.reconstruct;
   }
 
   #path(hash: string): string {
-    const base = this.#options()?.basePath ?? DEFAULT_BASE_PATH;
-    return `${base.replace(/\/+$/, "")}/sha256/${hash}`;
+    return `${this.options.basePath.replace(/\/+$/, "")}/sha256/${hash}`;
   }
 
-  #remember(attachment: StoredAttachment): void {
-    this.#knownBlobs.set(attachment.hash, attachment);
-    if (this.#knownBlobs.size <= 256) return;
-    const oldest = this.#knownBlobs.keys().next().value;
-    if (oldest !== undefined) this.#knownBlobs.delete(oldest);
+  #describe(row: AttachmentBlobRow): StoredAttachment {
+    return {
+      hash: row.hash,
+      path: this.#path(row.hash),
+      mediaType: row.media_type,
+      bytes: row.bytes,
+      ...(row.filename !== null ? { filename: row.filename } : {})
+    };
   }
 
-  /**
-   * Store one durable payload content-addressed and return its pointer part
-   * plus metadata. A standalone put remains valid until explicitly deleted;
-   * the caller owns inserting the pointer into a message when desired.
-   */
+  /** Store one payload content-addressed and return its pointer part. */
   async put(
     data: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | string,
     options: { mediaType: string; filename?: string; bytes?: number }
   ): Promise<{ part: SessionMessagePart; attachment: StoredAttachment }> {
-    const attachment = await this.#writeBlob(
-      attachmentSource(data, options.bytes),
-      options
-    );
+    const attachment = await this.#writeBlob(bytesSource(data, options.bytes), {
+      mediaType: options.mediaType,
+      ...(options.filename !== undefined ? { filename: options.filename } : {})
+    });
     return {
       part: {
         type: "file",
@@ -469,417 +687,344 @@ export class AttachmentEngine {
     };
   }
 
-  /** @internal Store one aged tool-output string without full data-URL decode. */
-  async putEvictedString(
-    value: string,
-    fallbackMediaType: string
-  ): Promise<StoredAttachment> {
-    const decoded = dataUrlSource(value);
-    return this.#writeBlob(
-      decoded?.source ?? attachmentSource(value, undefined),
-      { mediaType: decoded?.mediaType ?? fallbackMediaType }
-    );
-  }
-
-  /** Return durable whole-file metadata for one hash, when present. */
   get(hash: string): StoredAttachment | null {
-    return this.getMany([hash]).get(hash) ?? null;
+    const row = this.store.get(hash);
+    return row ? this.#describe(row) : null;
   }
 
-  /** @internal Resolve several whole-file records with one cold SQL read. */
   getMany(hashes: readonly string[]): Map<string, StoredAttachment> {
-    const unique = [...new Set(hashes)];
     const result = new Map<string, StoredAttachment>();
-    const missing: string[] = [];
-    for (const hash of unique) {
-      const known = this.#knownBlobs.get(hash);
-      if (known) result.set(hash, known);
-      else missing.push(hash);
-    }
-    for (const blob of this.#storage.getMany(missing).values()) {
-      const attachment: StoredAttachment = {
-        hash: blob.hash,
-        path: this.#path(blob.hash),
-        mediaType: blob.mediaType,
-        bytes: blob.bytes,
-        ...(blob.filename !== undefined ? { filename: blob.filename } : {})
-      };
-      this.#remember(attachment);
-      result.set(blob.hash, attachment);
+    for (const [hash, row] of this.store.getMany(hashes)) {
+      result.set(hash, this.#describe(row));
     }
     return result;
   }
 
-  /** Open one stored payload by pointer hash. */
   open(hash: string): Promise<ReadableStream<Uint8Array>> {
-    return this.#storage.open(hash);
+    return this.store.open(hash);
+  }
+
+  /** Summed stored bytes of the given blobs. */
+  referencedBytes(hashes: readonly string[]): number {
+    let total = 0;
+    for (const row of this.store.getMany(hashes).values()) total += row.bytes;
+    return total;
   }
 
   async #writeBlob(
     source: AttachmentByteSource,
-    options: { mediaType: string; filename?: string }
+    metadata: { mediaType: string; filename?: string }
   ): Promise<StoredAttachment> {
-    const blob = await this.#storage.put(source, options);
-    if (blob.created) {
+    const { row, created } = await this.store.put(source, metadata);
+    const attachment = this.#describe(row);
+    if (created) {
+      this.#created.add(attachment);
       this.#io.emit("session:attachment:stored", {
-        hash: blob.hash,
-        bytes: blob.bytes,
-        mediaType: options.mediaType,
-        backend: blob.backend
+        hash: row.hash,
+        bytes: row.bytes,
+        mediaType: row.media_type,
+        backend: row.backend
       });
     }
-    const attachment: StoredAttachment = {
-      hash: blob.hash,
-      path: this.#path(blob.hash),
-      mediaType: options.mediaType,
-      bytes: blob.bytes,
-      ...(options.filename !== undefined ? { filename: options.filename } : {})
-    };
-    this.#remember(attachment);
-    if (blob.created) this.#createdAttachments.add(attachment);
     return attachment;
   }
 
   /**
-   * Offload oversized inline `data:` file parts from one message. Blob
-   * writes complete before this returns, so the caller's row commit always
-   * points at durable bytes. Below-threshold and non-`data:` parts pass
-   * through untouched. Omitted attachment options retain legacy inline
-   * behavior.
+   * Move payloads out of a message row: media at or above the media
+   * threshold, then whatever else is largest until the row fits its budget.
+   * Blob writes complete before this returns, so a stored pointer always has
+   * durable bytes behind it.
    */
-  async extract(
+  async offload(
     message: SessionMessage,
-    thresholdBytes = this.inlineThresholdBytes
-  ): Promise<ExtractionResult> {
+    policy: OffloadPolicy
+  ): Promise<OffloadResult> {
+    const parts = message.parts.slice();
     const attachments: StoredAttachment[] = [];
-    if (!this.configured) {
-      return { message, attachments, changed: false };
+    let count = 0;
+    let bytes = 0;
+    const leaves = collectLeaves(parts).sort((a, b) => b.bytes - a.bytes);
+
+    // A leaf the media pass already moved must not be offloaded again by the
+    // budget pass: its slot now holds a pointer, and storing that pointer
+    // string as a payload would lose the original bytes.
+    const taken = new Set<Leaf>();
+    const take = async (leaf: Leaf): Promise<void> => {
+      if (taken.has(leaf)) return;
+      taken.add(leaf);
+      const attachment = await this.#offloadLeaf(parts, leaf);
+      if (!attachment) return;
+      attachments.push(attachment);
+      count++;
+      bytes += leaf.bytes;
+    };
+
+    for (const leaf of leaves) {
+      if (leaf.media && leaf.bytes >= policy.mediaThresholdBytes) {
+        await take(leaf);
+      }
     }
 
-    let changed = false;
-    const parts: SessionMessagePart[] = [];
-    for (const part of message.parts) {
-      if (
-        part.type !== "file" ||
-        typeof part.url !== "string" ||
-        !part.url.startsWith("data:") ||
-        estimatedDataUrlBytes(part.url) < thresholdBytes
-      ) {
-        parts.push(part);
-        continue;
+    let rowBytes: number | undefined;
+    if (Number.isFinite(policy.rowBudgetBytes)) {
+      const measure = (): number =>
+        (rowBytes = byteLength(JSON.stringify({ ...message, parts })));
+      for (const leaf of leaves) {
+        if (measure() <= policy.rowBudgetBytes) break;
+        await take(leaf);
       }
-      const decoded = dataUrlSource(part.url);
-      if (!decoded) {
-        parts.push(part);
-        continue;
-      }
-      const attachment = await this.#writeBlob(decoded.source, {
-        mediaType: part.mediaType ?? decoded.mediaType,
-        ...(part.filename !== undefined ? { filename: part.filename } : {})
-      });
-      attachments.push(attachment);
-      parts.push({
-        ...part,
-        mediaType: attachment.mediaType,
-        url: attachmentUrl(attachment.hash)
-      });
-      changed = true;
+      measure();
     }
+
     return {
-      message: changed ? { ...message, parts } : message,
+      message: count > 0 ? { ...message, parts } : message,
       attachments,
-      changed
+      parts: count,
+      bytes,
+      ...(rowBytes !== undefined ? { rowBytes } : {})
     };
   }
 
-  /**
-   * Record reference rows for every pointer part of a stored message.
-   * Idempotent on (hash, message_id, part_index). `known` carries records
-   * from a just-run extraction so their metadata never needs a store probe.
-   */
-  recordReferences(
-    sessionId: string,
-    message: SessionMessage,
-    known: readonly StoredAttachment[],
-    now: number
-  ): number {
-    const pointerHashes = message.parts.flatMap((part) => {
-      const hash = parseAttachmentUrl(part.url);
-      return hash ? [hash] : [];
+  async #offloadFile(part: SessionMessagePart & { url: string }): Promise<{
+    part: SessionMessagePart;
+    attachment: StoredAttachment;
+  } | null> {
+    const decoded = dataUrlSource(part.url);
+    if (!decoded) return null;
+    const attachment = await this.#writeBlob(decoded.source, {
+      mediaType: part.mediaType ?? decoded.mediaType,
+      ...(part.filename !== undefined ? { filename: part.filename } : {})
     });
-    const knownByHash = this.getMany(pointerHashes);
-    for (const attachment of known) {
-      knownByHash.set(attachment.hash, attachment);
-    }
+    return {
+      part: {
+        ...part,
+        mediaType: attachment.mediaType,
+        url: attachmentUrl(attachment.hash)
+      },
+      attachment
+    };
+  }
 
-    let totalBytes = 0;
-    const referenced = new Set<string>();
-    message.parts.forEach((part, index) => {
-      const hash = parseAttachmentUrl(part.url);
-      if (!hash) return;
-      const record = knownByHash.get(hash);
-      const bytes = record?.bytes ?? 0;
-      this.#io.sqlWrite(
-        `INSERT OR IGNORE INTO cf_agents_session_attachments
-           (hash, message_id, part_index, session_id, path, media_type, bytes, filename, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          hash,
-          message.id,
-          index,
-          sessionId,
-          record?.path ?? this.#path(hash),
-          part.mediaType ?? record?.mediaType ?? "application/octet-stream",
-          bytes,
-          part.filename ?? record?.filename ?? null,
-          now
-        ]
-      );
-      referenced.add(hash);
-      totalBytes += bytes;
-    });
-
-    // Tool-output eviction leaves a marker inside the existing part rather
-    // than changing its shape to a file part. Negative indexes retain those
-    // blob references for GC without colliding with real message-part indexes.
-    let syntheticPartIndex = -1;
-    for (const attachment of known) {
-      if (referenced.has(attachment.hash)) continue;
-      this.#io.sqlWrite(
-        `INSERT OR IGNORE INTO cf_agents_session_attachments
-           (hash, message_id, part_index, session_id, path, media_type, bytes, filename, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          attachment.hash,
-          message.id,
-          syntheticPartIndex--,
-          sessionId,
-          attachment.path,
-          attachment.mediaType,
-          attachment.bytes,
-          attachment.filename ?? null,
-          now
-        ]
-      );
-      referenced.add(attachment.hash);
-      totalBytes += attachment.bytes;
+  async #offloadLeaf(
+    parts: SessionMessagePart[],
+    leaf: Leaf
+  ): Promise<StoredAttachment | null> {
+    const part = parts[leaf.partIndex];
+    if (!part) return null;
+    if (leaf.kind === "file") {
+      if (!isInlineFilePart(part)) return null;
+      const offloaded = await this.#offloadFile(part);
+      if (!offloaded) return null;
+      parts[leaf.partIndex] = offloaded.part;
+      return offloaded.attachment;
     }
-    return totalBytes;
+    if (leaf.kind === "text") {
+      if (!hasText(part)) return null;
+      const attachment = await this.#writeString(part.text, false);
+      parts[leaf.partIndex] = { ...part, text: attachmentUrl(attachment.hash) };
+      return attachment;
+    }
+    const value = readAt(part.output, leaf.keys);
+    if (typeof value !== "string") return null;
+    const attachment = await this.#writeString(value, true);
+    parts[leaf.partIndex] = {
+      ...part,
+      output: writeAt(part.output, leaf.keys, attachmentUrl(attachment.hash))
+    };
+    return attachment;
   }
 
   /**
-   * Replace one message's derived reference rows inside the caller's SQLite
-   * transaction. Returns old hashes for payload cleanup after commit.
+   * Store a string. Tool-output strings that are data URLs (screenshots,
+   * downloads) store their decoded bytes under their own media type so the
+   * blob is a real file; everything else is stored as UTF-8 text.
    */
-  replaceReferenceRows(
-    sessionId: string,
-    message: SessionMessage,
-    known: readonly StoredAttachment[],
-    now: number
-  ): string[] {
-    const previous = this.#io.sql<{ hash: string }>(
-      `SELECT DISTINCT hash FROM cf_agents_session_attachments
-       WHERE message_id = ? AND session_id = ?`,
-      [message.id, sessionId]
-    );
-    this.#io.sqlWrite(
-      `DELETE FROM cf_agents_session_attachments
-       WHERE message_id = ? AND session_id = ?`,
-      [message.id, sessionId]
-    );
-    this.recordReferences(sessionId, message, known, now);
-    return previous.map((row) => row.hash);
+  #writeString(
+    value: string,
+    dataUrlAware: boolean
+  ): Promise<StoredAttachment> {
+    if (dataUrlAware) {
+      const decoded = dataUrlSource(value);
+      if (decoded && decoded.mediaType !== TEXT_MEDIA_TYPE) {
+        return this.#writeBlob(decoded.source, {
+          mediaType: decoded.mediaType
+        });
+      }
+    }
+    return this.#writeBlob(bytesSource(value, undefined), {
+      mediaType: TEXT_MEDIA_TYPE
+    });
   }
 
   /**
-   * Trust boundary for client-source writes: a pointer part is accepted
-   * only when its hash is already referenced somewhere in this session
-   * (a legitimate echo of stored history). Anything else — a forged or
-   * cross-session pointer — degrades to a marker.
+   * Trust boundary for client-source writes: a pointer is accepted only when
+   * its bytes are stored in this object. Anything else degrades to a marker
+   * so no row ever points at nothing.
    */
-  guardClientPointers(
-    sessionId: string,
-    message: SessionMessage
-  ): SessionMessage {
-    const hashes = [
-      ...new Set(
-        message.parts
-          .map((part) => parseAttachmentUrl(part.url))
-          .filter((hash): hash is string => hash !== null)
-      )
-    ];
+  async guardClientPointers(message: SessionMessage): Promise<SessionMessage> {
+    const hashes = pointerHashes(message);
     if (hashes.length === 0) return message;
-    const allowed = new Set(
-      this.#io
-        .sql<{ hash: string }>(
-          `SELECT DISTINCT hash FROM cf_agents_session_attachments
-           WHERE session_id = ? AND hash IN (SELECT value FROM json_each(?))`,
-          [sessionId, JSON.stringify(hashes)]
-        )
-        .map((row) => row.hash)
-    );
-    let changed = false;
-    const parts = message.parts.map((part) => {
-      const hash = parseAttachmentUrl(part.url);
-      if (!hash || allowed.has(hash)) return part;
-      changed = true;
-      return missingAttachmentPart(
-        part.mediaType ?? "application/octet-stream",
-        part.filename
-      );
+    const allowed = this.store.getMany(hashes);
+    return mapPointers(message, {
+      file: async (part, hash) =>
+        allowed.has(hash) ? part : missingFilePart(part),
+      text: async (hash) =>
+        allowed.has(hash) ? attachmentUrl(hash) : missingText(TEXT_MEDIA_TYPE)
     });
-    return changed ? { ...message, parts } : message;
   }
 
   /**
-   * Materialize pointer parts of one stored message through a
-   * reconstructor. `null` reconstructor (pointer mode) returns the message
-   * untouched with zero IO. Missing payloads degrade to markers — reads
-   * never throw on data loss.
+   * Materialize every pointer of a stored message. `null` (pointer mode)
+   * returns the message untouched with zero IO. Missing payloads degrade to
+   * markers — reads never throw on data loss.
    */
-  async materialize(
+  materialize(
     sessionId: string,
     message: SessionMessage,
     reconstructor: AttachmentReconstructor | null
   ): Promise<SessionMessage> {
-    if (!reconstructor) return message;
-    const pointers = message.parts.flatMap((part, index) => {
-      const hash = parseAttachmentUrl(part.url);
-      return hash ? [{ hash, index }] : [];
-    });
-    if (pointers.length === 0) return message;
-    const rows = this.#io.sql<AttachmentRow>(
-      `SELECT * FROM cf_agents_session_attachments
-       WHERE message_id = ? AND session_id = ?
-         AND hash IN (SELECT value FROM json_each(?))`,
-      [
-        message.id,
-        sessionId,
-        JSON.stringify([...new Set(pointers.map(({ hash }) => hash))])
-      ]
-    );
-    const references = new Map(
-      rows.map((row) => [`${row.hash}:${row.part_index}`, row])
-    );
-    const blobs = this.getMany(pointers.map(({ hash }) => hash));
-    const parts: SessionMessagePart[] = [];
-    for (let index = 0; index < message.parts.length; index++) {
-      const part = message.parts[index];
-      const hash = parseAttachmentUrl(part.url);
-      if (!hash) {
-        parts.push(part);
-        continue;
-      }
-      parts.push(
-        await this.#materializePartWith(
+    if (!reconstructor) return Promise.resolve(message);
+    return mapPointers(message, {
+      file: (part, hash, index) =>
+        this.#materializeFile(
           reconstructor,
           sessionId,
           message.id,
           index,
           part,
-          hash,
-          references.get(`${hash}:${index}`),
-          blobs.get(hash)
-        )
-      );
-    }
-    return { ...message, parts };
+          hash
+        ),
+      text: (hash) => this.#readString(sessionId, hash)
+    });
   }
 
-  async #materializePartWith(
+  async #readString(sessionId: string, hash: string): Promise<string> {
+    const row = this.store.get(hash);
+    try {
+      if (!row) throw new SessionAttachmentMissingError(hash);
+      const stream = await this.store.open(hash);
+      return row.media_type === TEXT_MEDIA_TYPE
+        ? await new Response(stream).text()
+        : await streamDataUrl(stream, row.media_type);
+    } catch (error) {
+      if (!(error instanceof SessionAttachmentMissingError)) throw error;
+      this.#io.emit("session:attachment:missing", { hash, sessionId });
+      return missingText(row?.media_type ?? TEXT_MEDIA_TYPE);
+    }
+  }
+
+  async #materializeFile(
     reconstructor: AttachmentReconstructor,
     sessionId: string,
     messageId: string,
     partIndex: number,
     part: SessionMessagePart,
-    hash: string,
-    row: AttachmentRow | undefined,
-    blob: StoredAttachment | undefined
+    hash: string
   ): Promise<SessionMessagePart> {
+    const row = this.store.get(hash);
     const mediaType =
-      row?.media_type ??
-      part.mediaType ??
-      blob?.mediaType ??
-      "application/octet-stream";
-    const filename =
-      row?.filename ?? part.filename ?? blob?.filename ?? undefined;
-    const path = row?.path ?? this.#path(hash);
-    let bytesCache: Uint8Array | null | undefined;
-    let dataUrlCache: string | null | undefined;
-    const readBytes = async (): Promise<Uint8Array | null> => {
-      if (bytesCache !== undefined) return bytesCache;
-      try {
-        bytesCache = new Uint8Array(
-          await new Response(await this.#storage.open(hash)).arrayBuffer()
-        );
-      } catch {
-        bytesCache = null;
-      }
-      return bytesCache;
-    };
-
+      part.mediaType ?? row?.media_type ?? "application/octet-stream";
+    const filename = part.filename ?? row?.filename ?? undefined;
+    const path = this.#path(hash);
+    let bytesCache: Uint8Array | undefined;
+    const open = (): Promise<ReadableStream<Uint8Array>> =>
+      this.store.open(hash);
     const resolved: ResolvedAttachment = {
       hash,
       path,
       mediaType,
-      bytes: row?.bytes ?? blob?.bytes ?? 0,
+      bytes: row?.bytes ?? 0,
       ...(filename !== undefined ? { filename } : {}),
       data: async () => {
-        const bytes = await readBytes();
-        if (!bytes) throw new SessionAttachmentMissingError(hash, path);
-        return bytes;
+        bytesCache ??= new Uint8Array(
+          await new Response(await open()).arrayBuffer()
+        );
+        return bytesCache;
       },
-      dataUrl: async () => {
-        if (dataUrlCache !== undefined) {
-          if (dataUrlCache === null) {
-            throw new SessionAttachmentMissingError(hash, path);
-          }
-          return dataUrlCache;
-        }
-        try {
-          dataUrlCache =
-            bytesCache instanceof Uint8Array
-              ? `data:${mediaType};base64,${encodeBase64(bytesCache)}`
-              : await streamDataUrl(await this.#storage.open(hash), mediaType);
-          return dataUrlCache;
-        } catch {
-          dataUrlCache = null;
-          throw new SessionAttachmentMissingError(hash, path);
-        }
-      },
+      dataUrl: async () =>
+        bytesCache
+          ? `data:${mediaType};base64,${encodeBase64(bytesCache)}`
+          : streamDataUrl(await open(), mediaType),
       stream: async () => {
         try {
-          return await this.#storage.open(hash);
+          return await open();
         } catch (error) {
           if (error instanceof SessionAttachmentMissingError) return null;
           throw error;
         }
       }
     };
-
     try {
-      return await reconstructor.part(resolved, {
+      const result = await reconstructor.part(resolved, {
         sessionId,
         messageId,
-        partIndex
+        partIndex,
+        part
       });
+      return result.type === part.type ? { ...part, ...result } : result;
     } catch (error) {
-      if (error instanceof SessionAttachmentMissingError) {
-        this.#io.emit("session:attachment:missing", { hash, sessionId });
-        return missingAttachmentPart(mediaType, filename);
-      }
-      throw error;
+      if (!(error instanceof SessionAttachmentMissingError)) throw error;
+      this.#io.emit("session:attachment:missing", { hash, sessionId });
+      return { type: "text", text: missingText(mediaType, filename) };
+    }
+  }
+
+  // ── References (derived, never refcounted) ────────────────────────────────
+
+  /** Insert reference rows for a new message inside the caller's transaction. */
+  recordReferences(
+    sessionId: string,
+    messageId: string,
+    hashes: readonly string[]
+  ): void {
+    for (const hash of hashes) {
+      this.#io.sqlWrite(
+        `INSERT OR IGNORE INTO cf_agents_session_attachments
+           (session_id, message_id, hash) VALUES (?, ?, ?)`,
+        [sessionId, messageId, hash]
+      );
     }
   }
 
   /**
-   * Drop reference rows for deleted messages and reap blobs nothing
-   * references any more. References are DERIVED, never refcounted: the row
-   * deletes and the existence probe run in the caller's synchronous block;
-   * only the store deletes are async and best-effort.
+   * Diff a message's reference rows against its current pointers inside the
+   * caller's transaction. Returns the hashes it dropped, for reaping after
+   * commit. Unchanged references cost no writes.
    */
-  /** Delete selected message-reference rows inside a caller transaction. */
-  deleteMessageReferenceRows(
+  replaceReferences(
+    sessionId: string,
+    messageId: string,
+    hashes: readonly string[]
+  ): string[] {
+    const existing = new Set(
+      this.#io
+        .sql<{ hash: string }>(
+          `SELECT hash FROM cf_agents_session_attachments
+           WHERE session_id = ? AND message_id = ?`,
+          [sessionId, messageId]
+        )
+        .map((row) => row.hash)
+    );
+    const wanted = new Set(hashes);
+    this.recordReferences(
+      sessionId,
+      messageId,
+      [...wanted].filter((hash) => !existing.has(hash))
+    );
+    const removed = [...existing].filter((hash) => !wanted.has(hash));
+    if (removed.length > 0) {
+      this.#io.sqlWrite(
+        `DELETE FROM cf_agents_session_attachments
+         WHERE session_id = ? AND message_id = ?
+           AND hash IN (SELECT value FROM json_each(?))`,
+        [sessionId, messageId, JSON.stringify(removed)]
+      );
+    }
+    return removed;
+  }
+
+  /** Drop reference rows of deleted messages inside the caller's transaction. */
+  deleteMessageReferences(
     sessionId: string,
     messageIds: readonly string[]
   ): string[] {
@@ -887,38 +1032,21 @@ export class AttachmentEngine {
     const ids = JSON.stringify([...new Set(messageIds)]);
     const affected = this.#io.sql<{ hash: string }>(
       `SELECT DISTINCT hash FROM cf_agents_session_attachments
-       WHERE session_id = ?
-         AND message_id IN (SELECT value FROM json_each(?))`,
+       WHERE session_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
       [sessionId, ids]
     );
     this.#io.sqlWrite(
       `DELETE FROM cf_agents_session_attachments
-       WHERE session_id = ?
-         AND message_id IN (SELECT value FROM json_each(?))`,
+       WHERE session_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
       [sessionId, ids]
     );
     return affected.map((row) => row.hash);
   }
 
-  /**
-   * Delete only blobs created by a coupled write that failed before recording
-   * its references. Reused standalone or previously referenced blobs are
-   * never inferred to be abandoned.
-   */
-  async discardUnreferenced(
-    attachments: readonly StoredAttachment[]
-  ): Promise<void> {
-    const created = attachments
-      .filter((attachment) => this.#createdAttachments.has(attachment))
-      .map((attachment) => attachment.hash);
-    await this.reapUnreferenced(created);
-  }
-
-  /** Delete one session's reference rows inside a caller transaction. */
-  deleteSessionReferenceRows(sessionId: string): string[] {
+  /** Drop one session's reference rows inside the caller's transaction. */
+  deleteSessionReferences(sessionId: string): string[] {
     const rows = this.#io.sql<{ hash: string }>(
-      `SELECT DISTINCT hash FROM cf_agents_session_attachments
-       WHERE session_id = ?`,
+      "SELECT DISTINCT hash FROM cf_agents_session_attachments WHERE session_id = ?",
       [sessionId]
     );
     this.#io.sqlWrite(
@@ -928,18 +1056,7 @@ export class AttachmentEngine {
     return rows.map((row) => row.hash);
   }
 
-  /** Explicitly delete an unreferenced standalone attachment. */
-  async delete(hash: string): Promise<boolean> {
-    const referenced = this.#io.sql<{ hash: string }>(
-      "SELECT hash FROM cf_agents_session_attachments WHERE hash = ? LIMIT 1",
-      [hash]
-    );
-    if (referenced.length > 0) return false;
-    this.#knownBlobs.delete(hash);
-    return this.#storage.delete(hash);
-  }
-
-  /** Delete payloads whose hashes have no remaining message references. */
+  /** Delete payloads whose hashes no message references any more. */
   async reapUnreferenced(hashes: readonly string[]): Promise<void> {
     const unique = [...new Set(hashes)];
     if (unique.length === 0) return;
@@ -954,9 +1071,8 @@ export class AttachmentEngine {
     );
     for (const hash of unique) {
       if (remaining.has(hash)) continue;
-      this.#knownBlobs.delete(hash);
       try {
-        if (await this.#storage.delete(hash)) {
+        if (await this.store.delete(hash)) {
           this.#io.emit("session:attachment:reaped", { hash });
         }
       } catch (error) {
@@ -968,22 +1084,27 @@ export class AttachmentEngine {
     }
   }
 
-  /** Attachment bytes referenced by a set of message ids (path stats). */
-  attachmentBytesByMessage(
-    sessionId: string,
-    messageIds: string[]
-  ): Map<string, number> {
-    const result = new Map<string, number>();
-    if (messageIds.length === 0) return result;
-    const rows = this.#io.sql<{ message_id: string; total: number }>(
-      `SELECT message_id, SUM(bytes) AS total
-       FROM cf_agents_session_attachments
-       WHERE session_id = ?
-         AND message_id IN (SELECT value FROM json_each(?))
-       GROUP BY message_id`,
-      [sessionId, JSON.stringify(messageIds)]
+  /**
+   * After a coupled write failed to persist its row: delete only the blobs
+   * that write created. Reused blobs are never inferred to be abandoned.
+   */
+  discardUnreferenced(attachments: readonly StoredAttachment[]): Promise<void> {
+    return this.reapUnreferenced(
+      attachments.filter((a) => this.#created.has(a)).map((a) => a.hash)
     );
-    for (const row of rows) result.set(row.message_id, row.total);
-    return result;
   }
+
+  /** Explicitly delete an unreferenced payload. */
+  async delete(hash: string): Promise<boolean> {
+    const referenced = this.#io.sql<{ hash: string }>(
+      "SELECT hash FROM cf_agents_session_attachments WHERE hash = ? LIMIT 1",
+      [hash]
+    );
+    if (referenced.length > 0) return false;
+    return this.store.delete(hash);
+  }
+}
+
+function positive(value: number | undefined, fallback: number): number {
+  return Math.max(1, Math.floor(value ?? fallback));
 }

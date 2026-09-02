@@ -4,27 +4,6 @@
  */
 
 /**
- * Thrown when `updateMessage()` targets a message id that does not exist in
- * the session. Reads return `null` instead, for existence probes.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export class SessionMessageNotFoundError extends Error {
-  readonly sessionId: string;
-  readonly messageId: string;
-
-  constructor(sessionId: string, messageId: string) {
-    super(
-      `Message "${messageId}" does not exist in session "${sessionId}". ` +
-        `Append it first, or use getMessage() to probe for existence.`
-    );
-    this.name = "SessionMessageNotFoundError";
-    this.sessionId = sessionId;
-    this.messageId = messageId;
-  }
-}
-
-/**
  * Thrown when a message is not JSON-serializable.
  *
  * @experimental The API surface may change before stabilizing.
@@ -33,6 +12,29 @@ export class SessionSerializationError extends Error {
   constructor(context: string, detail: string) {
     super(`Cannot serialize ${context}: ${detail}`);
     this.name = "SessionSerializationError";
+  }
+}
+
+/**
+ * Thrown when a message still exceeds the SQLite row budget after every
+ * offloadable string and file part has been moved to attachment storage.
+ * Sessions never truncates content to make a row fit.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class SessionMessageTooLargeError extends Error {
+  readonly messageId: string;
+  readonly bytes: number;
+  readonly maxBytes: number;
+
+  constructor(messageId: string, bytes: number, maxBytes: number) {
+    super(
+      `Message "${messageId}" is ${bytes} bytes after offload; the row budget is ${maxBytes}.`
+    );
+    this.name = "SessionMessageTooLargeError";
+    this.messageId = messageId;
+    this.bytes = bytes;
+    this.maxBytes = maxBytes;
   }
 }
 

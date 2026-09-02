@@ -5,136 +5,90 @@ import {
   enforceRowSizeLimit,
   ROW_MAX_BYTES
 } from "../../chat/sanitize";
-import { truncateOlderMessages } from "../../sessions/compaction";
-import type { SessionMessage } from "../../sessions/types";
+import {
+  COMPACTION_PREFIX,
+  createCompactFunction,
+  isCompactionMessage,
+  type SessionMessage
+} from "../../sessions";
 
-function textMessage(id: string, text: string): SessionMessage {
-  return {
-    id,
-    role: "user",
-    parts: [{ type: "text", text }]
-  };
+function textMessage(id: string, text: string, role = "user"): SessionMessage {
+  return { id, role, parts: [{ type: "text", text }] };
 }
 
-function toolMessage(id: string, output: unknown): SessionMessage {
-  return {
-    id,
-    role: "assistant",
-    parts: [
-      {
-        type: "tool-read",
-        toolCallId: `tc-${id}`,
-        toolName: "read",
-        state: "output-available",
-        input: { path: "/large.txt" },
-        output
+/** A conversation long enough to have a compressible middle. */
+function conversation(count: number): SessionMessage[] {
+  return Array.from({ length: count }, (_, index) =>
+    textMessage(
+      `m${index}`,
+      `turn ${index} ${"body ".repeat(20)}`,
+      index % 2 === 0 ? "user" : "assistant"
+    )
+  );
+}
+
+describe("createCompactFunction", () => {
+  it("returns null for a conversation with no compressible middle", async () => {
+    const compact = createCompactFunction({
+      summarize: async () => {
+        throw new Error("must not summarize");
       }
-    ]
-  };
-}
-
-function firstOutput(message: SessionMessage): unknown {
-  return message.parts[0].output;
-}
-
-describe("truncateOlderMessages", () => {
-  it("truncates older object tool outputs without changing their shape", () => {
-    const largeContent = "x".repeat(1000);
-    const messages = [
-      toolMessage("old-tool", {
-        path: "/large.txt",
-        content: largeContent,
-        totalLines: 1
-      }),
-      textMessage("old-user", "next"),
-      textMessage("recent-1", "recent one"),
-      textMessage("recent-2", "recent two")
-    ];
-
-    const truncated = truncateOlderMessages(messages, {
-      keepRecent: 2,
-      maxToolOutputChars: 100
     });
-    const output = firstOutput(truncated[0]);
+    expect(await compact(conversation(5))).toBeNull();
+  });
 
-    expect(output).toMatchObject({
-      path: "/large.txt",
-      totalLines: 1
+  it("summarizes the middle and protects the head and tail", async () => {
+    let prompt = "";
+    const compact = createCompactFunction({
+      summarize: async (received) => {
+        prompt = received;
+        return "the summary";
+      },
+      keepRecentTokens: 1
     });
-    expect(typeof output).toBe("object");
-    expect((output as { content: string }).content).toContain("[truncated");
-    expect((output as { content: string }).content.length).toBeLessThan(
-      largeContent.length
+    const messages = conversation(12);
+
+    const result = await compact(messages);
+    expect(result).not.toBeNull();
+    // The first three messages stay verbatim, so the range starts at m3.
+    expect(result?.fromMessageId).toBe("m3");
+    expect(result?.summary).toBe("the summary");
+    // At least the last two messages are protected from the range.
+    expect(result?.toMessageId).not.toBe("m11");
+    expect(prompt).toContain("turn 3");
+    expect(prompt).not.toContain("turn 11");
+  });
+
+  it("feeds a previous overlay back in and never puts it in the range", async () => {
+    let prompt = "";
+    const compact = createCompactFunction({
+      summarize: async (received) => {
+        prompt = received;
+        return "second summary";
+      },
+      keepRecentTokens: 1
+    });
+    const messages = conversation(12);
+    const overlay = textMessage(
+      `${COMPACTION_PREFIX}earlier`,
+      "previous summary",
+      "assistant"
     );
-    expect(firstOutput(messages[0])).toMatchObject({ content: largeContent });
+    messages.splice(4, 0, overlay);
+    expect(isCompactionMessage(overlay)).toBe(true);
+
+    const result = await compact(messages);
+    expect(result?.fromMessageId).not.toContain(COMPACTION_PREFIX);
+    expect(result?.toMessageId).not.toContain(COMPACTION_PREFIX);
+    expect(prompt).toContain("previous summary");
   });
 
-  it("preserves truncation context for nested arrays with small budgets", () => {
-    const messages = [
-      toolMessage("old-tool", {
-        a: Array.from({ length: 1000 }, (_, i) => i),
-        b: Array.from({ length: 1000 }, (_, i) => i),
-        c: Array.from({ length: 1000 }, (_, i) => i),
-        d: Array.from({ length: 1000 }, (_, i) => i),
-        e: Array.from({ length: 1000 }, (_, i) => i),
-        f: Array.from({ length: 1000 }, (_, i) => i),
-        g: Array.from({ length: 1000 }, (_, i) => i)
-      }),
-      textMessage("recent-1", "recent one"),
-      textMessage("recent-2", "recent two")
-    ];
-
-    const truncated = truncateOlderMessages(messages, {
-      keepRecent: 2,
-      maxToolOutputChars: 500
+  it("returns null when the model produces an empty summary", async () => {
+    const compact = createCompactFunction({
+      summarize: async () => "   ",
+      keepRecentTokens: 1
     });
-    const output = firstOutput(truncated[0]) as {
-      a: Array<Record<string, unknown> | string>;
-    };
-
-    expect(output.a).toHaveLength(1);
-    expect(output.a[0]).not.toBe("");
-    expect(output.a[0]).toMatchObject({
-      __truncated: true,
-      __truncatedChars: expect.any(Number)
-    });
-  });
-
-  it("leaves recent tool outputs intact", () => {
-    const recentOutput = {
-      path: "/recent.txt",
-      content: "y".repeat(1000),
-      totalLines: 1
-    };
-    const messages = [
-      textMessage("old-1", "old"),
-      textMessage("old-2", "old"),
-      toolMessage("recent-tool", recentOutput)
-    ];
-
-    const truncated = truncateOlderMessages(messages, {
-      keepRecent: 2,
-      maxToolOutputChars: 100
-    });
-
-    expect(firstOutput(truncated[2])).toBe(recentOutput);
-  });
-
-  it("keeps string tool outputs as strings", () => {
-    const messages = [
-      toolMessage("old-tool", "z".repeat(1000)),
-      textMessage("recent-1", "recent one"),
-      textMessage("recent-2", "recent two")
-    ];
-
-    const truncated = truncateOlderMessages(messages, {
-      keepRecent: 2,
-      maxToolOutputChars: 100
-    });
-    const output = firstOutput(truncated[0]);
-
-    expect(typeof output).toBe("string");
-    expect(output).toContain("[truncated");
+    expect(await compact(conversation(12))).toBeNull();
   });
 });
 

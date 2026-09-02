@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   ContextBlocks,
   type ContextProvider,
+  type SearchProvider,
+  type SkillProvider,
   type WritableContextProvider
-} from "../../sessions/context";
-import type { SkillProvider } from "../../sessions/skills";
-import type { SearchProvider } from "../../sessions/context-search";
+} from "../../context";
 
 // ── Providers that track init calls ────────────────────────────
 

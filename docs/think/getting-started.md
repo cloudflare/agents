@@ -200,36 +200,40 @@ Open the browser and send a message. The agent responds with streaming text, and
 
 ## 6. Add persistent memory
 
-Override `configureSession` to give the model writable memory that survives restarts:
+Override `configureContext` to give the model writable memory that survives restarts:
 
 ```typescript
+import type { ContextConfig } from "agents/context";
+
 export class MyAgent extends Think<Env> {
   getModel() {
     return "@cf/moonshotai/kimi-k2.7-code";
   }
 
-  configureSession(session: Session) {
-    return session
-      .withContext("soul", {
+  configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "soul",
         provider: {
           get: async () =>
             "You are a helpful assistant. Remember important facts about the user."
         }
-      })
-      .withContext("memory", {
+      },
+      {
+        label: "memory",
         description: "Important facts about the user and conversation.",
         maxTokens: 2000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 }
 ```
 
-Now the model sees a `MEMORY` section in its system prompt and gets a `set_context` tool to update it. Facts written to memory persist in SQLite and survive DO hibernation and restarts.
+Now the model sees a `MEMORY` section in its system prompt and gets a `set_context` tool to update it. A block declared without a `provider` is auto-wired to durable per-agent SQLite, so facts written to memory survive DO hibernation and restarts.
 
-When you use `configureSession`, the system prompt is built from context blocks rather than `getSystemPrompt()`. The `"soul"` block above acts as the system identity — it is read-only and always appears first. The `"memory"` block is writable, and the model proactively updates it when it learns something useful.
+When you declare context blocks, the system prompt is built from those blocks rather than `getSystemPrompt()`. The `"soul"` block above acts as the system identity: it is read-only and always appears first. The `"memory"` block is writable, and the model updates it when it learns something useful. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
 
-See the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for context blocks, compaction, search, skills, and multi-session support.
+The assembled blocks are available as `this.context` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior, and the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for compaction, search, and multi-session support.
 
 ## 7. Add custom tools
 
@@ -243,7 +247,7 @@ export class MyAgent extends Think<Env> {
   getModel() {
     /* ... */
   }
-  configureSession(session: Session) {
+  configureContext(): ContextConfig[] {
     /* ... */
   }
 
@@ -269,7 +273,7 @@ export class MyAgent extends Think<Env> {
 Think merges tools from multiple sources automatically. On every turn, the model has access to:
 
 1. **Workspace tools** — read, write, edit, list, find, grep, delete (built-in)
-2. **Session tools** — set_context, load_context, search_context (from `configureSession`)
+2. **Context tools** — set_context, load_context, search_context (from `configureContext`)
 3. **Your tools** — from `getTools()`
 4. **Skill tools** — activate_skill, read_skill_resource, and optional run_skill_script (from `getSkills()`)
 5. **MCP tools** — from connected MCP servers (if any)
@@ -311,4 +315,5 @@ See [Lifecycle Hooks](./lifecycle-hooks.md) for the full reference.
 - [Tools](./tools.md) — workspace tools, code execution, extensions
 - [Client Tools](./client-tools.md) — browser-side tools, approval flows, concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, scheduled turns, recovery
-- [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) — context blocks, compaction, search, multi-session
+- [Context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) — context blocks, providers, prompt assembly
+- [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) — compaction, search, attachments, multi-session

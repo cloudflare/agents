@@ -43,8 +43,6 @@ import {
   aiSdkRecoveryCodec,
   ResumeHandshake,
   isReplayChunk,
-  sanitizeMessage,
-  enforceRowSizeLimit,
   parseProtocolMessage,
   sendIfOpen,
   TurnQueue,
@@ -67,8 +65,10 @@ import {
 } from "agents/chat";
 import type { Streams } from "agents/streams";
 import {
+  ATTACHMENT_URL_PREFIX,
   Sessions,
   type Session,
+  type SessionMessage,
   type SessionsAttachmentOptions
 } from "agents/sessions";
 import { createChatTurnTaskDefinition } from "agents/chat";
@@ -297,6 +297,27 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
 }
 
 /**
+ * Floor for byte-budgeted wake hydration: however small the budget, at least
+ * this many recent messages are hydrated so a conversation is never woken
+ * with an unusably short tail.
+ */
+const HYDRATION_MIN_RECENT_MESSAGES = 20;
+
+/**
+ * True when a stored value carries an `attachment:` pointer anywhere — a
+ * file part URL or an offloaded tool-output string. Walks structure, not
+ * bytes, so it stays cheap on rows with very large payloads.
+ */
+function hasAttachmentPointer(value: unknown): boolean {
+  if (typeof value === "string") return value.startsWith(ATTACHMENT_URL_PREFIX);
+  if (Array.isArray(value)) return value.some(hasAttachmentPointer);
+  if (value !== null && typeof value === "object") {
+    return Object.values(value).some(hasAttachmentPointer);
+  }
+  return false;
+}
+
+/**
  * Schema for a client-defined tool sent from the browser.
  * These tools are executed on the client, not the server.
  *
@@ -403,17 +424,36 @@ export class AIChatAgent<
   private _abortRegistry: AbortRegistry;
 
   /**
-   * Optional Sessions attachment policy. When present, Sessions moves large
-   * inline file parts into its own chunked SQLite storage or configured R2
-   * tier. Omit it to preserve AIChatAgent's inline-file behavior.
+   * Sessions attachment policy overrides. Offload itself is not optional —
+   * Sessions always moves oversized file parts and tool-output strings into
+   * content-addressed storage and reconstructs them byte-for-byte on read.
+   * Set this only to tune the policy (thresholds, an R2 tier, a custom
+   * reconstructor, disabling the aged-row maintenance pass).
    */
   sessionAttachments: SessionsAttachmentOptions | undefined = undefined;
 
   /** Durable chat history for this Agent. */
   readonly sessions = new Sessions({
-    attachments: () => this.sessionAttachments,
-    missingUpdate: "ignore"
+    attachments: () => this.sessionAttachments
   });
+
+  /**
+   * Byte budget for wake-time transcript hydration into {@link messages}.
+   *
+   * `onStart` hydrates through `session.getRecentHistory(budget, …)`. The
+   * budget counts the attachment bytes each row re-inflates when it is
+   * reconstructed inline, so it bounds isolate memory rather than stored
+   * bytes: an oversized transcript hydrates as a bounded recent window
+   * instead of exhausting the isolate. Durable storage is never truncated by
+   * this — `sessions.session().getHistory()` still reads the full path, and
+   * the streamed `get-messages` route still serves every message.
+   *
+   * Set to `Number.POSITIVE_INFINITY` (or any non-positive value) to disable
+   * windowing and always hydrate the whole transcript.
+   *
+   * @default 32 * 1024 * 1024
+   */
+  hydrationByteBudget: number = 32 * 1024 * 1024;
 
   /** The default linear conversation handle. */
   readonly #session: Session = this.sessions.session();
@@ -587,14 +627,6 @@ export class AIChatAgent<
    * @internal
    */
   protected _lastBody: Record<string, unknown> | undefined;
-
-  /**
-   * Cache of last-persisted JSON for each message ID.
-   * Used for incremental persistence: skip SQL writes for unchanged messages.
-   * Lost on hibernation, repopulated from SQLite on wake.
-   * @internal
-   */
-  private _persistedMessageCache: Map<string, string> = new Map();
 
   /**
    * Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
@@ -916,8 +948,9 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this.sessions.__DO_NOT_USE_WILL_BREAK__sync().ensureTables();
-            this._migrateLegacyMessages();
+            // Session storage is Sessions' business and is initialized by its
+            // capability `onStart`; the constructor never reads or writes the
+            // transcript. Legacy lift and hydration happen in `onStart`.
 
             // Key-value table for request context that must survive hibernation
             // (e.g., custom body fields, client tools from the last chat request).
@@ -953,30 +986,32 @@ export class AIChatAgent<
           }
         );
 
-        const rawMessages = withAgentSpan(
-          this,
-          "load_chat_messages",
-          "initialization",
-          { "cloudflare.agents.component": "ai_chat" },
-          () => this._loadMessagesFromDb()
-        );
-
-        // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
-        this.messages = autoTransformMessages(rawMessages);
         update({
-          "cloudflare.agents.chat.messages.loaded": rawMessages.length,
           "cloudflare.agents.chat.active_stream.restored":
             this._resumableStream.hasActiveStream()
         });
       }
     );
 
+    // `this.messages` mirrors durable storage through the Sessions change
+    // feed rather than being hand-patched at each write site.
+    this.#subscribeToSessionChanges();
+
     const _onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
-      if (this.sessionAttachments) {
-        const history = (await this.#session.getHistory()) as UIMessage[];
-        this.messages = autoTransformMessages(history);
-      }
+      await withAgentSpan(
+        this,
+        "load_chat_messages",
+        "startup",
+        { "cloudflare.agents.component": "ai_chat" },
+        async (update) => {
+          await this._migrateLegacyMessages();
+          await this._hydrateMessages();
+          update({
+            "cloudflare.agents.chat.messages.loaded": this.messages.length
+          });
+        }
+      );
       return _onStart(props);
     };
 
@@ -1402,8 +1437,8 @@ export class AIChatAgent<
           this._lastClientTools = undefined;
           this._lastBody = undefined;
           this._persistRequestContext();
-          this._persistedMessageCache.clear();
-          this.messages = [];
+          // `clearMessages()` above emptied `this.messages` through the
+          // change feed.
           this._broadcastChatMessage(
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
             [connection.id]
@@ -1544,10 +1579,9 @@ export class AIChatAgent<
       return this._tryCatchChat(async () => {
         const url = new URL(request.url);
         if (url.pathname.split("/").pop() === "get-messages") {
-          const messages = this.sessionAttachments
-            ? ((await this.#session.getHistory()) as UIMessage[])
-            : this._loadMessagesFromDb();
-          return Response.json(autoTransformMessages(messages));
+          return new Response(this.#streamMessagesAsJson(), {
+            headers: { "content-type": "application/json" }
+          });
         }
         return _onRequest(request);
       });
@@ -2147,8 +2181,14 @@ export class AIChatAgent<
     });
   }
 
-  /** Lift ai-chat's legacy flat table into the default Sessions chain. */
-  private _migrateLegacyMessages(): void {
+  /**
+   * Lift ai-chat's legacy flat table into the default Sessions chain.
+   *
+   * Runs in `onStart` (before hydration), not in the constructor: the lift is
+   * an async import through Sessions, and the constructor does no session
+   * storage work at all.
+   */
+  private async _migrateLegacyMessages(): Promise<void> {
     const tables = new Set(
       this.ctx.storage.sql
         .exec(
@@ -2164,7 +2204,6 @@ export class AIChatAgent<
     );
     if (!tables.has("cf_ai_chat_agent_messages")) return;
 
-    const sync = this.sessions.__DO_NOT_USE_WILL_BREAK__sync();
     const rows = this.sql<{
       id: string;
       message: string;
@@ -2190,7 +2229,7 @@ export class AIChatAgent<
           typeof row.created_at === "number"
             ? row.created_at
             : Date.parse(String(row.created_at ?? ""));
-        sync.importMessage("", message, {
+        await this.#session.importMessage(message, {
           parentId,
           createdAt: Number.isFinite(parsedTime) ? parsedTime : index
         });
@@ -2210,37 +2249,130 @@ export class AIChatAgent<
     }
   }
 
-  async #projectMessage(
-    input: UIMessage,
-    stored: UIMessage
-  ): Promise<UIMessage> {
-    const attachments = this.sessionAttachments;
-    if (!attachments) return stored;
-    if (!attachments.reconstruct) return input;
-    return (
-      ((await this.#session.getMessage(stored.id)) as UIMessage | null) ??
-      stored
-    );
-  }
-
-  private _loadMessagesFromDb(): UIMessage[] {
-    const rows = this.sessions.__DO_NOT_USE_WILL_BREAK__sync().readAll("");
-    this._persistedMessageCache.clear();
+  /**
+   * Hydrate `this.messages` once per wake, bounded by
+   * {@link hydrationByteBudget}. This is the only transcript read on the
+   * startup path; every later change arrives through the Sessions change
+   * feed.
+   */
+  private async _hydrateMessages(): Promise<void> {
+    const budget = this.hydrationByteBudget;
+    const stored =
+      Number.isFinite(budget) && budget > 0
+        ? (
+            await this.#session.getRecentHistory(
+              budget,
+              HYDRATION_MIN_RECENT_MESSAGES
+            )
+          ).messages
+        : await this.#session.getHistory();
 
     const messages: UIMessage[] = [];
-    for (const row of rows) {
-      const message = row.message as UIMessage;
+    for (const message of stored as unknown[]) {
       if (!isValidMessageStructure(message)) {
         console.warn(
-          `[AIChatAgent] Skipping invalid message ${row.id}: ` +
+          `[AIChatAgent] Skipping invalid message ${(message as { id?: unknown } | null)?.id}: ` +
             "missing or malformed id, role, or parts"
         );
         continue;
       }
-      this._persistedMessageCache.set(message.id, JSON.stringify(message));
       messages.push(message);
     }
-    return messages;
+    // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
+    this.messages = autoTransformMessages(messages);
+  }
+
+  /**
+   * Mirror `this.messages` from the Sessions change feed. Every durable write
+   * dispatches here synchronously, so write sites never hand-patch the cache
+   * and a maintenance rewrite (inline payload → attachment pointer) refreshes
+   * the cached row like any other update.
+   */
+  #subscribeToSessionChanges(): void {
+    this.sessions.subscribe(async (event) => {
+      if (event.sessionId !== this.#session.sessionId) return;
+      switch (event.type) {
+        case "append": {
+          if (!event.inserted) return;
+          const message = await this.#messageForCache(event.message);
+          const index = this.messages.findIndex((m) => m.id === message.id);
+          if (index === -1) this.messages.push(message);
+          else this.messages[index] = message;
+          return;
+        }
+        case "update":
+        case "maintenance-rewrite": {
+          const index = this.messages.findIndex(
+            (m) => m.id === event.message.id
+          );
+          if (index === -1) return;
+          this.messages[index] = await this.#messageForCache(event.message);
+          return;
+        }
+        case "delete": {
+          const removed = new Set(event.messageIds);
+          this.messages = this.messages.filter((m) => !removed.has(m.id));
+          return;
+        }
+        case "clear": {
+          this.messages = [];
+          return;
+        }
+        default:
+          return;
+      }
+    });
+  }
+
+  /**
+   * Turn a stored row into its in-memory form. Rows without attachment
+   * pointers are used exactly as the write returned them; only a pointer
+   * bearing row costs a reconstructing re-read.
+   */
+  async #messageForCache(message: SessionMessage): Promise<UIMessage> {
+    const resolved = hasAttachmentPointer(message.parts)
+      ? (((await this.#session.getMessage(message.id)) as UIMessage | null) ??
+        (message as UIMessage))
+      : (message as UIMessage);
+    return autoTransformMessages([resolved])[0] ?? resolved;
+  }
+
+  /**
+   * Serialize the whole transcript as a JSON array of messages without ever
+   * holding it in one string: `historyBatches()` yields bounded batches and
+   * each batch is encoded straight into the response body.
+   */
+  #streamMessagesAsJson(): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    const batches = this.#session.historyBatches();
+    let opened = false;
+    let first = true;
+    return new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        if (!opened) {
+          opened = true;
+          controller.enqueue(encoder.encode("["));
+          return;
+        }
+        const next = await batches.next();
+        if (next.done) {
+          controller.enqueue(encoder.encode("]"));
+          controller.close();
+          return;
+        }
+        let chunk = "";
+        for (const message of autoTransformMessages(
+          next.value as UIMessage[]
+        )) {
+          chunk += `${first ? "" : ","}${JSON.stringify(message)}`;
+          first = false;
+        }
+        if (chunk.length > 0) controller.enqueue(encoder.encode(chunk));
+      },
+      cancel: async () => {
+        await batches.return?.(undefined);
+      }
+    });
   }
 
   private async _tryCatchChat<T>(fn: () => T | Promise<T>) {
@@ -5623,73 +5755,51 @@ export class AIChatAgent<
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
   ) {
-    const mergedMessages = reconcileMessages(messages, this.messages, (msg) =>
+    // Snapshot the pre-write transcript: `this.messages` is mirrored from the
+    // change feed and therefore mutates as the loop below writes.
+    const priorMessages = [...this.messages];
+    const mergedMessages = reconcileMessages(messages, priorMessages, (msg) =>
       this._sanitizeMessageForPersistence(msg)
-    );
-    let nextMessages = [...this.messages];
-    const indexById = new Map(
-      nextMessages.map((message, index) => [message.id, index])
     );
 
     for (const message of mergedMessages) {
       const sanitizedMessage = this._sanitizeMessageForPersistence(message);
-      const resolved = resolveToolMergeId(sanitizedMessage, this.messages);
-      const safe = this._enforceRowSizeLimit(resolved);
-      const json = JSON.stringify(safe);
-      let stored = safe;
-      if (this._persistedMessageCache.get(safe.id) !== json) {
-        const result = await this.#session.upsertMessage(safe);
-        stored = result.message as UIMessage;
-        this._persistedMessageCache.set(stored.id, JSON.stringify(stored));
-      }
-      const projected = await this.#projectMessage(safe, stored);
-
-      // A cache hit skips storage, not projection maintenance. Early approval
-      // persistence seeds the cache before the completed streaming message has
-      // entered `this.messages`; replacing it here preserves the old reload's
-      // behavior without an O(history) database read.
-      const existingIndex = indexById.get(projected.id);
-      if (existingIndex === undefined) {
-        indexById.set(projected.id, nextMessages.length);
-        nextMessages.push(projected);
-      } else {
-        nextMessages[existingIndex] = projected;
-      }
+      // An identical row writes nothing and dispatches no event; there is no
+      // in-process cache to keep in step, and no message-shaped truncation —
+      // Sessions offloads an oversized row losslessly instead.
+      await this.#session.upsertMessage(
+        resolveToolMergeId(sanitizedMessage, priorMessages)
+      );
     }
 
     // Regeneration can submit a strict subset of the server transcript. Keep
     // the old subset guard, but delete through Sessions so descendants splice
     // to their grandparent instead of breaking the active path.
     if (options?._deleteStaleRows) {
-      const serverIds = new Set(this.messages.map((message) => message.id));
+      const serverIds = new Set(priorMessages.map((message) => message.id));
       const isSubsetOfServer = mergedMessages.every((message) =>
         serverIds.has(message.id)
       );
       if (isSubsetOfServer) {
         const keepIds = new Set(mergedMessages.map((message) => message.id));
-        const staleIds = nextMessages
-          .map((message) => message.id)
-          .filter((id) => !keepIds.has(id));
-        await this._deleteMessagesByIds(staleIds);
-        nextMessages = nextMessages.filter((message) =>
-          keepIds.has(message.id)
+        await this._deleteMessagesByIds(
+          this.messages
+            .map((message) => message.id)
+            .filter((id) => !keepIds.has(id))
         );
       }
     }
 
     if (
       this.maxPersistedMessages != null &&
-      nextMessages.length > this.maxPersistedMessages
+      this.messages.length > this.maxPersistedMessages
     ) {
-      const excess = nextMessages.length - this.maxPersistedMessages;
-      const staleIds = nextMessages
-        .slice(0, excess)
-        .map((message) => message.id);
-      await this._deleteMessagesByIds(staleIds);
-      nextMessages = nextMessages.slice(excess);
+      const excess = this.messages.length - this.maxPersistedMessages;
+      await this._deleteMessagesByIds(
+        this.messages.slice(0, excess).map((message) => message.id)
+      );
     }
 
-    this.messages = autoTransformMessages(nextMessages);
     this._broadcastChatMessage(
       {
         messages: mergedMessages,
@@ -5746,45 +5856,34 @@ export class AIChatAgent<
   }
 
   /**
-   * Sanitizes a message for persistence by removing ephemeral provider-specific
-   * data that should not be stored or sent back in subsequent requests.
+   * Applies the ai-chat-specific normalization Sessions does not do.
+   *
+   * Sessions already strips OpenAI ephemeral fields (itemId,
+   * reasoningEncryptedContent) and drops truly empty reasoning parts on every
+   * write, so those steps are not repeated here.
    *
    * Pipeline:
    *
-   * 1. **Strip OpenAI ephemeral fields**: The AI SDK's @ai-sdk/openai provider
-   *    (v2.0.x+) defaults to using OpenAI's Responses API which assigns unique
-   *    itemIds and reasoningEncryptedContent to message parts. When persisted
-   *    and sent back, OpenAI rejects duplicate itemIds.
-   *
-   * 2. **Truncate provider-executed tool payloads**: Server-side tool
+   * 1. **Truncate provider-executed tool payloads**: Server-side tool
    *    executions (e.g. Anthropic code_execution, text_editor) can produce
    *    200KB+ payloads in `input` and `output`. These are truncated since the
    *    model has already consumed the results.
    *
-   * 3. **Filter truly empty reasoning parts**: After stripping, reasoning parts
-   *    with no text and no remaining providerMetadata are removed. Parts that
-   *    still carry providerMetadata (e.g. Anthropic's redacted_thinking blocks
-   *    with providerMetadata.anthropic.redactedData) are preserved, as they
-   *    contain data required for round-tripping with the provider API.
-   *
-   * 4. **User hook**: Calls the overridable `sanitizeMessageForPersistence()`
+   * 2. **User hook**: Calls the overridable `sanitizeMessageForPersistence()`
    *    method, allowing subclasses to apply custom transformations.
    *
    * @param message - The message to sanitize
-   * @returns A new message with ephemeral provider data removed
+   * @returns A new message with ai-chat's normalization applied
    */
   private _sanitizeMessageForPersistence(message: UIMessage): UIMessage {
-    // Base sanitization: strip OpenAI ephemeral fields + filter empty reasoning parts
-    const baseSanitized = sanitizeMessage(message);
-
     // ai-chat-specific: truncate large payloads in provider-executed tool parts
-    const parts = baseSanitized.parts.map((part) =>
+    const parts = message.parts.map((part) =>
       AIChatAgent._truncateProviderExecutedToolPayloads(part)
     ) as UIMessage["parts"];
 
     // Run user-overridable hook last
     return this.sanitizeMessageForPersistence({
-      ...baseSanitized,
+      ...message,
       parts
     });
   }
@@ -5885,32 +5984,13 @@ export class AIChatAgent<
     return key.startsWith(PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX);
   }
 
-  /** Delete message rows through Sessions and evict persistence-cache entries. */
+  /**
+   * Delete message rows through Sessions. The change feed removes them from
+   * `this.messages`.
+   */
   private async _deleteMessagesByIds(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
     await this.#session.deleteMessages(ids);
-    for (const id of ids) this._persistedMessageCache.delete(id);
-  }
-
-  /**
-   * Enforces SQLite row size limits by compacting tool outputs and text parts
-   * when a serialized message exceeds the safety threshold (1.8MB).
-   *
-   * Only fires in pathological cases (extremely large tool outputs or text).
-   * Returns the message unchanged if it fits within limits.
-   *
-   * Compaction strategy:
-   * 1. Compact tool outputs over 1KB (replace with LLM-friendly summary)
-   * 2. If still too big, truncate text parts from oldest to newest
-   * 3. Add metadata so clients can detect compaction
-   *
-   * @param message - The message to check
-   * @returns The message, compacted if necessary
-   */
-  private _enforceRowSizeLimit(message: UIMessage): UIMessage {
-    return enforceRowSizeLimit(message, {
-      warn: (m) => console.warn(`[AIChatAgent] ${m}`)
-    });
   }
 
   /**
@@ -6031,15 +6111,17 @@ export class AIChatAgent<
           ...message,
           parts: updatedParts
         });
-        const safe = this._enforceRowSizeLimit(updatedMessage);
-        const stored = (await this.#session.updateMessage(safe)) as UIMessage;
-        this._persistedMessageCache.set(stored.id, JSON.stringify(stored));
-        const index = this.messages.findIndex(
-          (candidate) => candidate.id === stored.id
-        );
-        if (index !== -1) {
-          const projected = await this.#projectMessage(safe, stored);
-          this.messages[index] = autoTransformMessages([projected])[0];
+        // The change feed patches `this.messages`. A `null` result means the
+        // row is not in storage (nothing to mirror), so patch the live view
+        // directly to keep the in-memory transcript consistent.
+        const stored = await this.#session.updateMessage(updatedMessage);
+        if (!stored) {
+          const index = this.messages.findIndex(
+            (candidate) => candidate.id === updatedMessage.id
+          );
+          if (index !== -1) {
+            this.messages[index] = autoTransformMessages([updatedMessage])[0];
+          }
         }
       }
     }
@@ -6455,10 +6537,6 @@ export class AIChatAgent<
               };
               const sanitized = this._sanitizeMessageForPersistence(snapshot);
               const stored = await this.#session.upsertMessage(sanitized);
-              this._persistedMessageCache.set(
-                stored.message.id,
-                JSON.stringify(stored.message)
-              );
               // Track that we persisted early so stream completion can update
               // in place rather than appending a duplicate.
               this._approvalPersistedMessageId = stored.message.id;

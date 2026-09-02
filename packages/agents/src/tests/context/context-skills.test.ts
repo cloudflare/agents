@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   ContextBlocks,
+  R2SkillProvider,
   type ContextProvider,
+  type SkillProvider,
   type WritableContextProvider
-} from "../../sessions/context";
-import { R2SkillProvider, type SkillProvider } from "../../sessions/skills";
+} from "../../context";
 
 // ── In-memory providers for tests ──────────────────────────────
 

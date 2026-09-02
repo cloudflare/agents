@@ -4,34 +4,34 @@
  * caller has settled startup ordering (`lifecycle.ready()` for public API,
  * explicit ownership for the sync aperture).
  *
- * Write economics (PR #2191 doctrine): rows written cost ~1000× rows read on
- * DO SQLite. The message table carries NO secondary indexes — the legacy
- * `assistant_messages` indexes cost two extra billed writes on every append
- * to serve queries that are rare, read-priced scans here. State is derived
- * from existing rows (active leaf = the session's max-rowid row; token totals
- * from stamped per-row estimates), never maintained in counter rows.
+ * Write economics: rows written cost ~1000× rows read on DO SQLite. Every
+ * table is WITHOUT ROWID with no secondary index, so one row write bills one
+ * row. State is derived from existing rows (active leaf = the session's
+ * max-seq row; token totals from stamped per-row estimates), never kept in
+ * counter rows, and an unchanged update writes nothing.
  */
 
-import { byteLength } from "../chat/sanitize";
-import { estimateMessageTokens, estimateStringTokens } from "./tokens";
 import {
-  AttachmentEngine,
   ATTACHMENT_URL_PREFIX,
+  AttachmentEngine,
   estimatedDataUrlBytes,
+  maintenanceCandidateBytes,
   parseAttachmentUrl,
+  pointerHashes,
   type StoredAttachment
 } from "./attachments";
-import type {
-  AttachmentSqlParam,
-  AttachmentChunkRow
-} from "./attachment-storage";
 import {
-  SessionMessageNotFoundError,
   SessionSearchDisabledError,
   SessionSerializationError
 } from "./errors";
-import { maxEvictableMediaBytes } from "./eviction";
+import type { SessionsIo } from "./io";
 import { overlayMessage, planOverlays } from "./overlays";
+import { byteLength } from "./sanitize";
+import {
+  estimateAttachmentTokens,
+  estimateMessageTokens,
+  estimateStringTokens
+} from "./tokens";
 import type {
   AttachmentReconstructor,
   HistoryReadOptions,
@@ -48,43 +48,14 @@ import type {
 } from "./types";
 
 /**
- * Bounds for each content-hydration query on a history path. Message rows
- * can be up to ~1.8MB each (ROW_MAX_BYTES in agents/chat), so content is
- * fetched in bounded batches: in workerd the SQLite allocator shares the
- * isolate's memory budget with the JS heap and oversized transient result
- * sets surface as SQLITE_NOMEM (#1710). Chunks are bounded by BOTH row count
- * and cumulative stored bytes (sizes come from content-free path stats).
+ * Bounds for each content-hydration query on a history path. In workerd the
+ * SQLite allocator shares the isolate's memory budget with the JS heap, so
+ * oversized transient result sets surface as SQLITE_NOMEM (#1710). Chunks
+ * are bounded by BOTH row count and cumulative stored bytes.
  */
 const HISTORY_CONTENT_CHUNK_SIZE = 50;
 const HISTORY_CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
-
-/** Flat token charge for an image attachment (vision-model ballpark). */
-export const IMAGE_ATTACHMENT_TOKENS = 1_600;
-/** Ceiling for a non-image attachment's bytes/4 token charge. */
-export const MAX_ATTACHMENT_TOKENS = 20_000;
-
-/**
- * Heuristic token weight of one attachment so media stops counting as zero
- * (the legacy behavior that let compaction ignore megabytes of images).
- * Model-reported usage remains the authoritative count.
- */
-export function estimateAttachmentTokens(
-  mediaType: string,
-  bytes: number
-): number {
-  if (mediaType.startsWith("image/")) return IMAGE_ATTACHMENT_TOKENS;
-  return Math.min(Math.ceil(bytes / 4), MAX_ATTACHMENT_TOKENS);
-}
-
-/** @internal SQL, KV, and telemetry supplied by the capability. */
-export interface SessionsCoreIo {
-  sql<T>(query: string, params: AttachmentSqlParam[]): T[];
-  sqlWrite(query: string, params: AttachmentSqlParam[]): number;
-  rawSql(query: string): void;
-  transaction<T>(fn: () => T): T;
-  chunk(storageId: string, index: number): AttachmentChunkRow | null;
-  emit(type: string, payload: Record<string, unknown>): void;
-}
+const LEGACY_TOMBSTONE_SUFFIX = "__lifted_v1";
 
 /** Per-session O(1)-maintained aggregates over the active branch path. */
 type StatsCache = {
@@ -98,100 +69,84 @@ type StatsCache = {
   overlayAdjustment: number;
 };
 
-/** Gate invoked between a durable append and its change-feed dispatch. */
-export type AppendGate = (
-  stats: SessionStats
-) => Promise<{ compacted: boolean }>;
+/** A parsed row plus whether its stored JSON carries any pointer. */
+type ParsedRow = { message: SessionMessage; pointers: boolean };
 
-const LEGACY_TOMBSTONE_SUFFIX = "__lifted_v1";
+export type UpdateOutcome = "missing" | "unchanged" | "updated";
 
 export class SessionsCore {
-  readonly io: SessionsCoreIo;
+  readonly io: SessionsIo;
   readonly attachments: AttachmentEngine;
   readonly #searchIndexing: boolean;
   readonly #reservedMetadataKeys: readonly string[];
-  readonly #missingUpdate: "ignore" | "error";
   #tablesEnsured = false;
 
   readonly #listeners = new Set<SessionChangeListener>();
   /** Active-leaf cache per session: undefined = cold, null = empty session. */
   readonly #leafCache = new Map<string, string | null>();
+  /** Next `seq` per session; the capability is the only writer. */
+  readonly #nextSeq = new Map<string, number>();
   readonly #statsCache = new Map<string, StatsCache>();
 
-  constructor(options: SessionsOptions, io: SessionsCoreIo) {
+  constructor(options: SessionsOptions, io: SessionsIo) {
     this.io = io;
     this.#searchIndexing = options.searchIndexing ?? false;
     this.#reservedMetadataKeys = options.reservedMetadataKeys ?? [];
-    this.#missingUpdate = options.missingUpdate ?? "error";
-    this.attachments = new AttachmentEngine(options.attachments, {
-      sql: (query, params) => this.io.sql(query, params),
-      sqlWrite: (query, params) => this.io.sqlWrite(query, params),
-      rawSql: (query) => this.io.rawSql(query),
-      transaction: (fn) => this.io.transaction(fn),
-      chunk: (storageId, index) => this.io.chunk(storageId, index),
-      emit: (type, payload) => this.io.emit(type, payload)
-    });
-  }
-
-  get searchIndexing(): boolean {
-    return this.#searchIndexing;
+    this.attachments = new AttachmentEngine(options.attachments, io);
   }
 
   // ── Schema ───────────────────────────────────────────────────────────────
 
   ensureTables(): void {
     if (this.#tablesEnsured) return;
-    this.io.rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_messages (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL DEFAULT '',
+    this.io.sqlWrite(
+      `CREATE TABLE IF NOT EXISTS cf_agents_session_messages (
+        session_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
         parent_id TEXT,
+        type TEXT NOT NULL DEFAULT 'message',
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         token_estimate INTEGER NOT NULL DEFAULT 0,
         media_candidate_bytes INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL
-      )
-    `);
-    this.io.rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_compactions (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, id)
+      ) WITHOUT ROWID`,
+      []
+    );
+    this.io.sqlWrite(
+      `CREATE TABLE IF NOT EXISTS cf_agents_session_compactions (
+        session_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
         summary TEXT NOT NULL,
         from_message_id TEXT NOT NULL,
         to_message_id TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )
-    `);
-    this.io.rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_attachments (
-        hash TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        part_index INTEGER NOT NULL,
-        session_id TEXT NOT NULL DEFAULT '',
-        path TEXT NOT NULL,
-        media_type TEXT NOT NULL,
-        bytes INTEGER NOT NULL,
-        filename TEXT,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY (hash, message_id, part_index)
-      )
-    `);
-    this.io.rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_config (
+        PRIMARY KEY (session_id, id)
+      ) WITHOUT ROWID`,
+      []
+    );
+    this.io.sqlWrite(
+      `CREATE TABLE IF NOT EXISTS cf_agents_session_attachments (
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        PRIMARY KEY (session_id, message_id, hash)
+      ) WITHOUT ROWID`,
+      []
+    );
+    this.io.sqlWrite(
+      `CREATE TABLE IF NOT EXISTS cf_agents_session_config (
         session_id TEXT NOT NULL,
         key TEXT NOT NULL,
         value TEXT NOT NULL,
         PRIMARY KEY (session_id, key)
-      )
-    `);
-    this.io.rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_context_blocks (
-        label TEXT PRIMARY KEY,
-        content TEXT NOT NULL,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+      ) WITHOUT ROWID`,
+      []
+    );
+    this.attachments.ensureTables();
     if (this.#searchIndexing) this.#ensureFtsTable();
     this.#tablesEnsured = true;
   }
@@ -203,40 +158,42 @@ export class SessionsCore {
         []
       ).length > 0;
     if (exists) return;
-    this.io.rawSql(`
-      CREATE VIRTUAL TABLE cf_agents_session_fts
-      USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')
-    `);
+    this.io.sqlWrite(
+      `CREATE VIRTUAL TABLE cf_agents_session_fts
+       USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')`,
+      []
+    );
     this.#backfillMissingFtsRows();
   }
 
+  /** Index rows that predate indexing, in SQL, without loading JSON into JS. */
   #backfillMissingFtsRows(): void {
-    // A host may enable indexing after messages already exist. Backfill in SQL
-    // without materializing message JSON in the isolate.
-    this.io.rawSql(`
-      INSERT INTO cf_agents_session_fts (id, session_id, role, content)
-      SELECT m.id, m.session_id, m.role,
-        group_concat(json_extract(part.value, '$.text'), ' ')
-      FROM cf_agents_session_messages AS m
-      JOIN json_each(
-        CASE WHEN json_valid(m.content) THEN m.content ELSE '{"parts":[]}' END,
-        '$.parts'
-      ) AS part
-      WHERE json_extract(part.value, '$.type') = 'text'
-        AND COALESCE(json_extract(part.value, '$.text'), '') <> ''
-        AND NOT EXISTS (
-          SELECT 1 FROM cf_agents_session_fts AS existing
-          WHERE existing.id = m.id AND existing.session_id = m.session_id
-        )
-      GROUP BY m.id, m.session_id, m.role
-    `);
+    this.io.sqlWrite(
+      `INSERT INTO cf_agents_session_fts (id, session_id, role, content)
+       SELECT m.id, m.session_id, m.role,
+         group_concat(json_extract(part.value, '$.text'), ' ')
+       FROM cf_agents_session_messages AS m
+       JOIN json_each(
+         CASE WHEN json_valid(m.content) THEN m.content ELSE '{"parts":[]}' END,
+         '$.parts'
+       ) AS part
+       WHERE json_extract(part.value, '$.type') = 'text'
+         AND COALESCE(json_extract(part.value, '$.text'), '') <> ''
+         AND NOT EXISTS (
+           SELECT 1 FROM cf_agents_session_fts AS existing
+           WHERE existing.id = m.id AND existing.session_id = m.session_id
+         )
+       GROUP BY m.id, m.session_id, m.role`,
+      []
+    );
   }
 
   /**
-   * One-time lift of the legacy `assistant_*` tables (pure SQL — SQLite
-   * streams internally, no JS materialization) followed by a RENAME to
-   * `*__lifted_v1` tombstones. A follow-up release drops the tombstones;
-   * until then a manual rollback can rename them back.
+   * One-time lift of the legacy `assistant_*` message and compaction tables
+   * (pure SQL — SQLite streams internally) followed by a RENAME to
+   * `*__lifted_v1` tombstones. A later release drops the tombstones; until
+   * then a manual rollback can rename them back. `assistant_config` belongs
+   * to Think, which lifts it itself.
    */
   migrateLegacy(): void {
     const legacy = (name: string): boolean =>
@@ -246,53 +203,40 @@ export class SessionsCore {
       ).length > 0;
     const tombstone = (name: string): void => {
       if (!legacy(name) || legacy(`${name}${LEGACY_TOMBSTONE_SUFFIX}`)) return;
-      this.io.rawSql(
-        `ALTER TABLE ${name} RENAME TO ${name}${LEGACY_TOMBSTONE_SUFFIX}`
+      this.io.sqlWrite(
+        `ALTER TABLE ${name} RENAME TO ${name}${LEGACY_TOMBSTONE_SUFFIX}`,
+        []
       );
     };
 
     if (legacy("assistant_messages")) {
-      this.io.rawSql(`
-        INSERT OR IGNORE INTO cf_agents_session_messages
-          (id, session_id, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
-        SELECT id, session_id, parent_id, role, content,
-          CAST(LENGTH(CAST(content AS BLOB)) / 4 AS INTEGER),
-          LENGTH(CAST(content AS BLOB)),
-          COALESCE(CAST(strftime('%s', created_at) AS INTEGER), 0) * 1000
-        FROM assistant_messages ORDER BY created_at ASC, rowid ASC
-      `);
-    }
-    if (legacy("assistant_compactions")) {
-      this.io.rawSql(`
-        INSERT OR IGNORE INTO cf_agents_session_compactions
-          (id, session_id, summary, from_message_id, to_message_id, created_at)
-        SELECT id, session_id, summary, from_message_id, to_message_id,
-          COALESCE(CAST(strftime('%s', created_at) AS INTEGER), 0) * 1000
-        FROM assistant_compactions ORDER BY created_at ASC, rowid ASC
-      `);
-    }
-    if (legacy("assistant_config")) {
-      this.io.rawSql(`
-        INSERT OR IGNORE INTO cf_agents_session_config (session_id, key, value)
-        SELECT session_id, key, value FROM assistant_config
-      `);
-    }
-    if (this.#searchIndexing && legacy("assistant_fts")) {
-      const existing = this.io.sql<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM cf_agents_session_fts",
+      this.io.sqlWrite(
+        `INSERT OR IGNORE INTO cf_agents_session_messages
+          (session_id, id, seq, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
+         SELECT session_id, id,
+           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at ASC, rowid ASC),
+           parent_id, role, content,
+           CAST(LENGTH(CAST(content AS BLOB)) / 4 AS INTEGER),
+           LENGTH(CAST(content AS BLOB)),
+           COALESCE(CAST(strftime('%s', created_at) AS INTEGER), 0) * 1000
+         FROM assistant_messages`,
         []
       );
-      if ((existing[0]?.n ?? 0) === 0) {
-        this.io.rawSql(`
-          INSERT INTO cf_agents_session_fts (id, session_id, role, content)
-          SELECT id, session_id, role, content FROM assistant_fts
-        `);
-      }
     }
-
+    if (legacy("assistant_compactions")) {
+      this.io.sqlWrite(
+        `INSERT OR IGNORE INTO cf_agents_session_compactions
+          (session_id, id, seq, summary, from_message_id, to_message_id, created_at)
+         SELECT session_id, id,
+           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at ASC, rowid ASC),
+           summary, from_message_id, to_message_id,
+           COALESCE(CAST(strftime('%s', created_at) AS INTEGER), 0) * 1000
+         FROM assistant_compactions`,
+        []
+      );
+    }
     tombstone("assistant_messages");
     tombstone("assistant_compactions");
-    tombstone("assistant_config");
     tombstone("assistant_sessions");
     tombstone("assistant_fts");
     if (this.#searchIndexing) this.#backfillMissingFtsRows();
@@ -311,34 +255,18 @@ export class SessionsCore {
     }
   }
 
-  /** Fire-and-forget dispatch for sync-aperture writes. */
-  notifyDetached(event: SessionChangeEvent): void {
-    void this.notify(event).catch((error) => {
-      console.warn(
-        `[Sessions] change listener failed for aperture write: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    });
-  }
-
   // ── Reads ────────────────────────────────────────────────────────────────
 
-  getMessageRaw(sessionId: string, id: string): SessionMessage | null {
-    return this.getMessageRecord(sessionId, id)?.message ?? null;
+  #row(sessionId: string, id: string): ParsedRow | null {
+    const rows = this.io.sql<{ content: string }>(
+      "SELECT content FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      [sessionId, id]
+    );
+    return rows.length > 0 ? this.#parse(rows[0].content) : null;
   }
 
-  getMessageRecord(
-    sessionId: string,
-    id: string
-  ): { content: string; message: SessionMessage } | null {
-    const rows = this.io.sql<{ content: string }>(
-      "SELECT content FROM cf_agents_session_messages WHERE id = ? AND session_id = ?",
-      [id, sessionId]
-    );
-    if (rows.length === 0) return null;
-    const message = this.#parse(rows[0].content);
-    return message ? { content: rows[0].content, message } : null;
+  getMessageRaw(sessionId: string, id: string): SessionMessage | null {
+    return this.#row(sessionId, id)?.message ?? null;
   }
 
   async getMessage(
@@ -346,20 +274,20 @@ export class SessionsCore {
     id: string,
     reconstructor: AttachmentReconstructor | null
   ): Promise<SessionMessage | null> {
-    const message = this.getMessageRaw(sessionId, id);
-    if (!message) return null;
-    return this.attachments.materialize(sessionId, message, reconstructor);
+    const row = this.#row(sessionId, id);
+    if (!row) return null;
+    return row.pointers
+      ? this.attachments.materialize(sessionId, row.message, reconstructor)
+      : row.message;
   }
 
   latestLeafId(sessionId: string): string | null {
     const cached = this.#leafCache.get(sessionId);
     if (cached !== undefined) return cached;
-    // The most recent append is always the active tip: children insert after
-    // their parents, so the session's max-rowid row is provably childless,
-    // and every write path maintains this cache in place. The capability is
-    // the only writer of its tables, so no self-heal validation is needed.
+    // Children insert after their parents, so the session's max-seq row is
+    // provably childless. Every write path maintains this cache in place.
     const rows = this.io.sql<{ id: string }>(
-      "SELECT id FROM cf_agents_session_messages WHERE session_id = ? ORDER BY rowid DESC LIMIT 1",
+      "SELECT id FROM cf_agents_session_messages WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
       [sessionId]
     );
     const leafId = rows[0]?.id ?? null;
@@ -370,8 +298,8 @@ export class SessionsCore {
   #resolveLeafId(sessionId: string, leafId?: string | null): string | null {
     if (leafId) {
       const rows = this.io.sql<{ id: string }>(
-        "SELECT id FROM cf_agents_session_messages WHERE id = ? AND session_id = ?",
-        [leafId, sessionId]
+        "SELECT id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+        [sessionId, leafId]
       );
       return rows[0]?.id ?? null;
     }
@@ -386,47 +314,30 @@ export class SessionsCore {
   getBranches(sessionId: string, messageId: string): SessionMessage[] {
     const rows = this.io.sql<{ content: string }>(
       `SELECT content FROM cf_agents_session_messages
-       WHERE parent_id = ? AND session_id = ?
-       ORDER BY created_at ASC, rowid ASC`,
-      [messageId, sessionId]
+       WHERE session_id = ? AND parent_id = ? ORDER BY seq ASC`,
+      [sessionId, messageId]
     );
     const result: SessionMessage[] = [];
     for (const row of rows) {
-      const message = this.#parse(row.content);
-      if (message) result.push(message);
+      const parsed = this.#parse(row.content);
+      if (parsed) result.push(parsed.message);
     }
     return result;
   }
 
-  getPathLength(sessionId: string, leafId?: string | null): number {
-    const leaf = this.#resolveLeafId(sessionId, leafId);
-    if (!leaf) return 0;
-    const rows = this.io.sql<{ count: number }>(
-      `WITH RECURSIVE path(id, parent_id, depth) AS (
-        SELECT id, parent_id, 0 FROM cf_agents_session_messages WHERE id = ?
-        UNION ALL
-        SELECT m.id, m.parent_id, p.depth + 1 FROM cf_agents_session_messages m
-        JOIN path p ON m.id = p.parent_id
-        WHERE m.session_id = ? AND p.depth < 10000
-      )
-      SELECT COUNT(*) AS count FROM path`,
-      [leaf, sessionId]
-    );
-    return rows[0]?.count ?? 0;
-  }
-
   /**
-   * The active branch path as content-free (id, role, bytes, tokenEstimate)
-   * rows, root → leaf. Recurses over (id, parent_id) only — carrying content
-   * through the recursive queue materializes the transcript several times
-   * inside SQLite's allocator (#1710).
+   * The active branch path as content-free rows, root → leaf. Recurses over
+   * (id, parent_id) only — carrying content through the recursive queue
+   * materializes the transcript several times inside SQLite (#1710).
+   * `attachmentBytes` is what inline reconstruction would add back.
    */
   pathRowStats(sessionId: string, leafId?: string | null): SessionRowStat[] {
     const leaf = this.#resolveLeafId(sessionId, leafId);
     if (!leaf) return [];
     return this.io.sql<SessionRowStat>(
       `WITH RECURSIVE path(id, parent_id, depth) AS (
-        SELECT id, parent_id, 0 FROM cf_agents_session_messages WHERE id = ?
+        SELECT id, parent_id, 0 FROM cf_agents_session_messages
+        WHERE session_id = ? AND id = ?
         UNION ALL
         SELECT m.id, m.parent_id, p.depth + 1 FROM cf_agents_session_messages m
         JOIN path p ON m.id = p.parent_id
@@ -435,10 +346,16 @@ export class SessionsCore {
       SELECT path.id AS id, am.role AS role,
         LENGTH(CAST(am.content AS BLOB)) AS bytes,
         am.token_estimate AS tokenEstimate,
-        am.media_candidate_bytes AS mediaCandidateBytes
-      FROM path JOIN cf_agents_session_messages am ON am.id = path.id
+        am.media_candidate_bytes AS mediaCandidateBytes,
+        COALESCE((
+          SELECT SUM(b.bytes) FROM cf_agents_session_attachments r
+          JOIN cf_agents_session_attachment_blobs b ON b.hash = r.hash
+          WHERE r.session_id = am.session_id AND r.message_id = am.id
+        ), 0) AS attachmentBytes
+      FROM path JOIN cf_agents_session_messages am
+        ON am.session_id = ? AND am.id = path.id
       ORDER BY path.depth DESC`,
-      [leaf, sessionId]
+      [sessionId, leaf, sessionId, sessionId]
     );
   }
 
@@ -467,26 +384,22 @@ export class SessionsCore {
   #contentByStats(
     sessionId: string,
     rows: readonly SessionRowStat[]
-  ): Map<string, SessionMessage> {
-    const result = new Map<string, SessionMessage>();
+  ): Map<string, ParsedRow> {
+    const result = new Map<string, ParsedRow>();
     if (rows.length === 0) return result;
     const fetched = this.io.sql<{ id: string; content: string }>(
       `SELECT id, content FROM cf_agents_session_messages
-       WHERE session_id = ?
-         AND id IN (SELECT value FROM json_each(?))`,
+       WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
       [sessionId, JSON.stringify(rows.map((row) => row.id))]
     );
     for (const row of fetched) {
-      const message = this.#parse(row.content);
-      if (message) result.set(row.id, message);
+      const parsed = this.#parse(row.content);
+      if (parsed) result.set(row.id, parsed);
     }
     return result;
   }
 
-  /**
-   * Iterate selected raw path rows in bounded content queries. Internal skill
-   * restoration uses this instead of one `getMessageRaw` query per row.
-   */
+  /** Iterate selected raw path rows in bounded content queries. */
   *rawMessagesByStats(
     sessionId: string,
     stats: readonly SessionRowStat[],
@@ -496,8 +409,8 @@ export class SessionsCore {
     for (const chunk of this.#boundedStatsChunks(ordered)) {
       const content = this.#contentByStats(sessionId, chunk);
       for (const row of chunk) {
-        const message = content.get(row.id);
-        if (message) yield message;
+        const parsed = content.get(row.id);
+        if (parsed) yield parsed.message;
       }
     }
   }
@@ -535,14 +448,15 @@ export class SessionsCore {
       )) {
         const content = this.#contentByStats(sessionId, chunk);
         for (const row of chunk) {
-          const message = content.get(row.id);
-          if (message) {
-            yield await this.attachments.materialize(
-              sessionId,
-              message,
-              reconstructor
-            );
-          }
+          const parsed = content.get(row.id);
+          if (!parsed) continue;
+          yield parsed.pointers
+            ? await this.attachments.materialize(
+                sessionId,
+                parsed.message,
+                reconstructor
+              )
+            : parsed.message;
         }
         index += chunk.length;
         if (signal?.aborted) {
@@ -554,9 +468,9 @@ export class SessionsCore {
 
   /**
    * Stream the path ending at `leafId` (default: active leaf), root → leaf,
-   * compaction overlays collapsed, pointer parts materialized through
+   * compaction overlays collapsed, pointers materialized through
    * `reconstructor`. Peak memory is one content chunk plus one message's
-   * reconstructed attachments — never the whole transcript.
+   * reconstructed payloads — never the whole transcript.
    */
   async *streamHistory(
     sessionId: string,
@@ -592,10 +506,11 @@ export class SessionsCore {
 
   /**
    * Byte-budgeted read of the most recent messages on the active branch
-   * path — the longest suffix fitting `maxContentBytes`, floored at
-   * `minRecentMessages` rows. Overlays whose anchors fall outside the
-   * window are skipped, showing the raw recent messages (the intended
-   * degraded view).
+   * path — the longest suffix whose hydrated size fits `maxContentBytes`,
+   * floored at `minRecentMessages` rows. Hydrated size counts stored bytes
+   * plus, when reconstructing, the attachment bytes each row inflates back.
+   * Overlays whose anchors fall outside the window are skipped, showing the
+   * raw recent messages (the intended degraded view).
    */
   async getRecentHistory(
     sessionId: string,
@@ -608,24 +523,25 @@ export class SessionsCore {
     if (stats.length === 0) {
       return { messages: [], truncated: false, totalContentBytes: 0 };
     }
+    const cost = (row: SessionRowStat): number =>
+      row.bytes + (reconstructor ? row.attachmentBytes : 0);
     const totalContentBytes = stats.reduce((sum, row) => sum + row.bytes, 0);
     const minRecent = Math.max(1, Math.floor(minRecentMessages));
     let start = stats.length - 1;
-    let used = stats[start]?.bytes ?? 0;
+    let used = cost(stats[start]);
     while (
       start > 0 &&
       (stats.length - start < minRecent ||
-        used + stats[start - 1].bytes <= maxContentBytes)
+        used + cost(stats[start - 1]) <= maxContentBytes)
     ) {
       start--;
-      used += stats[start].bytes;
+      used += cost(stats[start]);
     }
 
-    const window = stats.slice(start);
     const messages: SessionMessage[] = [];
     for await (const message of this.#streamStats(
       sessionId,
-      window,
+      stats.slice(start),
       this.getCompactions(sessionId),
       reconstructor
     )) {
@@ -642,7 +558,7 @@ export class SessionsCore {
         lastMessageAt: number;
       }>(
         `SELECT session_id, COUNT(*) AS messageCount, MAX(created_at) AS lastMessageAt
-       FROM cf_agents_session_messages GROUP BY session_id ORDER BY lastMessageAt DESC`,
+         FROM cf_agents_session_messages GROUP BY session_id ORDER BY lastMessageAt DESC`,
         []
       )
       .map((row) => ({
@@ -673,8 +589,7 @@ export class SessionsCore {
     if (cached) return cached;
     const stats = this.pathRowStats(sessionId);
     const pathIds = stats.map((row) => row.id);
-    const compactions = this.getCompactions(sessionId);
-    const spans = planOverlays(pathIds, compactions);
+    const spans = planOverlays(pathIds, this.getCompactions(sessionId));
     let overlayAdjustment = 0;
     for (const span of spans) {
       for (let i = span.startIndex; i <= span.endIndex; i++) {
@@ -682,30 +597,17 @@ export class SessionsCore {
       }
       overlayAdjustment += estimateStringTokens(span.compaction.summary);
     }
-    let attachmentBytes = 0;
-    if (pathIds.length > 0) {
-      const rows = this.io.sql<{ total: number | null }>(
-        `SELECT SUM(bytes) AS total FROM cf_agents_session_attachments
-         WHERE session_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
-        [sessionId, JSON.stringify(pathIds)]
-      );
-      attachmentBytes = rows[0]?.total ?? 0;
-    }
     const cache: StatsCache = {
       leafId: pathIds.at(-1) ?? null,
       pathIds,
       pathIdSet: new Set(pathIds),
       rawTokens: stats.reduce((sum, row) => sum + row.tokenEstimate, 0),
       rawBytes: stats.reduce((sum, row) => sum + row.bytes, 0),
-      attachmentBytes,
+      attachmentBytes: stats.reduce((sum, row) => sum + row.attachmentBytes, 0),
       overlayAdjustment
     };
     this.#statsCache.set(sessionId, cache);
     return cache;
-  }
-
-  invalidateStats(sessionId: string): void {
-    this.#statsCache.delete(sessionId);
   }
 
   // ── Writes ───────────────────────────────────────────────────────────────
@@ -738,9 +640,7 @@ export class SessionsCore {
     ) {
       return message;
     }
-    const metadata: Record<string, unknown> = {
-      ...message.metadata
-    };
+    const metadata: Record<string, unknown> = { ...message.metadata };
     let changed = false;
     for (const key of this.#reservedMetadataKeys) {
       if (key in metadata) {
@@ -754,32 +654,27 @@ export class SessionsCore {
     return withoutMetadata;
   }
 
-  #mediaCandidateBytesAtWrite(message: SessionMessage): number {
-    return maxEvictableMediaBytes(message);
-  }
-
-  /** Stamped row estimate: part heuristic plus attachment weights. */
-  estimateRowTokens(
-    message: SessionMessage,
-    extracted: readonly StoredAttachment[]
-  ): number {
+  /**
+   * Stamped row estimate: the part heuristic over the message as written
+   * (before offload, so text and tool strings count in full) plus a weight
+   * per file payload, inline or pointed at.
+   */
+  estimateRowTokens(message: SessionMessage): number {
     let tokens = estimateMessageTokens([message]);
-    const extractedByHash = new Map(extracted.map((a) => [a.hash, a]));
-    const storedByHash = this.attachments.getMany(
+    const stored = this.attachments.getMany(
       message.parts.flatMap((part) => {
-        const hash = parseAttachmentUrl(part.url);
-        return hash && !extractedByHash.has(hash) ? [hash] : [];
+        const hash = part.type === "file" ? parseAttachmentUrl(part.url) : null;
+        return hash ? [hash] : [];
       })
     );
     for (const part of message.parts) {
       if (part.type !== "file") continue;
       const hash = parseAttachmentUrl(part.url);
       if (hash) {
-        const record = extractedByHash.get(hash) ?? storedByHash.get(hash);
-        const bytes = record?.bytes ?? 0;
+        const record = stored.get(hash);
         tokens += estimateAttachmentTokens(
           record?.mediaType ?? part.mediaType ?? "application/octet-stream",
-          bytes
+          record?.bytes ?? 0
         );
       } else if (typeof part.url === "string" && part.url.startsWith("data:")) {
         tokens += estimateAttachmentTokens(
@@ -791,25 +686,35 @@ export class SessionsCore {
     return tokens;
   }
 
+  #allocateSeq(sessionId: string): number {
+    const cached = this.#nextSeq.get(sessionId);
+    const seq =
+      cached ??
+      this.io.sql<{ seq: number }>(
+        "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM cf_agents_session_messages WHERE session_id = ?",
+        [sessionId]
+      )[0]?.seq ??
+      1;
+    this.#nextSeq.set(sessionId, seq + 1);
+    return seq;
+  }
+
   /**
-   * Durable append. The caller has already sanitized, capped, and extracted
-   * attachments (`extracted`). Message, FTS, and reference rows commit in one
-   * synchronous SQLite transaction. Blob writes completed before this call;
-   * payload cleanup happens after commit.
+   * Durable append. The caller has already sanitized and offloaded the
+   * message. Message, FTS, and reference rows commit in one synchronous
+   * SQLite transaction; blob writes completed before this call.
    */
   append(
     sessionId: string,
     message: SessionMessage,
     parentId: string | null | undefined,
-    extracted: readonly StoredAttachment[]
+    tokenEstimate: number
   ): { inserted: boolean; parentId: string | null } {
     const existing = this.io.sql<{ id: string }>(
-      "SELECT id FROM cf_agents_session_messages WHERE id = ? AND session_id = ?",
-      [message.id, sessionId]
+      "SELECT id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      [sessionId, message.id]
     );
-    if (existing.length > 0) {
-      return { inserted: false, parentId: null };
-    }
+    if (existing.length > 0) return { inserted: false, parentId: null };
 
     // `undefined` uses the internally maintained latest leaf and needs no
     // validation read. Caller-supplied IDs remain untrusted and fall back to
@@ -821,26 +726,32 @@ export class SessionsCore {
       parent = parentId;
       if (parent) {
         const valid = this.io.sql<{ id: string }>(
-          "SELECT id FROM cf_agents_session_messages WHERE id = ? AND session_id = ?",
-          [parent, sessionId]
+          "SELECT id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+          [sessionId, parent]
         );
         if (valid.length === 0) parent = null;
       }
     }
 
     const json = this.#serialize(message);
-    const tokenEstimate = this.estimateRowTokens(message, extracted);
-    const mediaCandidateBytes = this.#mediaCandidateBytesAtWrite(message);
+    const hashes = json.includes(ATTACHMENT_URL_PREFIX)
+      ? pointerHashes(message)
+      : [];
+    const mediaCandidateBytes = maintenanceCandidateBytes(
+      message,
+      byteLength(json)
+    );
+    const seq = this.#allocateSeq(sessionId);
     const now = Date.now();
-    let attachmentBytes = 0;
     this.io.transaction(() => {
       this.io.sqlWrite(
         `INSERT INTO cf_agents_session_messages
-          (id, session_id, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          (session_id, id, seq, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          message.id,
           sessionId,
+          message.id,
+          seq,
           parent,
           message.role,
           json,
@@ -850,12 +761,7 @@ export class SessionsCore {
         ]
       );
       if (this.#searchIndexing) this.#indexFts(sessionId, message, false);
-      attachmentBytes = this.attachments.recordReferences(
-        sessionId,
-        message,
-        extracted,
-        now
-      );
+      this.attachments.recordReferences(sessionId, message.id, hashes);
     });
 
     // The freshly inserted row is the most recent childless node, so it is
@@ -866,15 +772,13 @@ export class SessionsCore {
     const cache = this.#statsCache.get(sessionId);
     if (cache) {
       if (parent === cache.leafId && previousLeaf === cache.leafId) {
-        // Linear append to the cached tip: O(1) maintenance.
         cache.leafId = message.id;
         cache.pathIds.push(message.id);
         cache.pathIdSet.add(message.id);
         cache.rawTokens += tokenEstimate;
         cache.rawBytes += byteLength(json);
-        cache.attachmentBytes += attachmentBytes;
+        cache.attachmentBytes += this.attachments.referencedBytes(hashes);
       } else {
-        // Branch append or unknown topology: re-derive lazily.
         this.#statsCache.delete(sessionId);
       }
     }
@@ -887,59 +791,56 @@ export class SessionsCore {
   }
 
   /**
-   * Durable update of an existing row. Throws
-   * {@link SessionMessageNotFoundError} when the id is absent.
+   * Durable update of an existing row. An identical row writes nothing:
+   * no row, no FTS, no reference change, no event.
    */
-  update(
+  async update(
     sessionId: string,
     message: SessionMessage,
-    extracted: readonly StoredAttachment[]
-  ): Promise<boolean> {
-    const oldRows = this.io.sql<{
-      token_estimate: number;
-      content: string;
-    }>(
-      "SELECT token_estimate, content FROM cf_agents_session_messages WHERE id = ? AND session_id = ?",
-      [message.id, sessionId]
+    tokenEstimate: number
+  ): Promise<UpdateOutcome> {
+    const oldRows = this.io.sql<{ token_estimate: number; content: string }>(
+      "SELECT token_estimate, content FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      [sessionId, message.id]
     );
-    if (oldRows.length === 0) {
-      if (this.#missingUpdate === "ignore") return Promise.resolve(false);
-      throw new SessionMessageNotFoundError(sessionId, message.id);
-    }
+    if (oldRows.length === 0) return "missing";
     const old = oldRows[0];
     const json = this.#serialize(message);
-    const tokenEstimate = this.estimateRowTokens(message, extracted);
-    const mediaCandidateBytes = this.#mediaCandidateBytesAtWrite(message);
-    const hadPointers = old.content.includes(ATTACHMENT_URL_PREFIX);
-    const hasPointers =
-      extracted.length > 0 || json.includes(ATTACHMENT_URL_PREFIX);
-    let previousHashes: string[] = [];
+    if (old.content === json) return "unchanged";
+
+    const mediaCandidateBytes = maintenanceCandidateBytes(
+      message,
+      byteLength(json)
+    );
+    const pointers =
+      old.content.includes(ATTACHMENT_URL_PREFIX) ||
+      json.includes(ATTACHMENT_URL_PREFIX);
+    let removed: string[] = [];
     this.io.transaction(() => {
       this.io.sqlWrite(
         `UPDATE cf_agents_session_messages
          SET role = ?, content = ?, token_estimate = ?, media_candidate_bytes = ?
-         WHERE id = ? AND session_id = ?`,
+         WHERE session_id = ? AND id = ?`,
         [
           message.role,
           json,
           tokenEstimate,
           mediaCandidateBytes,
-          message.id,
-          sessionId
+          sessionId,
+          message.id
         ]
       );
       if (this.#searchIndexing) this.#indexFts(sessionId, message, true);
-      if (hadPointers || hasPointers) {
-        previousHashes = this.attachments.replaceReferenceRows(
+      if (pointers) {
+        removed = this.attachments.replaceReferences(
           sessionId,
-          message,
-          extracted,
-          Date.now()
+          message.id,
+          pointerHashes(message)
         );
       }
     });
 
-    if (hadPointers || hasPointers) {
+    if (pointers) {
       this.#statsCache.delete(sessionId);
     } else {
       const cache = this.#statsCache.get(sessionId);
@@ -952,15 +853,16 @@ export class SessionsCore {
       sessionId,
       messageId: message.id
     });
-    return this.attachments.reapUnreferenced(previousHashes).then(() => true);
+    await this.attachments.reapUnreferenced(removed);
+    return "updated";
   }
 
   /**
-   * Select unexamined aged rows for a bounded media pass. Content enters JS
-   * only for these rows; the active path and age cutoff were derived from
+   * Aged rows with an inline payload at or above `minBytes`. Content enters
+   * JS only for these rows; the active path and age cutoff were derived from
    * content-free stats first.
    */
-  mediaMaintenanceCandidates(
+  maintenanceCandidates(
     sessionId: string,
     messageIds: readonly string[],
     minBytes: number,
@@ -972,24 +874,24 @@ export class SessionsCore {
        WHERE session_id = ?
          AND media_candidate_bytes >= ?
          AND id IN (SELECT value FROM json_each(?))
-       ORDER BY rowid ASC
+       ORDER BY seq ASC
        LIMIT ?`,
       [sessionId, minBytes, JSON.stringify(messageIds), limit]
     );
     const candidates: Array<{ content: string; message: SessionMessage }> = [];
     for (const row of rows) {
-      const message = this.#parse(row.content);
-      if (message) {
-        candidates.push({ content: row.content, message });
+      const parsed = this.#parse(row.content);
+      if (parsed) {
+        candidates.push({ content: row.content, message: parsed.message });
       } else {
-        this.markMediaCandidate(sessionId, row.id, row.content, 0);
+        this.markMaintenanceCandidate(sessionId, row.id, row.content, 0);
       }
     }
     return candidates;
   }
 
   /** Content-free probe used after a bounded maintenance pass. */
-  hasMediaMaintenanceCandidate(
+  hasMaintenanceCandidate(
     sessionId: string,
     messageIds: readonly string[],
     minBytes: number
@@ -1007,8 +909,8 @@ export class SessionsCore {
     );
   }
 
-  /** Correct a conservative legacy candidate hint after examining one row. */
-  markMediaCandidate(
+  /** Correct a conservative candidate hint after examining one row. */
+  markMaintenanceCandidate(
     sessionId: string,
     messageId: string,
     expectedContent: string,
@@ -1016,57 +918,57 @@ export class SessionsCore {
   ): void {
     this.io.sqlWrite(
       `UPDATE cf_agents_session_messages SET media_candidate_bytes = ?
-       WHERE id = ? AND session_id = ? AND content = ?`,
-      [candidateBytes, messageId, sessionId, expectedContent]
+       WHERE session_id = ? AND id = ? AND content = ?`,
+      [candidateBytes, sessionId, messageId, expectedContent]
     );
   }
 
   /**
-   * Compare-and-swap rewrite used by bounded maintenance passes. Blob writes
-   * happen before this call; a changed source row rejects the rewrite and
-   * discards any now-unreferenced blobs instead of overwriting a live turn.
+   * Compare-and-swap rewrite used by maintenance. Blob writes happen before
+   * this call; a changed source row rejects the rewrite and discards any
+   * now-unreferenced blobs instead of overwriting a live turn.
    */
   async rewriteForMaintenance(
     sessionId: string,
     expectedContent: string,
     message: SessionMessage,
-    attachments: readonly StoredAttachment[]
+    attachments: readonly StoredAttachment[],
+    tokenEstimate: number
   ): Promise<boolean> {
     const json = this.#serialize(message);
-    const tokenEstimate = this.estimateRowTokens(message, []);
-    const mediaCandidateBytes = this.#mediaCandidateBytesAtWrite(message);
+    const mediaCandidateBytes = maintenanceCandidateBytes(
+      message,
+      byteLength(json)
+    );
     let updated = 0;
-    let previousHashes: string[] = [];
+    let removed: string[] = [];
     this.io.transaction(() => {
       updated = this.io.sqlWrite(
         `UPDATE cf_agents_session_messages
-         SET role = ?, content = ?, token_estimate = ?, media_candidate_bytes = ?
-         WHERE id = ? AND session_id = ? AND content = ?`,
+         SET content = ?, token_estimate = ?, media_candidate_bytes = ?
+         WHERE session_id = ? AND id = ? AND content = ?`,
         [
-          message.role,
           json,
           tokenEstimate,
           mediaCandidateBytes,
-          message.id,
           sessionId,
+          message.id,
           expectedContent
         ]
       );
       if (updated === 0) return;
       if (this.#searchIndexing) this.#indexFts(sessionId, message, true);
-      previousHashes = this.attachments.replaceReferenceRows(
+      removed = this.attachments.replaceReferences(
         sessionId,
-        message,
-        attachments,
-        Date.now()
+        message.id,
+        pointerHashes(message)
       );
     });
     if (updated === 0) {
       await this.attachments.discardUnreferenced(attachments);
       return false;
     }
-
-    await this.attachments.reapUnreferenced(previousHashes);
+    await this.attachments.reapUnreferenced(removed);
     this.#statsCache.delete(sessionId);
     this.io.emit("session:message:maintenance-rewritten", {
       sessionId,
@@ -1077,18 +979,15 @@ export class SessionsCore {
 
   /**
    * Delete rows, SPLICING children to their grandparent so a mid-chain
-   * delete never decapitates older history (the legacy provider left a gap
-   * that silently truncated the recursive path walk).
+   * delete never decapitates older history. Only surviving boundary children
+   * are rewired: a prefix delete writes one boundary child, not one child
+   * per deleted message.
    */
   async deleteMessages(sessionId: string, messageIds: string[]): Promise<void> {
     const uniqueIds = [...new Set(messageIds)];
     if (uniqueIds.length === 0) return;
     const ids = JSON.stringify(uniqueIds);
 
-    // Rewire only surviving boundary children. A recursive walk skips any
-    // run of deleted ancestors and lands on the nearest surviving parent.
-    // Prefix retention therefore writes one boundary child, not one child per
-    // deleted message.
     let affectedHashes: string[] = [];
     this.io.transaction(() => {
       this.io.sqlWrite(
@@ -1134,7 +1033,7 @@ export class SessionsCore {
           [sessionId, ids]
         );
       }
-      affectedHashes = this.attachments.deleteMessageReferenceRows(
+      affectedHashes = this.attachments.deleteMessageReferences(
         sessionId,
         uniqueIds
       );
@@ -1168,7 +1067,7 @@ export class SessionsCore {
           [sessionId]
         );
       }
-      affectedHashes = this.attachments.deleteSessionReferenceRows(sessionId);
+      affectedHashes = this.attachments.deleteSessionReferences(sessionId);
     });
     await this.attachments.reapUnreferenced(affectedHashes);
     this.#leafCache.set(sessionId, null);
@@ -1186,11 +1085,16 @@ export class SessionsCore {
   ): StoredCompaction {
     const id = crypto.randomUUID();
     const now = Date.now();
+    const seq =
+      this.io.sql<{ seq: number }>(
+        "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM cf_agents_session_compactions WHERE session_id = ?",
+        [sessionId]
+      )[0]?.seq ?? 1;
     this.io.sqlWrite(
       `INSERT INTO cf_agents_session_compactions
-        (id, session_id, summary, from_message_id, to_message_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [id, sessionId, summary, fromMessageId, toMessageId, now]
+        (session_id, id, seq, summary, from_message_id, to_message_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [sessionId, id, seq, summary, fromMessageId, toMessageId, now]
     );
     this.#statsCache.delete(sessionId);
     this.io.emit("session:compacted", { sessionId, compactionId: id });
@@ -1212,8 +1116,9 @@ export class SessionsCore {
         to_message_id: string;
         created_at: number;
       }>(
-        `SELECT * FROM cf_agents_session_compactions
-       WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`,
+        `SELECT id, summary, from_message_id, to_message_id, created_at
+         FROM cf_agents_session_compactions
+         WHERE session_id = ? ORDER BY seq ASC`,
         [sessionId]
       )
       .map((row) => ({
@@ -1229,26 +1134,26 @@ export class SessionsCore {
 
   search(sessionId: string, query: string, limit: number): SearchResult[] {
     if (!this.#searchIndexing) throw new SessionSearchDisabledError();
-    // Wrap in double quotes to treat as a literal phrase, escaping any
-    // existing double quotes to prevent FTS5 syntax injection.
+    // Quote the query as a literal phrase, escaping embedded double quotes,
+    // so user input cannot inject FTS5 syntax.
     const sanitized = `"${query.replace(/"/g, '""')}"`;
     try {
       return this.io
         .sql<{ id: string; role: string; content: string }>(
           `SELECT f.id, f.role, f.content FROM cf_agents_session_fts f
-         INNER JOIN cf_agents_session_messages m
-           ON m.id = f.id AND m.session_id = f.session_id
-         WHERE cf_agents_session_fts MATCH ? AND f.session_id = ?
-         ORDER BY rank LIMIT ?`,
+           INNER JOIN cf_agents_session_messages m
+             ON m.session_id = f.session_id AND m.id = f.id
+           WHERE cf_agents_session_fts MATCH ? AND f.session_id = ?
+           ORDER BY rank LIMIT ?`,
           [sanitized, sessionId, limit]
         )
         .map((row) => ({ id: row.id, role: row.role, content: row.content }));
     } catch {
-      // Malformed FTS query — return empty results.
       return [];
     }
   }
 
+  /** Maintain the FTS row; on replace, an unchanged text writes nothing. */
   #indexFts(
     sessionId: string,
     message: SessionMessage,
@@ -1258,9 +1163,19 @@ export class SessionsCore {
       .filter((part) => part.type === "text")
       .map((part) => part.text ?? "")
       .join(" ");
-    // Updates delete first to handle text-to-no-text transitions. Appends and
-    // imports know their ID is new and skip the read/delete entirely.
-    if (replace) this.#deleteFts(sessionId, message.id);
+    if (replace) {
+      const existing = this.io.sql<{ content: string }>(
+        "SELECT content FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
+        [message.id, sessionId]
+      );
+      if (existing.length > 0) {
+        if (existing[0].content === text) return;
+        this.io.sqlWrite(
+          "DELETE FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
+          [message.id, sessionId]
+        );
+      }
+    }
     if (text) {
       this.io.sqlWrite(
         "INSERT INTO cf_agents_session_fts (id, session_id, role, content) VALUES (?, ?, ?, ?)",
@@ -1269,20 +1184,13 @@ export class SessionsCore {
     }
   }
 
-  #deleteFts(sessionId: string, id: string): void {
-    this.io.sqlWrite(
-      "DELETE FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
-      [id, sessionId]
-    );
-  }
-
   // ── Fork / import ────────────────────────────────────────────────────────
 
   /**
    * Copy the path ending at `atMessageId` (default: active leaf) into
-   * another session. Rows get fresh ids (the id column is a global PK);
-   * blobs are shared — attachment reference rows are copied, bytes never
-   * move. Compaction overlays are not copied (their anchors are re-ided).
+   * another session in one transaction. Rows get fresh ids; blobs are shared
+   * through copied reference rows, bytes never move. Compaction overlays are
+   * not copied (their anchors are re-ided).
    */
   fork(
     sessionId: string,
@@ -1290,43 +1198,43 @@ export class SessionsCore {
     atMessageId?: string
   ): { sessionId: string; leafId: string | null } {
     const stats = this.pathRowStats(sessionId, atMessageId ?? null);
-    const idMap = new Map<string, string>();
     let previousNewId: string | null = null;
-    for (const window of this.#boundedStatsChunks(stats)) {
-      const content = this.#contentByStats(sessionId, window);
-      for (const row of window) {
-        const message = content.get(row.id);
-        if (!message) continue;
-        const newId = crypto.randomUUID();
-        idMap.set(row.id, newId);
-        const copied = { ...message, id: newId };
-        this.io.sqlWrite(
-          `INSERT INTO cf_agents_session_messages
-            (id, session_id, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
-           SELECT ?, ?, ?, role, ?, token_estimate, media_candidate_bytes, created_at
-           FROM cf_agents_session_messages WHERE id = ? AND session_id = ?`,
-          [
-            newId,
-            toSessionId,
-            previousNewId,
-            this.#serialize(copied),
-            row.id,
-            sessionId
-          ]
-        );
-        this.io.sqlWrite(
-          `INSERT OR IGNORE INTO cf_agents_session_attachments
-            (hash, message_id, part_index, session_id, path, media_type, bytes, filename, created_at)
-           SELECT hash, ?, part_index, ?, path, media_type, bytes, filename, created_at
-           FROM cf_agents_session_attachments WHERE message_id = ? AND session_id = ?`,
-          [newId, toSessionId, row.id, sessionId]
-        );
-        if (this.#searchIndexing) {
-          this.#indexFts(toSessionId, copied, false);
+    this.io.transaction(() => {
+      for (const window of this.#boundedStatsChunks(stats)) {
+        const content = this.#contentByStats(sessionId, window);
+        for (const row of window) {
+          const parsed = content.get(row.id);
+          if (!parsed) continue;
+          const newId = crypto.randomUUID();
+          const copied = { ...parsed.message, id: newId };
+          this.io.sqlWrite(
+            `INSERT INTO cf_agents_session_messages
+              (session_id, id, seq, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
+             SELECT ?, ?, ?, ?, role, ?, token_estimate, media_candidate_bytes, created_at
+             FROM cf_agents_session_messages WHERE session_id = ? AND id = ?`,
+            [
+              toSessionId,
+              newId,
+              this.#allocateSeq(toSessionId),
+              previousNewId,
+              this.#serialize(copied),
+              sessionId,
+              row.id
+            ]
+          );
+          if (parsed.pointers) {
+            this.io.sqlWrite(
+              `INSERT OR IGNORE INTO cf_agents_session_attachments (session_id, message_id, hash)
+               SELECT ?, ?, hash FROM cf_agents_session_attachments
+               WHERE session_id = ? AND message_id = ?`,
+              [toSessionId, newId, sessionId, row.id]
+            );
+          }
+          if (this.#searchIndexing) this.#indexFts(toSessionId, copied, false);
+          previousNewId = newId;
         }
-        previousNewId = newId;
       }
-    }
+    });
     this.#leafCache.set(toSessionId, previousNewId);
     this.#statsCache.delete(toSessionId);
     return { sessionId: toSessionId, leafId: previousNewId };
@@ -1344,96 +1252,36 @@ export class SessionsCore {
     const json = this.#serialize(message);
     const inserted = this.io.sqlWrite(
       `INSERT OR IGNORE INTO cf_agents_session_messages
-        (id, session_id, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (session_id, id, seq, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        message.id,
         sessionId,
+        message.id,
+        this.#allocateSeq(sessionId),
         options.parentId,
         message.role,
         json,
-        this.estimateRowTokens(message, []),
-        this.#mediaCandidateBytesAtWrite(message),
+        this.estimateRowTokens(message),
+        maintenanceCandidateBytes(message, byteLength(json)),
         options.createdAt
       ]
     );
     if (inserted === 0) return;
     if (this.#searchIndexing) this.#indexFts(sessionId, message, false);
-    this.attachments.recordReferences(
-      sessionId,
-      message,
-      [],
-      options.createdAt
-    );
+    if (json.includes(ATTACHMENT_URL_PREFIX)) {
+      this.attachments.recordReferences(
+        sessionId,
+        message.id,
+        pointerHashes(message)
+      );
+    }
     this.#leafCache.set(sessionId, message.id);
     this.#statsCache.delete(sessionId);
   }
 
-  /** Every stored row of one session in insertion order (sync aperture). */
-  readAllRows(
-    sessionId: string
-  ): { id: string; parentId: string | null; message: SessionMessage }[] {
-    const rows = this.io.sql<{
-      id: string;
-      parent_id: string | null;
-      content: string;
-    }>(
-      "SELECT id, parent_id, content FROM cf_agents_session_messages WHERE session_id = ? ORDER BY rowid ASC",
-      [sessionId]
-    );
-    const result: {
-      id: string;
-      parentId: string | null;
-      message: SessionMessage;
-    }[] = [];
-    for (const row of rows) {
-      const message = this.#parse(row.content);
-      if (message) {
-        result.push({ id: row.id, parentId: row.parent_id, message });
-      }
-    }
-    return result;
-  }
-
-  // ── Context and lifted config ────────────────────────────────────────────
-
-  getContextValue(label: string): string | null {
-    const rows = this.io.sql<{ content: string }>(
-      "SELECT content FROM cf_agents_context_blocks WHERE label = ?",
-      [label]
-    );
-    return rows[0]?.content ?? null;
-  }
-
-  setContextValue(label: string, content: string): void {
-    this.io.sqlWrite(
-      `INSERT INTO cf_agents_context_blocks (label, content)
-       VALUES (?, ?)
-       ON CONFLICT(label) DO UPDATE SET
-         content = excluded.content,
-         updated_at = CURRENT_TIMESTAMP`,
-      [label, content]
-    );
-  }
-
-  getConfigValue(sessionId: string, key: string): string | null {
-    const rows = this.io.sql<{ value: string }>(
-      "SELECT value FROM cf_agents_session_config WHERE session_id = ? AND key = ?",
-      [sessionId, key]
-    );
-    return rows[0]?.value ?? null;
-  }
-
-  deleteConfigValue(sessionId: string, key: string): void {
-    this.io.sqlWrite(
-      "DELETE FROM cf_agents_session_config WHERE session_id = ? AND key = ?",
-      [sessionId, key]
-    );
-  }
-
   // ── Parsing ──────────────────────────────────────────────────────────────
 
-  #parse(json: string): SessionMessage | null {
+  #parse(json: string): ParsedRow | null {
     try {
       const message = JSON.parse(json);
       if (
@@ -1441,7 +1289,7 @@ export class SessionsCore {
         typeof message?.role === "string" &&
         Array.isArray(message?.parts)
       ) {
-        return message;
+        return { message, pointers: json.includes(ATTACHMENT_URL_PREFIX) };
       }
     } catch {
       /* skip unparseable rows, matching legacy behavior */

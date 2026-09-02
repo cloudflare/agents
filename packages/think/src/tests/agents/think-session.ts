@@ -55,9 +55,10 @@ import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
 import {
   Session,
-  type SessionEvictionResult,
+  type SessionMaintenanceResult,
   type StoredAttachment
 } from "agents/sessions";
+import type { ContextConfig } from "agents/context";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────
@@ -3271,13 +3272,14 @@ export class ThinkPropsTestAgent extends Think<
 export class ThinkSessionTestAgent extends Think {
   private _response = "Hello from session agent!";
 
-  override configureSession(session: Session) {
-    return session
-      .withContext("memory", {
+  override configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "memory",
         description: "Important facts learned during conversation.",
         maxTokens: 2000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3304,48 +3306,48 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async getSystemPromptSnapshot(): Promise<string> {
-    return this.session.freezeSystemPrompt();
+    return this.context.freezeSystemPrompt();
   }
 
   async setContextBlock(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
 
   async addDynamicContext(label: string, description?: string): Promise<void> {
-    await this.session.addContext(label, { description });
+    await this.context.addBlock({ label, description });
   }
 
   async removeDynamicContext(label: string): Promise<boolean> {
-    return this.session.removeContext(label);
+    return this.context.removeBlock(label);
   }
 
   async refreshPrompt(): Promise<string> {
-    return this.session.refreshSystemPrompt();
+    return this.context.refreshSystemPrompt();
   }
 
   async getContextLabels(): Promise<string[]> {
-    return this.session.getContextBlocks().map((b) => b.label);
+    return this.context.getBlocks().map((b) => b.label);
   }
 
   async getSessionToolNames(): Promise<string[]> {
-    const tools = await this.session.tools();
+    const tools = await this.context.tools();
     return Object.keys(tools);
   }
 
   async getContextBlockDetails(
     label: string
   ): Promise<{ writable: boolean; isSkill: boolean } | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     if (!block) return null;
     return { writable: block.writable, isSkill: block.isSkill };
   }
@@ -3404,14 +3406,15 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
 // Tests async configureSession — simulates reading config before setup.
 
 export class ThinkAsyncConfigSessionAgent extends Think {
-  override async configureSession(session: Session): Promise<Session> {
+  override async configureContext(): Promise<ContextConfig[]> {
     await new Promise((resolve) => setTimeout(resolve, 10));
-    return session
-      .withContext("memory", {
+    return [
+      {
+        label: "memory",
         description: "Async-configured memory block.",
         maxTokens: 1000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3434,16 +3437,16 @@ export class ThinkAsyncConfigSessionAgent extends Think {
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async setContextBlock(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
 }
@@ -3522,14 +3525,15 @@ type ConfigInSessionConfig = {
 };
 
 export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
-  override configureSession(session: Session) {
+  override configureContext(): ContextConfig[] {
     const persona =
       this.getConfig<ConfigInSessionConfig>()?.persona || "default persona";
-    return session
-      .withContext("memory", {
+    return [
+      {
+        label: "memory",
         description: `Agent persona: ${persona}`
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -8420,7 +8424,7 @@ export class ThinkMediaEvictionAgent extends Think {
 
   /**
    * Seed: 2 aged messages with oversized media (a data-URL file part and a
-   * tool output with a nested big string) + 4 small filler messages. The
+   * tool output with a nested data-URL string) + 4 small filler messages. The
    * eviction cutoff clamps `keepRecentMessages` to the model's read-time
    * window (4), so with 6 seeded messages the 2 media messages are aged
    * and the 4 fillers are protected.
@@ -8449,7 +8453,9 @@ export class ThinkMediaEvictionAgent extends Think {
           input: {},
           output: {
             mediaType: "image/png",
-            data: "B".repeat(BIG_MEDIA_CHARS),
+            // A screenshot is media wherever a tool put it: a nested
+            // `data:` URL leaves the row at the media threshold.
+            data: `data:image/png;base64,${"B".repeat(BIG_MEDIA_CHARS)}`,
             note: "small structured field"
           }
         }
@@ -8469,8 +8475,21 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
-  async runEvictionForTest(): Promise<SessionEvictionResult | null> {
-    return this.session.evictAgedMedia();
+  async runEvictionForTest(): Promise<SessionMaintenanceResult | null> {
+    return this.session.runMaintenance();
+  }
+
+  /**
+   * This class does NOT override `hydrationByteBudget`, so this reads the
+   * framework default.
+   */
+  async getHydrationBudgetForTest(): Promise<number> {
+    return this.hydrationByteBudget;
+  }
+
+  /** Re-run the budgeted cache refresh (a windowed read schedules maintenance). */
+  async resyncForTest(): Promise<number> {
+    return (await this.syncMessagesFromStorage()).length;
   }
 
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
@@ -8503,10 +8522,99 @@ export class ThinkMediaEvictionAgent extends Think {
   }
 }
 
-/** Eviction enabled with tiny thresholds — exercises the background pass. */
+/**
+ * A hydration budget small enough that any seeded transcript boots windowed.
+ * A truncated read is the trigger that schedules the background maintenance
+ * pass, so this agent exercises that path end to end.
+ */
 export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
+  override hydrationByteBudget = 1024;
+}
+
+// ── Pointer-inflation hydration (#1710) ─────────────────────────
+
+/** 56_000 base64 chars ≈ 42_000 decoded bytes per attachment. */
+const PTR_MEDIA_CHARS = 56_000;
+
+/**
+ * Every seeded row is offloaded on the WRITE path, so its stored bytes are
+ * ~a few hundred while the attachment it points at inflates back to ~42KB.
+ * A budget that counted only stored bytes would hydrate all ten rows (~2KB)
+ * and blow past its own ceiling on reconstruction; a budget that counts the
+ * reconstructed attachment bytes hydrates a window instead.
+ */
+export class ThinkPointerHydrationAgent extends Think {
+  override hydrationByteBudget = 64 * 1024;
   override mediaEviction: MediaEvictionConfig = {
     keepRecentMessages: 2,
     minPartBytes: 10_000
   };
+
+  override async configureSession(session: Session): Promise<Session> {
+    const existing = await session.getHistory({ reconstruct: "pointer" });
+    if (existing.length === 0) {
+      for (let i = 0; i < 10; i++) {
+        await session.appendMessage({
+          id: `ptr-${i}`,
+          role: i % 2 === 0 ? "user" : "assistant",
+          parts: [
+            { type: "text", text: `ptr ${i}` },
+            {
+              type: "file",
+              mediaType: "image/png",
+              // Distinct per row: content-addressed storage must not
+              // dedupe ten rows down to one blob.
+              url: `data:image/png;base64,${String.fromCharCode(65 + i).repeat(
+                PTR_MEDIA_CHARS
+              )}`
+            }
+          ]
+        });
+      }
+    }
+    return session;
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("pointer hydration agent response");
+  }
+
+  async getHydrationInfoForTest(): Promise<{
+    truncated: boolean;
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null> {
+    return this._lastHydration;
+  }
+
+  async getCachedMessageIdsForTest(): Promise<string[]> {
+    return this.messages.map((m) => m.id);
+  }
+
+  async getFullHistoryIdsForTest(): Promise<string[]> {
+    return (await this.session.getHistory({ reconstruct: "pointer" })).map(
+      (m) => m.id
+    );
+  }
+
+  /** Stored (pointer-form) bytes of the whole path — the on-disk footprint. */
+  async getStoredPathBytesForTest(): Promise<number> {
+    const stats = await this.session.getHistoryRowStats();
+    return stats.reduce((sum, row) => sum + row.bytes, 0);
+  }
+
+  /** Attachment bytes the path re-inflates when reconstructed inline. */
+  async getAttachmentPathBytesForTest(): Promise<number> {
+    const stats = await this.session.getHistoryRowStats();
+    return stats.reduce((sum, row) => sum + row.attachmentBytes, 0);
+  }
+
+  /** The `data:` URLs the hydrated window reconstructed, in cache order. */
+  async getCachedFileUrlsForTest(): Promise<string[]> {
+    return this.messages.map(
+      (m) =>
+        (m.parts.find((p) => p.type === "file") as { url?: string } | undefined)
+          ?.url ?? ""
+    );
+  }
 }

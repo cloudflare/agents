@@ -248,7 +248,7 @@ Think uses `ResumableStream` from `agents/chat` for stream resumability:
 
 Think installs the `agents/sessions` Lifecycle capability. Settled messages form a tree in `cf_agents_session_messages`; linear turns attach to the active leaf and regeneration can append another child under an older user message. `cf_agents_session_compactions` stores non-destructive summary overlays.
 
-Large file parts become content-addressed attachment pointers backed by Think's Workspace. Workspace keeps medium files in its SQLite file table and spills larger files to R2 when configured. Sessions reconstructs the original file part for Think's existing model and client paths.
+Oversized payloads become content-addressed attachment pointers owned by Sessions, not by Workspace. Sessions keeps payloads in its own chunked SQLite tables and uses an optional R2 tier for larger ones. Offload is lossless and covers file parts, text and reasoning parts, and strings nested in tool outputs; the default read reconstructs the original part byte for byte, so Think's model and client paths are unchanged. Workspace is operational storage for tools and projected skills and holds no message or attachment durability.
 
 A separate table stores request context across hibernation:
 
@@ -437,15 +437,17 @@ recording API.
 
 ## SQLite tables
 
-| Table                           | Owner             | Purpose                                                    |
-| ------------------------------- | ----------------- | ---------------------------------------------------------- |
-| `cf_agents_session_messages`    | Sessions          | Tree-structured conversation history and row estimates     |
-| `cf_agents_session_compactions` | Sessions          | Compaction overlays and summaries                          |
-| `cf_agents_session_attachments` | Sessions          | Message references to content-addressed Workspace blobs    |
-| `cf_agents_session_fts`         | Sessions          | Full-text search index for messages                        |
-| `think_config`                  | Think             | Think-private config (`_think_config`, client tools, body) |
-| `cf_agents_runs`                | Agent (inherited) | Durable fiber state and checkpoints                        |
-| `cf_agents_schedules`           | Agent (inherited) | Scheduled tasks and intervals                              |
+| Table                                            | Owner             | Purpose                                                      |
+| ------------------------------------------------ | ----------------- | ------------------------------------------------------------ |
+| `cf_agents_session_messages`                     | Sessions          | Tree-structured conversation history and row estimates       |
+| `cf_agents_session_compactions`                  | Sessions          | Compaction overlays and summaries                            |
+| `cf_agents_session_attachments`                  | Sessions          | Message references to Sessions-owned content-addressed blobs |
+| `cf_agents_session_fts`                          | Sessions          | Full-text search index for messages                          |
+| `cf_agents_session_attachment_blobs` / `_chunks` | Sessions          | Attachment payload metadata and 1.5 MiB SQLite windows       |
+| `cf_agents_context_blocks`                       | Context           | Prompt context blocks and the frozen system prompt           |
+| `think_config`                                   | Think             | Think-private config (`_think_config`, client tools, body)   |
+| `cf_agents_runs`                                 | Agent (inherited) | Durable fiber state and checkpoints                          |
+| `cf_agents_schedules`                            | Agent (inherited) | Scheduled tasks and intervals                                |
 
 ## Current distinctions from AIChatAgent
 

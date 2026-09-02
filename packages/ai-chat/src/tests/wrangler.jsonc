@@ -17,6 +17,10 @@
         "name": "TestChatAgent"
       },
       {
+        "class_name": "AttachmentChatAgent",
+        "name": "AttachmentChatAgent"
+      },
+      {
         "class_name": "CustomSanitizeAgent",
         "name": "CustomSanitizeAgent"
       },
@@ -189,6 +193,10 @@
     {
       "new_sqlite_classes": ["AIChatAgentToolParent"],
       "tag": "v13"
+    },
+    {
+      "new_sqlite_classes": ["AttachmentChatAgent"],
+      "tag": "v14"
     }
   ]
 }

@@ -3,7 +3,7 @@ import {
   ContextBlocks,
   type ContextProvider,
   type WritableContextProvider
-} from "../../sessions/context";
+} from "../../context";
 
 class ReadonlyProvider implements ContextProvider {
   constructor(private readonly value: string | null) {}

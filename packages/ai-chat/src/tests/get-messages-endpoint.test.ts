@@ -64,6 +64,66 @@ describe("GET /get-messages endpoint", () => {
     ]);
   });
 
+  it("streams a transcript with offloaded payloads as the same JSON array", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // One row large enough that Sessions offloads its payload, so the
+    // streamed response has to reconstruct across batch boundaries.
+    const hugeOutput = "Q".repeat(1_900_000);
+    const messages: ChatMessage[] = [
+      {
+        id: "stream-get-1",
+        role: "user",
+        parts: [{ type: "text", text: "run it" }]
+      },
+      {
+        id: "stream-get-2",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-bigTool",
+            toolCallId: "call_stream",
+            state: "output-available",
+            input: {},
+            output: hugeOutput
+          }
+        ] as ChatMessage["parts"]
+      },
+      {
+        id: "stream-get-3",
+        role: "user",
+        parts: [{ type: "text", text: "thanks" }]
+      }
+    ];
+
+    await agentStub.persistMessages(messages);
+    ws.close(1000);
+
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}/get-messages`
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    const returned = (await res.json()) as ChatMessage[];
+    expect(returned.map((m) => m.id)).toEqual([
+      "stream-get-1",
+      "stream-get-2",
+      "stream-get-3"
+    ]);
+    // Byte-for-byte identical to a materialized read of the same transcript.
+    expect(returned).toEqual(
+      (await agentStub.reconstructedMessagesForTest()) as ChatMessage[]
+    );
+    expect((returned[1].parts[0] as { output: unknown }).output).toBe(
+      hugeOutput
+    );
+  });
+
   it("returns 404 for non-existent routes", async () => {
     const res = await exports.default.fetch(
       "http://example.com/agents/test-chat-agent/foo/bar"

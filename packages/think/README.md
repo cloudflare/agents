@@ -292,9 +292,10 @@ from other skills.
 
 Skills are on-demand instructions, not always-on system prompt text. The model
 sees the catalog first, then calls `activate_skill` when a user task matches a
-skill description. Use a Session context block for behavior that should apply to
-every turn, especially when the agent also uses skills. `getSystemPrompt()` is a
-legacy fallback and is ignored once Session context blocks are configured.
+skill description. Use a context block from `configureContext()` for behavior
+that should apply to every turn, especially when the agent also uses skills.
+`getSystemPrompt()` is a legacy fallback and is ignored once context blocks are
+configured.
 
 Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
 enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
@@ -340,6 +341,8 @@ Script execution requires a Worker Loader binding:
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `agents/sessions`                       | `Sessions`, `Session`, `createCompactFunction`, attachments   |
+| `agents/context`                        | `ContextBlocks`, providers, `ContextConfig` — prompt assembly |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
@@ -362,7 +365,11 @@ Script execution requires a Worker Loader binding:
 | `getDefaultTimezone()`     | `undefined`                        | Default timezone for wall-clock schedules                                                                                                                                                                                    |
 | `maxSteps`                 | `10`                               | Max tool-call rounds per turn (property)                                                                                                                                                                                     |
 | `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
-| `configureSession()`       | identity                           | Add context blocks, compaction, search, skills                                                                                                                                                                               |
+| `configureSession()`       | identity                           | Configure the default session handle: compaction and search                                                                                                                                                                  |
+| `configureContext()`       | `[]`                               | Declare prompt context blocks. See [Session and context](#session-and-context)                                                                                                                                               |
+| `hydrationByteBudget`      | 32 MiB                             | Byte budget for startup transcript hydration. Charges each row its stored bytes plus the attachment bytes it re-inflates                                                                                                     |
+| `mediaEviction`            | `true`                             | Lossless offload and aged-row maintenance policy. `false` keeps payloads inline and disables the maintenance pass                                                                                                            |
+| `sessionAttachments`       | `{}`                               | Optional R2 tier and reconstruction policy for Sessions-owned attachments                                                                                                                                                    |
 | `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                                                                                             |
 | `skillWorkspace`           | `{}`                               | Project skills into Computer or legacy Shell; `false` disables projection                                                                                                                                                    |
 | `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
@@ -571,8 +578,8 @@ overflow could not be recovered, and `undefined` otherwise.
 
 `classifyChatError` maps a raw provider error to a provider-agnostic category
 (`"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`).
-Think ships no provider-specific matching in core — the app owns it, the same
-split as the `tokenCounter` passed to `compactAfter()`. Today it drives only
+Think ships no provider-specific matching in core: the app owns it, the same
+split as the `summarize` function passed to `createCompactFunction()`. Today it drives only
 context-overflow recovery: it is consulted when a turn errors and
 `contextOverflow.reactive` is enabled, and only `"context_overflow"` is acted on
 (other categories are reserved for future use). For the common case, assign the
@@ -745,53 +752,103 @@ When the LLM calls a client tool, the tool call chunk is sent to the client. The
 
 Tool approval flows are also supported via `CF_AGENT_TOOL_APPROVAL`.
 
-### Session and context blocks
+### Session and context
 
-Think uses Session for conversation storage. Override `configureSession` to add persistent memory, skills, compaction, and search:
+Think splits conversation storage from prompt assembly. `agents/sessions` stores
+messages; `agents/context` builds the system prompt. Think wires both during
+`onStart`.
+
+`configureSession()` configures the default session handle: compaction and
+search.
 
 ```ts
+import { createCompactFunction, type Session } from "agents/sessions";
+
 export class MyAgent extends Think<Env> {
   getModel() { ... }
 
   configureSession(session: Session) {
     return session
-      .withContext("memory", { description: "Learned facts", maxTokens: 2000 })
-      .withCachedPrompt();
+      .onCompaction(
+        createCompactFunction({
+          summarize: (prompt) => this.summarize(prompt),
+          keepRecentTokens: 20_000
+        })
+      )
+      .compactAfter(100_000);
   }
 }
 ```
 
-#### Dynamic context blocks
-
-Context blocks can also be added at runtime (e.g., by extensions):
+`configureContext()` declares the prompt blocks:
 
 ```ts
-await session.addContext("notes", { description: "User notes" });
-await session.refreshSystemPrompt(); // rebuild the prompt
+import type { ContextConfig } from "agents/context";
 
-session.removeContext("notes");
-await session.refreshSystemPrompt();
-```
-
-#### Legacy Session Skills
-
-Session still supports lower-level loadable context providers. Prefer the
-first-class Think skills API (`getSkills()`, `activate_skill`, and
-`read_skill_resource`) for new Agent Skills directories. Use Session skill
-providers only when you need generic `load_context` / `unload_context`
-management instead of Think's skills workflow.
-
-```ts
-import { R2SkillProvider } from "agents/sessions";
-
-configureSession(session: Session) {
-  return session
-    .withContext("skills", {
-      provider: new R2SkillProvider(this.env.SKILLS_BUCKET, { prefix: "skills/" })
-    })
-    .withCachedPrompt();
+export class MyAgent extends Think<Env> {
+  configureContext(): ContextConfig[] {
+    return [
+      { label: "soul", provider: { get: async () => "You are helpful." } },
+      { label: "memory", description: "Learned facts", maxTokens: 2_000 }
+    ];
+  }
 }
 ```
+
+A block declared without a `provider` is auto-wired to durable per-agent SQLite,
+so `memory` above is writable through the `set_context` tool with no extra
+wiring. The frozen system prompt is always persisted, so there is nothing to opt
+into: a cold wake reuses the exact prompt string the model already cached.
+
+The assembled blocks are available as `this.context` once the Lifecycle has
+started. See [Context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md)
+for providers, tools, and frozen-prompt behavior.
+
+#### Dynamic context blocks
+
+Blocks can be added at runtime, for example by extensions:
+
+```ts
+await this.context.addBlock({ label: "notes", description: "User notes" });
+await this.context.refreshSystemPrompt(); // rebuild the prompt
+
+this.context.removeBlock("notes");
+await this.context.refreshSystemPrompt();
+```
+
+#### Loadable context providers
+
+`agents/context` supports lower-level loadable providers. Prefer the first-class
+Think skills API (`getSkills()`, `activate_skill`, and `read_skill_resource`) for
+new Agent Skills directories. Use a skill provider only when you want generic
+`load_context` / `unload_context` management instead of Think's skills workflow.
+
+```ts
+import { R2SkillProvider, type ContextConfig } from "agents/context";
+
+configureContext(): ContextConfig[] {
+  return [
+    {
+      label: "skills",
+      provider: new R2SkillProvider(this.env.SKILLS_BUCKET, { prefix: "skills/" })
+    }
+  ];
+}
+```
+
+#### Message storage
+
+Sessions offloads oversized payloads out of message rows losslessly. File parts,
+text and reasoning parts, and strings nested in tool outputs above
+`mediaEviction.minPartBytes` (32 KiB by default) become
+`attachment:sha256:` pointers, and reads reconstruct them byte for byte. Nothing
+is truncated. Bytes live in this object's SQLite, or in R2 when you supply a
+bucket through `sessionAttachments`.
+
+Startup hydration reads a recent window bounded by `hydrationByteBudget`
+(32 MiB by default). The budget charges each row its stored bytes plus the
+attachment bytes it re-inflates, so it bounds isolate memory rather than the
+on-disk footprint.
 
 ### MCP integration
 

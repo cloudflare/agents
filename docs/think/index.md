@@ -204,18 +204,18 @@ Both Think and [`AIChatAgent`](https://github.com/cloudflare/agents/blob/main/do
 
 **AIChatAgent** is a protocol adapter. You override `onChatMessage` and are responsible for calling `streamText`, wiring tools, converting messages, and returning a `Response`. AIChatAgent handles the plumbing — message persistence, streaming, abort, resume — but the LLM call is entirely your concern.
 
-**Think** is an opinionated framework. It makes decisions for you: `getModel()` returns the model, `getSystemPrompt()` or `configureSession()` sets the prompt, `getTools()` returns tools. The default `onChatMessage` runs the complete agentic loop. You override individual pieces, not the whole pipeline.
+**Think** is an opinionated framework. It makes decisions for you: `getModel()` returns the model, `getSystemPrompt()` or `configureContext()` sets the prompt, `getTools()` returns tools. The default `onChatMessage` runs the complete agentic loop. You override individual pieces, not the whole pipeline.
 
-| Concern                | AIChatAgent                                                      | Think                                                               |
-| ---------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------- |
-| **Minimal subclass**   | ~15 lines (wire `streamText` + tools + system prompt + response) | 3 lines (`getModel()` only)                                         |
-| **Storage**            | Flat SQL table                                                   | Session: tree-structured messages, context blocks, compaction, FTS5 |
-| **Regeneration**       | Destructive (old response deleted)                               | Non-destructive branching (old responses preserved)                 |
-| **Context management** | Manual                                                           | Context blocks with LLM-writable persistent memory                  |
-| **Sub-agent RPC**      | Not built in                                                     | `chat()` with `StreamCallback`                                      |
-| **Programmatic turns** | `saveMessages()`                                                 | `saveMessages()`, `submitMessages()`, `continueLastTurn()`          |
-| **Compaction**         | `maxPersistedMessages` (deletes oldest)                          | Non-destructive summaries via overlays                              |
-| **Search**             | Not available                                                    | FTS5 full-text search per-session and cross-session                 |
+| Concern                | AIChatAgent                                                      | Think                                                      |
+| ---------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------- |
+| **Minimal subclass**   | ~15 lines (wire `streamText` + tools + system prompt + response) | 3 lines (`getModel()` only)                                |
+| **Storage**            | Flat SQL table                                                   | Sessions: tree-structured messages, compaction, FTS5       |
+| **Regeneration**       | Destructive (old response deleted)                               | Non-destructive branching (old responses preserved)        |
+| **Context management** | Manual                                                           | Context blocks with LLM-writable persistent memory         |
+| **Sub-agent RPC**      | Not built in                                                     | `chat()` with `StreamCallback`                             |
+| **Programmatic turns** | `saveMessages()`                                                 | `saveMessages()`, `submitMessages()`, `continueLastTurn()` |
+| **Compaction**         | `maxPersistedMessages` (deletes oldest)                          | Non-destructive summaries via overlays                     |
+| **Search**             | Not available                                                    | FTS5 full-text search per-session and cross-session        |
 
 ### When to use AIChatAgent
 
@@ -403,7 +403,10 @@ path.
 | `configureChannels()`      | `{}`                             | Per-channel policy and surfaces beyond the implicit `web` channel — see [Channels](./channels.md)                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `maxSteps`                 | `10`                             | Max tool-call rounds per turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `sendReasoning`            | `true`                           | Send reasoning chunks to chat clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `configureSession()`       | identity                         | Add context blocks, compaction, search, skills — see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md)                                                                                                                                                                                                                                                                                                                                                                                     |
+| `configureSession()`       | identity                         | Configure the default session handle: compaction and search — see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md)                                                                                                                                                                                                                                                                                                                                                                        |
+| `configureContext()`       | `[]`                             | Declare prompt context blocks — see [Session and context](#session-and-context)                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `hydrationByteBudget`      | 32 MiB                           | Byte budget for startup transcript hydration. Charges each row its stored bytes plus the attachment bytes it re-inflates                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `mediaEviction`            | `true`                           | Lossless offload and aged-row maintenance policy. `false` keeps payloads inline and disables the maintenance pass                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `skillWorkspace`           | `{}`                             | Project skills into Computer or legacy Shell; set `false` to disable                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -519,9 +522,9 @@ When skills are available, Think exposes:
 | `run_skill_script`    | Run a bundled script when `getSkillScriptRunner()` returns a runner |
 
 Skills are not always-on system prompt text. Use `getSystemPrompt()` or a
-Session context block for behavior that should apply to every turn. Use skills
-for task-specific procedures, references, scripts, templates, and assets that
-should be loaded only when relevant.
+context block from `configureContext()` for behavior that should apply to every
+turn. Use skills for task-specific procedures, references, scripts, templates,
+and assets that should be loaded only when relevant.
 
 Script execution is opt-in and requires a Worker Loader binding:
 
@@ -658,7 +661,7 @@ export class MyAgent extends Think<Env> {
 
 Use either layer alone, or both together: the proactive guard avoids most overflows, and the reactive backstop catches any that still slip through (for example, a turn that starts already over budget, or a single tool result so large that compaction cannot help — in which case it terminalizes cleanly). Both apply to every turn entry path (WebSocket, sub-agent `chat()`, and programmatic `saveMessages()` / `submitMessages()`), and both emit a `chat:context:compacted` [observability event](https://github.com/cloudflare/agents/blob/main/docs/agents/observability.md#chat-context-events).
 
-> A no-op compaction cannot rescue an over-budget turn, so recovery is only as effective as your compaction configuration. For tool-heavy histories, configure a `tokenCounter` on `compactAfter()` (see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md#auto-compaction)).
+> A no-op compaction cannot rescue an over-budget turn, so recovery is only as effective as your compaction configuration. For tool-heavy histories, lower the `compactAfter()` threshold and the `keepRecentTokens` budget of your compaction function (see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md#compaction)).
 
 For a runnable demo against a real Workers AI model, see [`examples/context-overflow-recovery`](https://github.com/cloudflare/agents/tree/main/examples/context-overflow-recovery).
 
@@ -829,12 +832,15 @@ You do not need new machinery to gate egress per call: `beforeToolCall` can `blo
 | Browser Run (`tools/browser`)    | Rendered pages, auth flows, screenshots, CDP automation                                  |
 | Typed tools / `agentTool()`      | Calling a `WorkerEntrypoint`/DO method with a typed schema, or delegating to a sub-agent |
 
-## Session Integration
+## Session and context
 
-Think uses [Session](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for conversation storage. Override `configureSession` to add persistent memory, compaction, search, and skills:
+Think splits conversation storage from prompt assembly. [`agents/sessions`](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) stores messages; [`agents/context`](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) builds the system prompt. Think wires both during `onStart`.
+
+`configureSession()` configures the default session handle: compaction and search.
 
 ```typescript
 import { Think, Session } from "@cloudflare/think";
+import { createCompactFunction } from "agents/sessions";
 
 export class MyAgent extends Think<Env> {
   getModel() {
@@ -843,19 +849,45 @@ export class MyAgent extends Think<Env> {
 
   configureSession(session: Session) {
     return session
-      .withContext("soul", {
-        provider: { get: async () => "You are a helpful coding assistant." }
-      })
-      .withContext("memory", {
-        description: "Important facts learned during conversation.",
-        maxTokens: 2000
-      })
-      .withCachedPrompt();
+      .onCompaction(
+        createCompactFunction({
+          summarize: (prompt) => this.summarize(prompt),
+          keepRecentTokens: 20_000
+        })
+      )
+      .compactAfter(100_000);
   }
 }
 ```
 
-Think's `this.messages` getter reads directly from Session's tree-structured storage. Context blocks, compaction overlays, and search are all handled by Session. See the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for the full API.
+`configureContext()` declares the prompt blocks:
+
+```typescript
+import type { ContextConfig } from "agents/context";
+
+export class MyAgent extends Think<Env> {
+  configureContext(): ContextConfig[] {
+    return [
+      { label: "soul", provider: { get: async () => "You are helpful." } },
+      { label: "memory", description: "Learned facts", maxTokens: 2_000 }
+    ];
+  }
+}
+```
+
+A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. The frozen system prompt is always persisted, so there is nothing to opt into: a cold wake reuses the exact prompt string the model already cached.
+
+The assembled blocks are available as `this.context` once the Lifecycle has started.
+
+Think's `this.messages` getter reads directly from the Session tree. Compaction overlays and search are handled by Sessions.
+
+### Message storage
+
+Sessions offloads oversized payloads out of message rows losslessly. File parts, text and reasoning parts, and strings nested in tool outputs above `mediaEviction.minPartBytes` (32 KiB by default) become `attachment:sha256:` pointers, and reads reconstruct them byte for byte. Nothing is truncated. Bytes live in this object's SQLite, or in R2 when you supply a bucket through `sessionAttachments`. A row that still exceeds the 1.5 MiB budget after every offloadable payload has moved out throws `SessionMessageTooLargeError`.
+
+`mediaEviction: false` keeps payloads inline and disables the aged-row maintenance pass. With maintenance on, `session.runMaintenance()` runs one bounded pass. It returns `null` when maintenance is disabled or a pass is already running.
+
+Startup hydration reads a recent window bounded by `hydrationByteBudget` (32 MiB by default). The budget charges each row its stored bytes plus the attachment bytes it re-inflates, so it bounds isolate memory rather than the on-disk footprint.
 
 ## Package Exports
 

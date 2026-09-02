@@ -5,7 +5,7 @@ A comparison of `@cloudflare/think` (`Think`) and `@cloudflare/ai-chat` (`AIChat
 Related:
 
 - [think-roadmap.md](./think-roadmap.md) — Think implementation plan (all phases complete)
-- [think-sessions.md](./think-sessions.md) — Session integration design
+- [sessions.md](./sessions.md) — Session integration design
 - [chat-api.md](./chat-api.md) — AIChatAgent + useAgentChat API analysis
 - [chat-improvements.md](./chat-improvements.md) — shared extraction + client DX improvements
 
@@ -139,13 +139,14 @@ Graduation path: add `getSystemPrompt()` for a custom prompt, `getTools()` for t
 Context blocks give the model writable persistent memory via the `set_context` tool. The model can learn and remember facts across conversations without any custom code.
 
 ```typescript
-configureSession(session: Session) {
-  return session
-    .withContext("memory", {
+configureContext(): ContextConfig[] {
+  return [
+    {
+      label: "memory",
       description: "Important facts about the user.",
       maxTokens: 2000
-    })
-    .withCachedPrompt();
+    }
+  ];
 }
 ```
 

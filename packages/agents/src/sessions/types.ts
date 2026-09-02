@@ -6,7 +6,6 @@
  */
 
 import type { StoredAttachment } from "./attachments";
-import type { ContextBlock, ContextConfig } from "./context";
 
 /**
  * Minimal message part shape used by Sessions internals.
@@ -68,19 +67,21 @@ export interface SessionRowStat {
   bytes: number;
   /** Token estimate stamped when the row was written. */
   tokenEstimate: number;
-  /** Largest payload eligible for aged media maintenance. */
+  /** Largest inline payload the maintenance pass could still offload. */
   mediaCandidateBytes: number;
+  /** Stored bytes of the attachments this row points at (0 when none). */
+  attachmentBytes: number;
 }
 
 /** Result of a byte-budgeted history read. */
 export interface RecentHistoryResult {
   /**
-   * The most recent messages on the active branch path whose summed stored
-   * content size fits `maxContentBytes`, root → leaf order, with compaction
-   * overlays applied within the window. The window always covers at least
-   * the leaf row (and `minRecentMessages` rows when requested), but rows
-   * whose stored content fails to parse are skipped — so a corrupt leaf can
-   * yield fewer messages than the window covers.
+   * The most recent messages on the active branch path that fit
+   * `maxContentBytes` when hydrated (stored bytes plus, when reconstructing
+   * inline, the attachment bytes each row re-inflates), root → leaf order,
+   * with compaction overlays applied within the window. The window always
+   * covers at least the leaf row (and `minRecentMessages` rows when
+   * requested); rows whose stored content fails to parse are skipped.
    */
   messages: SessionMessage[];
   /** True when older messages were left out to satisfy the byte budget. */
@@ -119,10 +120,25 @@ export interface SessionSummary {
 export interface AppendResult {
   /** False when the id already existed and the write was an idempotent no-op. */
   inserted: boolean;
-  /** The STORED form of the message (sanitized, row-capped, pointerized). */
+  /** The STORED form of the message (sanitized, pointerized). */
   message: SessionMessage;
   /** Attachments offloaded from this message during the write. */
   attachments: StoredAttachment[];
+}
+
+/** Totals from one bounded maintenance pass over aged rows. */
+export interface SessionMaintenanceResult {
+  /** Stored message rows rewritten by the pass. */
+  messages: number;
+  /** File parts and strings moved to attachment storage. */
+  parts: number;
+  /**
+   * Payload bytes moved out. A `data:` URL is counted by its decoded size,
+   * so the row itself shrinks by rather more than this.
+   */
+  bytes: number;
+  /** True when another eligible row remains after this bounded pass. */
+  backlogRemains: boolean;
 }
 
 /** Change-feed events dispatched synchronously after each durable write. */
@@ -139,15 +155,10 @@ export type SessionChangeEvent =
   | { type: "clear"; sessionId: string }
   | { type: "compact"; sessionId: string }
   | {
-      type: "eviction";
-      sessionId: string;
-      result: SessionEvictionResult;
-    }
-  | {
       /**
-       * A maintenance pass (e.g. aged media eviction) rewrote a stored row.
-       * Cache-owning hosts patch the row; no status or compaction side
-       * effects accompany it.
+       * A maintenance pass moved inline payloads of a stored row to
+       * attachment storage. Cache-owning hosts patch the row; no status or
+       * compaction side effects accompany it.
        */
       type: "maintenance-rewrite";
       sessionId: string;
@@ -163,11 +174,11 @@ export interface HistoryReadOptions {
   /** Read the path ending at this leaf instead of the active leaf. */
   leafId?: string | null;
   /**
-   * How `attachment:` pointer parts materialize:
-   * - `"inline"` (default): bytes are read back and the part becomes a
-   *   `data:`-URL file part again — an exact round-trip of what was written.
-   * - `"pointer"`: parts keep their `attachment:` URL; no bytes are read.
-   * Or a custom {@link AttachmentReconstructor}.
+   * How `attachment:` pointers materialize:
+   * - `"inline"` (default): bytes are read back — file parts become `data:`
+   *   URLs again and offloaded text returns as text, an exact round-trip.
+   * - `"pointer"`: pointers stay as written; no bytes are read.
+   * Or a custom {@link AttachmentReconstructor} for file parts.
    */
   reconstruct?: ReconstructMode;
   /** Abort a streamed read between chunks. */
@@ -208,13 +219,16 @@ export interface ReconstructContext {
   sessionId: string;
   messageId: string;
   partIndex: number;
+  /** The stored pointer part being replaced. */
+  part: SessionMessagePart;
 }
 
 /**
- * THE read-side plugin: decides how a stored pointer part becomes a message
- * part again. The default inlines a `data:` URL; a custom reconstructor can
- * emit a workspace-path marker for the model, a hosted URL, or anything
- * else — per part, sync or async.
+ * THE read-side plugin for file parts: decides how a stored pointer part
+ * becomes a message part again. The default inlines a `data:` URL; a custom
+ * reconstructor can emit a workspace-path marker for the model, a hosted
+ * URL, or anything else — per part, sync or async. A result of the same part
+ * type is spread over the stored part, so host fields survive.
  */
 export interface AttachmentReconstructor {
   part(
@@ -240,68 +254,53 @@ export interface SessionAttachmentBucket {
     value: ReadableStream<Uint8Array>,
     options?: { httpMetadata?: { contentType?: string } }
   ): Promise<unknown>;
-  delete(key: string | string[]): Promise<void>;
+  delete(key: string): Promise<void>;
 }
 
-/** Attachment extraction, storage-tier, and reconstruction policy. */
+/** Attachment storage-tier, offload, maintenance, and reconstruction policy. */
 export interface SessionsAttachmentOptions {
   /**
-   * Optional large-object tier. Without R2, Sessions stores every offloaded
-   * payload in chunked Durable Object SQLite. A thunk supports late-bound
-   * Worker bindings on Agent subclasses.
+   * Optional large-object tier. Without R2, every offloaded payload lives in
+   * chunked Durable Object SQLite.
    */
-  readonly r2?:
-    | SessionAttachmentBucket
-    | (() => SessionAttachmentBucket | undefined);
+  readonly r2?: SessionAttachmentBucket;
   /**
    * Payloads at or above this size use R2 when configured. Smaller payloads
    * stay in Sessions-owned SQLite chunks. Default 1,500,000 bytes.
    */
-  readonly r2ThresholdBytes?: number | (() => number);
+  readonly r2ThresholdBytes?: number;
   /** Private R2 object-key prefix. Default `cf-agents/sessions/attachments`. */
   readonly r2Prefix?: string;
   /**
    * File parts whose decoded payload is at least this many bytes are
-   * offloaded at append time. Default 32 KiB.
+   * offloaded at write time; the maintenance pass applies the same threshold
+   * to every inline payload of aged rows. Default 32 KiB.
    */
-  readonly inlineThresholdBytes?: number | (() => number);
-  /** Aged-row payload threshold. Defaults to `inlineThresholdBytes`. */
-  readonly evictionThresholdBytes?: number | (() => number);
+  readonly inlineThresholdBytes?: number;
+  /** Ceiling for one attachment payload. Default 32 MiB. */
+  readonly maxAttachmentBytes?: number;
   /** Logical locator prefix exposed to reconstructors. Default "/attachments". */
   readonly basePath?: string;
-  /** Ceiling for one attachment accepted by `attachments.put`. Default 8 MiB. */
-  readonly maxAttachmentBytes?: number;
   /**
-   * Messages this many positions from the leaf keep inline media untouched;
-   * older rows are drained by the aged-eviction pass. Default 8. A thunk
-   * defers to first use for hosts with late-bound policy fields.
+   * Rows this many positions from the leaf keep inline payloads untouched;
+   * older rows are drained by the maintenance pass. Default 8.
    */
-  readonly keepRecentMessages?: number | (() => number);
+  readonly keepRecentMessages?: number;
   /** Maximum aged rows rewritten by one maintenance pass. Default 64. */
-  readonly maxEvictionRowsPerPass?: number | (() => number);
-  /** Enable aged-row maintenance. Default true. */
-  readonly evictAged?: boolean | (() => boolean);
-  /** Preserve evicted payloads in the store. Default true. */
-  readonly preserveEvicted?: boolean | (() => boolean);
-  /** Read-side materialization default. Default: inline `data:` URLs. */
+  readonly maxMaintenanceRowsPerPass?: number;
+  /** Run the aged-row maintenance pass. Default true. */
+  readonly maintenance?: boolean;
+  /** Read-side materialization default for file parts. Default: inline. */
   readonly reconstruct?: AttachmentReconstructor;
-}
-
-/** Totals from one bounded aged-media maintenance pass. */
-export interface SessionEvictionResult {
-  /** Stored message rows rewritten by the pass. */
-  messages: number;
-  /** Individual file parts or nested tool-output strings externalized. */
-  parts: number;
-  /** Raw payload bytes removed from SQLite rows. */
-  bytes: number;
-  /** True when another eligible row remains after this bounded pass. */
-  backlogRemains: boolean;
 }
 
 /** Policy for a Sessions capability. */
 export interface SessionsOptions {
-  /** Attachment offload. Omitted → file parts stay inline (legacy behavior). */
+  /**
+   * Attachment policy. A thunk is re-read on every access so Agent subclasses
+   * can point it at fields (bindings, policy) initialized after the field
+   * initializer runs.
+   */
   readonly attachments?:
     | SessionsAttachmentOptions
     | (() => SessionsAttachmentOptions | undefined);
@@ -316,8 +315,6 @@ export interface SessionsOptions {
    * never search. Enabling it also lifts legacy FTS data during migration.
    */
   readonly searchIndexing?: boolean;
-  /** Missing `updateMessage` policy. Default `"error"`. */
-  readonly missingUpdate?: "ignore" | "error";
 }
 
 /** Trust policy shared by append and update writes. */
@@ -339,50 +336,3 @@ export interface AppendOptions extends WriteOptions {
    */
   parentId?: string | null;
 }
-
-/** Context block options accepted by {@link Session.withContext}. */
-export type SessionContextOptions = Omit<ContextConfig, "label">;
-
-/** Input passed to a custom session token counter. */
-export interface SessionTokenCounterInput {
-  /** Messages returned by `session.getHistory()` for the active branch. */
-  messages: SessionMessage[];
-  /** Frozen system prompt managed by the session context system. */
-  systemPrompt: string;
-  /** Loaded context blocks that were used to build `systemPrompt`. */
-  contextBlocks: ContextBlock[];
-}
-
-export type SessionTokenCounter = (
-  input: SessionTokenCounterInput
-) => number | Promise<number>;
-
-export interface CompactAfterOptions {
-  /**
-   * Authoritative token counter consulted to CONFIRM a compaction trigger
-   * after the O(1) stamped-estimate gate crosses the threshold. Reads
-   * history, so it never runs on the append hot path by itself.
-   */
-  tokenCounter?: SessionTokenCounter;
-}
-
-/**
- * Context passed to the registered compaction function so its boundary
- * logic can share the session's authoritative token accounting.
- */
-export interface CompactContext {
-  tokenCounter?: SessionTokenCounter;
-}
-
-export type CompactionErrorHandler = (error: unknown) => void | Promise<void>;
-
-/** @internal Raw `cf_agents_session_messages` SQLite row. */
-export type SessionMessageRow = {
-  id: string;
-  session_id: string;
-  parent_id: string | null;
-  role: string;
-  content: string;
-  token_estimate: number;
-  created_at: number;
-};

@@ -5,7 +5,7 @@ Think supports tools that execute in the browser. The client sends tool schemas 
 ## How Client Tools Work
 
 1. The client sends tool schemas as part of the chat request body
-2. Think merges client tools with server-side tools (workspace, `getTools()`, session, MCP)
+2. Think merges client tools with server-side tools (workspace, `getTools()`, context, MCP)
 3. The LLM calls a client tool — the tool call chunk is sent to the client over WebSocket
 4. The client executes the tool and sends back a `CF_AGENT_TOOL_RESULT` message
 5. Think persists the result, broadcasts `CF_AGENT_MESSAGE_UPDATED`, and optionally auto-continues

@@ -1,5 +1,6 @@
 import type { UIMessage } from "ai";
 import { DurableObject } from "cloudflare:workers";
+import { ContextBlocks, type ContextProvider } from "../context";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
   Sessions,
@@ -8,9 +9,8 @@ import {
   inlineReconstructor,
   pointerReconstructor,
   type AppendResult,
-  type ContextProvider,
   type SessionAttachmentBucket,
-  type SessionEvictionResult,
+  type SessionMaintenanceResult,
   type SessionMessage,
   type SessionStats
 } from "../sessions";
@@ -19,10 +19,10 @@ class ConversationObject extends DurableObject {
   readonly attachmentBucket: SessionAttachmentBucket | undefined;
 
   readonly sessions = new Sessions({
-    attachments: {
-      r2: () => this.attachmentBucket,
+    attachments: () => ({
+      r2: this.attachmentBucket,
       reconstruct: inlineReconstructor
-    }
+    })
   });
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
 }
@@ -33,11 +33,21 @@ object.sessions satisfies DurableObjectCapability;
 const soul: ContextProvider = {
   get: async () => "You are helpful."
 };
+const context = new ContextBlocks([
+  { label: "soul", provider: soul },
+  { label: "memory", maxTokens: 1_100, provider: soul }
+]);
+context.freezeSystemPrompt() satisfies Promise<string>;
+context.refreshSystemPrompt() satisfies Promise<string>;
+context.tools() satisfies Promise<Record<string, unknown>>;
+context.getBlocks() satisfies Array<{
+  label: string;
+  content: string;
+  tokens: number;
+}>;
+
 const session = object.sessions
   .session()
-  .withContext("soul", { provider: soul })
-  .withContext("memory", { maxTokens: 1_100 })
-  .withCachedPrompt()
   .onCompaction(createCompactFunction({ summarize: async () => "summary" }))
   .compactAfter(100_000);
 session.sessionId satisfies string;
@@ -51,7 +61,7 @@ const message: SessionMessage = {
 session.appendMessage(message) satisfies Promise<AppendResult>;
 declare const aiMessage: UIMessage;
 session.appendMessage(aiMessage) satisfies Promise<AppendResult>;
-session.updateMessage(message) satisfies Promise<SessionMessage>;
+session.updateMessage(message) satisfies Promise<SessionMessage | null>;
 session.getMessage(message.id) satisfies Promise<SessionMessage | null>;
 session.getHistory() satisfies Promise<SessionMessage[]>;
 session.getRecentHistory(1024, 2) satisfies Promise<{
@@ -60,15 +70,7 @@ session.getRecentHistory(1024, 2) satisfies Promise<{
   totalContentBytes: number;
 }>;
 session.stats() satisfies Promise<SessionStats>;
-session.evictAgedMedia() satisfies Promise<SessionEvictionResult | null>;
-session.freezeSystemPrompt() satisfies Promise<string>;
-session.refreshSystemPrompt() satisfies Promise<string>;
-session.getContextBlocks() satisfies Array<{
-  label: string;
-  content: string;
-  tokens: number;
-}>;
-session.tools() satisfies Promise<Record<string, unknown>>;
+session.runMaintenance() satisfies Promise<SessionMaintenanceResult | null>;
 object.sessions.listSessions() satisfies Promise<
   Array<{ sessionId: string; messageCount: number; lastMessageAt: number }>
 >;

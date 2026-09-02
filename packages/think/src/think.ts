@@ -15,7 +15,8 @@
  *   - getSystemPrompt()     — return the legacy fallback system prompt
  *   - getTools()            — return the ToolSet for the agentic loop
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
- *   - configureSession()    — add context blocks, compaction, search, skills
+ *   - configureSession()    — compaction and search policy
+ *   - configureContext()    — declare prompt context blocks
  *
  * Lifecycle hooks:
  *   - beforeTurn()          — inspect/override context, tools, model before inference
@@ -63,21 +64,23 @@
  * @example With context blocks and self-updating memory
  * ```typescript
  * import { Think } from "@cloudflare/think";
- * import type { Session } from "@cloudflare/think";
+ * import type { ContextConfig } from "agents/context";
  *
  * export class MemoryAgent extends Think<Env> {
  *   getModel() { ... }
  *
- *   configureSession(session: Session) {
- *     return session
- *       .withContext("soul", {
+ *   configureContext(): ContextConfig[] {
+ *     return [
+ *       {
+ *         label: "soul",
  *         provider: { get: async () => "You are a helpful coding assistant." }
- *       })
- *       .withContext("memory", {
+ *       },
+ *       {
+ *         label: "memory",
  *         description: "Important facts learned during conversation.",
  *         maxTokens: 2000
- *       })
- *       .withCachedPrompt();
+ *       }
+ *     ];
  *   }
  * }
  * ```
@@ -264,13 +267,21 @@ import type {
   ChatFiberSnapshot,
   OrphanPersistStore
 } from "agents/chat";
+import { truncateOlderMessages } from "agents/chat";
 import {
   Session,
   Sessions,
-  truncateOlderMessages,
   type SessionMessage,
   type SessionsAttachmentOptions
 } from "agents/sessions";
+import {
+  AgentContextProvider,
+  ContextBlocks,
+  reclaimLoadedSkill,
+  restoreLoadedSkills,
+  type ContextConfig,
+  type WritableContextProvider
+} from "agents/context";
 
 /**
  * The recent-message span the model sees at FULL fidelity each turn —
@@ -280,9 +291,9 @@ import {
  * - budgeted hydration never shrinks `this.messages` below it (the floor
  *   passed to `session.getRecentHistory`), so windowing cannot starve the
  *   model's context;
- * - media eviction never rewrites messages inside it (the
- *   `keepRecentMessages` clamp), so content the model still replays at full
- *   fidelity is never replaced with markers.
+ * - the aged-row maintenance pass never rewrites messages inside it (the
+ *   `keepRecentMessages` clamp), so the rows the model replays at full
+ *   fidelity never pay a payload read.
  */
 const MODEL_RECENT_WINDOW = 4;
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
@@ -2799,14 +2810,17 @@ export class Think<
    * truncated at read time before each turn, and the hydration floor
    * guarantees the full-fidelity span is always present.
    *
-   * The default (24MB) leaves headroom for the ~2-3x amplification between
-   * stored JSON and parsed in-memory messages. Set to
-   * `Number.POSITIVE_INFINITY` (or any non-positive value) to disable
-   * windowing and always hydrate the full transcript.
+   * The budget counts what hydration actually costs: a row's stored bytes
+   * plus the attachment bytes its pointers inflate back when reconstructed
+   * inline. A pointer row is therefore charged its payload, not its ~100
+   * stored bytes, so the ceiling bounds isolate memory rather than the
+   * on-disk footprint. Set to `Number.POSITIVE_INFINITY` (or any
+   * non-positive value) to disable windowing and always hydrate the full
+   * transcript.
    *
-   * @default 24 * 1024 * 1024
+   * @default 32 * 1024 * 1024
    */
-  hydrationByteBudget: number = 24 * 1024 * 1024;
+  hydrationByteBudget: number = 32 * 1024 * 1024;
 
   /**
    * Configure lossless file offload and aged tool-output eviction. Sessions
@@ -2849,48 +2863,59 @@ export class Think<
 
   /** Durable conversation history installed on this Agent's Lifecycle. */
   readonly sessions = new Sessions({
-    attachments: () => ({
-      ...this.sessionAttachments,
-      inlineThresholdBytes: () => {
-        if (
-          this.mediaEviction === false ||
-          (this.mediaEviction !== true &&
-            this.mediaEviction.externalizeToWorkspace === false)
-        ) {
-          return Number.MAX_SAFE_INTEGER;
-        }
-        return this.mediaEviction === true
-          ? 32 * 1024
-          : (this.mediaEviction.minPartBytes ?? 32 * 1024);
-      },
-      evictionThresholdBytes: () =>
-        this.mediaEviction === true || this.mediaEviction === false
-          ? 32 * 1024
-          : (this.mediaEviction.minPartBytes ?? 32 * 1024),
-      keepRecentMessages: () => {
-        const configured =
-          this.mediaEviction === true || this.mediaEviction === false
-            ? 8
-            : (this.mediaEviction.keepRecentMessages ?? 8);
-        return Math.max(MODEL_RECENT_WINDOW, configured);
-      },
-      maxEvictionRowsPerPass: () =>
-        this.mediaEviction === true || this.mediaEviction === false
-          ? 64
-          : (this.mediaEviction.maxRowsPerPass ?? 64),
-      evictAged: () => this.mediaEviction !== false,
-      preserveEvicted: () =>
-        this.mediaEviction === true || this.mediaEviction === false
-          ? true
-          : (this.mediaEviction.externalizeToWorkspace ?? true)
-    }),
+    attachments: () => this.#attachmentPolicy(),
     reservedMetadataKeys: RESERVED_MESSAGE_METADATA_KEYS,
-    searchIndexing: true,
-    missingUpdate: "ignore"
+    searchIndexing: true
   });
+
+  /**
+   * Sessions attachment policy, merging the host fields. `mediaEviction`
+   * predates `sessionAttachments` and maps onto it: `false` disables the
+   * aged-row pass, and its thresholds are the same numbers under their
+   * Sessions names. Payload bytes are always preserved — the old lossy mode
+   * is gone, so `externalizeToWorkspace` no longer has an effect.
+   */
+  #attachmentPolicy(): SessionsAttachmentOptions {
+    const eviction = this.mediaEviction;
+    const config = typeof eviction === "object" ? eviction : {};
+    return {
+      ...this.sessionAttachments,
+      inlineThresholdBytes: config.minPartBytes ?? 32 * 1024,
+      keepRecentMessages: Math.max(
+        MODEL_RECENT_WINDOW,
+        config.keepRecentMessages ?? 8
+      ),
+      maxMaintenanceRowsPerPass: config.maxRowsPerPass ?? 64,
+      maintenance: eviction !== false
+    };
+  }
 
   /** The default conversation handle configured by `configureSession()`. */
   session!: Session;
+
+  /** Prompt context blocks for this agent, built from `configureContext()`. */
+  #contextBlocks: ContextBlocks | undefined;
+
+  /**
+   * The agent's context blocks. Available once the Lifecycle has started.
+   */
+  protected get context(): ContextBlocks {
+    if (!this.#contextBlocks) {
+      throw new Error(
+        "Context is not initialized yet; it is available after onStart()."
+      );
+    }
+    return this.#contextBlocks;
+  }
+
+  /** Durable SQLite storage for one context block of this agent. */
+  #contextProvider(label: string): WritableContextProvider {
+    const sessionId = this.session?.sessionId ?? "";
+    return new AgentContextProvider(
+      this,
+      sessionId ? `${label}_${sessionId}` : label
+    );
+  }
 
   /** Cached messages, kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
@@ -3039,6 +3064,24 @@ export class Think<
 
           // 2. Session configuration (builder phase: context, compaction, skills)
           this.session = await this.configureSession(this.sessions.session());
+          this.#contextBlocks = new ContextBlocks(
+            await this.configureContext(),
+            this.#contextProvider("_system_prompt"),
+            (label) => this.#contextProvider(label)
+          );
+          this.#contextBlocks.setUnloadCallback(async (label, key) => {
+            try {
+              await reclaimLoadedSkill(this.session, label, key);
+            } catch (error) {
+              console.warn(
+                `[think] Failed to reclaim skill ${label}:${key}: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              );
+              throw error;
+            }
+          });
+          await restoreLoadedSkills(this.#contextBlocks, this.session);
           this._unsubscribeSessionChanges?.();
           this._unsubscribeSessionChanges = this.sessions.subscribe(
             async (event) => {
@@ -3069,11 +3112,11 @@ export class Think<
                   this._replaceCachedMessages([]);
                   break;
                 case "delete":
-                case "compact":
                   await this._syncMessages();
                   break;
-                case "eviction":
-                  this._emit("chat:media:evicted", { ...event.result });
+                case "compact":
+                  await this._syncMessages();
+                  await this.#contextBlocks?.refreshSystemPrompt();
                   break;
               }
             }
@@ -3083,9 +3126,6 @@ export class Think<
         }
       );
 
-      // Force Session to initialize its tables (assistant_messages,
-      // assistant_compactions, assistant_config, etc.) so that subsequent
-      // config reads work.
       //
       // Hydration is bounded by `hydrationByteBudget` (a byte-budgeted
       // recent window on oversized transcripts), but even the budgeted read
@@ -3499,14 +3539,13 @@ export class Think<
 
   /** Reconstruct a pointer-bearing stored row before it enters the live cache. */
   private async _messageForCache(message: SessionMessage): Promise<UIMessage> {
-    const hasPointer = message.parts.some(
-      (part) =>
-        part.type === "file" &&
-        typeof part.url === "string" &&
-        part.url.startsWith("attachment:sha256:")
-    );
-    if (!hasPointer) return message as UIMessage;
-    return (await this.session.getMessage(message.id)) as UIMessage;
+    // Any part can carry a pointer: files, offloaded text, and strings nested
+    // in tool output. One scan of the serialized row settles it.
+    if (!JSON.stringify(message).includes("attachment:sha256:")) {
+      return message as UIMessage;
+    }
+    return ((await this.session.getMessage(message.id)) ??
+      message) as UIMessage;
   }
 
   /** Patch or append one message in the live cache after a durable write. */
@@ -3538,7 +3577,10 @@ export class Think<
   private async _updateMessageInHistory(
     message: UIMessage
   ): Promise<UIMessage> {
-    return (await this.session.updateMessage(message)) as UIMessage;
+    // `null` means the row is gone (a concurrent clear or delete). Keep the
+    // caller's copy so the live cache stays coherent.
+    return ((await this.session.updateMessage(message)) ??
+      message) as UIMessage;
   }
 
   private async _upsertMessageInHistory(
@@ -3569,6 +3611,10 @@ export class Think<
 
   private async _clearHistory(): Promise<void> {
     await this.session.clearMessages();
+    // The transcript carried the skill-load record, so a cleared session
+    // starts with no skills loaded and a prompt rebuilt without them.
+    this.#contextBlocks?.clearSkillState();
+    await this.#contextBlocks?.refreshSystemPrompt();
     // Drop any pending terminal record (#1645) so a stale exhaustion can't
     // replay onto a freshly-cleared (empty) conversation on reconnect. Covers
     // both the WS `chat-clear` path and the programmatic `clearMessages()` API.
@@ -3839,45 +3885,34 @@ export class Think<
   #configTableReady = false;
 
   protected _migrateLegacyConfigToThinkTable(): void {
-    const tables = new Set(
-      this.ctx.storage.sql
-        .exec(
-          `SELECT name FROM sqlite_master
-           WHERE type = 'table'
-             AND name IN (
-               'cf_agents_session_config',
-               'assistant_config',
-               'assistant_config__lifted_v1'
-             )`
-        )
-        .toArray()
-        .map((row) => String(row.name))
-    );
-    const source = tables.has("cf_agents_session_config")
-      ? "cf_agents_session_config"
-      : tables.has("assistant_config")
-        ? "assistant_config"
-        : tables.has("assistant_config__lifted_v1")
-          ? "assistant_config__lifted_v1"
-          : null;
+    const legacy = this.ctx.storage.sql
+      .exec(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table'
+           AND name IN ('assistant_config', 'assistant_config__lifted_v1')`
+      )
+      .toArray()
+      .map((row) => String(row.name));
+    // Sessions leaves `assistant_config` alone; these keys are Think's, so
+    // Think lifts them straight into its own table.
+    const source = legacy.includes("assistant_config")
+      ? "assistant_config"
+      : legacy.includes("assistant_config__lifted_v1")
+        ? "assistant_config__lifted_v1"
+        : null;
     if (!source) return;
 
     for (const key of Think.CONFIG_KEYS) {
       const rows =
-        source === "cf_agents_session_config"
+        source === "assistant_config"
           ? this.sql<{ value: string }>`
-              SELECT value FROM cf_agents_session_config
+              SELECT value FROM assistant_config
               WHERE session_id = '' AND key = ${key}
             `
-          : source === "assistant_config"
-            ? this.sql<{ value: string }>`
-                SELECT value FROM assistant_config
-                WHERE session_id = '' AND key = ${key}
-              `
-            : this.sql<{ value: string }>`
-                SELECT value FROM assistant_config__lifted_v1
-                WHERE session_id = '' AND key = ${key}
-              `;
+          : this.sql<{ value: string }>`
+              SELECT value FROM assistant_config__lifted_v1
+              WHERE session_id = '' AND key = ${key}
+            `;
       const value = rows[0]?.value;
       if (value !== undefined) {
         this.sql`
@@ -4027,9 +4062,8 @@ export class Think<
 
   /**
    * Return the fallback system prompt for the assistant.
-   * Ignored when Session context blocks are configured. Use
-   * `configureSession().withContext()` for always-on instructions that should
-   * coexist with context blocks or skills.
+   * Ignored when context blocks are configured. Use `configureContext()` for
+   * always-on instructions that should coexist with context blocks or skills.
    */
   getSystemPrompt(): string {
     return [
@@ -4855,20 +4889,42 @@ export class Think<
   private _warnedMissingClassifier = false;
 
   /**
-   * Configure the session. Called once during `onStart`.
-   * Override to add context blocks, compaction, search, skills.
+   * Configure conversation storage. Called once during `onStart`. Override to
+   * set the compaction policy; prompt context is declared by
+   * {@link Think.configureContext} instead.
    *
    * @example
    * ```typescript
    * configureSession(session: Session) {
    *   return session
-   *     .withContext("memory", { description: "Learned facts", maxTokens: 2000 })
-   *     .withCachedPrompt();
+   *     .onCompaction(createCompactFunction({ summarize }))
+   *     .compactAfter(80_000);
    * }
    * ```
    */
   configureSession(session: Session): Session | Promise<Session> {
     return session;
+  }
+
+  /**
+   * Declare the prompt context blocks for this agent.
+   *
+   * Blocks render into the system prompt and, when their provider is
+   * writable, give the model `set_context` to update them. A block declared
+   * without a provider is auto-wired to durable per-agent SQLite storage.
+   *
+   * @example
+   * ```typescript
+   * configureContext(): ContextConfig[] {
+   *   return [
+   *     { label: "soul", provider: { get: async () => "You are helpful." } },
+   *     { label: "memory", description: "Learned facts", maxTokens: 2000 }
+   *   ];
+   * }
+   * ```
+   */
+  configureContext(): ContextConfig[] | Promise<ContextConfig[]> {
+    return [];
   }
 
   /**
@@ -4896,7 +4952,7 @@ export class Think<
 
       if (this.getSystemPrompt !== Think.prototype.getSystemPrompt) {
         const warning =
-          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured. getSkills() registers a skills context block, so move always-on instructions into configureSession().withContext(...) instead.";
+          "getSystemPrompt() is only used as a fallback when no context blocks are configured. getSkills() registers a skills context block, so move always-on instructions into configureContext() instead.";
         if (!this._loggedSkillWarnings.has(warning)) {
           this._loggedSkillWarnings.add(warning);
           console.warn(`[think] ${warning}`);
@@ -4910,7 +4966,8 @@ export class Think<
 
       await this._configureSkillWorkspace(registry);
 
-      await this.session.addContext(registry.contextLabel, {
+      await this.context.addBlock({
+        label: registry.contextLabel,
         description: "Think skills: available skill catalog",
         provider: {
           get: () => registry.systemPrompt()
@@ -4919,7 +4976,7 @@ export class Think<
 
       const previous = this._configGet("skillsFingerprint");
       if (previous !== registry.fingerprint) {
-        await this.session.refreshSystemPrompt();
+        await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", registry.fingerprint);
       }
     } catch (error) {
@@ -4992,7 +5049,7 @@ export class Think<
       await this._configureSkillWorkspace(this._skillRegistry);
       const previous = this._configGet("skillsFingerprint");
       if (previous !== this._skillRegistry.fingerprint) {
-        await this.session.refreshSystemPrompt();
+        await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
       }
     } catch (error) {
@@ -5450,7 +5507,8 @@ export class Think<
       const prefix = sanitizeName(ext.name);
       for (const ctxDef of manifest.context) {
         const namespacedLabel = `${prefix}_${ctxDef.label}`;
-        await this.session.addContext(namespacedLabel, {
+        await this.context.addBlock({
+          label: namespacedLabel,
           description: ctxDef.description,
           maxTokens: ctxDef.maxTokens
         });
@@ -5460,9 +5518,9 @@ export class Think<
     // Wire unload callback to clean up context blocks
     this.extensionManager.onUnload(async (_name, contextLabels) => {
       for (const label of contextLabels) {
-        this.session.removeContext(label);
+        this.context.removeBlock(label);
       }
-      await this.session.refreshSystemPrompt();
+      await this.context.refreshSystemPrompt();
     });
   }
 
@@ -5797,7 +5855,7 @@ export class Think<
     const actionTools = await this._compileActionTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
     await this._refreshSkillsIfChanged();
-    const contextTools = await this.session.tools();
+    const contextTools = await this.context.tools();
     const skillTools = this._skillRegistry?.tools() ?? {};
     const clientToolSet = createToolsFromClientSchemas(
       input.clientTools,
@@ -5835,7 +5893,7 @@ export class Think<
           : channelDefinition.instructions
         : undefined;
 
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     const rawBaseSystem = frozenPrompt || this.getSystemPrompt();
     const baseSystem = channelInstructions
       ? `${channelInstructions}\n\n${rawBaseSystem}`
@@ -7252,12 +7310,12 @@ export class Think<
   }
 
   async _hostGetContext(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async _hostSetContext(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async _hostGetMessages(
@@ -13795,7 +13853,12 @@ export class Think<
     // (2) Durable storage. Handles messages already persisted — including
     // partials written mid-stream by stall recovery and cross-message tool
     // results that target an earlier message than this turn's.
-    const history = await this._readMessagesFromStorage();
+    // Pointer mode: this scan runs on every tool result and only needs tool
+    // call ids, so it must not inflate every attachment on the path. The row
+    // it writes back is already the stored form.
+    const history = (await this.session.getHistory({
+      reconstruct: "pointer"
+    })) as UIMessage[];
     for (let i = 0; i < history.length; i++) {
       const msg = history[i];
       const msgParts = msg.parts as Array<Record<string, unknown>>;
@@ -13815,8 +13878,9 @@ export class Think<
         };
         const safe = await this._updateMessageInHistory(updatedMsg);
         // Session change callbacks may run after an immediately scheduled
-        // continuation begins. Keep its input cache coherent synchronously.
-        this._patchCachedMessage(safe);
+        // continuation begins. Keep its input cache coherent synchronously —
+        // reconstructed, since the row it just wrote is in pointer form.
+        this._patchCachedMessage(await this._messageForCache(safe));
         // Patch the live cache in place instead of doing a full
         // `_syncMessages()` round-trip.
         // A full re-read during a streaming turn drops in-flight messages

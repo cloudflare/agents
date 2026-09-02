@@ -7,7 +7,7 @@ A critical analysis of the current `@cloudflare/ai-chat` API surface — both th
 Related:
 
 - [think-vs-aichat.md](./think-vs-aichat.md) — feature gap analysis between Think and AIChatAgent
-- [think-sessions.md](./think-sessions.md) — Session integration design for Think
+- [sessions.md](./sessions.md) — Session integration design for Think
 - [think-roadmap.md](./think-roadmap.md) — implementation plan (supersedes the prioritization in this doc)
 
 ---
@@ -726,7 +726,7 @@ See [think-vs-aichat.md](./think-vs-aichat.md) for the full gap analysis. The hi
 
 2. **Sub-agent RPC (`chat()`).** AIChatAgent doesn't have this. The `chat(userMessage, callback, options?)` method for parent agents to drive sub-agent turns via RPC is a genuine differentiator for multi-agent architectures. This should be enhanced with `saveMessages`-equivalent programmatic turns.
 
-3. **Context blocks and compaction.** Session gives Think persistent, LLM-writable context blocks and non-destructive compaction — features AIChatAgent doesn't have. See [think-sessions.md](./think-sessions.md).
+3. **Context blocks and compaction.** Sessions gives Think non-destructive compaction and `agents/context` gives it persistent, LLM-writable prompt blocks. AIChatAgent has neither. See [sessions.md](./sessions.md) and [../docs/agents/context.md](../docs/agents/context.md).
 
 4. **Branching and regeneration.** Session's tree-structured messages provide non-destructive regeneration (alternatives preserved via branches) — strictly better than AIChatAgent's delete-and-rerun approach.
 

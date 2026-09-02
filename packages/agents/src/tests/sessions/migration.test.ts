@@ -117,8 +117,13 @@ describe("Sessions legacy migration", () => {
         }
       ]);
 
-      const sync = instance.sessions.__DO_NOT_USE_WILL_BREAK__sync();
-      expect(sync.getConfigValue("", "prompt")).toBe("frozen prompt");
+      // `seq` is assigned in branch order, so `ORDER BY seq` reproduces the
+      // legacy `created_at` ordering without a rowid or an index.
+      expect(instance.messageRows("")).toEqual([
+        { id: "m1", seq: 1, type: "message", parent_id: null },
+        { id: "m2", seq: 2, type: "message", parent_id: "m1" },
+        { id: "m3", seq: 3, type: "message", parent_id: "m1" }
+      ]);
       expect(
         await instance.kvGet<number>("cf_agents:sessions_schema_version")
       ).toBe(1);
@@ -126,7 +131,13 @@ describe("Sessions legacy migration", () => {
       const tables = instance.tableNames();
       expect(tables).toContain("assistant_messages__lifted_v1");
       expect(tables).toContain("assistant_compactions__lifted_v1");
-      expect(tables).toContain("assistant_config__lifted_v1");
+      // `assistant_config` belongs to Think: Sessions no longer lifts it into
+      // its own config table, and leaves the legacy table untouched.
+      expect(tables).not.toContain("assistant_config__lifted_v1");
+      expect(tables).toContain("assistant_config");
+      expect(instance.readLegacyConfig()).toEqual([
+        { key: "prompt", value: "frozen prompt" }
+      ]);
       expect(tables).toContain("assistant_sessions__lifted_v1");
       expect(instance.readLegacySessionTombstone()).toEqual([
         { id: "chat-one", name: "Chat one" }

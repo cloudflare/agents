@@ -2,7 +2,9 @@
 
 A server-only example of `Sessions` on a plain Durable Object. It demonstrates streamed history reads, branches, compaction overlays, and Sessions-owned file attachments.
 
-Message JSON stays in Durable Object SQLite. File parts larger than 32 KiB become content-addressed pointers. Sessions stores payloads below 1,500,000 bytes in 1.5 MiB SQLite windows and streams larger payloads to R2, so small attachments avoid R2 requests while large images and PDFs stay out of message rows.
+Message JSON stays in Durable Object SQLite. Payloads at or above 32 KiB become content-addressed `attachment:sha256:` pointers: `data:` URL file parts, text and reasoning parts, and strings nested in tool outputs alike. Offload is lossless, so the default read reconstructs the original part byte for byte, and nothing is ever truncated to make a row fit.
+
+Sessions stores payloads below 1,500,000 bytes in 1.5 MiB SQLite windows and streams larger payloads to R2, so small attachments avoid R2 requests while large images and PDFs stay out of message rows.
 
 ## Run
 
@@ -64,3 +66,5 @@ curl http://localhost:8787/agents/session-object/demo/attachments/<hash> --outpu
 ```
 
 `history?attachments=pointer` is the memory-safe path for exports, reconciliation, and maintenance. The default history route reconstructs file parts as data URLs for consumers that require complete AI SDK messages.
+
+For measured storage and latency numbers against a deployed worker with a real R2 bucket, see [`examples/next/sessions-slam`](../sessions-slam).

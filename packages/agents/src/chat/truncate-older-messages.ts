@@ -7,8 +7,8 @@
  * Does NOT mutate stored messages — operates on a copy.
  */
 
-import { truncateToolOutput } from "../chat/tool-output-truncation";
-import type { SessionMessage } from "./types";
+import { truncateToolOutput } from "./tool-output-truncation";
+import type { SessionMessage } from "../sessions/types";
 
 export interface TruncateOptions {
   /** Number of recent messages to keep intact (default: 4) */

@@ -5,7 +5,7 @@
  * Each block is a row in cf_agents_context_blocks.
  */
 
-import type { WritableContextProvider } from "./context";
+import type { WritableContextProvider } from "./blocks";
 
 /** Minimal tagged-template SQL surface used by SQLite context providers. */
 export interface SqlProvider {
