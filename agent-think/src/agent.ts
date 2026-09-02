@@ -20,12 +20,12 @@ import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   ChatResponseResult,
-  Session,
   ThinkSubmissionStatus,
   ToolCallResultContext,
   TurnContext
 } from "@cloudflare/think";
 import { skills, Think } from "@cloudflare/think";
+import type { ContextConfig } from "agents/context";
 import type { WorkspaceAgent } from "./workspace-agent";
 import type { LanguageModel, ToolSet } from "ai";
 import { getAgentByName } from "agents";
@@ -71,20 +71,22 @@ export interface AgentThinkSubmissionStatus {
 }
 
 /**
- * Register agent-think's identity and operating contract as durable, read-only
- * Session context. Unlike getSystemPrompt(), this block remains present when
+ * agent-think's identity and operating contract as a durable, read-only
+ * context block. Unlike getSystemPrompt(), this block remains present when
  * Think adds its own skills catalog context.
  */
-export function configureAgentThinkSession(
-  session: Session,
+export function agentThinkContext(
   getContext: () => RunContext | null
-): Session {
-  return session.withContext("agent-think", {
-    description: "Run identity, user instruction, and operating contract.",
-    provider: {
-      get: async () => agentThinkInstructions(getContext())
+): ContextConfig[] {
+  return [
+    {
+      label: "agent-think",
+      description: "Run identity, user instruction, and operating contract.",
+      provider: {
+        get: async () => agentThinkInstructions(getContext())
+      }
     }
-  });
+  ];
 }
 
 function agentThinkInstructions(ctx: RunContext | null): string | null {
@@ -229,7 +231,7 @@ export class ThinkAgent extends ThinkBase {
     await this.ctx.storage.put(CONTEXT_KEY, context);
     // The context block provider reads #context. Re-freeze it for every
     // dispatch so a re-mention on the same issue sees the latest instruction.
-    await this.session.refreshSystemPrompt();
+    await this.context.refreshSystemPrompt();
   }
 
   async getContext(): Promise<RunContext | null> {
@@ -495,8 +497,8 @@ export class ThinkAgent extends ThinkBase {
 
   // ── Think hooks ────────────────────────────────────────────────
 
-  override configureSession(session: Session): Session {
-    return configureAgentThinkSession(session, () => this.#context);
+  override configureContext(): ContextConfig[] {
+    return agentThinkContext(() => this.#context);
   }
 
   override getModel(): LanguageModel {
