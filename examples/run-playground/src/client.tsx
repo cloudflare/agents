@@ -4,7 +4,7 @@ import {
   Breadcrumbs,
   Button,
   LayerCard,
-  PoweredByCloudflare,
+  CloudflareLogo,
   Sidebar,
   Switch,
   Text,
@@ -12,7 +12,6 @@ import {
 } from "@cloudflare/kumo";
 import {
   ArrowElbowDownRightIcon,
-  CloudIcon,
   GithubLogoIcon,
   MoonIcon,
   PlayIcon,
@@ -231,10 +230,10 @@ function DemoSidebar({
     <Sidebar className="sticky top-0 h-svh [--sidebar-active-bg:var(--color-kumo-recessed)] [--sidebar-bg:var(--color-kumo-base)] dark:[--sidebar-active-bg:var(--color-kumo-control)]">
       <Sidebar.Header>
         <div className="flex items-center gap-2 px-2 py-1.5">
-          <CloudIcon
-            size={20}
-            weight="fill"
-            className="shrink-0 text-[#f6821f]"
+          <CloudflareLogo
+            variant="glyph"
+            className="h-5 w-auto shrink-0"
+            aria-hidden
           />
           <span className="truncate font-mono text-sm font-medium text-kumo-default">
             @cloudflare/run
@@ -273,11 +272,6 @@ function DemoSidebar({
           </Sidebar.Menu>
         </Sidebar.Group>
       </Sidebar.Content>
-      <Sidebar.Footer>
-        <div className="px-2 pb-1">
-          <PoweredByCloudflare />
-        </div>
-      </Sidebar.Footer>
     </Sidebar>
   );
 }
