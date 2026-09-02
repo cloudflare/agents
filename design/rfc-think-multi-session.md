@@ -1,8 +1,17 @@
 # RFC: Think Multi-Session via Composition
 
-Status: proposed
+Status: rejected
 
-Supersedes the unimplemented `SessionManager`-inside-Think plan from the retired `think-sessions.md` design.
+Replaced by
+[`rfc-user-chat-durable-objects.md`](./rfc-user-chat-durable-objects.md), which
+uses one top-level Durable Object per user-visible chat. A deployed routing
+spike showed that the User Durable Object can return a Chat Durable Object's
+WebSocket upgrade without receiving subsequent Chat frames, so chats do not
+need facet-backed routing.
+
+This RFC superseded the "Multi-Session Support" section of
+[`think-sessions.md`](./think-sessions.md), the unimplemented
+`SessionManager`-inside-Think plan.
 
 ## Summary
 
@@ -22,7 +31,7 @@ Today:
 
 - Think has a stubbed-out `_sessionId()` that returns `""` and an `assistant_config` table keyed on `(session_id, key)` that never keys on anything. The scaffolding suggests "top-level multi-session inside one Think DO" but the feature was never built.
 - Users who want ChatGPT-like "list of my chats, shared memory, cross-chat search" have to hand-roll every part: the directory, the shared memory wiring, the search aggregation, the client UI.
-- The older `think-sessions.md` design proposed adding `SessionManager` to Think (Option A below). That would force all of a user's conversations to serialize onto a single Durable Object — Durable Objects are single-threaded.
+- The older [`think-sessions.md`](./think-sessions.md) design proposed adding `SessionManager` to Think (Option A below). That would force all of a user's conversations to serialize onto a single Durable Object — Durable Objects are single-threaded.
 
 ## Proposal
 
@@ -301,16 +310,15 @@ Used inside a Think subclass like this:
 
 ```ts
 class MyChat extends Think<Env> {
-  configureContext(): ContextConfig[] {
+  configureSession(session: Session) {
     const dir = this.parentAgent(MyChats);
-    return [
-      {
-        label: "memory",
+    return session
+      .withContext("memory", {
         description: "Facts about the user",
         maxTokens: 2000,
         provider: new RemoteContextProvider(dir, "user_memory")
-      }
-    ];
+      })
+      .withCachedPrompt();
   }
 }
 ```
@@ -402,7 +410,7 @@ export function useChats(opts: UseChatsOptions): UseChatsReturn;
 
 6. **Concurrency.** The directory DO is single-threaded; two child writes can't actually interleave. What you still need to guard against is **lost updates from read-modify-write**: child A reads memory, child B writes, child A writes back, B's update is gone. Mitigation: prefer `appendSharedContext(label, delta)` for the common additive case; reserve `setSharedContext` for full replacement. Document it.
 7. **Stale frozen snapshot.** Child freezes the system prompt (including `user_memory`). Parent memory updates from another chat mid-turn. Accept staleness for the current turn; `session.refreshSystemPrompt()` pulls fresh content on the next turn boundary.
-8. **Parent cold start.** First call to `getSharedContext()` in a turn wakes the parent. Adds RPC latency. Usually once per turn, because the frozen system prompt is persisted and reused.
+8. **Parent cold start.** First call to `getSharedContext()` in a turn wakes the parent. Adds RPC latency. Usually once per turn (Session's `withCachedPrompt()` caches the frozen prompt).
 9. **Parent RPC failure.** `RemoteContextProvider.get()` returns `null` instead of throwing — chat must keep working even if shared memory is briefly unreachable. Inference continues with an empty memory block; next turn it'll retry.
 10. **Parent deletion with live children.** Same fail-soft path: each turn `RemoteContextProvider.get()` returns `null`, so the child keeps working in a memoryless mode. No cascade failures.
 
@@ -444,7 +452,7 @@ Since Think hasn't been released (`0.x`, no `1.0` yet):
 3. Land `RemoteContextProvider` / `RemoteSearchProvider` in `agents/experimental/memory/session/providers/remote.ts`.
 4. Land `useChats()` React hook — thin wrapper over `useAgent({ agent, name, sub: [{ agent, name }] })`.
 5. Ship `examples/chats` + docs page `docs/think/multi-chat.md`.
-6. Cross-link from `docs/think/index.md`. The `SessionManager`-flavored design has been retired.
+6. Cross-link from `docs/think/index.md` and remove the `SessionManager`-flavored section in `think-sessions.md`.
 7. Keep `SessionManager` in `experimental/memory/session` with a README note pointing at this RFC for the common case.
 
 ## Follow-ups (intentionally out of v1)
