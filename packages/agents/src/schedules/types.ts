@@ -103,11 +103,11 @@ export type ScheduleOptions = {
  * @internal Chat-recovery scaffolding, deliberately NOT part of
  * {@link ScheduleOptions}: schedules only shape future work — a row that
  * drives an OOM-prone loop belongs in the Tasks capability, whose runs
- * carry their own memory-limit policy. Until chat recovery migrates onto
- * Tasks, its schedules ride the alarm memory-limit breaker (#1825) through
- * this option; the Scheduler passes it through to the Lifecycle job row
- * untouched (`LifecycleJobPushOptions.recoveryLoop`). Removed with that
- * migration — do not use it for new work.
+ * carry their own memory-limit policy. Root chat recovery now uses Tasks;
+ * routed dynamic agents retain this schedule bridge until Tasks can mirror
+ * their wakes to the root alarm owner. Scheduler passes the option through to
+ * `LifecycleJobPushOptions.recoveryLoop`. Remove it after that routed cutover
+ * and legacy-row drain; do not use it for new work.
  */
 export type RecoveryLoopScheduleOptions = ScheduleOptions & {
   recoveryLoop: true;

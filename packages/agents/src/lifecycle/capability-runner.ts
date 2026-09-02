@@ -57,16 +57,18 @@ export type MemoryLimitContext = {
    * backed off or purged its row before invoking memory-limit policy.
    *
    * Capabilities whose durable state outlives their queue row use this to
-   * apply the same policy to the underlying work. Scheduler temporarily also
-   * uses a routed job's address to deliver sealing to its owning dynamic agent;
-   * chat recovery's Tasks migration removes that compatibility path.
+   * apply the same policy to the underlying work — Tasks routes a struck
+   * routed job's owner this way (see `setTaskRoutedMemoryLimitHandler`).
    */
   readonly executing?: LifecycleJob;
   /**
-   * Recovery-loop jobs removed when this strike sealed the breaker. This is a
-   * pre-purge snapshot because the durable rows no longer exist when policy
-   * hooks run. Routed capabilities can use it to notify each owning Lifecycle;
-   * ordinary capabilities should prefer `executing`.
+   * Recovery-loop jobs removed when this strike sealed the breaker. This is
+   * a pre-purge snapshot because the durable rows no longer exist when
+   * policy hooks run. No current capability reads this — Scheduler's own
+   * former use of it (routing a sealed strike to every purged row's owning
+   * dynamic agent) was retired once Tasks took over routed chat-recovery
+   * wakes — but it stays available for a capability whose routed rows can
+   * be purged as a pack, unlike Tasks' one-run-at-a-time model.
    */
   readonly purgedRecoveryLoopJobs?: ReadonlyArray<LifecycleJob>;
 };

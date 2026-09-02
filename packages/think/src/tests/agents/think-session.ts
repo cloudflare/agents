@@ -47,6 +47,8 @@ import type {
 } from "../../think";
 import {
   CHAT_MESSAGE_TYPES,
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator
@@ -75,6 +77,99 @@ export type RpcJsonObject = Record<
   | null
   | ReadonlyArray<string | number | boolean | null>
 >;
+
+function recoveryTransportCountsForTest(
+  agent: Think,
+  callback: string
+): { tasks: number; schedules: number } {
+  const scheduled = agent.sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM cf_agents_jobs
+    WHERE capability = 'scheduler' AND fn = ${callback}
+  `;
+  const tasks = agent.sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND state IN ('pending', 'running', 'waiting')
+      AND json_extract(metadata, '$.callback') = ${callback}
+  `;
+  return {
+    tasks: tasks[0]?.count ?? 0,
+    schedules: scheduled[0]?.count ?? 0
+  };
+}
+
+function recoveryWorkCountForTest(agent: Think, callback: string): number {
+  const counts = recoveryTransportCountsForTest(agent, callback);
+  return counts.tasks + counts.schedules;
+}
+
+async function runQueuedRecoveryTaskForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<boolean> {
+  const rows = agent.sql<{ run_id: string }>`
+    SELECT run_id FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND state IN ('pending', 'running', 'waiting')
+      AND json_extract(metadata, '$.callback') = ${callback}
+    ORDER BY created_at ASC
+    LIMIT 1
+  `;
+  const runId = rows[0]?.run_id;
+  if (!runId) return false;
+  const past = Date.now() - 1_000;
+  agent.sql`
+    UPDATE cf_agents_task_runs
+    SET next_at = ${past}, input = json_set(input, '$.delaySeconds', 0)
+    WHERE run_id = ${runId}
+  `;
+  agent.sql`
+    UPDATE cf_agents_task_steps SET next_at = ${past}
+    WHERE run_id = ${runId} AND kind = 'sleep'
+  `;
+  agent.sql`
+    UPDATE cf_agents_jobs SET time = ${past}
+    WHERE id = ${`task:${runId}`}
+  `;
+  await agent.alarm();
+  return true;
+}
+
+async function waitForThinkIdleForTest(agent: Think): Promise<void> {
+  await (
+    agent as unknown as { _turnQueue: { waitForIdle(): Promise<void> } }
+  )._turnQueue.waitForIdle();
+}
+
+async function runRecoveryWorkForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<void> {
+  if (await runQueuedRecoveryTaskForTest(agent, callback)) {
+    await waitForThinkIdleForTest(agent);
+    return;
+  }
+  const rows = agent.sql<{ payload: string }>`
+    SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+    WHERE capability = 'scheduler' AND fn = ${callback}
+    ORDER BY time ASC
+    LIMIT 1
+  `;
+  const payload = rows[0]?.payload;
+  if (!payload) {
+    await waitForThinkIdleForTest(agent);
+    return;
+  }
+  const host = agent as unknown as {
+    _chatRecoveryContinueDetached(data: unknown): Promise<void>;
+    _chatRecoveryRetryDetached(data: unknown): Promise<void>;
+  };
+  if (callback === "_chatRecoveryContinue") {
+    await host._chatRecoveryContinueDetached(JSON.parse(payload));
+  } else {
+    await host._chatRecoveryRetryDetached(JSON.parse(payload));
+  }
+}
 
 // ── Mock LanguageModel (v3 format) ──────────────────────────────
 
@@ -1436,24 +1531,14 @@ export class ThinkTestAgent extends Think {
     this.chatStreamStallTimeoutMs = timeoutMs;
     try {
       const first = await this.testChat("trigger stall then recover");
-      const scheduled = this.sql<{ payload: string }>`
-        SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-        WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        ORDER BY time ASC LIMIT 1
-      `;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_jobs
-          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
-      // Drive the scheduled continuation — this inference streams normally (the
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      // Drive the queued continuation — this inference streams normally (the
       // stall budget is exhausted), so the turn completes.
-      if (scheduled[0]) {
-        await (
-          this as unknown as {
-            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
-          }
-        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
       }
 
       const messages = await this.getMessages();
@@ -1500,22 +1585,12 @@ export class ThinkTestAgent extends Think {
     this._stallAttemptsRemaining = 1;
     try {
       const first = await this.testChat("per-turn stall override");
-      const scheduled = this.sql<{ payload: string }>`
-        SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-        WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        ORDER BY time ASC LIMIT 1
-      `;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_jobs
-          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
-      if (scheduled[0]) {
-        await (
-          this as unknown as {
-            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
-          }
-        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
       }
       const messages = await this.getMessages();
       const assistant = messages.filter((m) => m.role === "assistant");
@@ -1601,11 +1676,10 @@ export class ThinkTestAgent extends Think {
       const coalesceTimerArmedAfterStall =
         internal._autoContinuation._timer !== null;
       const streamingAssistantCleared = internal._streamingAssistant === null;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_jobs
-          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
       return {
         firstError: first.error,
         scheduledContinues,
@@ -2115,6 +2189,25 @@ export class ThinkTestAgent extends Think {
   async getLastBeforeTurnSystem(): Promise<string | null> {
     const log = this._beforeTurnLog;
     return log.length > 0 ? log[log.length - 1].system : null;
+  }
+
+  /** Insert a fiber-ledger row so `_checkRunFibers` finds it interrupted. */
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${crypto.randomUUID()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  /** Drive this facet's own fiber-recovery scan, exactly as a real wake would. */
+  async triggerFiberRecovery(): Promise<void> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
   }
 }
 
@@ -4842,53 +4935,25 @@ export class ThinkToolsTestAgent extends Think {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
-    // Recovery arms ZERO-delay schedules whose alarms the workers test pool
-    // can fire as soon as this RPC releases the DO, consuming the job rows.
-    // Read the counts synchronously inside the same invocation so callers can
-    // assert on them without racing that alarm.
+    // Read recovery state synchronously inside the same invocation: an
+    // immediate alarm may consume it after this RPC releases the object.
     return {
-      scheduledContinueCount: this._countScheduledChatRecovery(
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
         "_chatRecoveryContinue"
       ),
-      scheduledRetryCount:
-        this._countScheduledChatRecovery("_chatRecoveryRetry")
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
     };
-  }
-
-  private _countScheduledChatRecovery(callback: string): number {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler' AND fn = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
   }
 
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    return this._countScheduledChatRecovery(callback);
+    return recoveryWorkCountForTest(this, callback);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await (
-      this as unknown as {
-        _chatRecoveryRetryDetached(d: {
-          targetUserId?: string;
-          lastBody?: Record<string, unknown>;
-        }): Promise<void>;
-      }
-    )._chatRecoveryRetryDetached(
-      JSON.parse(rows[0].payload) as {
-        targetUserId?: string;
-        lastBody?: Record<string, unknown>;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
   async insertInterruptedStream(
@@ -4915,28 +4980,7 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await (
-      this as unknown as {
-        _chatRecoveryContinueDetached(d: {
-          targetAssistantId?: string;
-          lastBody?: Record<string, unknown> | null;
-          lastClientTools?: ClientToolSchema[] | null;
-        }): Promise<void>;
-      }
-    )._chatRecoveryContinueDetached(
-      JSON.parse(rows[0].payload) as {
-        targetAssistantId?: string;
-        lastBody?: Record<string, unknown> | null;
-        lastClientTools?: ClientToolSchema[] | null;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
@@ -7665,36 +7709,11 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await this._chatRecoveryRetryDetached(
-      JSON.parse(rows[0].payload) as {
-        targetUserId?: string;
-        lastBody?: Record<string, unknown>;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await this._chatRecoveryContinueDetached(
-      JSON.parse(rows[0].payload) as {
-        targetAssistantId?: string;
-        lastBody?: Record<string, unknown> | null;
-        lastClientTools?: ClientToolSchema[] | null;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
   async setRequestContextForTest(
@@ -7763,7 +7782,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    return this._countScheduledChatRecovery(callback);
+    return recoveryWorkCountForTest(this, callback);
   }
 
   /** Insert a stream-metadata row aged `ageMs` in the past (for cleanup tests). */
@@ -7881,26 +7900,24 @@ export class ThinkRecoveryTestAgent extends Think {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
-    // Recovery arms ZERO-delay schedules whose alarms the workers test pool
-    // can fire as soon as this RPC releases the DO, consuming the job rows.
-    // Read the counts synchronously inside the same invocation so callers can
-    // assert on them without racing that alarm.
+    // Read recovery state synchronously inside the same invocation: an
+    // immediate alarm may consume it after this RPC releases the object.
     return {
-      scheduledContinueCount: this._countScheduledChatRecovery(
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
         "_chatRecoveryContinue"
       ),
-      scheduledRetryCount:
-        this._countScheduledChatRecovery("_chatRecoveryRetry")
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
     };
   }
 
-  private _countScheduledChatRecovery(callback: string): number {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count
-      FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+  async triggerFiberRecoveryWithTransportForTest(
+    callback: string
+  ): Promise<{ tasks: number; schedules: number }> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+    return recoveryTransportCountsForTest(this, callback);
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
@@ -8085,13 +8102,81 @@ export class ThinkRecoveryTestAgent extends Think {
     )._chatRecoveryRetry(data);
   }
 
+  /** Exercise platform failure ownership on either side of model handoff. */
+  async testRecoveryDispatchHandoffForTest(options: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    phase: "before" | "after";
+  }): Promise<{ threw: boolean; tasks: number; schedules: number }> {
+    const data = { incidentId: crypto.randomUUID() };
+    if (options.callback === "_chatRecoveryContinue") {
+      await this.preScheduleRecoveryContinueForTest(data);
+    } else {
+      await this.preScheduleRecoveryRetryForTest(data);
+    }
+
+    type ContinueData = Parameters<Think["_chatRecoveryContinue"]>[0];
+    type RetryData = Parameters<Think["_chatRecoveryRetry"]>[0];
+    const host = this as unknown as {
+      _chatRecoveryContinueDetached(
+        data?: ContinueData,
+        onTurnStarted?: () => void
+      ): Promise<void>;
+      _chatRecoveryRetryDetached(
+        data?: RetryData,
+        onTurnStarted?: () => void
+      ): Promise<void>;
+    };
+    const originalContinue = host._chatRecoveryContinueDetached.bind(this);
+    const originalRetry = host._chatRecoveryRetryDetached.bind(this);
+    const fail = async (onTurnStarted?: () => void): Promise<never> => {
+      if (options.phase === "after") {
+        onTurnStarted?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      throw new Error("Network connection lost.");
+    };
+    host._chatRecoveryContinueDetached = (_data, onTurnStarted) =>
+      fail(onTurnStarted);
+    host._chatRecoveryRetryDetached = (_data, onTurnStarted) =>
+      fail(onTurnStarted);
+
+    let threw = false;
+    try {
+      if (options.callback === "_chatRecoveryContinue") {
+        await this._chatRecoveryContinue(data);
+      } else {
+        await this._chatRecoveryRetry(data);
+      }
+    } catch (error) {
+      threw =
+        error instanceof Error &&
+        error.message.includes("Network connection lost");
+    } finally {
+      host._chatRecoveryContinueDetached = originalContinue;
+      host._chatRecoveryRetryDetached = originalRetry;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      threw,
+      ...recoveryTransportCountsForTest(this, options.callback)
+    };
+  }
+
   /** Retry-path twin of `preScheduleRecoveryContinueForTest`. */
   async preScheduleRecoveryRetryForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryRetry", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<{
@@ -8113,17 +8198,20 @@ export class ThinkRecoveryTestAgent extends Think {
       : null;
   }
 
-  /**
-   * Pre-insert a matching `_chatRecoveryContinue` schedule row to simulate the
-   * not-yet-deleted one-shot row that `alarm()` is executing — so a reschedule
-   * with `idempotent: true` would (incorrectly) dedup onto it.
-   */
+  /** Pre-insert a recovery Task representing the current dispatch. */
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryContinue", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryContinue" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getScheduledChatRecoveryPayloadForTest(
@@ -8134,14 +8222,24 @@ export class ThinkRecoveryTestAgent extends Think {
     // `payload` as `never`. The scheduled payload only needs its recovery-link
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
-    const rows = this.sql<{ payload: string }>`
+    const taskRows = this.sql<{ payload: string }>`
+      SELECT json_extract(input, '$.data') AS payload
+      FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+        AND json_extract(metadata, '$.callback') = ${callback}
+      ORDER BY created_at ASC
+      LIMIT 1
+    `;
+    const scheduledRows = this.sql<{ payload: string }>`
       SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = ${callback}
       ORDER BY time ASC
       LIMIT 1
     `;
-    return rows[0]
-      ? (JSON.parse(rows[0].payload) as {
+    const payload = taskRows[0]?.payload ?? scheduledRows[0]?.payload;
+    return payload
+      ? (JSON.parse(payload) as {
           recoveredRequestId?: string;
           requestId?: string;
         })

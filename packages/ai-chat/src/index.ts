@@ -66,11 +66,15 @@ import {
   STREAM_CLEANUP_DELAY_SECONDS
 } from "agents/chat";
 import type { Streams } from "agents/streams";
-import { createChatTurnTaskDefinition } from "agents/chat";
 import {
-  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
-  isPlatformFailure
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
+  createChatRecoveryTaskDefinition,
+  createChatTurnTaskDefinition,
+  dispatchChatRecoveryToHandoff,
+  type ChatRecoveryTaskReason
 } from "agents/chat";
+import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
 import { MAX_BOUND_PARAMS, buildInClauseStrings } from "agents/chat";
 import {
   ContinuationState,
@@ -85,8 +89,6 @@ import {
 } from "agents/chat";
 import {
   resolveChatRecoveryConfig,
-  chatRecoveryRedeferPolicy,
-  chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
   ChatStreamStalledError,
@@ -697,7 +699,7 @@ export class AIChatAgent<
   private _registerChatTurnTaskDefinition(): void {
     const chatFiberName = (this.constructor as typeof AIChatAgent)
       .CHAT_FIBER_NAME;
-    this._registerInternalTaskDefinition(
+    this.tasks.register(
       chatFiberName,
       createChatTurnTaskDefinition({
         definitionName: chatFiberName,
@@ -709,6 +711,70 @@ export class AIChatAgent<
         withStash: (context, fn) => this._withFiberStash(context, fn),
         handleRecovery: (ctx) => this._handleInternalFiberRecovery(ctx)
       })
+    );
+  }
+
+  /** Register the shared Tasks transport for recovery continuations. */
+  private _registerChatRecoveryTaskDefinition(): void {
+    // SAFETY: the recovery engine is the sole producer of each callback's
+    // payload and the Task persists it verbatim, so the callback name selects
+    // the matching host input type.
+    this.tasks.register(
+      CHAT_RECOVERY_TASK_NAME,
+      createChatRecoveryTaskDefinition({
+        _chatRecoveryContinue: (data) =>
+          this._chatRecoveryContinue(data as ChatRecoveryContinueData),
+        _chatRecoveryRetry: (data) =>
+          this._chatRecoveryRetry(data as ChatRecoveryRetryData)
+      })
+    );
+  }
+
+  /**
+   * Run a queue-driven recovery callback to its model handoff and return;
+   * the turn continues as tracked alarm work, and a detached platform
+   * failure enqueues one replacement attempt through the same transport.
+   */
+  private _dispatchChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown> | undefined,
+    detached: (onTurnStarted: () => void) => Promise<void>
+  ): Promise<void> {
+    return dispatchChatRecoveryToHandoff({
+      detached,
+      track: (turn) => this.lifecycle.trackAlarmWork(turn),
+      redefer: (dedupeKey) =>
+        this._enqueueChatRecovery(
+          callback,
+          data ?? {},
+          "redefer",
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          dedupeKey
+        ),
+      onDetachedError: (error) =>
+        console.error(`[AIChatAgent] ${callback} dispatch failed`, error)
+    });
+  }
+
+  /**
+   * Enqueue one recovery attempt on the shared Tasks transport. Tasks
+   * mirrors a routed dynamic agent's wake to the root's alarm; the run
+   * itself, and this continuation's replay, still execute here. `dedupeKey`
+   * keys a retried enqueue so it joins its own prior attempt instead of
+   * duplicating it — see {@link chatRecoveryTaskRunOptions}.
+   */
+  private async _enqueueChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown>,
+    reason: ChatRecoveryTaskReason,
+    delaySeconds: number,
+    dedupeKey?: string
+  ): Promise<void> {
+    const input = { callback, data, delaySeconds };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, reason, dedupeKey)
     );
   }
 
@@ -729,7 +795,7 @@ export class AIChatAgent<
     const wrap = (data: unknown) =>
       wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
 
-    // Facet-hosted turns stay on the legacy fiber engine: the Fibers
+    // Facet-hosted turns stay on the legacy fiber engine: the Tasks
     // capability does not accept runs on routed sub-agents yet, and facet
     // recovery routes through the root's facet-run index.
     if (this.parentPath.length > 0) {
@@ -883,6 +949,7 @@ export class AIChatAgent<
     super(ctx, env);
     this.lifecycle.use(this.streams);
     this._registerChatTurnTaskDefinition();
+    this._registerChatRecoveryTaskDefinition();
     withAgentSpan(
       this,
       "chat_initialization",
@@ -4490,14 +4557,8 @@ export class AIChatAgent<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
-      scheduleRecovery: async (callback, data, reason, delaySeconds) => {
-        await this.schedule(
-          delaySeconds,
-          callback,
-          data,
-          chatRecoverySchedulePolicy(reason)
-        );
-      },
+      scheduleRecovery: (callback, data, reason, delaySeconds) =>
+        this._enqueueChatRecovery(callback, data, reason, delaySeconds),
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
@@ -4918,42 +4979,11 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
-    // Queue-driven schedule callback: the recovered turn can legitimately
-    // run for a long time (a hanging model stream is bounded only by the
-    // step timeout), and awaiting it here would hold the Lifecycle job
-    // queue — starving every other job on this object, including the very
-    // replay-wakes that advance recovery budgets. Dispatch detached, exactly
-    // as the legacy fire-and-forget runFiber dispatch did; all incident
-    // bookkeeping settles inside the detached body when the turn does.
-    let handoff: () => void = () => {};
-    const reachedTurn = new Promise<void>((resolve) => {
-      handoff = resolve;
-    });
-    const dispatch = this._chatRecoveryContinueDetached(data, handoff);
-    dispatch.catch((error) => {
-      if (isPlatformFailure(error)) {
-        // The queue job completed at the turn handoff, so the driver's
-        // platform-failure deferral can no longer apply; re-defer the
-        // dispatch ourselves so the turn re-runs on a fresh invocation
-        // (#1730).
-        void this.schedule(
-          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
-          "_chatRecoveryContinue",
-          data,
-          chatRecoveryRedeferPolicy()
-        ).catch(() => {});
-        return;
-      }
-      // Other failures after the handoff are the detached turn's own; its
-      // internal handling (OOM intercept, incident bookkeeping) already ran.
-      console.error(
-        "[AIChatAgent] _chatRecoveryContinue dispatch failed",
-        error
-      );
-    });
-    // A platform transient thrown before the turn starts must reach the
-    // queue so the job defers and retries (#1730).
-    await Promise.race([dispatch, reachedTurn]);
+    await this._dispatchChatRecovery(
+      "_chatRecoveryContinue",
+      data,
+      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+    );
   }
 
   protected async _chatRecoveryContinueDetached(
@@ -5047,8 +5077,9 @@ export class AIChatAgent<
       );
     } catch (error) {
       // AIChatAgent otherwise has no continuation `catch` (a thrown error
-      // propagates to `Agent._executeScheduleCallback`). The ONLY case we
-      // intercept is an OOM thrown out of the turn (#1825): route it through the
+      // propagates to the driving Task attempt, or the routed one-shot
+      // schedule row). The ONLY case we intercept is an OOM thrown out of
+      // the turn (#1825): route it through the
       // tight OOM-retry budget, and rethrow everything else so the existing
       // behavior is byte-identical for non-OOM errors.
       if (await this._handleRecoveryOom("_chatRecoveryContinue", data, error)) {
@@ -5232,8 +5263,9 @@ export class AIChatAgent<
    * Two residual at-least-once edges, both deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
-   *    invocation — every production scheduler carries one): the synthesized
-   *    incident can't be persisted (no key), so the guard can't arm.
+   *    invocation — every production recovery enqueue carries one): the
+   *    synthesized incident can't be persisted (no key), so the guard can't
+   *    arm.
    *  • The record is swept AGAIN between two alarms (the guard re-persists on
    *    the first, so this needs a second independent sweep) — vanishingly
    *    unlikely.
@@ -5241,10 +5273,11 @@ export class AIChatAgent<
   /**
    * Host memory-limit policy hook (#1825), dispatched structurally by
    * Lifecycle's circuit breaker — protected because it is framework
-   * machinery, not part of the public chat API. The breaker has already
-   * backed off / purged the `recoveryLoop`-flagged schedule rows (see
-   * `chatRecoverySchedulePolicy`); at the strike budget this seals
-   * in-flight recovery via {@link _cf_sealMemoryLimitedRecovery}.
+   * machinery, not part of the public chat API. Tasks applies the breaker to
+   * root recovery runs; the routed dynamic-agent fallback applies it to
+   * `recoveryLoop` schedule rows (see `RecoveryLoopScheduleOptions`). At the
+   * strike budget this hook seals active incidents via
+   * {@link _cf_sealMemoryLimitedRecovery}.
    */
   protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
     if (!context.sealed) return;
@@ -5374,39 +5407,11 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
-    // Queue-driven schedule callback: the recovered turn can legitimately
-    // run for a long time (a hanging model stream is bounded only by the
-    // step timeout), and awaiting it here would hold the Lifecycle job
-    // queue — starving every other job on this object, including the very
-    // replay-wakes that advance recovery budgets. Dispatch detached, exactly
-    // as the legacy fire-and-forget runFiber dispatch did; all incident
-    // bookkeeping settles inside the detached body when the turn does.
-    let handoff: () => void = () => {};
-    const reachedTurn = new Promise<void>((resolve) => {
-      handoff = resolve;
-    });
-    const dispatch = this._chatRecoveryRetryDetached(data, handoff);
-    dispatch.catch((error) => {
-      if (isPlatformFailure(error)) {
-        // The queue job completed at the turn handoff, so the driver's
-        // platform-failure deferral can no longer apply; re-defer the
-        // dispatch ourselves so the turn re-runs on a fresh invocation
-        // (#1730).
-        void this.schedule(
-          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
-          "_chatRecoveryRetry",
-          data,
-          chatRecoveryRedeferPolicy()
-        ).catch(() => {});
-        return;
-      }
-      // Other failures after the handoff are the detached turn's own; its
-      // internal handling (OOM intercept, incident bookkeeping) already ran.
-      console.error("[AIChatAgent] _chatRecoveryRetry dispatch failed", error);
-    });
-    // A platform transient thrown before the turn starts must reach the
-    // queue so the job defers and retries (#1730).
-    await Promise.race([dispatch, reachedTurn]);
+    await this._dispatchChatRecovery(
+      "_chatRecoveryRetry",
+      data,
+      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+    );
   }
 
   protected async _chatRecoveryRetryDetached(

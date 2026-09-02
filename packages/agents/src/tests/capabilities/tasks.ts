@@ -197,6 +197,165 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           return "ok";
         });
         return "fin";
+      },
+
+      /**
+       * Deterministically exhausts memory while a durable countdown remains
+       * (#1825): the counter survives the breaker's isolate resets, so every
+       * reclaim re-throws until the countdown ends — the shape of a doomed
+       * recovery loop the alarm memory-limit breaker must contain.
+       */
+      oomLoop: async (_input: undefined, _step: TaskStep) => {
+        const remaining =
+          (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+        if (remaining > 0) {
+          await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+          await this.ctx.storage.sync();
+          throw new Error(
+            "Durable Object's isolate exceeded its memory limit and was reset."
+          );
+        }
+        return "recovered";
+      },
+
+      /** The same poison signal thrown from inside a journaled step. */
+      oomStepLoop: async (_input: undefined, step: TaskStep) => {
+        await step.do(
+          "oom-step",
+          { retries: { limit: 3, delay: "1 minute" } },
+          async () => {
+            const remaining =
+              (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+            if (remaining > 0) {
+              await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+              await this.ctx.storage.sync();
+              throw new Error(
+                "Durable Object's isolate exceeded its memory limit and was reset."
+              );
+            }
+            return "recovered";
+          }
+        );
+      },
+
+      /** Exhausts its durable step budget on a platform transient. */
+      exhaustedPlatformStep: async (_input: undefined, step: TaskStep) => {
+        await step.do(
+          "connection",
+          { retries: { limit: 1 } },
+          ({ attempt }) => {
+            this.stepRuns.push(`exhausted-platform-step:${attempt}`);
+            throw new Error("Network connection lost.");
+          }
+        );
+      },
+
+      /** Throws the OOM signal only after Tasks detaches from JobDriver. */
+      lateOomStepLoop: async (_input: undefined, step: TaskStep) => {
+        await step.do(
+          "late-oom-step",
+          { retries: { limit: 3 }, timeout: 10_000 },
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 5_050));
+            const remaining =
+              (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+            if (remaining > 0) {
+              await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+              await this.ctx.storage.sync();
+              throw new Error(
+                "Durable Object's isolate exceeded its memory limit and was reset."
+              );
+            }
+            return "recovered";
+          }
+        );
+      },
+
+      /**
+       * One condemned attempt observed by two handoffs: the step's own memory
+       * reset plus a sibling promise the handler registered with the alarm
+       * that rejects with the same reset. The breaker must record one strike
+       * for the pair, not one per observer.
+       */
+      twinLateOom: async (_input: undefined, step: TaskStep) => {
+        const sibling = new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  "Durable Object's isolate exceeded its memory limit and was reset."
+                )
+              ),
+            5_050
+          );
+        });
+        this.lifecycle.trackAlarmWork(sibling);
+        await step.do(
+          "twin-oom-step",
+          { retries: { limit: 3 }, timeout: 10_000 },
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 5_050));
+            const remaining =
+              (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+            if (remaining > 0) {
+              await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+              await this.ctx.storage.sync();
+              throw new Error(
+                "Durable Object's isolate exceeded its memory limit and was reset."
+              );
+            }
+            return "recovered";
+          }
+        );
+      },
+
+      /**
+       * This run's own attempt strikes distinctly BEFORE a separately
+       * tracked sibling settles clean. The strike's isolate-reset side
+       * effect is scheduled but deferred; the clean sibling settling in that
+       * gap must not clear what the strike just recorded.
+       */
+      oomBeforeCleanSibling: async (_input: undefined, step: TaskStep) => {
+        const cleanSibling = new Promise<string>((resolve) => {
+          setTimeout(() => resolve("clean-sibling"), 7_000);
+        });
+        this.lifecycle.trackAlarmWork(cleanSibling);
+        await step.do(
+          "oom-before-clean-sibling",
+          { retries: { limit: 3 }, timeout: 10_000 },
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 5_050));
+            const remaining =
+              (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+            if (remaining > 0) {
+              await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+              await this.ctx.storage.sync();
+              throw new Error(
+                "Durable Object's isolate exceeded its memory limit and was reset."
+              );
+            }
+            return "recovered";
+          }
+        );
+      },
+
+      /** Settles successfully after Tasks' five-second job handoff. */
+      lateSuccess: async (_input: undefined, step: TaskStep) => {
+        return step.do("late-success-step", { timeout: 10_000 }, async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5_250));
+          return "late-success";
+        });
+      },
+
+      /**
+       * Clean sibling that is still active when the same alarm starts an OOM.
+       * Well under the 2s step timeout so it completes rather than re-parks.
+       */
+      alarmSiblingSuccess: async (_input: undefined, step: TaskStep) => {
+        return step.do("alarm-sibling", async () => {
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+          return "alarm-sibling-success";
+        });
       }
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },
@@ -256,6 +415,26 @@ export class TaskSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
     callbacks: {
       remind: (payload) => {
         this.remindRuns.push(String(payload));
+      },
+
+      /**
+       * Sleeps, then conditionally throws the OOM signal. A Scheduler job
+       * carries none of Tasks' own active-attempt tracking, so a memory-limit
+       * regression test can use it to isolate JobDriver's own alarm-boundary
+       * attribution from Tasks' independent (and already correct) re-tracking
+       * of a Task run an overlapping alarm invocation happens to re-dispatch.
+       */
+      slowOom: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        const remaining =
+          (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+        if (remaining > 0) {
+          await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+          await this.ctx.storage.sync();
+          throw new Error(
+            "Durable Object's isolate exceeded its memory limit and was reset."
+          );
+        }
       }
     }
   });
@@ -276,14 +455,16 @@ export function seedTaskRun(
     readonly generation?: string;
     readonly attempt?: number;
     readonly nextAt: number;
+    readonly retain?: boolean;
+    readonly idempotencyKey?: string;
   }
 ): void {
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_agents_task_runs
        (run_id, definition, input, state, generation, attempt, next_at,
-        retain, cancel_requested, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+        idempotency_key, retain, cancel_requested, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     options.runId,
     options.definition,
     options.input === undefined ? null : JSON.stringify(options.input),
@@ -291,6 +472,8 @@ export function seedTaskRun(
     options.generation ?? null,
     options.attempt ?? 0,
     options.nextAt,
+    options.idempotencyKey ?? null,
+    options.retain === false ? 0 : 1,
     now,
     now
   );
