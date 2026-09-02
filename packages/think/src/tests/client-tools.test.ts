@@ -8,6 +8,7 @@ import type { ChatResponseResult } from "../think";
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
+const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
 const MSG_TOOL_RESULT = "cf_agent_tool_result";
 const MSG_TOOL_APPROVAL = "cf_agent_tool_approval";
 const MSG_MESSAGE_UPDATED = "cf_agent_message_updated";
@@ -3043,6 +3044,83 @@ describe("Think — regeneration", () => {
     expect(promptRoles).toEqual([
       ["system", "user"],
       ["system", "user"]
+    ]);
+
+    await closeWS(ws);
+  });
+
+  it("repairs selected model history without replacing the active transcript", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    const firstUser = makeUserMessage("look this up");
+    const interruptedAssistant = makeToolMessage(
+      "tc-interrupted-branch",
+      "server_lookup",
+      "input-available"
+    );
+    const selectedUser = makeUserMessage("give me a different answer");
+    const previousAssistant: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "Previous answer" }]
+    };
+    await agent.persistToolCallMessage([
+      firstUser,
+      interruptedAssistant,
+      selectedUser,
+      previousAssistant
+    ]);
+
+    await agent.failNextTurnBeforeStream();
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [firstUser, interruptedAssistant, selectedUser], {
+      trigger: "regenerate-message"
+    });
+    const responseFrames = await donePromise;
+    await delay(200);
+
+    // Provider repair runs against the selected branch (which excludes the old
+    // answer), but the live cache remains the active path until the new sibling
+    // is persisted. Replacing it with model history would drop this id here.
+    const liveIdsAtTurnStart = await agent.getLiveMessageIdsAtTurnStart();
+    expect(liveIdsAtTurnStart.at(-1)).toEqual([
+      firstUser.id,
+      interruptedAssistant.id,
+      selectedUser.id,
+      previousAssistant.id
+    ]);
+
+    // The inference failed before a new sibling could be persisted. The active
+    // transcript and its client-facing view therefore still include the old
+    // answer, while the interrupted common-ancestor tool call was repaired.
+    const activeMessages = (await agent.getMessages()) as UIMessage[];
+    expect(activeMessages.map((message) => message.id)).toEqual([
+      firstUser.id,
+      interruptedAssistant.id,
+      selectedUser.id,
+      previousAssistant.id
+    ]);
+    expect((activeMessages[1].parts[0] as { state?: string }).state).toBe(
+      "output-error"
+    );
+    const repairedBroadcast = responseFrames.find(
+      (frame) => frame.type === MSG_CHAT_MESSAGES
+    );
+    if (!repairedBroadcast || !Array.isArray(repairedBroadcast.messages)) {
+      throw new Error("Expected repaired transcript broadcast");
+    }
+    expect(
+      (repairedBroadcast.messages as UIMessage[]).map((message) => message.id)
+    ).toEqual(activeMessages.map((message) => message.id));
+
+    const branches = (await agent.getBranches(selectedUser.id)) as UIMessage[];
+    expect(branches.map((message) => message.id)).toEqual([
+      previousAssistant.id
     ]);
 
     await closeWS(ws);
