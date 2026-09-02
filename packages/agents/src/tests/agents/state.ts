@@ -315,8 +315,9 @@ export class TestThrowingStateAgent extends Agent<Cloudflare.Env, TestState> {
   }
 
   // Notification hook: should not gate broadcasts; errors go to onError
-  onStateChanged(state: TestState, _source: Connection | "server") {
+  async onStateChanged(state: TestState, _source: Connection | "server") {
     this.onStateChangedCalled = true;
+    await Promise.resolve();
     if (state.count === -2) {
       throw new Error("onStateChanged failed: count cannot be -2");
     }

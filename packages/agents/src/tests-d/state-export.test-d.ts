@@ -20,6 +20,16 @@ const options = {
   }
 } satisfies StateManagerOptions<CounterState>;
 
+const asyncOptions = {
+  onChanged: async (state, source) => {
+    state satisfies CounterState;
+    source satisfies StateChangeSource;
+    await Promise.resolve();
+  }
+} satisfies StateManagerOptions<CounterState>;
+
+new StateManager(asyncOptions);
+
 class CounterObject extends DurableObject {
   readonly state = new StateManager(options);
   readonly lifecycle = Lifecycle.install(this).use(this.state);

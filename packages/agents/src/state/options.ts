@@ -30,7 +30,10 @@ export interface StateManagerOptions<State = unknown> {
   readonly initialState?: State;
 
   /** Called after a change is validated and persisted. */
-  readonly onChanged?: (state: State, source: StateChangeSource) => void;
+  readonly onChanged?: (
+    state: State,
+    source: StateChangeSource
+  ) => void | Promise<void>;
 
   /**
    * Synchronous gating hook run before a change is persisted. Throw to reject

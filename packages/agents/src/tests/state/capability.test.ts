@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { withCapabilityHarness } from "../shared/capability-harness";
 import { StateManager, type StateChangeSource } from "../../state";
 
@@ -123,7 +123,9 @@ describe("StateManager capability", () => {
       const events: Array<[number, StateChangeSource]> = [];
       const { capability, lifecycle } = install(
         new StateManager<number>({
-          onChanged: (state, source) => events.push([state, source])
+          onChanged: (state, source) => {
+            events.push([state, source]);
+          }
         })
       );
       await lifecycle.start();
@@ -139,7 +141,9 @@ describe("StateManager capability", () => {
       const events: Array<[number, StateChangeSource]> = [];
       const { capability, lifecycle } = install(
         new StateManager<number>({
-          onChanged: (state, source) => events.push([state, source])
+          onChanged: (state, source) => {
+            events.push([state, source]);
+          }
         })
       );
       await lifecycle.start();
@@ -165,5 +169,61 @@ describe("StateManager capability", () => {
       expect(() => capability.set(9)).not.toThrow();
       expect(capability.get()).toBe(9);
     });
+  });
+
+  it("tracks async onChanged work without making set async", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const events: number[] = [];
+      const { capability, lifecycle } = install(
+        new StateManager<number>({
+          onChanged: async (state) => {
+            await gate;
+            events.push(state);
+          }
+        })
+      );
+      await lifecycle.start();
+
+      expect(capability.set(10)).toBeUndefined();
+      expect(capability.get()).toBe(10);
+      expect(events).toEqual([]);
+
+      release();
+      await vi.waitFor(() => expect(events).toEqual([10]));
+    });
+  });
+
+  it("reports an async onChanged rejection without rejecting the change", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      await withCapabilityHarness(async ({ install }) => {
+        const { capability, lifecycle } = install(
+          new StateManager<number>({
+            onChanged: async () => {
+              await Promise.resolve();
+              throw new Error("async hook failed");
+            }
+          })
+        );
+        await lifecycle.start();
+
+        expect(capability.set(11)).toBeUndefined();
+        expect(capability.get()).toBe(11);
+        await vi.waitFor(() =>
+          expect(consoleError).toHaveBeenCalledWith(
+            "StateManager onChanged hook failed:",
+            expect.objectContaining({ message: "async hook failed" })
+          )
+        );
+      });
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });

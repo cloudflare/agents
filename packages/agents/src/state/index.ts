@@ -170,10 +170,20 @@ export class StateManager<State = unknown> extends LifecycleCapability {
       VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
     `;
 
+    let pending: void | Promise<void>;
     try {
-      this._options.onChanged?.(nextState, source);
+      pending = this._options.onChanged?.(nextState, source);
     } catch (error) {
       console.error("StateManager onChanged hook failed:", error);
+      return;
+    }
+
+    if (pending) {
+      this.lifecycle.waitUntil(
+        pending.catch((error) => {
+          console.error("StateManager onChanged hook failed:", error);
+        })
+      );
     }
   }
 }

@@ -342,6 +342,7 @@ export class Lifecycle<
     return Object.freeze({
       storage: this.#ctx.storage,
       sql: this.sql.bind(this),
+      waitUntil: (promise: Promise<unknown>) => this.#ctx.waitUntil(promise),
       sockets: Object.freeze({
         accept: (ws: WebSocket, tags: string[]) =>
           this.#ctx.acceptWebSocket(ws, tags),

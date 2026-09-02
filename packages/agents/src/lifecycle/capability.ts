@@ -75,6 +75,8 @@ export type LifecycleServices = {
     strings: TemplateStringsArray,
     ...values: (string | number | boolean | null)[]
   ) => T[];
+  /** Register non-blocking work with the host execution context. */
+  readonly waitUntil: (promise: Promise<unknown>) => void;
   readonly sockets: LifecycleSockets;
   readonly ready: () => Promise<void>;
   /** True while capability and host startup hooks are still running. */

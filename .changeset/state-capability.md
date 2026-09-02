@@ -25,7 +25,8 @@ storage — no alarm, no request path. It never touches connections.
 
 Host-owned behavior is injected, not moved: `validateStateChange`
 stays an overridable `Agent` method, while `initialState` and the
-post-change `onChanged` hook are passed into `StateManager`. Broadcast
+post-change `onChanged` hook are passed into `StateManager`. Synchronous and
+asynchronous notification hooks are both supported. Broadcast
 and the notification hook stay on `Agent`, and the `onMessage` state
 branch stays too; only its inner write delegates to the capability.
 
