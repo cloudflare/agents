@@ -307,6 +307,25 @@ describe("Sessions attachments", () => {
     });
   });
 
+  it("does not load payloads for an update whose target is gone", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(
+        fileMessage("m1", dataUrl("image/png", 80_000), "image/png")
+      );
+      const [pointed] = await session.getHistory({ attachments: "pointer" });
+      await session.deleteMessages(["m1"]);
+
+      // The row is gone, so the write returns null. Inlining first would load
+      // the payload only to discard it — and the payload is gone too, so it
+      // would also be the one path where a pointer cannot resolve.
+      const result = await session.updateMessage({ ...pointed, id: "m1" });
+      expect(result).toBeNull();
+      expect(instance.attachmentRecords()).toHaveLength(0);
+    });
+  });
+
   it("collects a payload once its last reference goes", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

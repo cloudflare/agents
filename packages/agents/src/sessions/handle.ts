@@ -289,11 +289,13 @@ export class Session {
       prepared.message,
       prepared.tokenEstimate
     );
+    // Bail before inlining: a write against a row that is gone returns null,
+    // and materializing its payloads first would load megabytes to throw them
+    // away.
+    if (outcome === "missing") return null;
+
     const emitted = this.#core.inlineMessage(prepared.message);
-    if (outcome !== "updated") {
-      if (outcome === "missing") return null;
-      return emitted;
-    }
+    if (outcome !== "updated") return emitted;
     await this.#core.notify({
       type: "update",
       sessionId: this.sessionId,
