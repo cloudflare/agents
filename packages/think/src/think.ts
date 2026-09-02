@@ -2072,6 +2072,11 @@ import type {
 
 // ── Lifecycle hook types ────────────────────────────────────────
 
+/** Branch endpoint whose root-to-message path supplies model context. */
+type InferenceHistorySelection = {
+  readonly leafId: string;
+};
+
 /**
  * A chat turn request. Built automatically by each entry path
  * (WebSocket, chat(), saveMessages, auto-continuation) and passed
@@ -3174,7 +3179,8 @@ export class Think<
    *
    * Intentionally UNBUDGETED — unlike the cache refresh in `_syncMessages`,
    * which routes through `session.getRecentHistory(hydrationByteBudget)`, this
-   * returns the full active path. Callers (message reconciliation, tool-update
+   * returns the full active path, or the full path ending at an explicitly
+   * selected branch point. Callers (message reconciliation and tool-update
    * application) must see every message: reconciliation diffs incoming client
    * messages against the complete server transcript, and a tool result can
    * target any message on the path, so a windowed read would drop rows and
@@ -3189,8 +3195,32 @@ export class Think<
    * and its `ORDER BY` sorter — and background media eviction shrinks the stored
    * footprint over time, so the steady-state read size converges down.
    */
-  private async _readMessagesFromStorage(): Promise<UIMessage[]> {
-    return (await this.session.getHistory()) as UIMessage[];
+  private async _readMessagesFromStorage(
+    history?: InferenceHistorySelection
+  ): Promise<UIMessage[]> {
+    return (await this.session.getHistory(history?.leafId)) as UIMessage[];
+  }
+
+  private _isHistoryWindowingDisabled(): boolean {
+    const budget = this.hydrationByteBudget;
+    return !Number.isFinite(budget) || budget <= 0;
+  }
+
+  /** Read byte-budgeted model history ending at the selected branch leaf. */
+  private async _readRecentInferenceMessages(
+    history: InferenceHistorySelection
+  ): Promise<UIMessage[]> {
+    if (this._isHistoryWindowingDisabled()) {
+      return this._readMessagesFromStorage(history);
+    }
+    const recent = await this.session.getRecentHistory(
+      this.hydrationByteBudget,
+      MODEL_RECENT_WINDOW,
+      history.leafId
+    );
+    // SAFETY: Think's Session stores sanitized UIMessage values; the provider's
+    // narrower SessionMessage type intentionally avoids depending on the AI SDK.
+    return recent.messages as UIMessage[];
   }
 
   /**
@@ -3558,7 +3588,7 @@ export class Think<
    */
   private async _syncMessages(): Promise<UIMessage[]> {
     const budget = this.hydrationByteBudget;
-    if (!Number.isFinite(budget) || budget <= 0) {
+    if (this._isHistoryWindowingDisabled()) {
       this._lastHydration = null;
       this._lastWindowedEmit = null;
       return this._replaceCachedMessages(await this._readMessagesFromStorage());
@@ -4916,6 +4946,8 @@ export class Think<
    * Turns are serialized, so a single value is safe.
    */
   private _activeTurnTools: ToolSet = {};
+  /** Branch-scoped history reused by retries and proactive recompaction. */
+  private _activeTurnHistory: InferenceHistorySelection | undefined;
   private _activeTurnActionMetadata = new Map<string, CompiledActionMetadata>();
   private _activeTurnAuthorization: NormalizedActionAuthorization = {
     allowed: true
@@ -5409,7 +5441,9 @@ export class Think<
     extra?: { requestId?: string; attempt?: number }
   ): Promise<boolean> {
     try {
-      const result = await this.session.compact();
+      const result = await this.session.compact(
+        this._activeTurnHistory?.leafId
+      );
       const shortened = Boolean(result);
       this._emit("chat:context:compacted", {
         reason,
@@ -5532,16 +5566,17 @@ export class Think<
   // ── Inference loop (Think owns this) ──────────────────────────
 
   /**
-   * Assemble provider-ready model messages from the current session history:
+   * Assemble provider-ready model messages from the selected session history:
    * repair the transcript, truncate older messages, drop any still-incomplete
    * tool calls, and convert to `ModelMessage[]`. Shared by the turn entry point
    * and the proactive context guard so a mid-turn recompaction rebuilds the
    * head through the exact same pipeline.
    */
   private async _assembleModelMessages(
-    tools: ToolSet
+    tools: ToolSet,
+    messages: UIMessage[] = this.messages
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
-    const history = await this._repairTranscriptForProvider(this.messages);
+    const history = await this._repairTranscriptForProvider(messages);
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
@@ -5624,7 +5659,13 @@ export class Think<
 
       // Rebuild the compacted head, then splice this turn's in-flight steps
       // (which are not yet persisted to the session) back onto the tail.
-      const head = await this._assembleModelMessages(this._activeTurnTools);
+      const activeHistory = this._activeTurnHistory
+        ? await this._readRecentInferenceMessages(this._activeTurnHistory)
+        : this.messages;
+      const head = await this._assembleModelMessages(
+        this._activeTurnTools,
+        activeHistory
+      );
       const tail = event.messages.slice(this._turnModelMessageBaseline);
       const merged = [...head, ...tail];
       // Re-baseline so a second guard fire this turn keeps the new tail. This
@@ -5793,7 +5834,10 @@ export class Think<
    * Merges tools, assembles context, fires lifecycle hooks, wraps tools
    * for interception, and calls streamText.
    */
-  private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
+  private async _runInferenceLoop(
+    input: TurnInput,
+    history?: InferenceHistorySelection
+  ): Promise<StreamableResult> {
     const turn = admittedTurnContext.getStore();
     const invoke = await withAgentSpan(
       this,
@@ -5812,13 +5856,14 @@ export class Think<
             }
           : {})
       },
-      () => this._prepareInferenceInvocation(input)
+      () => this._prepareInferenceInvocation(input, history)
     );
     return invoke();
   }
 
   private async _prepareInferenceInvocation(
-    input: TurnInput
+    input: TurnInput,
+    historySelection?: InferenceHistorySelection
   ): Promise<() => StreamableResult> {
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.
@@ -5827,8 +5872,12 @@ export class Think<
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
     this._activeTurnAuthorization = { allowed: true };
+    this._activeTurnHistory = historySelection;
+    const inferenceHistory = historySelection
+      ? await this._readRecentInferenceMessages(historySelection)
+      : this.messages;
     this._activeTurnApprovedActionInputs =
-      this._approvedActionInputsFromTranscript();
+      this._approvedActionInputsFromTranscript(inferenceHistory);
     // Reset the proactive-compaction cap for this streamText run.
     this._proactiveCompactionsThisRun = 0;
     if (this.waitForMcpConnections) {
@@ -5905,7 +5954,7 @@ export class Think<
       : rawBaseSystem;
     const system = this._systemPromptForTurn(baseSystem, tools);
 
-    const messages = await this._assembleModelMessages(tools);
+    const messages = await this._assembleModelMessages(tools, inferenceHistory);
 
     if (messages.length === 0) {
       throw new Error(
@@ -6345,9 +6394,11 @@ export class Think<
     emit.call(this, event.type, event.payload);
   }
 
-  private _approvedActionInputsFromTranscript(): Map<string, unknown> {
+  private _approvedActionInputsFromTranscript(
+    messages: UIMessage[]
+  ): Map<string, unknown> {
     const approved = new Map<string, unknown>();
-    for (const message of this.messages) {
+    for (const message of messages) {
       for (const part of message.parts ?? []) {
         if (typeof part !== "object" || part === null) continue;
         const record = part as Record<string, unknown>;
@@ -11750,6 +11801,8 @@ export class Think<
       if (isRegeneration && reconciled.length > 0) {
         branchParentId = reconciled[reconciled.length - 1].id;
       }
+      const regenerationHistory =
+        branchParentId === undefined ? undefined : { leafId: branchParentId };
 
       const persisted = await withAgentSpan(
         this,
@@ -11840,12 +11893,15 @@ export class Think<
                     email: undefined
                   },
                   () =>
-                    this._runInferenceLoop({
-                      signal: abortSignal,
-                      clientTools: clientToolsForTurn,
-                      body: bodyForTurn,
-                      continuation: false
-                    })
+                    this._runInferenceLoop(
+                      {
+                        signal: abortSignal,
+                        clientTools: clientToolsForTurn,
+                        body: bodyForTurn,
+                        continuation: false
+                      },
+                      regenerationHistory
+                    )
                 );
 
                 if (!result) {

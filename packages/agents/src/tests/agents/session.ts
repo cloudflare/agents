@@ -93,8 +93,16 @@ export class TestSessionAgent extends Agent {
     return this.session.getPathLength();
   }
 
-  async getRecentHistory(maxContentBytes: number, minRecentMessages?: number) {
-    return this.session.getRecentHistory(maxContentBytes, minRecentMessages);
+  async getRecentHistory(
+    maxContentBytes: number,
+    minRecentMessages?: number,
+    leafId?: string
+  ) {
+    return this.session.getRecentHistory(
+      maxContentBytes,
+      minRecentMessages,
+      leafId
+    );
   }
 
   async getHistoryRowStats() {
