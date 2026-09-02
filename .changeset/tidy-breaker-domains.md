@@ -11,8 +11,7 @@ Recovery-loop membership is now a property of the job row
 (`LifecycleJobPushOptions.recoveryLoop`): flagged jobs are backed off by
 the breaker on a strike and purged when it seals at the strike budget,
 without disturbing unrelated rows — a recovery schedule can no longer
-silently escape the breaker. Existing job tables are upgraded idempotently
-with the new column before any queue operation reads or writes it. The public `ScheduleOptions` vocabulary is
+silently escape the breaker. The public `ScheduleOptions` vocabulary is
 unchanged: schedules only shape future work, and chat recovery reaches the
 flag through internal scaffolding (`RecoveryLoopScheduleOptions`) retained
 only for legacy rows and routed dynamic agents. Root recovery moves to Tasks;

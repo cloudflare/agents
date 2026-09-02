@@ -217,16 +217,6 @@ export class JobQueue {
         execution_started_at INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       ) WITHOUT ROWID`);
-    const columns = [
-      ...this.#storage.sql.exec<{ name: string }>(
-        "SELECT name FROM pragma_table_info('cf_agents_jobs')"
-      )
-    ];
-    if (!columns.some((column) => column.name === "recovery_loop")) {
-      this.#storage.sql.exec(
-        "ALTER TABLE cf_agents_jobs ADD COLUMN recovery_loop INTEGER NOT NULL DEFAULT 0"
-      );
-    }
     this.#tableEnsured = true;
   }
 

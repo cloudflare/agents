@@ -42,9 +42,7 @@ The next physical alarm is a pure SQL computation over the queue:
 
 Re-arm requests are serialized so a later durable-state change cannot be
 overwritten by an earlier calculation, and requests made during startup are
-coalesced and applied after startup completes. JobQueue upgrades existing
-`cf_agents_jobs` tables with new policy columns before any operation references
-them; existing rows receive the policy's safe default.
+coalesced and applied after startup completes.
 
 ## When the alarm fires
 
