@@ -239,6 +239,14 @@
         "name": "TestWaitConnectionsAgent"
       },
       {
+        "class_name": "RoutingOwnerAgent",
+        "name": "RoutingOwnerAgent"
+      },
+      {
+        "class_name": "RoutedChatAgent",
+        "name": "RoutedChatAgent"
+      },
+      {
         "class_name": "TestSubAgentParent",
         "name": "TestSubAgentParent"
       },
@@ -441,6 +449,8 @@
         "TestSearchAgent",
         "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
+        "RoutingOwnerAgent",
+        "RoutedChatAgent",
         "TestSubAgentParent",
         "CustomBoundSubAgentParent",
         "TestWorkflowSubAgent",

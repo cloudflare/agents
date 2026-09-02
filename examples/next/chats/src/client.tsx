@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
+import type { RoutedAgentEntry } from "agents/routing";
 import "./styles.css";
 
 const USER_KEY = "next-chats-user";
@@ -26,12 +27,11 @@ const userId =
   localStorage.getItem(USER_KEY) ?? crypto.randomUUID().slice(0, 8);
 localStorage.setItem(USER_KEY, userId);
 
-type ChatMeta = {
-  chatId: string;
+type ChatEntry = RoutedAgentEntry<{
   title: string | null;
   lastMessage: string | null;
-  updatedAt: number;
-};
+  seq: number;
+}>;
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -68,9 +68,13 @@ function ChatPane({
   chatId: string;
   onActivity: () => void;
 }) {
-  // One WebSocket per open chat, straight to that chat's own DO — the
-  // user index is not on the message path at all.
-  const chat = useAgent({ agent: "chat-agent", name: `${userId}:${chatId}` });
+  // One WebSocket per open chat. The upgrade goes through the user hub,
+  // which resolves the chat ID; the chat's own DO then owns the socket,
+  // so the hub is not on the message path.
+  const chat = useAgent({
+    agent: "chat-agent",
+    basePath: `agents/user-agent/${encodeURIComponent(userId)}/chats/${encodeURIComponent(chatId)}`
+  });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -160,14 +164,14 @@ function App() {
   // One connection to the per-user index DO. Listing and search read
   // only this object — no chat DO wakes up for the sidebar.
   const user = useAgent({ agent: "user-agent", name: userId });
-  const [chats, setChats] = useState<ChatMeta[]>([]);
+  const [chats, setChats] = useState<ChatEntry[]>([]);
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
 
   const refreshChats = useCallback(async () => {
     const method = query.trim() === "" ? "listChats" : "searchChats";
     const args = query.trim() === "" ? [] : [query.trim()];
-    setChats((await user.call(method, args)) as ChatMeta[]);
+    setChats((await user.call(method, args)) as ChatEntry[]);
   }, [query, user]);
 
   useEffect(() => {
@@ -230,21 +234,21 @@ function App() {
               chats.map((chat) => (
                 <button
                   type="button"
-                  key={chat.chatId}
-                  onClick={() => setActiveId(chat.chatId)}
+                  key={chat.id}
+                  onClick={() => setActiveId(chat.id)}
                   className={`group flex w-full items-center justify-between px-4 py-3 text-left hover:bg-kumo-elevated ${
-                    activeId === chat.chatId ? "bg-kumo-elevated" : ""
+                    activeId === chat.id ? "bg-kumo-elevated" : ""
                   }`}
                 >
                   <div className="min-w-0">
                     <div className="truncate">
                       <Text size="sm" bold>
-                        {chat.title ?? "New chat"}
+                        {chat.metadata?.title ?? "New chat"}
                       </Text>
                     </div>
                     <div className="truncate">
                       <Text size="xs" variant="secondary">
-                        {chat.lastMessage ?? "No messages yet"}
+                        {chat.metadata?.lastMessage ?? "No messages yet"}
                       </Text>
                     </div>
                   </div>
@@ -255,7 +259,7 @@ function App() {
                     className="opacity-0 group-hover:opacity-100"
                     onClick={(event) => {
                       event.stopPropagation();
-                      void deleteChat(chat.chatId);
+                      void deleteChat(chat.id);
                     }}
                     icon={<TrashIcon size={14} />}
                   />
@@ -280,7 +284,7 @@ function App() {
               <Empty
                 icon={<ChatCircleIcon size={24} />}
                 title="Pick or create a chat"
-                description="Sidebar listing and search read only the per-user index DO; each conversation lives in its own Durable Object with its own SQLite, alarms, and placement."
+                description="Sidebar listing and search read only the per-user hub; each conversation lives in its own Durable Object with its own SQLite, alarms, and placement, reached through the hub's route."
               />
             </div>
           )}

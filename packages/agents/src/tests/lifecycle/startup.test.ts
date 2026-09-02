@@ -14,6 +14,19 @@ class ServiceProbeCapability extends LifecycleCapability {
   }
 }
 
+class OrderedStartCapability extends LifecycleCapability {
+  constructor(
+    id: string,
+    private readonly order: string[]
+  ) {
+    super(id);
+  }
+
+  override onStart(): void {
+    this.order.push(this.capabilityId);
+  }
+}
+
 describe("Lifecycle startup", () => {
   it("starts capabilities and the host from RPC entry points", async () => {
     const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
@@ -49,6 +62,19 @@ describe("Lifecycle startup", () => {
       expect(() => lifecycle.use(new ServiceProbeCapability())).toThrow(
         'Lifecycle capability "service-probe" is already installed'
       );
+    });
+  });
+
+  it("dispatches fallback capabilities after later-installed ones", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const order: string[] = [];
+      const { lifecycle } = install(new OrderedStartCapability("first", order));
+      lifecycle
+        .use(new OrderedStartCapability("fallback", order), { fallback: true })
+        .use(new OrderedStartCapability("second", order));
+
+      await lifecycle.start();
+      expect(order).toEqual(["first", "second", "fallback"]);
     });
   });
 
