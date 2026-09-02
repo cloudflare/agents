@@ -40,28 +40,32 @@ Measured against pi's own tools:
 | ----------------- | --------------------------------------------------------- | ------------------- |
 | text read cap     | 2,000 lines or 50 KB, whichever first                     | 2,000 lines, 3.5 MB |
 | over-cap behavior | truncate and tell the model `offset=N` to continue        | truncate the line   |
-| images            | optional `imageProcessor`, `autoResizeImages` defaults on | none                |
+| images            | optional `imageProcessor`, `autoResizeImages` defaults on | none, deliberately  |
 
 Two differences matter. Pi's cap is roughly seventy times smaller, and pi hands back a _continuation
 affordance_ rather than a dead end: the model knows exactly how to read the rest if it needs it,
-which is what makes an aggressive cap safe. Think has no image path at all, so a full-resolution
-screenshot enters context at whatever size the tool produced it.
+which is what makes an aggressive cap safe.
+
+We do not follow pi on images, and will not. Downscaling re-encodes a user's own bytes on their way
+to the model, which is a lossy transform of content nobody asked us to change, and it is the one
+kind of shaping a host cannot undo later. A full-resolution screenshot enters context at the size
+the tool produced it. Hosts that want smaller images can produce smaller images.
 
 The reason this belongs in `agents/context` rather than in each tool is that most tools are written
 by users of the SDK. A guardrail that every tool author has to implement is a guardrail almost nobody
 has. If the context layer wraps tool results on the way in, every host gets the behavior and a tool
 author has to opt out rather than opt in.
 
-Shape to aim for: a size budget applied to any tool result, truncation that always carries a
-continuation hint, and an image step that downscales before the bytes become part of the request.
-Defaults should be pi's, because they are the ones proven against real agent workloads.
+Shape to aim for: a size budget applied to any tool result, and truncation that always carries a
+continuation hint. Defaults should be pi's, because they are the ones proven against real agent
+workloads — text limits only.
 
 ### What exists
 
 `intake.ts` implements the first two. `shapeMessage` and `shapeHistory` apply an `IntakeLimits`
 to the tool parts of a message — a byte cap, a line cap, and a set of host-named fields to drop —
 and return the input by reference when nothing needed shaping, so an ordinary text transcript costs
-a walk and no allocation. Defaults are pi's 50 KB / 2,000 lines. The image step is not built.
+a walk and no allocation. Defaults are pi's 50 KB / 2,000 lines. Images are left alone by design.
 
 The `dropFields` mechanism exists because of a measurement rather than a guess: pi persists a raw
 provider payload beside the content it renders, and that duplicate alone accounted for 2.6 MB and
@@ -101,5 +105,5 @@ with the hosts.
 
 ## Open questions
 
-- The image step. Downscaling before bytes enter a request is the remaining piece of pi's intake
-  behavior, and it needs an image decoder the Workers runtime does not supply for free.
+None outstanding. Intake shaping caps text and drops host-named duplicates; images are deliberately
+untouched.
