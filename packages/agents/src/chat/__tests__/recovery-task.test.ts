@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  chatRecoveryTaskRunOptions,
   dispatchChatRecoveryToHandoff,
-  type ChatRecoveryHandoff
+  type ChatRecoveryHandoff,
+  type ChatRecoveryTaskInput
 } from "../recovery-task";
 
 /** Text `isPlatformFailure` recognizes, mirroring a real memory-limit reset. */
@@ -71,5 +73,42 @@ describe("dispatchChatRecoveryToHandoff — post-handoff redefer failure", () =>
     expect((detachedErrors[0] as Error).message).toContain(
       "enqueue always fails"
     );
+  });
+
+  it("reuses one dedupe key across every retry, so a retry after a partial success (the row was inserted, then the wake push threw) joins that run instead of duplicating it", async () => {
+    const dedupeKeysSeen: string[] = [];
+    const handoff: ChatRecoveryHandoff = {
+      detached: failingTurn(),
+      track: () => {},
+      redefer: async (dedupeKey) => {
+        dedupeKeysSeen.push(dedupeKey);
+        throw platformFailure("enqueue always fails");
+      },
+      onDetachedError: () => {}
+    };
+
+    await dispatchChatRecoveryToHandoff(handoff);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+
+    expect(dedupeKeysSeen).toHaveLength(3);
+    expect(new Set(dedupeKeysSeen).size).toBe(1);
+  });
+});
+
+describe("chatRecoveryTaskRunOptions — dedupeKey", () => {
+  const input: ChatRecoveryTaskInput = {
+    callback: "_chatRecoveryContinue",
+    data: { incidentId: "incident-1" },
+    delaySeconds: 30
+  };
+
+  it("keys the run by dedupeKey when supplied, joining a retry to its own prior attempt", () => {
+    const options = chatRecoveryTaskRunOptions(input, "redefer", "dedupe-1");
+    expect(options.runId).toBe("dedupe-1");
+  });
+
+  it("leaves redefer unkeyed when no dedupeKey is supplied, unchanged from before this fix", () => {
+    const options = chatRecoveryTaskRunOptions(input, "redefer");
+    expect(options.runId).toBeUndefined();
   });
 });

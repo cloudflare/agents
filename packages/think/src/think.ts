@@ -4566,12 +4566,13 @@ export class Think<
     return dispatchChatRecoveryToHandoff({
       detached,
       track: (turn) => this.lifecycle.trackAlarmWork(turn),
-      redefer: () =>
+      redefer: (dedupeKey) =>
         this._enqueueChatRecovery(
           callback,
           data ?? {},
           "redefer",
-          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          dedupeKey
         ),
       onDetachedError: (error) =>
         console.error(`[Think] ${callback} dispatch failed`, error)
@@ -4581,19 +4582,22 @@ export class Think<
   /**
    * Enqueue one recovery attempt on the shared Tasks transport. Tasks
    * mirrors a routed dynamic agent's wake to the root's alarm; the run
-   * itself, and this continuation's replay, still execute here.
+   * itself, and this continuation's replay, still execute here. `dedupeKey`
+   * keys a retried enqueue so it joins its own prior attempt instead of
+   * duplicating it — see {@link chatRecoveryTaskRunOptions}.
    */
   private async _enqueueChatRecovery(
     callback: ChatRecoveryScheduleCallback,
     data: Record<string, unknown>,
     reason: ChatRecoveryTaskReason,
-    delaySeconds: number
+    delaySeconds: number,
+    dedupeKey?: string
   ): Promise<void> {
     const input = { callback, data, delaySeconds };
     await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
       CHAT_RECOVERY_TASK_NAME,
       input,
-      chatRecoveryTaskRunOptions(input, reason)
+      chatRecoveryTaskRunOptions(input, reason, dedupeKey)
     );
   }
 

@@ -47,8 +47,16 @@ export type ChatRecoveryHandoff = {
   readonly detached: (onTurnStarted: () => void) => Promise<void>;
   /** Keep the detached turn inside the current alarm's breaker domain. */
   readonly track: (turn: Promise<void>) => void;
-  /** Enqueue exactly one replacement attempt for a detached platform failure. */
-  readonly redefer: () => Promise<void>;
+  /**
+   * Enqueue exactly one replacement attempt for a detached platform
+   * failure. `dedupeKey` is stable across every retried call for the same
+   * failure (see {@link dispatchChatRecoveryToHandoff}): acceptance may
+   * throw after already durably creating the run — most likely on the
+   * wake-mirror push, not the run insert itself — so a naive retry of an
+   * unkeyed enqueue risks creating another one. Pass it straight through as
+   * the run's `runId` so a retry joins that same row instead.
+   */
+  readonly redefer: (dedupeKey: string) => Promise<void>;
   /** Report a detached failure the turn's own bookkeeping already handled. */
   readonly onDetachedError: (error: unknown) => void;
 };
@@ -82,13 +90,15 @@ export async function dispatchChatRecoveryToHandoff(
   turn.catch((error) => {
     if (!handedOff) return;
     if (isPlatformFailure(error)) {
-      // Each failed attempt didn't create a row, so retrying is safe —
-      // redefer's own enqueue is non-idempotent by design (#1730), but
-      // that's for distinguishing this replacement from a concurrent one,
-      // not for tolerating repeat calls after failure. Surface the last
-      // failure the same way an unowned detached error already is, rather
-      // than swallowing it: no Task run is left to report through.
-      void tryN(3, () => handoff.redefer(), {
+      // A failed attempt may still have durably created the run before
+      // throwing — acceptance can fail on the wake-mirror push after the
+      // insert already committed — so every retry reuses the SAME key
+      // instead of generating a fresh one per attempt: a rejected enqueue
+      // does not prove nothing was created. Surface the last failure the
+      // same way an unowned detached error already is, rather than
+      // swallowing it: no Task run is left to report through.
+      const dedupeKey = crypto.randomUUID();
+      void tryN(3, () => handoff.redefer(dedupeKey), {
         baseDelayMs: 50,
         maxDelayMs: 500
       }).catch((redeferError) => handoff.onDetachedError(redeferError));
@@ -134,13 +144,18 @@ function parseChatRecoveryTaskInput(input: unknown): ChatRecoveryTaskInput {
  * Build run options for one recovery attempt.
  *
  * Initial detection joins an existing in-flight attempt for the same incident
- * and callback. Chained retries are intentionally unkeyed because they are
- * enqueued while the preceding run still exists. Non-retention releases the
- * initial key when the run settles.
+ * and callback. Chained retries are otherwise unkeyed because each one is
+ * enqueued while the preceding run still exists — a genuinely new attempt,
+ * not a retry of this same enqueue. `dedupeKey`, when supplied, keys this
+ * specific enqueue call by `runId` instead: every retry of one failed
+ * `redefer` (see {@link dispatchChatRecoveryToHandoff}) reuses the same key,
+ * so a rejected-but-already-inserted attempt is joined rather than
+ * duplicated. Non-retention releases the initial key when the run settles.
  */
 export function chatRecoveryTaskRunOptions(
   input: ChatRecoveryTaskInput,
-  reason: ChatRecoveryTaskReason
+  reason: ChatRecoveryTaskReason,
+  dedupeKey?: string
 ): TaskRunOptions {
   const incidentId =
     typeof input.data.incidentId === "string"
@@ -153,6 +168,7 @@ export function chatRecoveryTaskRunOptions(
 
   return {
     retain: false,
+    ...(dedupeKey !== undefined ? { runId: dedupeKey } : {}),
     ...(reason === "initial" && incidentId
       ? {
           idempotencyKey: `chat-recovery:${input.callback}:${incidentId}`
