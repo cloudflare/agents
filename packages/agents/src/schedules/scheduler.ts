@@ -882,9 +882,7 @@ export class Scheduler<
     const idempotent = isRecurring(timing)
       ? options?.idempotent !== false
       : Boolean(options?.idempotent);
-    // Not part of public ScheduleOptions. Root recovery uses Tasks; this
-    // remains only for legacy rows and routed dynamic agents until Tasks can
-    // mirror their wakes to the root. See RecoveryLoopScheduleOptions.
+    // Not part of public ScheduleOptions. See RecoveryLoopScheduleOptions.
     const recoveryLoop = (
       options as Partial<RecoveryLoopScheduleOptions> | undefined
     )?.recoveryLoop;

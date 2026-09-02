@@ -2190,6 +2190,25 @@ export class ThinkTestAgent extends Think {
     const log = this._beforeTurnLog;
     return log.length > 0 ? log[log.length - 1].system : null;
   }
+
+  /** Insert a fiber-ledger row so `_checkRunFibers` finds it interrupted. */
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${crypto.randomUUID()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  /** Drive this facet's own fiber-recovery scan, exactly as a real wake would. */
+  async triggerFiberRecovery(): Promise<void> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+  }
 }
 
 type AgentToolFinishForTest = {

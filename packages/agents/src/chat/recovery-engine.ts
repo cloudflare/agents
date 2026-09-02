@@ -10,7 +10,6 @@
  */
 
 import type { FiberRecoveryContext } from "../index";
-import type { RecoveryLoopScheduleOptions } from "../schedules/types";
 import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
@@ -35,8 +34,8 @@ export type ChatRecoveryScheduleCallback =
   | "_chatRecoveryRetry";
 
 /**
- * Why a recovery callback is being scheduled. The idempotency of the underlying
- * `schedule()` call depends ONLY on this:
+ * Why a recovery callback is being scheduled. The idempotency of the
+ * underlying Task run's `idempotencyKey` depends ONLY on this:
  *
  * - `"initial"` — the first schedule of a continuation/retry when an interrupted
  *   turn is detected on wake. A deploy rollout drops/reconnects the socket
@@ -46,11 +45,10 @@ export type ChatRecoveryScheduleCallback =
  *
  * - `"stable_timeout_retry"` — a reschedule issued from INSIDE the currently-
  *   executing recovery attempt (a continuation that timed out waiting for
- *   stable state). That attempt — a `__cf_internal_chat_recovery` Task run on a
- *   root agent, a one-shot schedule row on the routed fallback — settles only
- *   AFTER the callback returns, so an idempotent reschedule would dedup onto
- *   the doomed attempt and settle with it — the retry would never fire. A
- *   fresh (non-idempotent) delayed attempt survives.
+ *   stable state). That attempt — a `__cf_internal_chat_recovery` Task run —
+ *   settles only AFTER the callback returns, so an idempotent reschedule would
+ *   dedup onto the doomed attempt and settle with it — the retry would never
+ *   fire. A fresh (non-idempotent) delayed attempt survives.
  */
 export type ChatRecoveryScheduleReason = "initial" | "stable_timeout_retry";
 
@@ -74,34 +72,6 @@ export type RecoveryPartial = {
 
 /** Lifecycle status of a recovered stream's metadata row. */
 export type ChatStreamStatus = "streaming" | "completed" | "error";
-
-/**
- * Resolve `schedule()` options for the routed dynamic-agent fallback. Root
- * chat agents enqueue Tasks instead; dynamic agents temporarily retain
- * root-owned routed schedules until Tasks can mirror child wakes to the alarm
- * owner. Every fallback row is flagged `recoveryLoop` so the alarm memory-limit
- * breaker backs it off and purges it when sealing.
- *
- * This is a cutover invariant: flipping either idempotency case silently
- * breaks deploy-storm dedup (initial) or stalls stable-timeout retries
- * (reschedule), and neither is caught by a type error — only by the recovery
- * suites.
- */
-export function chatRecoverySchedulePolicy(
-  reason: ChatRecoveryScheduleReason
-): RecoveryLoopScheduleOptions {
-  return { idempotent: reason === "initial", recoveryLoop: true };
-}
-
-/**
- * Options for a manual post-handoff re-defer of a recovery continuation
- * (#1730): non-idempotent like every reschedule, and flagged for the alarm
- * memory-limit breaker like every recovery schedule — the flag is internal
- * scaffolding, so call sites route through here rather than writing it.
- */
-export function chatRecoveryRedeferPolicy(): RecoveryLoopScheduleOptions {
-  return { idempotent: false, recoveryLoop: true };
-}
 
 /** Identity + context for opening (or re-evaluating) a recovery incident. */
 export interface BeginChatRecoveryIncidentInput {
@@ -624,7 +594,8 @@ export class ChatRecoveryEngine {
    * 1. transition the incident to `scheduled` (persist + drive the #1620
    *    "recovering…" status) via {@link updateIncident};
    * 2. emit `chat:recovery:scheduled`; and
-   * 3. enqueue the callback through the adapter's idempotent schedule.
+   * 3. enqueue the callback through the adapter's transport — a Task run on
+   *    a root agent, an idempotent schedule on the routed fallback.
    *
    * `recoveryKind` is passed explicitly (not read off the incident) because a
    * caller can legitimately report a different kind than the incident was opened
@@ -787,8 +758,9 @@ export class ChatRecoveryEngine {
    * 6. terminalize via `exhaustChatRecovery` — BEFORE sealing. The terminal
    *    writes can reject with a platform transient in the deploy/storage window
    *    a give-up runs in (#1730); letting that throw propagate is deliberate, so
-   *    `Agent._executeScheduleCallback` defers the one-shot row and the WHOLE
-   *    give-up re-runs on a healthy isolate. Sealing first would arm the
+   *    the current recovery attempt (a Task run on a root agent, a one-shot
+   *    schedule row on the routed fallback) defers and the WHOLE give-up
+   *    re-runs on a healthy isolate. Sealing first would arm the
    *    re-entry guard and turn that re-run into a no-op, dropping the durable
    *    terminal record. The re-run is idempotent (terminal writes overwrite the
    *    same key); a second banner is the documented at-least-once edge; and

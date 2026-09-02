@@ -29,7 +29,6 @@ import type {
 import {
   CHAT_RECOVERY_TASK_NAME,
   ResumableStream,
-  chatRecoverySchedulePolicy,
   chatRecoveryTaskRunOptions
 } from "agents/chat";
 
@@ -3388,18 +3387,34 @@ type AgentToolInput = {
   streamError?: string;
 };
 
+const FACET_OOM_TEST_TASK_NAME = "__cf_test_facetRecoveryOom";
+
 export class AIChatAgentToolChild extends AIChatAgent<Env> {
-  /**
-   * Test-only routed recovery callback that deterministically reaches the
-   * root alarm's memory-limit breaker.
-   */
-  async facetRecoveryOomForTest(): Promise<void> {
-    throw new Error(
-      "Durable Object's isolate exceeded its memory limit and was reset."
-    );
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    // Test-only routed Task definition that deterministically reaches the
+    // root alarm's memory-limit breaker, mirroring the exact reset error
+    // text `isDurableObjectMemoryLimitReset` matches on. Sleeps first: a
+    // freshly accepted run is due immediately, and its first (uncontrolled-
+    // timing) natural dispatch must not race the test's own explicit
+    // strike-seeding — the sleep parks it safely regardless of when that
+    // dispatch happens. Only a caller that forces the run due a second time
+    // (past the journaled sleep) reaches the throw.
+    this.tasks.register(FACET_OOM_TEST_TASK_NAME, async (_input, step) => {
+      await step.sleep("armed", "1 hour");
+      throw new Error(
+        "Durable Object's isolate exceeded its memory limit and was reset."
+      );
+    });
   }
 
-  /** Seed one active incident and its root-owned routed recovery schedule. */
+  /**
+   * Seed one active incident and its routed recovery Task run, mirrored as
+   * one wake job on the root's queue, and wait for its natural first
+   * dispatch to safely park it (`waiting`, per the definition above).
+   * Returns the run ID so the caller can locate that mirror on the root's
+   * own queue and force it due again to arm the OOM throw.
+   */
   async seedFacetRecoveryOomForTest(incidentId: string): Promise<string> {
     const now = Date.now();
     await this.ctx.storage.put(
@@ -3416,16 +3431,33 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         lastAttemptAt: now
       }
     );
-    const schedule = await this.schedule(
-      60,
-      "facetRecoveryOomForTest",
+    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      FACET_OOM_TEST_TASK_NAME,
       { incidentId },
-      {
-        ...chatRecoverySchedulePolicy("initial"),
-        retry: { maxAttempts: 1 }
-      }
+      { retain: false }
     );
-    return schedule.id;
+    for (let i = 0; i < 50; i++) {
+      const run = await this.tasks.get(receipt.runId);
+      if (run?.state === "waiting") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return receipt.runId;
+  }
+
+  /** Force this facet's own run row due now, past its journaled sleep. */
+  async armFacetRecoveryOomForTest(runId: string): Promise<void> {
+    const now = Date.now();
+    // The run row's own deadline AND its journaled sleep step's deadline
+    // both gate replay: forcing only the run row due replays straight into
+    // the still-not-due sleep step, which just re-suspends for another
+    // hour unchanged.
+    this.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${now} WHERE run_id = ${runId}
+    `;
+    this.sql`
+      UPDATE cf_agents_task_steps SET next_at = ${now}
+      WHERE run_id = ${runId} AND step_name = 'armed'
+    `;
   }
 
   /** Read the persisted status of a test recovery incident. */
@@ -3436,6 +3468,36 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`
     );
     return incident?.status ?? null;
+  }
+
+  /** Insert a fiber-ledger row so `_checkRunFibers` finds it interrupted. */
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${crypto.randomUUID()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  /** Drive this facet's own fiber-recovery scan, exactly as a real wake would. */
+  async triggerFiberRecovery(): Promise<void> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+  }
+
+  /** Count this facet's own non-terminal recovery Task runs for `callback`. */
+  getChatRecoveryTaskRunCountForTest(callback: string): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+        AND json_extract(metadata, '$.callback') = ${callback}
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   override formatAgentToolInput(
@@ -4038,23 +4100,39 @@ export class AIChatAgentToolParent extends Agent<Env> {
       AIChatAgentToolChild,
       pending.childName
     );
-    const pendingScheduleId = await pendingChild.seedFacetRecoveryOomForTest(
+    const pendingRunId = await pendingChild.seedFacetRecoveryOomForTest(
       pending.incidentId
     );
     const executingChild = await this.subAgent(
       AIChatAgentToolChild,
       executing.childName
     );
-    const executingScheduleId =
-      await executingChild.seedFacetRecoveryOomForTest(executing.incidentId);
+    const executingRunId = await executingChild.seedFacetRecoveryOomForTest(
+      executing.incidentId
+    );
+    // Both runs safely parked themselves (waiting, ~1h out) on their own
+    // uncontrolled first dispatch; force only the executing one due again,
+    // past its journaled sleep, so this alarm cycle drives it and leaves
+    // the pending one untouched.
+    await executingChild.armFacetRecoveryOomForTest(executingRunId);
     this.sql`
       UPDATE cf_agents_jobs
       SET time = ${Date.now() - 1_000}
-      WHERE id = ${executingScheduleId}
+      WHERE capability = 'tasks'
+        AND json_extract(payload, '$.runId') = ${executingRunId}
     `;
     await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 2);
     await this.alarm();
-    return [executingScheduleId, pendingScheduleId];
+    return [executingRunId, pendingRunId];
+  }
+
+  /** Whether a routed Task run still has a wake job mirrored on this root. */
+  rootHasRoutedTaskWakeForTest(runId: string): boolean {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_jobs
+      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+    `;
+    return (rows[0]?.count ?? 0) > 0;
   }
 
   /** Read a child facet's durable recovery incident after root sealing. */
@@ -4072,6 +4150,42 @@ export class AIChatAgentToolParent extends Agent<Env> {
       SELECT COUNT(*) AS count FROM cf_agents_jobs WHERE id = ${scheduleId}
     `;
     return (rows[0]?.count ?? 0) > 0;
+  }
+
+  /**
+   * Drive real fiber-interruption recovery detection on a routed child and
+   * report where the continuation landed: the Task run stays on the child
+   * (its storage owns the run and step journal), mirrored as one routed wake
+   * job on this root's queue (`owner_path` set) — the alarm this root
+   * actually owns. `schedules` pins that the retired Scheduler bridge stays
+   * dead. Pins `_enqueueChatRecovery` against the real detection path, not a
+   * manually seeded row.
+   */
+  async driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
+    taskRunOnChild: number;
+    routedWakeOnRoot: number;
+    schedules: number;
+  }> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    await child.insertInterruptedFiber("__cf_internal_chat_turn:req-facet");
+    await child.triggerFiberRecovery();
+    const taskRunOnChild = await child.getChatRecoveryTaskRunCountForTest(
+      "_chatRecoveryContinue"
+    );
+    const schedules = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
+    `;
+    const routedWakeOnRoot = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_jobs
+      WHERE capability = 'tasks'
+        AND json_extract(payload, '$.owner_path') IS NOT NULL
+    `;
+    return {
+      taskRunOnChild,
+      routedWakeOnRoot: routedWakeOnRoot[0]?.count ?? 0,
+      schedules: schedules[0]?.count ?? 0
+    };
   }
 
   override broadcast(

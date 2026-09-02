@@ -218,8 +218,6 @@ import {
   MAX_BOUND_PARAMS,
   buildInClauseStrings,
   resolveChatRecoveryConfig,
-  chatRecoveryRedeferPolicy,
-  chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
   ChatStreamStalledError,
@@ -4581,9 +4579,9 @@ export class Think<
   }
 
   /**
-   * Enqueue one recovery attempt. Root agents use Tasks; routed dynamic agents
-   * keep the root-owned Scheduler bridge until Tasks can mirror their wakes to
-   * the dynamic-agent alarm owner.
+   * Enqueue one recovery attempt on the shared Tasks transport. Tasks
+   * mirrors a routed dynamic agent's wake to the root's alarm; the run
+   * itself, and this continuation's replay, still execute here.
    */
   private async _enqueueChatRecovery(
     callback: ChatRecoveryScheduleCallback,
@@ -4591,18 +4589,6 @@ export class Think<
     reason: ChatRecoveryTaskReason,
     delaySeconds: number
   ): Promise<void> {
-    if (this.parentPath.length > 0) {
-      await this.schedule(
-        delaySeconds,
-        callback,
-        data,
-        reason === "redefer"
-          ? chatRecoveryRedeferPolicy()
-          : chatRecoverySchedulePolicy(reason)
-      );
-      return;
-    }
-
     const input = { callback, data, delaySeconds };
     await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
       CHAT_RECOVERY_TASK_NAME,
@@ -4727,7 +4713,7 @@ export class Think<
     const wrap = (data: unknown) =>
       wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, data);
 
-    // Facet-hosted turns stay on the legacy fiber engine: the Fibers
+    // Facet-hosted turns stay on the legacy fiber engine: the Tasks
     // capability does not accept runs on routed sub-agents yet, and facet
     // recovery routes through the root's facet-run index.
     if (this.parentPath.length > 0) {
@@ -14919,10 +14905,10 @@ export class Think<
    * `_exhaustChatRecovery` entirely — so an app relying on `onExhausted` for the
    * terminal banner regressed to an eternal spinner when recovery gave up under
    * extreme churn. The error path matters just as much: a non-transient throw
-   * in a recovery callback is SWALLOWED by `Agent._executeScheduleCallback`
-   * (only a platform transient is re-thrown to preserve the one-shot row), so
-   * without routing it here the alarm row is deleted with no terminal UX at
-   * all — the half-finished message wedges silently. Shared by
+   * in a recovery callback is SWALLOWED by the driving Task attempt (or the
+   * routed one-shot schedule row) — only a platform transient is re-thrown to
+   * preserve it — so without routing it here the run/row settles with no
+   * terminal UX at all — the half-finished message wedges silently. Shared by
    * `_chatRecoveryRetry` and `_chatRecoveryContinue`.
    *
    * Exactly-once terminalization is defended by two independent guards:
@@ -14940,8 +14926,9 @@ export class Think<
    * Residual at-least-once edges, all deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
-   *    invocation — every production scheduler carries one): the synthesized
-   *    incident can't be persisted (no key), so guard #1 can't arm.
+   *    invocation — every production recovery enqueue carries one): the
+   *    synthesized incident can't be persisted (no key), so guard #1 can't
+   *    arm.
    *  • The record is swept AGAIN between two alarms (guard #1 re-persists on the
    *    first, so this needs a second independent sweep) — vanishingly unlikely.
    *  • A platform transient interrupts `_exhaustChatRecovery` after the banner
@@ -14953,8 +14940,9 @@ export class Think<
    * Lifecycle's circuit breaker — protected because it is framework
    * machinery, not part of the public Think API. Tasks applies the breaker to
    * root recovery runs; the routed dynamic-agent fallback applies it to
-   * `recoveryLoop` schedule rows. At the strike budget this hook seals active
-   * incidents via {@link _cf_sealMemoryLimitedRecovery}.
+   * `recoveryLoop` schedule rows (see `RecoveryLoopScheduleOptions`). At the
+   * strike budget this hook seals active incidents via
+   * {@link _cf_sealMemoryLimitedRecovery}.
    */
   protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
     if (!context.sealed) return;
@@ -15077,9 +15065,9 @@ export class Think<
    *   deploy code-update reset / script supersede, a `retryable`-flagged
    *   platform error, or "Network connection lost.", looking through wrappers
    *   like `SqlError` via the `cause` chain) is re-thrown (after best-effort
-   *   marking the incident `failed` for observability) so
-   *   `Agent._executeScheduleCallback` preserves the one-shot alarm row and
-   *   the platform re-runs recovery once it is healthy again — the turn can
+   *   marking the incident `failed` for observability) so the current
+   *   attempt (the driving Task run, or the routed one-shot schedule row) is
+   *   preserved and the platform re-runs recovery once it is healthy again — the turn can
    *   still recover, so it must NOT terminalize. Terminalizing here was the
    *   #1730 freeze: the give-up's own seal needs the very storage that is
    *   down, so it throws too, burns the in-process retry budget inside the
@@ -15090,11 +15078,11 @@ export class Think<
    *   `submission_not_running` no-op skip (a self-defeating defer).
    * - Any OTHER (application) error is terminalized through the give-up path
    *   (`onExhausted` + the `terminalMessage` banner) and NOT re-thrown. This is
-   *   the fix for the silent-seal failure mode: `_executeScheduleCallback`
-   *   swallows a non-transient throw and then `alarm()` deletes the one-shot
-   *   row, so without terminalizing here the half-finished turn is dropped
-   *   with no terminal event and no banner (the user stares at a frozen
-   *   message until they send something new).
+   *   the fix for the silent-seal failure mode: the driving attempt swallows
+   *   a non-transient throw and settles without terminalizing, so without
+   *   terminalizing here the half-finished turn is dropped with no terminal
+   *   event and no banner (the user stares at a frozen message until they
+   *   send something new).
    */
   private async _handleRecoveryCallbackError(
     callback: ChatRecoveryScheduleCallback,
@@ -15129,8 +15117,7 @@ export class Think<
     }
     // Preserve the underlying error for operators — the give-up path records
     // only the `recovery_error` category on the incident / `onExhausted` ctx,
-    // so without this log the actual cause would be lost. Mirrors
-    // `Agent._executeScheduleCallback`'s own logging.
+    // so without this log the actual cause would be lost.
     console.error(
       `[Think] ${callback} threw during recovery; terminalizing instead of leaving the turn wedged`,
       error

@@ -249,7 +249,12 @@ type ParentStub = DurableObjectStub & {
     childName: string,
     incidentId: string
   ): Promise<string | null>;
-  rootHasScheduleForTest(scheduleId: string): Promise<boolean>;
+  rootHasRoutedTaskWakeForTest(runId: string): Promise<boolean>;
+  driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
+    taskRunOnChild: number;
+    routedWakeOnRoot: number;
+    schedules: number;
+  }>;
 };
 
 function getParent(name = crypto.randomUUID()) {
@@ -260,7 +265,7 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
-  it("seals affected facet recovery incidents when the plain root alarm breaker seals", async () => {
+  it("seals the executing facet's recovery incident when the root alarm breaker seals", async () => {
     const parentName = crypto.randomUUID();
     const parent = await getParent(parentName);
     const executing = {
@@ -272,27 +277,58 @@ describe("AIChatAgent as an agent-tool child", () => {
       incidentId: `facet-pending-${crypto.randomUUID()}`
     };
 
-    const scheduleIds = await parent.driveFacetRecoveryOomSealForTest(
-      executing,
-      pending
-    );
+    const [executingRunId, pendingRunId] =
+      await parent.driveFacetRecoveryOomSealForTest(executing, pending);
     // The breaker resets the alarm-owning root after its writes settle. Read
     // through a fresh stub so the assertion does not race the condemned RPC
     // session.
     await new Promise((resolve) => setTimeout(resolve, 100));
     const freshParent = await getParent(parentName);
 
-    for (const scheduleId of scheduleIds) {
-      expect(await freshParent.rootHasScheduleForTest(scheduleId)).toBe(false);
-    }
-    for (const recovery of [executing, pending]) {
-      expect(
-        await freshParent.facetRecoveryIncidentStatusForTest(
-          recovery.childName,
-          recovery.incidentId
-        )
-      ).toBe("exhausted");
-    }
+    // The struck run's wake mirror is gone and its incident sealed on the
+    // owning facet, through the routed memory-limit forwarding.
+    expect(await freshParent.rootHasRoutedTaskWakeForTest(executingRunId)).toBe(
+      false
+    );
+    expect(
+      await freshParent.facetRecoveryIncidentStatusForTest(
+        executing.childName,
+        executing.incidentId
+      )
+    ).toBe("exhausted");
+
+    // Tasks backs off per struck run instead of Scheduler's old blanket
+    // purge-on-seal: a pending incident that never came due this cycle
+    // keeps its wake and stays scheduled.
+    expect(await freshParent.rootHasRoutedTaskWakeForTest(pendingRunId)).toBe(
+      true
+    );
+    expect(
+      await freshParent.facetRecoveryIncidentStatusForTest(
+        pending.childName,
+        pending.incidentId
+      )
+    ).toBe("scheduled");
+  });
+
+  it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {
+    const parent = await getParent();
+    const childName = crypto.randomUUID();
+
+    const transport =
+      await parent.driveFacetChatRecoveryDetectionForTest(childName);
+
+    // Real fiber-interruption detection on a facet must reach
+    // `_enqueueChatRecovery`'s single Tasks transport — not just a test
+    // that seeds a schedule row directly and never exercises the path
+    // itself. The run and step journal stay on the child; only its wake
+    // mirrors to this root's queue, and the retired Scheduler bridge stays
+    // dead.
+    expect(transport).toEqual({
+      taskRunOnChild: 1,
+      routedWakeOnRoot: 1,
+      schedules: 0
+    });
   });
 
   it("runs an AIChatAgent child and returns summary, output, events, and chunks", async () => {

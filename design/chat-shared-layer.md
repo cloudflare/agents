@@ -155,7 +155,7 @@ Pure functions for aligning client messages with server state during persistence
 
 ### recovery-engine.ts
 
-**`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a `runFiber` that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
+**`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a Task run for a root agent, or `runFiber` for a routed facet, that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
 
 Durable chat recovery is an invariant in both hosts: every chat entry path runs inside a recovery fiber. `ChatRecoveryConfig` accepts `true` or a tuning object, not `false`; previously compiled JavaScript that still supplies `false` is resolved to the default configuration. This guarantees that agent-tool child inspection can use durable recovery state after a restart instead of relying on instance-local abort controllers or stream managers.
 

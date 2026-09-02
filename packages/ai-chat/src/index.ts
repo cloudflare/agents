@@ -89,8 +89,6 @@ import {
 } from "agents/chat";
 import {
   resolveChatRecoveryConfig,
-  chatRecoveryRedeferPolicy,
-  chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
   ChatStreamStalledError,
@@ -758,9 +756,9 @@ export class AIChatAgent<
   }
 
   /**
-   * Enqueue one recovery attempt. Root agents use Tasks; routed dynamic agents
-   * keep the root-owned Scheduler bridge until Tasks can mirror their wakes to
-   * the dynamic-agent alarm owner.
+   * Enqueue one recovery attempt on the shared Tasks transport. Tasks
+   * mirrors a routed dynamic agent's wake to the root's alarm; the run
+   * itself, and this continuation's replay, still execute here.
    */
   private async _enqueueChatRecovery(
     callback: ChatRecoveryScheduleCallback,
@@ -768,18 +766,6 @@ export class AIChatAgent<
     reason: ChatRecoveryTaskReason,
     delaySeconds: number
   ): Promise<void> {
-    if (this.parentPath.length > 0) {
-      await this.schedule(
-        delaySeconds,
-        callback,
-        data,
-        reason === "redefer"
-          ? chatRecoveryRedeferPolicy()
-          : chatRecoverySchedulePolicy(reason)
-      );
-      return;
-    }
-
     const input = { callback, data, delaySeconds };
     await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
       CHAT_RECOVERY_TASK_NAME,
@@ -805,7 +791,7 @@ export class AIChatAgent<
     const wrap = (data: unknown) =>
       wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
 
-    // Facet-hosted turns stay on the legacy fiber engine: the Fibers
+    // Facet-hosted turns stay on the legacy fiber engine: the Tasks
     // capability does not accept runs on routed sub-agents yet, and facet
     // recovery routes through the root's facet-run index.
     if (this.parentPath.length > 0) {
@@ -5087,8 +5073,9 @@ export class AIChatAgent<
       );
     } catch (error) {
       // AIChatAgent otherwise has no continuation `catch` (a thrown error
-      // propagates to `Agent._executeScheduleCallback`). The ONLY case we
-      // intercept is an OOM thrown out of the turn (#1825): route it through the
+      // propagates to the driving Task attempt, or the routed one-shot
+      // schedule row). The ONLY case we intercept is an OOM thrown out of
+      // the turn (#1825): route it through the
       // tight OOM-retry budget, and rethrow everything else so the existing
       // behavior is byte-identical for non-OOM errors.
       if (await this._handleRecoveryOom("_chatRecoveryContinue", data, error)) {
@@ -5272,8 +5259,9 @@ export class AIChatAgent<
    * Two residual at-least-once edges, both deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
-   *    invocation — every production scheduler carries one): the synthesized
-   *    incident can't be persisted (no key), so the guard can't arm.
+   *    invocation — every production recovery enqueue carries one): the
+   *    synthesized incident can't be persisted (no key), so the guard can't
+   *    arm.
    *  • The record is swept AGAIN between two alarms (the guard re-persists on
    *    the first, so this needs a second independent sweep) — vanishingly
    *    unlikely.
@@ -5283,8 +5271,9 @@ export class AIChatAgent<
    * Lifecycle's circuit breaker — protected because it is framework
    * machinery, not part of the public chat API. Tasks applies the breaker to
    * root recovery runs; the routed dynamic-agent fallback applies it to
-   * `recoveryLoop` schedule rows. At the strike budget this hook seals active
-   * incidents via {@link _cf_sealMemoryLimitedRecovery}.
+   * `recoveryLoop` schedule rows (see `RecoveryLoopScheduleOptions`). At the
+   * strike budget this hook seals active incidents via
+   * {@link _cf_sealMemoryLimitedRecovery}.
    */
   protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
     if (!context.sealed) return;

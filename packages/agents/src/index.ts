@@ -130,7 +130,11 @@ import {
   setSchedulerCallbackResolver,
   setSchedulerRoutedMemoryLimitHandler
 } from "./schedules/scheduler";
-import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
+import {
+  Tasks,
+  setTaskDefinitionResolver,
+  setTaskRoutedMemoryLimitHandler
+} from "./tasks/tasks";
 import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
 import type {
   Schedule,
@@ -2349,11 +2353,10 @@ export class Agent<
         ).call(this, payload, schedule);
     });
 
-    // Temporary bridge for a legacy routed chat-recovery schedule: the queue
-    // and physical alarm live on the root Agent, but the incident and sealing
-    // hook live on each owning dynamic agent. Scheduler routes a sealed strike
-    // to owners whose flagged rows were purged. Root recovery runs on Tasks;
-    // this goes away once Tasks supports routed dynamic-agent wakes.
+    // Bridge for a `recoveryLoop`-flagged routed schedule: the queue and
+    // physical alarm live on the root Agent, but the incident and sealing
+    // hook live on each owning dynamic agent. Scheduler routes a sealed
+    // strike to owners whose flagged rows were purged.
     setSchedulerRoutedMemoryLimitHandler(this.scheduler, (context) => {
       const hook = (
         this as unknown as {
@@ -2365,6 +2368,18 @@ export class Agent<
 
     this.tasks = new Tasks({
       onError: (error) => this.onError(error)
+    });
+
+    // Twin bridge for a routed Task run: the physical alarm lives on the
+    // root, but the run's storage and this hook live on the owning dynamic
+    // agent, whose own Lifecycle never observes the root's alarm directly.
+    setTaskRoutedMemoryLimitHandler(this.tasks, (context) => {
+      const hook = (
+        this as unknown as {
+          onAlarmMemoryLimit?: (value: typeof context) => void | Promise<void>;
+        }
+      ).onAlarmMemoryLimit;
+      return hook?.call(this, context);
     });
 
     // Framework-internal reserved (`__cf`-prefixed) definitions — chat
