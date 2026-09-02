@@ -1288,6 +1288,17 @@ export class SessionsCore {
   // ── Parsing ──────────────────────────────────────────────────────────────
 
   /**
+   * Put attachment payloads back inline, for a message a caller supplied
+   * rather than one just read. A caller that read with `attachments:
+   * "pointer"` and wrote the result back would otherwise hand pointer form
+   * straight into the change feed. Returns the input by reference when it
+   * carries no pointers, which is the ordinary case.
+   */
+  inlineMessage(message: SessionMessage): SessionMessage {
+    return this.#inline(message);
+  }
+
+  /**
    * Put attachment payloads back inline. Reads are lossless by default, so a
    * host that stored a message gets exactly that message back.
    */
