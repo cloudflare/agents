@@ -26,6 +26,7 @@ const entries = [
   "src/schedules/parser.ts",
   "src/tasks/index.ts",
   "src/streams/index.ts",
+  "src/state/index.ts",
   "src/websockets/index.ts",
   "src/codemode/ai.ts",
   "src/experimental/memory/session/index.ts",

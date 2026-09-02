@@ -104,6 +104,9 @@ class ServiceCapability extends LifecycleCapability {
   probe(): void {
     expectTypeOf(this.lifecycle).toEqualTypeOf<LifecycleServices>();
     expectTypeOf(this.lifecycle.storage).toEqualTypeOf<DurableObjectStorage>();
+    expectTypeOf(this.lifecycle.sql`SELECT 1`).toEqualTypeOf<
+      Record<string, string | number | boolean | null>[]
+    >();
     expectTypeOf(this.lifecycle.starting()).toEqualTypeOf<boolean>();
     expectTypeOf(this.lifecycle.jobs).toEqualTypeOf<LifecycleJobs>();
     expectTypeOf(
