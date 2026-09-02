@@ -214,6 +214,61 @@ describe("Tasks capability", () => {
     });
   });
 
+  it("repairs a missing wake mirror when a retry joins an already-accepted run", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const runId = "repair-wake-run";
+
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "sleeper",
+        { ms: 60 * 60 * 1000 },
+        { runId }
+      );
+      expect(receipt.accepted).toBe(true);
+      await waitForState(instance.tasks, runId, ["waiting"]);
+    });
+
+    // Simulate acceptance throwing after the row was already durably
+    // inserted — the realistic failure is on the wake-mirror push itself,
+    // not the insert — by deleting the mirror directly, as if it never
+    // landed.
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "DELETE FROM cf_agents_jobs WHERE id = ?",
+        `task:${runId}`
+      );
+      const rows = state.storage.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM cf_agents_jobs WHERE id = ?",
+          `task:${runId}`
+        )
+        .toArray();
+      expect(rows[0]?.count).toBe(0);
+    });
+
+    // A retry that joins the existing run (same runId, the real caller
+    // pattern for a redefer retry) must repair the missing wake, not just
+    // report accepted:false against a run nothing will ever wake again.
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const joined = await instance.tasks.run(
+        "sleeper",
+        { ms: 60 * 60 * 1000 },
+        { runId }
+      );
+      expect(joined.accepted).toBe(false);
+    });
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const rows = state.storage.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM cf_agents_jobs WHERE id = ?",
+          `task:${runId}`
+        )
+        .toArray();
+      expect(rows[0]?.count).toBe(1);
+    });
+  });
+
   it("completes a run through the warm path with journaled steps and host context", async () => {
     const name = crypto.randomUUID();
     const stub = env.TaskHarnessObject.getByName(name);

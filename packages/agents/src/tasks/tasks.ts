@@ -1036,6 +1036,19 @@ export class Tasks<
             `refusing to join it with conflicting key "${options.idempotencyKey}"`
         );
       }
+      // A prior accept can throw after already durably inserting this row —
+      // most likely here, on the wake mirror, rather than on the insert
+      // itself — so a caller retrying the same runId or idempotencyKey
+      // after a failure needs this join to repair a missing or stale
+      // mirror, not just report accepted:false against a row nothing will
+      // ever wake.
+      // A prior accept can throw after already durably inserting this row —
+      // most likely here, on the wake mirror, rather than on the insert
+      // itself — so a caller retrying the same runId or idempotencyKey
+      // after a failure needs this join to repair a missing or stale
+      // mirror, not just report accepted:false against a row nothing will
+      // ever wake.
+      await this.#syncWake(existing.run_id);
       return {
         runId: existing.run_id,
         definition,
