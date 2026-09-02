@@ -237,6 +237,46 @@ describe("Sessions attachments", () => {
     });
   });
 
+  it("reports the same byte total whether stats were cached or derived", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage({
+        id: "m0",
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      });
+
+      // Prime the incremental cache, then write media through it. The cache
+      // tracks serialized pointer JSON; row stats charge the payload as well.
+      // If the two disagree, the total depends on whether the cache happened
+      // to be warm — which would make the hydration budget unreliable.
+      await session.stats();
+      await session.appendMessage(
+        fileMessage("m1", dataUrl("image/png", 200_000), "image/png")
+      );
+
+      const derived = (await session.getHistoryRowStats()).reduce(
+        (sum, row) => sum + row.bytes,
+        0
+      );
+      expect((await session.stats()).totalContentBytes).toBe(derived);
+
+      // And again across an update that drops the payload.
+      await session.stats();
+      await session.updateMessage({
+        id: "m1",
+        role: "user",
+        parts: [{ type: "text", text: "never mind" }]
+      });
+      const afterUpdate = (await session.getHistoryRowStats()).reduce(
+        (sum, row) => sum + row.bytes,
+        0
+      );
+      expect((await session.stats()).totalContentBytes).toBe(afterUpdate);
+    });
+  });
+
   it("collects a payload once its last reference goes", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

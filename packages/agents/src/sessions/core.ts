@@ -12,6 +12,7 @@
  */
 
 import {
+  ATTACHMENT_URL_PREFIX,
   extractAttachments,
   referencedAttachments,
   resolveAttachments
@@ -881,7 +882,14 @@ export class SessionsCore {
 
     const cache = this.#statsCache.get(sessionId);
     if (cache) {
-      if (parent === cache.leafId && previousLeaf === cache.leafId) {
+      // A message that points at payloads costs more than its serialized
+      // pointer JSON: `pathRowStats` charges the payloads too, because that is
+      // what a read materializes. Rather than duplicate that formula here and
+      // risk the two drifting, drop the cache and let the next `stats()`
+      // derive it. Reads are cheap; a wrong total is not.
+      if (referencedAttachments(staged).length > 0) {
+        this.#statsCache.delete(sessionId);
+      } else if (parent === cache.leafId && previousLeaf === cache.leafId) {
         cache.leafId = message.id;
         cache.pathIds.push(message.id);
         cache.pathIdSet.add(message.id);
@@ -970,8 +978,18 @@ export class SessionsCore {
 
     const cache = this.#statsCache.get(sessionId);
     if (cache?.pathIdSet.has(message.id)) {
-      cache.rawTokens += tokenEstimate - old.token_estimate;
-      cache.rawBytes += byteLength(json) - byteLength(oldContent);
+      // Same reason as append: an attachment-bearing row is charged its
+      // payloads by `pathRowStats`, and the old content may have referenced
+      // payloads this version dropped. Derive rather than track.
+      if (
+        referencedAttachments(staged).length > 0 ||
+        oldContent.includes(ATTACHMENT_URL_PREFIX)
+      ) {
+        this.#statsCache.delete(sessionId);
+      } else {
+        cache.rawTokens += tokenEstimate - old.token_estimate;
+        cache.rawBytes += byteLength(json) - byteLength(oldContent);
+      }
     }
     this.io.emit("session:message:updated", {
       sessionId,
