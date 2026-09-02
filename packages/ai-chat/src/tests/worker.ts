@@ -3465,6 +3465,23 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     `;
   }
 
+  /** This facet's own run row state, to check a routed strike reached it. */
+  getFacetRecoveryOomRunStateForTest(runId: string): {
+    state: string;
+    generation: string | null;
+    next_at: number | null;
+  } | null {
+    const rows = this.sql<{
+      state: string;
+      generation: string | null;
+      next_at: number | null;
+    }>`
+      SELECT state, generation, next_at FROM cf_agents_task_runs
+      WHERE run_id = ${runId}
+    `;
+    return rows[0] ?? null;
+  }
+
   /** Read the persisted status of a test recovery incident. */
   async facetRecoveryIncidentStatusForTest(
     incidentId: string
@@ -4129,6 +4146,47 @@ export class AIChatAgentToolParent extends Agent<Env> {
     await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 2);
     await this.alarm();
     return [executingRunId, pendingRunId];
+  }
+
+  /**
+   * Drive the root alarm to a single (non-sealing) memory-limit strike on
+   * one routed child recovery run. Returns the run ID; the breaker's
+   * deferred isolate reset means the caller should read the resulting
+   * claim state through a fresh stub, not this same invocation.
+   */
+  async driveFacetRecoveryOomBackoffForTest(executing: {
+    childName: string;
+    incidentId: string;
+  }): Promise<string> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      executing.childName
+    );
+    const runId = await child.seedFacetRecoveryOomForTest(executing.incidentId);
+    await child.armFacetRecoveryOomForTest(runId);
+    this.sql`
+      UPDATE cf_agents_jobs
+      SET time = ${Date.now() - 1_000}
+      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+    `;
+    // One strike under the 3-strike seal threshold (#1825): the breaker
+    // backs off without sealing.
+    await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 0);
+    await this.alarm();
+    return runId;
+  }
+
+  /** This facet's own run row state, read through the parent by name. */
+  async facetRecoveryOomRunStateForTest(
+    childName: string,
+    runId: string
+  ): Promise<{
+    state: string;
+    generation: string | null;
+    next_at: number | null;
+  } | null> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    return child.getFacetRecoveryOomRunStateForTest(runId);
   }
 
   /** Whether a routed Task run still has a wake job mirrored on this root. */

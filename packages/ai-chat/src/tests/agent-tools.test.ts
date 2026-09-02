@@ -250,6 +250,18 @@ type ParentStub = DurableObjectStub & {
     incidentId: string
   ): Promise<string | null>;
   rootHasRoutedTaskWakeForTest(runId: string): Promise<boolean>;
+  driveFacetRecoveryOomBackoffForTest(executing: {
+    childName: string;
+    incidentId: string;
+  }): Promise<string>;
+  facetRecoveryOomRunStateForTest(
+    childName: string,
+    runId: string
+  ): Promise<{
+    state: string;
+    generation: string | null;
+    next_at: number | null;
+  } | null>;
   driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
     taskRunOnChild: number;
     routedWakeOnRoot: number;
@@ -309,6 +321,34 @@ describe("AIChatAgent as an agent-tool child", () => {
         pending.incidentId
       )
     ).toBe("scheduled");
+  });
+
+  it("backs off a routed facet's own claim on a non-sealing strike, not just the root's mirror", async () => {
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-backoff-${crypto.randomUUID()}`
+    };
+
+    const runId = await parent.driveFacetRecoveryOomBackoffForTest(executing);
+    // Same deferred-reset caution as the sealing test above.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const freshParent = await getParent(parentName);
+
+    const runState = await freshParent.facetRecoveryOomRunStateForTest(
+      executing.childName,
+      runId
+    );
+    // The facet's own claim is cleared and its deadline backed off — not
+    // just the root's mirror job, which the platform breaker already
+    // backs off on its own. A claim left untouched here would let any
+    // facet startup before the backoff elapses read it as an interrupted
+    // attempt and reconcile it due again now, resurrecting the run through
+    // the breaker.
+    expect(runState?.state).toBe("running");
+    expect(runState?.generation).toBeNull();
+    expect(runState?.next_at).toBeGreaterThan(Date.now());
   });
 
   it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {

@@ -429,26 +429,35 @@ export class Tasks<
     if (timing?.owner_path) {
       // This root mirrors a routed facet's wake; the run and its step
       // journal live on the owning facet, so dispatch routes back there.
+      // The facet applies the same bounded-dispatch policy as the local
+      // path below and returns its own wake outcome for this mirror job —
+      // a later settle's own routed #syncWake still supersedes it (newer
+      // pushes win over drive results), same as the local path.
       try {
-        await this.lifecycle.routes.to(
+        return (await this.lifecycle.routes.to(
           {
             key: timing.owner_path_key ?? timing.owner_path,
             data: timing.owner_path
           },
           { type: "dispatch", runId } satisfies TaskRouteMessage
-        );
+        )) as LifecycleJobOutcome;
       } catch (error) {
         if (isPlatformFailure(error)) throw error;
         console.error(`error dispatching routed Task run "${runId}"`, error);
         return "yield";
       }
-      // The facet's own #syncWake, made during the dispatch above and
-      // routed back to this root, supersedes whatever this returns — the
-      // same "newer pushes win over drive results" contract as the local
-      // path below.
-      return undefined;
     }
 
+    return this.#dispatchRun(runId);
+  }
+
+  /**
+   * Drive one due run to its next durable boundary, bounded by the dispatch
+   * budget, and return the wake outcome for whichever queue row is driving
+   * it — this capability's own job locally, or a routed `dispatch` message
+   * a root is awaiting across the route boundary.
+   */
+  async #dispatchRun(runId: string): Promise<LifecycleJobOutcome> {
     const active = this.#active.get(runId);
     if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
@@ -514,14 +523,16 @@ export class Tasks<
     const timing = isTaskWakeJobPayload(job.payload) ? job.payload : undefined;
     const runId = timing?.runId ?? job.id.slice(WAKE_JOB_PREFIX.length);
 
-    if (timing?.owner_path && context.sealed) {
+    if (timing?.owner_path) {
       // The struck job was this root's mirror of a routed facet's wake; the
-      // run's storage lives on the facet, so a terminal seal is forwarded
-      // there to fail the run and notify the owning host. A non-sealed
-      // strike needs no forwarding: the platform breaker already backs off
-      // this mirror job row on its own, and the facet's own claim backstop
-      // (written when it claimed the run) is the durable recovery wake
-      // regardless of this row's timing.
+      // run row and its claim live on the facet, so the strike is forwarded
+      // there to apply the same policy locally — clearing the claim and
+      // backing off (or terminally failing, when sealed). Forwarding a
+      // non-sealed strike too matters: this root's own mirror job backs off
+      // on its own, but the facet's run row would otherwise keep its old
+      // claim, and any facet startup before the backoff elapses would read
+      // that claim as an interrupted attempt and reconcile it due again now
+      // — resurrecting the run through the breaker.
       try {
         await this.lifecycle.routes.to(
           {
@@ -710,8 +721,7 @@ export class Tasks<
         return this.#syncRoutedWake(owner, message.runId, message.next);
       }
       case "dispatch":
-        await this.#executeRun(message.runId);
-        return true;
+        return this.#dispatchRun(message.runId);
       case "memoryLimit": {
         await this.#applyMemoryLimit(message.runId, message.context);
         // The owner's own Lifecycle never observes the root's alarm; this
