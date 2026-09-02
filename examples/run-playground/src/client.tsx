@@ -164,22 +164,6 @@ return "you should never see this";
 
 const ALL_PRESETS = [...EXAMPLE_PRESETS, ...BREAK_PRESETS];
 
-/** Keep in sync with the hostFunctions passed to run() in server.ts. */
-const HOST_FUNCTIONS = [
-  {
-    signature: "demo.customers()",
-    description: "Six demo customer records. Runs in the parent Worker."
-  },
-  {
-    signature: "demo.wait(ms)",
-    description: "Signal-aware sleep in the parent; cancellation reaches it."
-  },
-  {
-    signature: "demo.vault()",
-    description: "Always throws on the host — one of the escape room's doors."
-  }
-];
-
 /**
  * Left-hand navigation entries. Each demo gets a row here; adding a second
  * demo means adding an entry and rendering its main content when selected.
@@ -366,8 +350,13 @@ export default {
         {`\`,
       hostFunctions: {
         demo: {
+          // returns six demo customer records. runs in the parent worker.
           customers: async () => CUSTOMERS,
+
+          // signal-aware sleep in the parent; cancellation reaches it.
           wait: async (ms) => sleepUnlessAborted(ms),
+
+          // always throws on the host.
           vault: async () => { throw new Error("The vault stays shut."); }
         }
       },
@@ -531,34 +520,16 @@ function AboutAside() {
           <Text size="sm">
             Everything you run here executes in a brand-new{" "}
             <span className="font-mono text-[0.9em]">Dynamic Worker</span> via{" "}
-            <span className="font-mono text-[0.9em]">@cloudflare/run</span> — no
-            bindings, no imports, and no network. Its only authority is the{" "}
-            <span className="font-mono text-[0.9em]">demo.*</span> host
+            <span className="font-mono text-[0.9em]">@cloudflare/run</span>. The
+            code has no bindings, no imports, and no network. Its only authority
+            is the <span className="font-mono text-[0.9em]">demo.*</span> host
             functions the server passes in.
           </Text>
           <Text size="sm" variant="secondary">
-            Pick a preset — especially the hostile ones — and watch each escape
-            attempt come back as a clean, typed RunError with a stable code,
-            bounded logs, and a stack that points at your own source lines.
+            Pick a preset and watch each escape attempt come back as a clean,
+            typed RunError with a stable code, bounded logs, and a stack that
+            points at your own source lines.
           </Text>
-        </div>
-      </Card>
-
-      <Card title="Host functions">
-        <div>
-          {HOST_FUNCTIONS.map((hostFunction) => (
-            <div
-              key={hostFunction.signature}
-              className="grid gap-1 border-b border-kumo-line px-4 py-3 last:border-b-0"
-            >
-              <code className="w-fit rounded bg-kumo-elevated px-1.5 py-0.5 font-mono text-xs text-kumo-default">
-                {hostFunction.signature}
-              </code>
-              <Text size="sm" variant="secondary">
-                {hostFunction.description}
-              </Text>
-            </div>
-          ))}
         </div>
       </Card>
 
@@ -571,7 +542,7 @@ function AboutAside() {
             ],
             [
               "Limits",
-              "Wall timeout, CPU budget, log bytes, host-call counts — all bounded with safe defaults."
+              "Wall timeout, CPU budget, log bytes, host-call counts are all bounded with safe defaults."
             ],
             [
               "Errors",
@@ -579,7 +550,7 @@ function AboutAside() {
             ],
             [
               "Data",
-              "Results cross over native Workers RPC: BigInt, Map, Set, Date, typed arrays, and cycles survive."
+              "Results cross over native Workers RPC, so BigInt, Map, Set, Date, typed arrays, and cycles survive."
             ]
           ].map(([label, description]) => (
             <div
@@ -684,9 +655,8 @@ interface EscapeLevel {
   warning?: string;
 }
 
-/** Every level starts from the same innocent attempt — the puzzle is yours. */
-const ESCAPE_STARTER_SOURCE = `return "let me out";
-`;
+/** Placeholder for the empty editor — writing the escape is the puzzle. */
+const ESCAPE_STARTER_SOURCE = `return "let me out";`;
 
 /**
  * One level per RunError code, easiest doors first. Winning a level means
@@ -902,7 +872,7 @@ function EscapeBoard({
 function EscapeRoom() {
   const [levelIndex, setLevelIndex] = useState(0);
   const [collected, setCollected] = useState<Set<string>>(loadCollectedCodes);
-  const [source, setSource] = useState(ESCAPE_STARTER_SOURCE);
+  const [source, setSource] = useState("");
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<RunApiResponse>();
   const [clueOpen, setClueOpen] = useState(false);
@@ -911,7 +881,7 @@ function EscapeRoom() {
 
   function selectLevel(index: number) {
     setLevelIndex(index);
-    setSource(ESCAPE_STARTER_SOURCE);
+    setSource("");
     setResult(undefined);
     setClueOpen(false);
     setAnswerRevealed(false);
@@ -1050,6 +1020,7 @@ function EscapeRoom() {
                 value={source}
                 onChange={(event) => setSource(event.currentTarget.value)}
                 onKeyDown={(event) => insertEditorTab(event, source, setSource)}
+                placeholder={ESCAPE_STARTER_SOURCE}
                 spellCheck={false}
                 aria-label="Escape attempt editor"
                 className="min-h-[180px] w-full resize-y font-mono text-[13px]"
@@ -1180,7 +1151,7 @@ function EscapeRoom() {
 
       <aside className="flex w-full flex-col gap-5 xl:sticky xl:top-[4.25rem] xl:h-fit xl:w-[300px] xl:shrink-0">
         <Card
-          title="House rules"
+          title="How to play"
           meta={
             collected.size > 0 && (
               <Button size="sm" variant="ghost" onClick={resetBoard}>
@@ -1193,15 +1164,11 @@ function EscapeRoom() {
             <Text size="sm">
               Twelve locked doors, one per{" "}
               <span className="font-mono text-[0.9em]">RunError</span> code.
-              Each level dares you to reach something you shouldn't — the
-              network, the host, the clock, the RPC boundary. Write an attempt
-              that triggers exactly the level's code to collect it.
             </Text>
             <Text size="sm" variant="secondary">
-              Stuck? The lightbulb above the editor offers a clue — and will
-              show you a working answer if the clue isn't enough. Every failure
-              comes back the same way: one typed error with a stable code and
-              bounded logs, never a host stack trace.
+              For each level, write an attempt to reach something you shouldn't
+              (e.g. network, the host, the clock, the RPC boundary). When you
+              trigger exactly the level's code, you'll escape that room!
             </Text>
           </div>
         </Card>
@@ -1313,7 +1280,11 @@ export function App() {
                 <span className="font-mono">@cloudflare/run</span>
               </Breadcrumbs.Link>
               <Breadcrumbs.Separator />
-              <Breadcrumbs.Current>run-playground</Breadcrumbs.Current>
+              <Breadcrumbs.Link href="/">run-playground</Breadcrumbs.Link>
+              <Breadcrumbs.Separator />
+              <Breadcrumbs.Current>
+                {DEMOS.find((entry) => entry.id === demo)?.label}
+              </Breadcrumbs.Current>
             </Breadcrumbs>
           </div>
           <div className="flex shrink-0 items-center gap-3">
