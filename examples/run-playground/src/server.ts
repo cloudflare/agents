@@ -147,24 +147,6 @@ function formatRunValue(
   }
 }
 
-/**
- * Pretty-printed JSON of a run result. JSON cannot represent everything RPC
- * carries, so BigInt renders with an `n` suffix and Map/Set as their entries.
- */
-function formatRawResult(value: unknown): string {
-  const raw = JSON.stringify(
-    value,
-    (_key, entry: unknown) => {
-      if (typeof entry === "bigint") return `${entry}n`;
-      if (entry instanceof Map) return Object.fromEntries(entry);
-      if (entry instanceof Set) return [...entry];
-      return entry;
-    },
-    2
-  );
-  return raw ?? "undefined";
-}
-
 /** Parse and bound the request body; returns undefined when malformed. */
 function parseRunRequestBody(value: unknown): RunRequestBody | undefined {
   if (typeof value !== "object" || value === null) return undefined;
@@ -259,7 +241,9 @@ async function handleRun(request: Request, env: Env): Promise<Response> {
     const response: RunApiResponse = {
       ok: true,
       value: formatRunValue(result.value).slice(0, DISPLAY_VALUE_MAX_CHARS),
-      raw: formatRawResult({
+      // Same walker as the value view — JSON.stringify would silently lose
+      // what RPC preserved (-0 becomes 0, BigInt has no representation).
+      raw: formatRunValue({
         status: result.status,
         value: result.value,
         logs: result.logs
