@@ -38,8 +38,11 @@ per-run tool agents — reached via `this.dynamicAgents`. See
   forwarded to that chat. The chat answers the upgrade and owns the
   socket, so chat frames never wake the hub.
 - **Listing and search** read only the hub. Each chat pushes its title
-  and last message back with `recordChatActivity()`, which is one
-  `setMetadata()` call; entries list most recently updated first.
+  and last message back with `recordChatActivity()`, which fences the
+  push's own timestamp against the entry's current one before calling
+  `setMetadata()` — a push delayed by a slow round-trip can't overwrite
+  a more recent one that arrived first. Entries list most recently
+  updated first, ties broken by write order.
 - **Deletion** is `chats.delete(id)`: the entry is hidden, the chat is
   condemned so it wipes its own storage moments later, and the row is
   removed. A push for a deleted chat returns `false`, so delayed

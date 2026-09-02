@@ -456,11 +456,13 @@ One top-level Durable Object per chat, plus a per-user index DO the chats push t
 // ChatAgent (one DO per chat) pushes on every write, through whatever
 // RPC surface the hub exposes over its RoutedAgents catalog:
 const user = await getAgentByName(this.env.UserAgent, ownerUserId);
-await user.recordChatActivity(chatId, { title, lastMessage });
+await user.recordChatActivity(chatId, { title, lastMessage, updatedAt });
 
 // UserAgent (the hub) answers listing and cross-chat search from its
 // own SQLite — no chat DO wakes up — and applies the push with
-// `this.chats.setMetadata(chatId, meta)`.
+// `this.chats.setMetadata(chatId, meta)` after fencing `updatedAt`
+// against the entry's current value, so a push delayed by a slow
+// round-trip can't overwrite a more recent one that arrived first.
 ```
 
 `RoutedAgents` packages the hub side of this pattern: a durable ID-to-Agent catalog plus request and WebSocket forwarding under one route segment. See [Routing to independent Agents](./routing.md#routing-to-independent-agents).

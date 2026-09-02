@@ -19,6 +19,8 @@ import { RoutedAgents } from "agents/routing";
 type ChatMeta = {
   title: string | null;
   lastMessage: string | null;
+  /** The pushing message's own timestamp — fences out delayed pushes. */
+  updatedAt: number;
 };
 
 type ChatMessage = {
@@ -73,7 +75,8 @@ export class ChatAgent extends Agent<Env> {
         const user = await getAgentByName(this.env.UserAgent, owner.userId);
         await user.recordChatActivity(owner.chatId, {
           title: first ? first.text.slice(0, 80) : null,
-          lastMessage: text.slice(0, 120)
+          lastMessage: text.slice(0, 120),
+          updatedAt: at
         });
       } catch (error) {
         console.warn("[ChatAgent] owner update failed", error);
@@ -137,7 +140,7 @@ export class UserAgent extends Agent<Env> {
   @callable()
   async createChat(): Promise<string> {
     const { id } = await this.chats.create({
-      metadata: { title: null, lastMessage: null }
+      metadata: { title: null, lastMessage: null, updatedAt: 0 }
     });
     try {
       const chat = await this.chats.get(id);
@@ -154,8 +157,21 @@ export class UserAgent extends Agent<Env> {
     return id;
   }
 
-  /** DO-RPC target for ChatAgent pushes. False once the chat is deleted. */
-  recordChatActivity(chatId: string, meta: ChatMeta): Promise<boolean> {
+  /**
+   * DO-RPC target for ChatAgent pushes. Rejects a push whose own
+   * timestamp is not newer than the entry's current one, so a push
+   * delayed by a slow round-trip can't overwrite a more recent one that
+   * happened to arrive first — `RoutedAgents.setMetadata()` itself has
+   * no ordering concept, so the fence lives here. False for a deleted
+   * chat or a push this hub has already superseded.
+   */
+  async recordChatActivity(chatId: string, meta: ChatMeta): Promise<boolean> {
+    const current = (await this.chats.list()).find(
+      (entry) => entry.id === chatId
+    );
+    if (!current || (current.metadata?.updatedAt ?? 0) >= meta.updatedAt) {
+      return false;
+    }
     return this.chats.setMetadata(chatId, meta);
   }
 

@@ -117,9 +117,41 @@ describe("user hub routing to one DO per chat", () => {
     expect(
       await user.recordChatActivity(chatId, {
         title: "stale",
-        lastMessage: "late completion"
+        lastMessage: "late completion",
+        updatedAt: Date.now()
       })
     ).toBe(false);
     expect(await user.listChats()).toEqual([]);
+  });
+
+  it("a delayed push cannot overwrite a more recent one", async () => {
+    const userId = uniqueUser();
+    const user = await getAgentByName(env.UserAgent, userId);
+    const chatId = await user.createChat();
+
+    const now = Date.now();
+    expect(
+      await user.recordChatActivity(chatId, {
+        title: "Newer",
+        lastMessage: "arrived first",
+        updatedAt: now
+      })
+    ).toBe(true);
+
+    // A push whose own timestamp is older is rejected even though it is
+    // delivered second — this is what a slow round-trip from an earlier
+    // message would look like landing after a later one.
+    expect(
+      await user.recordChatActivity(chatId, {
+        title: "Older",
+        lastMessage: "delayed",
+        updatedAt: now - 1
+      })
+    ).toBe(false);
+
+    expect((await user.listChats())[0]?.metadata).toMatchObject({
+      title: "Newer",
+      lastMessage: "arrived first"
+    });
   });
 });

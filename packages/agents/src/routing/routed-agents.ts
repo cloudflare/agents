@@ -14,6 +14,16 @@ import type {
  */
 const TABLE = "cf_agents_routed_agents";
 
+/**
+ * Derives the next per-route sequence number from a `MAX(seq)` read
+ * instead of a maintained counter row — one more billed read, not a
+ * second write-hot row per create()/setMetadata() call. Breaks ties
+ * between equal `Date.now()` values deterministically by write order,
+ * which a random entry `id` cannot: DO SQLite millisecond timestamps
+ * collide easily under rapid same-route writes.
+ */
+const NEXT_SEQ = `(SELECT COALESCE(MAX(seq), 0) + 1 FROM ${TABLE} WHERE route = ?)`;
+
 /** A public entry in an {@link RoutedAgents}. */
 export type RoutedAgentEntry<Metadata = unknown> = {
   /** Stable application-facing identifier used in routes. */
@@ -113,14 +123,15 @@ export class RoutedAgents<
     const encoded = encodeMetadata(options?.metadata ?? null);
     const now = Date.now();
     this.#sql(
-      `INSERT INTO ${TABLE} (route, id, agent_name, status, metadata, created_at, updated_at)
-       VALUES (?, ?, ?, 'active', ?, ?, ?)`,
+      `INSERT INTO ${TABLE} (route, id, agent_name, status, metadata, created_at, updated_at, seq)
+       VALUES (?, ?, ?, 'active', ?, ?, ?, ${NEXT_SEQ})`,
       this.#route,
       id,
       crypto.randomUUID(),
       encoded,
       now,
-      now
+      now,
+      this.#route
     );
     // Round-trip through JSON so this agrees with list()'s decoded copy —
     // returning the caller's object verbatim would diverge for values JSON
@@ -140,13 +151,17 @@ export class RoutedAgents<
     return agentName ? this.#stub(agentName) : null;
   }
 
-  /** List active entries, most recently updated first. */
+  /**
+   * List active entries, most recently updated first. Entries whose
+   * `updatedAt` ties are ordered by actual write order, not by the
+   * random entry `id`.
+   */
   async list(): Promise<ReadonlyArray<RoutedAgentEntry<Metadata>>> {
     await this.lifecycle.ready();
     return this.#sql<EntryRow>(
       `SELECT id, metadata, created_at AS createdAt, updated_at AS updatedAt
        FROM ${TABLE} WHERE route = ? AND status = 'active'
-       ORDER BY updated_at DESC, id ASC`,
+       ORDER BY updated_at DESC, seq DESC, id ASC`,
       this.#route
     ).map((row) => ({
       ...row,
@@ -162,10 +177,11 @@ export class RoutedAgents<
     await this.lifecycle.ready();
     return (
       this.#sql(
-        `UPDATE ${TABLE} SET metadata = ?, updated_at = ?
+        `UPDATE ${TABLE} SET metadata = ?, updated_at = ?, seq = ${NEXT_SEQ}
          WHERE route = ? AND id = ? AND status = 'active' RETURNING id`,
         encodeMetadata(metadata),
         Date.now(),
+        this.#route,
         this.#route,
         id
       ).length > 0
@@ -213,6 +229,7 @@ export class RoutedAgents<
       metadata TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
+      seq INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (route, id)
     ) WITHOUT ROWID`);
   }

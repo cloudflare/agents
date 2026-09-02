@@ -1,7 +1,8 @@
 import { env, exports } from "cloudflare:workers";
-import { evictDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../index";
+import type { RoutingOwnerAgent } from "./agents/routed-agents";
 
 const openSockets = new Set<WebSocket>();
 
@@ -120,6 +121,27 @@ describe("RoutedAgents", () => {
     expect(entries.find((entry) => entry.id === second.id)?.metadata).toEqual({
       title: "Second"
     });
+  });
+
+  it("orders same-millisecond updates by write order, not by random id", async () => {
+    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const first = await owner.createChat("First");
+    const second = await owner.createChat("Second");
+
+    // Bump each row's sequence with one more write, "second" last so it
+    // must sort first, then pin both to a genuinely tied timestamp — seq
+    // is then the only thing that can order them correctly.
+    await owner.setChatMetadata(first.id, "First");
+    await owner.setChatMetadata(second.id, "Second");
+    await runInDurableObject(owner, (instance: RoutingOwnerAgent) => {
+      const now = Date.now();
+      instance.sql`UPDATE cf_agents_routed_agents SET updated_at = ${now} WHERE route = 'chats'`;
+    });
+
+    expect((await owner.listChats()).map((entry) => entry.id)).toEqual([
+      second.id,
+      first.id
+    ]);
   });
 
   it("forwards HTTP requests and preserves the suffix", async () => {
