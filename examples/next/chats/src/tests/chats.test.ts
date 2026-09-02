@@ -118,7 +118,7 @@ describe("user hub routing to one DO per chat", () => {
       await user.recordChatActivity(chatId, {
         title: "stale",
         lastMessage: "late completion",
-        updatedAt: Date.now()
+        seq: 99
       })
     ).toBe(false);
     expect(await user.listChats()).toEqual([]);
@@ -129,29 +129,45 @@ describe("user hub routing to one DO per chat", () => {
     const user = await getAgentByName(env.UserAgent, userId);
     const chatId = await user.createChat();
 
-    const now = Date.now();
     expect(
       await user.recordChatActivity(chatId, {
         title: "Newer",
         lastMessage: "arrived first",
-        updatedAt: now
+        seq: 2
       })
     ).toBe(true);
 
-    // A push whose own timestamp is older is rejected even though it is
+    // A push whose own ordinal is lower is rejected even though it is
     // delivered second — this is what a slow round-trip from an earlier
     // message would look like landing after a later one.
     expect(
       await user.recordChatActivity(chatId, {
         title: "Older",
         lastMessage: "delayed",
-        updatedAt: now - 1
+        seq: 1
       })
     ).toBe(false);
 
     expect((await user.listChats())[0]?.metadata).toMatchObject({
       title: "Newer",
       lastMessage: "arrived first"
+    });
+  });
+
+  it("two messages landing in the same millisecond never tie", async () => {
+    const userId = uniqueUser();
+    const user = await getAgentByName(env.UserAgent, userId);
+    const chatId = await user.createChat();
+
+    // The real client sends the user message and its echo back to back;
+    // both can land in the same millisecond. Using each message's own
+    // AUTOINCREMENT ordinal instead of Date.now() means the second push
+    // is never mistaken for a tie and discarded.
+    await post(userId, chatId, "first");
+    const messages = await post(userId, chatId, "second, same millisecond");
+
+    expect((await user.listChats())[0]?.metadata).toMatchObject({
+      lastMessage: messages.at(-1)?.text
     });
   });
 });

@@ -39,10 +39,13 @@ per-run tool agents — reached via `this.dynamicAgents`. See
   socket, so chat frames never wake the hub.
 - **Listing and search** read only the hub. Each chat pushes its title
   and last message back with `recordChatActivity()`, which fences the
-  push's own timestamp against the entry's current one before calling
-  `setMetadata()` — a push delayed by a slow round-trip can't overwrite
-  a more recent one that arrived first. Entries list most recently
-  updated first, ties broken by write order.
+  push's own chat-local message ordinal against the entry's current one,
+  inside `blockConcurrencyWhile`, before calling `setMetadata()` — a
+  push delayed by a slow round-trip can't overwrite one that arrived
+  first, two concurrent pushes can't both read the same stale value, and
+  two messages landing in the same millisecond never tie the way a
+  wall-clock fence would. Entries list most recently updated first, ties
+  broken by write order.
 - **Deletion** is `chats.delete(id)`: the entry is hidden, the chat is
   condemned so it wipes its own storage moments later, and the row is
   removed. A push for a deleted chat returns `false`, so delayed

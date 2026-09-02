@@ -16,11 +16,20 @@ const TABLE = "cf_agents_routed_agents";
 
 /**
  * Derives the next per-route sequence number from a `MAX(seq)` read
- * instead of a maintained counter row — one more billed read, not a
- * second write-hot row per create()/setMetadata() call. Breaks ties
- * between equal `Date.now()` values deterministically by write order,
- * which a random entry `id` cannot: DO SQLite millisecond timestamps
- * collide easily under rapid same-route writes.
+ * instead of a maintained counter row. Breaks ties between equal
+ * `Date.now()` values deterministically by write order, which a random
+ * entry `id` cannot: DO SQLite millisecond timestamps collide easily
+ * under rapid same-route writes.
+ *
+ * This scans every row for the route on each create()/setMetadata() —
+ * intentionally, not a missed index. DO SQLite bills roughly 1000
+ * writes for the cost of 1000 reads, so a maintained counter row (an
+ * extra write on every call) only wins at deep four-figure entries per
+ * route; a `(route, seq)` index would cost an extra write on every call
+ * too, since `seq` changes on every write it would index. `RoutedAgents`
+ * targets one owner's own catalog (chats, documents, sessions) — for a
+ * route expected to hold thousands of entries, benchmark before relying
+ * on this ordering; it is not built for that scale.
  */
 const NEXT_SEQ = `(SELECT COALESCE(MAX(seq), 0) + 1 FROM ${TABLE} WHERE route = ?)`;
 

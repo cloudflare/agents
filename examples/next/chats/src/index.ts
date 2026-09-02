@@ -19,8 +19,14 @@ import { RoutedAgents } from "agents/routing";
 type ChatMeta = {
   title: string | null;
   lastMessage: string | null;
-  /** The pushing message's own timestamp — fences out delayed pushes. */
-  updatedAt: number;
+  /**
+   * The pushing message's own ordinal in its chat, from `messages`'
+   * `AUTOINCREMENT` id. Fences out delayed or superseded pushes without
+   * relying on `Date.now()` resolution: two messages sent back to back
+   * (a real echo can round-trip inside one millisecond) get consecutive
+   * ordinals and so never tie, unlike wall-clock timestamps.
+   */
+  seq: number;
 };
 
 type ChatMessage = {
@@ -54,12 +60,9 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async addMessage(role: "user" | "assistant", text: string): Promise<number> {
-    const at = Date.now();
-    this.sql`
-      INSERT INTO messages (role, text, at) VALUES (${role}, ${text}, ${at})
-    `;
-    const [{ n }] = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM messages
+    const [{ id: seq }] = this.sql<{ id: number }>`
+      INSERT INTO messages (role, text, at) VALUES (${role}, ${text}, ${Date.now()})
+      RETURNING id
     `;
 
     // Push the latest snapshot to the owner so listing and search never
@@ -76,14 +79,14 @@ export class ChatAgent extends Agent<Env> {
         await user.recordChatActivity(owner.chatId, {
           title: first ? first.text.slice(0, 80) : null,
           lastMessage: text.slice(0, 120),
-          updatedAt: at
+          seq
         });
       } catch (error) {
         console.warn("[ChatAgent] owner update failed", error);
       }
     }
 
-    return n;
+    return seq;
   }
 
   @callable()
@@ -140,7 +143,7 @@ export class UserAgent extends Agent<Env> {
   @callable()
   async createChat(): Promise<string> {
     const { id } = await this.chats.create({
-      metadata: { title: null, lastMessage: null, updatedAt: 0 }
+      metadata: { title: null, lastMessage: null, seq: 0 }
     });
     try {
       const chat = await this.chats.get(id);
@@ -158,21 +161,28 @@ export class UserAgent extends Agent<Env> {
   }
 
   /**
-   * DO-RPC target for ChatAgent pushes. Rejects a push whose own
-   * timestamp is not newer than the entry's current one, so a push
-   * delayed by a slow round-trip can't overwrite a more recent one that
-   * happened to arrive first — `RoutedAgents.setMetadata()` itself has
-   * no ordering concept, so the fence lives here. False for a deleted
-   * chat or a push this hub has already superseded.
+   * DO-RPC target for ChatAgent pushes. Rejects a push whose `seq` is
+   * not strictly greater than the entry's current one, so a push
+   * delayed by a slow round-trip can't overwrite one that arrived first
+   * — `RoutedAgents.setMetadata()` itself has no ordering concept, so
+   * the fence lives here. False for a deleted chat or a superseded push.
+   *
+   * `blockConcurrencyWhile` makes the read-then-write atomic against
+   * other concurrent calls to this method on this same hub instance —
+   * without it, two pushes could both read the same "current" value
+   * before either writes, and the fence would compare against a value
+   * that's already stale by the time the later one applies.
    */
-  async recordChatActivity(chatId: string, meta: ChatMeta): Promise<boolean> {
-    const current = (await this.chats.list()).find(
-      (entry) => entry.id === chatId
-    );
-    if (!current || (current.metadata?.updatedAt ?? 0) >= meta.updatedAt) {
-      return false;
-    }
-    return this.chats.setMetadata(chatId, meta);
+  recordChatActivity(chatId: string, meta: ChatMeta): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const current = (await this.chats.list()).find(
+        (entry) => entry.id === chatId
+      );
+      if (!current || (current.metadata?.seq ?? 0) >= meta.seq) {
+        return false;
+      }
+      return this.chats.setMetadata(chatId, meta);
+    });
   }
 
   /** Most recent activity first; reads only this DO. */

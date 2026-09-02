@@ -30,7 +30,7 @@ localStorage.setItem(USER_KEY, userId);
 type ChatEntry = RoutedAgentEntry<{
   title: string | null;
   lastMessage: string | null;
-  updatedAt: number;
+  seq: number;
 }>;
 
 type ChatMessage = {
