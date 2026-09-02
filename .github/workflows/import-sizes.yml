@@ -1,0 +1,100 @@
+name: Package Import Sizes
+
+on:
+  pull_request:
+    paths-ignore:
+      - "design/**"
+      - "*.md"
+      - ".changeset/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+  NX_PARALLEL: "2"
+
+permissions:
+  contents: read
+
+jobs:
+  import-sizes:
+    name: Import sizes
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          filter: tree:0
+
+      - uses: ./.github/actions/install
+
+      - name: Build proposed package
+        run: pnpm exec nx run agents:build
+
+      - name: Measure proposed imports
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          pnpm --filter agents exec tsx ./scripts/import-sizes.ts measure
+          --package-dir .
+          --revision "$HEAD_SHA"
+          --output "$RUNNER_TEMP/agents-import-sizes/head.json"
+
+      - name: Check out base revision
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          filter: tree:0
+          repository: ${{ github.event.pull_request.base.repo.full_name }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .import-size-base
+
+      - name: Install and build base package
+        run: |
+          pnpm --dir .import-size-base install --frozen-lockfile
+          pnpm --dir .import-size-base exec nx run agents:build
+
+      - name: Measure base imports
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          pnpm --filter agents exec tsx ./scripts/import-sizes.ts measure
+          --package-dir "$GITHUB_WORKSPACE/.import-size-base/packages/agents"
+          --revision "$BASE_SHA"
+          --output "$RUNNER_TEMP/agents-import-sizes/base.json"
+
+      - name: Compare import sizes
+        id: import-sizes
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        run: >-
+          pnpm --filter agents exec tsx ./scripts/import-sizes.ts compare
+          --base "$RUNNER_TEMP/agents-import-sizes/base.json"
+          --head "$RUNNER_TEMP/agents-import-sizes/head.json"
+          --output "$RUNNER_TEMP/agents-import-sizes/report.json"
+          --repository "$GITHUB_REPOSITORY"
+          --pr "$PR_NUMBER"
+          --run-id "$RUN_ID"
+          --run-attempt "$RUN_ATTEMPT"
+          --threshold 10
+          --github-output "$GITHUB_OUTPUT"
+          --github-step-summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload import-size report
+        uses: actions/upload-artifact@v7
+        with:
+          name: agents-import-sizes-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/agents-import-sizes/report.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce import-size limit
+        if: steps.import-sizes.outputs.gate == 'fail'
+        run: |
+          echo "One or more existing imports grew by more than 10%." >&2
+          exit 1

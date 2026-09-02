@@ -505,7 +505,7 @@ This pattern has several advantages for long-running agents:
 
 ## Delegating to sub-agents
 
-A project manager does not do everything itself. It delegates specialized work to sub-agents — child Durable Objects (facets) spawned under the parent. Each facet has its own isolated SQLite state and runs in parallel, but stays colocated on the same machine as the parent.
+A project manager does not do everything itself. It delegates specialized work to sub-agents — child Durable Objects (facets) spawned under the parent. Each facet has its own isolated SQLite state and runs in parallel, but stays colocated on the same machine as the parent. This per-run, parent-supervised delegation is the use case facets are for; see [When to use dynamic agents](./sub-agents.md#when-to-use-dynamic-agents) before reaching for one to model long-lived independent peers.
 
 ```typescript
 export class ProjectManager extends Agent<Env, ProjectState> {

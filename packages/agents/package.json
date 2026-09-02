@@ -118,6 +118,11 @@
       "import": "./dist/client.js",
       "require": "./dist/client.js"
     },
+    "./routing": {
+      "types": "./dist/routing/index.d.ts",
+      "import": "./dist/routing/index.js",
+      "require": "./dist/routing/index.js"
+    },
     "./streams": {
       "types": "./dist/streams/index.d.ts",
       "import": "./dist/streams/index.js",
