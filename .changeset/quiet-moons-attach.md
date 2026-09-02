@@ -12,4 +12,4 @@ Payload lifetime is derived from message references; the bytes go when the last 
 
 `getRecentHistory()` loses its `minRecentMessages` argument. The byte budget is now a hard ceiling: a message-count floor admitted rows whatever their size, so a window of media-heavy messages could hydrate far past the limit meant to bound it. The newest message is always returned.
 
-Also fixes two migration faults that could lose data: `AIChatAgent` dropped its legacy table when rows were merely *accounted for* rather than imported, deleting any row that failed to parse; and Sessions stamped its schema version even when a legacy lift was incomplete, so it never retried. Both lifts are idempotent, so the source now survives until every row has actually landed.
+Also fixes two migration faults that could lose data: `AIChatAgent` dropped its legacy table when rows were merely _accounted for_ rather than imported, deleting any row that failed to parse; and Sessions stamped its schema version even when a legacy lift was incomplete, so it never retried. Both lifts are idempotent, so the source now survives until every row has actually landed.
