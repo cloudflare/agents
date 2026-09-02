@@ -90,6 +90,21 @@ export type JobDriverOptions = {
 /** The dispatch an async flow belongs to while an alarm drives it. */
 type AlarmScope = { readonly executing: JobStorageRow | undefined };
 
+/**
+ * Carries the row a platform failure escaped from out to `runAlarm`'s catch,
+ * across the rethrow from `#driveJob`. Attribution must not live in a shared
+ * instance field: overlapping `alarm()` invocations (a deadman or the
+ * platform's own re-fire racing a still-running invocation) dispatch jobs
+ * concurrently, and a field would let a later dispatch overwrite the row an
+ * earlier one is still unwinding for.
+ */
+class AttributedPlatformFailure {
+  constructor(
+    readonly row: JobStorageRow,
+    readonly cause: unknown
+  ) {}
+}
+
 /** One recorded memory-limit strike, shared by every flow that observed it. */
 type MemoryLimitStrike = {
   readonly strikes: number;
@@ -111,7 +126,6 @@ export class JobDriver {
    * platform fires its own).
    */
   readonly #alarmScope = new AsyncLocalStorage<AlarmScope>();
-  #executingRow: JobStorageRow | undefined;
   #alarmsInFlight = 0;
   /**
    * Work handed off by alarm-driven jobs that has not settled yet. While it
@@ -150,19 +164,43 @@ export class JobDriver {
     runHostAlarm: () => Promise<void>
   ): Promise<void> {
     this.#alarmsInFlight++;
+    // Only a clean pass (no memory-limit reset seen by this invocation
+    // itself) is ever eligible to trigger the quiescence-clear check below —
+    // a pass that just recorded a strike must not immediately re-check
+    // quiescence and undo what it just set. Reaching quiescence again is a
+    // job for some LATER, genuinely clean invocation or handoff settlement.
+    let clean = false;
     try {
-      await initialize();
-      await this.#driveDueJobs();
-      await this.#alarmScope.run({ executing: undefined }, runHostAlarm);
-      await this.#clearMemoryLimitStrikesWhenQuiescent();
-    } catch (error) {
-      if (!isDurableObjectMemoryLimitReset(error)) throw error;
-      const executing = this.#executingRow;
-      this.#executingRow = undefined;
-      await this.#handleMemoryLimitReset(error, executing);
-      return;
+      try {
+        await initialize();
+        await this.#driveDueJobs();
+        await this.#alarmScope.run({ executing: undefined }, runHostAlarm);
+        clean = true;
+      } catch (error) {
+        // A platform failure from #driveJob carries its row out of the
+        // rethrow; anything else (initialize/runHostAlarm) has no job to
+        // attribute. Unwrap either way before classifying the real error.
+        const attributed = error instanceof AttributedPlatformFailure;
+        const cause = attributed ? error.cause : error;
+        if (!isDurableObjectMemoryLimitReset(cause)) {
+          throw attributed ? cause : error;
+        }
+        await this.#handleMemoryLimitReset(
+          cause,
+          attributed ? error.row : undefined
+        );
+        return;
+      }
     } finally {
+      // Re-check quiescence exactly when this alarm's own "in flight" status
+      // ends, using the freshest counters — one of the two points (the
+      // other is a handoff settling, see #settleAlarmWork) that must not be
+      // skipped: whichever transition happens last is what performs the
+      // clear, and each transition re-evaluates both conditions itself
+      // rather than trusting a stale snapshot taken before the other side's
+      // own transition landed.
       this.#alarmsInFlight--;
+      if (clean) await this.#clearMemoryLimitStrikesWhenQuiescent();
     }
     await this.#options.rearm();
   }
@@ -208,13 +246,23 @@ export class JobDriver {
     } finally {
       this.#outstandingAlarmWork.delete(work);
     }
-    // An alarm in flight classifies at its own end.
-    if (this.#alarmsInFlight === 0) {
-      await this.#clearMemoryLimitStrikesWhenQuiescent();
-    }
+    // This settle is itself a quiescence transition — re-check freshly
+    // rather than trusting whether an alarm looked in flight before this
+    // delete landed (see runAlarm's matching call for why neither side may
+    // skip its own check).
+    await this.#clearMemoryLimitStrikesWhenQuiescent();
   }
 
+  /**
+   * Clear the strike counter once the alarm domain is fully quiescent: no
+   * alarm invocation in flight and no handed-off work outstanding. Called at
+   * every transition that could make either condition newly true (an alarm
+   * ending, a handoff settling) — each call re-reads both counters fresh, so
+   * whichever transition happens last is the one that performs the clear.
+   * Idempotent: a redundant call after the strike is already cleared no-ops.
+   */
   async #clearMemoryLimitStrikesWhenQuiescent(): Promise<void> {
+    if (this.#alarmsInFlight > 0) return;
     if (this.#outstandingAlarmWork.size > 0) return;
     this.#strike = undefined;
     await this.#clearMemoryLimitStrikes();
@@ -309,7 +357,6 @@ export class JobDriver {
       }
     }, hungTimeoutMs(row));
 
-    this.#executingRow = row;
     let outcome: LifecycleJobOutcome | void;
     try {
       outcome = await this.#alarmScope.run({ executing: row }, () =>
@@ -343,9 +390,11 @@ export class JobDriver {
           `Deferring job ${row.id} to a fresh invocation after a ` +
             `platform failure; the job is preserved.`
         );
-        // Leave #executingRow set: the memory-limit breaker at the alarm
-        // boundary targets the exact job that was executing.
-        throw error;
+        // Carry the row out with the error rather than through a shared
+        // field: an overlapping alarm's own #driveJob may already be
+        // dispatching a different row by the time this unwinds to
+        // runAlarm's catch.
+        throw new AttributedPlatformFailure(row, error);
       }
       // Application failure after retry exhaustion: the owner observes it
       // and decides advancement; default is completion.
@@ -363,7 +412,6 @@ export class JobDriver {
 
     if (disabled()) return;
     queue.applyOutcome(row.id, outcome ?? undefined);
-    this.#executingRow = undefined;
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {

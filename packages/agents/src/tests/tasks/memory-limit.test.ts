@@ -6,7 +6,8 @@ import {
   backdateTaskWake,
   seedTaskRun,
   seedTaskStep,
-  type TaskHarnessObject
+  type TaskHarnessObject,
+  type TaskSchedulerCoexistObject
 } from "../capabilities/tasks";
 
 /**
@@ -500,6 +501,82 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
       }
     );
   });
+
+  it("backs off the queue row of the job that struck, not one an overlapping alarm invocation happened to finish", async () => {
+    // A Scheduler job carries none of Tasks' own active-attempt tracking
+    // (which would otherwise independently and correctly re-track a Task
+    // run that a second overlapping alarm invocation re-dispatches,
+    // masking a misattribution in JobDriver's own alarm-boundary
+    // bookkeeping). This isolates JobDriver's attribution specifically.
+    const name = `coexist-overlap-attribution-${crypto.randomUUID()}`;
+    const stub = env.TaskSchedulerCoexistObject.getByName(name);
+    let strikingJobId = "";
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: TaskSchedulerCoexistObject, state) => {
+          await instance.lifecycle.start();
+          await state.storage.put("oomLoopRemaining", 1);
+          const schedule = await instance.scheduler.set(
+            60,
+            "slowOom",
+            undefined
+          );
+          strikingJobId = schedule.id;
+          // Mark it singleflight so a second overlapping alarm invocation's
+          // own due-snapshot (which still includes this row — nothing
+          // updates its queue-level `time` at claim time) skips it as
+          // already running instead of racing a second, concurrent
+          // dispatch of the very same job.
+          state.storage.sql.exec(
+            "UPDATE cf_agents_jobs SET time = ?, singleflight = 1 WHERE id = ?",
+            Date.now() - 1_000,
+            schedule.id
+          );
+          // Two genuinely overlapping alarm() invocations on the same
+          // instance. The first claims the slow, striking scheduler job and
+          // stays inside it for a full second. Shortly after, the second
+          // skips that still-running row and dispatches a distinct, fast,
+          // unrelated Task run entirely on its own — including reaching the
+          // far end of #driveJob for that run — well before the first
+          // observes the memory-limit reset. Attribution keyed off a shared
+          // instance field would let the second invocation's own dispatch
+          // clear it out from under the first.
+          const overlapping = (
+            instance as unknown as { alarm(): Promise<void> }
+          ).alarm();
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue("sleeper", {
+            ms: 1
+          });
+          await (instance as unknown as { alarm(): Promise<void> }).alarm();
+          await overlapping;
+        }
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes("Alarm memory-limit strike")
+      ) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    await runInDurableObject(
+      env.TaskSchedulerCoexistObject.getByName(name),
+      async (_instance: TaskSchedulerCoexistObject, state) => {
+        const row = state.storage.sql
+          .exec("SELECT time FROM cf_agents_jobs WHERE id = ?", strikingJobId)
+          .toArray()[0] as { time: number } | undefined;
+        // Correctly attributed: the breaker backed off THIS job's queue row.
+        // Misattribution (executing undefined, or the other job) would
+        // leave it at its stale due time — hot-looping on the very next
+        // alarm instead of backing off.
+        expect(row?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
+      }
+    );
+  }, 15_000);
 
   it("sealing at the strike budget terminally fails the run and ends the loop", async () => {
     const name = `tasks-oom-seal-${crypto.randomUUID()}`;

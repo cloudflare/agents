@@ -385,6 +385,26 @@ export class TaskSchedulerCoexistObject extends DurableObject<Cloudflare.Env> {
     callbacks: {
       remind: (payload) => {
         this.remindRuns.push(String(payload));
+      },
+
+      /**
+       * Sleeps, then conditionally throws the OOM signal. A Scheduler job
+       * carries none of Tasks' own active-attempt tracking, so a memory-limit
+       * regression test can use it to isolate JobDriver's own alarm-boundary
+       * attribution from Tasks' independent (and already correct) re-tracking
+       * of a Task run an overlapping alarm invocation happens to re-dispatch.
+       */
+      slowOom: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        const remaining =
+          (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+        if (remaining > 0) {
+          await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+          await this.ctx.storage.sync();
+          throw new Error(
+            "Durable Object's isolate exceeded its memory limit and was reset."
+          );
+        }
       }
     }
   });
