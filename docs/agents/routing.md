@@ -606,7 +606,7 @@ Each agent is accessed via its own path:
 A hub Agent often owns an open-ended set of independent peers: one Durable Object per chat, document, or session for a user. `RoutedAgents` from `agents/routing` codifies that topology as a Lifecycle capability. The hub keeps a durable catalog of public IDs mapped to opaque physical names, and forwards requests under one route segment to the selected Agent:
 
 ```typescript
-import { Agent, callable } from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 import { RoutedAgents } from "agents/routing";
 
 export class ChatAgent extends Agent<Env> {
@@ -639,6 +639,18 @@ export class UserAgent extends Agent<Env> {
     return this.chats.delete(id);
   }
 }
+
+export default {
+  async fetch(request: Request, env: Env) {
+    // Routes both /agents/user-agent/{id} and the forwarded
+    // /agents/user-agent/{id}/chats/{id}/... paths — RoutedAgents claims
+    // the latter from inside UserAgent once the request reaches it.
+    return (
+      (await routeAgentRequest(request, env)) ??
+      new Response("Not found", { status: 404 })
+    );
+  }
+} satisfies ExportedHandler<Env>;
 ```
 
 The client keeps one connection to the hub and one to the active chat, both addressed through the hub:
