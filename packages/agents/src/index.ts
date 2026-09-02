@@ -156,11 +156,7 @@ import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
-import {
-  Scheduler,
-  setSchedulerCallbackResolver,
-  setSchedulerRoutedMemoryLimitHandler
-} from "./schedules/scheduler";
+import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import {
   Tasks,
   setTaskDefinitionResolver,
@@ -1975,19 +1971,6 @@ export class Agent<
         (
           method as (payload: unknown, schedule: Schedule<unknown>) => unknown
         ).call(this, payload, schedule);
-    });
-
-    // Bridge for a `recoveryLoop`-flagged routed schedule: the queue and
-    // physical alarm live on the root Agent, but the incident and sealing
-    // hook live on each owning dynamic agent. Scheduler routes a sealed
-    // strike to owners whose flagged rows were purged.
-    setSchedulerRoutedMemoryLimitHandler(this.scheduler, (context) => {
-      const hook = (
-        this as unknown as {
-          onAlarmMemoryLimit?: (value: typeof context) => void | Promise<void>;
-        }
-      ).onAlarmMemoryLimit;
-      return hook?.call(this, context);
     });
 
     this.tasks = new Tasks({

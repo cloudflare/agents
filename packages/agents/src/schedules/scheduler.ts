@@ -12,7 +12,6 @@ import {
   type LifecycleRouteAddress,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
-import type { MemoryLimitContext } from "../lifecycle/capability-runner";
 import type {
   LifecycleJob,
   LifecycleJobContext,
@@ -58,11 +57,6 @@ const schedulerCallbackResolvers = new WeakMap<
   (name: string) => ResolvedSchedulerCallback | undefined
 >();
 
-const schedulerRoutedMemoryLimitHandlers = new WeakMap<
-  object,
-  (context: MemoryLimitContext) => void | Promise<void>
->();
-
 /**
  * @internal Supply a composition-root fallback for callback names outside the
  * registered map. Agent uses this to keep its historical name-based
@@ -75,21 +69,6 @@ export function setSchedulerCallbackResolver(
   resolver: (name: string) => ResolvedSchedulerCallback | undefined
 ): void {
   schedulerCallbackResolvers.set(scheduler, resolver);
-}
-
-/**
- * @internal Temporary compatibility bridge for chat-recovery schedules owned
- * by a routed dynamic agent. The root owns the physical alarm and queue row;
- * this handler lets Scheduler deliver a sealed memory-limit strike to the
- * routed host that owns the incident. Root recovery already runs on Tasks;
- * remove this once Tasks supports routed dynamic-agent wakes and the legacy
- * rows have drained.
- */
-export function setSchedulerRoutedMemoryLimitHandler(
-  scheduler: Scheduler<never>,
-  handler: (context: MemoryLimitContext) => void | Promise<void>
-): void {
-  schedulerRoutedMemoryLimitHandlers.set(scheduler, handler);
 }
 
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
@@ -157,11 +136,6 @@ type SchedulerRouteMessage =
       readonly fn: string;
       readonly job: SchedulerJobPayload;
       readonly retry?: RetryOptions;
-    }
-  | {
-      /** @internal Removed when Tasks supports routed dynamic-agent wakes. */
-      readonly type: "memoryLimit";
-      readonly context: MemoryLimitContext;
     };
 
 type InsertResult<T> = {
@@ -395,57 +369,6 @@ export class Scheduler<
     return this.#recurrenceOutcome(timing);
   }
 
-  /**
-   * Deliver a sealed strike to each routed owner whose recovery row was
-   * purged. The queue already broke the loop; this only lets those dynamic
-   * agents persist their terminal chat state. Tasks will move that policy into
-   * the owning capability and delete this bridge.
-   */
-  async onMemoryLimit(context: MemoryLimitContext): Promise<void> {
-    if (!context.sealed) return;
-
-    const candidates = [
-      ...(context.purgedRecoveryLoopJobs ?? []),
-      ...(context.executing ? [context.executing] : [])
-    ];
-    const targets = new Map<string, LifecycleRouteAddress>();
-    for (const job of candidates) {
-      if (
-        job.capability !== this.capabilityId ||
-        !job.recoveryLoop ||
-        !isSchedulerJobPayload(job.payload) ||
-        !job.payload.owner_path
-      ) {
-        continue;
-      }
-      const target = {
-        key: job.payload.owner_path_key ?? job.payload.owner_path,
-        data: job.payload.owner_path
-      };
-      targets.set(target.key, target);
-    }
-
-    const routedContext: MemoryLimitContext = {
-      sealed: true,
-      executing: context.executing
-    };
-    for (const target of targets.values()) {
-      try {
-        await this.lifecycle.routes.to(target, {
-          type: "memoryLimit",
-          context: routedContext
-        } satisfies SchedulerRouteMessage);
-      } catch (error) {
-        // One deleted or broken dynamic agent must not prevent the remaining
-        // owners from terminalizing after their queue rows were purged.
-        console.error(
-          `Failed to route sealed recovery policy to ${target.key}`,
-          error
-        );
-      }
-    }
-  }
-
   /** Observe one schedule's terminal application failure. */
   async onJobError(
     context: LifecycleJobContext,
@@ -521,12 +444,6 @@ export class Scheduler<
           message.retry
         );
         return true;
-      case "memoryLimit": {
-        const handler = schedulerRoutedMemoryLimitHandlers.get(this);
-        if (!handler) return false;
-        await this.lifecycle.runInHostContext(() => handler(message.context));
-        return true;
-      }
       default:
         throw new Error("Unknown routed Scheduler message");
     }
