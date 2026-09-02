@@ -330,6 +330,58 @@ function formatMilliseconds(value: number): string {
   return `${value.toLocaleString("en-US")} ms`;
 }
 
+/** 262144 → "262_144", the numeric-separator style you'd write in source. */
+function formatNumericLiteral(value: number): string {
+  return value.toLocaleString("en-US").replaceAll(",", "_");
+}
+
+/**
+ * Frames the editable source inside the actual Worker code you'd write to
+ * call run(), so the playground teaches the real API shape — the textarea sits
+ * exactly where the `source` template literal goes, and the limits object
+ * tracks the sliders live.
+ */
+function WorkerCodeFrame({
+  limits,
+  children
+}: {
+  limits: Limits;
+  children: React.ReactNode;
+}) {
+  const frameClass =
+    "overflow-x-auto px-3 font-mono text-xs leading-5 text-kumo-subtle";
+  return (
+    <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
+      <pre className={`${frameClass} pt-3`}>
+        {`import { run } from "@cloudflare/run";
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const result = await run({
+      loader: env.LOADER,
+      source: \``}
+      </pre>
+      <div className="px-3 py-1.5">{children}</div>
+      <pre className={`${frameClass} pb-3`}>
+        {`\`,
+      hostFunctions: {
+        demo: {
+          customers: async () => CUSTOMERS,
+          wait: async (ms) => sleepUnlessAborted(ms),
+          vault: async () => { throw new Error("The vault stays shut."); }
+        }
+      },
+      limits: { timeoutMs: ${formatNumericLiteral(limits.timeoutMs)}, cpuMs: ${formatNumericLiteral(limits.cpuMs)}, maxLogBytes: ${formatNumericLiteral(limits.maxLogBytes)} }
+    });
+
+    return Response.json(result);
+  }
+};`}
+      </pre>
+    </div>
+  );
+}
+
 function formatBytes(value: number): string {
   return value >= 1024
     ? `${(value / 1024).toLocaleString("en-US")} KiB`
@@ -1320,15 +1372,19 @@ export function App() {
                       </div>
                     )}
 
-                    <Textarea
-                      ref={editorRef}
-                      value={source}
-                      onChange={(event) => setSource(event.currentTarget.value)}
-                      onKeyDown={handleEditorKeyDown}
-                      spellCheck={false}
-                      aria-label="Source editor"
-                      className="min-h-[240px] resize-y font-mono text-[13px]"
-                    />
+                    <WorkerCodeFrame limits={limits}>
+                      <Textarea
+                        ref={editorRef}
+                        value={source}
+                        onChange={(event) =>
+                          setSource(event.currentTarget.value)
+                        }
+                        onKeyDown={handleEditorKeyDown}
+                        spellCheck={false}
+                        aria-label="Source editor"
+                        className="min-h-[200px] w-full resize-y bg-kumo-base font-mono text-[13px]"
+                      />
+                    </WorkerCodeFrame>
                   </div>
 
                   <div className="border-t border-kumo-line p-4">
