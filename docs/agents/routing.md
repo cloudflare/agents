@@ -665,7 +665,7 @@ What the capability guarantees:
 - `delete(id)` hides the entry first, condemns the target, then removes the row. The target wipes its own storage on its next wake, moments later, and the condemned marker survives interruption. A failed call leaves a hidden row, and calling `delete` again retries.
 - Physical names are random UUIDs that never leave the hub. Clients only ever see entry IDs.
 - `namespace` is any `DurableObjectNamespace`, including a binding to a class exported by another Worker via `script_name`, so the hub and its targets can be deployed and scaled independently.
-- Destroying the hub condemns every remaining entry, so targets never outlive the catalog that named them.
+- Destroying the hub retries condemning every remaining entry before its own storage is wiped, but this is best-effort: the platform wipes the hub's storage right after disposal regardless of outcome, so a target that is still unreachable after retries is orphaned, with no catalog row left to retry from later.
 
 The catalog stores existence, ownership, and application metadata. Conversation data stays in the target, and a target that needs its hub calls back with `getAgentByName(this.env.UserAgent, ownerName)`. When to prefer this over facets is covered in [Dynamic agents](./sub-agents.md#when-to-use-dynamic-agents).
 

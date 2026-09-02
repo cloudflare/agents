@@ -106,6 +106,27 @@ describe("RoutedAgents", () => {
     }
   });
 
+  it("condemns a stuck 'deleting' entry too, not only active ones", async () => {
+    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const stuck = await owner.createChat("Stuck mid-delete");
+    const stuckName = await owner.physicalName(stuck.id);
+    if (!stuckName) throw new Error("Expected a physical name");
+    await owner.setChatValue(stuck.id, "message", "persisted");
+
+    // Simulate a delete() whose condemn RPC never landed: the row is
+    // 'deleting' but the target was never actually condemned.
+    await runInDurableObject(owner, (instance: RoutingOwnerAgent) => {
+      instance.sql`UPDATE cf_agents_routed_agents SET status = 'deleting' WHERE route = 'chats'`;
+    });
+
+    await (owner.destroy() as Promise<void>).catch(() => {});
+
+    await vi.waitFor(async () => {
+      const revived = await getAgentByName(env.RoutedChatAgent, stuckName);
+      expect(await revived.getValue("message")).toBeNull();
+    }, 10_000);
+  });
+
   it("updates metadata without waking unrelated child Agents", async () => {
     const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
     const first = await owner.createChat("First");

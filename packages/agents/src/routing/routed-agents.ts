@@ -74,7 +74,9 @@ function encodeMetadata(value: unknown): string {
  * WebSocket upgrades to the selected Agent. After an upgrade the target
  * owns the socket, so ordinary frames never wake the owner. The target
  * Agent needs no matching capability. Destroying the owner condemns every
- * remaining entry so targets never outlive their catalog.
+ * remaining entry with a few retries so targets don't casually outlive
+ * their catalog — this is best-effort, not a durability guarantee; see
+ * {@link RoutedAgents.dispose}.
  *
  * Pick a `route` that cannot appear as a literal path segment elsewhere
  * under the owner (its own name, another route, or a path the owner's own
@@ -235,33 +237,53 @@ export class RoutedAgents<
   }
 
   /**
-   * Condemn every remaining entry when the owner itself is destroyed.
+   * Condemn every remaining entry (including one already `deleting`, in
+   * case its own condemnation RPC never landed) when the owner itself is
+   * destroyed.
    *
    * `Agent.destroy()` disposes capabilities before it wipes its own
    * storage, so the catalog is still readable here — without this, the
    * catalog would vanish with the owner while every target it named kept
-   * running and billing storage, unreachable forever. One failed RPC is
-   * logged and does not block condemning the rest.
+   * running and billing storage, unreachable forever.
+   *
+   * This is best-effort, not a durability guarantee: `Agent.destroy()`
+   * wipes the owner's storage immediately after disposal regardless of
+   * whether any capability's `dispose()` reports failure, so a target
+   * that is still unreachable after retries here is orphaned for good —
+   * there is no later "repeated call retries" for a catalog row that no
+   * longer exists. Retrying briefly here converts the common transient
+   * failure into a condemned target instead of an orphan; it cannot
+   * convert a target that is durably unreachable.
    */
   async dispose(): Promise<void> {
     const entries = this.#sql<{ agentName: string }>(
       `SELECT agent_name AS agentName FROM ${TABLE}
-       WHERE route = ? AND status = 'active'`,
+       WHERE route = ? AND status IN ('active', 'deleting')`,
       this.#route
     );
     await Promise.all(
-      entries.map(({ agentName }) =>
-        this.#namespace
-          .get(this.#namespace.idFromName(agentName))
-          ._cf_scheduleDestroy()
-          .catch((error) =>
-            console.error(
-              `RoutedAgents "${this.#route}" failed to condemn ${agentName} on owner disposal`,
-              error
-            )
-          )
-      )
+      entries.map(({ agentName }) => this.#condemnWithRetry(agentName))
     );
+  }
+
+  async #condemnWithRetry(agentName: string, attempts = 3): Promise<void> {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        await this.#namespace
+          .get(this.#namespace.idFromName(agentName))
+          ._cf_scheduleDestroy();
+        return;
+      } catch (error) {
+        if (attempt === attempts) {
+          console.error(
+            `RoutedAgents "${this.#route}" could not condemn ${agentName} on owner disposal after ${attempts} attempts; its storage will leak, since the owner's catalog — the only record of it — is wiped immediately after disposal`,
+            error
+          );
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, attempt * 50));
+      }
+    }
   }
 
   /** Forward a matching HTTP request to the selected Agent. */
