@@ -27,7 +27,6 @@ type Command =
       readonly workflowRunId: number;
       readonly workflowRunAttempt: number;
       readonly thresholdPercent: number;
-      readonly githubOutput?: string;
       readonly githubStepSummary?: string;
     };
 
@@ -59,13 +58,6 @@ async function main(): Promise<void> {
   await writeImportSizeJson(command.output, report);
   printReportSummary(report);
 
-  if (command.githubOutput !== undefined) {
-    await appendFile(
-      resolve(command.githubOutput),
-      `gate=${report.gate}\noverall=${report.overall}\n`,
-      "utf8"
-    );
-  }
   if (command.githubStepSummary !== undefined) {
     await appendFile(
       resolve(command.githubStepSummary),
@@ -101,9 +93,6 @@ function parseCommand(args: ReadonlyArray<string>): Command {
         "threshold",
         DEFAULT_THRESHOLD_PERCENT
       ),
-      ...(flags.get("github-output") !== undefined
-        ? { githubOutput: requiredFlag(flags, "github-output") }
-        : {}),
       ...(flags.get("github-step-summary") !== undefined
         ? {
             githubStepSummary: requiredFlag(flags, "github-step-summary")
@@ -218,7 +207,7 @@ function renderStepSummary(report: ImportSizeReport): string {
   return [
     `## ${status} ${report.packageName} import sizes\n`,
     `Measured ${report.summary.total} runtime imports as minified gzip. ` +
-      `Increases above ${formatPercent(report.thresholdPercent)} fail this check.\n`,
+      `Increases above ${formatPercent(report.thresholdPercent)} are marked red; this report is informational.\n`,
     `| Red | Yellow | Green | Unchanged | New | Removed |`,
     `| ---: | -----: | ----: | --------: | --: | ------: |`,
     `| ${report.summary.red} | ${report.summary.yellow} | ${report.summary.green} | ${report.summary.unchanged} | ${report.summary.new} | ${report.summary.removed} |\n`
