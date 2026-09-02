@@ -31,6 +31,7 @@ interface Host {
     options?: { maxExecutions?: number; name?: string }
   ): Promise<ProxyToolOutput>;
   approve(executionId: string): Promise<ProxyToolOutput>;
+  approveWithoutValidators(executionId: string): Promise<ProxyToolOutput>;
   approveWithoutItems(executionId: string): Promise<ProxyToolOutput>;
   runSnippetWithoutItems(snippet: string): Promise<ProxyToolOutput>;
   expirePaused(maxAgeMs?: number): Promise<string[]>;
@@ -48,6 +49,14 @@ interface Host {
   ): Promise<Snippet>;
   snippets(): Promise<Snippet[]>;
   sideEffects(): Promise<SideEffects>;
+  validationState(): Promise<{
+    calls: string[];
+    codeContext?: {
+      code: string;
+      normalizedCode: string;
+      connectors: string[];
+    };
+  }>;
   lifecycle(): Promise<{
     opened: string[];
     disposed: Array<{ executionId: string; status: string }>;
@@ -86,6 +95,104 @@ describe("codemode durable runtime (e2e)", () => {
 
     expect(out.status).toBe("completed");
     if (out.status === "completed") expect(out.result).toEqual([]);
+  });
+
+  it("rejects generated code before creating an execution", async () => {
+    const h = host();
+    const out = await h.run(`async () => "INVALID_CODE"`);
+
+    expect(out.status).toBe("error");
+    if (out.status !== "error") return;
+    expect(out.executionId).toBe("");
+    expect(out.error).toContain("Validation failed for generated code");
+    expect(out.error).toContain("[test-policy] (invalid-code)");
+    expect(await h.executions()).toEqual([]);
+
+    const validation = await h.validationState();
+    expect(validation.codeContext?.code).toContain("INVALID_CODE");
+    expect(validation.codeContext?.normalizedCode).toContain("async ()");
+    expect(validation.codeContext?.connectors).toEqual(["items"]);
+  });
+
+  it("rejects a concrete call before its connector executes", async () => {
+    const h = host();
+    const out = await h.run(
+      `async () => await items.add_note({ text: "invalid" })`
+    );
+
+    expect(out.status).toBe("error");
+    if (out.status !== "error") return;
+    expect(out.error).toContain("Validation failed for items.add_note");
+    expect(out.error).toContain("[test-policy] text:");
+    expect((await h.sideEffects()).notes).toEqual([]);
+    expect((await h.executions())[0]?.status).toBe("error");
+  });
+
+  it("fails closed without exposing validator exceptions", async () => {
+    const h = host();
+    const out = await h.run(
+      `async () => await items.add_note({ text: "throw-validator" })`
+    );
+
+    expect(out.status).toBe("error");
+    if (out.status !== "error") return;
+    expect(out.error).toContain(
+      'Validator "test-policy" could not complete; the operation was not executed.'
+    );
+    expect(out.error).not.toContain("secret validator implementation detail");
+    expect((await h.sideEffects()).notes).toEqual([]);
+  });
+
+  it("stops later side effects when sandbox code catches a rejection", async () => {
+    const h = host();
+    const out = await h.run(`async () => {
+      try { await items.add_note({ text: "invalid" }); } catch {}
+      try { await items.add_note({ text: "later" }); } catch {}
+      return "caught";
+    }`);
+
+    expect(out.status).toBe("error");
+    expect((await h.sideEffects()).notes).toEqual([]);
+  });
+
+  it("does not revalidate durable replay but revalidates real execution", async () => {
+    const h = host();
+    const first = await h.run(`async () => {
+      await items.list_items();
+      await items.read_counter();
+      return await items.create_item({ title: "x" });
+    }`);
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    expect((await h.validationState()).calls).toEqual([
+      "items.list_items",
+      "items.read_counter"
+    ]);
+
+    const resumed = await h.approve(first.executionId);
+    expect(resumed.status).toBe("completed");
+    expect((await h.validationState()).calls).toEqual([
+      "items.list_items",
+      "items.read_counter",
+      "items.read_counter",
+      "items.create_item"
+    ]);
+  });
+
+  it("refuses to resume when a required validator is missing", async () => {
+    const h = host();
+    const first = await h.run(
+      `async () => await items.create_item({ title: "x" })`
+    );
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    const resumed = await h.approveWithoutValidators(first.executionId);
+    expect(resumed.status).toBe("error");
+    if (resumed.status !== "error") return;
+    expect(resumed.error).toContain('requires validator(s) "test-policy"');
+    expect((await h.sideEffects()).created).toEqual([]);
   });
 
   it("names the connector globals (and renders hints) in the tool description", async () => {
