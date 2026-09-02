@@ -9,7 +9,12 @@ import type {
   GenerateTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { Agent, getCurrentAgent, routeAgentRequest } from "agents";
+import {
+  Agent,
+  type AgentContext,
+  getCurrentAgent,
+  routeAgentRequest
+} from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type {
   AgentToolEventMessage,
