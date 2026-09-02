@@ -349,6 +349,8 @@ export class Lifecycle<
       ready: () => this.#readyForCapabilityOperation(),
       starting: () => this.#status === "starting",
       jobs: this.#jobsForOwner(capabilityId),
+      trackAlarmWork: (work: Promise<unknown>) =>
+        this.#jobDriver.trackAlarmWork(work),
       runInHostContext: async (
         fn: () => unknown,
         scope?: LifecycleHostContextScope
@@ -768,6 +770,17 @@ export class Lifecycle<
       });
     this.#alarmRearmQueue = next;
     await next;
+  }
+
+  /**
+   * Keep work a job handed off at a bounded return inside the current
+   * alarm's memory-limit breaker domain (#1825). Hosts call this where a
+   * queue-driven callback detaches long work and returns.
+   *
+   * @returns True when called during an alarm invocation; false otherwise.
+   */
+  trackAlarmWork(work: Promise<unknown>): boolean {
+    return this.#jobDriver.trackAlarmWork(work);
   }
 
   /** Dispose installed capabilities in reverse registration order. */
