@@ -12,6 +12,8 @@ import {
 } from "@cloudflare/kumo";
 import {
   ArrowElbowDownRightIcon,
+  CheckCircleIcon,
+  DoorOpenIcon,
   GithubLogoIcon,
   MoonIcon,
   PlayIcon,
@@ -20,7 +22,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { RunApiResponse } from "./server";
+import type { RunApiResponse, RunRequestBody } from "./server";
 
 interface Preset {
   id: string;
@@ -169,6 +171,10 @@ const HOST_FUNCTIONS = [
   {
     signature: "demo.wait(ms)",
     description: "Signal-aware sleep in the parent; cancellation reaches it."
+  },
+  {
+    signature: "demo.vault()",
+    description: "Always throws on the host — one of the escape room's doors."
   }
 ];
 
@@ -181,6 +187,11 @@ const DEMOS = [
     id: "playground",
     label: "Run playground",
     icon: TerminalWindowIcon
+  },
+  {
+    id: "escape",
+    label: "Escape room",
+    icon: DoorOpenIcon
   }
 ] as const;
 
@@ -535,6 +546,24 @@ function AboutAside() {
   );
 }
 
+/** Insert two spaces at the cursor when Tab is pressed inside an editor. */
+function insertEditorTab(
+  event: React.KeyboardEvent<HTMLTextAreaElement>,
+  source: string,
+  setSource: (value: string) => void
+) {
+  if (event.key !== "Tab") return;
+  event.preventDefault();
+  const editor = event.currentTarget;
+  const { selectionStart, selectionEnd } = editor;
+  setSource(
+    `${source.slice(0, selectionStart)}  ${source.slice(selectionEnd)}`
+  );
+  requestAnimationFrame(() => {
+    editor.setSelectionRange(selectionStart + 2, selectionStart + 2);
+  });
+}
+
 const STACK_LINE_PATTERN = /run\.js:(\d+):(\d+)/;
 
 function StackTrace({
@@ -583,6 +612,471 @@ const LOG_LEVEL_CLASSES: Record<string, string> = {
   info: "text-kumo-default",
   debug: "text-kumo-subtle"
 };
+
+type EscapeLimits = NonNullable<RunRequestBody["limits"]>;
+
+interface EscapeLevel {
+  /** The RunError code this door collects. */
+  code: string;
+  title: string;
+  goal: string;
+  source: string;
+  limits?: EscapeLimits;
+  abortAfterMs?: number;
+  /** Shown when the level only behaves this way deployed, not in local dev. */
+  warning?: string;
+}
+
+/**
+ * One level per RunError code, easiest doors first. Winning a level means
+ * making run() reject with exactly that code.
+ */
+const ESCAPE_LEVELS: EscapeLevel[] = [
+  {
+    code: "RUN_COMPILE_ERROR",
+    title: "Smuggle in an import",
+    goal: "Pull in a module. Imports — static or dynamic — are rejected before any Worker is even loaded.",
+    source: `import { readFileSync } from "node:fs";
+return readFileSync("/etc/passwd", "utf8");
+`
+  },
+  {
+    code: "RUN_EXECUTION_ERROR",
+    title: "Reach the network",
+    goal: "Make an outbound request. The sandbox has no network at the platform level — there is no fetch to monkey-patch back.",
+    source: `return await fetch("https://example.com");
+`
+  },
+  {
+    code: "RUN_SERIALIZATION_ERROR",
+    title: "Sneak a function out",
+    goal: "Return something the RPC boundary refuses to carry — like live code.",
+    source: `return () => "backdoor";
+`
+  },
+  {
+    code: "RUN_TIMEOUT",
+    title: "Outlive the wall clock",
+    goal: "This level's wall-clock budget is 1.5 seconds. Wait longer than the parent allows.",
+    limits: { timeoutMs: 1_500 },
+    source: `await new Promise((resolve) => setTimeout(resolve, 60_000));
+return "still here";
+`
+  },
+  {
+    code: "RUN_HOST_FUNCTION_ERROR",
+    title: "Open the vault",
+    goal: "demo.vault() throws on the host. The failure crosses back as one sanitized error — host internals never leak into the sandbox.",
+    source: `return await demo.vault();
+`
+  },
+  {
+    code: "RUN_HOST_FUNCTION_LIMIT",
+    title: "Hammer the host",
+    goal: "This level allows 3 host calls per run. Make more.",
+    limits: { maxHostFunctionCalls: 3 },
+    source: `for (let i = 0; i < 10; i++) {
+  await demo.wait(1);
+}
+return "done hammering";
+`
+  },
+  {
+    code: "RUN_DETACHED_HOST_FUNCTION",
+    title: "Leave a call dangling",
+    goal: "Start a host call, then return without it. The run refuses to settle cleanly around a dangling host call.",
+    source: `demo.wait(60_000).catch(() => {});
+return "gone before it settles";
+`
+  },
+  {
+    code: "RUN_ABORTED",
+    title: "Get unplugged",
+    goal: "For this level the server pulls the plug 750 ms in — cancellation reaches the in-flight host call, and the child is disposed.",
+    abortAfterMs: 750,
+    source: `await demo.wait(30_000);
+return "unreachable";
+`
+  },
+  {
+    code: "RUN_SOURCE_TOO_LARGE",
+    title: "Write a novel",
+    goal: "This level's source budget is 256 bytes — and this program is under it. Pad it past the line, then run.",
+    limits: { maxSourceBytes: 256 },
+    source: `// Budget: 256 bytes of source. This program is under it.
+// Add code or comments until you blow the budget.
+return "tiny";
+`
+  },
+  {
+    code: "RUN_INVALID_INPUT",
+    title: "Break the contract",
+    goal: "This level ships an illegal limits object (timeoutMs: 0 — the minimum is 1). run() rejects before anything loads; your code is never even compiled.",
+    limits: { timeoutMs: 0 },
+    source: `return "this never runs";
+`
+  },
+  {
+    code: "RUN_RESOURCE_LIMIT",
+    title: "Burn the CPU",
+    goal: "Spin synchronously against a 500 ms CPU budget until the platform kills the isolate.",
+    limits: { cpuMs: 500, timeoutMs: 120_000 },
+    warning:
+      "Deployed only — local dev doesn't meter CPU, so this loop just runs to completion (slowly).",
+    source: `let x = 0;
+for (let i = 0; i < 3_000_000_000; i++) {
+  x += Math.sqrt(i);
+}
+return x;
+`
+  },
+  {
+    code: "RUN_WORKER_ERROR",
+    title: "Hang the runtime",
+    goal: "Await a promise nothing will ever settle. workerd's hang detector notices code that can never produce a response and kills the request.",
+    limits: { timeoutMs: 5_000 },
+    warning:
+      "Deployed only — in local dev the wall clock wins instead and you get RUN_TIMEOUT.",
+    source: `await new Promise(() => {});
+return "unreachable";
+`
+  }
+];
+
+const ESCAPE_STORAGE_KEY = "run-escape-collected";
+
+function loadCollectedCodes(): Set<string> {
+  try {
+    const parsed: unknown = JSON.parse(
+      localStorage.getItem(ESCAPE_STORAGE_KEY) ?? "[]"
+    );
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed.filter((code): code is string => typeof code === "string")
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+/** ESCAPE_LEVELS is a nonempty literal; indexing still types as undefined. */
+function getEscapeLevel(index: number): EscapeLevel {
+  const level = ESCAPE_LEVELS[index];
+  if (level === undefined) throw new Error(`No escape level ${index}`);
+  return level;
+}
+
+/** The bingo board: one row per RunError code, lit once collected. */
+function EscapeBoard({
+  collected,
+  activeIndex,
+  onSelect
+}: {
+  collected: Set<string>;
+  activeIndex: number;
+  onSelect: (index: number) => void;
+}) {
+  return (
+    <Card
+      title="The board"
+      meta={
+        <span className="font-mono text-xs text-kumo-subtle">
+          {collected.size} / {ESCAPE_LEVELS.length}
+        </span>
+      }
+    >
+      <div>
+        {ESCAPE_LEVELS.map((level, index) => {
+          const done = collected.has(level.code);
+          return (
+            <button
+              key={level.code}
+              type="button"
+              onClick={() => onSelect(index)}
+              aria-pressed={index === activeIndex}
+              className={`flex w-full cursor-pointer items-center gap-2 border-b border-kumo-line px-4 py-2 text-left last:border-b-0 hover:bg-kumo-elevated ${
+                index === activeIndex ? "bg-kumo-elevated" : ""
+              }`}
+            >
+              <CheckCircleIcon
+                size={14}
+                weight={done ? "fill" : "regular"}
+                className={
+                  done
+                    ? "shrink-0 text-status-success"
+                    : "shrink-0 text-kumo-subtle"
+                }
+              />
+              <span
+                className={`truncate font-mono text-xs ${
+                  done ? "text-kumo-default" : "text-kumo-subtle"
+                }`}
+              >
+                {level.code}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Idea #2 from the demo list: the error-code escape room. Each level dares
+ * you to reach something you shouldn't; "winning" a level means collecting
+ * its RunError code. All twelve codes fill the board.
+ */
+function EscapeRoom() {
+  const [levelIndex, setLevelIndex] = useState(0);
+  const [collected, setCollected] = useState<Set<string>>(loadCollectedCodes);
+  const [source, setSource] = useState(() => getEscapeLevel(0).source);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<RunApiResponse>();
+  const level = getEscapeLevel(levelIndex);
+
+  function selectLevel(index: number) {
+    setLevelIndex(index);
+    setSource(getEscapeLevel(index).source);
+    setResult(undefined);
+  }
+
+  function resetBoard() {
+    localStorage.removeItem(ESCAPE_STORAGE_KEY);
+    setCollected(new Set());
+  }
+
+  async function handleRun() {
+    setRunning(true);
+    setResult(undefined);
+    try {
+      const body: RunRequestBody = {
+        source,
+        ...(level.limits === undefined ? {} : { limits: level.limits }),
+        ...(level.abortAfterMs === undefined
+          ? {}
+          : { abortAfterMs: level.abortAfterMs })
+      };
+      const response = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const outcome = (await response.json()) as RunApiResponse;
+      setResult(outcome);
+      if (!outcome.ok && outcome.code === level.code) {
+        setCollected((previous) => {
+          const next = new Set(previous);
+          next.add(level.code);
+          localStorage.setItem(ESCAPE_STORAGE_KEY, JSON.stringify([...next]));
+          return next;
+        });
+      }
+    } catch (error: unknown) {
+      setResult({
+        ok: false,
+        code: "NETWORK",
+        message: error instanceof Error ? error.message : String(error),
+        logs: [],
+        durationMs: 0
+      });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const matched = result?.ok === false && result.code === level.code;
+
+  return (
+    <div className="flex flex-col gap-6 xl:flex-row">
+      <div className="flex min-w-0 grow flex-col gap-5">
+        <Card
+          title={`Level ${levelIndex + 1}: ${level.title}`}
+          meta={
+            <Button
+              variant="primary"
+              size="sm"
+              loading={running}
+              onClick={handleRun}
+              icon={<PlayIcon size={14} weight="fill" />}
+            >
+              Run
+            </Button>
+          }
+        >
+          <div className="grid gap-3 p-4">
+            <div>
+              <SectionLabel>Levels</SectionLabel>
+              <div className="flex flex-wrap gap-1.5">
+                {ESCAPE_LEVELS.map((entry, index) => (
+                  <Button
+                    key={entry.code}
+                    size="sm"
+                    variant={index === levelIndex ? "secondary" : "ghost"}
+                    aria-pressed={index === levelIndex}
+                    onClick={() => selectLevel(index)}
+                    icon={
+                      collected.has(entry.code) ? (
+                        <CheckCircleIcon
+                          size={12}
+                          weight="fill"
+                          className="text-status-success"
+                        />
+                      ) : undefined
+                    }
+                  >
+                    {index + 1}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid gap-1.5">
+              <Text size="sm">{level.goal}</Text>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Text size="xs" variant="secondary">
+                  Target:
+                </Text>
+                <code className="rounded bg-kumo-elevated px-1.5 py-0.5 font-mono text-xs text-kumo-default">
+                  {level.code}
+                </code>
+                {level.limits !== undefined && (
+                  <code className="rounded bg-kumo-elevated px-1.5 py-0.5 font-mono text-xs text-kumo-subtle">
+                    {Object.entries(level.limits)
+                      .map(([key, value]) => `${key}: ${value}`)
+                      .join(", ")}
+                  </code>
+                )}
+              </div>
+              {level.warning !== undefined && (
+                <p className="text-xs text-status-warning">{level.warning}</p>
+              )}
+            </div>
+
+            <Textarea
+              value={source}
+              onChange={(event) => setSource(event.currentTarget.value)}
+              onKeyDown={(event) => insertEditorTab(event, source, setSource)}
+              spellCheck={false}
+              aria-label="Escape attempt editor"
+              className="min-h-[180px] resize-y font-mono text-[13px]"
+            />
+          </div>
+        </Card>
+
+        <Card
+          title="Attempt"
+          meta={
+            <>
+              {result !== undefined && (
+                <span
+                  className="font-mono text-xs text-kumo-subtle"
+                  title="time spent inside run() on the server"
+                >
+                  {result.durationMs}ms
+                </span>
+              )}
+              {result?.ok === true && <Badge variant="warning">escaped?</Badge>}
+              {result?.ok === false && (
+                <Badge variant={matched ? "success" : "destructive"}>
+                  {result.code}
+                </Badge>
+              )}
+            </>
+          }
+        >
+          <div className="p-4">
+            {result === undefined && !running && (
+              <Text size="sm" variant="secondary">
+                Run your escape attempt to see what comes back.
+              </Text>
+            )}
+            {running && (
+              <Text size="sm" variant="secondary">
+                Loading a fresh isolate…
+              </Text>
+            )}
+
+            {result?.ok === true && (
+              <div className="grid gap-2">
+                <Text size="sm">
+                  The run completed normally — no escape here. Value:
+                </Text>
+                <pre className="rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-kumo-default whitespace-pre-wrap break-words">
+                  {result.value}
+                </pre>
+              </div>
+            )}
+
+            {result?.ok === false && (
+              <div className="grid gap-2">
+                <Text size="sm">
+                  {matched
+                    ? `Collected ${level.code} — the escape came back as one typed error.`
+                    : `That raised ${result.code}, but this door wants ${level.code}.`}
+                </Text>
+                <pre className="font-mono text-xs text-status-error whitespace-pre-wrap break-words">
+                  {result.message}
+                </pre>
+              </div>
+            )}
+          </div>
+
+          {result !== undefined && result.logs.length > 0 && (
+            <div className="border-t border-kumo-line p-4">
+              <SectionLabel>Console</SectionLabel>
+              <div className="max-h-48 overflow-y-auto rounded-md bg-kumo-elevated p-2.5">
+                {result.logs.map((log, index) => (
+                  <pre
+                    // biome-ignore lint: log order is the identity
+                    key={index}
+                    className={`font-mono text-xs whitespace-pre-wrap break-words ${LOG_LEVEL_CLASSES[log.level] ?? "text-kumo-default"}`}
+                  >
+                    <span className="text-kumo-subtle">[{log.level}] </span>
+                    {log.message}
+                  </pre>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <aside className="flex w-full flex-col gap-5 xl:sticky xl:top-[4.25rem] xl:h-fit xl:w-[300px] xl:shrink-0">
+        <EscapeBoard
+          collected={collected}
+          activeIndex={levelIndex}
+          onSelect={selectLevel}
+        />
+        <Card
+          title="House rules"
+          meta={
+            collected.size > 0 && (
+              <Button size="sm" variant="ghost" onClick={resetBoard}>
+                Reset
+              </Button>
+            )
+          }
+        >
+          <div className="grid gap-3 p-4">
+            <Text size="sm">
+              Twelve locked doors, one per{" "}
+              <span className="font-mono text-[0.9em]">RunError</span> code.
+              Each level dares you to reach something you shouldn't — the
+              network, the host, the clock, the RPC boundary. Trigger exactly
+              the level's code to collect it.
+            </Text>
+            <Text size="sm" variant="secondary">
+              The code is fully editable — the prefilled attempt is just a head
+              start. Every failure comes back the same way: one typed error with
+              a stable code and bounded logs, never a host stack trace.
+            </Text>
+          </div>
+        </Card>
+      </aside>
+    </div>
+  );
+}
 
 export function App() {
   const initialPreset = EXAMPLE_PRESETS[0];
@@ -647,16 +1141,7 @@ export function App() {
   function handleEditorKeyDown(
     event: React.KeyboardEvent<HTMLTextAreaElement>
   ) {
-    if (event.key !== "Tab") return;
-    event.preventDefault();
-    const editor = event.currentTarget;
-    const { selectionStart, selectionEnd } = editor;
-    setSource(
-      `${source.slice(0, selectionStart)}  ${source.slice(selectionEnd)}`
-    );
-    requestAnimationFrame(() => {
-      editor.setSelectionRange(selectionStart + 2, selectionStart + 2);
-    });
+    insertEditorTab(event, source, setSource);
   }
 
   function renderPresetButtons(presets: Preset[]) {
@@ -705,6 +1190,7 @@ export function App() {
         </header>
 
         <main className="mx-auto w-full max-w-[1600px] grow px-4 pt-8 pb-6 md:px-8">
+          {demo === "escape" && <EscapeRoom />}
           {demo === "playground" && (
             /* Main + aside columns, like the dashboard's PageColumns. */
             <div className="flex flex-col gap-6 xl:flex-row">

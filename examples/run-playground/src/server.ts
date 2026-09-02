@@ -1,10 +1,25 @@
 import { getHostFunctionContext, run, RunError } from "@cloudflare/run";
 import type { RunLimits, RunLog } from "@cloudflare/run";
 
+/** Limit keys the API forwards to run() untouched — including invalid
+ * values, so the escape room can demonstrate RUN_INVALID_INPUT. */
+const FORWARDED_LIMIT_KEYS = [
+  "timeoutMs",
+  "cpuMs",
+  "maxLogBytes",
+  "maxSourceBytes",
+  "maxHostFunctionCalls"
+] as const;
+
 /** JSON body accepted by POST /api/run. */
-interface RunRequestBody {
+export interface RunRequestBody {
   source: string;
-  limits?: Pick<RunLimits, "timeoutMs" | "cpuMs" | "maxLogBytes">;
+  limits?: Pick<RunLimits, (typeof FORWARDED_LIMIT_KEYS)[number]>;
+  /**
+   * Abort the run from the parent this many milliseconds in — the escape
+   * room's RUN_ABORTED level. Bounded so a caller cannot park timers.
+   */
+  abortAfterMs?: number;
 }
 
 /** JSON response returned by POST /api/run. */
@@ -155,17 +170,30 @@ function parseRunRequestBody(value: unknown): RunRequestBody | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const source = Reflect.get(value, "source");
   if (typeof source !== "string") return undefined;
+  const body: RunRequestBody = { source };
+  const abortAfterMs = Reflect.get(value, "abortAfterMs");
+  if (abortAfterMs !== undefined) {
+    if (
+      typeof abortAfterMs !== "number" ||
+      abortAfterMs < 1 ||
+      abortAfterMs > 30_000
+    ) {
+      return undefined;
+    }
+    body.abortAfterMs = abortAfterMs;
+  }
   const rawLimits = Reflect.get(value, "limits");
-  if (rawLimits === undefined) return { source };
+  if (rawLimits === undefined) return body;
   if (typeof rawLimits !== "object" || rawLimits === null) return undefined;
   const limits: RunRequestBody["limits"] = {};
-  for (const key of ["timeoutMs", "cpuMs", "maxLogBytes"] as const) {
+  for (const key of FORWARDED_LIMIT_KEYS) {
     const limit = Reflect.get(rawLimits, key);
     if (limit === undefined) continue;
     if (typeof limit !== "number") return undefined;
     limits[key] = limit;
   }
-  return { source, limits };
+  body.limits = limits;
+  return body;
 }
 
 async function handleRun(request: Request, env: Env): Promise<Response> {
@@ -177,12 +205,24 @@ async function handleRun(request: Request, env: Env): Promise<Response> {
     );
   }
 
+  // The escape room's RUN_ABORTED level: the parent pulls the plug mid-run.
+  const abort =
+    body.abortAfterMs === undefined ? undefined : new AbortController();
+  const abortTimer =
+    abort === undefined
+      ? undefined
+      : setTimeout(
+          () => abort.abort(new Error("Unplugged by the parent Worker.")),
+          body.abortAfterMs
+        );
+
   const started = Date.now();
   try {
     const result = await run({
       loader: IS_LOCAL_DEV ? createLocalDevLoader(env.LOADER) : env.LOADER,
       source: body.source,
       ...(body.limits === undefined ? {} : { limits: body.limits }),
+      ...(abort === undefined ? {} : { signal: abort.signal }),
       hostFunctions: {
         demo: {
           /** The only data authority the sandboxed code has. */
@@ -208,6 +248,10 @@ async function handleRun(request: Request, env: Env): Promise<Response> {
               );
             });
             return ms;
+          },
+          /** Always throws — the escape room's RUN_HOST_FUNCTION_ERROR door. */
+          async vault(): Promise<never> {
+            throw new Error("The vault stays shut.");
           }
         }
       }
@@ -245,6 +289,8 @@ async function handleRun(request: Request, env: Env): Promise<Response> {
       durationMs
     };
     return Response.json(response, { status: 500 });
+  } finally {
+    if (abortTimer !== undefined) clearTimeout(abortTimer);
   }
 }
 
