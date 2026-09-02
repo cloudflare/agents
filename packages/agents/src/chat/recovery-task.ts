@@ -9,7 +9,7 @@
  * @internal Sibling-package support for AI Chat and Think.
  */
 
-import { isPlatformFailure } from "../retries";
+import { isPlatformFailure, tryN } from "../retries";
 import type { TaskRunOptions, TaskStep } from "../tasks/types";
 import type { ChatRecoveryScheduleCallback } from "./recovery-engine";
 
@@ -62,7 +62,9 @@ export type ChatRecoveryHandoff = {
  * compatibility schedule row) keeps ownership and the driver's
  * platform-failure deferral applies (#1730). After the handoff the turn is
  * detached alarm work: a platform failure enqueues one replacement attempt,
- * and any other failure belongs to the turn's own incident bookkeeping.
+ * retried a few times since the completed Task no longer owns this incident
+ * and a failure here would otherwise abandon it silently, and any other
+ * failure belongs to the turn's own incident bookkeeping.
  */
 export async function dispatchChatRecoveryToHandoff(
   handoff: ChatRecoveryHandoff
@@ -80,7 +82,16 @@ export async function dispatchChatRecoveryToHandoff(
   turn.catch((error) => {
     if (!handedOff) return;
     if (isPlatformFailure(error)) {
-      void handoff.redefer().catch(() => {});
+      // Each failed attempt didn't create a row, so retrying is safe —
+      // redefer's own enqueue is non-idempotent by design (#1730), but
+      // that's for distinguishing this replacement from a concurrent one,
+      // not for tolerating repeat calls after failure. Surface the last
+      // failure the same way an unowned detached error already is, rather
+      // than swallowing it: no Task run is left to report through.
+      void tryN(3, () => handoff.redefer(), {
+        baseDelayMs: 50,
+        maxDelayMs: 500
+      }).catch((redeferError) => handoff.onDetachedError(redeferError));
       return;
     }
     handoff.onDetachedError(error);

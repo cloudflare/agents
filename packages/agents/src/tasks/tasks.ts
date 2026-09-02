@@ -1124,6 +1124,12 @@ export class Tasks<
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
     `;
+    // Mirror the claim deadline before the handler runs, not after: a
+    // routed run's root has no other way to learn it, and a push here
+    // clears the queue row's in-flight marker, so it durably wins over a
+    // root dispatch that later returns a stale outcome past its own
+    // budget (job-queue's own "newer pushes win" guard on that marker).
+    await this.#syncWake(runId);
 
     const controller = new AbortController();
     // Emitted before the handler starts: invocation is synchronous up to the

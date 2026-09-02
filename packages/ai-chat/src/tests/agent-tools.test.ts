@@ -381,6 +381,24 @@ describe("AIChatAgent as an agent-tool child", () => {
     ).toBe("exhausted");
   }, 20_000);
 
+  it("keeps a routed run's claim mirrored on root after root detaches at the dispatch budget", async () => {
+    const parent = await getParent();
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-slow-oom-mirror-${crypto.randomUUID()}`
+    };
+
+    // Returns once root's own budget wins (~5s), well before the facet's
+    // ~6.5s delayed failure. If root's own stale outcome deletes the
+    // mirror job here — instead of the facet's claim-time push already
+    // having overwritten it — a hung or interrupted attempt has no alarm
+    // left to resume it at all, regardless of whether this specific
+    // attempt eventually settles cleanly.
+    const runId = await parent.driveFacetRecoverySlowOomSealForTest(executing);
+
+    expect(await parent.rootHasRoutedTaskWakeForTest(runId)).toBe(true);
+  }, 10_000);
+
   it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {
     const parent = await getParent();
     const childName = crypto.randomUUID();
