@@ -14,7 +14,7 @@ Sessions requires no alarm. It works in root Durable Objects and in facets with 
 
 Prompt assembly is not part of this capability. Context blocks, frozen prompts, and their providers live in `agents/context` and compose with a session handle. Sessions stores messages; nothing in it knows what a system prompt is.
 
-**Sessions stores messages. It is not a file store.** A message can reference a file without being one. Payloads ride inline in the message row and are chunked out only when the row cannot hold them; chunking never reclaims database space, because the chunks live in the same Durable Object as the row. A Durable Object's 10 GB ceiling is therefore the real bound on how much media one conversation can hold — roughly 39,000 200 KB images, measured. An application that handles files should keep them in a file store and put a reference in the message. Think does this with its Workspace, which spills to R2 at 1,500,000 bytes.
+**Sessions stores messages. It is not a file store.** A message can reference a file without being one. A message rides in one SQLite row, and a message too large for one row is split across continuation rows in the same Durable Object. Splitting never reclaims database space, so a Durable Object's 10 GB ceiling is the real bound on how much one conversation can hold. An application that handles files should keep them in a file store and put a reference in the message. Think does this with its Workspace, which spills to R2 at 1,500,000 bytes.
 
 ## Write economics
 
@@ -22,17 +22,20 @@ A row write on Durable Object SQLite costs roughly 1000 times a row read. That r
 
 Every table is `WITHOUT ROWID` with a composite primary key and no secondary index:
 
-- `cf_agents_session_messages`, keyed `(session_id, id)`: `seq`, parent, `type`, role, message JSON, stamped token estimate, timestamp
+- `cf_agents_session_messages`, keyed `(session_id, id)`: `seq`, parent, `type`, role, the first slice of the message JSON, the count of continuation rows, stamped token estimate, timestamp
+- `cf_agents_session_message_chunks`, keyed `(session_id, id, idx)`: the remaining slices of a message too large for one row
 - `cf_agents_session_compactions`, keyed `(session_id, id)`: non-destructive summary ranges
-- `cf_agents_session_attachments`, keyed `(session_id, message_id, hash)`: message-to-payload references and nothing else
+- `cf_agents_session_attachment_meta`, keyed `hash`: size, media type and chunk count of one payload
+- `cf_agents_session_attachment_chunks`, keyed `(hash, idx)`: the payload bytes, in 1.5 MiB windows
+- `cf_agents_session_attachment_refs`, keyed `(session_id, message_id, hash)`: which messages hold a payload alive
 - `cf_agents_session_config`, keyed `(session_id, key)`: lifted session configuration
 - `cf_agents_session_fts`: optional FTS5 index, created only when `searchIndexing` is enabled
 
-A text append with search disabled bills exactly one row write. `seq` carries ordering and `type` distinguishes row kinds, so neither needs an index to be useful. The reference table's three key columns _are_ the row, so a reference costs one write rather than a write plus an index entry. The old provider maintained secondary indexes that charged every append for queries used far less often.
+A text append with search disabled bills exactly one row write. `seq` carries ordering and `type` distinguishes row kinds, so neither needs an index to be useful. A continuation row carries its slice and nothing else, so an over-budget message costs exactly one billed row per slice. The old provider maintained secondary indexes that charged every append for queries used far less often.
 
-State is derived, not maintained. Active leaf, token totals, and session summaries all fall out of existing rows. An unchanged update writes nothing at all.
+State is derived, not maintained. Active leaf, token totals, and session summaries all fall out of existing rows. An unchanged update writes nothing at all — and the guard compares the FULL reassembled content, not just the slice the message row holds.
 
-Message, FTS, and attachment-reference mutations run in one synchronous SQLite transaction. Attachment payload storage completes before that transaction. Payload deletion happens after commit.
+Message, continuation, and FTS mutations run in one synchronous SQLite transaction. A message and its continuations always commit, are replaced, and are deleted together.
 
 Bulk deletion uses one recursive rewire and one set-based delete. Deleting a linear prefix rewrites only the first surviving boundary child rather than one child per deleted message.
 
@@ -44,84 +47,53 @@ Sessions then fetches message content in windows bounded by both 50 rows and 4 M
 
 `history()` releases each content window after yielding it. `historyBatches()` adds a caller-selected batch bound. `getHistory()` deliberately materializes the full path for compatibility callers.
 
-`getRecentHistory(maxBytes, minRecent)` materializes a suffix under an explicit byte budget. The budget is charged per row as stored bytes plus, when reconstructing inline, the attachment bytes that row re-inflates. A row holding a pointer to an 8 MiB image is charged 8 MiB, not the ~100 bytes it occupies on disk. Charging stored bytes alone would let a short transcript of pointers blow the isolate's memory while reporting a tiny budget usage, so this is the difference between a budget that bounds disk and a budget that bounds memory. In pointer mode no bytes are read and only stored bytes count.
+`getRecentHistory(maxBytes, minRecent)` materializes a suffix under an explicit byte budget. Each row is charged its FULL stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 1.5 MiB its first slice occupies. Charging only the message row would let a short transcript of split messages blow the isolate's memory while reporting a tiny budget usage. That accounting is what makes the budget bound memory rather than the first-slice footprint.
 
-Loaded-skill restoration in `agents/context` uses the same bounded content windows in pointer mode. It does not issue one message query per assistant row.
+Reading continuations does not cost the common case anything. The bounded window selects message rows exactly as it always did, and issues one extra query for continuations only for the ids in that window whose `content_chunks` is non-zero. A window with no split messages issues no second query at all.
 
-## Attachment ownership
+Loaded-skill restoration in `agents/context` uses the same bounded content windows. It does not issue one message query per assistant row.
 
-Sessions owns canonical attachment storage. Workspace is not an attachment store, and message durability does not depend on Computer or Shell.
+## Row chunking
 
-A stored payload is replaced by an AI SDK-compatible pointer:
+A message is stored as one JSON string. `MAX_INLINE_ROW_BYTES` (1.5 MiB, exactly `1536 * 1024`) is what one SQLite row holds; the headroom below 2 MiB covers row keys and SQLite record overhead. A message under that budget occupies one row with `content_chunks = 0`, which is the overwhelmingly common case and costs one billed row write. A message over it is cut into slices: slice 0 stays in the message row, the rest become continuation rows numbered from 1. A read concatenates them back.
 
-```text
-attachment:sha256:<64 lowercase hex characters>
-```
+Chunking buys nothing in space, and never claimed to: continuation rows live in the same Durable Object as the message they belong to, inside the same 10 GB. Billing counts rows written, not bytes, so a 500 KB message costs the same one billed row as a tiny one and a 5 MB message costs four. A host that wants bytes to leave the object writes them to a file store; Think's Workspace spills to R2 at 1,500,000 bytes.
 
-The hash covers the raw complete file. The pointer is a content address and encodes nothing about placement.
+There is no size ceiling and therefore no size error: `SessionMessageTooLargeError` does not exist.
 
-The attachment tables are:
+## Attachments
 
-- `cf_agents_session_attachment_blobs`: hash, private storage ID, byte size, and default media metadata
-- `cf_agents_session_attachment_chunks`: fixed SQLite payload windows
-- `cf_agents_session_attachments`: derived message references
+A part that declares a non-text media type and carries its bytes inline is stored outside the message. The bytes go to a content-addressed store; the part keeps its shape and its `mediaType`, with the payload field replaced by an `attachment:sha256:<hex>` pointer. A read puts the payload back, so a round trip is exact.
 
-The blob and chunk tables are lazy. A text-only object never creates them. The reference table remains part of the core Sessions schema.
+The rule is typed, not sized. An image is extracted whether it is 8 KB or 8 MB, and prose is never extracted at any size. That uniformity is the point: a message's stored shape does not depend on how large an image happened to be, so nothing has to explain why one image is a pointer and another is inline.
 
-### One rule, no content types
+This is the opposite of an earlier revision, which extracted payloads only when a row was over budget. That made extraction a rescue mechanism competing with row chunking, and it could not even do the job it existed for — extraction needed an extractable leaf, so a row over budget from bloated metadata or thousands of small parts had nothing to extract and failed. The two mechanisms are now independent and never interact: media leaves by type before the row is measured, and chunking is a size backstop for what remains.
 
-One mechanism moves every kind of oversized payload out of a row and back: `data:` URL file parts, text and reasoning parts, and strings nested in tool outputs. The stored form keeps the part's shape and swaps the payload for a pointer. Reading back reconstructs the payload byte for byte.
+### What it costs, honestly
 
-Storage draws no distinction between those kinds. An earlier design extracted "media" at a low fixed threshold and left everything else in the row until the row overflowed. That split was wrong on its own terms: documents do not arrive as media — a PDF read through a tool lands as plain tool-output text with no media type — so the type rule optimised the small case and ignored the large one. Deduplication, the other justification, is opportunistic and does not depend on type either.
+Keeping media out of the message is not free. A 200 KB image bills four rows — the message, one payload chunk, its metadata, and one reference — where inlining billed one. A 2 MiB image bills five.
 
-What replaced it is one budget, with no configuration at all:
+What it buys is that the message row stays a few hundred bytes however large the payload is, which is what makes a byte-budgeted read a real bound and a pointer-mode read cheap. Measured against real transcripts, this is also the difference between Claude Code, whose largest message across 82,902 is 481 KB, and pi, which inlines and reaches 2.64 MB.
 
-1. If the serialized row would exceed `MAX_INLINE_ROW_BYTES`, the largest payloads are chunked out until it fits.
-2. Otherwise the payload stays inline.
+Because the row no longer reflects what a read materializes, `SessionRowStat.bytes` charges each message for the payloads it points at, at their inlined size. Without that a byte budget would admit a window that hydrates far larger than it measured.
 
-There is no eager extraction because there is nothing eager extraction could buy. Chunking into the attachment tables does not make the database smaller: chunk rows live in the same Durable Object as the row they came out of, inside the same 10 GB. And billing counts ROWS written, not bytes — writing a 500 KB row costs the same one billed row as a tiny one, while chunking it out costs four (message, reference, blob, chunk). Inline is both cheaper and no larger, so a payload only ever moves to make an over-budget row fit.
+Content addressing here buys idempotency, not space: a replayed append re-derives the same address and writes nothing. Two messages that happen to carry the same image do share a record, but nothing in the design depends on that being common.
 
-An earlier revision added an optional R2 tier here, with a 1,500,000-byte threshold. It was deleted before release. Sessions is a message store, and hosts that handle files already have a file store: Think's Workspace spills to R2 at exactly that threshold, so the two were doing the same job twice.
+Payload lifetime is derived from reference rows. A message that stops pointing at a payload drops its reference, and the payload is deleted once the last one goes. The reference table has no index on `hash`: it takes a write on every media append, and the reachability check that reads it is a scan of a small table, which is far cheaper than maintaining an index on the write path.
 
-Sessions never truncates. When a row still exceeds `MAX_INLINE_ROW_BYTES` (1.5 MiB) after every offloadable string has been moved out largest-first, the write throws `SessionMessageTooLargeError` rather than storing a lossy row.
+### Splitting on bytes, not characters
 
-That is the point of the design. A storage layer that silently shortens content makes every downstream correctness question unanswerable: a host cannot tell a model's own brevity from storage having eaten the middle of a tool result, and a replayed turn stops being a replay. Rejecting the write pushes the decision to the caller, who is the only party that knows whether the content can be split, summarized, or dropped.
+SQLite's row limit is a **byte** limit and one character can be up to four bytes, so slices are cut by accumulated UTF-8 byte length. Widths come from the code unit directly (1, 2, or 3 bytes; 4 for a surrogate pair) rather than from encoding a copy.
 
-### SQLite windows
+A surrogate pair moves as a unit, so a boundary can never land between its halves. A lone surrogate is not valid UTF-8 and SQLite may mangle it, which would silently corrupt the round-trip — the one failure this design must not have. `splitContent(s).join("")` equals `s` exactly, and that is asserted over multi-byte and emoji content that straddles a boundary.
 
-SQLite payloads use immutable 1.5 MiB windows, exactly `1536 * 1024` bytes except for the final row. This is larger than Computer's 512 KiB filesystem chunks because Sessions never performs partial attachment edits. Larger windows reduce billed writes, and the remaining space below 2 MiB leaves room for SQLite record keys and encoding overhead.
+### No upper bound, stated
 
-Each stream pull reads one `(storage_id, chunk_index)` primary-key row. Sessions does not open a cursor over every payload BLOB.
+Sessions imposes no maximum message size, and there is no configurable ceiling to add one. That is deliberate: "nothing is ever too large to store" is the property worth having, and a ceiling would put back the failure mode the pointer contract could not avoid.
 
-### Writing a payload
+The consequence is that one very large write can consume a meaningful share of a Durable Object's 10 GB. Bounding untrusted input is the application's job. `appendMessage(msg, { source: "client" })` sanitizes provider metadata and strips reserved metadata keys; it does not limit size, and the docs say so.
 
-For replayable inputs such as data URLs, strings, and byte arrays, Sessions hashes first. An existing whole-file hash causes no payload write at all.
-
-A one-shot stream takes one path whatever its length: windows are written and hashed as the bytes arrive, so a payload is never materialized whole. A declared `bytes` is still worth passing — Sessions validates it against what actually arrived and rejects a mismatch — but it no longer changes where the bytes go.
-
-### Resource lifetime
-
-`attachments.put()` creates a durable resource and returns its pointer. It starts no timer, and Sessions does not infer abandonment from a temporary lack of references. The bytes survive until either `attachments.delete()` removes them, or a message has referenced them and the last reference's removal reaps them.
-
-Those two rules cover both callers. A standalone upload that never enters a message is the uploader's to delete. An attachment that entered the transcript is collected with the last message pointing at it, so deleting messages does not leak bytes and forking does not orphan them.
-
-Client uploads ride the same rules. The server calls `put()`, returns the pointer part, the client echoes that part in its next message, and `appendMessage(msg, { source: "client" })` accepts it because the bytes already exist in this object. A pointer the client invents or copies from elsewhere fails the same check and becomes a marker part. That is the whole trust boundary: existence in local storage, not a signature or a nonce.
-
-Coupled message writes clean up after themselves. If offload creates a new blob and the message write fails or loses a race, Sessions deletes only the blobs that write created. It never deletes a pre-existing or shared blob by inference.
-
-There is no age-based sweep, per-chunk timestamp, or refcount counter. A process failure at the exact commit boundary can leave unreachable storage overhead. The design accepts that rare leak rather than charging every healthy conversation for recurring scans, or risking speculative deletion of a valid standalone resource.
-
-The low-level API requires callers to serialize `attachments.delete(pointer)` against inserting that same pointer. Think and AIChatAgent already serialize their chat mutations.
-
-## Attachment memory behavior
-
-Base64 data URLs decode in bounded windows. They are not converted into a second complete byte array before storage.
-
-SQLite writes retain at most one 1.5 MiB output window plus the source chunks needed to fill it. SQLite reads load one 1.5 MiB row per stream pull.
-
-The default inline reconstructor still returns a complete data URL for Think and AIChatAgent compatibility. It base64-encodes the attachment stream with at most a two-byte carry between chunks, but the final JavaScript string is still a whole-file allocation. `attachment.data()` also materializes the complete payload by definition. `attachment.stream()` and `attachmentResponse()` do not.
-
-Hosts should use pointer mode for export, indexing, and unbounded scans. Model calls and legacy client snapshots must materialize bounded arrays until their protocols change.
+Sessions never truncates. That is the point: a storage layer that silently shortens content makes every downstream correctness question unanswerable — a host cannot tell a model's own brevity from storage having eaten the middle of a tool result, and a replayed turn stops being a replay.
 
 ## Search
 
@@ -137,8 +109,6 @@ Compaction stores an overlay that replaces a span at read time. Original rows ar
 
 `compactAfter(tokenThreshold)` gates on the O(1) stamped aggregate, so the cheap trigger never reads the transcript to decide whether to compact. Model-reported usage remains the authoritative count; the stamped estimate only decides when to look.
 
-The compaction function receives pointer-mode history. Attachment payloads are never inlined into a summarization pass.
-
 Trimming a transcript for a model request is a different concern and lives in `agents/chat` as `truncateOlderMessages`.
 
 ## Host mappings
@@ -149,7 +119,6 @@ Think installs two chat capabilities and composes context beside them:
 
 ```ts
 readonly sessions = new Sessions({
-  attachments: () => this.#attachmentPolicy(),
   reservedMetadataKeys: RESERVED_MESSAGE_METADATA_KEYS,
   searchIndexing: true
 });
@@ -161,13 +130,11 @@ Sessions stores settled conversation messages. Streams stores in-flight output a
 
 `configureSession(session)` configures compaction and search on the default handle. `configureContext()` declares prompt blocks, which Think turns into a `ContextBlocks` wired to durable per-agent SQLite: a block with no provider gets storage by label, and the frozen prompt is always persisted. Think subscribes to the Sessions change feed to keep its in-isolate `messages` array coherent.
 
-Only the top-level `attachments` option is a thunk, so Think can re-read the `sessionAttachments` host field, which is set after the field initializer runs. Individual policy fields are plain values.
+Row chunking and Think's media eviction are separate concerns and must stay separate. Chunking is storage: a message too large for one row is split and reassembled byte for byte, invisibly and losslessly. Media eviction is a context-window decision owned by Think: aged media is removed from the conversation, visibly and lossily, and preserved as a Workspace file the agent can read back by path.
 
-Sessions' attachment store and Think's media eviction are separate concerns and must stay separate. The attachment store is storage: a large payload becomes an `attachment:sha256:` pointer and reads reconstruct it byte for byte, invisibly and losslessly. Media eviction is a context-window decision owned by Think: aged media is removed from the conversation, visibly and lossily, and preserved as a Workspace file the agent can read back by path.
+`mediaEviction` supplies no storage policy at all. `minPartBytes` is Think's context threshold for what leaves the conversation; how Sessions lays a message out in rows is settled by the row budget alone. Eviction reads history with payloads inlined, so it decodes a `data:` URL directly and never has to resolve a pointer itself. Rewriting the message to a marker drops its reference, so the payload is collected — eviction now genuinely reclaims session storage rather than only shortening the context. Its Workspace write, its `[evicted <mediaType>, <bytes> bytes; preserved at <path>]` marker, and its `/attachments/evicted/<id>-<n>.<ext>` paths are unchanged.
 
-`mediaEviction` supplies no storage policy at all. `minPartBytes` is Think's context threshold for what leaves the conversation; where Sessions keeps a payload is settled by the row budget alone. Eviction reads the bytes back through `sessions.attachments.open()` when the row holds a pointer, and decodes the `data:` URL in place when it does not.
-
-Think's startup hydration uses `getRecentHistory(hydrationByteBudget, MODEL_RECENT_WINDOW)`, with the budget defaulting to 32 MiB. The floor keeps windowing from starving the model's context; the byte budget bounds hydrated memory because it charges re-inflated attachment bytes.
+Think's startup hydration uses `getRecentHistory(hydrationByteBudget, MODEL_RECENT_WINDOW)`, with the budget defaulting to 32 MiB. The floor keeps windowing from starving the model's context; the byte budget bounds hydrated memory because row stats charge continuation bytes.
 
 Think appends a regenerated assistant message under the same user parent, so the prior response remains stored. `getBranches(parentId)` lists alternatives and `getHistory({ leafId })` selects one path.
 
@@ -177,7 +144,7 @@ The primary multi-chat architecture is a directory Durable Object plus one Think
 
 ### AIChatAgent
 
-AIChatAgent uses the default handle as a linear chain. It retains its mutable `messages` field, destructive regeneration, `maxPersistedMessages`, v4 conversion, and full-transcript client protocol. The attachment ceiling, locator, and reconstructor remain tunable through `sessionAttachments`; extraction itself is not a policy.
+AIChatAgent uses the default handle as a linear chain. It retains its mutable `messages` field, destructive regeneration, `maxPersistedMessages`, v4 conversion, and full-transcript client protocol. There is nothing to configure about storage layout, so `sessionAttachments` is gone; a stored row is exactly what the write returned, so mirroring the change feed into the in-memory cache never costs a re-read.
 
 ## Migration
 
@@ -185,17 +152,17 @@ Lifecycle startup copies legacy `assistant_*` message, compaction, and config ro
 
 AIChatAgent performs its package-owned lift from `cf_ai_chat_agent_messages`, converts old message shapes, imports a linear chain, and tombstones the source table.
 
-Cross-object moves use `importMessage(message, { parentId, createdAt })`: one historical row written verbatim, with no offload and no change-feed event. It replaced an internal sync aperture, which existed only because import needed to bypass the write pipeline and is not a general-purpose escape hatch anyone should reach for.
+Cross-object moves use `importMessage(message, { parentId, createdAt })`: one historical message written verbatim, split the same way an append is, with no change-feed event. It replaced an internal sync aperture, which existed only because import needed to bypass the write pipeline and is not a general-purpose escape hatch anyone should reach for.
 
 ## Trade-offs
 
 SQLite-native storage removes the old Postgres provider option and its duplicate implementation.
 
-Whole-file deduplication does not reuse matching subranges across different files. Chunk-level content addressing would add hashes, indexes, and writes while providing little benefit for compressed images and PDFs. Computer needs that complexity for partial filesystem edits; immutable attachments do not.
+Extracting media costs extra row writes on every media append, in exchange for a message row whose size is independent of its payloads. Text pays nothing: a prose message is one row, exactly as before.
 
-Default inline reconstruction preserves current chat behavior but still creates a complete base64 string. The storage layer cannot remove that final allocation without changing Think, AIChatAgent, or the model and client protocols.
+A read of a split message is one extra query, not one per message: the window queries continuations for exactly the ids that have them. A window of ordinary messages issues none.
 
-Rejecting an oversized row is a visible failure where truncation was an invisible one. That is the intended trade: a host that must accept arbitrary tool output has to split or summarize it, and gets an error telling it so instead of a silently damaged transcript.
+There is no ceiling and therefore no size error. A host that accepts arbitrary untrusted input has to bound it itself; Sessions will faithfully store whatever it is handed. Bounding what a model SEES is a different concern and lives in `agents/context`, on the read path, where a cap can change without having destroyed the stored bytes.
 
 ## Key decisions
 

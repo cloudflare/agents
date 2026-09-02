@@ -61,30 +61,32 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
-  it("bills one row for a payload the message row can hold", async () => {
+  it("bills a message row plus the attachment rows for inline media", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      // The payload stays in the row. Billing counts ROWS, not bytes: a
-      // 200 KB row and a 40-byte row both cost one.
-      const append = await instance.benchAttachmentAppend(200 * 1024);
+      // A 200 KB image costs four rows, not one: the message row, one payload
+      // chunk, its metadata, and the reference that keeps it alive. That is
+      // the real price of keeping media out of the message, and it is paid on
+      // every media write — the message row in exchange stays a few hundred
+      // bytes however large the image is.
+      const append = await instance.benchPayloadAppend(200 * 1024);
 
-      expect(append.rowsWritten).toBe(1);
-      expect(instance.attachmentBlobCount()).toBe(0);
-      expect(instance.attachmentChunkCount()).toBe(0);
+      expect(append.rowsWritten).toBe(4);
+      expect(instance.continuationRowCount("bench-payload")).toBe(0);
     });
   });
 
-  it("bills four rows when the row cannot hold the payload", async () => {
+  it("bills one extra row per payload chunk, and never splits the message", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      const append = await instance.benchAttachmentAppend(2 * 1024 * 1024);
+      // 2 MiB of payload spans the 1.5 MiB window twice, so it costs five
+      // rows: the message, two payload chunks, metadata, and one reference.
+      // The message row itself never chunks — the bytes left before it was
+      // measured.
+      const append = await instance.benchPayloadAppend(2 * 1024 * 1024);
 
-      // Message row + attachment reference row + whole-file blob row + two
-      // 1.5 MiB chunk rows = 5. Chunking never reclaims space, so this cost
-      // is only ever paid to make an over-budget row fit.
       expect(append.rowsWritten).toBe(5);
-      expect(instance.attachmentBlobCount()).toBe(1);
-      expect(instance.attachmentChunkCount()).toBe(2);
+      expect(instance.continuationRowCount("bench-payload")).toBe(0);
     });
   });
 });

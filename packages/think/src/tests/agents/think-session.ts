@@ -53,7 +53,7 @@ import {
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
-import { Session, type StoredAttachment } from "agents/sessions";
+import { Session } from "agents/sessions";
 import type { ContextConfig } from "agents/context";
 import { z } from "zod";
 
@@ -8406,10 +8406,9 @@ export class ThinkWindowedHydrationAgent extends Think {
 const BIG_MEDIA_CHARS = 16_000;
 
 /**
- * A payload the message row CANNOT hold, so Sessions chunks it out and the
- * row stores an `attachment:sha256:` pointer. Think's eviction has to read
- * the bytes back through `sessions.attachments.open()`. Both branches are
- * live, which is why both sizes are seeded.
+ * A payload the message row CANNOT hold, so Sessions splits the message
+ * across continuation rows. The part is still an inline `data:` URL, so
+ * eviction decodes it exactly as it does a small one.
  */
 export const POINTER_MEDIA_CHARS = 1_600_000;
 
@@ -8509,39 +8508,14 @@ export class ThinkMediaEvictionAgent extends Think {
   }
 
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
-    return (await this.session.getMessage(id, {
-      reconstruct: "pointer"
-    })) as UIMessage | null;
-  }
-
-  async getInlinedMessageForTest(id: string): Promise<UIMessage | null> {
     return (await this.session.getMessage(id)) as UIMessage | null;
   }
 
-  async getAttachmentForTest(
-    pointer: string
-  ): Promise<StoredAttachment | null> {
-    return this.sessions.attachments.get(pointer);
-  }
-
-  async readAttachmentForTest(pointer: string): Promise<Uint8Array> {
-    const stream = await this.sessions.attachments.open(pointer);
-    return new Uint8Array(await new Response(stream).arrayBuffer());
-  }
-
-  async getAttachmentReferenceCountForTest(): Promise<number> {
+  /** Continuation rows the object currently holds. */
+  async getContinuationRowCountForTest(): Promise<number> {
     return (
       this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_session_attachments
-    `[0]?.count ?? 0
-    );
-  }
-
-  /** Content-addressed blobs still held by Sessions. */
-  async getAttachmentBlobCountForTest(): Promise<number> {
-    return (
-      this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_session_attachment_blobs
+      SELECT COUNT(*) AS count FROM cf_agents_session_message_chunks
     `[0]?.count ?? 0
     );
   }
@@ -8603,7 +8577,7 @@ export class ThinkPointerHydrationAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
 
   override async configureSession(session: Session): Promise<Session> {
-    const existing = await session.getHistory({ reconstruct: "pointer" });
+    const existing = await session.getHistory();
     if (existing.length === 0) {
       for (let i = 0; i < 10; i++) {
         await session.appendMessage({
@@ -8644,21 +8618,13 @@ export class ThinkPointerHydrationAgent extends Think {
   }
 
   async getFullHistoryIdsForTest(): Promise<string[]> {
-    return (await this.session.getHistory({ reconstruct: "pointer" })).map(
-      (m) => m.id
-    );
+    return (await this.session.getHistory()).map((m) => m.id);
   }
 
-  /** Stored (pointer-form) bytes of the whole path — the on-disk footprint. */
+  /** Stored bytes of the whole path — the on-disk footprint. */
   async getStoredPathBytesForTest(): Promise<number> {
     const stats = await this.session.getHistoryRowStats();
     return stats.reduce((sum, row) => sum + row.bytes, 0);
-  }
-
-  /** Attachment bytes the path re-inflates when reconstructed inline. */
-  async getAttachmentPathBytesForTest(): Promise<number> {
-    const stats = await this.session.getHistoryRowStats();
-    return stats.reduce((sum, row) => sum + row.attachmentBytes, 0);
   }
 
   /** The `data:` URLs the hydrated window reconstructed, in cache order. */

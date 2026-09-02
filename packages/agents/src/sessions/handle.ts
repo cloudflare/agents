@@ -1,8 +1,7 @@
 /**
  * Per-session handle returned by `Sessions.session()`. Carries the
  * session-scoped compaction policy and orchestrates every public write:
- * sanitize → strip/guard client input → offload payloads → durable write →
- * change feed.
+ * sanitize → strip reserved client metadata → durable write → change feed.
  *
  * The handle stores messages. Prompt assembly (context blocks, frozen
  * prompts, skills) lives in `agents/context` and composes with this handle
@@ -11,9 +10,7 @@
 
 import type { CompactResult } from "./compaction-helpers";
 import { COMPACTION_PREFIX } from "./compaction-helpers";
-import { MAX_INLINE_ROW_BYTES } from "./attachments";
 import type { SessionsCore } from "./core";
-import { SessionMessageTooLargeError } from "./errors";
 import { byteLength, sanitizeMessage } from "./sanitize";
 import type {
   AppendOptions,
@@ -29,7 +26,7 @@ import type {
   WriteOptions
 } from "./types";
 
-/** Summarizes a branch into an overlay. Receives pointer-mode history. */
+/** Summarizes a branch into an overlay. */
 export type CompactionFunction = (
   messages: SessionMessage[]
 ) => Promise<CompactResult | null>;
@@ -86,17 +83,13 @@ export class Session {
     options: HistoryReadOptions = {}
   ): AsyncGenerator<SessionMessage, void, undefined> {
     await this.#ready();
-    yield* this.#core.streamHistory(
-      this.sessionId,
-      options,
-      this.#core.attachments.resolveReconstructor(options.reconstruct)
-    );
+    yield* this.#core.streamHistory(this.sessionId, options);
   }
 
   /**
    * Stream history in bounded non-empty batches. Both message count and
-   * reconstructed serialized bytes bound each batch; a single large message
-   * is yielded by itself.
+   * serialized bytes bound each batch; a single large message is yielded by
+   * itself.
    */
   async *historyBatches(
     options: HistoryBatchReadOptions = {}
@@ -133,60 +126,48 @@ export class Session {
   /**
    * Materialize the whole selected path. Prefer `history()` or
    * `getRecentHistory()` inside a Durable Object: this holds every message
-   * of the branch, with attachments inlined, in memory at once.
+   * of the branch in memory at once.
    */
   async getHistory(
     options: HistoryReadOptions = {}
   ): Promise<SessionMessage[]> {
     await this.#ready();
-    return this.#core.getHistory(
-      this.sessionId,
-      options,
-      this.#core.attachments.resolveReconstructor(options.reconstruct)
-    );
+    return this.#core.getHistory(this.sessionId, options);
   }
 
   /**
    * Byte-budgeted read of the most recent messages on the active branch path
    * (always at least the leaf, and at least `minRecentMessages` when the path
-   * is long enough). When reconstructing, the budget counts the attachment
-   * bytes each row inflates back, so it bounds hydrated memory (#1710).
+   * is long enough). The budget counts each row plus its continuation rows,
+   * so it bounds hydrated memory (#1710).
    */
   async getRecentHistory(
     maxContentBytes: number,
     minRecentMessages = 1,
-    options: Pick<HistoryReadOptions, "reconstruct" | "leafId"> = {}
+    options: Pick<HistoryReadOptions, "leafId"> = {}
   ): Promise<RecentHistoryResult> {
     await this.#ready();
-    const result = await this.#core.getRecentHistory(
+    return this.#core.getRecentHistory(
       this.sessionId,
       maxContentBytes,
       minRecentMessages,
-      this.#core.attachments.resolveReconstructor(options.reconstruct),
       options.leafId
     );
-    return result;
   }
 
   /**
-   * Per-row stored sizes, attachment sizes, and stamped token estimates for
-   * the active branch path (root → leaf) WITHOUT loading message content.
+   * Per-row stored sizes (row plus continuation rows) and stamped token
+   * estimates for the active branch path (root → leaf) WITHOUT loading
+   * message content.
    */
   async getHistoryRowStats(leafId?: string | null): Promise<SessionRowStat[]> {
     await this.#ready();
     return this.#core.pathRowStats(this.sessionId, leafId);
   }
 
-  async getMessage(
-    id: string,
-    options: Pick<HistoryReadOptions, "reconstruct"> = {}
-  ): Promise<SessionMessage | null> {
+  async getMessage(id: string): Promise<SessionMessage | null> {
     await this.#ready();
-    return this.#core.getMessage(
-      this.sessionId,
-      id,
-      this.#core.attachments.resolveReconstructor(options.reconstruct)
-    );
+    return this.#core.getMessage(this.sessionId, id);
   }
 
   async getLatestLeaf(): Promise<SessionMessage | null> {
@@ -229,24 +210,17 @@ export class Session {
         parentId: options.parentId,
         inserted: false
       });
-      return { inserted: false, message: existing, attachments: [] };
+      return { inserted: false, message: existing };
     }
 
-    const prepared = await this.#prepare(message, options.source);
-    let inserted: boolean;
-    try {
-      ({ inserted } = this.#core.append(
-        this.sessionId,
-        prepared.message,
-        options.parentId,
-        prepared.tokenEstimate
-      ));
-    } catch (error) {
-      await this.#core.attachments.discardUnreferenced(prepared.attachments);
-      throw error;
-    }
+    const prepared = this.#prepare(message, options.source);
+    const { inserted } = this.#core.append(
+      this.sessionId,
+      prepared.message,
+      options.parentId,
+      prepared.tokenEstimate
+    );
     if (!inserted) {
-      await this.#core.attachments.discardUnreferenced(prepared.attachments);
       const stored =
         this.#core.getMessageRaw(this.sessionId, message.id) ??
         prepared.message;
@@ -257,7 +231,7 @@ export class Session {
         parentId: options.parentId,
         inserted: false
       });
-      return { inserted: false, message: stored, attachments: [] };
+      return { inserted: false, message: stored };
     }
 
     let compacted = false;
@@ -273,11 +247,7 @@ export class Session {
         inserted: true
       });
     }
-    return {
-      inserted: true,
-      message: prepared.message,
-      attachments: prepared.attachments
-    };
+    return { inserted: true, message: prepared.message };
   }
 
   /** Append a chain of messages; returns the last appended id. */
@@ -305,20 +275,13 @@ export class Session {
     options: WriteOptions = {}
   ): Promise<SessionMessage | null> {
     await this.#ready();
-    const prepared = await this.#prepare(message, options.source);
-    let outcome: Awaited<ReturnType<SessionsCore["update"]>>;
-    try {
-      outcome = await this.#core.update(
-        this.sessionId,
-        prepared.message,
-        prepared.tokenEstimate
-      );
-    } catch (error) {
-      await this.#core.attachments.discardUnreferenced(prepared.attachments);
-      throw error;
-    }
+    const prepared = this.#prepare(message, options.source);
+    const outcome = await this.#core.update(
+      this.sessionId,
+      prepared.message,
+      prepared.tokenEstimate
+    );
     if (outcome !== "updated") {
-      await this.#core.attachments.discardUnreferenced(prepared.attachments);
       if (outcome === "missing") return null;
       return prepared.message;
     }
@@ -341,16 +304,12 @@ export class Session {
     const stored = await this.updateMessage(message, {
       source: options.source
     });
-    return {
-      inserted: false,
-      message: stored ?? message,
-      attachments: []
-    };
+    return { inserted: false, message: stored ?? message };
   }
 
   /**
    * Import one historical message verbatim (migrations, cross-object moves):
-   * explicit parent and timestamp, no offload, no change-feed event.
+   * explicit parent and timestamp, no change-feed event.
    */
   async importMessage(
     message: SessionMessage,
@@ -378,8 +337,8 @@ export class Session {
 
   /**
    * Copy the path ending at `atMessageId` (default: the active leaf) into a
-   * new session. Message rows get fresh ids; attachment blobs are shared,
-   * never copied. Compaction overlays are not copied.
+   * new session. Message rows get fresh ids, continuation rows and all.
+   * Compaction overlays are not copied.
    */
   async fork(
     options: { atMessageId?: string; toSessionId?: string } = {}
@@ -418,8 +377,6 @@ export class Session {
    * overlay. When `leafId` is given, compact that root-to-leaf branch instead
    * of the active branch. Requires `onCompaction()`.
    *
-   * The function receives pointer-mode history: attachment payloads are never
-   * inlined into a summarization pass.
    */
   async compact(leafId?: string | null): Promise<CompactResult | null> {
     await this.#ready();
@@ -429,11 +386,7 @@ export class Session {
         "No compaction function registered. Call onCompaction() first."
       );
     }
-    const history = await this.#core.getHistory(
-      this.sessionId,
-      { leafId },
-      null
-    );
+    const history = await this.#core.getHistory(this.sessionId, { leafId });
 
     let result: CompactResult | null;
     try {
@@ -473,43 +426,22 @@ export class Session {
   // ── Internal ─────────────────────────────────────────────────────────────
 
   /**
-   * The shared write pipeline: sanitize provider metadata, strip reserved
-   * metadata and guard pointers on client-source input, then move payloads
-   * out of the row (async, BEFORE the durable write, so a stored pointer
-   * always has bytes behind it). Content is never truncated: a row that
-   * cannot fit its budget after offload is rejected.
+   * The shared write pipeline: sanitize provider metadata and strip reserved
+   * metadata on client-source input. Content is never truncated and never
+   * too large: a message that exceeds the row budget is split across
+   * continuation rows by the durable write.
    */
-  async #prepare(
+  #prepare(
     message: SessionMessage,
     source: "client" | "server" | undefined
-  ): Promise<{
-    message: SessionMessage;
-    attachments: AppendResult["attachments"];
-    tokenEstimate: number;
-  }> {
+  ): { message: SessionMessage; tokenEstimate: number } {
     let prepared = sanitizeMessage(message);
     if (source === "client") {
       prepared = this.#core.stripReservedMetadata(prepared);
-      prepared = await this.#core.attachments.guardClientPointers(prepared);
-    }
-    const offloaded = await this.#core.attachments.offload(prepared, {
-      rowBudgetBytes: MAX_INLINE_ROW_BYTES
-    });
-    if (
-      offloaded.rowBytes !== undefined &&
-      offloaded.rowBytes > MAX_INLINE_ROW_BYTES
-    ) {
-      await this.#core.attachments.discardUnreferenced(offloaded.attachments);
-      throw new SessionMessageTooLargeError(
-        message.id,
-        offloaded.rowBytes,
-        MAX_INLINE_ROW_BYTES
-      );
     }
     return {
-      message: offloaded.message,
-      attachments: offloaded.attachments,
-      tokenEstimate: this.#core.estimateRowTokens(offloaded.message)
+      message: prepared,
+      tokenEstimate: this.#core.estimateRowTokens(prepared)
     };
   }
 

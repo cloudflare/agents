@@ -1,8 +1,9 @@
 /**
  * Durable conversation history for Lifecycle Objects. `Sessions` owns the
  * `cf_agents_session_*` tables: tree-structured messages (branch
- * regeneration, latest-leaf paths), compaction overlays, opt-in FTS search,
- * and content-addressed payload offload behind a structural store seam.
+ * regeneration, latest-leaf paths), compaction overlays, and opt-in FTS
+ * search. A message larger than one SQLite row is split across continuation
+ * rows and reassembled on read, so nothing is ever too large to store.
  *
  * Sessions consumes only the standard capability services — storage and
  * events. It needs no alarm, so it also works on facets (facets have
@@ -13,14 +14,11 @@
 
 import { LifecycleCapability } from "../lifecycle/capability";
 import { SqlError } from "../sql-error";
-import { SessionAttachmentMissingError } from "./errors";
-import { parseAttachmentUrl, type StoredAttachment } from "./attachments";
 import { SessionsCore } from "./core";
 import { Session } from "./handle";
 import type { SqlParam } from "./io";
 import type {
   SessionChangeListener,
-  SessionMessagePart,
   SessionSummary,
   SessionsOptions
 } from "./types";
@@ -30,29 +28,6 @@ const CURRENT_SESSIONS_SCHEMA_VERSION = 1;
 
 /** The default session id used when `session()` is called without one. */
 export const DEFAULT_SESSION_ID = "";
-
-/** Content-addressed payload storage shared by every session. */
-export interface SessionsAttachments {
-  /**
-   * Store one payload content-addressed and get back a pointer part ready to
-   * place in a message, plus its record. Accepts a stream — the streaming
-   * upload path. The bytes stay until a message references them (then the
-   * last reference's removal reaps them) or `delete()` removes them.
-   */
-  put(
-    data: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | string,
-    options: { mediaType: string; filename?: string; bytes?: number }
-  ): Promise<{ part: SessionMessagePart; attachment: StoredAttachment }>;
-  /** Return metadata for one stored payload, when known. */
-  get(hashOrUrl: string): Promise<StoredAttachment | null>;
-  /** Open one stored payload by pointer hash or `attachment:` URL. */
-  open(hashOrUrl: string): Promise<ReadableStream<Uint8Array>>;
-  /**
-   * Delete a payload. Returns false when it does not exist or a stored
-   * message still references it.
-   */
-  delete(hashOrUrl: string): Promise<boolean>;
-}
 
 /**
  * Durable conversation history for a Lifecycle Object.
@@ -125,36 +100,6 @@ export class Sessions extends LifecycleCapability {
    */
   subscribe(listener: SessionChangeListener): () => void {
     return this.#getCore().subscribe(listener);
-  }
-
-  /** Content-addressed payload storage shared by every session. */
-  get attachments(): SessionsAttachments {
-    const core = this.#getCore();
-    const resolveHash = (hashOrUrl: string): string => {
-      const hash = parseAttachmentUrl(hashOrUrl) ?? hashOrUrl;
-      if (!/^[0-9a-f]{64}$/.test(hash)) {
-        throw new SessionAttachmentMissingError(hash, hashOrUrl);
-      }
-      return hash;
-    };
-    return {
-      put: async (data, options) => {
-        await this.lifecycle.ready();
-        return core.attachments.put(data, options);
-      },
-      get: async (hashOrUrl) => {
-        await this.lifecycle.ready();
-        return core.attachments.get(resolveHash(hashOrUrl));
-      },
-      open: async (hashOrUrl) => {
-        await this.lifecycle.ready();
-        return core.attachments.open(resolveHash(hashOrUrl));
-      },
-      delete: async (hashOrUrl) => {
-        await this.lifecycle.ready();
-        return core.attachments.delete(resolveHash(hashOrUrl));
-      }
-    };
   }
 
   // ── Wiring ───────────────────────────────────────────────────────────────

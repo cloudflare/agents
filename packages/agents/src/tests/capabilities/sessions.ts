@@ -58,7 +58,6 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
   });
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
   readonly events: RecordedEvent[] = [];
-  onAttachmentStored: (() => void) | undefined;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -67,9 +66,6 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
         type: event.type,
         payload: (event.payload ?? {}) as Record<string, unknown>
       });
-      if (event.type === "session:attachment:stored") {
-        this.onAttachmentStored?.();
-      }
     });
   }
 
@@ -78,21 +74,77 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     return this.events.filter((event) => event.type === type);
   }
 
-  /** Number of immutable whole-file blobs owned by Sessions. */
-  attachmentBlobCount(): number {
-    if (!this.#tableExists("cf_agents_session_attachment_blobs")) return 0;
+  /** Continuation rows a message was split across, in `idx` order. */
+  continuationRows(
+    sessionId: string,
+    messageId: string
+  ): Array<{ idx: number; bytes: number }> {
+    return this.ctx.storage.sql
+      .exec<{ idx: number; bytes: number }>(
+        `SELECT idx, LENGTH(CAST(content AS BLOB)) AS bytes
+         FROM cf_agents_session_message_chunks
+         WHERE session_id = ? AND id = ? ORDER BY idx ASC`,
+        sessionId,
+        messageId
+      )
+      .toArray();
+  }
+
+  /** Every continuation row in the object, regardless of session. */
+  continuationRowCount(): number {
     return Number(
       this.ctx.storage.sql
-        .exec(
-          "SELECT COUNT(*) AS count FROM cf_agents_session_attachment_blobs"
-        )
+        .exec("SELECT COUNT(*) AS count FROM cf_agents_session_message_chunks")
         .one().count
     );
   }
 
-  /** Number of fixed-window SQLite rows backing attachment blobs. */
+  /** The `content_chunks` stamped on one stored message row. */
+  contentChunks(sessionId: string, messageId: string): number | null {
+    const rows = this.ctx.storage.sql
+      .exec<{ content_chunks: number }>(
+        "SELECT content_chunks FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+        sessionId,
+        messageId
+      )
+      .toArray();
+    return rows.length > 0 ? Number(rows[0].content_chunks) : null;
+  }
+
+  /** Stored size of one message row, excluding anything it points at. */
+  messageRowBytes(sessionId: string, messageId: string): number {
+    return Number(
+      this.ctx.storage.sql
+        .exec<{ bytes: number }>(
+          `SELECT LENGTH(CAST(content AS BLOB)) AS bytes
+           FROM cf_agents_session_messages WHERE session_id = ? AND id = ?`,
+          sessionId,
+          messageId
+        )
+        .one().bytes
+    );
+  }
+
+  /** Every attachment payload held by the object, newest address order. */
+  attachmentRecords(): Array<{
+    hash: string;
+    bytes: number;
+    mediaType: string;
+  }> {
+    return this.ctx.storage.sql
+      .exec<{ hash: string; bytes: number; media_type: string }>(
+        "SELECT hash, bytes, media_type FROM cf_agents_session_attachment_meta ORDER BY hash"
+      )
+      .toArray()
+      .map((row) => ({
+        hash: row.hash,
+        bytes: Number(row.bytes),
+        mediaType: row.media_type
+      }));
+  }
+
+  /** Attachment chunk rows in the object. */
   attachmentChunkCount(): number {
-    if (!this.#tableExists("cf_agents_session_attachment_chunks")) return 0;
     return Number(
       this.ctx.storage.sql
         .exec(
@@ -102,30 +154,13 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
-  /** Whole-file hashes currently present in Sessions storage. */
-  attachmentHashes(): string[] {
-    if (!this.#tableExists("cf_agents_session_attachment_blobs")) return [];
-    return this.ctx.storage.sql
-      .exec<{ hash: string }>(
-        "SELECT hash FROM cf_agents_session_attachment_blobs ORDER BY hash"
-      )
-      .toArray()
-      .map((row) => row.hash);
-  }
-
-  /** Reference rows of one message: `(session_id, message_id, hash)` only. */
-  attachmentReferences(
-    sessionId: string,
-    messageId: string
-  ): Array<{ hash: string }> {
-    return this.ctx.storage.sql
-      .exec<{ hash: string }>(
-        `SELECT hash FROM cf_agents_session_attachments
-         WHERE session_id = ? AND message_id = ? ORDER BY hash`,
-        sessionId,
-        messageId
-      )
-      .toArray();
+  /** Reference rows tying messages to payloads. */
+  attachmentRefCount(): number {
+    return Number(
+      this.ctx.storage.sql
+        .exec("SELECT COUNT(*) AS count FROM cf_agents_session_attachment_refs")
+        .one().count
+    );
   }
 
   /** Column names of a Sessions table, for schema assertions. */
@@ -185,7 +220,8 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
-  #tableExists(name: string): boolean {
+  /** True when a table exists, for migration assertions. */
+  tableExists(name: string): boolean {
     return (
       this.ctx.storage.sql
         .exec(
@@ -193,13 +229,6 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
           name
         )
         .toArray().length > 0
-    );
-  }
-
-  /** Simulate loss of SQLite payload rows while preserving blob metadata. */
-  deleteAttachmentChunks(): void {
-    this.ctx.storage.sql.exec(
-      "DELETE FROM cf_agents_session_attachment_chunks"
     );
   }
 
@@ -292,11 +321,13 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
   readonly #billed = new BilledRows(this.ctx.storage.sql);
 
-  attachmentChunkCount(): number {
+  /** Continuation rows written for one message. */
+  continuationRowCount(messageId: string): number {
     return Number(
       this.ctx.storage.sql
         .exec(
-          "SELECT COUNT(*) AS count FROM cf_agents_session_attachment_chunks"
+          "SELECT COUNT(*) AS count FROM cf_agents_session_message_chunks WHERE id = ?",
+          messageId
         )
         .one().count
     );
@@ -355,16 +386,6 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
     return { rowsWritten: this.#billed.stop() };
   }
 
-  attachmentBlobCount(): number {
-    return Number(
-      this.ctx.storage.sql
-        .exec(
-          "SELECT COUNT(*) AS count FROM cf_agents_session_attachment_blobs"
-        )
-        .one().count
-    );
-  }
-
   /** A prefix delete rewires one surviving boundary child, not one per row. */
   async benchDeleteLinearPrefix(
     messageCount: number
@@ -387,7 +408,7 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** Billed rows for one append carrying a payload of `payloadBytes`. */
-  async benchAttachmentAppend(
+  async benchPayloadAppend(
     payloadBytes: number
   ): Promise<{ rowsWritten: number }> {
     await this.lifecycle.start();
@@ -396,7 +417,7 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
     const payload = btoa("y".repeat(payloadBytes));
     this.#billed.start();
     await session.appendMessage({
-      id: "bench-attachment",
+      id: "bench-payload",
       role: "user",
       parts: [
         { type: "text", text: "see attached" },

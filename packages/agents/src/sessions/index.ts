@@ -5,22 +5,15 @@
  * stabilizing.
  */
 
-export {
-  DEFAULT_SESSION_ID,
-  Sessions,
-  type SessionsAttachments
-} from "./sessions";
+export { DEFAULT_SESSION_ID, Sessions } from "./sessions";
 export { Session, type CompactionFunction } from "./handle";
-export { attachmentResponse, type AttachmentResponseOptions } from "./http";
+export { MAX_INLINE_ROW_BYTES } from "./chunking";
 export {
   ATTACHMENT_URL_PREFIX,
   attachmentUrl,
-  inlineReconstructor,
-  MAX_INLINE_ROW_BYTES,
-  parseAttachmentUrl,
-  pointerReconstructor,
-  type StoredAttachment
-} from "./attachments";
+  parseAttachmentUrl
+} from "./attachment-ingest";
+export { ATTACHMENT_CHUNK_BYTES } from "./attachment-store";
 export {
   estimateAttachmentTokens,
   estimateMessageTokens,
@@ -34,23 +27,16 @@ export {
   type CompactResult
 } from "./compaction-helpers";
 export {
-  SessionAttachmentMissingError,
-  SessionAttachmentStoreError,
-  SessionAttachmentTooLargeError,
-  SessionMessageTooLargeError,
   SessionSearchDisabledError,
   SessionSerializationError
 } from "./errors";
 export type {
   AppendOptions,
+  AttachmentMode,
   AppendResult,
-  AttachmentReconstructor,
   HistoryBatchReadOptions,
   HistoryReadOptions,
-  ReconstructContext,
-  ReconstructMode,
   RecentHistoryResult,
-  ResolvedAttachment,
   SearchResult,
   SessionChangeEvent,
   SessionChangeListener,
@@ -59,7 +45,6 @@ export type {
   SessionRowStat,
   SessionStats,
   SessionSummary,
-  SessionsAttachmentOptions,
   SessionsOptions,
   StoredCompaction,
   WriteOptions

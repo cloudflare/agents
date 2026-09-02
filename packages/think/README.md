@@ -367,9 +367,8 @@ Script execution requires a Worker Loader binding:
 | `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
 | `configureSession()`       | identity                           | Configure the default session handle: compaction and search                                                                                                                                                                  |
 | `configureContext()`       | `[]`                               | Declare prompt context blocks. See [Session and context](#session-and-context)                                                                                                                                               |
-| `hydrationByteBudget`      | 32 MiB                             | Byte budget for startup transcript hydration. Charges each row its stored bytes plus the attachment bytes it re-inflates                                                                                                     |
+| `hydrationByteBudget`      | 32 MiB                             | Byte budget for startup transcript hydration. Charges each row its full stored size, including the continuation rows a large message is split across                                                                         |
 | `mediaEviction`            | `true`                             | Media eviction policy: aged media leaves the conversation and is preserved as a Workspace file. `false` keeps aged media in the conversation                                                                                 |
-| `sessionAttachments`       | `{}`                               | Payload ceiling, locator prefix, and reconstruction policy for Sessions-owned attachments                                                                                                                                    |
 | `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                                                                                             |
 | `skillWorkspace`           | `{}`                               | Project skills into Computer or legacy Shell; `false` disables projection                                                                                                                                                    |
 | `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
@@ -818,18 +817,19 @@ await this.context.refreshSystemPrompt();
 
 #### Message storage
 
-Sessions stores MESSAGES; it is not a file store. It extracts oversized
-payloads out of message rows losslessly, and makes no distinction between
-kinds of payload: file parts, text and reasoning parts, and strings nested in
-tool outputs are all treated alike. A payload leaves the row for exactly one
-reason: the serialized row would otherwise exceed the 1.5 MiB budget, so the
-largest payloads are chunked out until it fits. Extracted payloads become
-`attachment:sha256:` pointers and reads reconstruct them byte for byte; nothing
-is truncated. Chunking never reclaims database space — the chunks live in the
-same Durable Object as the row — so a payload the row can hold simply stays
-inline. Files belong in the Workspace, which spills to R2; put a reference to
-one in the message. This is a storage detail: invisible to the model, and
-unrelated to media eviction.
+Sessions stores MESSAGES; it is not a file store. A message rides in one
+SQLite row until its serialized JSON exceeds the 1.5 MiB row budget; a message
+larger than that is split across continuation rows and reassembled on read.
+Nothing is truncated and no message is too large to store, so there is no size
+error to handle and nothing to configure.
+
+Splitting never reclaims database space — the continuation rows live in the
+same Durable Object as the message — and Sessions imposes no upper bound on a
+single message, so one very large write can consume a meaningful share of the
+10 GB an object has. Bounding untrusted input is the application's job. Files
+belong in the Workspace, which spills to R2; put a reference to one in the
+message. This is a storage detail: invisible to the model, and unrelated to
+media eviction.
 
 #### Media eviction
 

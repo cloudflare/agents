@@ -3,23 +3,16 @@ import { DurableObject } from "cloudflare:workers";
 import { ContextBlocks, type ContextProvider } from "../context";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
+  MAX_INLINE_ROW_BYTES,
   Sessions,
-  attachmentResponse,
   createCompactFunction,
-  inlineReconstructor,
-  pointerReconstructor,
   type AppendResult,
   type SessionMessage,
   type SessionStats
 } from "../sessions";
 
 class ConversationObject extends DurableObject {
-  readonly sessions = new Sessions({
-    attachments: () => ({
-      maxAttachmentBytes: 8 * 1024 * 1024,
-      reconstruct: inlineReconstructor
-    })
-  });
+  readonly sessions = new Sessions({ searchIndexing: true });
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
 }
 
@@ -71,7 +64,7 @@ object.sessions.listSessions() satisfies Promise<
 >;
 
 async function consumeHistory(): Promise<void> {
-  for await (const item of session.history({ reconstruct: "pointer" })) {
+  for await (const item of session.history({ leafId: null })) {
     item satisfies SessionMessage;
   }
   for await (const batch of session.historyBatches({
@@ -83,45 +76,9 @@ async function consumeHistory(): Promise<void> {
 }
 void consumeHistory;
 
-object.sessions.attachments.put("document", {
-  mediaType: "text/plain",
-  filename: "document.txt"
-}) satisfies Promise<{
-  part: SessionMessage["parts"][number];
-  attachment: {
-    hash: string;
-    path: string;
-    mediaType: string;
-    bytes: number;
-    filename?: string;
-  };
-}>;
-object.sessions.attachments.get("ab".repeat(32)) satisfies Promise<{
-  hash: string;
-  path: string;
-  mediaType: string;
-  bytes: number;
-  filename?: string;
-} | null>;
-object.sessions.attachments.open("ab".repeat(32)) satisfies Promise<
-  ReadableStream<Uint8Array>
->;
-object.sessions.attachments.delete("ab".repeat(32)) satisfies Promise<boolean>;
-attachmentResponse(
-  object.sessions,
-  "ab".repeat(32)
-) satisfies Promise<Response>;
-
-inlineReconstructor satisfies {
-  part: (...args: never[]) => unknown;
-};
-pointerReconstructor satisfies {
-  part: (...args: never[]) => unknown;
-};
+MAX_INLINE_ROW_BYTES satisfies number;
 
 new Sessions({
-  attachments: {
-    // @ts-expect-error Sessions is a message store: there is no R2 tier.
-    r2: {}
-  }
+  // @ts-expect-error Sessions is a message store: there is no attachment tier.
+  attachments: {}
 });

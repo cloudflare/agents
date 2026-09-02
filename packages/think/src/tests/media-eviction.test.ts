@@ -9,8 +9,8 @@ import type { MediaEvictionConfig } from "../think";
  *
  * Aged media leaves the conversation so the model stops re-reading a large
  * image every turn; the bytes land in the Workspace, raw and correctly typed,
- * and the marker tells the agent where to read them back. This is not the
- * Sessions attachment store, which is an invisible, lossless storage detail.
+ * and the marker tells the agent where to read them back. This is not row
+ * chunking, which is an invisible, lossless storage detail.
  */
 
 type MediaEvictionStub = {
@@ -23,9 +23,7 @@ type MediaEvictionStub = {
     backlogRemains: boolean;
   } | null>;
   getStoredMessageForTest(id: string): Promise<UIMessage | null>;
-  getInlinedMessageForTest(id: string): Promise<UIMessage | null>;
-  getAttachmentReferenceCountForTest(): Promise<number>;
-  getAttachmentBlobCountForTest(): Promise<number>;
+  getContinuationRowCountForTest(): Promise<number>;
   readEvictedFileForTest(path: string): Promise<{
     byteLength: number;
     mimeType: string | null;
@@ -49,12 +47,12 @@ const AGED_POLICY: MediaEvictionConfig = {
 const PAYLOAD_BYTES = 12_000;
 
 /**
- * Over the row budget, so Sessions chunks the payload out and the stored row
- * holds an `attachment:sha256:` pointer instead of a `data:` URL. Eviction
- * has to read those bytes back through `sessions.attachments.open()`.
+ * Over the row budget, so Sessions splits the message across continuation
+ * rows. The part is still an inline `data:` URL, so eviction decodes it in
+ * place exactly as it does a small one.
  */
-const POINTER_MEDIA_CHARS = 1_600_000;
-const POINTER_PAYLOAD_BYTES = 1_200_000;
+const SPLIT_MEDIA_CHARS = 1_600_000;
+const SPLIT_PAYLOAD_BYTES = 1_200_000;
 
 async function evictionAgent(name: string): Promise<MediaEvictionStub> {
   return (await getAgentByName(
@@ -94,7 +92,7 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
 
     // A reconstructing read sees the marker too — the media is gone from the
     // conversation, which is the whole point.
-    const inlined = await agent.getInlinedMessageForTest("m0");
+    const inlined = await agent.getStoredMessageForTest("m0");
     expect(JSON.stringify(inlined)).not.toContain("data:image/png");
   });
 
@@ -145,37 +143,37 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     expect(file?.mimeType).toBe("image/png");
   });
 
-  it("reaps the Sessions blob so the bytes live in exactly one place", async () => {
-    const agent = await evictionAgent(uniqueName("evict-reap"));
-    // A payload the row cannot hold, so Sessions chunks it out and the
-    // stored rows carry `attachment:sha256:` pointers.
+  it("evicts a payload larger than one row, leaving the bytes in one place", async () => {
+    const agent = await evictionAgent(uniqueName("evict-split"));
     await agent.setMediaEvictionForTest(AGED_POLICY);
-    await agent.seedMediaHistoryForTest("m", POINTER_MEDIA_CHARS);
+    await agent.seedMediaHistoryForTest("m", SPLIT_MEDIA_CHARS);
 
+    // The message is split across continuation rows, and the part is still
+    // the inline `data:` URL eviction decodes.
+    expect(await agent.getContinuationRowCountForTest()).toBeGreaterThan(0);
     const seeded = await agent.getStoredMessageForTest("m0");
-    expect(JSON.stringify(seeded)).toContain("attachment:sha256:");
-    expect(await agent.getAttachmentBlobCountForTest()).toBeGreaterThan(0);
-    expect(await agent.getAttachmentReferenceCountForTest()).toBeGreaterThan(0);
+    expect((seeded?.parts[1] as { url?: string } | undefined)?.url).toMatch(
+      /^data:image\/png;base64,/
+    );
 
     expect(await agent.runEvictionForTest()).toMatchObject({
       messages: 2,
       parts: 2,
-      bytes: POINTER_PAYLOAD_BYTES * 2
+      bytes: SPLIT_PAYLOAD_BYTES * 2
     });
 
     const m0 = await agent.getStoredMessageForTest("m0");
     expect(m0?.parts[1]).toEqual({
       type: "text",
-      text: `[evicted image/png, ${POINTER_PAYLOAD_BYTES} bytes; preserved at /attachments/evicted/m0-0.png]`
+      text: `[evicted image/png, ${SPLIT_PAYLOAD_BYTES} bytes; preserved at /attachments/evicted/m0-0.png]`
     });
-    // The last reference is gone, so the blob is reaped: the only copy of
-    // these bytes is now the Workspace file.
-    expect(await agent.getAttachmentReferenceCountForTest()).toBe(0);
-    expect(await agent.getAttachmentBlobCountForTest()).toBe(0);
+    // The rewritten row is small again, so its continuations are gone: the
+    // only copy of these bytes is now the Workspace file.
+    expect(await agent.getContinuationRowCountForTest()).toBe(0);
     expect(
       (await agent.readEvictedFileForTest("/attachments/evicted/m0-0.png"))
         ?.byteLength
-    ).toBe(POINTER_PAYLOAD_BYTES);
+    ).toBe(SPLIT_PAYLOAD_BYTES);
   });
 
   it("leaves recent messages alone", async () => {
@@ -233,7 +231,7 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     await agent.seedMediaHistoryForTest();
 
     expect(await agent.runEvictionForTest()).toBeNull();
-    const inlined = await agent.getInlinedMessageForTest("m0");
+    const inlined = await agent.getStoredMessageForTest("m0");
     expect((inlined?.parts[1] as { url: string } | undefined)?.url).toBe(
       `data:image/png;base64,${"A".repeat(16_000)}`
     );

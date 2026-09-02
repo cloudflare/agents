@@ -117,7 +117,7 @@ describe("GET /get-messages endpoint", () => {
     ]);
     // Byte-for-byte identical to a materialized read of the same transcript.
     expect(returned).toEqual(
-      (await agentStub.reconstructedMessagesForTest()) as ChatMessage[]
+      (await agentStub.getPersistedMessages()) as ChatMessage[]
     );
     expect((returned[1].parts[0] as { output: unknown }).output).toBe(
       hugeOutput

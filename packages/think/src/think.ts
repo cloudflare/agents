@@ -268,12 +268,7 @@ import type {
   OrphanPersistStore
 } from "agents/chat";
 import { truncateOlderMessages } from "agents/chat";
-import {
-  Session,
-  Sessions,
-  type SessionMessage,
-  type SessionsAttachmentOptions
-} from "agents/sessions";
+import { Session, Sessions, type SessionMessage } from "agents/sessions";
 import {
   AgentContextProvider,
   ContextBlocks,
@@ -2840,15 +2835,6 @@ export class Think<
   mediaEviction: MediaEvictionConfig | boolean = true;
 
   /**
-   * Ceiling, locator, and reconstruction policy for Sessions-owned
-   * attachments. Sessions is a message store: payloads ride inline in the
-   * message row and are chunked out only when the row cannot hold them, so
-   * there is nothing here about WHERE bytes go. Files belong in the
-   * Workspace, which spills to R2.
-   */
-  sessionAttachments: SessionsAttachmentOptions = {};
-
-  /**
    * Durable chat recovery configuration. Every chat turn runs in `runFiber`,
    * enabling `onChatRecovery` and `this.stash()` during streaming. Assign an
    * object to tune recovery budgets and terminal behavior.
@@ -2865,21 +2851,9 @@ export class Think<
 
   /** Durable conversation history installed on this Agent's Lifecycle. */
   readonly sessions = new Sessions({
-    attachments: () => this.#attachmentPolicy(),
     reservedMetadataKeys: RESERVED_MESSAGE_METADATA_KEYS,
     searchIndexing: true
   });
-
-  /**
-   * Sessions attachment policy.
-   *
-   * `mediaEviction` is Think's own CONTEXT technique and none of it is
-   * passed on: where Sessions keeps a payload is a storage question, settled
-   * by the row budget alone.
-   */
-  #attachmentPolicy(): SessionsAttachmentOptions {
-    return { ...this.sessionAttachments };
-  }
 
   /** The default conversation handle configured by `configureSession()`. */
   session!: Session;
@@ -3505,42 +3479,23 @@ export class Think<
 
       let processed = 0;
       for (const row of aged) {
-        // Neither the stored row nor anything it points at is large enough
-        // to hold an evictable payload — skip without reading it. A rewritten
-        // row drops below this line and is skipped by every later pass.
-        if (
-          row.bytes < config.minPartBytes &&
-          row.attachmentBytes < config.minPartBytes
-        ) {
-          continue;
-        }
+        // The stored row is not large enough to hold an evictable payload —
+        // skip without reading it. A rewritten row drops below this line and
+        // is skipped by every later pass.
+        if (row.bytes < config.minPartBytes) continue;
         if (processed >= config.maxRowsPerPass) {
           totals.backlogRemains = true;
           break;
         }
         processed++;
 
-        // Read the STORED form: an `attachment:` pointer must stay a pointer
-        // here, or reconstruction would inline the payload just to evict it.
-        const message = (await this.session.getMessage(row.id, {
-          reconstruct: "pointer"
-        })) as UIMessage | null;
+        const message = (await this.session.getMessage(
+          row.id
+        )) as UIMessage | null;
         if (!message) continue;
 
         const result = await evictMediaFromMessage(message, {
           minPartBytes: config.minPartBytes,
-          attachments: {
-            measure: async (url) => {
-              const stored = await this.sessions.attachments.get(url);
-              return stored
-                ? { bytes: stored.bytes, mediaType: stored.mediaType }
-                : null;
-            },
-            read: async (url) => {
-              const stream = await this.sessions.attachments.open(url);
-              return new Uint8Array(await new Response(stream).arrayBuffer());
-            }
-          },
           write: async (index, bytes, mediaType) => {
             const path = evictedFilePath(message.id, index, mediaType);
             await this.workspace.writeFileBytes(
@@ -3553,8 +3508,8 @@ export class Think<
         });
         if (!result.changed) continue;
 
-        // Dropping the last reference to the payload reaps the Sessions blob,
-        // so the bytes now exist only as the Workspace file.
+        // The rewritten row no longer carries the payload, so the bytes now
+        // exist only as the Workspace file.
         await this._updateMessageInHistory(result.message);
         totals.messages++;
         totals.parts += result.parts;
@@ -13992,12 +13947,7 @@ export class Think<
     // (2) Durable storage. Handles messages already persisted — including
     // partials written mid-stream by stall recovery and cross-message tool
     // results that target an earlier message than this turn's.
-    // Pointer mode: this scan runs on every tool result and only needs tool
-    // call ids, so it must not inflate every attachment on the path. The row
-    // it writes back is already the stored form.
-    const history = (await this.session.getHistory({
-      reconstruct: "pointer"
-    })) as UIMessage[];
+    const history = (await this.session.getHistory()) as UIMessage[];
     for (let i = 0; i < history.length; i++) {
       const msg = history[i];
       const msgParts = msg.parts as Array<Record<string, unknown>>;

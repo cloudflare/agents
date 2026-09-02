@@ -1,12 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
-import {
-  Sessions,
-  attachmentResponse,
-  type ReconstructMode,
-  type SessionMessage
-} from "agents/sessions";
+import { Sessions, type SessionMessage } from "agents/sessions";
 
 function parseMessage(value: unknown): SessionMessage | null {
   if (typeof value !== "object" || value === null) return null;
@@ -55,7 +50,7 @@ function historyResponse(
   );
 }
 
-/** A plain Durable Object with durable conversation history and attachments. */
+/** A plain Durable Object with durable conversation history. */
 export class SessionObject extends DurableObject<Env> {
   readonly sessions = new Sessions({ searchIndexing: true });
 
@@ -78,13 +73,19 @@ export class SessionObject extends DurableObject<Env> {
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/history")) {
-      const reconstruct: ReconstructMode =
-        url.searchParams.get("attachments") === "pointer"
-          ? "pointer"
-          : "inline";
+      const leaf = url.searchParams.get("leaf");
       return historyResponse(
-        this.session.history({ reconstruct, signal: request.signal })
+        this.session.history({ leafId: leaf, signal: request.signal })
       );
+    }
+
+    const message = url.pathname.match(/\/messages\/([^/]+)$/);
+    if (request.method === "GET" && message) {
+      const stored = await this.session.getMessage(
+        decodeURIComponent(message[1])
+      );
+      if (!stored) return new Response("Not found", { status: 404 });
+      return Response.json(stored);
     }
 
     const branches = url.pathname.match(/\/branches\/([^/]+)$/);
@@ -92,11 +93,6 @@ export class SessionObject extends DurableObject<Env> {
       return Response.json(
         await this.session.getBranches(decodeURIComponent(branches[1]))
       );
-    }
-
-    const attachment = url.pathname.match(/\/attachments\/([0-9a-f]{64})$/);
-    if (request.method === "GET" && attachment) {
-      return attachmentResponse(this.sessions, attachment[1]);
     }
 
     if (request.method === "POST" && url.pathname.endsWith("/compactions")) {

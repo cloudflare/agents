@@ -1,4 +1,5 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
@@ -205,15 +206,15 @@ describe("Oversized rows and incremental persistence", () => {
       ws.close(1000);
     });
 
-    it("offloads an oversized tool output and reconstructs it byte-for-byte", async () => {
+    it("splits an oversized tool output across rows and reads it back byte-for-byte", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
-      // A tool output that cannot fit the SQLite row budget. Sessions moves it
-      // into attachment storage instead of truncating it.
+      // A tool output that cannot fit one SQLite row. Sessions splits the
+      // message across continuation rows instead of truncating it.
       const hugeOutput = "X".repeat(1_900_000);
       const message: ChatMessage = {
         id: "size-big",
@@ -231,19 +232,12 @@ describe("Oversized rows and incremental persistence", () => {
 
       await agentStub.persistMessages([message]);
 
-      // The stored row keeps a content-addressed pointer, not the payload.
       const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
       expect(stored.length).toBe(1);
-      expect((stored[0].parts[0] as { output: string }).output).toMatch(
-        /^attachment:sha256:[0-9a-f]{64}$/
-      );
-
-      // Reading it back re-inflates the original bytes exactly.
-      const reconstructed =
-        (await agentStub.reconstructedMessagesForTest()) as ChatMessage[];
-      expect((reconstructed[0].parts[0] as { output: unknown }).output).toBe(
+      expect((stored[0].parts[0] as { output: unknown }).output).toBe(
         hugeOutput
       );
+      expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
 
       // No compaction metadata is stamped: nothing was lost.
       expect(stored[0].metadata).toBeUndefined();
@@ -251,7 +245,7 @@ describe("Oversized rows and incremental persistence", () => {
       ws.close(1000);
     });
 
-    it("offloads an oversized user text part losslessly", async () => {
+    it("stores an oversized user text part losslessly", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
@@ -269,22 +263,19 @@ describe("Oversized rows and incremental persistence", () => {
 
       const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
       expect(stored.length).toBe(1);
-      expect((stored[0].parts[0] as { text: string }).text).toMatch(
-        /^attachment:sha256:[0-9a-f]{64}$/
-      );
+      expect((stored[0].parts[0] as { text: string }).text).toBe(largeText);
+      expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
 
-      const reconstructed =
-        (await agentStub.reconstructedMessagesForTest()) as ChatMessage[];
-      expect((reconstructed[0].parts[0] as { text: string }).text).toBe(
-        largeText
-      );
+      // The in-memory cache holds the same message the store does.
+      const cached = (await agentStub.getMessagesForTest()) as ChatMessage[];
+      expect((cached[0].parts[0] as { text: string }).text).toBe(largeText);
 
       ws.close(1000);
     });
   });
 
   describe("Unicode byte-length measurement", () => {
-    it("offloads multi-byte Unicode that exceeds the byte budget", async () => {
+    it("splits multi-byte Unicode on byte boundaries, not character counts", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
@@ -313,15 +304,10 @@ describe("Oversized rows and incremental persistence", () => {
 
       const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
       expect(stored.length).toBe(1);
-      expect((stored[0].parts[0] as { output: string }).output).toMatch(
-        /^attachment:sha256:[0-9a-f]{64}$/
-      );
-
-      const reconstructed =
-        (await agentStub.reconstructedMessagesForTest()) as ChatMessage[];
-      expect((reconstructed[0].parts[0] as { output: unknown }).output).toBe(
+      expect((stored[0].parts[0] as { output: unknown }).output).toBe(
         cjkOutput
       );
+      expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
 
       ws.close(1000);
     });
@@ -385,6 +371,48 @@ describe("Oversized rows and incremental persistence", () => {
       expect(chunks[1].body).toContain("text-end");
 
       ws.close(1000);
+    });
+  });
+
+  describe("Wake hydration of a split message", () => {
+    it("rehydrates a message larger than one row after an eviction", async () => {
+      const room = `row-chunk-wake-${crypto.randomUUID()}`;
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      const url = `data:image/png;base64,${btoa("o".repeat(2 * 1024 * 1024))}`;
+      await agentStub.persistMessages([
+        {
+          id: "wake-user",
+          role: "user",
+          parts: [
+            { type: "text", text: "look at this" },
+            { type: "file", mediaType: "image/png", url }
+          ]
+        },
+        {
+          id: "wake-assistant",
+          role: "assistant",
+          parts: [{ type: "text", text: "seen" }]
+        }
+      ]);
+      expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
+
+      await evictDurableObject(agentStub);
+
+      const restored = (await agentStub.getMessagesForTest()) as ChatMessage[];
+      expect(restored.map((message) => message.id)).toEqual([
+        "wake-user",
+        "wake-assistant"
+      ]);
+      expect(restored[0].parts[1]).toMatchObject({ type: "file", url });
+
+      const response = await exports.default.fetch(
+        `http://example.com/agents/test-chat-agent/${room}/get-messages`
+      );
+      expect((await response.json()) as ChatMessage[]).toEqual(restored);
+
+      await agentStub.clearSessionForTest();
+      expect(await agentStub.continuationRowCountForTest()).toBe(0);
     });
   });
 });

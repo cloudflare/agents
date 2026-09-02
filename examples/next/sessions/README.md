@@ -1,10 +1,10 @@
 # Next: sessions
 
-A server-only example of `Sessions` on a plain Durable Object. It demonstrates streamed history reads, branches, compaction overlays, and Sessions-owned file attachments.
+A server-only example of `Sessions` on a plain Durable Object. It demonstrates streamed history reads, branches, and compaction overlays.
 
-Sessions stores MESSAGES; it is not a file store. Message JSON stays in Durable Object SQLite, and a payload rides inline in its message row until the serialized row would exceed 1.5 MiB. Then the largest payloads — `data:` URL file parts, text and reasoning parts, and strings nested in tool outputs alike — become content-addressed `attachment:sha256:` pointers backed by 1.5 MiB SQLite windows, until the row fits. Extraction is lossless, so the default read reconstructs the original part byte for byte, and nothing is ever truncated to make a row fit.
+Sessions stores MESSAGES; it is not a file store. Message JSON stays in Durable Object SQLite. A message whose serialized JSON exceeds the 1.5 MiB row budget is split across continuation rows and reassembled on read, so a round-trip is byte-exact, nothing is truncated, and no message is too large to store.
 
-Chunking never reclaims database space: the chunks live in the same Durable Object as the row they came out of, so a Durable Object's 10 GB ceiling is the real bound on how much media one conversation can hold. An application that handles files should keep them in a file store and put a reference in the message.
+Continuation rows live in the same Durable Object as the message they belong to, so a Durable Object's 10 GB ceiling is the real bound on how much one conversation can hold, and Sessions imposes no per-message limit of its own. An application that handles files should keep them in a file store and put a reference in the message.
 
 ## Run
 
@@ -29,8 +29,8 @@ curl -X POST 'http://localhost:8787/agents/session-object/demo/messages?parent=m
 # Stream the active path as newline-delimited JSON.
 curl -N http://localhost:8787/agents/session-object/demo/history
 
-# Read without loading attachment bytes.
-curl -N 'http://localhost:8787/agents/session-object/demo/history?attachments=pointer'
+# Stream the path ending at a chosen leaf.
+curl -N 'http://localhost:8787/agents/session-object/demo/history?leaf=m2'
 
 # List children of m1.
 curl http://localhost:8787/agents/session-object/demo/branches/m1
@@ -41,7 +41,7 @@ curl -X POST http://localhost:8787/agents/session-object/demo/compactions \
   -d '{"summary":"The user greeted the assistant.","fromMessageId":"m1","toMessageId":"m2"}'
 ```
 
-A file part can contain a `data:` URL. Sessions writes the decoded bytes before committing the pointer row:
+A message can carry a file part with an inline `data:` URL. It rides in the message like any other content — split across continuation rows when it is large — and reads back byte for byte:
 
 ```json
 {
@@ -59,10 +59,8 @@ A file part can contain a `data:` URL. Sessions writes the decoded bytes before 
 }
 ```
 
-The append response contains `attachment:sha256:<hash>`. Fetch it without buffering through:
+Read one message back by id:
 
 ```sh
-curl http://localhost:8787/agents/session-object/demo/attachments/<hash> --output screen.png
+curl http://localhost:8787/agents/session-object/demo/messages/image-1
 ```
-
-`history?attachments=pointer` is the memory-safe path for exports and reconciliation. The default history route reconstructs file parts as data URLs for consumers that require complete AI SDK messages.

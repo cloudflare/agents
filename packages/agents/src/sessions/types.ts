@@ -5,8 +5,6 @@
  * stabilizing.
  */
 
-import type { StoredAttachment } from "./attachments";
-
 /**
  * Minimal message part shape used by Sessions internals.
  * Vercel AI SDK's `UIMessagePart` is structurally compatible.
@@ -23,7 +21,7 @@ export interface SessionMessagePart {
   result?: unknown;
   /** File parts (AI SDK `FileUIPart`): IANA media type of the payload. */
   mediaType?: string;
-  /** File parts: a `data:` URL, remote URL, or `attachment:` pointer. */
+  /** File parts: a `data:` URL or a remote URL. */
   url?: string;
   /** File parts: original filename, when one was supplied. */
   filename?: string;
@@ -63,20 +61,20 @@ export interface SessionRowStat {
   id: string;
   /** Stored message role (e.g. "user" / "assistant"). */
   role: string;
-  /** Serialized content size of the stored row in bytes. */
+  /**
+   * Serialized content size in bytes: the message row plus every
+   * continuation row it was split across.
+   */
   bytes: number;
   /** Token estimate stamped when the row was written. */
   tokenEstimate: number;
-  /** Stored bytes of the attachments this row points at (0 when none). */
-  attachmentBytes: number;
 }
 
 /** Result of a byte-budgeted history read. */
 export interface RecentHistoryResult {
   /**
-   * The most recent messages on the active branch path that fit
-   * `maxContentBytes` when hydrated (stored bytes plus, when reconstructing
-   * inline, the attachment bytes each row re-inflates), root → leaf order,
+   * The most recent messages on the active branch path whose stored bytes
+   * (row plus continuation rows) fit `maxContentBytes`, root → leaf order,
    * with compaction overlays applied within the window. The window always
    * covers at least the leaf row (and `minRecentMessages` rows when
    * requested); rows whose stored content fails to parse are skipped.
@@ -100,8 +98,6 @@ export interface SessionStats {
   tokenEstimate: number;
   /** Summed stored content bytes of the active path. */
   totalContentBytes: number;
-  /** Summed offloaded attachment bytes referenced by the active path. */
-  attachmentBytes: number;
   /** Message count of the active path. */
   pathLength: number;
 }
@@ -118,10 +114,8 @@ export interface SessionSummary {
 export interface AppendResult {
   /** False when the id already existed and the write was an idempotent no-op. */
   inserted: boolean;
-  /** The STORED form of the message (sanitized, pointerized). */
+  /** The STORED form of the message (sanitized). */
   message: SessionMessage;
-  /** Attachments offloaded from this message during the write. */
-  attachments: StoredAttachment[];
 }
 
 /** Change-feed events dispatched synchronously after each durable write. */
@@ -143,19 +137,24 @@ export type SessionChangeListener = (
 ) => void | Promise<void>;
 
 /** Options accepted by history reads. */
+/**
+ * How a read presents attachment payloads.
+ *
+ * - `"inline"` (default) rebuilds the `data:` URL the payload was extracted
+ *   from, so a read returns exactly what was written.
+ * - `"pointer"` leaves the `attachment:sha256:` reference in place, for
+ *   callers that only need to know a payload exists — scanning, copying, or
+ *   assembling context — and should not pay to materialize it.
+ */
+export type AttachmentMode = "inline" | "pointer";
+
 export interface HistoryReadOptions {
   /** Read the path ending at this leaf instead of the active leaf. */
   leafId?: string | null;
-  /**
-   * How `attachment:` pointers materialize:
-   * - `"inline"` (default): bytes are read back — file parts become `data:`
-   *   URLs again and offloaded text returns as text, an exact round-trip.
-   * - `"pointer"`: pointers stay as written; no bytes are read.
-   * Or a custom {@link AttachmentReconstructor} for file parts.
-   */
-  reconstruct?: ReconstructMode;
   /** Abort a streamed read between chunks. */
   signal?: AbortSignal;
+  /** Attachment presentation. Default `"inline"`. */
+  attachments?: AttachmentMode;
 }
 
 /** Options accepted by batched history reads. */
@@ -164,79 +163,13 @@ export interface HistoryBatchReadOptions extends HistoryReadOptions {
   batchSize?: number;
   /**
    * Maximum serialized bytes per yielded batch. Default 4 MiB. A single
-   * reconstructed message can exceed the limit and is yielded alone.
+   * message larger than the limit is yielded alone.
    */
   maxBatchBytes?: number;
 }
 
-/** How attachment pointers are reconstructed during a history read. */
-export type ReconstructMode = "inline" | "pointer" | AttachmentReconstructor;
-
-/** A stored attachment resolved for reconstruction. */
-export interface ResolvedAttachment {
-  hash: string;
-  /** Logical Sessions locator. This is not a Workspace filesystem path. */
-  path: string;
-  mediaType: string;
-  bytes: number;
-  filename?: string;
-  /** Lazily read the full payload. */
-  data(): Promise<Uint8Array>;
-  /** Lazily build a `data:` URL for the payload. */
-  dataUrl(): Promise<string>;
-  /** Lazily open the payload as a stream. */
-  stream(): Promise<ReadableStream<Uint8Array> | null>;
-}
-
-export interface ReconstructContext {
-  sessionId: string;
-  messageId: string;
-  partIndex: number;
-  /** The stored pointer part being replaced. */
-  part: SessionMessagePart;
-}
-
-/**
- * THE read-side plugin for file parts: decides how a stored pointer part
- * becomes a message part again. The default inlines a `data:` URL; a custom
- * reconstructor can emit a workspace-path marker for the model, a hosted
- * URL, or anything else — per part, sync or async. A result of the same part
- * type is spread over the stored part, so host fields survive.
- */
-export interface AttachmentReconstructor {
-  part(
-    attachment: ResolvedAttachment,
-    context: ReconstructContext
-  ): SessionMessagePart | Promise<SessionMessagePart>;
-}
-
-/**
- * Attachment ceiling, locator, and reconstruction policy.
- *
- * There is nothing here about WHEN a payload is extracted, because that is
- * not a policy: a payload stays inline in its message row until the row
- * would exceed `MAX_INLINE_ROW_BYTES`, and then the largest payloads are
- * chunked out until it fits.
- */
-export interface SessionsAttachmentOptions {
-  /** Ceiling for one attachment payload. Default 32 MiB. */
-  readonly maxAttachmentBytes?: number;
-  /** Logical locator prefix exposed to reconstructors. Default "/attachments". */
-  readonly basePath?: string;
-  /** Read-side materialization default for file parts. Default: inline. */
-  readonly reconstruct?: AttachmentReconstructor;
-}
-
 /** Policy for a Sessions capability. */
 export interface SessionsOptions {
-  /**
-   * Attachment policy. A thunk is re-read on every access so Agent subclasses
-   * can point it at fields (bindings, policy) initialized after the field
-   * initializer runs.
-   */
-  readonly attachments?:
-    | SessionsAttachmentOptions
-    | (() => SessionsAttachmentOptions | undefined);
   /**
    * Message-metadata keys reserved for server-side writers. Stripped from
    * writes marked `source: "client"`. Default: none.
@@ -253,8 +186,8 @@ export interface SessionsOptions {
 /** Trust policy shared by append and update writes. */
 export interface WriteOptions {
   /**
-   * `"client"` marks untrusted intake: reserved metadata keys and forged
-   * attachment pointers are stripped. Default `"server"`.
+   * `"client"` marks untrusted intake: reserved metadata keys are stripped.
+   * Default `"server"`.
    */
   source?: "client" | "server";
 }

@@ -1,13 +1,12 @@
 /**
  * Aged-media eviction — a CONTEXT-WINDOW technique owned by Think.
  *
- * This is deliberately not the Sessions attachment store, and the two must
+ * This is deliberately not how Sessions stores a message, and the two must
  * not be confused:
  *
- *   - Sessions attachments are a STORAGE detail. A large payload is stored
- *     content-addressed and the row keeps an `attachment:sha256:` pointer,
- *     which reads inline again byte for byte. Invisible to the model and
- *     lossless.
+ *   - Row chunking is a STORAGE detail. A message too large for one SQLite
+ *     row is split across continuation rows and reassembled on read, byte
+ *     for byte. Invisible to the model and lossless.
  *   - Media eviction is a CONTEXT decision. Once a screenshot has aged out
  *     of the recent window, re-sending it on every turn is pure cost, so
  *     Think removes it from the conversation and leaves a marker naming a
@@ -20,19 +19,16 @@
  * image back into the model's context.
  *
  * Evicted values are:
- *   - `file` parts whose `url` is a large `data:` URL or an `attachment:`
- *     pointer — the part becomes a text marker;
- *   - large `data:` / `attachment:` strings nested anywhere inside a tool
- *     part's `output` (screenshots commonly arrive that way) — the string is
- *     replaced in place so tool-specific `toModelOutput` handlers still work.
+ *   - `file` parts whose `url` is a large `data:` URL — the part becomes a
+ *     text marker;
+ *   - large `data:` strings nested anywhere inside a tool part's `output`
+ *     (screenshots commonly arrive that way) — the string is replaced in
+ *     place so tool-specific `toModelOutput` handlers still work.
  *
  * Plain text parts are never evicted: they are the conversation itself.
  */
 
 import type { UIMessage } from "ai";
-
-/** Stored form of a payload Sessions has moved into attachment storage. */
-export const ATTACHMENT_URL_PREFIX = "attachment:sha256:";
 
 /** Nested tool-output walks stop here so hostile output cannot recurse forever. */
 const MAX_WALK_DEPTH = 8;
@@ -91,19 +87,9 @@ export function evictionMarker(
   return `[evicted ${media}${bytes} bytes; preserved at ${path}]`;
 }
 
-/** Reads the bytes behind an `attachment:sha256:` pointer. */
-export interface AttachmentSource {
-  /** Stored size and media type, without loading the payload. */
-  measure(url: string): Promise<{ bytes: number; mediaType?: string } | null>;
-  /** Raw decoded bytes. */
-  read(url: string): Promise<Uint8Array>;
-}
-
 export interface EvictMessageOptions {
   /** Minimum decoded payload size to evict. */
   minPartBytes: number;
-  /** Access to Sessions-owned attachment bytes. */
-  attachments: AttachmentSource;
   /**
    * Persist one payload and return the Workspace path it was written to.
    * `index` is the 0-based ordinal of the evicted value within the message.
@@ -198,7 +184,7 @@ async function evictUrl(
   fallbackMediaType?: string
 ): Promise<string | null> {
   if (typeof url !== "string") return null;
-  const payload = await resolvePayload(state, url);
+  const payload = resolvePayload(state, url);
   if (!payload) return null;
   const mediaType = payload.mediaType ?? fallbackMediaType;
   const path = await state.options.write(state.index, payload.bytes, mediaType);
@@ -208,32 +194,22 @@ async function evictUrl(
   return evictionMarker(payload.bytes.byteLength, path, mediaType);
 }
 
-async function resolvePayload(
+/**
+ * A stored payload is always an inline `data:` URL now, so eviction decodes
+ * it directly.
+ */
+function resolvePayload(
   state: WalkState,
   url: string
-): Promise<{ bytes: Uint8Array; mediaType?: string } | null> {
-  const { minPartBytes, attachments } = state.options;
-
-  if (url.startsWith(ATTACHMENT_URL_PREFIX)) {
-    const info = await attachments.measure(url);
-    if (!info || info.bytes < minPartBytes) return null;
-    const bytes = await attachments.read(url);
-    if (bytes.byteLength < minPartBytes) return null;
-    return info.mediaType === undefined
-      ? { bytes }
-      : { bytes, mediaType: info.mediaType };
-  }
-
-  if (url.startsWith("data:")) {
-    // A `data:` URL is always larger than its payload, so the cheap string
-    // length rules out small values before any decoding happens.
-    if (url.length < minPartBytes) return null;
-    const decoded = decodeDataUrl(url);
-    if (!decoded || decoded.bytes.byteLength < minPartBytes) return null;
-    return decoded;
-  }
-
-  return null;
+): { bytes: Uint8Array; mediaType?: string } | null {
+  const { minPartBytes } = state.options;
+  if (!url.startsWith("data:")) return null;
+  // A `data:` URL is always larger than its payload, so the cheap string
+  // length rules out small values before any decoding happens.
+  if (url.length < minPartBytes) return null;
+  const decoded = decodeDataUrl(url);
+  if (!decoded || decoded.bytes.byteLength < minPartBytes) return null;
+  return decoded;
 }
 
 async function walkAndEvict(

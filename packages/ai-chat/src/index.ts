@@ -64,13 +64,7 @@ import {
   STREAM_CLEANUP_DELAY_SECONDS
 } from "agents/chat";
 import type { Streams } from "agents/streams";
-import {
-  ATTACHMENT_URL_PREFIX,
-  Sessions,
-  type Session,
-  type SessionMessage,
-  type SessionsAttachmentOptions
-} from "agents/sessions";
+import { Sessions, type Session, type SessionMessage } from "agents/sessions";
 import { createChatTurnTaskDefinition } from "agents/chat";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
@@ -304,20 +298,6 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
 const HYDRATION_MIN_RECENT_MESSAGES = 20;
 
 /**
- * True when a stored value carries an `attachment:` pointer anywhere — a
- * file part URL or an offloaded tool-output string. Walks structure, not
- * bytes, so it stays cheap on rows with very large payloads.
- */
-function hasAttachmentPointer(value: unknown): boolean {
-  if (typeof value === "string") return value.startsWith(ATTACHMENT_URL_PREFIX);
-  if (Array.isArray(value)) return value.some(hasAttachmentPointer);
-  if (value !== null && typeof value === "object") {
-    return Object.values(value).some(hasAttachmentPointer);
-  }
-  return false;
-}
-
-/**
  * Schema for a client-defined tool sent from the browser.
  * These tools are executed on the client, not the server.
  *
@@ -427,28 +407,16 @@ export class AIChatAgent<
    */
   private _abortRegistry: AbortRegistry;
 
-  /**
-   * Sessions attachment policy overrides. Extraction itself is not optional
-   * and not configurable: a payload rides inline in its message row until
-   * the row would exceed `MAX_INLINE_ROW_BYTES`, and then the largest
-   * payloads are chunked out until it fits, reconstructing byte-for-byte on
-   * read. Set this only to tune the payload ceiling, the logical locator
-   * prefix, or the reconstructor.
-   */
-  sessionAttachments: SessionsAttachmentOptions | undefined = undefined;
-
   /** Durable chat history for this Agent. */
-  readonly sessions = new Sessions({
-    attachments: () => this.sessionAttachments
-  });
+  readonly sessions = new Sessions();
 
   /**
    * Byte budget for wake-time transcript hydration into {@link messages}.
    *
    * `onStart` hydrates through `session.getRecentHistory(budget, …)`. The
-   * budget counts the attachment bytes each row re-inflates when it is
-   * reconstructed inline, so it bounds isolate memory rather than stored
-   * bytes: an oversized transcript hydrates as a bounded recent window
+   * budget counts each stored row plus the continuation rows it was split
+   * across, so it bounds isolate memory: an oversized transcript hydrates
+   * as a bounded recent window
    * instead of exhausting the isolate. Durable storage is never truncated by
    * this — `sessions.session().getHistory()` still reads the full path, and
    * the streamed `get-messages` route still serves every message.
@@ -2335,7 +2303,7 @@ export class AIChatAgent<
       switch (event.type) {
         case "append": {
           if (!event.inserted) return;
-          const message = await this.#messageForCache(event.message);
+          const message = this.#messageForCache(event.message);
           const index = this.messages.findIndex((m) => m.id === message.id);
           if (index === -1) this.messages.push(message);
           else this.messages[index] = message;
@@ -2346,7 +2314,7 @@ export class AIChatAgent<
             (m) => m.id === event.message.id
           );
           if (index === -1) return;
-          this.messages[index] = await this.#messageForCache(event.message);
+          this.messages[index] = this.#messageForCache(event.message);
           return;
         }
         case "delete": {
@@ -2365,16 +2333,12 @@ export class AIChatAgent<
   }
 
   /**
-   * Turn a stored row into its in-memory form. Rows without attachment
-   * pointers are used exactly as the write returned them; only a pointer
-   * bearing row costs a reconstructing re-read.
+   * Turn a stored row into its in-memory form. A stored row is exactly what
+   * the write returned, so this never costs a re-read.
    */
-  async #messageForCache(message: SessionMessage): Promise<UIMessage> {
-    const resolved = hasAttachmentPointer(message.parts)
-      ? (((await this.#session.getMessage(message.id)) as UIMessage | null) ??
-        (message as UIMessage))
-      : (message as UIMessage);
-    return autoTransformMessages([resolved])[0] ?? resolved;
+  #messageForCache(message: SessionMessage): UIMessage {
+    const stored = message as UIMessage;
+    return autoTransformMessages([stored])[0] ?? stored;
   }
 
   /**

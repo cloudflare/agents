@@ -75,3 +75,14 @@ export function estimateAttachmentTokens(
   if (mediaType.startsWith("image/")) return IMAGE_ATTACHMENT_TOKENS;
   return Math.min(Math.ceil(bytes / 4), MAX_ATTACHMENT_TOKENS);
 }
+
+/** Approximate decoded size of a `data:` URL without decoding it. */
+export function estimatedDataUrlBytes(url: string): number {
+  const comma = url.indexOf(",");
+  if (!url.startsWith("data:") || comma < 0) return 0;
+  const header = url.slice("data:".length, comma);
+  const payload = url.slice(comma + 1);
+  return header.endsWith(";base64")
+    ? Math.floor((payload.length * 3) / 4)
+    : payload.length;
+}

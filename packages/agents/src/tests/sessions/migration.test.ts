@@ -97,13 +97,10 @@ describe("Sessions legacy migration", () => {
       instance.seedLegacy([...legacySchema(), ...legacyRows()]);
 
       const session = instance.sessions.session();
-      const active = await session.getHistory({ reconstruct: "pointer" });
+      const active = await session.getHistory();
       expect(active.map((item) => item.id)).toEqual(["m1", "m3"]);
 
-      const compactedBranch = await session.getHistory({
-        leafId: "m2",
-        reconstruct: "pointer"
-      });
+      const compactedBranch = await session.getHistory({ leafId: "m2" });
       expect(compactedBranch).toHaveLength(1);
       expect(compactedBranch[0].parts[0].text).toBe("first branch summary");
 
@@ -151,9 +148,7 @@ describe("Sessions legacy migration", () => {
     await evictDurableObject(stub);
 
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-      const active = await instance.sessions.session().getHistory({
-        reconstruct: "pointer"
-      });
+      const active = await instance.sessions.session().getHistory();
       expect(active.map((item) => item.id)).toEqual(["m1", "m3"]);
       expect(instance.tableNames()).not.toContain("assistant_messages");
     });
@@ -177,6 +172,7 @@ describe("Sessions legacy migration", () => {
            type TEXT NOT NULL DEFAULT 'message',
            role TEXT NOT NULL,
            content TEXT NOT NULL,
+           content_chunks INTEGER NOT NULL DEFAULT 0,
            token_estimate INTEGER NOT NULL DEFAULT 0,
            created_at INTEGER NOT NULL,
            PRIMARY KEY (session_id, id)
@@ -189,7 +185,7 @@ describe("Sessions legacy migration", () => {
       ]);
 
       // Touch the session so the Lifecycle starts and the lift runs.
-      await instance.sessions.session().getHistory({ reconstruct: "pointer" });
+      await instance.sessions.session().getHistory();
 
       expect(instance.tableNames()).toContain("assistant_messages");
       expect(

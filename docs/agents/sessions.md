@@ -4,7 +4,7 @@
 
 `agents/sessions` stores durable conversation history in a [Lifecycle Object](./lifecycle.md). It provides tree-structured messages, streamed and byte-budgeted reads, compaction overlays, optional full-text search, and lossless payload storage.
 
-**Sessions stores messages. It is not a file store.** A message can reference a file without being one. Payloads ride inline in the message row and are chunked out only when the row cannot hold them, and chunking never reclaims database space — the chunks live in the same Durable Object as the row. A Durable Object's 10 GB ceiling is therefore the real bound on how much media one conversation can hold: roughly 39,000 200 KB images, measured. An application that handles files should keep them in a file store and put a reference in the message. Think does exactly that with its [Workspace](../think/index.md), which spills to R2.
+**Sessions stores messages. It is not a file store.** Media you attach to a message is kept out of the message row and stored separately, addressed by content, and put back verbatim when you read. That keeps a message row small however large its attachments are — but it does not reclaim database space, because the payload lives in the same Durable Object. A Durable Object's 10 GB ceiling is therefore the real bound on how much media one conversation can hold: roughly 39,000 200 KB images, measured. An application that handles files should keep them in a file store and put a reference in the message. Think does exactly that with its [Workspace](../think/index.md), which spills to R2.
 
 Prompt assembly lives in [`agents/context`](./context.md) and composes with a session handle rather than living inside it.
 
@@ -58,7 +58,6 @@ const result = await this.session.appendMessage({
 
 result.inserted; // false when this ID already existed
 result.message; // exact stored form
-result.attachments; // payloads offloaded by this write
 ```
 
 An append without `parentId` attaches to the active leaf. Pass `null` to create a root or pass a message ID to create a branch:
@@ -69,7 +68,7 @@ await this.session.appendMessage(alternativeReply, {
 });
 ```
 
-Every write runs the same pipeline: sanitize provider metadata, strip reserved metadata and guard pointers on client input, move oversized payloads into attachment storage, then commit the row. Payload writes complete before the row commits, so a stored pointer always has durable bytes behind it.
+Every write runs the same pipeline: sanitize provider metadata, strip reserved metadata on client input, then commit the row and any continuation rows in one synchronous SQLite transaction.
 
 Mark untrusted input with `source: "client"`:
 
@@ -83,7 +82,7 @@ await sessions.session().appendMessage(clientMessage, {
 });
 ```
 
-This strips reserved metadata keys and rejects attachment pointers whose bytes are not already stored in this object.
+This strips reserved metadata keys. It does not limit message size — see [There is no upper bound on a message](#there-is-no-upper-bound-on-a-message).
 
 Other writes:
 
@@ -101,21 +100,19 @@ Deleting a message splices its children to its parent. Removing a message in the
 
 ### Row budget
 
-A serialized message row is capped at `MAX_INLINE_ROW_BYTES` (1.5 MiB). Sessions never truncates content to make a row fit. It offloads oversized strings largest-first until the row fits, and if the row still exceeds the budget after every offloadable payload has moved out, the write throws `SessionMessageTooLargeError`:
+Sessions stores messages. One SQLite row holds up to `MAX_INLINE_ROW_BYTES` (1.5 MiB) of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
 
-```ts
-import { SessionMessageTooLargeError } from "agents/sessions";
+A message that does not fit is split across continuation rows and reassembled on read. Nothing is truncated, nothing is summarized, and no message is too large to store — a 5 MB message is one message row plus three continuation rows, and reads back byte for byte. There is no error to catch and nothing to configure.
 
-try {
-  await session.appendMessage(message);
-} catch (error) {
-  if (error instanceof SessionMessageTooLargeError) {
-    error.messageId;
-    error.bytes; // serialized size after offload
-    error.maxBytes; // 1.5 MiB
-  }
-}
-```
+Slices are cut on UTF-8 **byte** boundaries, never in the middle of a surrogate pair, so a message full of emoji or CJK text round-trips exactly like an ASCII one.
+
+### There is no upper bound on a message
+
+This is a deliberate position, not an omission: Sessions imposes no maximum message size. A message is split across as many continuation rows as it needs, so a single very large write can consume a meaningful share of the Durable Object's 10 GB.
+
+Bounding the size of untrusted input is the application's job. In particular, `appendMessage(message, { source: "client" })` sanitizes provider metadata and strips reserved metadata keys — it does **not** limit size. If clients can write to a session, check the size of what they send before you append it.
+
+An application that handles files should keep them in a file store (R2, or the Workspace) and put a reference in the message.
 
 ## Read history
 
@@ -152,7 +149,7 @@ recent.totalContentBytes;
 
 The second argument is a minimum number of recent messages. The minimum can exceed the byte budget, so choose it deliberately.
 
-The budget counts what hydration actually costs. Each row is charged its stored bytes plus, when reconstructing inline, the attachment bytes its pointers inflate back. A row holding a pointer to an 8 MiB image is charged 8 MiB, not the ~100 bytes it occupies on disk. That is what makes the budget a bound on isolate memory rather than on the on-disk footprint. In pointer mode no attachment bytes are read, so only stored bytes count.
+The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 1.5 MiB its first slice occupies. That is what makes the budget a bound on isolate memory.
 
 `getHistory()` materializes the selected path and exists for consumers that require an array:
 
@@ -172,7 +169,7 @@ await session.getHistoryRowStats();
 await session.stats();
 ```
 
-`getHistoryRowStats()` returns per-row stored bytes, attachment bytes, and stamped token estimates, without loading message content. `stats()` derives path length, stored content bytes, attachment bytes, and a heuristic token estimate for the active path with compaction overlays applied.
+`getHistoryRowStats()` returns per-row stored bytes (row plus continuation rows) and stamped token estimates, without loading message content. `stats()` derives path length, stored content bytes, and a heuristic token estimate for the active path with compaction overlays applied.
 
 ## Branches and forks
 
@@ -192,13 +189,13 @@ const fork = await session.fork({
 });
 ```
 
-Forked messages receive new IDs. Content-addressed attachment blobs are shared through new reference rows rather than copied. Compaction overlays are not copied.
+Forked messages receive new IDs, continuation rows and all. Compaction overlays are not copied.
 
-To move a conversation between Durable Objects, export the source with `history({ reconstruct: "pointer" })` and replay it with `importMessage()` on the destination:
+To move a conversation between Durable Objects, export the source with `history()` and replay it with `importMessage()` on the destination:
 
 ```ts
 let parentId: string | null = null;
-for await (const message of source.history({ reconstruct: "pointer" })) {
+for await (const message of source.history()) {
   await destination.importMessage(message, {
     parentId,
     createdAt: message.createdAt?.getTime() ?? Date.now()
@@ -207,7 +204,7 @@ for await (const message of source.history({ reconstruct: "pointer" })) {
 }
 ```
 
-`importMessage()` writes one historical message verbatim: explicit parent and timestamp, no offload, no change-feed event. Copy attachment blobs separately when the two objects do not share an attachment namespace. A pointer-mode export carries pointers, not bytes.
+`importMessage()` writes one historical message verbatim: explicit parent and timestamp, no change-feed event. It splits over-budget messages the same way an append does.
 
 For one-Durable-Object-per-conversation applications, keep the conversation directory in a parent or router Durable Object.
 
@@ -243,193 +240,60 @@ Or store an already-produced summary:
 await session.addCompaction(summary, fromMessageId, toMessageId);
 ```
 
-The compaction function receives pointer-mode history, so attachment payloads are never inlined into a summarization pass.
-
 Sessions stamps each message with a token estimate when the row is written. `compactAfter()` gates on that O(1) aggregate and never reads the transcript to decide whether to compact. Auto-compaction failures are non-fatal: they log, emit `session:error`, and leave the transcript alone.
 
 To trim a transcript before handing it to a model, `truncateOlderMessages` is exported from [`agents/chat`](./chat-agents.md), not from `agents/sessions`.
 
+## Large messages
+
+A message is stored as one JSON string. When that string exceeds the row budget it is cut into slices: slice 0 lives in the message row, the rest become numbered continuation rows in `cf_agents_session_message_chunks`. A read concatenates them back, so what you append is exactly what you read.
+
+This is invisible from the outside. There is no pointer, no reconstruction mode, and no read option:
+
+```ts
+await session.appendMessage(message); // any size
+const stored = await session.getMessage(message.id); // byte-identical
+```
+
+The common path pays nothing for it. A window of messages with no continuations issues exactly the same queries it always did; the extra query for continuation rows runs only for the ids in the window that actually have them.
+
+### What it costs
+
+Splitting is not a way to shrink the database. Continuation rows live in the same Durable Object as the message they belong to, inside the same 10 GB. Billing counts rows written, not bytes, so a 500 KB message costs the same one billed row as a tiny one, and a 2 MB message costs two.
+
+`SessionRowStat.bytes` and `SessionStats.totalContentBytes` report the whole message — row plus continuations — so a byte budget passed to `getRecentHistory()` bounds the memory a hydration will actually take.
+
+### Files belong in a file store
+
+Sessions is a message store, not a file store. Attaching a file is convenient and exact, but it is stored in the conversation forever and counted against the Durable Object's 10 GB. An application that handles files should write them to R2 or the Workspace and put a path or URL in the message instead.
+
 ## Attachments
 
-Offload is always lossless, and it makes no distinction between kinds of payload. A `data:` URL file part, a long text or reasoning part, and a long string nested in a tool output are all just payloads:
-
-- `data:` URL file parts
-- text and reasoning parts
-- strings nested inside tool outputs
-
-The stored form keeps the part's shape and replaces the payload with an `attachment:sha256:<hash>` pointer. Bytes live in content-addressed storage. Reading back inlines the payload again, so a round-trip is exact, byte for byte. Nothing is truncated or summarized to make something fit.
-
-### When a payload leaves the row
-
-One rule, with no configuration: a payload stays inline in its message row until the serialized row would exceed `MAX_INLINE_ROW_BYTES` (1.5 MiB). Then the largest payloads are chunked out until the row fits. A row that still cannot fit throws `SessionMessageTooLargeError`. Nothing is truncated.
-
-Anything else stays inline.
-
-Chunking is not a way to shrink the database. Chunk rows live in the same Durable Object as the row they came out of, inside the same 10 GB, so extraction never reclaims a byte — it only makes an over-budget row fit. Billing counts rows written, not bytes, so writing a 500 KB row costs the same one billed row as a tiny one, while chunking it out costs four (message, reference, blob, chunk). That is why inline is the correct resting place and why there is nothing here to tune.
-
-Configure the ceiling, the locator, and the reconstructor:
+A part that declares a non-text media type and carries its bytes inline — an image, an audio clip, a PDF — is stored outside the message. The part keeps its shape and its `mediaType`; only the payload is replaced, by an `attachment:sha256:<hex>` pointer. Reads put the payload back, so this is invisible unless you ask to see it:
 
 ```ts
-import { Sessions } from "agents/sessions";
-
-readonly sessions = new Sessions({
-  attachments: {
-    maxAttachmentBytes: 32 * 1024 * 1024
-  }
-});
+await session.appendMessage(messageWithImage);
+const stored = await session.getMessage(messageWithImage.id); // byte-identical
 ```
 
-| Option               | Default        | Meaning                                          |
-| -------------------- | -------------- | ------------------------------------------------ |
-| `maxAttachmentBytes` | 32 MiB         | Ceiling for one attachment payload               |
-| `basePath`           | `/attachments` | Logical locator prefix exposed to reconstructors |
-| `reconstruct`        | inline         | Read-side materialization default for file parts |
+The rule is about **type, not size**. An image is stored this way whether it is 8 KB or 8 MB, and text is never stored this way at any size — long prose is split across continuation rows instead. The two mechanisms never interact: media leaves the message before the row is measured, so a message carrying a large image usually has no continuation rows at all.
 
-Individual fields are plain values, not thunks. Only the top-level `attachments` option may be a function, which is re-read on every access so an `Agent` subclass can point it at policy fields that are initialized after the field initializer runs:
+To see the pointers rather than the payloads — when scanning a transcript, or assembling context where materializing megabytes would be wasted — read in pointer mode:
 
 ```ts
-readonly sessions = new Sessions({
-  attachments: () => ({ reconstruct: this.reconstructor })
-});
+const history = await session.getHistory({ attachments: "pointer" });
+// parts carry url: "attachment:sha256:…" and their original mediaType
 ```
 
-Sessions owns the payload tables, message references, deduplication, and deletion. Workspace is not part of attachment durability.
+Identical payloads are stored once. That is a consequence of addressing bytes by their hash, which mainly means a retried write costs nothing; do not rely on it as a space optimization.
 
-Payloads are split into 1.5 MiB SQLite rows. Each read pulls one row by `(storage_id, chunk_index)`. The final row can be shorter.
+A payload lives as long as some message references it. Deleting the last message that points at one deletes the bytes; clearing a session deletes all of them.
 
-The write order is:
+### What it costs
 
-1. Decode and hash the payload incrementally.
-2. Reuse an existing whole-file hash or write a new payload.
-3. Commit the message, optional FTS row, and attachment references in one SQLite transaction.
+Keeping media out of the message is not free. A 200 KB image bills four row writes — the message, one payload chunk, its metadata, and one reference — where inlining it would bill one. A 2 MiB image bills five. Text messages are unaffected and still bill exactly one row.
 
-### Upload a stream
-
-`attachments.put()` accepts a `ReadableStream`, `Uint8Array`, `ArrayBuffer`, or string:
-
-```ts
-const contentLength = request.headers.get("content-length");
-const { part } = await sessions.attachments.put(request.body!, {
-  mediaType: request.headers.get("content-type") ?? "application/octet-stream",
-  filename: "document.pdf",
-  ...(contentLength ? { bytes: Number(contentLength) } : {})
-});
-```
-
-Pass `bytes` when the stream length is known: Sessions validates it against the bytes that actually arrive and rejects a mismatch. Either way the stream is written into 1.5 MiB SQLite windows and hashed as it goes, so a payload is never materialized whole.
-
-A payload exceeding `maxAttachmentBytes` throws `SessionAttachmentTooLargeError` before anything commits.
-
-### Attachment lifetime
-
-`put()` stores bytes that survive until one of two things happens:
-
-- `attachments.delete()` removes them explicitly, or
-- a message has referenced them and the last remaining reference is removed, which reaps them.
-
-So an attachment created by `put()` and never referenced stays until you delete it, and an attachment that entered the transcript is garbage-collected with the last message that pointed at it.
-
-```ts
-await sessions.attachments.delete(part.url);
-```
-
-`delete()` returns `false` while any stored message still references the hash, and `false` when the hash is unknown.
-
-There is no age-based unreferenced-blob sweep. A coupled message write cleans up only the payloads that write created, if the row write fails or loses a race. It never infers that a pre-existing payload is abandoned.
-
-Serialize `attachments.delete(pointer)` against inserting that same pointer into a message. Think and AIChatAgent already serialize their chat mutations.
-
-### Client uploads
-
-A browser uploading a file does not send bytes through the message. The server stores them, hands back a pointer part, and the client echoes that part in its next message:
-
-1. The client uploads to your endpoint, which calls `sessions.attachments.put(...)`.
-2. The endpoint returns the `part` from that call to the client.
-3. The client includes `part` verbatim in the parts of its next chat message.
-4. The server appends it with `appendMessage(message, { source: "client" })`.
-
-Step 4 accepts the pointer precisely because the bytes exist in this object. Client-source writes look up every pointer in the message and keep only the ones whose payload is already stored here. A pointer a client invents, or copies from another object, is replaced with a short marker part instead of being trusted.
-
-### Storage operations
-
-For a new small attachment that fits one SQLite window, an append changes:
-
-- one whole-file blob row
-- one payload chunk row
-- one message row
-- one message-reference row
-
-Each additional 1.5 MiB payload window adds one row. A replayable duplicate performs no payload write at all.
-
-A one-shot stream cannot be deduplicated until its hash is known. If its bytes already exist, Sessions drops the freshly written chunks and reuses the stored hash.
-
-## Reconstruct attachments
-
-History reads support three modes.
-
-### Inline
-
-The default restores the original payload exactly: a file part becomes its `data:` URL again, and offloaded text comes back as text.
-
-```ts
-for await (const message of session.history({ reconstruct: "inline" })) {
-  // AI SDK-compatible file parts
-}
-```
-
-Sessions base64-encodes the attachment stream incrementally, carrying at most two bytes between input chunks. The final data URL is still one JavaScript string. Use inline reconstruction only for a bounded message range.
-
-### Pointer
-
-Pointer mode performs no attachment reads:
-
-```ts
-for await (const message of session.history({ reconstruct: "pointer" })) {
-  // file.url remains attachment:sha256:<hash>
-}
-```
-
-Use pointer mode for exports, indexing, and cross-Durable-Object transfer.
-
-### Custom reconstruction
-
-A reconstructor is the read-side plugin for file parts. It receives lazy byte access:
-
-```ts
-const publicUrlReconstructor = {
-  part(attachment) {
-    return {
-      type: "file",
-      mediaType: attachment.mediaType,
-      filename: attachment.filename,
-      url: `https://files.example.com/${attachment.hash}`
-    };
-  }
-};
-
-await session.getRecentHistory(4 * 1024 * 1024, 4, {
-  reconstruct: publicUrlReconstructor
-});
-```
-
-The attachment object provides `data()`, `dataUrl()`, and `stream()`. `data()` deliberately materializes all bytes. `stream()` returns one SQLite window at a time. `attachment.path` is a logical Sessions locator, not a Workspace path.
-
-A custom reconstructor applies to file parts. Offloaded text and reasoning always return as text.
-
-Missing payloads become a short marker part. They do not make the rest of the transcript unreadable.
-
-## Serve attachments over HTTP
-
-```ts
-import { attachmentResponse } from "agents/sessions";
-
-async onRequest(request: Request) {
-  const hash = new URL(request.url).pathname.split("/").at(-1)!;
-  return attachmentResponse(this.sessions, hash);
-}
-```
-
-The response streams from Sessions storage and sets content type, content length, and content disposition headers from stored metadata.
+What you get is a message row that stays a few hundred bytes however large the payload is. `SessionRowStat.bytes` still charges each message for the payloads it points at, so the byte budget you pass to `getRecentHistory()` remains a bound on the memory a hydration actually takes.
 
 ## Full-text search
 
@@ -450,15 +314,15 @@ On Durable Object SQLite a row write costs roughly 1000 times a row read, so the
 
 Every Sessions table is `WITHOUT ROWID` with a composite primary key and no secondary index:
 
-| Table                           | Primary key                      | Contents                                                                    |
-| ------------------------------- | -------------------------------- | --------------------------------------------------------------------------- |
-| `cf_agents_session_messages`    | `(session_id, id)`               | `seq`, `parent_id`, `type`, `role`, JSON content, token estimate, timestamp |
-| `cf_agents_session_compactions` | `(session_id, id)`               | Non-destructive summary ranges                                              |
-| `cf_agents_session_attachments` | `(session_id, message_id, hash)` | Message-to-payload references                                               |
-| `cf_agents_session_config`      | `(session_id, key)`              | Lifted session configuration                                                |
-| `cf_agents_session_fts`         | virtual                          | Optional FTS5 index, created only when `searchIndexing` is enabled          |
+| Table                              | Primary key             | Contents                                                                                        |
+| ---------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------- |
+| `cf_agents_session_messages`       | `(session_id, id)`      | `seq`, `parent_id`, `type`, `role`, JSON content, continuation count, token estimate, timestamp |
+| `cf_agents_session_message_chunks` | `(session_id, id, idx)` | Continuation slices of a message too large for one row                                          |
+| `cf_agents_session_compactions`    | `(session_id, id)`      | Non-destructive summary ranges                                                                  |
+| `cf_agents_session_config`         | `(session_id, key)`     | Lifted session configuration                                                                    |
+| `cf_agents_session_fts`            | virtual                 | Optional FTS5 index, created only when `searchIndexing` is enabled                              |
 
-A text append with search disabled bills exactly one row write. The `seq` column carries ordering and `type` distinguishes row kinds, so neither needs an index. The attachment reference table stores only the three key columns, so a reference is the row rather than a row plus an index entry.
+A text append with search disabled bills exactly one row write. The `seq` column carries ordering and `type` distinguishes row kinds, so neither needs an index. A continuation row carries its slice and nothing else — no hash, no media type, no size — so an over-budget message costs one billed row per slice and nothing more.
 
 State is derived rather than maintained. The active leaf is the session's max-`seq` row, token totals come from per-row stamped estimates, and session summaries are derived from message rows. No counter row, registry row, or refcount is written on the append path.
 
@@ -489,16 +353,12 @@ This is a local cache-coherence feed, not a cross-object event log. Capability d
 
 Each error carries a stable `name`, so hosts and tests can classify failures without matching message text.
 
-| Error                            | Thrown when                                                               |
-| -------------------------------- | ------------------------------------------------------------------------- |
-| `SessionMessageTooLargeError`    | A row still exceeds 1.5 MiB after every offloadable payload has moved out |
-| `SessionSerializationError`      | A message is not JSON-serializable                                        |
-| `SessionSearchDisabledError`     | `search()` is called without `searchIndexing: true`                       |
-| `SessionAttachmentTooLargeError` | One attachment exceeds `maxAttachmentBytes`                               |
-| `SessionAttachmentMissingError`  | The `attachments` API is asked for a payload that is not stored           |
-| `SessionAttachmentStoreError`    | The configured store failed, wrapped with path and operation context      |
+| Error                        | Thrown when                                         |
+| ---------------------------- | --------------------------------------------------- |
+| `SessionSerializationError`  | A message is not JSON-serializable                  |
+| `SessionSearchDisabledError` | `search()` is called without `searchIndexing: true` |
 
-History reads never throw `SessionAttachmentMissingError`. They degrade the part to a marker instead.
+There is no "message too large" error. A message that exceeds the row budget is split across continuation rows instead.
 
 ## Multiple sessions
 
@@ -519,24 +379,22 @@ For user-facing chat applications, prefer one Durable Object per conversation. T
 
 `Think` and `AIChatAgent` use Sessions internally.
 
-- Think uses branches, compaction, search, Sessions-owned attachment storage, and the change feed. Its prompt context comes from [`agents/context`](./context.md).
-- AIChatAgent uses the default handle as a linear chain. Its existing destructive regeneration, mutable `messages` array, retention option, and wire protocol remain unchanged. Attachment storage is opt-in through `sessionAttachments`.
+- Think uses branches, compaction, search, and the change feed. Its prompt context comes from [`agents/context`](./context.md). Aged media leaves the conversation through Think's own media eviction, which is a context-window technique and unrelated to how Sessions stores a row.
+- AIChatAgent uses the default handle as a linear chain. Its existing destructive regeneration, mutable `messages` array, retention option, and wire protocol remain unchanged.
 
-Existing `assistant_*` Session tables and `cf_ai_chat_agent_messages` are lifted automatically. Legacy tables are renamed to `*__lifted_v1` tombstones for one release so rollback remains possible.
+Existing `assistant_*` Session tables and `cf_ai_chat_agent_messages` are lifted automatically, then dropped once every row is verified copied.
 
 ## Memory boundaries and future streaming
 
-The capability streams history and attachments, but some consumers still require arrays.
+The capability streams history, but some consumers still require arrays.
 
-| Operation                                 | Current shape                                 | Future direction                                                   |
-| ----------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------ |
-| History export and indexing               | Stream or bounded batches                     | Already streamable                                                 |
-| Tool-call lookup and reconciliation scans | Host-specific arrays in current chat packages | Can scan batches and stop early                                    |
-| Model request input                       | AI SDK message array                          | Must materialize a bounded model window                            |
-| Compaction summarizer input               | Message array                                 | Must materialize a bounded compaction range                        |
-| Legacy full-transcript client snapshots   | Message array                                 | Can move to paginated history plus live deltas                     |
-| Attachment delivery                       | `ReadableStream`                              | Already streamable                                                 |
-| Attachment hashing on write               | Incremental stream                            | Already streamable: windows are written and hashed as bytes arrive |
+| Operation                                 | Current shape                                 | Future direction                               |
+| ----------------------------------------- | --------------------------------------------- | ---------------------------------------------- |
+| History export and indexing               | Stream or bounded batches                     | Already streamable                             |
+| Tool-call lookup and reconciliation scans | Host-specific arrays in current chat packages | Can scan batches and stop early                |
+| Model request input                       | AI SDK message array                          | Must materialize a bounded model window        |
+| Compaction summarizer input               | Message array                                 | Must materialize a bounded compaction range    |
+| Legacy full-transcript client snapshots   | Message array                                 | Can move to paginated history plus live deltas |
 
 The chat packages retain their current public arrays and wire behavior in this release. Moving reconciliation and client history protocols to streaming requires separate protocol work.
 

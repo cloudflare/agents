@@ -33,18 +33,8 @@ type TestToolCallPart = Extract<
   { type: `tool-${string}` }
 >;
 
-/** The STORED rows: attachment pointers stay as written, never inlined. */
+/** The STORED rows, reassembled from their continuation rows. */
 async function persistedMessages(agent: AIChatAgent): Promise<ChatMessage[]> {
-  const history = await agent.sessions
-    .session()
-    .getHistory({ reconstruct: "pointer" });
-  return history as ChatMessage[];
-}
-
-/** The stored rows with attachment payloads reconstructed byte-for-byte. */
-async function reconstructedMessages(
-  agent: AIChatAgent
-): Promise<ChatMessage[]> {
   const history = await agent.sessions.session().getHistory();
   return history as ChatMessage[];
 }
@@ -67,8 +57,7 @@ function sessionChangeEventCount(agent: AIChatAgent): number {
 }
 
 async function persistedMessageCount(agent: AIChatAgent): Promise<number> {
-  return (await agent.sessions.session().getHistory({ reconstruct: "pointer" }))
-    .length;
+  return (await agent.sessions.session().getHistory()).length;
 }
 
 function makeSSEChunkResponse(chunks: ReadonlyArray<Record<string, unknown>>) {
@@ -145,7 +134,6 @@ export type Env = {
   AIChatAgentToolParent: DurableObjectNamespace<AIChatAgentToolParent>;
   AIChatAgentToolChild: DurableObjectNamespace<AIChatAgentToolChild>;
   StuckAgentToolChild: DurableObjectNamespace<StuckAgentToolChild>;
-  AttachmentChatAgent: DurableObjectNamespace<AttachmentChatAgent>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -553,11 +541,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this.messages as ChatMessage[];
   }
 
-  /** Stored rows with attachment payloads reconstructed byte-for-byte. */
-  reconstructedMessagesForTest(): Promise<ChatMessage[]> {
-    return reconstructedMessages(this);
-  }
-
   /**
    * Count of Sessions change-feed events. An unchanged row writes nothing and
    * dispatches no event, so this is the observable no-op signal.
@@ -566,12 +549,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return sessionChangeEventCount(this);
   }
 
-  getAttachmentFileCountForTest(): number {
+  /** Continuation rows the store currently holds for this object. */
+  continuationRowCountForTest(): number {
     return Number(
       this.ctx.storage.sql
-        .exec(
-          "SELECT COUNT(*) AS count FROM cf_agents_session_attachment_blobs"
-        )
+        .exec("SELECT COUNT(*) AS count FROM cf_agents_session_message_chunks")
         .one().count
     );
   }
@@ -4807,33 +4789,6 @@ export class AIChatAgentToolParent extends Agent<Env> {
     );
 
     return this.events;
-  }
-}
-
-/**
- * Attachment policy declared as a class field, so it survives a Durable
- * Object eviction the way a real subclass's policy does.
- */
-export class AttachmentChatAgent extends AIChatAgent<Env> {
-  override sessionAttachments = { maxAttachmentBytes: 8 * 1024 * 1024 };
-
-  async getMessagesForTest(): Promise<ChatMessage[]> {
-    await this.__unsafe_ensureInitialized();
-    return this.messages as ChatMessage[];
-  }
-
-  getPersistedMessages(): Promise<ChatMessage[]> {
-    return persistedMessages(this);
-  }
-
-  getAttachmentFileCountForTest(): number {
-    return Number(
-      this.ctx.storage.sql
-        .exec(
-          "SELECT COUNT(*) AS count FROM cf_agents_session_attachment_blobs"
-        )
-        .one().count
-    );
   }
 }
 

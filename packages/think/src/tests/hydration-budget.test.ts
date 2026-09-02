@@ -44,7 +44,6 @@ type PointerHydrationStub = {
   getCachedMessageIdsForTest(): Promise<string[]>;
   getFullHistoryIdsForTest(): Promise<string[]>;
   getStoredPathBytesForTest(): Promise<number>;
-  getAttachmentPathBytesForTest(): Promise<number>;
   getCachedFileUrlsForTest(): Promise<string[]>;
 };
 
@@ -181,30 +180,24 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(await agent.getHydrationBudgetForTest()).toBe(32 * 1024 * 1024);
   });
 
-  it("charges a pointer row the bytes it re-inflates, not its stored size", async () => {
+  it("charges a split row its continuation bytes, not just its first slice", async () => {
     const agent = (await getAgentByName(
       env.ThinkPointerHydrationAgent,
       uniqueName("pointer-hydration")
     )) as unknown as PointerHydrationStub;
 
-    // Ten rows, each chunked out on the write path because the row could not
-    // hold the payload: the stored transcript is ~a couple of KB, comfortably
-    // UNDER the 64KB budget. A budget that counted stored bytes alone would
-    // happily hydrate all ten — and then inflate 12 MB into the isolate.
+    // Ten messages, each too large for one SQLite row and so split across
+    // continuation rows. Row stats count the continuations, so the reported
+    // size is the whole 16 MB — the memory a hydration would actually take,
+    // not the ~1.5 MiB first slice of each row.
     const storedBytes = await agent.getStoredPathBytesForTest();
-    expect(storedBytes).toBeLessThan(64 * 1024);
-    const attachmentBytes = await agent.getAttachmentPathBytesForTest();
-    expect(attachmentBytes).toBe(10 * 1_200_000);
+    expect(storedBytes).toBeGreaterThan(10 * 1_600_000);
 
     const info = await agent.getHydrationInfoForTest();
     expect(info).not.toBeNull();
-    // The budget counts the reconstruction, so this DOES window.
     expect(info!.truncated).toBe(true);
-    // `totalContentBytes` still reports the on-disk footprint, which is why
-    // it alone cannot be the thing the budget is compared against.
     expect(info!.totalContentBytes).toBe(storedBytes);
-    expect(info!.totalContentBytes).toBeLessThan(64 * 1024);
-    // One row × 1.2 MB already overshoots 64KB, so the window is the
+    // One row × 1.6 MB already overshoots 64KB, so the window is the
     // full-fidelity floor and nothing more.
     expect(info!.hydratedMessages).toBe(4);
 
@@ -215,7 +208,7 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
       Array.from({ length: 10 }, (_, i) => `ptr-${i}`)
     );
 
-    // The window is reconstructed byte-for-byte, not left as pointers.
+    // The window reads back byte for byte across its continuation rows.
     const urls = await agent.getCachedFileUrlsForTest();
     expect(urls).toEqual(
       [6, 7, 8, 9].map(
