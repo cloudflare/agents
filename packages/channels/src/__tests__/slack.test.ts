@@ -152,7 +152,9 @@ describe("Slack signed ingress", () => {
         address: {
           teamId: "TWORK",
           channelId: "CGENERAL",
-          threadTs: "1710000000.000100"
+          threadTs: "1710000000.000100",
+          recipientUserId: "UHUMAN",
+          recipientTeamId: "TWORK"
         },
         label: "Slack · CGENERAL · thread 1710000000.000100"
       },
@@ -711,7 +713,7 @@ describe("Slack interactions and delivery outcomes", () => {
     const result = await channel.deliver(
       threadSurface,
       { title: "Build blocked", markdown: "Please **help**" },
-      { deliveryId: "caller-delivery-1" }
+      { delivery: { deliveryId: "caller-delivery-1" } }
     );
 
     expect(result).toEqual({

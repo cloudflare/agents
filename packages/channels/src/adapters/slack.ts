@@ -1,10 +1,13 @@
 import type {
   Channel,
   ChannelApprovalRequest,
+  ChannelChunk,
   ChannelMessage,
   ChannelRoute,
+  ChannelStreamOptions,
   DeliveryResult
 } from "../channel";
+import { collectText, consumeChunks, createPacer } from "../stream";
 import type { ChannelIdentity } from "../identity";
 import {
   isChannelMessageSurface,
@@ -116,7 +119,14 @@ export type SlackWebhookOptions = {
 
 export type SlackMessageSurface = ChannelMessageSurface<
   string,
-  { channelId: string; threadTs?: string } | { teamId: string; userId: string }
+  | {
+      channelId: string;
+      threadTs?: string;
+      /** The reader a channel stream is rendered for. Slack requires it. */
+      recipientUserId?: string;
+      recipientTeamId?: string;
+    }
+  | { teamId: string; userId: string }
 >;
 
 /** Configuration for a Slack Channel. */
@@ -127,6 +137,11 @@ export type SlackChannelOptions = {
   apiBaseUrl?: string;
   /** Project canonical Channel Markdown into Slack mrkdwn text. */
   toText?: (message: ChannelMessage) => string;
+  /**
+   * Smallest gap between `chat.appendStream` calls. Chunks produced inside
+   * one interval are appended together. @default 500
+   */
+  streamIntervalMs?: number;
   /** Add signed Slack HTTP ingress to the returned Channel. */
   webhook?: SlackWebhookOptions;
   /** Select an application route from the event, exact payload, and Host context. */
@@ -158,6 +173,10 @@ const DEFAULT_SLACK_WEBHOOK_PATH = "/webhooks/slack";
 const DEFAULT_MAX_SKEW_SECONDS = 5 * 60;
 const APPROVE_ACTION_ID = "cloudflare_channels_approve_v1";
 const REJECT_ACTION_ID = "cloudflare_channels_reject_v1";
+const DEFAULT_STREAM_INTERVAL_MS = 500;
+const SLACK_APPEND_LIMIT = 12_000;
+const SLACK_TASK_FIELD_LIMIT = 256;
+const SLACK_CONTEXT_LIMIT = 3000;
 const AMBIGUOUS_SLACK_ERRORS = new Set([
   "fatal_error",
   "internal_error",
@@ -305,6 +324,12 @@ function normalizedEvent(
         channelId,
         ...((threadTimestamp || !isDirectMessage) && {
           threadTs: threadTimestamp ?? timestamp
+        }),
+        // Slack renders a channel stream for one reader, and requires both
+        // ids to do it. A direct message already has a single reader.
+        ...(!isDirectMessage && {
+          recipientUserId: actorId,
+          recipientTeamId: teamId
         })
       },
       label: replySurfaceLabel(
@@ -431,7 +456,11 @@ async function normalizedInteractions(
         address: {
           teamId,
           channelId,
-          threadTs: threadTimestamp ?? timestamp
+          threadTs: threadTimestamp ?? timestamp,
+          ...(!isDirectMessage && {
+            recipientUserId: actorId,
+            recipientTeamId: teamId
+          })
         },
         label: replySurfaceLabel(channelId, threadTimestamp ?? timestamp)
       },
@@ -602,7 +631,7 @@ function failed(
   code: string,
   message: string,
   retryable: boolean
-): DeliveryResult {
+): Extract<DeliveryResult, { status: "failed" }> {
   return {
     status: "failed",
     retryable,
@@ -614,23 +643,10 @@ function slackErrorCode(error: string): string {
   return `SLACK_API_ERROR_${error.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
 }
 
-function classifyApiResponse(
+function classifyApiFailure(
   response: Response,
   payload: SlackApiResponse
-): DeliveryResult {
-  if (payload.ok === true) {
-    if (typeof payload.channel === "string" && typeof payload.ts === "string") {
-      return {
-        status: "delivered",
-        reference: outboundReference(payload.channel, payload.ts)
-      };
-    }
-    return uncertain(
-      "SLACK_DELIVERY_ERROR",
-      "Slack returned an invalid delivery response"
-    );
-  }
-
+): Exclude<DeliveryResult, { status: "delivered" }> {
   if (payload.ok === false) {
     const error =
       typeof payload.error === "string" ? payload.error : "unknown_error";
@@ -681,9 +697,19 @@ function approvalValue(
   } satisfies ApprovalValue);
 }
 
-type SlackTarget =
-  | { teamId?: string; channelId: string; threadTs?: string }
-  | { teamId: string; userId: string };
+/** A resolved conversation, with the reader a stream should be rendered for. */
+type SlackDestination = {
+  channelId: string;
+  threadTs?: string;
+  recipientUserId?: string;
+  recipientTeamId?: string;
+};
+
+type SlackTarget = SlackDestination | { teamId: string; userId: string };
+
+function optionalId(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
 
 function slackTarget(surface: ChannelMessageSurface): SlackTarget | undefined {
   if (
@@ -712,11 +738,94 @@ function slackTarget(surface: ChannelMessageSurface): SlackTarget | undefined {
   ) {
     return undefined;
   }
+  const recipientUserId = optionalId(address.recipientUserId);
+  const recipientTeamId = optionalId(address.recipientTeamId);
   return {
     channelId: address.channelId,
     ...(typeof address.threadTs === "string" && {
       threadTs: address.threadTs
-    })
+    }),
+    // Slack rejects one without the other, so only carry a complete pair.
+    ...(recipientUserId &&
+      recipientTeamId && { recipientUserId, recipientTeamId })
+  };
+}
+
+type SlackStreamChunk =
+  | { type: "markdown_text"; text: string }
+  | {
+      type: "task_update";
+      id: string;
+      title: string;
+      status: "in_progress" | "complete" | "error";
+      details?: string;
+    };
+
+const SLACK_TASK_STATUS = {
+  started: "in_progress",
+  completed: "complete",
+  failed: "error"
+} as const;
+
+function clamp(value: string, limit: number): string {
+  return value.length <= limit ? value : `${value.slice(0, limit - 1)}\u2026`;
+}
+
+function splitText(text: string, limit: number): string[] {
+  if (text.length <= limit) return text.length > 0 ? [text] : [];
+  const pieces: string[] = [];
+  for (let index = 0; index < text.length; index += limit) {
+    pieces.push(text.slice(index, index + limit));
+  }
+  return pieces;
+}
+
+/**
+ * Render a neutral chunk as Slack stream content.
+ *
+ * `reasoning` has no Slack rendering and is dropped. A `source` is collected
+ * rather than appended, so it can be rendered once beneath the finished
+ * message instead of interrupting the text.
+ */
+function toStreamChunks(
+  chunk: ChannelChunk,
+  sources: { url: string; title?: string }[]
+): SlackStreamChunk[] {
+  switch (chunk.type) {
+    case "text":
+      return splitText(chunk.text, SLACK_APPEND_LIMIT).map((text) => ({
+        type: "markdown_text",
+        text
+      }));
+    case "tool":
+      return [
+        {
+          type: "task_update",
+          id: chunk.name,
+          title: clamp(chunk.title ?? chunk.name, SLACK_TASK_FIELD_LIMIT),
+          status: SLACK_TASK_STATUS[chunk.status],
+          ...(chunk.detail !== undefined && {
+            details: clamp(chunk.detail, SLACK_TASK_FIELD_LIMIT)
+          })
+        }
+      ];
+    case "source":
+      sources.push(chunk);
+      return [];
+    case "reasoning":
+      return [];
+  }
+}
+
+function sourcesBlock(
+  sources: readonly { url: string; title?: string }[]
+): Record<string, unknown> {
+  const text = sources
+    .map((source) => `<${source.url}|${source.title ?? source.url}>`)
+    .join(" \u00b7 ");
+  return {
+    type: "context",
+    elements: [{ type: "mrkdwn", text: clamp(text, SLACK_CONTEXT_LIMIT) }]
   };
 }
 
@@ -733,11 +842,16 @@ export function slack(
     ""
   );
   const toText = options.toText ?? defaultText;
+  const streamIntervalMs =
+    options.streamIntervalMs ?? DEFAULT_STREAM_INTERVAL_MS;
+  if (!Number.isInteger(streamIntervalMs) || streamIntervalMs < 0) {
+    throw new Error("streamIntervalMs must be a non-negative integer");
+  }
   const ingress = options.webhook ? slackWebhook(options.webhook) : undefined;
 
   async function resolveTarget(
     target: SlackTarget
-  ): Promise<{ channelId: string; threadTs?: string } | DeliveryResult> {
+  ): Promise<SlackDestination | DeliveryResult> {
     if (!("userId" in target)) return target;
 
     let response: Response;
@@ -772,7 +886,11 @@ export function slack(
       ? (payload as SlackOpenConversationResponse)
       : undefined;
     if (result?.ok === true && typeof result.channel?.id === "string") {
-      return { channelId: result.channel.id };
+      return {
+        channelId: result.channel.id,
+        recipientUserId: target.userId,
+        recipientTeamId: target.teamId
+      };
     }
     const error = typeof result?.error === "string" ? result.error : "unknown";
     return failed(
@@ -801,21 +919,44 @@ export function slack(
     const target = await resolveTarget(unresolvedTarget);
     if ("status" in target) return target;
 
+    const sent = await callSlack("chat.postMessage", {
+      channel: target.channelId,
+      text,
+      mrkdwn: true,
+      ...(target.threadTs && { thread_ts: target.threadTs }),
+      ...(blocks && { blocks })
+    });
+    return "status" in sent
+      ? sent
+      : {
+          status: "delivered",
+          reference: outboundReference(sent.channelId, sent.ts)
+        };
+  }
+
+  /**
+   * One transport path for every Slack method this Channel calls.
+   *
+   * Each of them answers with the conversation and timestamp on success, and
+   * every failure mode is classified the same way, so posting and streaming
+   * cannot drift apart.
+   */
+  async function callSlack(
+    method: string,
+    body: Record<string, unknown>
+  ): Promise<
+    | { channelId: string; ts: string }
+    | Exclude<DeliveryResult, { status: "delivered" }>
+  > {
     let response: Response;
     try {
-      response = await fetch(`${apiBaseUrl}/chat.postMessage`, {
+      response = await fetch(`${apiBaseUrl}/${method}`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${options.botToken}`,
           "content-type": "application/json; charset=utf-8"
         },
-        body: JSON.stringify({
-          channel: target.channelId,
-          text,
-          mrkdwn: true,
-          ...(target.threadTs && { thread_ts: target.threadTs }),
-          ...(blocks && { blocks })
-        })
+        body: JSON.stringify(body)
       });
     } catch {
       return uncertain(
@@ -828,33 +969,152 @@ export function slack(
     try {
       payload = await response.json();
     } catch {
-      if (response.status === 429) {
-        return failed(
-          "SLACK_HTTP_ERROR_429",
-          "Slack rate limited the message",
-          true
-        );
-      }
-      if (response.status >= 400 && response.status < 500) {
-        return failed(
-          `SLACK_HTTP_ERROR_${response.status}`,
-          `Slack rejected the message with HTTP ${response.status}`,
-          false
-        );
-      }
-      return uncertain(
-        "SLACK_DELIVERY_ERROR",
-        "Slack returned an invalid delivery response"
+      payload = undefined;
+    }
+    const apiResponse = asApiResponse(payload);
+    if (
+      apiResponse?.ok === true &&
+      typeof apiResponse.channel === "string" &&
+      typeof apiResponse.ts === "string"
+    ) {
+      return { channelId: apiResponse.channel, ts: apiResponse.ts };
+    }
+    return apiResponse?.ok === true
+      ? uncertain(
+          "SLACK_DELIVERY_ERROR",
+          "Slack returned an invalid delivery response"
+        )
+      : classifyApiFailure(response, apiResponse ?? {});
+  }
+
+  async function streamMessage(
+    destination: ChannelMessageSurface,
+    chunks: ReadableStream<ChannelChunk>,
+    streamOptions: ChannelStreamOptions
+  ): Promise<DeliveryResult> {
+    const unresolvedTarget = slackTarget(destination);
+    if (!unresolvedTarget) {
+      await chunks.cancel().catch(() => {});
+      return failed(
+        "SLACK_SURFACE_INVALID",
+        `Slack cannot parse the address for Channel "${destination.channelKey}"`,
+        false
       );
     }
 
-    const apiResponse = asApiResponse(payload);
-    return apiResponse
-      ? classifyApiResponse(response, apiResponse)
-      : uncertain(
-          "SLACK_DELIVERY_ERROR",
-          "Slack returned an invalid delivery response"
+    // Slack only permits native channel streaming in a thread. Preserve the
+    // simpler top-level application API by collecting and posting one ordinary
+    // message; direct-message targets still use native streaming.
+    if (!("userId" in unresolvedTarget) && !unresolvedTarget.threadTs) {
+      const collected = await collectText(chunks);
+      if (collected.interrupted && collected.text.length === 0) {
+        return failed(
+          "SLACK_STREAM_INTERRUPTED",
+          "The stream ended before producing any content to deliver",
+          false
         );
+      }
+      const delivered = await postMessage(
+        destination,
+        toText({
+          ...(streamOptions.title && { title: streamOptions.title }),
+          markdown: collected.text
+        })
+      );
+      if (!collected.interrupted || delivered.status !== "delivered") {
+        return delivered;
+      }
+      return uncertain(
+        "SLACK_STREAM_INTERRUPTED",
+        "An incomplete answer was delivered because the stream ended early",
+        delivered.reference
+      );
+    }
+
+    const target = await resolveTarget(unresolvedTarget);
+    if ("status" in target) {
+      await chunks.cancel().catch(() => {});
+      return target;
+    }
+
+    const started = await callSlack("chat.startStream", {
+      channel: target.channelId,
+      ...(target.threadTs && { thread_ts: target.threadTs }),
+      ...(target.recipientUserId && {
+        recipient_user_id: target.recipientUserId,
+        recipient_team_id: target.recipientTeamId
+      }),
+      // Every call in a stream must use the mode the stream was opened in,
+      // so the title goes in a chunk rather than `markdown_text`. Opening
+      // with `markdown_text` makes Slack reject each later append with
+      // `streaming_mode_mismatch`, losing the whole answer.
+      ...(streamOptions.title && {
+        chunks: [{ type: "markdown_text", text: `${streamOptions.title}\n\n` }]
+      })
+    });
+    if ("status" in started) {
+      await chunks.cancel().catch(() => {});
+      return started;
+    }
+
+    const reference = outboundReference(started.channelId, started.ts);
+    const sources: { url: string; title?: string }[] = [];
+    const shouldFlush = createPacer(streamIntervalMs);
+    let pending: SlackStreamChunk[] = [];
+    let appendFailure:
+      | Exclude<DeliveryResult, { status: "delivered" }>
+      | undefined;
+
+    return consumeChunks(chunks, {
+      async onChunk(chunk) {
+        pending.push(...toStreamChunks(chunk, sources));
+        if (pending.length === 0 || !shouldFlush()) return;
+        const appended = await callSlack("chat.appendStream", {
+          channel: started.channelId,
+          ts: started.ts,
+          chunks: pending
+        });
+        pending = [];
+        if ("status" in appended) {
+          appendFailure = appended;
+          // Stop reading, but still stop the stream: Slack leaves a message
+          // stuck in its streaming state otherwise.
+          throw new Error(appended.error.message);
+        }
+      },
+      async onFinish(outcome) {
+        // Whatever the pacer withheld rides along on the terminal call, so an
+        // interrupted answer keeps its tail without an extra round trip.
+        const stopped = await callSlack("chat.stopStream", {
+          channel: started.channelId,
+          ts: started.ts,
+          ...(pending.length > 0 && !appendFailure && { chunks: pending }),
+          ...(sources.length > 0 && { blocks: [sourcesBlock(sources)] })
+        });
+        if ("status" in stopped) {
+          return uncertain(
+            stopped.error.code,
+            `Slack could not stop the stream: ${stopped.error.message}`,
+            reference
+          );
+        }
+        if (appendFailure) {
+          return uncertain(
+            appendFailure.error.code,
+            appendFailure.error.message,
+            reference
+          );
+        }
+        if (outcome.interrupted) {
+          return uncertain(
+            "SLACK_STREAM_INTERRUPTED",
+            "The answer ended early, so the Slack message is incomplete",
+            reference
+          );
+        }
+        return { status: "delivered", reference };
+      }
+    });
   }
 
   return {
@@ -870,6 +1130,9 @@ export function slack(
     },
     deliver(destination, message) {
       return postMessage(destination, toText(message));
+    },
+    stream(destination, chunks, streamOptions) {
+      return streamMessage(destination, chunks, streamOptions);
     },
     requestApproval(destination, { interactionId, request }) {
       if (interactionId.length === 0) {

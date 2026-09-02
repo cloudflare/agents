@@ -60,6 +60,7 @@
   },
   "dependencies": {
     "@cloudflare/voice": "workspace:*",
+    "agents": "workspace:*",
     "postal-mime": "^2.7.5"
   },
   "peerDependencies": {
