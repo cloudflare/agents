@@ -217,6 +217,54 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     expect(view.wake?.time ?? 0).toBeGreaterThan(Date.now() + 20_000);
   }, 15_000);
 
+  it("preserves a strike through a clean sibling settling after it", async () => {
+    const name = `tasks-oom-before-clean-sibling-${crypto.randomUUID()}`;
+    const runId = "oom-before-clean-sibling";
+    const stub = env.TaskHarnessObject.getByName(name);
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: TaskHarnessObject, state) => {
+          await state.storage.put("oomLoopRemaining", 1);
+          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+            "oomBeforeCleanSibling",
+            undefined,
+            { runId }
+          );
+          backdateTaskWake(state.storage, runId);
+          await instance.lifecycle.rearmAlarm();
+          await (instance as unknown as { alarm(): Promise<void> }).alarm();
+          await waitForStrikes(state.storage, (strikes) => strikes === 1);
+          // The clean sibling settles ~2s after the strike — comfortably
+          // after handleMemoryLimitReset's own awaited work (strike write,
+          // onMemoryLimit, rearm, sync) has fully finished and removed the
+          // OOM promise from the outstanding set — so if the bug is
+          // present, the sibling's own settle finds the domain quiescent
+          // and wrongly clears.
+          await new Promise((resolve) => setTimeout(resolve, 2_500));
+        }
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes("Alarm memory-limit strike")
+      ) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const preserved = await readBreakerView(name, runId);
+    expect(preserved.strikes).toBe(1);
+
+    // A second, independent strike must build on the preserved count, not
+    // restart at 1 — proving the first was never actually erased.
+    await seedDoomedRun(name, "oom-before-clean-sibling-2", 5);
+    await driveOomWake(name);
+    const second = await readBreakerView(name, "oom-before-clean-sibling-2");
+    expect(second.strikes).toBe(2);
+  }, 15_000);
+
   it("keeps a queued attempt inside the alarm breaker after its bounded handoff", async () => {
     const name = `tasks-late-oom-backoff-${crypto.randomUUID()}`;
     const runId = "late-backoff";

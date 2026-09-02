@@ -309,6 +309,36 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         );
       },
 
+      /**
+       * This run's own attempt strikes distinctly BEFORE a separately
+       * tracked sibling settles clean. The strike's isolate-reset side
+       * effect is scheduled but deferred; the clean sibling settling in that
+       * gap must not clear what the strike just recorded.
+       */
+      oomBeforeCleanSibling: async (_input: undefined, step: TaskStep) => {
+        const cleanSibling = new Promise<string>((resolve) => {
+          setTimeout(() => resolve("clean-sibling"), 7_000);
+        });
+        this.lifecycle.trackAlarmWork(cleanSibling);
+        await step.do(
+          "oom-before-clean-sibling",
+          { retries: { limit: 3 }, timeout: 10_000 },
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 5_050));
+            const remaining =
+              (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+            if (remaining > 0) {
+              await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+              await this.ctx.storage.sync();
+              throw new Error(
+                "Durable Object's isolate exceeded its memory limit and was reset."
+              );
+            }
+            return "recovered";
+          }
+        );
+      },
+
       /** Settles successfully after Tasks' five-second job handoff. */
       lateSuccess: async (_input: undefined, step: TaskStep) => {
         return step.do("late-success-step", { timeout: 10_000 }, async () => {

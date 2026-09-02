@@ -142,6 +142,16 @@ export class JobDriver {
    * quiescent classification.
    */
   #strike: Promise<MemoryLimitStrike> | undefined;
+  /**
+   * Once a strike has been fully recorded in this isolate, no later
+   * settlement may clear the durable counter — a slower, unrelated clean
+   * sibling finishing after the strike (but before the isolate reset it
+   * scheduled actually lands) must not erase what was just recorded. The
+   * isolate reset always follows a recorded strike, so the next genuinely
+   * clean cycle runs in a fresh isolate with a fresh `JobDriver` and this
+   * flag back at its default; there is no cross-isolate state to reset.
+   */
+  #strikeRecordedThisIsolate = false;
 
   constructor(options: JobDriverOptions) {
     this.#options = options;
@@ -255,15 +265,17 @@ export class JobDriver {
 
   /**
    * Clear the strike counter once the alarm domain is fully quiescent: no
-   * alarm invocation in flight and no handed-off work outstanding. Called at
-   * every transition that could make either condition newly true (an alarm
-   * ending, a handoff settling) — each call re-reads both counters fresh, so
-   * whichever transition happens last is the one that performs the clear.
-   * Idempotent: a redundant call after the strike is already cleared no-ops.
+   * alarm invocation in flight, no handed-off work outstanding, and no
+   * strike recorded in this isolate that a fresh isolate hasn't yet
+   * superseded. Called at every transition that could make either counter
+   * newly zero (an alarm ending, a handoff settling) — each call re-reads
+   * both fresh, so whichever transition happens last is the one that
+   * performs the clear. Idempotent: redundant calls no-op.
    */
   async #clearMemoryLimitStrikesWhenQuiescent(): Promise<void> {
     if (this.#alarmsInFlight > 0) return;
     if (this.#outstandingAlarmWork.size > 0) return;
+    if (this.#strikeRecordedThisIsolate) return;
     this.#strike = undefined;
     await this.#clearMemoryLimitStrikes();
   }
@@ -477,6 +489,10 @@ export class JobDriver {
   ): Promise<void> {
     const { queue } = this.#options;
     const first = this.#strike === undefined;
+    // Set before the first await below: closes the window as tightly as
+    // possible against a still-outstanding clean sibling reaching quiescence
+    // and clearing what this event is about to record.
+    this.#strikeRecordedThisIsolate = true;
     this.#strike ??= this.#recordMemoryLimitStrike(error);
     const strike = await this.#strike;
 
