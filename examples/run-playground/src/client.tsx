@@ -3,6 +3,7 @@ import {
   Badge,
   Breadcrumbs,
   Button,
+  Dialog,
   LayerCard,
   CloudflareLogo,
   Sidebar,
@@ -15,6 +16,7 @@ import {
   CheckCircleIcon,
   DoorOpenIcon,
   GithubLogoIcon,
+  LightbulbIcon,
   MoonIcon,
   PlayIcon,
   SunIcon,
@@ -620,12 +622,19 @@ interface EscapeLevel {
   code: string;
   title: string;
   goal: string;
-  source: string;
+  /** Hint shown in the clue dialog — nudges without handing over the code. */
+  clue: string;
+  /** A working answer, revealed on request from the clue dialog. */
+  solution: string;
   limits?: EscapeLimits;
   abortAfterMs?: number;
   /** Shown when the level only behaves this way deployed, not in local dev. */
   warning?: string;
 }
+
+/** Every level starts from the same innocent attempt — the puzzle is yours. */
+const ESCAPE_STARTER_SOURCE = `return "let me out";
+`;
 
 /**
  * One level per RunError code, easiest doors first. Winning a level means
@@ -635,47 +644,53 @@ const ESCAPE_LEVELS: EscapeLevel[] = [
   {
     code: "RUN_COMPILE_ERROR",
     title: "Smuggle in an import",
-    goal: "Pull in a module. Imports — static or dynamic — are rejected before any Worker is even loaded.",
-    source: `import { readFileSync } from "node:fs";
+    goal: "Your program arrives alone — no modules, no dependencies, no package manager. Try to bring a friend anyway.",
+    clue: "Any import will do — static or dynamic, real or made up. The ban is enforced before anything loads, so the module doesn't even need to exist.",
+    solution: `import { readFileSync } from "node:fs";
 return readFileSync("/etc/passwd", "utf8");
 `
   },
   {
     code: "RUN_EXECUTION_ERROR",
     title: "Reach the network",
-    goal: "Make an outbound request. The sandbox has no network at the platform level — there is no fetch to monkey-patch back.",
-    source: `return await fetch("https://example.com");
+    goal: "There's a whole internet out there. Touch it.",
+    clue: "Reach for the global every exfiltration attempt starts with. It exists — the platform just refuses to let anything out.",
+    solution: `return await fetch("https://example.com");
 `
   },
   {
     code: "RUN_SERIALIZATION_ERROR",
     title: "Sneak a function out",
-    goal: "Return something the RPC boundary refuses to carry — like live code.",
-    source: `return () => "backdoor";
+    goal: "Results cross back over an RPC boundary that carries data — BigInt, Map, Set, Date, even cycles. Get something across that isn't data.",
+    clue: "Return something callable. Live code can't be serialized, so the boundary rejects it on the way out.",
+    solution: `return () => "backdoor";
 `
   },
   {
     code: "RUN_TIMEOUT",
     title: "Outlive the wall clock",
-    goal: "This level's wall-clock budget is 1.5 seconds. Wait longer than the parent allows.",
+    goal: "This level's wall-clock budget is 1.5 seconds. Overstay your welcome.",
+    clue: "You don't have to do any work — just wait. Timers exist inside the sandbox; sleep longer than the budget.",
     limits: { timeoutMs: 1_500 },
-    source: `await new Promise((resolve) => setTimeout(resolve, 60_000));
+    solution: `await new Promise((resolve) => setTimeout(resolve, 60_000));
 return "still here";
 `
   },
   {
     code: "RUN_HOST_FUNCTION_ERROR",
     title: "Open the vault",
-    goal: "demo.vault() throws on the host. The failure crosses back as one sanitized error — host internals never leak into the sandbox.",
-    source: `return await demo.vault();
+    goal: "One of the demo.* host functions is booby-trapped. Find it and trip it.",
+    clue: "Besides demo.customers() and demo.wait(ms) there's a third host function with a suspicious name. Call the one that sounds locked.",
+    solution: `return await demo.vault();
 `
   },
   {
     code: "RUN_HOST_FUNCTION_LIMIT",
     title: "Hammer the host",
-    goal: "This level allows 3 host calls per run. Make more.",
+    goal: "This level allows 3 host calls per run. Be greedy.",
+    clue: "A small loop of await demo.wait(1) blows the budget on the fourth call — and if you don't catch the rejection, the whole run fails with the limit code.",
     limits: { maxHostFunctionCalls: 3 },
-    source: `for (let i = 0; i < 10; i++) {
+    solution: `for (let i = 0; i < 10; i++) {
   await demo.wait(1);
 }
 return "done hammering";
@@ -684,46 +699,50 @@ return "done hammering";
   {
     code: "RUN_DETACHED_HOST_FUNCTION",
     title: "Leave a call dangling",
-    goal: "Start a host call, then return without it. The run refuses to settle cleanly around a dangling host call.",
-    source: `demo.wait(60_000).catch(() => {});
+    goal: "The run refuses to settle while a host call dangles. Prove it: finish your program while the host is still working.",
+    clue: "Start a slow host call like demo.wait(60_000), don't await it (catch its rejection so nothing else fires first), and return immediately.",
+    solution: `demo.wait(60_000).catch(() => {});
 return "gone before it settles";
 `
   },
   {
     code: "RUN_ABORTED",
     title: "Get unplugged",
-    goal: "For this level the server pulls the plug 750 ms in — cancellation reaches the in-flight host call, and the child is disposed.",
+    goal: "You can't trigger this one from inside. 750 ms into this level, the parent Worker pulls the plug — just make sure you're mid-flight when it happens.",
+    clue: "Anything still running at 750 ms collects it. Await a slow host call — demo.wait(30_000) — and never come back.",
     abortAfterMs: 750,
-    source: `await demo.wait(30_000);
+    solution: `await demo.wait(30_000);
 return "unreachable";
 `
   },
   {
     code: "RUN_SOURCE_TOO_LARGE",
     title: "Write a novel",
-    goal: "This level's source budget is 256 bytes — and this program is under it. Pad it past the line, then run.",
+    goal: "This level's source budget is 256 bytes, checked before a single byte runs. Write a novel.",
+    clue: "Nothing has to execute — padding counts. A few long comment lines push you over the line.",
     limits: { maxSourceBytes: 256 },
-    source: `// Budget: 256 bytes of source. This program is under it.
-// Add code or comments until you blow the budget.
-return "tiny";
+    solution: `// ${"All work and no play makes Jack a dull boy. ".repeat(6).trim()}
+return "a novel";
 `
   },
   {
     code: "RUN_INVALID_INPUT",
     title: "Break the contract",
-    goal: "This level ships an illegal limits object (timeoutMs: 0 — the minimum is 1). run() rejects before anything loads; your code is never even compiled.",
+    goal: "Some escapes never get to run at all. This level ships an illegal limits object (timeoutMs: 0 — the minimum is 1). Prove the contract is checked first.",
+    clue: "It's not about your code — the level's own limits are already illegal, and run() rejects before compiling anything. Run whatever you like.",
     limits: { timeoutMs: 0 },
-    source: `return "this never runs";
+    solution: `return "the contract already failed";
 `
   },
   {
     code: "RUN_RESOURCE_LIMIT",
     title: "Burn the CPU",
-    goal: "Spin synchronously against a 500 ms CPU budget until the platform kills the isolate.",
+    goal: "Wall clocks can't interrupt a busy loop — only the CPU meter can. This level's budget is 500 ms of real CPU. Force the platform to kill you.",
+    clue: "Spin synchronously — a huge loop of real math, no awaits. Deployed, the CPU meter terminates the isolate mid-loop.",
     limits: { cpuMs: 500, timeoutMs: 120_000 },
     warning:
-      "Deployed only — local dev doesn't meter CPU, so this loop just runs to completion (slowly).",
-    source: `let x = 0;
+      "Deployed only — local dev doesn't meter CPU, so a big loop just runs to completion (slowly).",
+    solution: `let x = 0;
 for (let i = 0; i < 3_000_000_000; i++) {
   x += Math.sqrt(i);
 }
@@ -733,11 +752,12 @@ return x;
   {
     code: "RUN_WORKER_ERROR",
     title: "Hang the runtime",
-    goal: "Await a promise nothing will ever settle. workerd's hang detector notices code that can never produce a response and kills the request.",
+    goal: "Make the runtime itself realize your code can never produce an answer.",
+    clue: "Await a promise nothing will ever settle — no timer, no resolver, nothing. workerd's hang detector does the rest.",
     limits: { timeoutMs: 5_000 },
     warning:
       "Deployed only — in local dev the wall clock wins instead and you get RUN_TIMEOUT.",
-    source: `await new Promise(() => {});
+    solution: `await new Promise(() => {});
 return "unreachable";
 `
   }
@@ -830,15 +850,24 @@ function EscapeBoard({
 function EscapeRoom() {
   const [levelIndex, setLevelIndex] = useState(0);
   const [collected, setCollected] = useState<Set<string>>(loadCollectedCodes);
-  const [source, setSource] = useState(() => getEscapeLevel(0).source);
+  const [source, setSource] = useState(ESCAPE_STARTER_SOURCE);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<RunApiResponse>();
+  const [clueOpen, setClueOpen] = useState(false);
+  const [answerRevealed, setAnswerRevealed] = useState(false);
   const level = getEscapeLevel(levelIndex);
 
   function selectLevel(index: number) {
     setLevelIndex(index);
-    setSource(getEscapeLevel(index).source);
+    setSource(ESCAPE_STARTER_SOURCE);
     setResult(undefined);
+    setClueOpen(false);
+    setAnswerRevealed(false);
+  }
+
+  function closeClueDialog() {
+    setClueOpen(false);
+    setAnswerRevealed(false);
   }
 
   function resetBoard() {
@@ -953,16 +982,71 @@ function EscapeRoom() {
               )}
             </div>
 
-            <Textarea
-              value={source}
-              onChange={(event) => setSource(event.currentTarget.value)}
-              onKeyDown={(event) => insertEditorTab(event, source, setSource)}
-              spellCheck={false}
-              aria-label="Escape attempt editor"
-              className="min-h-[180px] resize-y font-mono text-[13px]"
-            />
+            <div>
+              <div className="flex items-center justify-between">
+                <SectionLabel>Your attempt</SectionLabel>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setClueOpen(true)}
+                  icon={<LightbulbIcon size={14} />}
+                >
+                  Clue
+                </Button>
+              </div>
+              <Textarea
+                value={source}
+                onChange={(event) => setSource(event.currentTarget.value)}
+                onKeyDown={(event) => insertEditorTab(event, source, setSource)}
+                spellCheck={false}
+                aria-label="Escape attempt editor"
+                className="min-h-[180px] w-full resize-y font-mono text-[13px]"
+              />
+            </div>
           </div>
         </Card>
+
+        <Dialog.Root
+          open={clueOpen}
+          onOpenChange={(open) => {
+            if (!open) closeClueDialog();
+          }}
+        >
+          <Dialog className="max-w-lg p-6">
+            <Dialog.Title>Clue — {level.title}</Dialog.Title>
+            <Dialog.Description>{level.clue}</Dialog.Description>
+            {answerRevealed && (
+              <pre className="mt-3 rounded-md bg-kumo-elevated p-2.5 font-mono text-xs text-kumo-default whitespace-pre-wrap break-words">
+                {level.solution}
+              </pre>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={closeClueDialog}>
+                Close
+              </Button>
+              {answerRevealed ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setSource(level.solution);
+                    closeClueDialog();
+                  }}
+                >
+                  Use this answer
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setAnswerRevealed(true)}
+                >
+                  Just show me the answer
+                </Button>
+              )}
+            </div>
+          </Dialog>
+        </Dialog.Root>
 
         <Card
           title="Attempt"
@@ -1043,11 +1127,6 @@ function EscapeRoom() {
       </div>
 
       <aside className="flex w-full flex-col gap-5 xl:sticky xl:top-[4.25rem] xl:h-fit xl:w-[300px] xl:shrink-0">
-        <EscapeBoard
-          collected={collected}
-          activeIndex={levelIndex}
-          onSelect={selectLevel}
-        />
         <Card
           title="House rules"
           meta={
@@ -1063,16 +1142,22 @@ function EscapeRoom() {
               Twelve locked doors, one per{" "}
               <span className="font-mono text-[0.9em]">RunError</span> code.
               Each level dares you to reach something you shouldn't — the
-              network, the host, the clock, the RPC boundary. Trigger exactly
-              the level's code to collect it.
+              network, the host, the clock, the RPC boundary. Write an attempt
+              that triggers exactly the level's code to collect it.
             </Text>
             <Text size="sm" variant="secondary">
-              The code is fully editable — the prefilled attempt is just a head
-              start. Every failure comes back the same way: one typed error with
-              a stable code and bounded logs, never a host stack trace.
+              Stuck? The lightbulb above the editor offers a clue — and will
+              show you a working answer if the clue isn't enough. Every failure
+              comes back the same way: one typed error with a stable code and
+              bounded logs, never a host stack trace.
             </Text>
           </div>
         </Card>
+        <EscapeBoard
+          collected={collected}
+          activeIndex={levelIndex}
+          onSelect={selectLevel}
+        />
       </aside>
     </div>
   );
