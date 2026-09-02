@@ -3043,9 +3043,7 @@ export class Think<
                   if (!event.inserted || event.parentId !== undefined) {
                     await this._syncMessages();
                   } else {
-                    this._upsertCachedMessage(
-                      await this._messageForCache(event.message)
-                    );
+                    this._upsertCachedMessage(event.message as UIMessage);
                   }
                   break;
                 case "update":
@@ -3054,9 +3052,7 @@ export class Think<
                       (message) => message.id === event.message.id
                     )
                   ) {
-                    this._patchCachedMessage(
-                      await this._messageForCache(event.message)
-                    );
+                    this._patchCachedMessage(event.message as UIMessage);
                   }
                   break;
                 case "clear":
@@ -3633,17 +3629,6 @@ export class Think<
     );
     this._scheduleMediaEvictionPass();
     return hydrated;
-  }
-
-  /** Reconstruct a pointer-bearing stored row before it enters the live cache. */
-  private async _messageForCache(message: SessionMessage): Promise<UIMessage> {
-    // Any part can carry a pointer: files, offloaded text, and strings nested
-    // in tool output. One scan of the serialized row settles it.
-    if (!JSON.stringify(message).includes("attachment:sha256:")) {
-      return message as UIMessage;
-    }
-    return ((await this.session.getMessage(message.id)) ??
-      message) as UIMessage;
   }
 
   /** Patch or append one message in the live cache after a durable write. */
@@ -13965,9 +13950,8 @@ export class Think<
         };
         const safe = await this._updateMessageInHistory(updatedMsg);
         // Session change callbacks may run after an immediately scheduled
-        // continuation begins. Keep its input cache coherent synchronously —
-        // reconstructed, since the row it just wrote is in pointer form.
-        this._patchCachedMessage(await this._messageForCache(safe));
+        // continuation begins. Keep its input cache coherent synchronously.
+        this._patchCachedMessage(safe);
         // Patch the live cache in place instead of doing a full
         // `_syncMessages()` round-trip.
         // A full re-read during a streaming turn drops in-flight messages
