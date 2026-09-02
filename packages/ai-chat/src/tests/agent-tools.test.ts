@@ -262,6 +262,10 @@ type ParentStub = DurableObjectStub & {
     generation: string | null;
     next_at: number | null;
   } | null>;
+  driveFacetRecoverySlowOomSealForTest(executing: {
+    childName: string;
+    incidentId: string;
+  }): Promise<string>;
   driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
     taskRunOnChild: number;
     routedWakeOnRoot: number;
@@ -350,6 +354,32 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(runState?.generation).toBeNull();
     expect(runState?.next_at).toBeGreaterThan(Date.now());
   });
+
+  it("seals a routed run whose failure lands after root detaches at the dispatch budget", async () => {
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-slow-oom-${crypto.randomUUID()}`
+    };
+
+    // Root's own dispatch budget (5s) elapses well before the facet's
+    // ~6.5s delayed failure — this call returns once root detaches, not
+    // once the run actually fails.
+    await parent.driveFacetRecoverySlowOomSealForTest(executing);
+    // The failure that arrives after root detached must still be seen:
+    // this is exactly the gap a routed dispatch that discards its
+    // still-pending call (instead of tracking it) would miss entirely.
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    const freshParent = await getParent(parentName);
+
+    expect(
+      await freshParent.facetRecoveryIncidentStatusForTest(
+        executing.childName,
+        executing.incidentId
+      )
+    ).toBe("exhausted");
+  }, 20_000);
 
   it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {
     const parent = await getParent();

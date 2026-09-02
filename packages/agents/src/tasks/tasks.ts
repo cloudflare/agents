@@ -429,44 +429,72 @@ export class Tasks<
     if (timing?.owner_path) {
       // This root mirrors a routed facet's wake; the run and its step
       // journal live on the owning facet, so dispatch routes back there.
-      // The facet applies the same bounded-dispatch policy as the local
-      // path below and returns its own wake outcome for this mirror job —
-      // a later settle's own routed #syncWake still supersedes it (newer
-      // pushes win over drive results), same as the local path.
+      // The facet fully awaits its own dispatch — no local budget to race,
+      // since this root now races its own await of the call and, on
+      // budget, keeps the still-pending call tracked against this alarm's
+      // memory-limit breaker domain instead of discarding it. Verified
+      // against a deployed repro: a callee's real memory-limit reset mid
+      // RPC rejects the caller's pending call with the platform's own
+      // "exceeded its memory limit" text, exactly what the breaker already
+      // matches on — so a late failure on the facet is attributed here
+      // just like a local detached attempt would be.
+      const target = {
+        key: timing.owner_path_key ?? timing.owner_path,
+        data: timing.owner_path
+      };
+      const call = this.lifecycle.routes.to(target, {
+        type: "dispatch",
+        runId
+      } satisfies TaskRouteMessage);
+      let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+      const budget = new Promise<"budget">((resolve) => {
+        budgetTimer = setTimeout(() => resolve("budget"), DISPATCH_BUDGET_MS);
+      });
       try {
-        return (await this.lifecycle.routes.to(
-          {
-            key: timing.owner_path_key ?? timing.owner_path,
-            data: timing.owner_path
-          },
-          { type: "dispatch", runId } satisfies TaskRouteMessage
-        )) as LifecycleJobOutcome;
+        const winner = await Promise.race([
+          call.then((outcome) => ({ outcome })),
+          budget
+        ]);
+        if (winner === "budget") {
+          this.lifecycle.trackAlarmWork(call);
+          // The facet's own routed #syncWake, made whenever it eventually
+          // settles, supersedes whatever this returns (newer pushes win
+          // over drive results), same as the local path below.
+          return undefined;
+        }
+        return winner.outcome as LifecycleJobOutcome;
       } catch (error) {
         if (isPlatformFailure(error)) throw error;
         console.error(`error dispatching routed Task run "${runId}"`, error);
         return "yield";
+      } finally {
+        clearTimeout(budgetTimer);
       }
     }
 
     return this.#dispatchRun(runId);
   }
 
+  /** Push a live attempt's durable claim deadline forward one claim window. */
+  #refreshClaim(runId: string): void {
+    this.#store.sql`
+      UPDATE cf_agents_task_runs
+      SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
+      WHERE run_id = ${runId} AND state = 'running'
+    `;
+  }
+
   /**
-   * Drive one due run to its next durable boundary, bounded by the dispatch
-   * budget, and return the wake outcome for whichever queue row is driving
-   * it — this capability's own job locally, or a routed `dispatch` message
-   * a root is awaiting across the route boundary.
+   * Drive one local due run to its next durable boundary, bounded by the
+   * dispatch budget, and return the wake outcome for this capability's own
+   * queue job.
    */
   async #dispatchRun(runId: string): Promise<LifecycleJobOutcome> {
     const active = this.#active.get(runId);
     if (active) {
       // A live attempt in this isolate; push the claim backstop forward so
       // the due job does not hot-loop the alarm while it works.
-      this.#store.sql`
-        UPDATE cf_agents_task_runs
-        SET next_at = ${Date.now() + this.#claimTimeoutMs()}, updated_at = ${Date.now()}
-        WHERE run_id = ${runId} AND state = 'running'
-      `;
+      this.#refreshClaim(runId);
       this.lifecycle.trackAlarmWork(active.promise);
       return this.#wakeOutcome(runId);
     }
@@ -500,6 +528,26 @@ export class Tasks<
     } finally {
       clearTimeout(budgetTimer);
     }
+    return this.#wakeOutcome(runId);
+  }
+
+  /**
+   * Drive one routed dispatch to completion on this owning facet. There is
+   * no local budget to race here: the root that sent this message races
+   * its own await of the call instead, so a full await is safe regardless
+   * of how long the attempt takes — the call keeps running on this facet
+   * either way. An already-active attempt only needs its claim refreshed:
+   * it is already tracked against whichever alarm's breaker domain
+   * originally dispatched it (a root's pending routed call, or this
+   * facet's own local alarm).
+   */
+  async #dispatchRoutedRun(runId: string): Promise<LifecycleJobOutcome> {
+    const active = this.#active.get(runId);
+    if (active) {
+      this.#refreshClaim(runId);
+      return this.#wakeOutcome(runId);
+    }
+    await this.#executeRun(runId);
     return this.#wakeOutcome(runId);
   }
 
@@ -721,7 +769,7 @@ export class Tasks<
         return this.#syncRoutedWake(owner, message.runId, message.next);
       }
       case "dispatch":
-        return this.#dispatchRun(message.runId);
+        return this.#dispatchRoutedRun(message.runId);
       case "memoryLimit": {
         await this.#applyMemoryLimit(message.runId, message.context);
         // The owner's own Lifecycle never observes the root's alarm; this
@@ -770,6 +818,29 @@ export class Tasks<
       retry: WAKE_JOB_RETRY
     });
     return true;
+  }
+
+  /**
+   * @internal Framework aperture: bulk-cancel this root's routed wake
+   * mirrors for every run owned by a deleted facet subtree. The runs and
+   * their step journals live on the deleted facets' own storage and are
+   * wiped with them; only this root's mirror job needs an explicit cancel,
+   * or it stays due forever, retrying a dispatch to a facet that is gone.
+   */
+  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
+    prefix: string
+  ): Promise<void> {
+    for (const job of this.lifecycle.jobs.list()) {
+      const timing = isTaskWakeJobPayload(job.payload)
+        ? job.payload
+        : undefined;
+      const ownerKey = timing?.owner_path_key ?? timing?.owner_path;
+      if (!timing?.owner_path || ownerKey === null || ownerKey === undefined) {
+        continue;
+      }
+      if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
+      await this.lifecycle.jobs.cancel(job.id);
+    }
   }
 
   /** Mirror every non-terminal run into the queue (startup reconcile). */

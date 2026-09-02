@@ -3393,6 +3393,7 @@ type AgentToolInput = {
 };
 
 const FACET_OOM_TEST_TASK_NAME = "__cf_test_facetRecoveryOom";
+const FACET_SLOW_OOM_TEST_TASK_NAME = "__cf_test_facetRecoverySlowOom";
 
 export class AIChatAgentToolChild extends AIChatAgent<Env> {
   constructor(ctx: AgentContext, env: Env) {
@@ -3411,16 +3412,30 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         "Durable Object's isolate exceeded its memory limit and was reset."
       );
     });
+    // Twin of the above, but genuinely slow (not suspended) past the
+    // dispatch budget once armed, so the routed dispatch budget race on
+    // the root actually detaches before this throws — exercising root's
+    // own tracking of the still-pending call, not just the local path.
+    this.tasks.register(FACET_SLOW_OOM_TEST_TASK_NAME, async (_input, step) => {
+      await step.sleep("armed", "1 hour");
+      await new Promise((resolve) => setTimeout(resolve, 6_500));
+      throw new Error(
+        "Durable Object's isolate exceeded its memory limit and was reset."
+      );
+    });
   }
 
   /**
    * Seed one active incident and its routed recovery Task run, mirrored as
    * one wake job on the root's queue, and wait for its natural first
-   * dispatch to safely park it (`waiting`, per the definition above).
+   * dispatch to safely park it (`waiting`, per the definitions above).
    * Returns the run ID so the caller can locate that mirror on the root's
    * own queue and force it due again to arm the OOM throw.
    */
-  async seedFacetRecoveryOomForTest(incidentId: string): Promise<string> {
+  async seedFacetRecoveryOomForTest(
+    incidentId: string,
+    definition: string = FACET_OOM_TEST_TASK_NAME
+  ): Promise<string> {
     const now = Date.now();
     await this.ctx.storage.put(
       `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`,
@@ -3437,7 +3452,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       }
     );
     const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      FACET_OOM_TEST_TASK_NAME,
+      definition,
       { incidentId },
       { retain: false }
     );
@@ -4172,6 +4187,39 @@ export class AIChatAgentToolParent extends Agent<Env> {
     // One strike under the 3-strike seal threshold (#1825): the breaker
     // backs off without sealing.
     await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 0);
+    await this.alarm();
+    return runId;
+  }
+
+  /**
+   * Drive the root alarm to dispatch a routed run whose failure takes
+   * longer than the five-second dispatch budget, sealing on it. Root's
+   * own budget wins the race well before the facet throws, so this
+   * returns once root has detached — the caller must wait out the
+   * remaining delay (through a fresh stub) before checking the seal
+   * actually landed.
+   */
+  async driveFacetRecoverySlowOomSealForTest(executing: {
+    childName: string;
+    incidentId: string;
+  }): Promise<string> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      executing.childName
+    );
+    const runId = await child.seedFacetRecoveryOomForTest(
+      executing.incidentId,
+      "__cf_test_facetRecoverySlowOom"
+    );
+    await child.armFacetRecoveryOomForTest(runId);
+    this.sql`
+      UPDATE cf_agents_jobs
+      SET time = ${Date.now() - 1_000}
+      WHERE capability = 'tasks' AND json_extract(payload, '$.runId') = ${runId}
+    `;
+    // Two strikes already banked: the slow run's eventual (delayed)
+    // failure is the third, sealing strike (#1825).
+    await this.ctx.storage.put("cf_agents:oom_alarm_strikes", 2);
     await this.alarm();
     return runId;
   }
