@@ -234,6 +234,14 @@ export class Session {
       return { inserted: false, message: stored };
     }
 
+    // Everything Sessions hands back is inlined, whatever the caller passed.
+    // A caller that read with `attachments: "pointer"` and wrote the result
+    // back would otherwise put pointer form into the change feed and into its
+    // own cache, and the same append would return one shape when it inserted
+    // and another when it found a duplicate. No-op by reference for the
+    // ordinary inline write.
+    const emitted = this.#core.inlineMessage(prepared.message);
+
     let compacted = false;
     if (this.#tokenThreshold != null && this.#compactionFn) {
       compacted = await this.#maybeAutoCompact();
@@ -242,12 +250,12 @@ export class Session {
       await this.#core.notify({
         type: "append",
         sessionId: this.sessionId,
-        message: prepared.message,
+        message: emitted,
         parentId: options.parentId,
         inserted: true
       });
     }
-    return { inserted: true, message: prepared.message };
+    return { inserted: true, message: emitted };
   }
 
   /** Append a chain of messages; returns the last appended id. */
@@ -281,16 +289,17 @@ export class Session {
       prepared.message,
       prepared.tokenEstimate
     );
+    const emitted = this.#core.inlineMessage(prepared.message);
     if (outcome !== "updated") {
       if (outcome === "missing") return null;
-      return prepared.message;
+      return emitted;
     }
     await this.#core.notify({
       type: "update",
       sessionId: this.sessionId,
-      message: prepared.message
+      message: emitted
     });
-    return prepared.message;
+    return emitted;
   }
 
   async upsertMessage(

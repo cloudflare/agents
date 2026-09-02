@@ -237,6 +237,76 @@ describe("Sessions attachments", () => {
     });
   });
 
+  it("returns and emits inline form even when handed pointers", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      const original = fileMessage(
+        "m1",
+        dataUrl("image/png", 90_000),
+        "image/png"
+      );
+      await session.appendMessage(original);
+
+      // A caller that reads pointers and writes them back is the case that
+      // breaks a naive contract: the write path must not let pointer form
+      // leak into results or the change feed.
+      const [pointed] = await session.getHistory({ attachments: "pointer" });
+
+      const emitted: SessionMessage[] = [];
+      const unsubscribe = instance.sessions.subscribe((event) => {
+        if (event.type === "append" || event.type === "update") {
+          emitted.push(event.message);
+        }
+      });
+
+      // Appending it under a fresh id inserts; appending again is a duplicate.
+      // Both must come back the same shape.
+      const first = await session.appendMessage({ ...pointed, id: "m2" });
+      const retry = await session.appendMessage({ ...pointed, id: "m2" });
+      unsubscribe();
+
+      expect(first.message.parts[1].url).toBe(original.parts[1].url);
+      expect(retry.message.parts[1].url).toBe(original.parts[1].url);
+      expect(retry.message).toEqual(first.message);
+
+      // ...and nothing pointer-shaped reached a subscriber.
+      expect(emitted.length).toBeGreaterThan(0);
+      for (const message of emitted) {
+        expect(JSON.stringify(message)).not.toContain("attachment:sha256:");
+      }
+    });
+  });
+
+  it("inlines a pointer-form update before returning or emitting it", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      const original = fileMessage(
+        "m1",
+        dataUrl("image/png", 70_000),
+        "image/png"
+      );
+      await session.appendMessage(original);
+
+      const [pointed] = await session.getHistory({ attachments: "pointer" });
+      const emitted: SessionMessage[] = [];
+      const unsubscribe = instance.sessions.subscribe((event) => {
+        if (event.type === "update") emitted.push(event.message);
+      });
+
+      const updated = await session.updateMessage({
+        ...pointed,
+        parts: [{ type: "text", text: "edited" }, pointed.parts[1]]
+      });
+      unsubscribe();
+
+      expect(updated?.parts[1].url).toBe(original.parts[1].url);
+      expect(emitted).toHaveLength(1);
+      expect(JSON.stringify(emitted[0])).not.toContain("attachment:sha256:");
+    });
+  });
+
   it("collects a payload once its last reference goes", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
