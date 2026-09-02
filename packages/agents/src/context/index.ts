@@ -24,3 +24,12 @@ export {
   type SearchProvider
 } from "./search";
 export { AgentContextProvider, type SqlProvider } from "./sqlite-provider";
+export {
+  DEFAULT_MAX_TOOL_OUTPUT_BYTES,
+  DEFAULT_MAX_TOOL_OUTPUT_LINES,
+  capText,
+  shapeHistory,
+  shapeMessage,
+  type IntakeLimits,
+  type TruncationInfo
+} from "./intake";
