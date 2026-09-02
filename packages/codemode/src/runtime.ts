@@ -80,6 +80,12 @@ export type ToolLogEntry = {
    * instead of replaying a recorded result; their result is never stored.
    */
   ephemeral?: boolean;
+  /**
+   * How a paused call is satisfied: `"approval"` executes server-side once
+   * approved; `"client"` stays pending until `resolve()` supplies the result.
+   * Only present on approval-gated entries.
+   */
+  resolution?: "approval" | "client";
   state: ToolLogEntryState;
 };
 
@@ -116,6 +122,11 @@ export type PendingAction = {
   connector: string;
   method: string;
   args: unknown;
+  /**
+   * How the action is satisfied: `"approval"` (approve → execute server-side)
+   * or `"client"` (the host must supply the result via `resolve()`).
+   */
+  resolution?: "approval" | "client";
 };
 
 /**
@@ -173,7 +184,8 @@ function pendingOf(state: ExecutionState): PendingAction[] {
       seq: e.seq,
       connector: e.connector,
       method: e.method,
-      args: e.args
+      args: e.args,
+      resolution: e.resolution
     }));
 }
 
@@ -230,6 +242,7 @@ type LogRow = {
   result: string | null;
   requires_approval: number;
   ephemeral: number;
+  resolution: string | null;
   state: string;
 };
 
@@ -251,6 +264,10 @@ function rowToEntry(row: LogRow): ToolLogEntry {
     result: parseForStorage(row.result),
     requiresApproval: row.requires_approval === 1,
     ephemeral: row.ephemeral === 1 ? true : undefined,
+    resolution:
+      row.resolution === "approval" || row.resolution === "client"
+        ? row.resolution
+        : undefined,
     state: row.state as ToolLogEntryState
   };
 }
@@ -322,6 +339,7 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         result TEXT,
         requires_approval INTEGER NOT NULL DEFAULT 0,
         ephemeral INTEGER NOT NULL DEFAULT 0,
+        resolution TEXT,
         state TEXT NOT NULL,
         PRIMARY KEY (execution_id, seq)
       );
@@ -334,6 +352,16 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         connectors TEXT
       );
     `);
+    // Additive migration: cm_log tables created before the `resolution`
+    // column existed lack it (CREATE TABLE IF NOT EXISTS won't add it).
+    const logColumns = this.ctx.storage.sql
+      .exec<{ name: string }>(`PRAGMA table_info(cm_log)`)
+      .toArray();
+    if (!logColumns.some((c) => c.name === "resolution")) {
+      this.ctx.storage.sql.exec(
+        `ALTER TABLE cm_log ADD COLUMN resolution TEXT`
+      );
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -415,7 +443,8 @@ export class CodemodeRuntime extends DurableObject<unknown> {
     method: string,
     args: unknown,
     requiresApproval: boolean,
-    ephemeral = false
+    ephemeral = false,
+    resolution?: "approval" | "client"
   ): Promise<ToolDecision> {
     const row = this.#requireRow(executionId);
 
@@ -464,6 +493,18 @@ export class CodemodeRuntime extends DurableObject<unknown> {
         return { kind: "replay", result: existing.result };
       }
       if (existing.state === "pending") {
+        // A client-resolved call is never executed server-side: approval (or
+        // any replay pass reaching it) must not flip it to "executing". It
+        // stays pending — only resolve() can satisfy it with the client's
+        // result — so re-pause the run here.
+        if (existing.resolution === "client") {
+          this.ctx.storage.sql.exec(
+            `UPDATE cm_executions SET status = 'paused', updated_at = ? WHERE id = ?`,
+            Date.now(),
+            executionId
+          );
+          return { kind: "pause", seq };
+        }
         // Approved since the last run. Transition pending → executing and
         // persist BEFORE returning, so a concurrent reject() (e.g. a second UI
         // tab) sees "executing" and no-ops instead of reverting an action that
@@ -503,8 +544,8 @@ export class CodemodeRuntime extends DurableObject<unknown> {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cm_log
         (execution_id, seq, connector, method, args, result,
-         requires_approval, ephemeral, state)
-        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+         requires_approval, ephemeral, resolution, state)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       executionId,
       seq,
       connector,
@@ -512,6 +553,8 @@ export class CodemodeRuntime extends DurableObject<unknown> {
       storedArgs,
       requiresApproval ? 1 : 0,
       ephemeral ? 1 : 0,
+      // Both values imply a pause; "approval" is the default for a gated call.
+      requiresApproval ? (resolution ?? "approval") : null,
       state
     );
 
@@ -676,6 +719,43 @@ export class CodemodeRuntime extends DurableObject<unknown> {
       Date.now(),
       executionId
     );
+    return true;
+  }
+
+  /**
+   * Supply the result of a pending client-resolved action. The entry flips to
+   * "applied" with the given result, exactly as if the tool had executed —
+   * the replay pass then serves the value to the resumed code from the log.
+   * The execution stays paused; the caller resumes it (see `resolveCodemode`).
+   *
+   * Returns whether the result was recorded: `false` when the entry is no
+   * longer pending or the run is no longer paused (stale/duplicate resolve),
+   * mirroring `reject()`.
+   */
+  async resolve(
+    executionId: string,
+    seq: number,
+    result: unknown
+  ): Promise<boolean> {
+    const execution = this.#executionRow(executionId);
+    if (!execution || execution.status !== "paused") return false;
+    const entry = this.#logRow(executionId, seq);
+    if (entry?.state !== "pending") return false;
+    // The size/serializability guard applies as to any recorded result — an
+    // unrecordable client value throws a model-actionable error to the caller
+    // and leaves the entry pending.
+    const stored = toStored(
+      `The result of ${entry.connector}.${entry.method}`,
+      result
+    );
+    this.ctx.storage.sql.exec(
+      `UPDATE cm_log SET result = ?, state = 'applied'
+        WHERE execution_id = ? AND seq = ?`,
+      stored,
+      executionId,
+      seq
+    );
+    this.#touch(executionId);
     return true;
   }
 
