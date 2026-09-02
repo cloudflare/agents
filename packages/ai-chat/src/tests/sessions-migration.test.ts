@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 /** Legacy ai-chat rows are lifted by the next constructor invocation. */
 describe("AIChatAgent Sessions migration", () => {
-  it("lifts v4 and v5 rows into one linear session and tombstones the table", async () => {
+  it("lifts v4 and v5 rows into one linear session and drops the table", async () => {
     const stub = await getAgentByName(
       env.TestChatAgent,
       `sessions-migration-${crypto.randomUUID()}`
@@ -22,9 +22,9 @@ describe("AIChatAgent Sessions migration", () => {
     ]);
     expect(restored[0].parts).toEqual([{ type: "text", text: "old format" }]);
     expect(restored[1].parts).toEqual([{ type: "text", text: "new format" }]);
-    expect(await stub.legacyMessageTableNamesForTest()).toEqual([
-      "cf_ai_chat_agent_messages__lifted_v1"
-    ]);
+    // The source is dropped, not renamed: a tombstone would leave the object
+    // holding its whole transcript twice.
+    expect(await stub.legacyMessageTableNamesForTest()).toEqual([]);
 
     await evictDurableObject(stub);
 
@@ -33,8 +33,6 @@ describe("AIChatAgent Sessions migration", () => {
         (message) => message.id
       )
     ).toEqual(["legacy-v4", "legacy-v5"]);
-    expect(await stub.legacyMessageTableNamesForTest()).toEqual([
-      "cf_ai_chat_agent_messages__lifted_v1"
-    ]);
+    expect(await stub.legacyMessageTableNamesForTest()).toEqual([]);
   });
 });

@@ -55,7 +55,6 @@ import type {
  */
 const HISTORY_CONTENT_CHUNK_SIZE = 50;
 const HISTORY_CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
-const LEGACY_TOMBSTONE_SUFFIX = "__lifted_v1";
 
 /** Per-session O(1)-maintained aggregates over the active branch path. */
 type StatsCache = {
@@ -189,11 +188,19 @@ export class SessionsCore {
   }
 
   /**
-   * One-time lift of the legacy `assistant_*` message and compaction tables
-   * (pure SQL — SQLite streams internally) followed by a RENAME to
-   * `*__lifted_v1` tombstones. A later release drops the tombstones; until
-   * then a manual rollback can rename them back. `assistant_config` belongs
-   * to Think, which lifts it itself.
+   * One-time lift of the legacy `assistant_*` message and compaction tables.
+   *
+   * The copy is pure SQL, so SQLite streams it rather than materializing rows
+   * in the isolate. Each source table is then verified row by row against its
+   * destination and DROPPED. Keeping the originals as renamed tombstones would
+   * leave every upgraded object holding its conversation history twice, which
+   * on a large store is both a bill and a headroom problem: a Durable Object
+   * tops out at 10 GB and gets uncomfortable well before that, so a 5 GB
+   * history plus its copy has nowhere to go. The copy already needs that
+   * space transiently, which is exactly why it must not be kept. A table whose verification fails is
+   * left in place with a `session:migration:incomplete` event so the rows can
+   * still be recovered by hand. `assistant_config` belongs to Think, which
+   * lifts and drops it itself.
    */
   migrateLegacy(): void {
     const legacy = (name: string): boolean =>
@@ -201,12 +208,39 @@ export class SessionsCore {
         "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
         [name]
       ).length > 0;
-    const tombstone = (name: string): void => {
-      if (!legacy(name) || legacy(`${name}${LEGACY_TOMBSTONE_SUFFIX}`)) return;
-      this.io.sqlWrite(
-        `ALTER TABLE ${name} RENAME TO ${name}${LEGACY_TOMBSTONE_SUFFIX}`,
+    const drop = (name: string): void => {
+      if (legacy(name)) this.io.sqlWrite(`DROP TABLE ${name}`, []);
+    };
+    /**
+     * Drop a lifted source only once every one of its rows has a copy holding
+     * the same payload. Matching on the key alone would accept a destination
+     * row that merely occupies the key, and dropping a table that was not
+     * fully copied is the one failure this migration must never have.
+     */
+    const dropWhenCopied = (
+      source: string,
+      destination: string,
+      payload: string
+    ): void => {
+      const [counts] = this.io.sql<{ source: number; copied: number }>(
+        `SELECT
+           (SELECT COUNT(*) FROM ${source}) AS source,
+           (SELECT COUNT(*) FROM ${source} AS legacy
+             JOIN ${destination} AS lifted
+               ON lifted.session_id = legacy.session_id
+              AND lifted.id = legacy.id
+              AND lifted.${payload} = legacy.${payload}) AS copied`,
         []
       );
+      if (counts && counts.source === counts.copied) {
+        drop(source);
+        return;
+      }
+      this.io.emit("session:migration:incomplete", {
+        table: source,
+        source: counts?.source ?? 0,
+        copied: counts?.copied ?? 0
+      });
     };
 
     if (legacy("assistant_messages")) {
@@ -222,6 +256,14 @@ export class SessionsCore {
          FROM assistant_messages`,
         []
       );
+      // The FTS index is rebuilt from the lifted rows below, so the old one is
+      // redundant the moment its messages land.
+      if (this.#searchIndexing) this.#backfillMissingFtsRows();
+      dropWhenCopied(
+        "assistant_messages",
+        "cf_agents_session_messages",
+        "content"
+      );
     }
     if (legacy("assistant_compactions")) {
       this.io.sqlWrite(
@@ -234,12 +276,16 @@ export class SessionsCore {
          FROM assistant_compactions`,
         []
       );
+      dropWhenCopied(
+        "assistant_compactions",
+        "cf_agents_session_compactions",
+        "summary"
+      );
     }
-    tombstone("assistant_messages");
-    tombstone("assistant_compactions");
-    tombstone("assistant_sessions");
-    tombstone("assistant_fts");
-    if (this.#searchIndexing) this.#backfillMissingFtsRows();
+    // Neither carries data the new schema needs: the registry is derived from
+    // message rows now, and the index is rebuilt from message text.
+    drop("assistant_sessions");
+    drop("assistant_fts");
   }
 
   // ── Change feed ──────────────────────────────────────────────────────────

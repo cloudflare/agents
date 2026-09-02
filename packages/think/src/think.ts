@@ -3894,7 +3894,7 @@ export class Think<
       .toArray()
       .map((row) => String(row.name));
     // Sessions leaves `assistant_config` alone; these keys are Think's, so
-    // Think lifts them straight into its own table.
+    // Think lifts them into its own table and drops the source.
     const source = legacy.includes("assistant_config")
       ? "assistant_config"
       : legacy.includes("assistant_config__lifted_v1")
@@ -3921,6 +3921,9 @@ export class Think<
         `;
       }
     }
+    // Config is a handful of small rows and every key Think reads now lives in
+    // think_config, so the source has nothing left to give.
+    this.ctx.storage.sql.exec(`DROP TABLE ${source}`);
   }
 
   private _ensureConfigTable(): void {

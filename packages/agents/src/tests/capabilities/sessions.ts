@@ -219,15 +219,6 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.get<T>(key);
   }
 
-  /** Legacy conversation-directory rows remain available in the tombstone. */
-  readLegacySessionTombstone(): Array<{ id: string; name: string }> {
-    return this.ctx.storage.sql
-      .exec<{ id: string; name: string }>(
-        "SELECT id, name FROM assistant_sessions__lifted_v1 ORDER BY id"
-      )
-      .toArray();
-  }
-
   /** Legacy config rows, which Sessions leaves untouched for Think to lift. */
   readLegacyConfig(): Array<{ key: string; value: string }> {
     return this.ctx.storage.sql

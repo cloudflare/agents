@@ -90,7 +90,7 @@ function legacyRows(): string[] {
 }
 
 describe("Sessions legacy migration", () => {
-  it("lifts assistant tables, preserves branch order, and leaves rollback tombstones", async () => {
+  it("lifts assistant tables, preserves branch order, and drops the sources", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
 
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
@@ -128,23 +128,24 @@ describe("Sessions legacy migration", () => {
         await instance.kvGet<number>("cf_agents:sessions_schema_version")
       ).toBe(1);
 
+      // Every lifted source is dropped once its rows are verified present.
+      // Keeping them would leave the object storing its history twice, and a
+      // Durable Object only has 10 GB to spend.
       const tables = instance.tableNames();
-      expect(tables).toContain("assistant_messages__lifted_v1");
-      expect(tables).toContain("assistant_compactions__lifted_v1");
-      // `assistant_config` belongs to Think: Sessions no longer lifts it into
-      // its own config table, and leaves the legacy table untouched.
-      expect(tables).not.toContain("assistant_config__lifted_v1");
+      for (const name of [
+        "assistant_messages",
+        "assistant_compactions",
+        "assistant_sessions",
+        "assistant_fts"
+      ]) {
+        expect(tables).not.toContain(name);
+        expect(tables).not.toContain(`${name}__lifted_v1`);
+      }
+      // `assistant_config` belongs to Think, which lifts and drops it itself.
       expect(tables).toContain("assistant_config");
       expect(instance.readLegacyConfig()).toEqual([
         { key: "prompt", value: "frozen prompt" }
       ]);
-      expect(tables).toContain("assistant_sessions__lifted_v1");
-      expect(instance.readLegacySessionTombstone()).toEqual([
-        { id: "chat-one", name: "Chat one" }
-      ]);
-      expect(tables).toContain("assistant_fts__lifted_v1");
-      expect(tables).not.toContain("assistant_messages");
-      expect(tables).not.toContain("assistant_fts");
     });
 
     await evictDurableObject(stub);
@@ -154,11 +155,47 @@ describe("Sessions legacy migration", () => {
         reconstruct: "pointer"
       });
       expect(active.map((item) => item.id)).toEqual(["m1", "m3"]);
+      expect(instance.tableNames()).not.toContain("assistant_messages");
+    });
+  });
+
+  it("keeps a lifted source when a row did not copy faithfully", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // A destination row already occupying `m2`'s key makes `INSERT OR
+      // IGNORE` skip the legacy row, so the legacy payload never arrives.
+      // Dropping the source here would destroy the only copy of it.
+      instance.seedLegacy([
+        ...legacySchema(),
+        ...legacyRows(),
+        `CREATE TABLE IF NOT EXISTS cf_agents_session_messages (
+           session_id TEXT NOT NULL,
+           id TEXT NOT NULL,
+           seq INTEGER NOT NULL,
+           parent_id TEXT,
+           type TEXT NOT NULL DEFAULT 'message',
+           role TEXT NOT NULL,
+           content TEXT NOT NULL,
+           token_estimate INTEGER NOT NULL DEFAULT 0,
+           media_candidate_bytes INTEGER NOT NULL DEFAULT 0,
+           created_at INTEGER NOT NULL,
+           PRIMARY KEY (session_id, id)
+         ) WITHOUT ROWID`,
+        `INSERT INTO cf_agents_session_messages
+           (session_id, id, seq, parent_id, type, role, content, token_estimate, media_candidate_bytes, created_at)
+         VALUES ('', 'm2', 1, NULL, 'message', 'user',
+           '{"id":"m2","role":"user","parts":[{"type":"text","text":"squatter"}]}',
+           0, 0, 1)`
+      ]);
+
+      // Touch the session so the Lifecycle starts and the lift runs.
+      await instance.sessions.session().getHistory({ reconstruct: "pointer" });
+
+      expect(instance.tableNames()).toContain("assistant_messages");
       expect(
-        instance
-          .tableNames()
-          .filter((name) => name === "assistant_messages__lifted_v1")
-      ).toHaveLength(1);
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "assistant_messages", source: 3, copied: 2 });
     });
   });
 
@@ -174,7 +211,7 @@ describe("Sessions legacy migration", () => {
         expect(
           (await session.search("root question")).map((hit) => hit.id)
         ).toEqual(["m1"]);
-        expect(instance.tableNames()).toContain("assistant_fts__lifted_v1");
+        expect(instance.tableNames()).not.toContain("assistant_fts");
       }
     );
   });

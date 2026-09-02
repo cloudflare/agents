@@ -410,6 +410,10 @@ const agentToolChunkEncoder = new TextEncoder();
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
+/** Bounds for one window of the legacy lift: rows and their summed bytes. */
+const LEGACY_LIFT_WINDOW_ROWS = 25;
+const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
+
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -2187,66 +2191,103 @@ export class AIChatAgent<
    * Runs in `onStart` (before hydration), not in the constructor: the lift is
    * an async import through Sessions, and the constructor does no session
    * storage work at all.
+   *
+   * Order is read first as ids alone, then message bodies are fetched in
+   * windows bounded by row count and bytes, so a large transcript never sits
+   * in the isolate at once. Once every readable row has a copy the legacy
+   * table is DROPPED rather than renamed: keeping it would leave the object
+   * holding its history twice.
    */
   private async _migrateLegacyMessages(): Promise<void> {
-    const tables = new Set(
+    const present =
       this.ctx.storage.sql
         .exec(
           `SELECT name FROM sqlite_master
-           WHERE type = 'table'
-             AND name IN (
-               'cf_ai_chat_agent_messages',
-               'cf_ai_chat_agent_messages__lifted_v1'
-             )`
+           WHERE type = 'table' AND name = 'cf_ai_chat_agent_messages'`
         )
-        .toArray()
-        .map((row) => String(row.name))
-    );
-    if (!tables.has("cf_ai_chat_agent_messages")) return;
+        .toArray().length > 0;
+    if (!present) return;
 
-    const rows = this.sql<{
+    // Ids and sizes only: the ordering pass must not carry message bodies.
+    const order = this.sql<{
       id: string;
-      message: string;
+      bytes: number;
       created_at: string | number | null;
     }>`
-      SELECT id, message, created_at FROM cf_ai_chat_agent_messages
+      SELECT id, LENGTH(CAST(message AS BLOB)) AS bytes, created_at
+      FROM cf_ai_chat_agent_messages
       ORDER BY created_at ASC, rowid ASC
     `;
+
     let parentId: string | null = null;
-    for (let index = 0; index < rows.length; index++) {
-      const row = rows[index];
-      try {
-        const parsed: unknown = JSON.parse(row.message);
-        const message = autoTransformMessages([parsed])[0];
-        if (!message || !isValidMessageStructure(message)) {
-          console.warn(
-            `[AIChatAgent] Skipping invalid legacy message ${row.id}: ` +
-              "missing or malformed id, role, or parts"
-          );
+    let imported = 0;
+    let skipped = 0;
+    let index = 0;
+    while (index < order.length) {
+      const window: typeof order = [];
+      let bytes = 0;
+      while (
+        index < order.length &&
+        window.length < LEGACY_LIFT_WINDOW_ROWS &&
+        (window.length === 0 ||
+          bytes + order[index].bytes <= LEGACY_LIFT_WINDOW_BYTES)
+      ) {
+        bytes += order[index].bytes;
+        window.push(order[index]);
+        index++;
+      }
+      const ids = JSON.stringify(window.map((row) => row.id));
+      const bodies = new Map(
+        this.sql<{ id: string; message: string }>`
+          SELECT id, message FROM cf_ai_chat_agent_messages
+          WHERE id IN (SELECT value FROM json_each(${ids}))
+        `.map((row) => [row.id, row.message] as const)
+      );
+
+      for (const row of window) {
+        const body = bodies.get(row.id);
+        if (body === undefined) {
+          skipped++;
           continue;
         }
-        const parsedTime =
-          typeof row.created_at === "number"
-            ? row.created_at
-            : Date.parse(String(row.created_at ?? ""));
-        await this.#session.importMessage(message, {
-          parentId,
-          createdAt: Number.isFinite(parsedTime) ? parsedTime : index
-        });
-        parentId = message.id;
-      } catch (error) {
-        console.error(`Failed to migrate message ${row.id}:`, error);
+        try {
+          const parsed: unknown = JSON.parse(body);
+          const message = autoTransformMessages([parsed])[0];
+          if (!message || !isValidMessageStructure(message)) {
+            console.warn(
+              `[AIChatAgent] Skipping invalid legacy message ${row.id}: ` +
+                "missing or malformed id, role, or parts"
+            );
+            skipped++;
+            continue;
+          }
+          const parsedTime =
+            typeof row.created_at === "number"
+              ? row.created_at
+              : Date.parse(String(row.created_at ?? ""));
+          await this.#session.importMessage(message, {
+            parentId,
+            createdAt: Number.isFinite(parsedTime) ? parsedTime : imported
+          });
+          parentId = message.id;
+          imported++;
+        } catch (error) {
+          console.error(`Failed to migrate message ${row.id}:`, error);
+          skipped++;
+        }
       }
     }
 
-    if (tables.has("cf_ai_chat_agent_messages__lifted_v1")) {
+    if (imported + skipped === order.length) {
       this.ctx.storage.sql.exec("DROP TABLE cf_ai_chat_agent_messages");
-    } else {
-      this.ctx.storage.sql.exec(
-        `ALTER TABLE cf_ai_chat_agent_messages
-         RENAME TO cf_ai_chat_agent_messages__lifted_v1`
-      );
+      return;
     }
+    // Something read differently than it counted. Keep the source table so the
+    // rows remain recoverable, and say so loudly.
+    console.error(
+      `[AIChatAgent] Legacy lift accounted for ${imported + skipped} of ` +
+        `${order.length} rows; leaving cf_ai_chat_agent_messages in place.`
+    );
   }
 
   /**
