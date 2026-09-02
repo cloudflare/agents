@@ -4,14 +4,21 @@ import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
 
-/** ai-chat keeps its existing message behavior when attachment storage is on. */
+/**
+ * ai-chat keeps its existing message behavior when a payload is chunked out.
+ *
+ * Sessions is a message store: a payload only leaves the row when the row
+ * cannot hold it, so every fixture below carries more than
+ * `MAX_INLINE_ROW_BYTES` (1.5 MiB).
+ */
+const OVER_BUDGET_BYTES = 2 * 1024 * 1024;
+
 describe("AIChatAgent Sessions attachments", () => {
   it("stores a pointer but keeps in-memory and HTTP messages reconstructed", async () => {
     const room = `sessions-attachment-${crypto.randomUUID()}`;
     const stub = await getAgentByName(env.TestChatAgent, room);
-    await stub.enableAttachmentsForTest();
 
-    const url = `data:image/png;base64,${btoa("image payload")}`;
+    const url = `data:image/png;base64,${btoa("p".repeat(OVER_BUDGET_BYTES))}`;
     const message: UIMessage = {
       id: "image-message",
       role: "user",
@@ -44,9 +51,7 @@ describe("AIChatAgent Sessions attachments", () => {
     // survives eviction the way a real subclass's policy does.
     const stub = await getAgentByName(env.AttachmentChatAgent, room);
 
-    const url = `data:image/png;base64,${btoa(
-      "payload that outlives the isolate".repeat(64)
-    )}`;
+    const url = `data:image/png;base64,${btoa("o".repeat(OVER_BUDGET_BYTES))}`;
     await stub.persistMessages([
       {
         id: "wake-user",

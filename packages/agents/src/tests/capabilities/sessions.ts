@@ -1,54 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { setLifecycleEventSink } from "../../lifecycle/durable-object-lifecycle";
-import { Sessions, type SessionAttachmentBucket } from "../../sessions";
+import { Sessions } from "../../sessions";
 
 /** One capability telemetry event recorded by a harness object. */
 export type RecordedEvent = { type: string; payload: Record<string, unknown> };
-
-/**
- * In-memory stand-in for an R2 bucket, counting the calls Sessions makes.
- *
- * R2 is the only tier that reclaims Durable Object space, so it is also the
- * only reason Sessions extracts a payload a row could still hold. A test that
- * wants to observe extraction therefore has to configure a bucket.
- */
-export class MemoryAttachmentBucket implements SessionAttachmentBucket {
-  readonly objects = new Map<string, Uint8Array>();
-  puts = 0;
-  gets = 0;
-  deletes = 0;
-
-  async get(key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> {
-    this.gets++;
-    const stored = this.objects.get(key);
-    if (!stored) return null;
-    const bytes = new Uint8Array(stored);
-    return {
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(bytes);
-          controller.close();
-        }
-      })
-    };
-  }
-
-  async put(key: string, value: ReadableStream<Uint8Array>): Promise<void> {
-    this.puts++;
-    this.objects.set(
-      key,
-      new Uint8Array(await new Response(value).arrayBuffer())
-    );
-  }
-
-  async delete(key: string | string[]): Promise<void> {
-    this.deletes++;
-    for (const item of typeof key === "string" ? [key] : key) {
-      this.objects.delete(item);
-    }
-  }
-}
 
 /**
  * Sums BILLED row writes across a window of SQLite statements.
@@ -97,18 +53,7 @@ class BilledRows {
  * below covers the opt-in path.
  */
 export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
-  #bucket: MemoryAttachmentBucket | undefined;
-  #r2ThresholdBytes = 1024;
-
   readonly sessions = new Sessions({
-    // A thunk, so `useAttachmentBucket()` can install the large-object tier
-    // before the first write.
-    attachments: () => ({
-      ...(this.#bucket ? { r2: this.#bucket } : {}),
-      r2ThresholdBytes: this.#r2ThresholdBytes,
-      keepRecentMessages: 2,
-      maxMaintenanceRowsPerPass: 2
-    }),
     reservedMetadataKeys: ["channel", "turnMetadata"]
   });
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
@@ -126,21 +71,6 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
         this.onAttachmentStored?.();
       }
     });
-  }
-
-  /**
-   * Give this object an R2 tier, so payloads at or above `thresholdBytes`
-   * are extracted instead of staying inline. Call before the first write.
-   */
-  useAttachmentBucket(thresholdBytes = 1024): MemoryAttachmentBucket {
-    this.#r2ThresholdBytes = thresholdBytes;
-    this.#bucket = new MemoryAttachmentBucket();
-    return this.#bucket;
-  }
-
-  /** Payload bytes currently held in the R2 tier, if one is configured. */
-  bucketObjectCount(): number {
-    return this.#bucket?.objects.size ?? 0;
   }
 
   /** Telemetry events of one type, in dispatch order. */
@@ -358,31 +288,9 @@ export class SessionSearchHarnessObject extends DurableObject<Cloudflare.Env> {
  * indexing is off, which is the default and the shape most hosts run.
  */
 export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
-  #bucket: MemoryAttachmentBucket | undefined;
-
-  readonly sessions = new Sessions({
-    attachments: () => ({
-      ...(this.#bucket ? { r2: this.#bucket } : {}),
-      r2ThresholdBytes: 1024
-    })
-  });
+  readonly sessions = new Sessions();
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
   readonly #billed = new BilledRows(this.ctx.storage.sql);
-
-  /**
-   * Install the R2 tier, so payloads at or above 1 KiB are extracted. Without
-   * it a payload stays inline and an append is billed as one row like any
-   * other.
-   */
-  useAttachmentBucket(): MemoryAttachmentBucket {
-    this.#bucket = new MemoryAttachmentBucket();
-    return this.#bucket;
-  }
-
-  /** Payload objects held in the R2 tier. */
-  bucketObjectCount(): number {
-    return this.#bucket?.objects.size ?? 0;
-  }
 
   attachmentChunkCount(): number {
     return Number(

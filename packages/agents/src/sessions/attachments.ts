@@ -5,7 +5,7 @@
  * back: data-URL file parts, text and reasoning parts, and strings nested in
  * tool outputs. The stored form keeps the part's shape and replaces the
  * payload with an `attachment:sha256:<hex>` pointer; bytes live in
- * content-addressed storage (chunked SQLite or R2). Reading back inlines the
+ * content-addressed chunked SQLite storage. Reading back inlines the
  * payload again by default, so a round-trip is exact. Nothing is truncated.
  *
  * Ordering: blob writes complete BEFORE the message row commits, so a stored
@@ -28,7 +28,6 @@ import type {
   ResolvedAttachment,
   SessionMessage,
   SessionMessagePart,
-  SessionsAttachmentOptions,
   SessionsOptions
 } from "./types";
 
@@ -40,12 +39,8 @@ export const ATTACHMENT_URL_PREFIX = "attachment:sha256:";
  */
 export const MAX_INLINE_ROW_BYTES = SESSION_ATTACHMENT_CHUNK_BYTES;
 
-const DEFAULT_R2_THRESHOLD_BYTES = 1_500_000;
-const DEFAULT_R2_PREFIX = "cf-agents/sessions/attachments";
 const DEFAULT_MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 const DEFAULT_BASE_PATH = "/attachments";
-const DEFAULT_KEEP_RECENT_MESSAGES = 8;
-const DEFAULT_MAX_MAINTENANCE_ROWS = 64;
 const STRING_STREAM_CHARS = 256 * 1024;
 const BASE64_STREAM_CHARS = (SESSION_ATTACHMENT_CHUNK_BYTES / 3) * 4;
 const TEXT_MEDIA_TYPE = "text/plain";
@@ -65,14 +60,8 @@ export interface StoredAttachment {
 
 /** Attachment policy with defaults applied. */
 export interface ResolvedAttachmentOptions {
-  readonly bucket: SessionsAttachmentOptions["r2"];
-  readonly r2ThresholdBytes: number;
-  readonly r2Prefix: string;
   readonly maxAttachmentBytes: number;
   readonly basePath: string;
-  readonly keepRecentMessages: number;
-  readonly maxMaintenanceRowsPerPass: number;
-  readonly maintenance: boolean;
   readonly reconstruct: AttachmentReconstructor;
 }
 
@@ -80,14 +69,11 @@ export interface ResolvedAttachmentOptions {
  * What one offload pass moves out of a message row.
  *
  * There is no content-type distinction: a `data:` URL file part, a long text
- * part, and a long string nested in tool output are all just payloads. Only
- * two things move one out of the row, and both are read from the engine's
- * resolved options rather than passed here:
- *
- *  1. R2, when a bucket is configured. Extracting into R2 is the only move
- *     that reclaims Durable Object space — SQLite chunks live in the same
- *     10 GB as the row they came out of — so it is the only eager one.
- *  2. The row budget below, which applies with or without a bucket.
+ * part, and a long string nested in tool output are all just payloads. One
+ * thing, and only one, moves a payload out of the row: the row budget below.
+ * Extraction never reclaims Durable Object space — the chunks live in the
+ * same 10 GB as the row they came out of — so there is no reason to extract
+ * a payload the row can still hold.
  */
 export interface OffloadPolicy {
   /**
@@ -465,29 +451,6 @@ function writeAt(
   };
 }
 
-/**
- * The largest inline payload a later maintenance pass could move out of this
- * row, which is what the stamped hint has to mean for bounded passes to
- * terminate. The pass compares it against whatever threshold is in force at
- * the time, so lowering `r2ThresholdBytes` makes older rows discoverable
- * without restamping them.
- *
- * Without a bucket the pass has nowhere useful to move anything — chunking a
- * payload leaves the bytes in the same Durable Object — so every row stamps
- * 0 and never becomes a candidate.
- */
-export function maintenanceCandidateBytes(
-  message: SessionMessage,
-  options: Pick<ResolvedAttachmentOptions, "bucket">
-): number {
-  if (!options.bucket) return 0;
-  let maximum = 0;
-  for (const leaf of collectLeaves(message.parts)) {
-    maximum = Math.max(maximum, leaf.bytes);
-  }
-  return maximum;
-}
-
 /** Walk every string leaf of a tool output, replacing through `visit`. */
 async function mapStrings(
   value: unknown,
@@ -612,26 +575,11 @@ export class AttachmentEngine {
     const input =
       typeof this.#input === "function" ? this.#input() : this.#input;
     return {
-      bucket: input?.r2,
-      r2ThresholdBytes: positive(
-        input?.r2ThresholdBytes,
-        DEFAULT_R2_THRESHOLD_BYTES
-      ),
-      r2Prefix: input?.r2Prefix ?? DEFAULT_R2_PREFIX,
       maxAttachmentBytes: positive(
         input?.maxAttachmentBytes,
         DEFAULT_MAX_ATTACHMENT_BYTES
       ),
       basePath: input?.basePath ?? DEFAULT_BASE_PATH,
-      keepRecentMessages: positive(
-        input?.keepRecentMessages,
-        DEFAULT_KEEP_RECENT_MESSAGES
-      ),
-      maxMaintenanceRowsPerPass: positive(
-        input?.maxMaintenanceRowsPerPass,
-        DEFAULT_MAX_MAINTENANCE_ROWS
-      ),
-      maintenance: input?.maintenance ?? true,
       reconstruct: input?.reconstruct ?? inlineReconstructor
     };
   }
@@ -719,18 +667,16 @@ export class AttachmentEngine {
       this.#io.emit("session:attachment:stored", {
         hash: row.hash,
         bytes: row.bytes,
-        mediaType: row.media_type,
-        backend: row.backend
+        mediaType: row.media_type
       });
     }
     return attachment;
   }
 
   /**
-   * Move payloads out of a message row: with a bucket, anything at or above
-   * the R2 threshold; then, bucket or not, whatever is largest until the row
-   * fits its budget. Blob writes complete before this returns, so a stored
-   * pointer always has durable bytes behind it.
+   * Move payloads out of a message row: the largest first, until the row
+   * fits its budget and no further. Blob writes complete before this
+   * returns, so a stored pointer always has durable bytes behind it.
    */
   async offload(
     message: SessionMessage,
@@ -742,9 +688,9 @@ export class AttachmentEngine {
     let bytes = 0;
     const leaves = collectLeaves(parts).sort((a, b) => b.bytes - a.bytes);
 
-    // A leaf the R2 pass already moved must not be offloaded again by the
-    // budget pass: its slot now holds a pointer, and storing that pointer
-    // string as a payload would lose the original bytes.
+    // A leaf that already moved must not be offloaded again: its slot now
+    // holds a pointer, and storing that pointer string as a payload would
+    // lose the original bytes.
     const taken = new Set<Leaf>();
     const take = async (leaf: Leaf): Promise<void> => {
       if (taken.has(leaf)) return;
@@ -755,15 +701,6 @@ export class AttachmentEngine {
       count++;
       bytes += leaf.bytes;
     };
-
-    // Rule 1: R2 is the only tier that reclaims Durable Object space, so it
-    // is the only reason to extract a payload the row could still hold.
-    const { bucket, r2ThresholdBytes } = this.options;
-    if (bucket) {
-      for (const leaf of leaves) {
-        if (leaf.bytes >= r2ThresholdBytes) await take(leaf);
-      }
-    }
 
     let rowBytes: number | undefined;
     if (Number.isFinite(policy.rowBudgetBytes)) {

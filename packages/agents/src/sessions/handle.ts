@@ -14,7 +14,6 @@ import { COMPACTION_PREFIX } from "./compaction-helpers";
 import { MAX_INLINE_ROW_BYTES } from "./attachments";
 import type { SessionsCore } from "./core";
 import { SessionMessageTooLargeError } from "./errors";
-import { runMaintenancePass } from "./maintenance";
 import { byteLength, sanitizeMessage } from "./sanitize";
 import type {
   AppendOptions,
@@ -23,7 +22,6 @@ import type {
   HistoryReadOptions,
   RecentHistoryResult,
   SearchResult,
-  SessionMaintenanceResult,
   SessionMessage,
   SessionRowStat,
   SessionStats,
@@ -45,8 +43,6 @@ export class Session {
     return this.#coreProvider();
   }
 
-  #maintenanceRunning = false;
-  #maintenanceScheduled = false;
   #compactionFn: CompactionFunction | null = null;
   #tokenThreshold: number | undefined;
 
@@ -169,7 +165,6 @@ export class Session {
       this.#core.attachments.resolveReconstructor(options.reconstruct),
       options.leafId
     );
-    if (result.truncated) this.#scheduleMaintenance();
     return result;
   }
 
@@ -397,17 +392,6 @@ export class Session {
     );
   }
 
-  /**
-   * Move inline payloads of aged rows into attachment storage — legacy rows,
-   * rows written under a looser policy, and large tool outputs. Recent rows
-   * are untouched. Bounded per pass; reschedules itself while a backlog
-   * remains.
-   */
-  async runMaintenance(): Promise<SessionMaintenanceResult | null> {
-    await this.#ready();
-    return this.#runMaintenance();
-  }
-
   // ── Compaction ───────────────────────────────────────────────────────────
 
   async addCompaction(
@@ -547,45 +531,5 @@ export class Session {
       });
       return false;
     }
-  }
-
-  #scheduleMaintenance(): void {
-    if (
-      this.#maintenanceScheduled ||
-      this.#maintenanceRunning ||
-      !this.#core.attachments.options.maintenance
-    ) {
-      return;
-    }
-    this.#maintenanceScheduled = true;
-    setTimeout(() => {
-      this.#maintenanceScheduled = false;
-      void this.#runMaintenance();
-    }, 0);
-  }
-
-  async #runMaintenance(): Promise<SessionMaintenanceResult | null> {
-    if (
-      this.#maintenanceRunning ||
-      !this.#core.attachments.options.maintenance
-    ) {
-      return null;
-    }
-    this.#maintenanceRunning = true;
-    let result: SessionMaintenanceResult | null = null;
-    try {
-      result = await runMaintenancePass(this.#core, this.sessionId);
-    } catch (error) {
-      this.#core.io.emit("session:maintenance:failed", {
-        sessionId: this.sessionId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      this.#maintenanceRunning = false;
-    }
-    // Chain the next pass only after clearing the running flag, which
-    // `#scheduleMaintenance` treats as "already covered".
-    if (result?.backlogRemains) this.#scheduleMaintenance();
-    return result;
   }
 }

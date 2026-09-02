@@ -428,11 +428,12 @@ export class AIChatAgent<
   private _abortRegistry: AbortRegistry;
 
   /**
-   * Sessions attachment policy overrides. Offload itself is not optional —
-   * Sessions always moves oversized file parts and tool-output strings into
-   * content-addressed storage and reconstructs them byte-for-byte on read.
-   * Set this only to tune the policy (thresholds, an R2 tier, a custom
-   * reconstructor, disabling the aged-row maintenance pass).
+   * Sessions attachment policy overrides. Extraction itself is not optional
+   * and not configurable: a payload rides inline in its message row until
+   * the row would exceed `MAX_INLINE_ROW_BYTES`, and then the largest
+   * payloads are chunked out until it fits, reconstructing byte-for-byte on
+   * read. Set this only to tune the payload ceiling, the logical locator
+   * prefix, or the reconstructor.
    */
   sessionAttachments: SessionsAttachmentOptions | undefined = undefined;
 
@@ -2325,9 +2326,8 @@ export class AIChatAgent<
 
   /**
    * Mirror `this.messages` from the Sessions change feed. Every durable write
-   * dispatches here synchronously, so write sites never hand-patch the cache
-   * and a maintenance rewrite (inline payload → attachment pointer) refreshes
-   * the cached row like any other update.
+   * dispatches here synchronously, so write sites never hand-patch the
+   * cache.
    */
   #subscribeToSessionChanges(): void {
     this.sessions.subscribe(async (event) => {
@@ -2341,8 +2341,7 @@ export class AIChatAgent<
           else this.messages[index] = message;
           return;
         }
-        case "update":
-        case "maintenance-rewrite": {
+        case "update": {
           const index = this.messages.findIndex(
             (m) => m.id === event.message.id
           );

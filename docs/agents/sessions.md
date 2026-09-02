@@ -2,9 +2,11 @@
 
 > **Experimental.** Everything exported from `agents/sessions` may change between releases while the API stabilizes.
 
-`agents/sessions` stores durable conversation history in a [Lifecycle Object](./lifecycle.md). It provides tree-structured messages, streamed and byte-budgeted reads, compaction overlays, optional full-text search, and lossless payload offload.
+`agents/sessions` stores durable conversation history in a [Lifecycle Object](./lifecycle.md). It provides tree-structured messages, streamed and byte-budgeted reads, compaction overlays, optional full-text search, and lossless payload storage.
 
-Sessions stores messages. Prompt assembly lives in [`agents/context`](./context.md) and composes with a session handle rather than living inside it.
+**Sessions stores messages. It is not a file store.** A message can reference a file without being one. Payloads ride inline in the message row and are chunked out only when the row cannot hold them, and chunking never reclaims database space — the chunks live in the same Durable Object as the row. A Durable Object's 10 GB ceiling is therefore the real bound on how much media one conversation can hold: roughly 39,000 200 KB images, measured. An application that handles files should keep them in a file store and put a reference in the message. Think does exactly that with its [Workspace](../think/index.md), which spills to R2.
+
+Prompt assembly lives in [`agents/context`](./context.md) and composes with a session handle rather than living inside it.
 
 `Think` and `AIChatAgent` use this capability for message persistence. You can also install it on a plain Durable Object.
 
@@ -152,8 +154,6 @@ The second argument is a minimum number of recent messages. The minimum can exce
 
 The budget counts what hydration actually costs. Each row is charged its stored bytes plus, when reconstructing inline, the attachment bytes its pointers inflate back. A row holding a pointer to an 8 MiB image is charged 8 MiB, not the ~100 bytes it occupies on disk. That is what makes the budget a bound on isolate memory rather than on the on-disk footprint. In pointer mode no attachment bytes are read, so only stored bytes count.
 
-`getRecentHistory()` schedules a maintenance pass when it had to truncate, on the assumption that a transcript that overflows its budget has aged rows worth draining.
-
 `getHistory()` materializes the selected path and exists for consumers that require an array:
 
 ```ts
@@ -172,7 +172,7 @@ await session.getHistoryRowStats();
 await session.stats();
 ```
 
-`getHistoryRowStats()` returns per-row stored bytes, attachment bytes, stamped token estimates, and the largest remaining offload candidate, without loading message content. `stats()` derives path length, stored content bytes, attachment bytes, and a heuristic token estimate for the active path with compaction overlays applied.
+`getHistoryRowStats()` returns per-row stored bytes, attachment bytes, and stamped token estimates, without loading message content. `stats()` derives path length, stored content bytes, attachment bytes, and a heuristic token estimate for the active path with compaction overlays applied.
 
 ## Branches and forks
 
@@ -261,54 +261,41 @@ The stored form keeps the part's shape and replaces the payload with an `attachm
 
 ### When a payload leaves the row
 
-Two things, and only two, move a payload out of a message row:
-
-1. **R2, when a bucket is configured.** A payload at or above `r2ThresholdBytes` is written to one private R2 object and the row keeps a pointer.
-2. **The row budget.** If the serialized row would exceed `MAX_INLINE_ROW_BYTES` (1.5 MiB), payloads are offloaded largest-first until it fits — into R2 under rule 1, otherwise into SQLite chunks. A row that still cannot fit throws `SessionMessageTooLargeError`.
+One rule, with no configuration: a payload stays inline in its message row until the serialized row would exceed `MAX_INLINE_ROW_BYTES` (1.5 MiB). Then the largest payloads are chunked out until the row fits. A row that still cannot fit throws `SessionMessageTooLargeError`. Nothing is truncated.
 
 Anything else stays inline.
 
-Extraction is not a way to shrink the database. Chunk rows live in the same Durable Object as the row they came out of, inside the same 10 GB; only R2 actually reclaims space. Billing counts rows written, not bytes, so rewriting a 500 KB row costs the same one billed row as a tiny one, while extracting it costs four (message, reference, blob, chunk). That is why R2 is the single eager threshold and why, without a bucket, inline is the correct resting place.
+Chunking is not a way to shrink the database. Chunk rows live in the same Durable Object as the row they came out of, inside the same 10 GB, so extraction never reclaims a byte — it only makes an over-budget row fit. Billing counts rows written, not bytes, so writing a 500 KB row costs the same one billed row as a tiny one, while chunking it out costs four (message, reference, blob, chunk). That is why inline is the correct resting place and why there is nothing here to tune.
 
-Configure the policy with plain values:
+Configure the ceiling, the locator, and the reconstructor:
 
 ```ts
 import { Sessions } from "agents/sessions";
 
 readonly sessions = new Sessions({
   attachments: {
-    maxAttachmentBytes: 32 * 1024 * 1024,
-    r2: env.ATTACHMENTS,
-    r2ThresholdBytes: 1_500_000
+    maxAttachmentBytes: 32 * 1024 * 1024
   }
 });
 ```
 
-| Option                      | Default                          | Meaning                                                        |
-| --------------------------- | -------------------------------- | -------------------------------------------------------------- |
-| `r2`                        | none                             | Optional large-object tier                                     |
-| `r2ThresholdBytes`          | `1_500_000`                      | The single extraction threshold; only applies when `r2` is set |
-| `r2Prefix`                  | `cf-agents/sessions/attachments` | Private R2 object-key prefix                                   |
-| `maxAttachmentBytes`        | 32 MiB                           | Ceiling for one attachment payload                             |
-| `basePath`                  | `/attachments`                   | Logical locator prefix exposed to reconstructors               |
-| `keepRecentMessages`        | `8`                              | Rows this close to the leaf keep inline payloads untouched     |
-| `maxMaintenanceRowsPerPass` | `64`                             | Maximum aged rows rewritten by one maintenance pass            |
-| `maintenance`               | `true`                           | Run the aged-row maintenance pass (a no-op without `r2`)       |
-| `reconstruct`               | inline                           | Read-side materialization default for file parts               |
+| Option               | Default        | Meaning                                          |
+| -------------------- | -------------- | ------------------------------------------------ |
+| `maxAttachmentBytes` | 32 MiB         | Ceiling for one attachment payload               |
+| `basePath`           | `/attachments` | Logical locator prefix exposed to reconstructors |
+| `reconstruct`        | inline         | Read-side materialization default for file parts |
 
-Individual fields are plain values, not thunks. Only the top-level `attachments` option may be a function, which is re-read on every access so an `Agent` subclass can point it at bindings or policy fields that are initialized after the field initializer runs:
+Individual fields are plain values, not thunks. Only the top-level `attachments` option may be a function, which is re-read on every access so an `Agent` subclass can point it at policy fields that are initialized after the field initializer runs:
 
 ```ts
 readonly sessions = new Sessions({
-  attachments: () => ({ r2: this.env.ATTACHMENTS })
+  attachments: () => ({ reconstruct: this.reconstructor })
 });
 ```
 
-Sessions owns the payload tables, private R2 keys, message references, deduplication, and deletion. Workspace is not part of attachment durability.
+Sessions owns the payload tables, message references, deduplication, and deletion. Workspace is not part of attachment durability.
 
-Without R2, the only payloads Sessions moves out are the ones an over-budget row cannot hold, and they go into Durable Object SQLite. With R2, every payload at or above `r2ThresholdBytes` moves into one private R2 object.
-
-SQLite payloads are split into 1.5 MiB rows. Each read pulls one row by `(storage_id, chunk_index)`. The final row can be shorter.
+Payloads are split into 1.5 MiB SQLite rows. Each read pulls one row by `(storage_id, chunk_index)`. The final row can be shorter.
 
 The write order is:
 
@@ -329,7 +316,7 @@ const { part } = await sessions.attachments.put(request.body!, {
 });
 ```
 
-Pass `bytes` when the stream length is known. A large declared-length stream goes directly to R2 through a fixed-length stream while Sessions hashes it. An unknown-length stream is staged in 1.5 MiB SQLite windows until Sessions knows its hash and placement.
+Pass `bytes` when the stream length is known: Sessions validates it against the bytes that actually arrive and rejects a mismatch. Either way the stream is written into 1.5 MiB SQLite windows and hashed as it goes, so a payload is never materialized whole.
 
 A payload exceeding `maxAttachmentBytes` throws `SessionAttachmentTooLargeError` before anything commits.
 
@@ -372,9 +359,9 @@ For a new small attachment that fits one SQLite window, an append changes:
 - one message row
 - one message-reference row
 
-Each additional 1.5 MiB payload window adds one row. A new R2-backed attachment uses one R2 PUT and stores blob, message, and reference metadata in SQLite. A replayable duplicate performs no payload write or R2 PUT.
+Each additional 1.5 MiB payload window adds one row. A replayable duplicate performs no payload write at all.
 
-A declared-length one-shot stream cannot be deduplicated until its hash is known. If its bytes already exist, Sessions deletes the newly uploaded private object and reuses the stored hash.
+A one-shot stream cannot be deduplicated until its hash is known. If its bytes already exist, Sessions drops the freshly written chunks and reuses the stored hash.
 
 ## Reconstruct attachments
 
@@ -402,7 +389,7 @@ for await (const message of session.history({ reconstruct: "pointer" })) {
 }
 ```
 
-Use pointer mode for exports, indexing, maintenance, and cross-Durable-Object transfer.
+Use pointer mode for exports, indexing, and cross-Durable-Object transfer.
 
 ### Custom reconstruction
 
@@ -425,7 +412,7 @@ await session.getRecentHistory(4 * 1024 * 1024, 4, {
 });
 ```
 
-The attachment object provides `data()`, `dataUrl()`, and `stream()`. `data()` deliberately materializes all bytes. `stream()` returns one SQLite window at a time or the R2 object body. `attachment.path` is a logical Sessions locator, not a Workspace path.
+The attachment object provides `data()`, `dataUrl()`, and `stream()`. `data()` deliberately materializes all bytes. `stream()` returns one SQLite window at a time. `attachment.path` is a logical Sessions locator, not a Workspace path.
 
 A custom reconstructor applies to file parts. Offloaded text and reasoning always return as text.
 
@@ -443,29 +430,6 @@ async onRequest(request: Request) {
 ```
 
 The response streams from Sessions storage and sets content type, content length, and content disposition headers from stored metadata.
-
-## Maintenance
-
-With a bucket configured, payloads still inline in aged rows are drained into R2 by a bounded maintenance pass. It covers rows written before offload existed and rows written under a looser threshold.
-
-Without a bucket the pass has no work to do and returns empty totals without reading a single row. Moving a payload into SQLite chunks would leave the bytes in this same Durable Object, so inline is where they belong.
-
-```ts
-const result = await session.runMaintenance();
-
-result.messages; // stored rows rewritten
-result.parts; // file parts and strings moved to attachment storage
-result.bytes; // payload bytes removed from SQLite rows
-result.backlogRemains; // another eligible row remains after this pass
-```
-
-The pass is lossless. It runs the same offload the write path runs, so bytes move into R2 and reconstruct exactly. Nothing is replaced with a marker and nothing is dropped.
-
-Rows within `keepRecentMessages` of the leaf are never touched, so the model's hot window never pays a reconstruction read. One pass rewrites at most `maxMaintenanceRowsPerPass` rows and reschedules itself while a backlog remains. Set `maintenance: false` to turn it off.
-
-Each message row stores the largest payload maintenance could still offload, or zero when no bucket is configured. That number does not depend on the current threshold, so lowering `r2ThresholdBytes` later still finds older candidates, and rows with no candidates never enter the maintenance content query. A backlog probe reads only an ID rather than another large message.
-
-A completed pass emits the `session:maintenance:completed` telemetry event, and each rewritten row dispatches a `maintenance-rewrite` change-feed event so a cache-owning host can patch its projection. `runMaintenance()` returns `null` when maintenance is disabled or a pass is already running.
 
 ## Full-text search
 
@@ -486,13 +450,13 @@ On Durable Object SQLite a row write costs roughly 1000 times a row read, so the
 
 Every Sessions table is `WITHOUT ROWID` with a composite primary key and no secondary index:
 
-| Table                           | Primary key                      | Contents                                                                                                         |
-| ------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `cf_agents_session_messages`    | `(session_id, id)`               | `seq`, `parent_id`, `type`, `role`, JSON content, token estimate, largest remaining offload candidate, timestamp |
-| `cf_agents_session_compactions` | `(session_id, id)`               | Non-destructive summary ranges                                                                                   |
-| `cf_agents_session_attachments` | `(session_id, message_id, hash)` | Message-to-payload references                                                                                    |
-| `cf_agents_session_config`      | `(session_id, key)`              | Lifted session configuration                                                                                     |
-| `cf_agents_session_fts`         | virtual                          | Optional FTS5 index, created only when `searchIndexing` is enabled                                               |
+| Table                           | Primary key                      | Contents                                                                    |
+| ------------------------------- | -------------------------------- | --------------------------------------------------------------------------- |
+| `cf_agents_session_messages`    | `(session_id, id)`               | `seq`, `parent_id`, `type`, `role`, JSON content, token estimate, timestamp |
+| `cf_agents_session_compactions` | `(session_id, id)`               | Non-destructive summary ranges                                              |
+| `cf_agents_session_attachments` | `(session_id, message_id, hash)` | Message-to-payload references                                               |
+| `cf_agents_session_config`      | `(session_id, key)`              | Lifted session configuration                                                |
+| `cf_agents_session_fts`         | virtual                          | Optional FTS5 index, created only when `searchIndexing` is enabled          |
 
 A text append with search disabled bills exactly one row write. The `seq` column carries ordering and `type` distinguishes row kinds, so neither needs an index. The attachment reference table stores only the three key columns, so a reference is the row rather than a row plus an index entry.
 
@@ -508,7 +472,6 @@ const unsubscribe = sessions.subscribe(async (event) => {
   switch (event.type) {
     case "append":
     case "update":
-    case "maintenance-rewrite":
       await updateLocalProjection(event.message);
       break;
     case "delete":
@@ -565,16 +528,16 @@ Existing `assistant_*` Session tables and `cf_ai_chat_agent_messages` are lifted
 
 The capability streams history and attachments, but some consumers still require arrays.
 
-| Operation                                 | Current shape                                 | Future direction                                                                                 |
-| ----------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| History export, indexing, maintenance     | Stream or bounded batches                     | Already streamable                                                                               |
-| Tool-call lookup and reconciliation scans | Host-specific arrays in current chat packages | Can scan batches and stop early                                                                  |
-| Model request input                       | AI SDK message array                          | Must materialize a bounded model window                                                          |
-| Compaction summarizer input               | Message array                                 | Must materialize a bounded compaction range                                                      |
-| Legacy full-transcript client snapshots   | Message array                                 | Can move to paginated history plus live deltas                                                   |
-| Attachment delivery                       | `ReadableStream`                              | Already streamable                                                                               |
-| Attachment hashing on write               | Incremental stream                            | Declared-length large streams go directly to R2; unknown lengths stage in bounded SQLite windows |
+| Operation                                 | Current shape                                 | Future direction                                                   |
+| ----------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------ |
+| History export and indexing               | Stream or bounded batches                     | Already streamable                                                 |
+| Tool-call lookup and reconciliation scans | Host-specific arrays in current chat packages | Can scan batches and stop early                                    |
+| Model request input                       | AI SDK message array                          | Must materialize a bounded model window                            |
+| Compaction summarizer input               | Message array                                 | Must materialize a bounded compaction range                        |
+| Legacy full-transcript client snapshots   | Message array                                 | Can move to paginated history plus live deltas                     |
+| Attachment delivery                       | `ReadableStream`                              | Already streamable                                                 |
+| Attachment hashing on write               | Incremental stream                            | Already streamable: windows are written and hashed as bytes arrive |
 
 The chat packages retain their current public arrays and wire behavior in this release. Moving reconciliation and client history protocols to streaming requires separate protocol work.
 
-See `examples/next/sessions` for a runnable server-only example, and `examples/next/sessions-slam` for the deployed measurement harness.
+See `examples/next/sessions` for a runnable server-only example.

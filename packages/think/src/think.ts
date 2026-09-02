@@ -289,9 +289,9 @@ import {
  * - budgeted hydration never shrinks `this.messages` below it (the floor
  *   passed to `session.getRecentHistory`), so windowing cannot starve the
  *   model's context;
- * - the aged-row maintenance pass never rewrites messages inside it (the
+ * - media eviction never rewrites messages inside it (the
  *   `keepRecentMessages` clamp), so the rows the model replays at full
- *   fidelity never pay a payload read.
+ *   fidelity are never stripped.
  */
 const MODEL_RECENT_WINDOW = 4;
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
@@ -2840,18 +2840,13 @@ export class Think<
   mediaEviction: MediaEvictionConfig | boolean = true;
 
   /**
-   * Optional R2 and reconstruction policy for Sessions-owned attachments.
-   * Small attachments remain in this Durable Object's SQLite storage.
+   * Ceiling, locator, and reconstruction policy for Sessions-owned
+   * attachments. Sessions is a message store: payloads ride inline in the
+   * message row and are chunked out only when the row cannot hold them, so
+   * there is nothing here about WHERE bytes go. Files belong in the
+   * Workspace, which spills to R2.
    */
-  sessionAttachments: Pick<
-    SessionsAttachmentOptions,
-    | "r2"
-    | "r2ThresholdBytes"
-    | "r2Prefix"
-    | "maxAttachmentBytes"
-    | "basePath"
-    | "reconstruct"
-  > = {};
+  sessionAttachments: SessionsAttachmentOptions = {};
 
   /**
    * Durable chat recovery configuration. Every chat turn runs in `runFiber`,
@@ -2876,28 +2871,14 @@ export class Think<
   });
 
   /**
-   * Sessions attachment policy, merging the host fields.
+   * Sessions attachment policy.
    *
-   * With eviction ON, Think owns aged-row policy, so Sessions' own aged pass
-   * is switched OFF: otherwise it would move the same bytes into attachment
-   * storage a moment before Think moves them out to the Workspace.
-   *
-   * `mediaEviction.minPartBytes` is Think's own CONTEXT threshold and is not
+   * `mediaEviction` is Think's own CONTEXT technique and none of it is
    * passed on: where Sessions keeps a payload is a storage question, settled
-   * by `sessionAttachments.r2ThresholdBytes` and the row budget alone.
+   * by the row budget alone.
    */
   #attachmentPolicy(): SessionsAttachmentOptions {
-    const config = resolveMediaEvictionConfig(this.mediaEviction);
-    if (!config) return { ...this.sessionAttachments };
-    return {
-      ...this.sessionAttachments,
-      keepRecentMessages: Math.max(
-        MODEL_RECENT_WINDOW,
-        config.keepRecentMessages
-      ),
-      maxMaintenanceRowsPerPass: config.maxRowsPerPass,
-      maintenance: false
-    };
+    return { ...this.sessionAttachments };
   }
 
   /** The default conversation handle configured by `configureSession()`. */
@@ -3094,7 +3075,6 @@ export class Think<
                   }
                   break;
                 case "update":
-                case "maintenance-rewrite":
                   if (
                     this._cachedMessages.some(
                       (message) => message.id === event.message.id

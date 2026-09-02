@@ -57,13 +57,7 @@ function historyResponse(
 
 /** A plain Durable Object with durable conversation history and attachments. */
 export class SessionObject extends DurableObject<Env> {
-  readonly sessions = new Sessions({
-    attachments: {
-      r2: this.env.ATTACHMENTS,
-      r2ThresholdBytes: 1_500_000
-    },
-    searchIndexing: true
-  });
+  readonly sessions = new Sessions({ searchIndexing: true });
 
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
   readonly session = this.sessions.session();

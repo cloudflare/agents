@@ -187,14 +187,14 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
       uniqueName("pointer-hydration")
     )) as unknown as PointerHydrationStub;
 
-    // Ten rows, each offloaded on the write path: the stored transcript is
-    // ~a couple of KB, comfortably UNDER the 64KB budget. A budget that
-    // counted stored bytes alone would happily hydrate all ten — and then
-    // inflate ~420KB of attachments into the isolate.
+    // Ten rows, each chunked out on the write path because the row could not
+    // hold the payload: the stored transcript is ~a couple of KB, comfortably
+    // UNDER the 64KB budget. A budget that counted stored bytes alone would
+    // happily hydrate all ten — and then inflate 12 MB into the isolate.
     const storedBytes = await agent.getStoredPathBytesForTest();
     expect(storedBytes).toBeLessThan(64 * 1024);
     const attachmentBytes = await agent.getAttachmentPathBytesForTest();
-    expect(attachmentBytes).toBeGreaterThan(400_000);
+    expect(attachmentBytes).toBe(10 * 1_200_000);
 
     const info = await agent.getHydrationInfoForTest();
     expect(info).not.toBeNull();
@@ -204,7 +204,7 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     // it alone cannot be the thing the budget is compared against.
     expect(info!.totalContentBytes).toBe(storedBytes);
     expect(info!.totalContentBytes).toBeLessThan(64 * 1024);
-    // Four rows × ~42KB already overshoots 64KB, so the window is the
+    // One row × 1.2 MB already overshoots 64KB, so the window is the
     // full-fidelity floor and nothing more.
     expect(info!.hydratedMessages).toBe(4);
 
@@ -220,7 +220,9 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(urls).toEqual(
       [6, 7, 8, 9].map(
         (i) =>
-          `data:image/png;base64,${String.fromCharCode(65 + i).repeat(56_000)}`
+          `data:image/png;base64,${String.fromCharCode(65 + i).repeat(
+            1_600_000
+          )}`
       )
     );
   });

@@ -12,12 +12,6 @@
       }
     ]
   },
-  "r2_buckets": [
-    {
-      "binding": "ATTACHMENTS",
-      "bucket_name": "next-sessions-attachments"
-    }
-  ],
   "migrations": [
     {
       "tag": "v1",

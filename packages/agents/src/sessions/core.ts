@@ -15,10 +15,8 @@ import {
   ATTACHMENT_URL_PREFIX,
   AttachmentEngine,
   estimatedDataUrlBytes,
-  maintenanceCandidateBytes,
   parseAttachmentUrl,
-  pointerHashes,
-  type StoredAttachment
+  pointerHashes
 } from "./attachments";
 import {
   SessionSearchDisabledError,
@@ -108,7 +106,6 @@ export class SessionsCore {
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         token_estimate INTEGER NOT NULL DEFAULT 0,
-        offload_candidate_bytes INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (session_id, id)
       ) WITHOUT ROWID`,
@@ -246,12 +243,11 @@ export class SessionsCore {
     if (legacy("assistant_messages")) {
       this.io.sqlWrite(
         `INSERT OR IGNORE INTO cf_agents_session_messages
-          (session_id, id, seq, parent_id, role, content, token_estimate, offload_candidate_bytes, created_at)
+          (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
          SELECT session_id, id,
            ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at ASC, rowid ASC),
            parent_id, role, content,
            CAST(LENGTH(CAST(content AS BLOB)) / 4 AS INTEGER),
-           LENGTH(CAST(content AS BLOB)),
            COALESCE(CAST(strftime('%s', created_at) AS INTEGER), 0) * 1000
          FROM assistant_messages`,
         []
@@ -392,7 +388,6 @@ export class SessionsCore {
       SELECT path.id AS id, am.role AS role,
         LENGTH(CAST(am.content AS BLOB)) AS bytes,
         am.token_estimate AS tokenEstimate,
-        am.offload_candidate_bytes AS offloadCandidateBytes,
         COALESCE((
           SELECT SUM(b.bytes) FROM cf_agents_session_attachments r
           JOIN cf_agents_session_attachment_blobs b ON b.hash = r.hash
@@ -783,17 +778,13 @@ export class SessionsCore {
     const hashes = json.includes(ATTACHMENT_URL_PREFIX)
       ? pointerHashes(message)
       : [];
-    const offloadCandidateBytes = maintenanceCandidateBytes(
-      message,
-      this.attachments.options
-    );
     const seq = this.#allocateSeq(sessionId);
     const now = Date.now();
     this.io.transaction(() => {
       this.io.sqlWrite(
         `INSERT INTO cf_agents_session_messages
-          (session_id, id, seq, parent_id, role, content, token_estimate, offload_candidate_bytes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           sessionId,
           message.id,
@@ -802,7 +793,6 @@ export class SessionsCore {
           message.role,
           json,
           tokenEstimate,
-          offloadCandidateBytes,
           now
         ]
       );
@@ -854,10 +844,6 @@ export class SessionsCore {
     const json = this.#serialize(message);
     if (old.content === json) return "unchanged";
 
-    const offloadCandidateBytes = maintenanceCandidateBytes(
-      message,
-      this.attachments.options
-    );
     const pointers =
       old.content.includes(ATTACHMENT_URL_PREFIX) ||
       json.includes(ATTACHMENT_URL_PREFIX);
@@ -865,16 +851,9 @@ export class SessionsCore {
     this.io.transaction(() => {
       this.io.sqlWrite(
         `UPDATE cf_agents_session_messages
-         SET role = ?, content = ?, token_estimate = ?, offload_candidate_bytes = ?
+         SET role = ?, content = ?, token_estimate = ?
          WHERE session_id = ? AND id = ?`,
-        [
-          message.role,
-          json,
-          tokenEstimate,
-          offloadCandidateBytes,
-          sessionId,
-          message.id
-        ]
+        [message.role, json, tokenEstimate, sessionId, message.id]
       );
       if (this.#searchIndexing) this.#indexFts(sessionId, message, true);
       if (pointers) {
@@ -901,126 +880,6 @@ export class SessionsCore {
     });
     await this.attachments.reapUnreferenced(removed);
     return "updated";
-  }
-
-  /**
-   * Aged rows with an inline payload at or above `minBytes`. Content enters
-   * JS only for these rows; the active path and age cutoff were derived from
-   * content-free stats first.
-   */
-  maintenanceCandidates(
-    sessionId: string,
-    messageIds: readonly string[],
-    minBytes: number,
-    limit: number
-  ): Array<{ content: string; message: SessionMessage }> {
-    if (messageIds.length === 0) return [];
-    const rows = this.io.sql<{ id: string; content: string }>(
-      `SELECT id, content FROM cf_agents_session_messages
-       WHERE session_id = ?
-         AND offload_candidate_bytes >= ?
-         AND id IN (SELECT value FROM json_each(?))
-       ORDER BY seq ASC
-       LIMIT ?`,
-      [sessionId, minBytes, JSON.stringify(messageIds), limit]
-    );
-    const candidates: Array<{ content: string; message: SessionMessage }> = [];
-    for (const row of rows) {
-      const parsed = this.#parse(row.content);
-      if (parsed) {
-        candidates.push({ content: row.content, message: parsed.message });
-      } else {
-        this.markMaintenanceCandidate(sessionId, row.id, row.content, 0);
-      }
-    }
-    return candidates;
-  }
-
-  /** Content-free probe used after a bounded maintenance pass. */
-  hasMaintenanceCandidate(
-    sessionId: string,
-    messageIds: readonly string[],
-    minBytes: number
-  ): boolean {
-    if (messageIds.length === 0) return false;
-    return (
-      this.io.sql<{ present: number }>(
-        `SELECT 1 AS present FROM cf_agents_session_messages
-         WHERE session_id = ?
-           AND offload_candidate_bytes >= ?
-           AND id IN (SELECT value FROM json_each(?))
-         LIMIT 1`,
-        [sessionId, minBytes, JSON.stringify(messageIds)]
-      ).length > 0
-    );
-  }
-
-  /** Correct a conservative candidate hint after examining one row. */
-  markMaintenanceCandidate(
-    sessionId: string,
-    messageId: string,
-    expectedContent: string,
-    candidateBytes: number
-  ): void {
-    this.io.sqlWrite(
-      `UPDATE cf_agents_session_messages SET offload_candidate_bytes = ?
-       WHERE session_id = ? AND id = ? AND content = ?`,
-      [candidateBytes, sessionId, messageId, expectedContent]
-    );
-  }
-
-  /**
-   * Compare-and-swap rewrite used by maintenance. Blob writes happen before
-   * this call; a changed source row rejects the rewrite and discards any
-   * now-unreferenced blobs instead of overwriting a live turn.
-   */
-  async rewriteForMaintenance(
-    sessionId: string,
-    expectedContent: string,
-    message: SessionMessage,
-    attachments: readonly StoredAttachment[],
-    tokenEstimate: number
-  ): Promise<boolean> {
-    const json = this.#serialize(message);
-    const offloadCandidateBytes = maintenanceCandidateBytes(
-      message,
-      this.attachments.options
-    );
-    let updated = 0;
-    let removed: string[] = [];
-    this.io.transaction(() => {
-      updated = this.io.sqlWrite(
-        `UPDATE cf_agents_session_messages
-         SET content = ?, token_estimate = ?, offload_candidate_bytes = ?
-         WHERE session_id = ? AND id = ? AND content = ?`,
-        [
-          json,
-          tokenEstimate,
-          offloadCandidateBytes,
-          sessionId,
-          message.id,
-          expectedContent
-        ]
-      );
-      if (updated === 0) return;
-      if (this.#searchIndexing) this.#indexFts(sessionId, message, true);
-      removed = this.attachments.replaceReferences(
-        sessionId,
-        message.id,
-        pointerHashes(message)
-      );
-    });
-    if (updated === 0) {
-      await this.attachments.discardUnreferenced(attachments);
-      return false;
-    }
-    await this.attachments.reapUnreferenced(removed);
-    this.#statsCache.delete(sessionId);
-    this.io.emit("session:message:maintenance-rewritten", {
-      sessionId,
-      messageId: message.id
-    });
-    return true;
   }
 
   /**
@@ -1255,8 +1114,8 @@ export class SessionsCore {
           const copied = { ...parsed.message, id: newId };
           this.io.sqlWrite(
             `INSERT INTO cf_agents_session_messages
-              (session_id, id, seq, parent_id, role, content, token_estimate, offload_candidate_bytes, created_at)
-             SELECT ?, ?, ?, ?, role, ?, token_estimate, offload_candidate_bytes, created_at
+              (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+             SELECT ?, ?, ?, ?, role, ?, token_estimate, created_at
              FROM cf_agents_session_messages WHERE session_id = ? AND id = ?`,
             [
               toSessionId,
@@ -1298,8 +1157,8 @@ export class SessionsCore {
     const json = this.#serialize(message);
     const inserted = this.io.sqlWrite(
       `INSERT OR IGNORE INTO cf_agents_session_messages
-        (session_id, id, seq, parent_id, role, content, token_estimate, offload_candidate_bytes, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sessionId,
         message.id,
@@ -1308,7 +1167,6 @@ export class SessionsCore {
         message.role,
         json,
         this.estimateRowTokens(message),
-        maintenanceCandidateBytes(message, this.attachments.options),
         options.createdAt
       ]
     );

@@ -27,48 +27,6 @@ import type {
   ChatRecoveryOptions
 } from "../";
 import { ResumableStream, chatRecoverySchedulePolicy } from "agents/chat";
-import type { SessionAttachmentBucket } from "agents/sessions";
-
-/**
- * Module-scoped stand-in for R2. Sessions only extracts a payload out of a
- * message row when a bucket is configured — that is the one move that
- * reclaims Durable Object space — so a test that wants a stored pointer has
- * to supply one. Module scope keeps the bytes across a Durable Object
- * eviction, as a real bucket would.
- */
-class TestAttachmentBucket implements SessionAttachmentBucket {
-  readonly objects = new Map<string, Uint8Array>();
-
-  async get(key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> {
-    const stored = this.objects.get(key);
-    if (!stored) return null;
-    const bytes = new Uint8Array(stored);
-    return {
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(bytes);
-          controller.close();
-        }
-      })
-    };
-  }
-
-  async put(key: string, value: ReadableStream<Uint8Array>): Promise<void> {
-    this.objects.set(
-      key,
-      new Uint8Array(await new Response(value).arrayBuffer())
-    );
-  }
-
-  async delete(key: string | string[]): Promise<void> {
-    for (const item of typeof key === "string" ? [key] : key) {
-      this.objects.delete(item);
-    }
-  }
-}
-
-const testAttachmentBucket = new TestAttachmentBucket();
-
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
   ChatMessage["parts"][number],
@@ -608,14 +566,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return sessionChangeEventCount(this);
   }
 
-  enableAttachmentsForTest(): void {
-    this.sessionAttachments = {
-      r2: testAttachmentBucket,
-      r2ThresholdBytes: 1,
-      maintenance: false
-    };
-  }
-
   getAttachmentFileCountForTest(): number {
     return Number(
       this.ctx.storage.sql
@@ -1048,12 +998,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this.sql`
       INSERT INTO cf_agents_session_messages
         (id, session_id, seq, parent_id, role, content, token_estimate,
-         media_candidate_bytes, created_at)
+         created_at)
       VALUES (
         ${rowId}, '',
         (SELECT COALESCE(MAX(seq), 0) + 1
          FROM cf_agents_session_messages WHERE session_id = ''),
-        ${parentId}, 'user', ${rawJson}, 0, 0, ${Date.now()}
+        ${parentId}, 'user', ${rawJson}, 0, ${Date.now()}
       )
     `;
   }
@@ -4865,13 +4815,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
  * Object eviction the way a real subclass's policy does.
  */
 export class AttachmentChatAgent extends AIChatAgent<Env> {
-  override sessionAttachments = {
-    r2: testAttachmentBucket,
-    // Above the small text parts in the fixture: there is no media-versus-
-    // text rule any more, so only size decides what leaves the row.
-    r2ThresholdBytes: 1024,
-    maintenance: false
-  };
+  override sessionAttachments = { maxAttachmentBytes: 8 * 1024 * 1024 };
 
   async getMessagesForTest(): Promise<ChatMessage[]> {
     await this.__unsafe_ensureInitialized();

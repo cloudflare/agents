@@ -61,31 +61,30 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
-  it("bills one row for a payload that stays inline", async () => {
+  it("bills one row for a payload the message row can hold", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      // No bucket, so the payload stays in the row. Billing counts ROWS, not
-      // bytes: a 4 KB row and a 40-byte row both cost one.
-      const append = await instance.benchAttachmentAppend(4096);
+      // The payload stays in the row. Billing counts ROWS, not bytes: a
+      // 200 KB row and a 40-byte row both cost one.
+      const append = await instance.benchAttachmentAppend(200 * 1024);
 
       expect(append.rowsWritten).toBe(1);
       expect(instance.attachmentBlobCount()).toBe(0);
+      expect(instance.attachmentChunkCount()).toBe(0);
     });
   });
 
-  it("bills three rows for a payload extracted to R2", async () => {
+  it("bills four rows when the row cannot hold the payload", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      const bucket = instance.useAttachmentBucket();
-      const append = await instance.benchAttachmentAppend(4096);
+      const append = await instance.benchAttachmentAppend(2 * 1024 * 1024);
 
-      // Message row + attachment reference row + whole-file blob row = 3.
-      // There is no chunk row: the bytes are in R2, which is the only reason
-      // to pay the extra two rows at all.
-      expect(append.rowsWritten).toBe(3);
+      // Message row + attachment reference row + whole-file blob row + two
+      // 1.5 MiB chunk rows = 5. Chunking never reclaims space, so this cost
+      // is only ever paid to make an over-budget row fit.
+      expect(append.rowsWritten).toBe(5);
       expect(instance.attachmentBlobCount()).toBe(1);
-      expect(instance.attachmentChunkCount()).toBe(0);
-      expect(bucket.objects.size).toBe(1);
+      expect(instance.attachmentChunkCount()).toBe(2);
     });
   });
 });

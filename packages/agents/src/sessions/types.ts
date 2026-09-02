@@ -67,8 +67,6 @@ export interface SessionRowStat {
   bytes: number;
   /** Token estimate stamped when the row was written. */
   tokenEstimate: number;
-  /** Largest inline payload the maintenance pass could still offload. */
-  offloadCandidateBytes: number;
   /** Stored bytes of the attachments this row points at (0 when none). */
   attachmentBytes: number;
 }
@@ -126,21 +124,6 @@ export interface AppendResult {
   attachments: StoredAttachment[];
 }
 
-/** Totals from one bounded maintenance pass over aged rows. */
-export interface SessionMaintenanceResult {
-  /** Stored message rows rewritten by the pass. */
-  messages: number;
-  /** File parts and strings moved to attachment storage. */
-  parts: number;
-  /**
-   * Payload bytes moved out. A `data:` URL is counted by its decoded size,
-   * so the row itself shrinks by rather more than this.
-   */
-  bytes: number;
-  /** True when another eligible row remains after this bounded pass. */
-  backlogRemains: boolean;
-}
-
 /** Change-feed events dispatched synchronously after each durable write. */
 export type SessionChangeEvent =
   | {
@@ -153,17 +136,7 @@ export type SessionChangeEvent =
   | { type: "update"; sessionId: string; message: SessionMessage }
   | { type: "delete"; sessionId: string; messageIds: string[] }
   | { type: "clear"; sessionId: string }
-  | { type: "compact"; sessionId: string }
-  | {
-      /**
-       * A maintenance pass moved inline payloads of a stored row to
-       * attachment storage. Cache-owning hosts patch the row; no status or
-       * compaction side effects accompany it.
-       */
-      type: "maintenance-rewrite";
-      sessionId: string;
-      message: SessionMessage;
-    };
+  | { type: "compact"; sessionId: string };
 
 export type SessionChangeListener = (
   event: SessionChangeEvent
@@ -237,60 +210,19 @@ export interface AttachmentReconstructor {
   ): SessionMessagePart | Promise<SessionMessagePart>;
 }
 
-/** R2 object body needed by the Sessions attachment adapter. */
-export interface SessionAttachmentObject {
-  readonly body: ReadableStream<Uint8Array>;
-}
-
 /**
- * Narrow R2 port used by Sessions-owned attachment storage. A Cloudflare
- * `R2Bucket` satisfies this interface. Sessions owns object keys, metadata,
- * deduplication, and garbage collection.
+ * Attachment ceiling, locator, and reconstruction policy.
+ *
+ * There is nothing here about WHEN a payload is extracted, because that is
+ * not a policy: a payload stays inline in its message row until the row
+ * would exceed `MAX_INLINE_ROW_BYTES`, and then the largest payloads are
+ * chunked out until it fits.
  */
-export interface SessionAttachmentBucket {
-  get(key: string): Promise<SessionAttachmentObject | null>;
-  put(
-    key: string,
-    value: ReadableStream<Uint8Array>,
-    options?: { httpMetadata?: { contentType?: string } }
-  ): Promise<unknown>;
-  delete(key: string): Promise<void>;
-}
-
-/** Attachment storage-tier, offload, maintenance, and reconstruction policy. */
 export interface SessionsAttachmentOptions {
-  /**
-   * Optional large-object tier. Without R2, every offloaded payload lives in
-   * chunked Durable Object SQLite.
-   */
-  readonly r2?: SessionAttachmentBucket;
-  /**
-   * The single extraction threshold, and only meaningful when `r2` is set:
-   * a payload at or above this size is moved out of the message row into
-   * one private R2 object. Below it, payloads stay inline in the row unless
-   * the row itself exceeds `MAX_INLINE_ROW_BYTES`.
-   *
-   * Extraction into SQLite chunks does not make the database smaller — the
-   * chunks live in the same Durable Object as the row — so R2 is the only
-   * reason to extract a payload eagerly. Default 1,500,000 bytes.
-   */
-  readonly r2ThresholdBytes?: number;
-  /** Private R2 object-key prefix. Default `cf-agents/sessions/attachments`. */
-  readonly r2Prefix?: string;
   /** Ceiling for one attachment payload. Default 32 MiB. */
   readonly maxAttachmentBytes?: number;
   /** Logical locator prefix exposed to reconstructors. Default "/attachments". */
   readonly basePath?: string;
-  /**
-   * Rows this many positions from the leaf keep inline payloads untouched;
-   * older rows are drained into R2 by the maintenance pass. Without a
-   * bucket that pass has nothing to do and does not run. Default 8.
-   */
-  readonly keepRecentMessages?: number;
-  /** Maximum aged rows rewritten by one maintenance pass. Default 64. */
-  readonly maxMaintenanceRowsPerPass?: number;
-  /** Run the aged-row maintenance pass (a no-op without `r2`). Default true. */
-  readonly maintenance?: boolean;
   /** Read-side materialization default for file parts. Default: inline. */
   readonly reconstruct?: AttachmentReconstructor;
 }

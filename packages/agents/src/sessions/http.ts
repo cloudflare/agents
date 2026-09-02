@@ -40,7 +40,7 @@ export async function attachmentResponse(
       headers.set("content-disposition", `${disposition}${filename}`);
     }
     // A plain JS stream loses `content-length` in workerd; the fixed-length
-    // pipe keeps the declared size on both the SQLite and R2 tiers.
+    // pipe keeps the declared size.
     const fixed = new FixedLengthStream(attachment.bytes);
     void body.pipeTo(fixed.writable).catch(() => undefined);
     return new Response(fixed.readable, { headers });

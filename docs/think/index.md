@@ -883,7 +883,7 @@ Think's `this.messages` getter reads directly from the Session tree. Compaction 
 
 ### Message storage
 
-Sessions offloads oversized payloads out of message rows losslessly, and it makes no distinction between kinds of payload: file parts, text and reasoning parts, and strings nested in tool outputs are all treated alike. A payload leaves the row for one of two reasons — it is at or above `sessionAttachments.r2ThresholdBytes` and you supplied an R2 bucket, or the row would otherwise exceed the 1.5 MiB budget. Extracted payloads become `attachment:sha256:` pointers and reads reconstruct them byte for byte; nothing is truncated, and a row that still cannot fit throws `SessionMessageTooLargeError`. R2 is the only tier that reclaims space, so without a bucket a payload the row can hold simply stays inline. This is a storage detail: it is invisible to the model, and it is unrelated to media eviction.
+Sessions stores MESSAGES; it is not a file store. It extracts oversized payloads out of message rows losslessly, and makes no distinction between kinds of payload: file parts, text and reasoning parts, and strings nested in tool outputs are all treated alike. A payload leaves the row for exactly one reason: the serialized row would otherwise exceed the 1.5 MiB budget, so the largest payloads are chunked out until it fits. Extracted payloads become `attachment:sha256:` pointers and reads reconstruct them byte for byte; nothing is truncated, and a row that still cannot fit throws `SessionMessageTooLargeError`. Chunking never reclaims database space — the chunks live in the same Durable Object as the row — so a payload the row can hold simply stays inline, and a Durable Object's 10 GB ceiling is the real bound on how much media one conversation can hold. Files belong in the Workspace, which spills to R2; put a reference to one in the message. This is a storage detail: it is invisible to the model, and it is unrelated to media eviction.
 
 ### Media eviction
 
@@ -897,7 +897,7 @@ The bytes are written to the Workspace at that path, raw and with their real mim
 
 Passes are bounded (`maxRowsPerPass`, 64 by default) and run in the background after a turn or a hydration read, rescheduling themselves while a backlog remains. Only payloads of at least `minPartBytes` are evicted, and `keepRecentMessages` is clamped to the four messages the model replays at full fidelity, so eviction can never rewrite content the model is still reading. Once a row is rewritten, the Sessions attachment reference is dropped and the blob is reaped: the bytes exist in exactly one place, the Workspace file.
 
-`mediaEviction: false` keeps aged media in the conversation, so the model keeps seeing it. It does not change where Sessions keeps the bytes — a large payload may still be stored as a pointer, which is unobservable — and it leaves Sessions' own aged-row maintenance at its default. With eviction on, Think owns aged-row policy and Sessions' maintenance pass is switched off, so the same bytes are not moved into attachment storage a moment before Think moves them out.
+`mediaEviction: false` keeps aged media in the conversation, so the model keeps seeing it. It does not change where Sessions keeps the bytes — a large payload may still be stored as a pointer, which is unobservable.
 
 Startup hydration reads a recent window bounded by `hydrationByteBudget` (32 MiB by default). The budget charges each row its stored bytes plus the attachment bytes it re-inflates, so it bounds isolate memory rather than the on-disk footprint.
 

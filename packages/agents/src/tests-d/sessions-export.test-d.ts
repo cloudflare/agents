@@ -9,18 +9,14 @@ import {
   inlineReconstructor,
   pointerReconstructor,
   type AppendResult,
-  type SessionAttachmentBucket,
-  type SessionMaintenanceResult,
   type SessionMessage,
   type SessionStats
 } from "../sessions";
 
 class ConversationObject extends DurableObject {
-  readonly attachmentBucket: SessionAttachmentBucket | undefined;
-
   readonly sessions = new Sessions({
     attachments: () => ({
-      r2: this.attachmentBucket,
+      maxAttachmentBytes: 8 * 1024 * 1024,
       reconstruct: inlineReconstructor
     })
   });
@@ -70,7 +66,6 @@ session.getRecentHistory(1024, 2) satisfies Promise<{
   totalContentBytes: number;
 }>;
 session.stats() satisfies Promise<SessionStats>;
-session.runMaintenance() satisfies Promise<SessionMaintenanceResult | null>;
 object.sessions.listSessions() satisfies Promise<
   Array<{ sessionId: string; messageCount: number; lastMessageAt: number }>
 >;
@@ -126,11 +121,7 @@ pointerReconstructor satisfies {
 
 new Sessions({
   attachments: {
-    r2: {
-      // @ts-expect-error attachment R2 adapters must provide streaming bodies.
-      get: async () => ({ body: "not a stream" }),
-      put: async () => undefined,
-      delete: async () => undefined
-    }
+    // @ts-expect-error Sessions is a message store: there is no R2 tier.
+    r2: {}
   }
 });

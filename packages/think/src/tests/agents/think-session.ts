@@ -53,12 +53,7 @@ import {
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
-import {
-  Session,
-  type SessionAttachmentBucket,
-  type SessionMaintenanceResult,
-  type StoredAttachment
-} from "agents/sessions";
+import { Session, type StoredAttachment } from "agents/sessions";
 import type { ContextConfig } from "agents/context";
 import { z } from "zod";
 
@@ -8404,47 +8399,19 @@ export class ThinkWindowedHydrationAgent extends Think {
 
 // ── Media eviction agents (#1710, step 3) ───────────────────────
 
+/**
+ * A payload the message row CAN hold, so it stays inline as a `data:` URL.
+ * Think's eviction has to decode it in place.
+ */
 const BIG_MEDIA_CHARS = 16_000;
 
 /**
- * A module-scoped stand-in for R2, shared by the test agents that need
- * Sessions to actually extract a payload. R2 is the only tier that reclaims
- * Durable Object space, so it is the only thing that makes Sessions move a
- * payload the row could still hold — and module scope means the bytes
- * survive a Durable Object eviction, exactly as a real bucket would.
+ * A payload the message row CANNOT hold, so Sessions chunks it out and the
+ * row stores an `attachment:sha256:` pointer. Think's eviction has to read
+ * the bytes back through `sessions.attachments.open()`. Both branches are
+ * live, which is why both sizes are seeded.
  */
-class TestAttachmentBucket implements SessionAttachmentBucket {
-  readonly objects = new Map<string, Uint8Array>();
-
-  async get(key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> {
-    const stored = this.objects.get(key);
-    if (!stored) return null;
-    const bytes = new Uint8Array(stored);
-    return {
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(bytes);
-          controller.close();
-        }
-      })
-    };
-  }
-
-  async put(key: string, value: ReadableStream<Uint8Array>): Promise<void> {
-    this.objects.set(
-      key,
-      new Uint8Array(await new Response(value).arrayBuffer())
-    );
-  }
-
-  async delete(key: string | string[]): Promise<void> {
-    for (const item of typeof key === "string" ? [key] : key) {
-      this.objects.delete(item);
-    }
-  }
-}
-
-const testAttachmentBucket = new TestAttachmentBucket();
+export const POINTER_MEDIA_CHARS = 1_600_000;
 
 /**
  * Eviction disabled by default so tests can seed deterministically, then
@@ -8452,13 +8419,6 @@ const testAttachmentBucket = new TestAttachmentBucket();
  */
 export class ThinkMediaEvictionAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
-  // A storage tier, so the seeded payloads leave the row as pointers and the
-  // eviction pass has to read them back through `attachments.open()`.
-  override sessionAttachments = {
-    r2: testAttachmentBucket,
-    r2ThresholdBytes: 10_000
-  };
-
   override getModel(): LanguageModel {
     return createMockModel("media eviction agent response");
   }
@@ -8476,7 +8436,10 @@ export class ThinkMediaEvictionAgent extends Think {
    * window (4), so with 6 seeded messages the 2 media messages are aged
    * and the 4 fillers are protected.
    */
-  async seedMediaHistoryForTest(prefix = "m"): Promise<void> {
+  async seedMediaHistoryForTest(
+    prefix = "m",
+    mediaChars = BIG_MEDIA_CHARS
+  ): Promise<void> {
     await this.appendMessageToHistory({
       id: `${prefix}0`,
       role: "user",
@@ -8485,7 +8448,7 @@ export class ThinkMediaEvictionAgent extends Think {
         {
           type: "file",
           mediaType: "image/png",
-          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+          url: `data:image/png;base64,${"A".repeat(mediaChars)}`
         }
       ]
     } as UIMessage);
@@ -8500,9 +8463,9 @@ export class ThinkMediaEvictionAgent extends Think {
           input: {},
           output: {
             mediaType: "image/png",
-            // A screenshot is media wherever a tool put it: a nested
-            // `data:` URL leaves the row at the media threshold.
-            data: `data:image/png;base64,${"B".repeat(BIG_MEDIA_CHARS)}`,
+            // A screenshot is media wherever a tool put it: eviction finds
+            // a nested `data:` URL or pointer just as readily.
+            data: `data:image/png;base64,${"B".repeat(mediaChars)}`,
             note: "small structured field"
           }
         }
@@ -8532,11 +8495,6 @@ export class ThinkMediaEvictionAgent extends Think {
     return this._evictAgedMediaBestEffort();
   }
 
-  /** One bounded Sessions-owned attachment maintenance pass. */
-  async runSessionMaintenanceForTest(): Promise<SessionMaintenanceResult | null> {
-    return this.session.runMaintenance();
-  }
-
   /**
    * This class does NOT override `hydrationByteBudget`, so this reads the
    * framework default.
@@ -8545,7 +8503,7 @@ export class ThinkMediaEvictionAgent extends Think {
     return this.hydrationByteBudget;
   }
 
-  /** Re-run the budgeted cache refresh (a windowed read schedules maintenance). */
+  /** Re-run the budgeted cache refresh (a windowed read schedules eviction). */
   async resyncForTest(): Promise<number> {
     return (await this.syncMessagesFromStorage()).length;
   }
@@ -8615,7 +8573,7 @@ export class ThinkMediaEvictionAgent extends Think {
 
 /**
  * A hydration budget small enough that any seeded transcript boots windowed.
- * A truncated read is the trigger that schedules the background maintenance
+ * A truncated read is the trigger that schedules the background eviction
  * pass, so this agent exercises that path end to end.
  */
 export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
@@ -8624,23 +8582,22 @@ export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
 
 // ── Pointer-inflation hydration (#1710) ─────────────────────────
 
-/** 56_000 base64 chars ≈ 42_000 decoded bytes per attachment. */
-const PTR_MEDIA_CHARS = 56_000;
+/**
+ * Over the row budget, so every seeded row stores a pointer:
+ * 1_600_000 base64 chars decode to 1_200_000 bytes.
+ */
+export const PTR_MEDIA_CHARS = 1_600_000;
 
 /**
- * Every seeded row is offloaded on the WRITE path, so its stored bytes are
- * ~a few hundred while the attachment it points at inflates back to ~42KB.
- * A budget that counted only stored bytes would hydrate all ten rows (~2KB)
- * and blow past its own ceiling on reconstruction; a budget that counts the
- * reconstructed attachment bytes hydrates a window instead.
+ * Every seeded row overflows the row budget, so it is chunked out on the
+ * WRITE path: its stored bytes are ~a few hundred while the attachment it
+ * points at inflates back to 1.2 MB. A budget that counted only stored
+ * bytes would hydrate all ten rows (~2KB) and blow past its own ceiling on
+ * reconstruction; a budget that counts the reconstructed attachment bytes
+ * hydrates a window instead.
  */
 export class ThinkPointerHydrationAgent extends Think {
   override hydrationByteBudget = 64 * 1024;
-  // Every seeded payload is over this, so each row stores a pointer.
-  override sessionAttachments = {
-    r2: testAttachmentBucket,
-    r2ThresholdBytes: 32 * 1024
-  };
   // Storage-level offload only: this agent is about hydration accounting, so
   // Think's context-window eviction stays off and the payloads stay stored.
   override mediaEviction: MediaEvictionConfig | boolean = false;

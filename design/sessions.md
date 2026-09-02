@@ -14,13 +14,15 @@ Sessions requires no alarm. It works in root Durable Objects and in facets with 
 
 Prompt assembly is not part of this capability. Context blocks, frozen prompts, and their providers live in `agents/context` and compose with a session handle. Sessions stores messages; nothing in it knows what a system prompt is.
 
+**Sessions stores messages. It is not a file store.** A message can reference a file without being one. Payloads ride inline in the message row and are chunked out only when the row cannot hold them; chunking never reclaims database space, because the chunks live in the same Durable Object as the row. A Durable Object's 10 GB ceiling is therefore the real bound on how much media one conversation can hold — roughly 39,000 200 KB images, measured. An application that handles files should keep them in a file store and put a reference in the message. Think does this with its Workspace, which spills to R2 at 1,500,000 bytes.
+
 ## Write economics
 
 A row write on Durable Object SQLite costs roughly 1000 times a row read. That ratio is the constraint the schema is built around.
 
 Every table is `WITHOUT ROWID` with a composite primary key and no secondary index:
 
-- `cf_agents_session_messages`, keyed `(session_id, id)`: `seq`, parent, `type`, role, message JSON, stamped token estimate, largest remaining offload candidate, timestamp
+- `cf_agents_session_messages`, keyed `(session_id, id)`: `seq`, parent, `type`, role, message JSON, stamped token estimate, timestamp
 - `cf_agents_session_compactions`, keyed `(session_id, id)`: non-destructive summary ranges
 - `cf_agents_session_attachments`, keyed `(session_id, message_id, hash)`: message-to-payload references and nothing else
 - `cf_agents_session_config`, keyed `(session_id, key)`: lifted session configuration
@@ -30,21 +32,19 @@ A text append with search disabled bills exactly one row write. `seq` carries or
 
 State is derived, not maintained. Active leaf, token totals, and session summaries all fall out of existing rows. An unchanged update writes nothing at all.
 
-Message, FTS, and attachment-reference mutations run in one synchronous SQLite transaction. Attachment payload storage completes before that transaction. Payload deletion happens after commit and never holds a SQLite transaction across R2 I/O.
+Message, FTS, and attachment-reference mutations run in one synchronous SQLite transaction. Attachment payload storage completes before that transaction. Payload deletion happens after commit.
 
 Bulk deletion uses one recursive rewire and one set-based delete. Deleting a linear prefix rewrites only the first surviving boundary child rather than one child per deleted message.
 
 ## History reads
 
-A history read first runs one recursive CTE over IDs, parent IDs, roles, token estimates, candidate sizes, and stored JSON sizes. It does not carry message content through the recursive queue or sorter. The path is capped at 10,000 rows.
+A history read first runs one recursive CTE over IDs, parent IDs, roles, token estimates, and stored JSON sizes. It does not carry message content through the recursive queue or sorter. The path is capped at 10,000 rows.
 
 Sessions then fetches message content in windows bounded by both 50 rows and 4 MiB of stored JSON. In workerd the SQLite allocator shares the isolate's memory budget with the JS heap, so an oversized transient result set surfaces as `SQLITE_NOMEM` rather than as slow I/O. Both bounds exist for that reason.
 
 `history()` releases each content window after yielding it. `historyBatches()` adds a caller-selected batch bound. `getHistory()` deliberately materializes the full path for compatibility callers.
 
 `getRecentHistory(maxBytes, minRecent)` materializes a suffix under an explicit byte budget. The budget is charged per row as stored bytes plus, when reconstructing inline, the attachment bytes that row re-inflates. A row holding a pointer to an 8 MiB image is charged 8 MiB, not the ~100 bytes it occupies on disk. Charging stored bytes alone would let a short transcript of pointers blow the isolate's memory while reporting a tiny budget usage, so this is the difference between a budget that bounds disk and a budget that bounds memory. In pointer mode no bytes are read and only stored bytes count.
-
-A truncated read schedules a maintenance pass: a transcript that overflows its hydration budget is exactly the transcript with aged rows worth draining.
 
 Loaded-skill restoration in `agents/context` uses the same bounded content windows in pointer mode. It does not issue one message query per assistant row.
 
@@ -58,11 +58,11 @@ A stored payload is replaced by an AI SDK-compatible pointer:
 attachment:sha256:<64 lowercase hex characters>
 ```
 
-The hash covers the raw complete file. Whole-file identity is stable across SQLite and R2 placement, so the pointer does not encode a backend.
+The hash covers the raw complete file. The pointer is a content address and encodes nothing about placement.
 
 The attachment tables are:
 
-- `cf_agents_session_attachment_blobs`: hash, backend, private storage ID, R2 key, byte size, and default media metadata
+- `cf_agents_session_attachment_blobs`: hash, private storage ID, byte size, and default media metadata
 - `cf_agents_session_attachment_chunks`: fixed SQLite payload windows
 - `cf_agents_session_attachments`: derived message references
 
@@ -74,13 +74,14 @@ One mechanism moves every kind of oversized payload out of a row and back: `data
 
 Storage draws no distinction between those kinds. An earlier design extracted "media" at a low fixed threshold and left everything else in the row until the row overflowed. That split was wrong on its own terms: documents do not arrive as media — a PDF read through a tool lands as plain tool-output text with no media type — so the type rule optimised the small case and ignored the large one. Deduplication, the other justification, is opportunistic and does not depend on type either.
 
-What replaced it is one threshold and one budget:
+What replaced it is one budget, with no configuration at all:
 
-1. With an R2 bucket configured, any single payload at or above `r2ThresholdBytes` is extracted into one private R2 object.
-2. Bucket or not, if the serialized row would exceed `MAX_INLINE_ROW_BYTES`, the largest payloads are extracted until it fits — into R2 under rule 1, otherwise into SQLite chunks.
-3. Otherwise the payload stays inline.
+1. If the serialized row would exceed `MAX_INLINE_ROW_BYTES`, the largest payloads are chunked out until it fits.
+2. Otherwise the payload stays inline.
 
-Rule 1 is the only eager extraction because it is the only one that reclaims space. Extracting into the attachment tables does not make the database smaller: chunk rows live in the same Durable Object as the row they came out of, inside the same 10 GB. And billing counts ROWS written, not bytes — rewriting a 500 KB row costs the same one billed row as a tiny one, while extracting it costs four (message, reference, blob, chunk). Without a bucket, inline is both cheaper and no larger.
+There is no eager extraction because there is nothing eager extraction could buy. Chunking into the attachment tables does not make the database smaller: chunk rows live in the same Durable Object as the row they came out of, inside the same 10 GB. And billing counts ROWS written, not bytes — writing a 500 KB row costs the same one billed row as a tiny one, while chunking it out costs four (message, reference, blob, chunk). Inline is both cheaper and no larger, so a payload only ever moves to make an over-budget row fit.
+
+An earlier revision added an optional R2 tier here, with a 1,500,000-byte threshold. It was deleted before release. Sessions is a message store, and hosts that handle files already have a file store: Think's Workspace spills to R2 at exactly that threshold, so the two were doing the same job twice.
 
 Sessions never truncates. When a row still exceeds `MAX_INLINE_ROW_BYTES` (1.5 MiB) after every offloadable string has been moved out largest-first, the write throws `SessionMessageTooLargeError` rather than storing a lossy row.
 
@@ -92,15 +93,11 @@ SQLite payloads use immutable 1.5 MiB windows, exactly `1536 * 1024` bytes excep
 
 Each stream pull reads one `(storage_id, chunk_index)` primary-key row. Sessions does not open a cursor over every payload BLOB.
 
-### R2 tier
+### Writing a payload
 
-R2 is optional, and `r2ThresholdBytes` (default 1,500,000) is meaningful only when a bucket is set. Sessions owns private random object keys beneath `cf-agents/sessions/attachments` unless the host configures another prefix.
+For replayable inputs such as data URLs, strings, and byte arrays, Sessions hashes first. An existing whole-file hash causes no payload write at all.
 
-For replayable inputs such as data URLs, strings, and byte arrays, Sessions hashes first. An existing whole-file hash causes no payload write and no R2 PUT. A new large payload streams to one R2 object.
-
-For a one-shot stream with a declared byte length, a large payload streams directly to R2 through `FixedLengthStream` while Sessions hashes it and enforces the size ceiling.
-
-An unknown-length one-shot stream is staged in 1.5 MiB SQLite windows while hashing. If it crosses the R2 threshold, Sessions streams those windows to R2 and removes them. Callers should pass `bytes` when they know the content length, to avoid the staging writes.
+A one-shot stream takes one path whatever its length: windows are written and hashed as the bytes arrive, so a payload is never materialized whole. A declared `bytes` is still worth passing — Sessions validates it against what actually arrived and rejects a mismatch — but it no longer changes where the bytes go.
 
 ### Resource lifetime
 
@@ -112,7 +109,7 @@ Client uploads ride the same rules. The server calls `put()`, returns the pointe
 
 Coupled message writes clean up after themselves. If offload creates a new blob and the message write fails or loses a race, Sessions deletes only the blobs that write created. It never deletes a pre-existing or shared blob by inference.
 
-There is no age-based sweep, pending-R2 scan, per-chunk timestamp, or refcount counter. A process failure at the exact R2-or-SQLite commit boundary can leave unreachable storage overhead. The design accepts that rare leak rather than charging every healthy conversation for recurring scans, or risking speculative deletion of a valid standalone resource.
+There is no age-based sweep, per-chunk timestamp, or refcount counter. A process failure at the exact commit boundary can leave unreachable storage overhead. The design accepts that rare leak rather than charging every healthy conversation for recurring scans, or risking speculative deletion of a valid standalone resource.
 
 The low-level API requires callers to serialize `attachments.delete(pointer)` against inserting that same pointer. Think and AIChatAgent already serialize their chat mutations.
 
@@ -120,25 +117,11 @@ The low-level API requires callers to serialize `attachments.delete(pointer)` ag
 
 Base64 data URLs decode in bounded windows. They are not converted into a second complete byte array before storage.
 
-SQLite writes retain at most one 1.5 MiB output window plus the source chunks needed to fill it. SQLite reads load one 1.5 MiB row per stream pull. R2 reads return the object body.
+SQLite writes retain at most one 1.5 MiB output window plus the source chunks needed to fill it. SQLite reads load one 1.5 MiB row per stream pull.
 
 The default inline reconstructor still returns a complete data URL for Think and AIChatAgent compatibility. It base64-encodes the attachment stream with at most a two-byte carry between chunks, but the final JavaScript string is still a whole-file allocation. `attachment.data()` also materializes the complete payload by definition. `attachment.stream()` and `attachmentResponse()` do not.
 
-Hosts should use pointer mode for export, indexing, maintenance, and unbounded scans. Model calls and legacy client snapshots must materialize bounded arrays until their protocols change.
-
-## Maintenance
-
-The maintenance pass drains payloads still stored inline in aged rows into R2: rows written before offload existed, and rows written under a looser threshold.
-
-It only has work to do when a bucket is configured. Without one it returns empty totals without reading a row, because moving a payload into SQLite chunks leaves the bytes in this same Durable Object — inline is the correct resting place, not a backlog.
-
-The pass is lossless. It runs the same offload the write path runs, so payloads move to R2 and reconstruct exactly. There is no lossy mode and no marker substitution. `runMaintenance()` returns the rows rewritten, parts moved, bytes removed, and whether a backlog remains.
-
-New writes stamp the largest offloadable payload size while the parsed message is already in memory, or zero when no bucket is configured and the pass could not move anything. That number is threshold-independent, so lowering `r2ThresholdBytes` later still finds older candidates, and rows with no candidates never enter the maintenance content query. A conservative legacy hint is corrected once after inspection. Backlog checks select only an ID and do not load another large message.
-
-Rows within `keepRecentMessages` of the leaf are never rewritten, so the model's hot window never pays a reconstruction read. One pass is bounded by row count, writes payloads before rewriting a row, and uses a content compare-and-swap, then reschedules itself while a backlog remains.
-
-A rewritten row emits a `maintenance-rewrite` change-feed event so a cache-owning host patches its projection, with no status or compaction side effects. A completed pass emits `session:maintenance:completed`.
+Hosts should use pointer mode for export, indexing, and unbounded scans. Model calls and legacy client snapshots must materialize bounded arrays until their protocols change.
 
 ## Search
 
@@ -178,11 +161,11 @@ Sessions stores settled conversation messages. Streams stores in-flight output a
 
 `configureSession(session)` configures compaction and search on the default handle. `configureContext()` declares prompt blocks, which Think turns into a `ContextBlocks` wired to durable per-agent SQLite: a block with no provider gets storage by label, and the frozen prompt is always persisted. Think subscribes to the Sessions change feed to keep its in-isolate `messages` array coherent.
 
-Only the top-level `attachments` option is a thunk, so Think can re-read host fields (`sessionAttachments`, `mediaEviction`) that are set after the field initializer runs. Individual policy fields are plain values.
+Only the top-level `attachments` option is a thunk, so Think can re-read the `sessionAttachments` host field, which is set after the field initializer runs. Individual policy fields are plain values.
 
 Sessions' attachment store and Think's media eviction are separate concerns and must stay separate. The attachment store is storage: a large payload becomes an `attachment:sha256:` pointer and reads reconstruct it byte for byte, invisibly and losslessly. Media eviction is a context-window decision owned by Think: aged media is removed from the conversation, visibly and lossily, and preserved as a Workspace file the agent can read back by path.
 
-`mediaEviction` switches Sessions' own aged-row maintenance OFF, because with eviction on Think owns aged-row policy — otherwise Sessions would move the same bytes into attachment storage a moment before Think moves them out to the Workspace. It does not supply any storage threshold: `minPartBytes` is Think's context threshold for what leaves the conversation, and where Sessions keeps a payload is settled by `sessionAttachments.r2ThresholdBytes` and the row budget alone.
+`mediaEviction` supplies no storage policy at all. `minPartBytes` is Think's context threshold for what leaves the conversation; where Sessions keeps a payload is settled by the row budget alone. Eviction reads the bytes back through `sessions.attachments.open()` when the row holds a pointer, and decodes the `data:` URL in place when it does not.
 
 Think's startup hydration uses `getRecentHistory(hydrationByteBudget, MODEL_RECENT_WINDOW)`, with the budget defaulting to 32 MiB. The floor keeps windowing from starving the model's context; the byte budget bounds hydrated memory because it charges re-inflated attachment bytes.
 
@@ -194,7 +177,7 @@ The primary multi-chat architecture is a directory Durable Object plus one Think
 
 ### AIChatAgent
 
-AIChatAgent uses the default handle as a linear chain. It retains its mutable `messages` field, destructive regeneration, `maxPersistedMessages`, v4 conversion, and full-transcript client protocol. Attachment offload policy remains opt-in through `sessionAttachments`.
+AIChatAgent uses the default handle as a linear chain. It retains its mutable `messages` field, destructive regeneration, `maxPersistedMessages`, v4 conversion, and full-transcript client protocol. The attachment ceiling, locator, and reconstructor remain tunable through `sessionAttachments`; extraction itself is not a policy.
 
 ## Migration
 
@@ -203,45 +186,6 @@ Lifecycle startup copies legacy `assistant_*` message, compaction, and config ro
 AIChatAgent performs its package-owned lift from `cf_ai_chat_agent_messages`, converts old message shapes, imports a linear chain, and tombstones the source table.
 
 Cross-object moves use `importMessage(message, { parentId, createdAt })`: one historical row written verbatim, with no offload and no change-feed event. It replaced an internal sync aperture, which existed only because import needed to bypass the write pipeline and is not a general-purpose escape hatch anyone should reach for.
-
-## Measured
-
-`examples/next/sessions-slam` drives a deployed worker with a real R2 bucket, wrapping `sql.exec` so
-every billed `rowsWritten` is attributed to the scenario that caused it. The run below is 33
-scenarios, all passing, against one Durable Object.
-
-| Scenario                                   | Server ms   | Rows written | Result                                                  |
-| ------------------------------------------ | ----------- | ------------ | ------------------------------------------------------- |
-| append 500 x 2 KiB text                    | 0           | 500          | exactly one billed row per append                       |
-| append 10 x (2 KiB text + 100 KiB pointer) | 0           | 20           | message row plus reference row; blob deduplicated       |
-| append 20 x 1.40 MiB text                  | 0           | 20           | prose stays in the row: one write each, no blob         |
-| append-large 1,000,000 B text              | 0           | 1            | inline; stored row 976.7 KiB                            |
-| append-large 1,600,000 B text              | 327         | 3            | over the row budget: offloaded, stored row 177 B        |
-| append-large 5,000,000 B text              | 345         | 3            | offloaded, stored row 177 B                             |
-| append-tool 3,000,000 B tool output        | 397         | 3            | nested output string offloaded, stored row 320 B        |
-| upload 1,499,999 B, declared / unknown     | 65 / 32     | 2 / 2        | last size below the R2 threshold                        |
-| upload 1,572,864 B, declared / unknown     | 224 / 366   | 1 / 3        | exact 1.5 MiB window                                    |
-| upload 1,572,865 B, declared / unknown     | 223 / 388   | 1 / 5        | one byte over: two staged chunks                        |
-| upload 8 MiB, declared / unknown           | 1083 / 678  | 1 / 13       |                                                         |
-| upload 32 MiB, declared / unknown          | 2297 / 3403 | 1 / 45       | the default `maxAttachmentBytes`                        |
-| hydrate 32 MiB, min 4, inline              | 526         | 0            | 19 of 536 messages, truncated, 31.11 MiB hydrated       |
-| hydrate 32 MiB, min 4, pointer             | 0           | 0            | all 536 messages, 30.00 MiB, no payload reads           |
-| history stream, inline                     | 4595        | 0            | 536 messages, 61.79 MiB of NDJSON, first byte at 395 ms |
-| history stream, pointer                    | 687         | 0            | 536 messages, 30.00 MiB, first byte at 478 ms           |
-| fork (536 messages)                        | 0           | 551          | blobs shared, reference rows copied                     |
-| compact                                    | 0           | 1            | one overlay row                                         |
-
-Four things the run settles that a local test cannot:
-
-- Nothing is truncated. The 1.6 MB and 5 MB text parts and the 3 MB tool-output string all became
-  pointers, and their payloads read back byte for byte.
-- The byte budget bounds memory rather than disk. Inline hydration stopped at 19 messages and 31.11
-  MiB against a 32 MiB budget on a path whose stored bytes are 30.00 MiB, because pointer rows are
-  charged what they re-inflate. The same path in pointer mode is one read of 30.00 MiB.
-- Streaming holds at size. 61.79 MiB of history left a 128 MiB isolate with a first byte at 395 ms,
-  and a 32 MiB upload streamed in and back out with its SHA-256 verified.
-- Declaring a length matters. A large upload with `bytes` set streams straight to R2 for one row
-  write; the same bytes with an unknown length pay 45 row writes for SQLite staging at 32 MiB.
 
 ## Trade-offs
 

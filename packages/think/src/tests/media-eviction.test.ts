@@ -15,14 +15,13 @@ import type { MediaEvictionConfig } from "../think";
 
 type MediaEvictionStub = {
   setMediaEvictionForTest(config: MediaEvictionConfig | boolean): Promise<void>;
-  seedMediaHistoryForTest(prefix?: string): Promise<void>;
+  seedMediaHistoryForTest(prefix?: string, mediaChars?: number): Promise<void>;
   runEvictionForTest(): Promise<{
     messages: number;
     parts: number;
     bytes: number;
     backlogRemains: boolean;
   } | null>;
-  runSessionMaintenanceForTest(): Promise<{ messages: number } | null>;
   getStoredMessageForTest(id: string): Promise<UIMessage | null>;
   getInlinedMessageForTest(id: string): Promise<UIMessage | null>;
   getAttachmentReferenceCountForTest(): Promise<number>;
@@ -48,6 +47,14 @@ const AGED_POLICY: MediaEvictionConfig = {
 
 /** 16_000 base64 chars decode to exactly 12_000 bytes. */
 const PAYLOAD_BYTES = 12_000;
+
+/**
+ * Over the row budget, so Sessions chunks the payload out and the stored row
+ * holds an `attachment:sha256:` pointer instead of a `data:` URL. Eviction
+ * has to read those bytes back through `sessions.attachments.open()`.
+ */
+const POINTER_MEDIA_CHARS = 1_600_000;
+const POINTER_PAYLOAD_BYTES = 1_200_000;
 
 async function evictionAgent(name: string): Promise<MediaEvictionStub> {
   return (await getAgentByName(
@@ -140,10 +147,10 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
 
   it("reaps the Sessions blob so the bytes live in exactly one place", async () => {
     const agent = await evictionAgent(uniqueName("evict-reap"));
-    // Seeding UNDER the policy sends the payloads through the Sessions write
-    // path, so the stored rows carry `attachment:sha256:` pointers.
+    // A payload the row cannot hold, so Sessions chunks it out and the
+    // stored rows carry `attachment:sha256:` pointers.
     await agent.setMediaEvictionForTest(AGED_POLICY);
-    await agent.seedMediaHistoryForTest();
+    await agent.seedMediaHistoryForTest("m", POINTER_MEDIA_CHARS);
 
     const seeded = await agent.getStoredMessageForTest("m0");
     expect(JSON.stringify(seeded)).toContain("attachment:sha256:");
@@ -153,13 +160,13 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     expect(await agent.runEvictionForTest()).toMatchObject({
       messages: 2,
       parts: 2,
-      bytes: PAYLOAD_BYTES * 2
+      bytes: POINTER_PAYLOAD_BYTES * 2
     });
 
     const m0 = await agent.getStoredMessageForTest("m0");
     expect(m0?.parts[1]).toEqual({
       type: "text",
-      text: `[evicted image/png, ${PAYLOAD_BYTES} bytes; preserved at /attachments/evicted/m0-0.png]`
+      text: `[evicted image/png, ${POINTER_PAYLOAD_BYTES} bytes; preserved at /attachments/evicted/m0-0.png]`
     });
     // The last reference is gone, so the blob is reaped: the only copy of
     // these bytes is now the Workspace file.
@@ -168,7 +175,7 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     expect(
       (await agent.readEvictedFileForTest("/attachments/evicted/m0-0.png"))
         ?.byteLength
-    ).toBe(PAYLOAD_BYTES);
+    ).toBe(POINTER_PAYLOAD_BYTES);
   });
 
   it("leaves recent messages alone", async () => {
@@ -233,20 +240,6 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     expect(
       await agent.readEvictedFileForTest("/attachments/evicted/m0-0.png")
     ).toBeNull();
-  });
-
-  it("owns the aged-row pass, so Sessions' own maintenance stands down", async () => {
-    const agent = await evictionAgent(uniqueName("evict-maintenance"));
-    await agent.seedMediaHistoryForTest();
-
-    // Disabled: Sessions keeps its default maintenance, which is free to move
-    // the same bytes into attachment storage.
-    expect(await agent.runSessionMaintenanceForTest()).not.toBeNull();
-
-    // Enabled: Think owns aged rows, so Sessions' pass is off and cannot
-    // shuttle bytes into attachment storage a moment before Think evicts them.
-    await agent.setMediaEvictionForTest(AGED_POLICY);
-    expect(await agent.runSessionMaintenanceForTest()).toBeNull();
   });
 
   it("a windowed hydration read schedules the pass", async () => {
