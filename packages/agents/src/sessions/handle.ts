@@ -137,20 +137,17 @@ export class Session {
 
   /**
    * Byte-budgeted read of the most recent messages on the active branch path
-   * (always at least the leaf, and at least `minRecentMessages` when the path
-   * is long enough). The budget counts each row plus its continuation rows,
-   * so it bounds hydrated memory (#1710).
+   * (always at least the leaf). The budget counts each row, its continuation
+   * rows, and the payloads it points at, so it bounds hydrated memory (#1710).
    */
   async getRecentHistory(
     maxContentBytes: number,
-    minRecentMessages = 1,
     options: Pick<HistoryReadOptions, "leafId"> = {}
   ): Promise<RecentHistoryResult> {
     await this.#ready();
     return this.#core.getRecentHistory(
       this.sessionId,
       maxContentBytes,
-      minRecentMessages,
       options.leafId
     );
   }

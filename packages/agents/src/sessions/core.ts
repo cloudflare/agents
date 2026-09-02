@@ -198,7 +198,13 @@ export class SessionsCore {
    * still be recovered by hand. `assistant_config` belongs to Think, which
    * lifts and drops it itself.
    */
-  migrateLegacy(): void {
+  /**
+   * Lift legacy `assistant_*` tables. Returns false when any source could not
+   * be fully copied, so the caller can leave the schema version unstamped and
+   * retry on a later start rather than stranding the rows.
+   */
+  migrateLegacy(): boolean {
+    let complete = true;
     const legacy = (name: string): boolean =>
       this.io.sql<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
@@ -232,6 +238,7 @@ export class SessionsCore {
         drop(source);
         return;
       }
+      complete = false;
       this.io.emit("session:migration:incomplete", {
         table: source,
         source: counts?.source ?? 0,
@@ -281,6 +288,7 @@ export class SessionsCore {
     // message rows now, and the index is rebuilt from message text.
     drop("assistant_sessions");
     drop("assistant_fts");
+    return complete;
   }
 
   // ── Change feed ──────────────────────────────────────────────────────────
@@ -598,16 +606,22 @@ export class SessionsCore {
 
   /**
    * Byte-budgeted read of the most recent messages on the active branch
-   * path — the longest suffix whose stored size fits `maxContentBytes`,
-   * floored at `minRecentMessages` rows. Stored size counts each row plus
-   * its continuation rows, so the budget bounds real hydrated memory.
+   * path — the longest suffix whose stored size fits `maxContentBytes`.
+   * Stored size counts each row, its continuation rows, and the payloads it
+   * points at, so the budget bounds real hydrated memory.
+   *
+   * There is no message-count floor. One used to exist, and it silently
+   * defeated the budget: it admitted rows regardless of size, so a window of
+   * media-heavy messages could hydrate far past the limit that was supposed to
+   * bound it. The newest message is always returned even if it alone exceeds
+   * the budget, since returning nothing is worse; that single row is the one
+   * case the budget cannot bound.
    * Overlays whose anchors fall outside the window are skipped, showing the
    * raw recent messages (the intended degraded view).
    */
   async getRecentHistory(
     sessionId: string,
     maxContentBytes: number,
-    minRecentMessages: number,
     leafId?: string | null
   ): Promise<RecentHistoryResult> {
     const stats = this.pathRowStats(sessionId, leafId);
@@ -615,16 +629,13 @@ export class SessionsCore {
       return { messages: [], truncated: false, totalContentBytes: 0 };
     }
     const totalContentBytes = stats.reduce((sum, row) => sum + row.bytes, 0);
-    const minRecent = Math.max(1, Math.floor(minRecentMessages));
     let start = stats.length - 1;
     let used = stats[start].bytes;
-    while (
-      start > 0 &&
-      (stats.length - start < minRecent ||
-        used + stats[start - 1].bytes <= maxContentBytes)
-    ) {
+    while (start > 0) {
+      const next = stats[start - 1].bytes;
+      if (used + next > maxContentBytes) break;
       start--;
-      used += stats[start].bytes;
+      used += next;
     }
 
     const messages: SessionMessage[] = [];

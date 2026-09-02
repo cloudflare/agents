@@ -375,7 +375,7 @@ describe("Oversized rows and incremental persistence", () => {
   });
 
   describe("Wake hydration of a split message", () => {
-    it("rehydrates a message larger than one row after an eviction", async () => {
+    it("rehydrates an attachment and a split row after an eviction", async () => {
       const room = `row-chunk-wake-${crypto.randomUUID()}`;
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -395,6 +395,18 @@ describe("Oversized rows and incremental persistence", () => {
           parts: [{ type: "text", text: "seen" }]
         }
       ]);
+      // The image is an attachment, so it leaves the row rather than splitting
+      // it; the long prose below is what actually chunks. Both must survive a
+      // wake identically.
+      expect(await agentStub.continuationRowCountForTest()).toBe(0);
+
+      await agentStub.persistMessages([
+        {
+          id: "wake-long",
+          role: "assistant",
+          parts: [{ type: "text", text: "p".repeat(2 * 1024 * 1024) }]
+        }
+      ]);
       expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
 
       await evictDurableObject(agentStub);
@@ -402,7 +414,8 @@ describe("Oversized rows and incremental persistence", () => {
       const restored = (await agentStub.getMessagesForTest()) as ChatMessage[];
       expect(restored.map((message) => message.id)).toEqual([
         "wake-user",
-        "wake-assistant"
+        "wake-assistant",
+        "wake-long"
       ]);
       expect(restored[0].parts[1]).toMatchObject({ type: "file", url });
 

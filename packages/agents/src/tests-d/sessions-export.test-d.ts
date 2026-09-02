@@ -53,7 +53,7 @@ session.appendMessage(aiMessage) satisfies Promise<AppendResult>;
 session.updateMessage(message) satisfies Promise<SessionMessage | null>;
 session.getMessage(message.id) satisfies Promise<SessionMessage | null>;
 session.getHistory() satisfies Promise<SessionMessage[]>;
-session.getRecentHistory(1024, 2) satisfies Promise<{
+session.getRecentHistory(1024) satisfies Promise<{
   messages: SessionMessage[];
   truncated: boolean;
   totalContentBytes: number;

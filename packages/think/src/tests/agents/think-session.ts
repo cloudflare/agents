@@ -8272,10 +8272,10 @@ export class ThinkOnStartHydrationFailureAgent extends Think {
     const originalRecent = session.getRecentHistory.bind(session);
     session.getRecentHistory = async (
       maxContentBytes: number,
-      minRecentMessages?: number
+      options?: Parameters<typeof originalRecent>[1]
     ) => {
       failFirstRead();
-      return originalRecent(maxContentBytes, minRecentMessages);
+      return originalRecent(maxContentBytes, options);
     };
     return session;
   }

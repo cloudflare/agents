@@ -354,9 +354,13 @@ describe("Sessions capability", () => {
         stats.reduce((sum, row) => sum + row.bytes, 0)
       );
 
-      const floored = await session.getRecentHistory(1, 3);
-      expect(floored.messages).toHaveLength(3);
-      expect(floored.messages.map((m) => m.id)).toEqual(["m3", "m4", "m5"]);
+      // The budget is a hard ceiling with no count floor under it: a floor
+      // that admitted rows regardless of size would defeat the bound it sits
+      // under. A budget nothing fits still returns the newest message, because
+      // returning nothing is worse.
+      const starved = await session.getRecentHistory(1);
+      expect(starved.messages.map((m) => m.id)).toEqual(["m5"]);
+      expect(starved.truncated).toBe(true);
     });
   });
 
@@ -709,16 +713,14 @@ describe("Sessions capability", () => {
 
         // A budget that covers the big row's FULL size reaches it.
         const generous = await session.getRecentHistory(
-          bigRow.bytes + leafRow.bytes + 64,
-          1
+          bigRow.bytes + leafRow.bytes + 64
         );
         expect(generous.messages.map((m) => m.id)).toEqual(["h1", "h2"]);
 
         // A budget sized to slice 0 alone does not, because the continuation
         // bytes are charged too (#1710).
         const tight = await session.getRecentHistory(
-          MAX_INLINE_ROW_BYTES + leafRow.bytes,
-          1
+          MAX_INLINE_ROW_BYTES + leafRow.bytes
         );
         expect(tight.messages.map((m) => m.id)).toEqual(["h2"]);
         expect(tight.truncated).toBe(true);

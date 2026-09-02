@@ -3576,9 +3576,10 @@ export class Think<
    *
    * Bounded by `hydrationByteBudget`: oversized transcripts hydrate as a
    * recent window instead of exhausting the isolate's memory (#1710). The
-   * window never shrinks below `MODEL_RECENT_WINDOW` messages, so budgeted
-   * hydration cannot starve the model-facing context assembly (which keeps
-   * that many recent messages at full fidelity).
+   * budget is a hard ceiling with no message-count floor beneath it — a floor
+   * that admitted rows regardless of size would defeat the bound it sits
+   * under. A window of unusually large messages can therefore be shorter than
+   * `MODEL_RECENT_WINDOW`; `getHistory()` still reads the full path.
    */
   private async _syncMessages(): Promise<UIMessage[]> {
     const budget = this.hydrationByteBudget;
@@ -3592,10 +3593,7 @@ export class Think<
       return full;
     }
 
-    const recent = await this.session.getRecentHistory(
-      budget,
-      MODEL_RECENT_WINDOW
-    );
+    const recent = await this.session.getRecentHistory(budget);
     this._lastHydration = {
       truncated: recent.truncated,
       totalContentBytes: recent.totalContentBytes,

@@ -206,6 +206,37 @@ describe("Sessions attachments", () => {
     });
   });
 
+  it("does not let a run of media-heavy messages exceed the read budget", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      for (let i = 0; i < 8; i++) {
+        await session.appendMessage(
+          fileMessage(
+            `m${i}`,
+            dataUrl("image/png", 400_000, String(i)),
+            "image/png"
+          )
+        );
+      }
+
+      // Eight messages, each roughly 533 KB once inlined. A budget of 1.5 MB
+      // must admit about two of them — a message-count floor that ignored size
+      // would have hydrated all eight, which is exactly the exhaustion the
+      // budget exists to prevent.
+      const budget = 1_500_000;
+      const recent = await session.getRecentHistory(budget);
+
+      expect(recent.messages.length).toBeLessThanOrEqual(3);
+      expect(recent.truncated).toBe(true);
+      const hydrated = recent.messages.reduce(
+        (sum, message) => sum + JSON.stringify(message).length,
+        0
+      );
+      expect(hydrated).toBeLessThan(budget * 1.1);
+    });
+  });
+
   it("collects a payload once its last reference goes", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

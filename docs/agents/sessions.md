@@ -295,6 +295,8 @@ Keeping media out of the message is not free. A 200 KB image bills four row writ
 
 What you get is a message row that stays a few hundred bytes however large the payload is. `SessionRowStat.bytes` still charges each message for the payloads it points at, so the byte budget you pass to `getRecentHistory()` remains a bound on the memory a hydration actually takes.
 
+That budget is a hard ceiling with no message-count floor beneath it. `getRecentHistory()` returns the longest recent suffix that fits, and always at least the newest message; a window of unusually large messages is simply shorter. A floor that admitted rows regardless of size would defeat the bound it sits under, which is why there is no longer a `minRecentMessages` argument.
+
 ## Full-text search
 
 Message search is opt-in because FTS adds writes to every append:

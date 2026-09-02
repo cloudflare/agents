@@ -66,11 +66,12 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(info!.truncated).toBe(true);
     // ~300KB stored vs 64KB budget.
     expect(info!.totalContentBytes).toBeGreaterThan(250_000);
-    // The window floor: never fewer than the read-time truncation span the
-    // model sees at full fidelity (4 messages), even though 4 × 30KB
-    // overshoots the 64KB budget — windowing must not starve the model.
-    expect(info!.hydratedMessages).toBeGreaterThanOrEqual(4);
-    expect(info!.hydratedMessages).toBeLessThan(10);
+    // The budget is a hard ceiling with no message-count floor beneath it. A
+    // floor that admitted rows regardless of size would defeat the bound it
+    // sits under, so a window of unusually large messages is simply shorter:
+    // 4 × 30KB does not fit 64KB, and is not admitted because it does not.
+    expect(info!.hydratedMessages).toBeGreaterThanOrEqual(1);
+    expect(info!.hydratedMessages).toBeLessThan(4);
 
     // The in-memory view is the SUFFIX of the seeded chain, ending at the
     // leaf — and durable storage still holds the full transcript.
@@ -180,16 +181,18 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(await agent.getHydrationBudgetForTest()).toBe(32 * 1024 * 1024);
   });
 
-  it("charges a split row its continuation bytes, not just its first slice", async () => {
+  it("charges a message the payloads it points at, not just its row", async () => {
     const agent = (await getAgentByName(
       env.ThinkPointerHydrationAgent,
       uniqueName("pointer-hydration")
     )) as unknown as PointerHydrationStub;
 
-    // Ten messages, each too large for one SQLite row and so split across
-    // continuation rows. Row stats count the continuations, so the reported
-    // size is the whole 16 MB — the memory a hydration would actually take,
-    // not the ~1.5 MiB first slice of each row.
+    // Ten messages, each carrying a 1.6 MB image. The image is an attachment,
+    // so each message ROW is a few hundred bytes — but a read inlines the
+    // payload again, so the memory a hydration actually takes is the whole
+    // 16 MB. Row stats charge the payload for exactly that reason; counting
+    // rows alone would let the budget admit a window far larger than it
+    // measured.
     const storedBytes = await agent.getStoredPathBytesForTest();
     expect(storedBytes).toBeGreaterThan(10 * 1_600_000);
 
@@ -197,26 +200,22 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(info).not.toBeNull();
     expect(info!.truncated).toBe(true);
     expect(info!.totalContentBytes).toBe(storedBytes);
-    // One row × 1.6 MB already overshoots 64KB, so the window is the
-    // full-fidelity floor and nothing more.
-    expect(info!.hydratedMessages).toBe(4);
+    // One row × 1.6 MB already overshoots 64KB, so nothing beyond the newest
+    // message can be admitted. Durable storage is untouched — this bounds what
+    // a wake materializes, not what is stored.
+    expect(info!.hydratedMessages).toBe(1);
 
     const cached = await agent.getCachedMessageIdsForTest();
-    expect(cached).toEqual(["ptr-6", "ptr-7", "ptr-8", "ptr-9"]);
+    expect(cached).toEqual(["ptr-9"]);
     // Durable storage still holds every row.
     expect(await agent.getFullHistoryIdsForTest()).toEqual(
       Array.from({ length: 10 }, (_, i) => `ptr-${i}`)
     );
 
-    // The window reads back byte for byte across its continuation rows.
+    // What the window does hold reads back byte for byte.
     const urls = await agent.getCachedFileUrlsForTest();
-    expect(urls).toEqual(
-      [6, 7, 8, 9].map(
-        (i) =>
-          `data:image/png;base64,${String.fromCharCode(65 + i).repeat(
-            1_600_000
-          )}`
-      )
-    );
+    expect(urls).toEqual([
+      `data:image/png;base64,${String.fromCharCode(65 + 9).repeat(1_600_000)}`
+    ]);
   });
 });
