@@ -277,8 +277,6 @@ import {
 import {
   AgentContextProvider,
   ContextBlocks,
-  reclaimLoadedSkill,
-  restoreLoadedSkills,
   type ContextConfig,
   type WritableContextProvider
 } from "agents/context";
@@ -307,6 +305,12 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
 import { Workspace } from "@cloudflare/shell";
+import {
+  evictMediaFromMessage,
+  evictedFilePath,
+  resolveMediaEvictionConfig,
+  type MediaEvictionConfig
+} from "./media-eviction";
 import { createWorkspaceTools } from "./tools/workspace";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
@@ -1167,20 +1171,7 @@ export interface OnStartDegradation {
   error: unknown;
 }
 
-/** Policy for lossless attachment offload and aged media maintenance. */
-export interface MediaEvictionConfig {
-  /** Messages at the active-path tail that remain untouched. Default 8. */
-  keepRecentMessages?: number;
-  /** Minimum payload bytes to evict. Default 32 KiB. */
-  minPartBytes?: number;
-  /**
-   * Preserve evicted payloads in Sessions attachment storage. The legacy
-   * option name remains for source compatibility. Default true.
-   */
-  externalizeToWorkspace?: boolean;
-  /** Maximum aged rows rewritten by one maintenance pass. Default 64. */
-  maxRowsPerPass?: number;
-}
+export type { MediaEvictionConfig } from "./media-eviction";
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -2823,10 +2814,26 @@ export class Think<
   hydrationByteBudget: number = 32 * 1024 * 1024;
 
   /**
-   * Configure lossless file offload and aged tool-output eviction. Sessions
-   * owns attachment bytes in chunked SQLite or the optional R2 tier; message
-   * rows retain content-addressed pointers. `false` keeps media inline and
-   * disables aged maintenance.
+   * Aged-media eviction — a CONTEXT-WINDOW technique, not a storage setting.
+   *
+   * Once media has aged past `keepRecentMessages` on the active path, Think
+   * removes it from the conversation so the model stops re-reading a large
+   * image on every turn, and leaves a marker naming a Workspace file under
+   * `/attachments/evicted/`. The bytes are written raw with their real mime
+   * type, so the agent can read the picture back with the workspace `read`
+   * tool when it deliberately needs it again. Visible to the model and lossy
+   * on purpose.
+   *
+   * This is separate from Sessions attachment storage, which is invisible
+   * and lossless: a large payload may be held as an `attachment:sha256:`
+   * pointer whether eviction is on or off.
+   *
+   * `false` keeps aged media in the conversation, so the model keeps seeing
+   * it. It does NOT change where Sessions keeps the bytes.
+   *
+   * `keepRecentMessages` is clamped to at least the recent window the model
+   * replays at full fidelity (4 messages), so eviction can never rewrite
+   * content the model still sees.
    *
    * @default true
    */
@@ -2869,24 +2876,27 @@ export class Think<
   });
 
   /**
-   * Sessions attachment policy, merging the host fields. `mediaEviction`
-   * predates `sessionAttachments` and maps onto it: `false` disables the
-   * aged-row pass, and its thresholds are the same numbers under their
-   * Sessions names. Payload bytes are always preserved — the old lossy mode
-   * is gone, so `externalizeToWorkspace` no longer has an effect.
+   * Sessions attachment policy, merging the host fields.
+   *
+   * With eviction ON, Think owns aged-row policy, so Sessions' own aged pass
+   * is switched OFF: otherwise it would move the same bytes into attachment
+   * storage a moment before Think moves them out to the Workspace.
+   *
+   * `mediaEviction.minPartBytes` is Think's own CONTEXT threshold and is not
+   * passed on: where Sessions keeps a payload is a storage question, settled
+   * by `sessionAttachments.r2ThresholdBytes` and the row budget alone.
    */
   #attachmentPolicy(): SessionsAttachmentOptions {
-    const eviction = this.mediaEviction;
-    const config = typeof eviction === "object" ? eviction : {};
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return { ...this.sessionAttachments };
     return {
       ...this.sessionAttachments,
-      inlineThresholdBytes: config.minPartBytes ?? 32 * 1024,
       keepRecentMessages: Math.max(
         MODEL_RECENT_WINDOW,
-        config.keepRecentMessages ?? 8
+        config.keepRecentMessages
       ),
-      maxMaintenanceRowsPerPass: config.maxRowsPerPass ?? 64,
-      maintenance: eviction !== false
+      maxMaintenanceRowsPerPass: config.maxRowsPerPass,
+      maintenance: false
     };
   }
 
@@ -3069,19 +3079,6 @@ export class Think<
             this.#contextProvider("_system_prompt"),
             (label) => this.#contextProvider(label)
           );
-          this.#contextBlocks.setUnloadCallback(async (label, key) => {
-            try {
-              await reclaimLoadedSkill(this.session, label, key);
-            } catch (error) {
-              console.warn(
-                `[think] Failed to reclaim skill ${label}:${key}: ${
-                  error instanceof Error ? error.message : String(error)
-                }`
-              );
-              throw error;
-            }
-          });
-          await restoreLoadedSkills(this.#contextBlocks, this.session);
           this._unsubscribeSessionChanges?.();
           this._unsubscribeSessionChanges = this.sessions.subscribe(
             async (event) => {
@@ -3449,6 +3446,166 @@ export class Think<
     }
   }
 
+  private _mediaEvictionRunning = false;
+  private _mediaEvictionScheduled = false;
+
+  /**
+   * Schedule a bounded media-eviction pass (see `mediaEviction`).
+   *
+   * Coalesces repeated requests and defers past the current event-loop work,
+   * so it is safe to call from the cache-refresh path that `onStart` runs
+   * inside `blockConcurrencyWhile`: the pass itself never runs in `onStart`,
+   * and `_evictAgedMediaBestEffort` swallows its own failures, so a bad pass
+   * can never brick the object.
+   */
+  private _scheduleMediaEvictionPass(): void {
+    if (this._mediaEvictionScheduled || this._mediaEvictionRunning) return;
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return;
+    // Cheap "is there anything aged at all" gate. A windowed hydration is
+    // itself proof of a longer stored path, so it qualifies even though the
+    // in-memory window is exactly the protected tail.
+    const keepRecent = Math.max(config.keepRecentMessages, MODEL_RECENT_WINDOW);
+    if (
+      this._lastHydration?.truncated !== true &&
+      this._cachedMessages.length <= keepRecent
+    ) {
+      return;
+    }
+    this._mediaEvictionScheduled = true;
+    setTimeout(() => {
+      this._mediaEvictionScheduled = false;
+      void this._evictAgedMediaBestEffort();
+    }, 0);
+  }
+
+  /**
+   * Remove aged media from the conversation, leaving a Workspace pointer the
+   * agent can read back.
+   *
+   * Memory-bounded by design: candidate sizes come from `getHistoryRowStats()`
+   * (no content loaded), only rows big enough to hold an evictable payload are
+   * read, and they are processed one at a time. Bytes are written to the
+   * Workspace BEFORE the row is rewritten, so a failed pass never loses data;
+   * once the rewritten row is stored, its Sessions attachment reference is
+   * gone and the blob is reaped, so the bytes live in exactly one place.
+   *
+   * The aged cutoff is `keepRecentMessages` clamped to at least
+   * `MODEL_RECENT_WINDOW`: messages the model still replays at full fidelity
+   * are never rewritten, whatever the configuration says.
+   *
+   * Best-effort: failures are logged and the next pass retries. When a pass
+   * stops at `maxRowsPerPass` having made progress, the next one is scheduled
+   * so a backlog drains on its own; a pass that changed nothing does not
+   * reschedule, which is what guarantees termination.
+   */
+  protected async _evictAgedMediaBestEffort(): Promise<{
+    messages: number;
+    parts: number;
+    bytes: number;
+    backlogRemains: boolean;
+  } | null> {
+    if (this._mediaEvictionRunning) return null;
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return null;
+    this._mediaEvictionRunning = true;
+    const totals = {
+      messages: 0,
+      parts: 0,
+      bytes: 0,
+      backlogRemains: false
+    };
+    try {
+      const stats = await this.session.getHistoryRowStats();
+      const keepRecent = Math.max(
+        config.keepRecentMessages,
+        MODEL_RECENT_WINDOW
+      );
+      const aged = stats.slice(0, Math.max(0, stats.length - keepRecent));
+
+      let processed = 0;
+      for (const row of aged) {
+        // Neither the stored row nor anything it points at is large enough
+        // to hold an evictable payload — skip without reading it. A rewritten
+        // row drops below this line and is skipped by every later pass.
+        if (
+          row.bytes < config.minPartBytes &&
+          row.attachmentBytes < config.minPartBytes
+        ) {
+          continue;
+        }
+        if (processed >= config.maxRowsPerPass) {
+          totals.backlogRemains = true;
+          break;
+        }
+        processed++;
+
+        // Read the STORED form: an `attachment:` pointer must stay a pointer
+        // here, or reconstruction would inline the payload just to evict it.
+        const message = (await this.session.getMessage(row.id, {
+          reconstruct: "pointer"
+        })) as UIMessage | null;
+        if (!message) continue;
+
+        const result = await evictMediaFromMessage(message, {
+          minPartBytes: config.minPartBytes,
+          attachments: {
+            measure: async (url) => {
+              const stored = await this.sessions.attachments.get(url);
+              return stored
+                ? { bytes: stored.bytes, mediaType: stored.mediaType }
+                : null;
+            },
+            read: async (url) => {
+              const stream = await this.sessions.attachments.open(url);
+              return new Uint8Array(await new Response(stream).arrayBuffer());
+            }
+          },
+          write: async (index, bytes, mediaType) => {
+            const path = evictedFilePath(message.id, index, mediaType);
+            await this.workspace.writeFileBytes(
+              path,
+              bytes,
+              mediaType ?? "application/octet-stream"
+            );
+            return path;
+          }
+        });
+        if (!result.changed) continue;
+
+        // Dropping the last reference to the payload reaps the Sessions blob,
+        // so the bytes now exist only as the Workspace file.
+        await this._updateMessageInHistory(result.message);
+        totals.messages++;
+        totals.parts += result.parts;
+        totals.bytes += result.bytes;
+      }
+
+      if (totals.messages > 0) {
+        this._emit("chat:media:evicted", {
+          messages: totals.messages,
+          parts: totals.parts,
+          bytes: totals.bytes,
+          externalizedBytes: totals.bytes
+        });
+      }
+      return totals;
+    } catch (error) {
+      console.error(
+        "[Think] media eviction pass failed; a later pass will retry.",
+        error
+      );
+      return null;
+    } finally {
+      this._mediaEvictionRunning = false;
+      // Only chain when this pass actually shrank something: a pass that
+      // changed nothing would otherwise reschedule itself forever.
+      if (totals.backlogRemains && totals.messages > 0) {
+        this._scheduleMediaEvictionPass();
+      }
+    }
+  }
+
   /** Replace the live cache with a durable storage snapshot. */
   private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
     this._cachedMessages = messages;
@@ -3493,7 +3650,11 @@ export class Think<
     if (!Number.isFinite(budget) || budget <= 0) {
       this._lastHydration = null;
       this._lastWindowedEmit = null;
-      return this._replaceCachedMessages(await this._readMessagesFromStorage());
+      const full = this._replaceCachedMessages(
+        await this._readMessagesFromStorage()
+      );
+      this._scheduleMediaEvictionPass();
+      return full;
     }
 
     const recent = await this.session.getRecentHistory(
@@ -3534,7 +3695,11 @@ export class Think<
     } else {
       this._lastWindowedEmit = null;
     }
-    return this._replaceCachedMessages(recent.messages as UIMessage[]);
+    const hydrated = this._replaceCachedMessages(
+      recent.messages as UIMessage[]
+    );
+    this._scheduleMediaEvictionPass();
+    return hydrated;
   }
 
   /** Reconstruct a pointer-bearing stored row before it enters the live cache. */
@@ -3613,7 +3778,6 @@ export class Think<
     await this.session.clearMessages();
     // The transcript carried the skill-load record, so a cleared session
     // starts with no skills loaded and a prompt rebuilt without them.
-    this.#contextBlocks?.clearSkillState();
     await this.#contextBlocks?.refreshSystemPrompt();
     // Drop any pending terminal record (#1645) so a stale exhaustion can't
     // replay onto a freshly-cleared (empty) conversation on reconnect. Covers
@@ -4658,8 +4822,6 @@ export class Think<
       "grep",
       "delete"
     ].some((toolName) => toolNames.has(toolName));
-    const hasContextTools =
-      toolNames.has("load_context") || toolNames.has("unload_context");
     const hasExtensionTools =
       toolNames.has("load_extension") || toolNames.has("list_extensions");
     const hasExecuteTool = toolNames.has("execute");
@@ -4685,12 +4847,6 @@ export class Think<
       );
       lines.push(
         "- Some tools may call server code, browser/client code, MCP servers, extensions, or delegated agents. Use them according to their descriptions."
-      );
-    }
-
-    if (hasContextTools) {
-      lines.push(
-        "- If context-loading tools are available, use them to load relevant memory, skills, or project context before acting on incomplete information."
       );
     }
 

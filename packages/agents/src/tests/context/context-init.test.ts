@@ -3,7 +3,6 @@ import {
   ContextBlocks,
   type ContextProvider,
   type SearchProvider,
-  type SkillProvider,
   type WritableContextProvider
 } from "../../context";
 
@@ -35,33 +34,6 @@ class TrackingWritableProvider implements WritableContextProvider {
 
   async set(content: string) {
     this.written = content;
-  }
-}
-
-class TrackingSkillProvider implements SkillProvider {
-  initLabel: string | null = null;
-  private skills = new Map<string, { content: string; description?: string }>();
-
-  init(label: string) {
-    this.initLabel = label;
-  }
-
-  async get() {
-    if (this.skills.size === 0) return null;
-    return Array.from(this.skills.entries())
-      .map(
-        ([key, { description }]) =>
-          `- ${key}${description ? `: ${description}` : ""}`
-      )
-      .join("\n");
-  }
-
-  async load(key: string) {
-    return this.skills.get(key)?.content ?? null;
-  }
-
-  async set(key: string, content: string, description?: string) {
-    this.skills.set(key, { content, description });
   }
 }
 
@@ -126,13 +98,6 @@ describe("init(label) lifecycle", () => {
     const blocks = new ContextBlocks([{ label: "memory", provider }]);
     await blocks.load();
     expect(provider.initLabel).toBe("memory");
-  });
-
-  it("calls init on skill provider with correct label", async () => {
-    const provider = new TrackingSkillProvider();
-    const blocks = new ContextBlocks([{ label: "skills", provider }]);
-    await blocks.load();
-    expect(provider.initLabel).toBe("skills");
   });
 
   it("calls init on search provider with correct label", async () => {

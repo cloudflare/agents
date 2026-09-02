@@ -88,20 +88,4 @@ describe("Sessions context blocks", () => {
       "exceeds maxTokens"
     );
   });
-
-  it("renders empty skill-capable blocks so their tools stay discoverable", async () => {
-    const blocks = new ContextBlocks([
-      {
-        label: "skills",
-        provider: {
-          get: async () => null,
-          load: async () => null
-        }
-      }
-    ]);
-    await blocks.load();
-
-    expect(blocks.toSystemPrompt()).toContain("SKILLS");
-    expect(blocks.toSystemPrompt()).toContain("[loadable]");
-  });
 });

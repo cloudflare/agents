@@ -1,9 +1,10 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type {
-  SessionHarnessObject,
-  SessionSearchHarnessObject
+import {
+  MemoryAttachmentBucket,
+  type SessionHarnessObject,
+  type SessionSearchHarnessObject
 } from "../capabilities/sessions";
 import {
   attachmentResponse,
@@ -15,7 +16,6 @@ import {
   SessionSearchDisabledError,
   Sessions,
   estimateStringTokens,
-  type SessionAttachmentBucket,
   type SessionChangeEvent,
   type SessionMessage
 } from "../../sessions";
@@ -55,43 +55,6 @@ async function collect(
   const messages: SessionMessage[] = [];
   for await (const message of iterator) messages.push(message);
   return messages;
-}
-
-class FakeAttachmentBucket implements SessionAttachmentBucket {
-  readonly objects = new Map<string, Uint8Array>();
-  puts = 0;
-  gets = 0;
-  deletes = 0;
-
-  async get(key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> {
-    this.gets++;
-    const stored = this.objects.get(key);
-    if (!stored) return null;
-    const bytes = new Uint8Array(stored);
-    return {
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(bytes);
-          controller.close();
-        }
-      })
-    };
-  }
-
-  async put(key: string, value: ReadableStream<Uint8Array>): Promise<void> {
-    this.puts++;
-    this.objects.set(
-      key,
-      new Uint8Array(await new Response(value).arrayBuffer())
-    );
-  }
-
-  async delete(key: string | string[]): Promise<void> {
-    this.deletes++;
-    for (const item of typeof key === "string" ? [key] : key) {
-      this.objects.delete(item);
-    }
-  }
 }
 
 describe("Sessions capability", () => {
@@ -503,6 +466,7 @@ describe("Sessions capability", () => {
   it("forks a path into a new session sharing attachment blobs", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket();
       const session = instance.sessions.session();
       await session.appendMessage(text("f1", "one"));
       await session.appendMessage(imageMessage("f2", 4096));
@@ -524,15 +488,19 @@ describe("Sessions capability", () => {
   });
 
   describe("attachments", () => {
-    it("offloads oversized inline media and round-trips it on read", async () => {
+    it("extracts a payload over the R2 threshold and round-trips it", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const bucket = instance.useAttachmentBucket();
         const session = instance.sessions.session();
         const original = imageMessage("img", 4096);
         const result = await session.appendMessage(original);
         expect(result.attachments).toHaveLength(1);
         expect(instance.attachmentBlobCount()).toBe(1);
-        expect(instance.attachmentChunkCount()).toBe(1);
+        // The bytes left the Durable Object: that is the whole point of
+        // extracting them, and only R2 can do it.
+        expect(bucket.objects.size).toBe(1);
+        expect(instance.attachmentChunkCount()).toBe(0);
 
         // Stored form carries the pointer, not the payload.
         const filePart = result.message.parts[1];
@@ -552,9 +520,10 @@ describe("Sessions capability", () => {
       });
     });
 
-    it("keeps small media inline", async () => {
+    it("keeps a payload below the threshold inline", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const session = instance.sessions.session();
         const small = imageMessage("small", 128);
         await session.appendMessage(small);
@@ -566,9 +535,10 @@ describe("Sessions capability", () => {
       });
     });
 
-    it("does not offload media for an idempotent duplicate", async () => {
+    it("does not offload a payload for an idempotent duplicate", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const session = instance.sessions.session();
         await session.appendMessage(text("same-id", "stored text"));
 
@@ -585,24 +555,26 @@ describe("Sessions capability", () => {
     it("dedups identical payloads and reaps blobs only when unreferenced", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const bucket = instance.useAttachmentBucket();
         const session = instance.sessions.session();
         await session.appendMessage(imageMessage("dup1", 4096));
         await session.appendMessage(imageMessage("dup2", 4096));
         expect(instance.attachmentBlobCount()).toBe(1);
-        expect(instance.attachmentChunkCount()).toBe(1);
+        expect(bucket.objects.size).toBe(1);
 
         await session.deleteMessages(["dup1"]);
         expect(instance.attachmentBlobCount()).toBe(1);
 
         await session.deleteMessages(["dup2"]);
         expect(instance.attachmentBlobCount()).toBe(0);
-        expect(instance.attachmentChunkCount()).toBe(0);
+        expect(bucket.objects.size).toBe(0);
       });
     });
 
     it("replaces attachment references before reaping the old payload", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const session = instance.sessions.session();
         await session.appendMessage(imageMessage("updated", 4096));
         const [oldHash] = instance.attachmentHashes();
@@ -626,9 +598,10 @@ describe("Sessions capability", () => {
     it("degrades missing payloads to markers instead of throwing", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const bucket = instance.useAttachmentBucket();
         const session = instance.sessions.session();
         await session.appendMessage(imageMessage("lost", 4096));
-        instance.deleteAttachmentChunks();
+        bucket.objects.clear();
         const read = await session.getMessage("lost");
         expect(read?.parts[1].type).toBe("text");
         expect(read?.parts[1].text).toContain("no longer available");
@@ -662,6 +635,7 @@ describe("Sessions capability", () => {
     it("accepts legitimate client echoes of stored pointers", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const session = instance.sessions.session();
         const result = await session.appendMessage(imageMessage("orig", 4096));
         const echoed: SessionMessage = {
@@ -745,7 +719,12 @@ describe("Sessions capability", () => {
     it("cleans only newly created blobs when an update finds no row", async () => {
       await withCapabilityHarness(async ({ install, storage }) => {
         const { capability, lifecycle } = install(
-          new Sessions({ attachments: { inlineThresholdBytes: 1 } })
+          new Sessions({
+            attachments: {
+              r2: new MemoryAttachmentBucket(),
+              r2ThresholdBytes: 1
+            }
+          })
         );
         await lifecycle.start();
         const existingUrl = `data:text/plain;base64,${btoa("existing")}`;
@@ -788,14 +767,10 @@ describe("Sessions capability", () => {
 
     it("uses one R2 object for large payloads and skips duplicate puts", async () => {
       await withCapabilityHarness(async ({ install, storage }) => {
-        const bucket = new FakeAttachmentBucket();
+        const bucket = new MemoryAttachmentBucket();
         const { capability, lifecycle } = install(
           new Sessions({
-            attachments: {
-              r2: bucket,
-              inlineThresholdBytes: 1,
-              r2ThresholdBytes: 1024
-            }
+            attachments: { r2: bucket, r2ThresholdBytes: 1024 }
           })
         );
         await lifecycle.start();
@@ -828,7 +803,7 @@ describe("Sessions capability", () => {
 
     it("streams a declared-length upload directly to R2", async () => {
       await withCapabilityHarness(async ({ install, storage }) => {
-        const bucket = new FakeAttachmentBucket();
+        const bucket = new MemoryAttachmentBucket();
         const { capability, lifecycle } = install(
           new Sessions({
             attachments: { r2: bucket, r2ThresholdBytes: 1024 }
@@ -947,6 +922,7 @@ describe("Sessions capability", () => {
     it("serves attachment responses without buffering the payload", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const appended = await instance.sessions
           .session()
           .appendMessage(imageMessage("served", 4096));
@@ -969,6 +945,7 @@ describe("Sessions capability", () => {
     it("counts attachment weight in stats and row estimates", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const session = instance.sessions.session();
         await session.appendMessage(imageMessage("weighted", 4096));
         const stats = await session.stats();
@@ -1066,6 +1043,7 @@ describe("Sessions capability", () => {
     it("stores the message verbatim, without offloading payloads", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const session = instance.sessions.session();
         const original = imageMessage("i-media", 4096);
         await session.importMessage(original, {
@@ -1109,7 +1087,7 @@ describe("Sessions capability", () => {
           "role",
           "content",
           "token_estimate",
-          "media_candidate_bytes",
+          "offload_candidate_bytes",
           "created_at"
         ]);
         // Attachment references are derived: no path, media type, size, or
@@ -1265,6 +1243,7 @@ describe("Sessions capability", () => {
     it("round-trips every offloaded media type", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const session = instance.sessions.session();
         const mediaTypes = [
           ["application/pdf", "doc.pdf"],
@@ -1335,7 +1314,7 @@ describe("Sessions capability", () => {
 
     it("moves an unknown-length stream to R2 without leaving chunk rows", async () => {
       await withCapabilityHarness(async ({ install, storage }) => {
-        const bucket = new FakeAttachmentBucket();
+        const bucket = new MemoryAttachmentBucket();
         const { capability, lifecycle } = install(
           new Sessions({
             attachments: { r2: bucket, r2ThresholdBytes: 4096 }
@@ -1378,10 +1357,100 @@ describe("Sessions capability", () => {
     });
   });
 
+  describe("one extraction rule", () => {
+    /** A 200 KB image: large for a row, far below the R2 threshold. */
+    function bigImage(id: string): SessionMessage {
+      return imageMessage(id, 200 * 1024);
+    }
+
+    it("keeps a 200 KB image inline when no bucket is configured", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const original = bigImage("inline-image");
+        const result = await session.appendMessage(original);
+
+        // Moving these bytes into chunk rows would not free one byte of the
+        // 10 GB: the chunks live in this same Durable Object. Inline is the
+        // resting place, and it costs one billed row instead of four.
+        expect(result.attachments).toEqual([]);
+        expect(instance.attachmentBlobCount()).toBe(0);
+        expect(instance.attachmentChunkCount()).toBe(0);
+        expect(
+          await session.getMessage("inline-image", { reconstruct: "pointer" })
+        ).toEqual(original);
+        expect(await session.getMessage("inline-image")).toEqual(original);
+      });
+    });
+
+    it("extracts the same image to R2 when a bucket is configured", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const bucket = instance.useAttachmentBucket(64 * 1024);
+        const session = instance.sessions.session();
+        const original = bigImage("r2-image");
+        const result = await session.appendMessage(original);
+
+        expect(result.attachments).toHaveLength(1);
+        expect(bucket.objects.size).toBe(1);
+        // The bytes are out of the Durable Object, which is the only move
+        // that actually reclaims space.
+        expect(instance.attachmentChunkCount()).toBe(0);
+        const stored = await session.getMessage("r2-image", {
+          reconstruct: "pointer"
+        });
+        expect(parseAttachmentUrl(stored?.parts[1].url)).toBeTruthy();
+        expect(await session.getMessage("r2-image")).toEqual(original);
+      });
+    });
+
+    it("extracts a 3 MB text part with no bucket, because the row cannot hold it", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const original = text("over-budget", "t".repeat(3 * 1024 * 1024));
+        const result = await session.appendMessage(original);
+
+        // Nothing about the payload's type earns this: only the row budget.
+        expect(result.attachments).toHaveLength(1);
+        expect(instance.attachmentChunkCount()).toBeGreaterThan(0);
+        const rows = await session.getHistoryRowStats();
+        expect(rows[0].bytes).toBeLessThanOrEqual(MAX_INLINE_ROW_BYTES);
+        expect(await session.getMessage("over-budget")).toEqual(original);
+      });
+    });
+
+    it("reconstructs all three byte for byte", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket(64 * 1024);
+        const session = instance.sessions.session();
+        const inline = imageMessage("mixed-inline", 200 * 1024);
+        const extracted = {
+          ...imageMessage("mixed-r2", 200 * 1024),
+          role: "assistant"
+        };
+        // Distinct payload bytes, so a wrong hash cannot read as a pass.
+        extracted.parts[1].url = `data:image/png;base64,${btoa(
+          "q".repeat(200 * 1024)
+        )}`;
+        const oversized = text("mixed-text", "t".repeat(3 * 1024 * 1024));
+
+        for (const message of [inline, extracted, oversized]) {
+          await session.appendMessage(message);
+        }
+
+        const history = await session.getHistory();
+        expect(history).toEqual([inline, extracted, oversized]);
+      });
+    });
+  });
+
   describe("hydration budget", () => {
     it("charges attachment bytes against the recent-history budget", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        instance.useAttachmentBucket();
         const session = instance.sessions.session();
         await session.appendMessage(text("h0", "z".repeat(200)));
         await session.appendMessage(imageMessage("h1", 4096));

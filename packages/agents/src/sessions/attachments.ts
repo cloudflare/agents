@@ -40,7 +40,6 @@ export const ATTACHMENT_URL_PREFIX = "attachment:sha256:";
  */
 export const MAX_INLINE_ROW_BYTES = SESSION_ATTACHMENT_CHUNK_BYTES;
 
-const DEFAULT_INLINE_THRESHOLD_BYTES = 32 * 1024;
 const DEFAULT_R2_THRESHOLD_BYTES = 1_500_000;
 const DEFAULT_R2_PREFIX = "cf-agents/sessions/attachments";
 const DEFAULT_MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
@@ -70,7 +69,6 @@ export interface ResolvedAttachmentOptions {
   readonly r2ThresholdBytes: number;
   readonly r2Prefix: string;
   readonly maxAttachmentBytes: number;
-  readonly inlineThresholdBytes: number;
   readonly basePath: string;
   readonly keepRecentMessages: number;
   readonly maxMaintenanceRowsPerPass: number;
@@ -81,20 +79,21 @@ export interface ResolvedAttachmentOptions {
 /**
  * What one offload pass moves out of a message row.
  *
- * Media and prose are treated differently on purpose. Media is opaque bytes
- * the row should never carry, so it leaves at a fixed threshold. Prose is the
- * conversation itself, so it stays in the row until the row cannot hold it.
+ * There is no content-type distinction: a `data:` URL file part, a long text
+ * part, and a long string nested in tool output are all just payloads. Only
+ * two things move one out of the row, and both are read from the engine's
+ * resolved options rather than passed here:
+ *
+ *  1. R2, when a bucket is configured. Extracting into R2 is the only move
+ *     that reclaims Durable Object space — SQLite chunks live in the same
+ *     10 GB as the row they came out of — so it is the only eager one.
+ *  2. The row budget below, which applies with or without a bucket.
  */
 export interface OffloadPolicy {
   /**
-   * Media at or above this decoded size becomes a pointer: `data:` URL file
-   * parts, and `data:` URL strings nested in tool output (a screenshot is
-   * media wherever a tool put it).
-   */
-  mediaThresholdBytes: number;
-  /**
-   * Serialized row ceiling. Whatever is left is offloaded largest-first,
-   * prose included, until the row fits. Content is never truncated.
+   * Serialized row ceiling. Payloads are offloaded largest-first until the
+   * row fits. Content is never truncated; a row that still does not fit is
+   * rejected by the caller.
    */
   rowBudgetBytes: number;
 }
@@ -378,8 +377,6 @@ type Leaf = {
   kind: "file" | "text" | "output";
   keys: (string | number)[];
   bytes: number;
-  /** A file part or a `data:` URL string: opaque bytes, not conversation. */
-  media: boolean;
 };
 
 function collectLeaves(parts: readonly SessionMessagePart[]): Leaf[] {
@@ -390,20 +387,18 @@ function collectLeaves(parts: readonly SessionMessagePart[]): Leaf[] {
         partIndex,
         kind: "file",
         keys: [],
-        bytes: estimatedDataUrlBytes(part.url),
-        media: true
+        bytes: estimatedDataUrlBytes(part.url)
       });
     } else if (hasText(part) && !parseAttachmentUrl(part.text)) {
       leaves.push({
         partIndex,
         kind: "text",
         keys: [],
-        bytes: byteLength(part.text),
-        media: false
+        bytes: byteLength(part.text)
       });
     } else if (isToolPart(part) && part.output !== undefined) {
-      collectStringLeaves(part.output, [], 0, (keys, bytes, media) =>
-        leaves.push({ partIndex, kind: "output", keys, bytes, media })
+      collectStringLeaves(part.output, [], 0, (keys, bytes) =>
+        leaves.push({ partIndex, kind: "output", keys, bytes })
       );
     }
   });
@@ -414,15 +409,17 @@ function collectStringLeaves(
   value: unknown,
   keys: (string | number)[],
   depth: number,
-  found: (keys: (string | number)[], bytes: number, media: boolean) => void
+  found: (keys: (string | number)[], bytes: number) => void
 ): void {
   if (typeof value === "string") {
     if (parseAttachmentUrl(value)) return;
-    const media = value.startsWith("data:");
+    // A `data:` URL measures as its decoded payload; that is a size, not a
+    // classification — it is offloaded on exactly the same terms as prose.
     found(
       keys,
-      media ? estimatedDataUrlBytes(value) : byteLength(value),
-      media
+      value.startsWith("data:")
+        ? estimatedDataUrlBytes(value)
+        : byteLength(value)
     );
     return;
   }
@@ -469,20 +466,24 @@ function writeAt(
 }
 
 /**
- * Bytes a later maintenance pass could still move out of this row, which is
- * what the stamped hint has to mean for bounded passes to terminate: media
- * always, and everything else only while the row is over budget. A row whose
- * hint is 0 is one maintenance would not change, so it never becomes a
- * candidate again.
+ * The largest inline payload a later maintenance pass could move out of this
+ * row, which is what the stamped hint has to mean for bounded passes to
+ * terminate. The pass compares it against whatever threshold is in force at
+ * the time, so lowering `r2ThresholdBytes` makes older rows discoverable
+ * without restamping them.
+ *
+ * Without a bucket the pass has nowhere useful to move anything — chunking a
+ * payload leaves the bytes in the same Durable Object — so every row stamps
+ * 0 and never becomes a candidate.
  */
 export function maintenanceCandidateBytes(
   message: SessionMessage,
-  rowBytes: number
+  options: Pick<ResolvedAttachmentOptions, "bucket">
 ): number {
-  const overBudget = rowBytes > MAX_INLINE_ROW_BYTES;
+  if (!options.bucket) return 0;
   let maximum = 0;
   for (const leaf of collectLeaves(message.parts)) {
-    if (leaf.media || overBudget) maximum = Math.max(maximum, leaf.bytes);
+    maximum = Math.max(maximum, leaf.bytes);
   }
   return maximum;
 }
@@ -621,10 +622,6 @@ export class AttachmentEngine {
         input?.maxAttachmentBytes,
         DEFAULT_MAX_ATTACHMENT_BYTES
       ),
-      inlineThresholdBytes: positive(
-        input?.inlineThresholdBytes,
-        DEFAULT_INLINE_THRESHOLD_BYTES
-      ),
       basePath: input?.basePath ?? DEFAULT_BASE_PATH,
       keepRecentMessages: positive(
         input?.keepRecentMessages,
@@ -730,10 +727,10 @@ export class AttachmentEngine {
   }
 
   /**
-   * Move payloads out of a message row: media at or above the media
-   * threshold, then whatever else is largest until the row fits its budget.
-   * Blob writes complete before this returns, so a stored pointer always has
-   * durable bytes behind it.
+   * Move payloads out of a message row: with a bucket, anything at or above
+   * the R2 threshold; then, bucket or not, whatever is largest until the row
+   * fits its budget. Blob writes complete before this returns, so a stored
+   * pointer always has durable bytes behind it.
    */
   async offload(
     message: SessionMessage,
@@ -745,7 +742,7 @@ export class AttachmentEngine {
     let bytes = 0;
     const leaves = collectLeaves(parts).sort((a, b) => b.bytes - a.bytes);
 
-    // A leaf the media pass already moved must not be offloaded again by the
+    // A leaf the R2 pass already moved must not be offloaded again by the
     // budget pass: its slot now holds a pointer, and storing that pointer
     // string as a payload would lose the original bytes.
     const taken = new Set<Leaf>();
@@ -759,9 +756,12 @@ export class AttachmentEngine {
       bytes += leaf.bytes;
     };
 
-    for (const leaf of leaves) {
-      if (leaf.media && leaf.bytes >= policy.mediaThresholdBytes) {
-        await take(leaf);
+    // Rule 1: R2 is the only tier that reclaims Durable Object space, so it
+    // is the only reason to extract a payload the row could still hold.
+    const { bucket, r2ThresholdBytes } = this.options;
+    if (bucket) {
+      for (const leaf of leaves) {
+        if (leaf.bytes >= r2ThresholdBytes) await take(leaf);
       }
     }
 

@@ -251,13 +251,24 @@ To trim a transcript before handing it to a model, `truncateOlderMessages` is ex
 
 ## Attachments
 
-Offload is always on and always lossless. It applies to every oversized payload, not just files:
+Offload is always lossless, and it makes no distinction between kinds of payload. A `data:` URL file part, a long text or reasoning part, and a long string nested in a tool output are all just payloads:
 
 - `data:` URL file parts
 - text and reasoning parts
 - strings nested inside tool outputs
 
 The stored form keeps the part's shape and replaces the payload with an `attachment:sha256:<hash>` pointer. Bytes live in content-addressed storage. Reading back inlines the payload again, so a round-trip is exact, byte for byte. Nothing is truncated or summarized to make something fit.
+
+### When a payload leaves the row
+
+Two things, and only two, move a payload out of a message row:
+
+1. **R2, when a bucket is configured.** A payload at or above `r2ThresholdBytes` is written to one private R2 object and the row keeps a pointer.
+2. **The row budget.** If the serialized row would exceed `MAX_INLINE_ROW_BYTES` (1.5 MiB), payloads are offloaded largest-first until it fits — into R2 under rule 1, otherwise into SQLite chunks. A row that still cannot fit throws `SessionMessageTooLargeError`.
+
+Anything else stays inline.
+
+Extraction is not a way to shrink the database. Chunk rows live in the same Durable Object as the row they came out of, inside the same 10 GB; only R2 actually reclaims space. Billing counts rows written, not bytes, so rewriting a 500 KB row costs the same one billed row as a tiny one, while extracting it costs four (message, reference, blob, chunk). That is why R2 is the single eager threshold and why, without a bucket, inline is the correct resting place.
 
 Configure the policy with plain values:
 
@@ -266,7 +277,6 @@ import { Sessions } from "agents/sessions";
 
 readonly sessions = new Sessions({
   attachments: {
-    inlineThresholdBytes: 32 * 1024,
     maxAttachmentBytes: 32 * 1024 * 1024,
     r2: env.ATTACHMENTS,
     r2ThresholdBytes: 1_500_000
@@ -274,18 +284,17 @@ readonly sessions = new Sessions({
 });
 ```
 
-| Option                      | Default                          | Meaning                                                    |
-| --------------------------- | -------------------------------- | ---------------------------------------------------------- |
-| `r2`                        | none                             | Optional large-object tier                                 |
-| `r2ThresholdBytes`          | `1_500_000`                      | Payloads at or above this size use R2 when configured      |
-| `r2Prefix`                  | `cf-agents/sessions/attachments` | Private R2 object-key prefix                               |
-| `inlineThresholdBytes`      | 32 KiB                           | Payloads at or above this size are offloaded               |
-| `maxAttachmentBytes`        | 32 MiB                           | Ceiling for one attachment payload                         |
-| `basePath`                  | `/attachments`                   | Logical locator prefix exposed to reconstructors           |
-| `keepRecentMessages`        | `8`                              | Rows this close to the leaf keep inline payloads untouched |
-| `maxMaintenanceRowsPerPass` | `64`                             | Maximum aged rows rewritten by one maintenance pass        |
-| `maintenance`               | `true`                           | Run the aged-row maintenance pass                          |
-| `reconstruct`               | inline                           | Read-side materialization default for file parts           |
+| Option                      | Default                          | Meaning                                                        |
+| --------------------------- | -------------------------------- | -------------------------------------------------------------- |
+| `r2`                        | none                             | Optional large-object tier                                     |
+| `r2ThresholdBytes`          | `1_500_000`                      | The single extraction threshold; only applies when `r2` is set |
+| `r2Prefix`                  | `cf-agents/sessions/attachments` | Private R2 object-key prefix                                   |
+| `maxAttachmentBytes`        | 32 MiB                           | Ceiling for one attachment payload                             |
+| `basePath`                  | `/attachments`                   | Logical locator prefix exposed to reconstructors               |
+| `keepRecentMessages`        | `8`                              | Rows this close to the leaf keep inline payloads untouched     |
+| `maxMaintenanceRowsPerPass` | `64`                             | Maximum aged rows rewritten by one maintenance pass            |
+| `maintenance`               | `true`                           | Run the aged-row maintenance pass (a no-op without `r2`)       |
+| `reconstruct`               | inline                           | Read-side materialization default for file parts               |
 
 Individual fields are plain values, not thunks. Only the top-level `attachments` option may be a function, which is re-read on every access so an `Agent` subclass can point it at bindings or policy fields that are initialized after the field initializer runs:
 
@@ -297,7 +306,7 @@ readonly sessions = new Sessions({
 
 Sessions owns the payload tables, private R2 keys, message references, deduplication, and deletion. Workspace is not part of attachment durability.
 
-Without R2, Sessions stores every offloaded payload in Durable Object SQLite. With R2, payloads below `r2ThresholdBytes` stay in SQLite and larger payloads use one private R2 object.
+Without R2, the only payloads Sessions moves out are the ones an over-budget row cannot hold, and they go into Durable Object SQLite. With R2, every payload at or above `r2ThresholdBytes` moves into one private R2 object.
 
 SQLite payloads are split into 1.5 MiB rows. Each read pulls one row by `(storage_id, chunk_index)`. The final row can be shorter.
 
@@ -437,7 +446,9 @@ The response streams from Sessions storage and sets content type, content length
 
 ## Maintenance
 
-Payloads that are still inline in aged rows are drained by a bounded maintenance pass. It covers rows written before offload existed, rows written under a looser threshold, and large strings nested in tool outputs.
+With a bucket configured, payloads still inline in aged rows are drained into R2 by a bounded maintenance pass. It covers rows written before offload existed and rows written under a looser threshold.
+
+Without a bucket the pass has no work to do and returns empty totals without reading a single row. Moving a payload into SQLite chunks would leave the bytes in this same Durable Object, so inline is where they belong.
 
 ```ts
 const result = await session.runMaintenance();
@@ -448,11 +459,11 @@ result.bytes; // payload bytes removed from SQLite rows
 result.backlogRemains; // another eligible row remains after this pass
 ```
 
-The pass is lossless. It runs the same offload the write path runs, so bytes move into attachment storage and reconstruct exactly. Nothing is replaced with a marker and nothing is dropped.
+The pass is lossless. It runs the same offload the write path runs, so bytes move into R2 and reconstruct exactly. Nothing is replaced with a marker and nothing is dropped.
 
 Rows within `keepRecentMessages` of the leaf are never touched, so the model's hot window never pays a reconstruction read. One pass rewrites at most `maxMaintenanceRowsPerPass` rows and reschedules itself while a backlog remains. Set `maintenance: false` to turn it off.
 
-Each message row stores the largest payload maintenance could still offload. That number does not depend on the current threshold, so lowering the threshold later still finds older candidates, and rows with no candidates never enter the maintenance content query. A backlog probe reads only an ID rather than another large message.
+Each message row stores the largest payload maintenance could still offload, or zero when no bucket is configured. That number does not depend on the current threshold, so lowering `r2ThresholdBytes` later still finds older candidates, and rows with no candidates never enter the maintenance content query. A backlog probe reads only an ID rather than another large message.
 
 A completed pass emits the `session:maintenance:completed` telemetry event, and each rewritten row dispatches a `maintenance-rewrite` change-feed event so a cache-owning host can patch its projection. `runMaintenance()` returns `null` when maintenance is disabled or a pass is already running.
 

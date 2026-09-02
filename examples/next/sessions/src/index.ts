@@ -60,7 +60,6 @@ export class SessionObject extends DurableObject<Env> {
   readonly sessions = new Sessions({
     attachments: {
       r2: this.env.ATTACHMENTS,
-      inlineThresholdBytes: 32 * 1024,
       r2ThresholdBytes: 1_500_000
     },
     searchIndexing: true

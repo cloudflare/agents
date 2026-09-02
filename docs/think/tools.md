@@ -9,7 +9,7 @@ On every turn, Think merges tools from multiple sources. Later sources override 
 1. **Workspace tools** — `read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash` (built-in)
 2. **`getTools()`** — your custom server-side tools
 3. **Extension tools** — tools from loaded extensions (prefixed by extension name)
-4. **Context tools** — `set_context`, `load_context`, `search_context` (from `configureContext`)
+4. **Context tools** — `set_context`, `search_context` (from `configureContext`)
 5. **Skill tools** — `activate_skill`, `read_skill_resource`, `run_skill_script` (from `getSkills()`)
 6. **MCP tools** — from connected MCP servers (when `includeMcpTools` is enabled)
 7. **Client tools** — from the browser (see [Client Tools](./client-tools.md))

@@ -68,9 +68,19 @@ The attachment tables are:
 
 The blob and chunk tables are lazy. A text-only object never creates them. The reference table remains part of the core Sessions schema.
 
-### Lossless by construction
+### One rule, no content types
 
 One mechanism moves every kind of oversized payload out of a row and back: `data:` URL file parts, text and reasoning parts, and strings nested in tool outputs. The stored form keeps the part's shape and swaps the payload for a pointer. Reading back reconstructs the payload byte for byte.
+
+Storage draws no distinction between those kinds. An earlier design extracted "media" at a low fixed threshold and left everything else in the row until the row overflowed. That split was wrong on its own terms: documents do not arrive as media — a PDF read through a tool lands as plain tool-output text with no media type — so the type rule optimised the small case and ignored the large one. Deduplication, the other justification, is opportunistic and does not depend on type either.
+
+What replaced it is one threshold and one budget:
+
+1. With an R2 bucket configured, any single payload at or above `r2ThresholdBytes` is extracted into one private R2 object.
+2. Bucket or not, if the serialized row would exceed `MAX_INLINE_ROW_BYTES`, the largest payloads are extracted until it fits — into R2 under rule 1, otherwise into SQLite chunks.
+3. Otherwise the payload stays inline.
+
+Rule 1 is the only eager extraction because it is the only one that reclaims space. Extracting into the attachment tables does not make the database smaller: chunk rows live in the same Durable Object as the row they came out of, inside the same 10 GB. And billing counts ROWS written, not bytes — rewriting a 500 KB row costs the same one billed row as a tiny one, while extracting it costs four (message, reference, blob, chunk). Without a bucket, inline is both cheaper and no larger.
 
 Sessions never truncates. When a row still exceeds `MAX_INLINE_ROW_BYTES` (1.5 MiB) after every offloadable string has been moved out largest-first, the write throws `SessionMessageTooLargeError` rather than storing a lossy row.
 
@@ -84,7 +94,7 @@ Each stream pull reads one `(storage_id, chunk_index)` primary-key row. Sessions
 
 ### R2 tier
 
-R2 is optional. The default threshold is 1,500,000 bytes. Sessions owns private random object keys beneath `cf-agents/sessions/attachments` unless the host configures another prefix.
+R2 is optional, and `r2ThresholdBytes` (default 1,500,000) is meaningful only when a bucket is set. Sessions owns private random object keys beneath `cf-agents/sessions/attachments` unless the host configures another prefix.
 
 For replayable inputs such as data URLs, strings, and byte arrays, Sessions hashes first. An existing whole-file hash causes no payload write and no R2 PUT. A new large payload streams to one R2 object.
 
@@ -118,11 +128,13 @@ Hosts should use pointer mode for export, indexing, maintenance, and unbounded s
 
 ## Maintenance
 
-The maintenance pass drains payloads still stored inline in aged rows: rows written before offload existed, rows written under a looser threshold, and large strings nested in tool outputs.
+The maintenance pass drains payloads still stored inline in aged rows into R2: rows written before offload existed, and rows written under a looser threshold.
 
-The pass is lossless. It runs the same offload the write path runs, with no row budget, so payloads move to attachment storage and reconstruct exactly. There is no lossy mode and no marker substitution. `runMaintenance()` returns the rows rewritten, parts moved, bytes removed, and whether a backlog remains.
+It only has work to do when a bucket is configured. Without one it returns empty totals without reading a row, because moving a payload into SQLite chunks leaves the bytes in this same Durable Object — inline is the correct resting place, not a backlog.
 
-New writes stamp the largest offloadable payload size while the parsed message is already in memory. That number is threshold-independent, so lowering the threshold later still finds older candidates, and rows with no candidates never enter the maintenance content query. A conservative legacy hint is corrected once after inspection. Backlog checks select only an ID and do not load another large message.
+The pass is lossless. It runs the same offload the write path runs, so payloads move to R2 and reconstruct exactly. There is no lossy mode and no marker substitution. `runMaintenance()` returns the rows rewritten, parts moved, bytes removed, and whether a backlog remains.
+
+New writes stamp the largest offloadable payload size while the parsed message is already in memory, or zero when no bucket is configured and the pass could not move anything. That number is threshold-independent, so lowering `r2ThresholdBytes` later still finds older candidates, and rows with no candidates never enter the maintenance content query. A conservative legacy hint is corrected once after inspection. Backlog checks select only an ID and do not load another large message.
 
 Rows within `keepRecentMessages` of the leaf are never rewritten, so the model's hot window never pays a reconstruction read. One pass is bounded by row count, writes payloads before rewriting a row, and uses a content compare-and-swap, then reschedules itself while a backlog remains.
 
@@ -166,7 +178,11 @@ Sessions stores settled conversation messages. Streams stores in-flight output a
 
 `configureSession(session)` configures compaction and search on the default handle. `configureContext()` declares prompt blocks, which Think turns into a `ContextBlocks` wired to durable per-agent SQLite: a block with no provider gets storage by label, and the frozen prompt is always persisted. Think subscribes to the Sessions change feed to keep its in-isolate `messages` array coherent.
 
-Only the top-level `attachments` option is a thunk, so Think can re-read host fields (`sessionAttachments`, `mediaEviction`) that are set after the field initializer runs. Individual policy fields are plain values. `mediaEviction` predates `sessionAttachments` and maps onto it: `false` disables the aged-row pass, and its thresholds are the same numbers under their Sessions names. Payload bytes are always preserved, so `externalizeToWorkspace` no longer has an effect.
+Only the top-level `attachments` option is a thunk, so Think can re-read host fields (`sessionAttachments`, `mediaEviction`) that are set after the field initializer runs. Individual policy fields are plain values.
+
+Sessions' attachment store and Think's media eviction are separate concerns and must stay separate. The attachment store is storage: a large payload becomes an `attachment:sha256:` pointer and reads reconstruct it byte for byte, invisibly and losslessly. Media eviction is a context-window decision owned by Think: aged media is removed from the conversation, visibly and lossily, and preserved as a Workspace file the agent can read back by path.
+
+`mediaEviction` switches Sessions' own aged-row maintenance OFF, because with eviction on Think owns aged-row policy — otherwise Sessions would move the same bytes into attachment storage a moment before Think moves them out to the Workspace. It does not supply any storage threshold: `minPartBytes` is Think's context threshold for what leaves the conversation, and where Sessions keeps a payload is settled by `sessionAttachments.r2ThresholdBytes` and the row budget alone.
 
 Think's startup hydration uses `getRecentHistory(hydrationByteBudget, MODEL_RECENT_WINDOW)`, with the budget defaulting to 32 MiB. The floor keeps windowing from starving the model's context; the byte budget bounds hydrated memory because it charges re-inflated attachment bytes.
 

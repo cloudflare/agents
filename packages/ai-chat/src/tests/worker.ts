@@ -27,6 +27,47 @@ import type {
   ChatRecoveryOptions
 } from "../";
 import { ResumableStream, chatRecoverySchedulePolicy } from "agents/chat";
+import type { SessionAttachmentBucket } from "agents/sessions";
+
+/**
+ * Module-scoped stand-in for R2. Sessions only extracts a payload out of a
+ * message row when a bucket is configured — that is the one move that
+ * reclaims Durable Object space — so a test that wants a stored pointer has
+ * to supply one. Module scope keeps the bytes across a Durable Object
+ * eviction, as a real bucket would.
+ */
+class TestAttachmentBucket implements SessionAttachmentBucket {
+  readonly objects = new Map<string, Uint8Array>();
+
+  async get(key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> {
+    const stored = this.objects.get(key);
+    if (!stored) return null;
+    const bytes = new Uint8Array(stored);
+    return {
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        }
+      })
+    };
+  }
+
+  async put(key: string, value: ReadableStream<Uint8Array>): Promise<void> {
+    this.objects.set(
+      key,
+      new Uint8Array(await new Response(value).arrayBuffer())
+    );
+  }
+
+  async delete(key: string | string[]): Promise<void> {
+    for (const item of typeof key === "string" ? [key] : key) {
+      this.objects.delete(item);
+    }
+  }
+}
+
+const testAttachmentBucket = new TestAttachmentBucket();
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -569,7 +610,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   enableAttachmentsForTest(): void {
     this.sessionAttachments = {
-      inlineThresholdBytes: 1,
+      r2: testAttachmentBucket,
+      r2ThresholdBytes: 1,
       maintenance: false
     };
   }
@@ -4824,7 +4866,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
  */
 export class AttachmentChatAgent extends AIChatAgent<Env> {
   override sessionAttachments = {
-    inlineThresholdBytes: 1,
+    r2: testAttachmentBucket,
+    // Above the small text parts in the fixture: there is no media-versus-
+    // text rule any more, so only size decides what leaves the row.
+    r2ThresholdBytes: 1024,
     maintenance: false
   };
 

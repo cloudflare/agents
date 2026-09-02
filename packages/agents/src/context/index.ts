@@ -16,7 +16,6 @@ export {
   type ContextBlock,
   type ContextConfig,
   type ContextProvider,
-  type SkillUnloadCallback,
   type WritableContextProvider
 } from "./blocks";
 export {
@@ -24,12 +23,4 @@ export {
   isSearchProvider,
   type SearchProvider
 } from "./search";
-export {
-  isSkillProvider,
-  R2SkillProvider,
-  reclaimLoadedSkill,
-  restoreLoadedSkills,
-  type SkillProvider,
-  type SkillSession
-} from "./skills";
 export { AgentContextProvider, type SqlProvider } from "./sqlite-provider";

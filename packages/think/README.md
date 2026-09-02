@@ -368,7 +368,7 @@ Script execution requires a Worker Loader binding:
 | `configureSession()`       | identity                           | Configure the default session handle: compaction and search                                                                                                                                                                  |
 | `configureContext()`       | `[]`                               | Declare prompt context blocks. See [Session and context](#session-and-context)                                                                                                                                               |
 | `hydrationByteBudget`      | 32 MiB                             | Byte budget for startup transcript hydration. Charges each row its stored bytes plus the attachment bytes it re-inflates                                                                                                     |
-| `mediaEviction`            | `true`                             | Lossless offload and aged-row maintenance policy. `false` keeps payloads inline and disables the maintenance pass                                                                                                            |
+| `mediaEviction`            | `true`                             | Media eviction policy: aged media leaves the conversation and is preserved as a Workspace file. `false` keeps aged media in the conversation                                                                                 |
 | `sessionAttachments`       | `{}`                               | Optional R2 tier and reconstruction policy for Sessions-owned attachments                                                                                                                                                    |
 | `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                                                                                             |
 | `skillWorkspace`           | `{}`                               | Project skills into Computer or legacy Shell; `false` disables projection                                                                                                                                                    |
@@ -816,34 +816,48 @@ this.context.removeBlock("notes");
 await this.context.refreshSystemPrompt();
 ```
 
-#### Loadable context providers
-
-`agents/context` supports lower-level loadable providers. Prefer the first-class
-Think skills API (`getSkills()`, `activate_skill`, and `read_skill_resource`) for
-new Agent Skills directories. Use a skill provider only when you want generic
-`load_context` / `unload_context` management instead of Think's skills workflow.
-
-```ts
-import { R2SkillProvider, type ContextConfig } from "agents/context";
-
-configureContext(): ContextConfig[] {
-  return [
-    {
-      label: "skills",
-      provider: new R2SkillProvider(this.env.SKILLS_BUCKET, { prefix: "skills/" })
-    }
-  ];
-}
-```
-
 #### Message storage
 
-Sessions offloads oversized payloads out of message rows losslessly. File parts,
-text and reasoning parts, and strings nested in tool outputs above
-`mediaEviction.minPartBytes` (32 KiB by default) become
-`attachment:sha256:` pointers, and reads reconstruct them byte for byte. Nothing
-is truncated. Bytes live in this object's SQLite, or in R2 when you supply a
-bucket through `sessionAttachments`.
+Sessions offloads oversized payloads out of message rows losslessly, and it
+makes no distinction between kinds of payload: file parts, text and reasoning
+parts, and strings nested in tool outputs are all treated alike. A payload
+leaves the row for one of two reasons — it is at or above
+`sessionAttachments.r2ThresholdBytes` and you supplied an R2 bucket, or the row
+would otherwise exceed the 1.5 MiB budget. Extracted payloads become
+`attachment:sha256:` pointers and reads reconstruct them byte for byte; nothing
+is truncated. R2 is the only tier that reclaims space, so without a bucket a
+payload the row can hold simply stays inline. This is a storage detail:
+invisible to the model, and unrelated to media eviction.
+
+#### Media eviction
+
+Media eviction is a context-window technique, not a storage one. Re-sending a
+screenshot the model has already looked at on every later turn is pure cost, so
+once a message has aged past `mediaEviction.keepRecentMessages` (8 by default)
+on the active path, Think takes the media out of the conversation and leaves a
+marker in its place:
+
+```
+[evicted image/png, 812004 bytes; preserved at /attachments/evicted/msg_01H8-0.png]
+```
+
+The bytes are written to the Workspace at that path, raw and with their real
+mime type — not as a `data:` URL string. The workspace `read` tool recognises
+`image/*`, so when the agent decides it needs the picture again it reads the
+path out of the marker and the actual image goes back into context. Eviction is
+visible to the model and lossy on purpose.
+
+Passes are bounded (`maxRowsPerPass`, 64 by default) and run in the background
+after a turn or a hydration read, rescheduling while a backlog remains. Only
+payloads of at least `minPartBytes` are evicted, and `keepRecentMessages` is
+clamped to the four messages the model replays at full fidelity. Once a row is
+rewritten the Sessions attachment reference is dropped and the blob is reaped,
+so the bytes exist in exactly one place: the Workspace file.
+
+`mediaEviction: false` keeps aged media in the conversation, so the model keeps
+seeing it. It does not change where Sessions keeps the bytes, and it leaves
+Sessions' own aged-row maintenance at its default. With eviction on, Think owns
+aged-row policy and Sessions' maintenance pass is switched off.
 
 Startup hydration reads a recent window bounded by `hydrationByteBudget`
 (32 MiB by default). The budget charges each row its stored bytes plus the

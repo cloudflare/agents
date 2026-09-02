@@ -178,12 +178,12 @@ describe("Sessions legacy migration", () => {
            role TEXT NOT NULL,
            content TEXT NOT NULL,
            token_estimate INTEGER NOT NULL DEFAULT 0,
-           media_candidate_bytes INTEGER NOT NULL DEFAULT 0,
+           offload_candidate_bytes INTEGER NOT NULL DEFAULT 0,
            created_at INTEGER NOT NULL,
            PRIMARY KEY (session_id, id)
          ) WITHOUT ROWID`,
         `INSERT INTO cf_agents_session_messages
-           (session_id, id, seq, parent_id, type, role, content, token_estimate, media_candidate_bytes, created_at)
+           (session_id, id, seq, parent_id, type, role, content, token_estimate, offload_candidate_bytes, created_at)
          VALUES ('', 'm2', 1, NULL, 'message', 'user',
            '{"id":"m2","role":"user","parts":[{"type":"text","text":"squatter"}]}',
            0, 0, 1)`

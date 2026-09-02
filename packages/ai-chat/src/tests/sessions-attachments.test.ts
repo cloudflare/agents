@@ -44,7 +44,9 @@ describe("AIChatAgent Sessions attachments", () => {
     // survives eviction the way a real subclass's policy does.
     const stub = await getAgentByName(env.AttachmentChatAgent, room);
 
-    const url = `data:image/png;base64,${btoa("payload that outlives the isolate")}`;
+    const url = `data:image/png;base64,${btoa(
+      "payload that outlives the isolate".repeat(64)
+    )}`;
     await stub.persistMessages([
       {
         id: "wake-user",

@@ -508,9 +508,7 @@ export class Session {
       prepared = this.#core.stripReservedMetadata(prepared);
       prepared = await this.#core.attachments.guardClientPointers(prepared);
     }
-    const threshold = this.#core.attachments.options.inlineThresholdBytes;
     const offloaded = await this.#core.attachments.offload(prepared, {
-      mediaThresholdBytes: threshold,
       rowBudgetBytes: MAX_INLINE_ROW_BYTES
     });
     if (

@@ -248,7 +248,9 @@ Think uses `ResumableStream` from `agents/chat` for stream resumability:
 
 Think installs the `agents/sessions` Lifecycle capability. Settled messages form a tree in `cf_agents_session_messages`; linear turns attach to the active leaf and regeneration can append another child under an older user message. `cf_agents_session_compactions` stores non-destructive summary overlays.
 
-Oversized payloads become content-addressed attachment pointers owned by Sessions, not by Workspace. Sessions keeps payloads in its own chunked SQLite tables and uses an optional R2 tier for larger ones. Offload is lossless and covers file parts, text and reasoning parts, and strings nested in tool outputs; the default read reconstructs the original part byte for byte, so Think's model and client paths are unchanged. Workspace is operational storage for tools and projected skills and holds no message or attachment durability.
+Oversized payloads become content-addressed attachment pointers owned by Sessions, not by Workspace. Sessions keeps payloads in its own chunked SQLite tables and uses an optional R2 tier for larger ones. Offload is lossless and covers file parts, text and reasoning parts, and strings nested in tool outputs; the default read reconstructs the original part byte for byte, so Think's model and client paths are unchanged.
+
+Media eviction (`mediaEviction`) is Think's own concern and sits above that storage layer. Once media has aged past the recent window, Think replaces it in the conversation with an `[evicted <mediaType>, <bytes> bytes; preserved at <path>]` marker and writes the raw bytes to the Workspace under `/attachments/evicted/`, with their real mime type so the workspace `read` tool hands the model a real image on the way back. The Sessions attachment reference is dropped in the same write, so the blob is reaped and the bytes exist only in the Workspace. Workspace remains operational storage for tools, projected skills, and evicted media, and holds no message durability.
 
 A separate table stores request context across hibernation:
 

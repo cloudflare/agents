@@ -1,13 +1,11 @@
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
-import { describe, expect, it, vi } from "vitest";
-import type { UIMessage } from "ai";
+import { describe, expect, it } from "vitest";
 import type {
   OnStartDegradationForTest,
   TestChatResult
 } from "./agents/think-session";
-import type { MediaEvictionConfig } from "../think";
 
 /**
  * Steps 2 and 3 of #1710.
@@ -16,10 +14,7 @@ import type { MediaEvictionConfig } from "../think";
  * as a bounded recent window instead of materializing fully in memory on
  * every wake.
  *
- * Step 3 — `mediaEviction`: oversized inline media (data-URL file parts,
- * large strings in tool outputs) is evicted from AGED stored messages and
- * preserved as workspace files, so the persisted footprint stops growing
- * with session age.
+ * Media eviction itself lives in `media-eviction.test.ts`.
  */
 
 type WindowedHydrationStub = {
@@ -37,26 +32,7 @@ type WindowedHydrationStub = {
 };
 
 type MediaEvictionStub = {
-  setMediaEvictionForTest(config: MediaEvictionConfig | boolean): Promise<void>;
-  seedMediaHistoryForTest(prefix?: string): Promise<void>;
-  runEvictionForTest(): Promise<{
-    messages: number;
-    parts: number;
-    bytes: number;
-    backlogRemains: boolean;
-  } | null>;
-  getStoredMessageForTest(id: string): Promise<UIMessage | null>;
-  getInlinedMessageForTest(id: string): Promise<UIMessage | null>;
-  getAttachmentForTest(pointer: string): Promise<{
-    hash: string;
-    path: string;
-    mediaType: string;
-    bytes: number;
-  } | null>;
-  readAttachmentForTest(pointer: string): Promise<Uint8Array>;
-  getAttachmentReferenceCountForTest(): Promise<number>;
   getHydrationBudgetForTest(): Promise<number>;
-  resyncForTest(): Promise<number>;
 };
 
 type PointerHydrationStub = {
@@ -246,265 +222,6 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
         (i) =>
           `data:image/png;base64,${String.fromCharCode(65 + i).repeat(56_000)}`
       )
-    );
-  });
-});
-
-describe("mediaEviction — aged media leaves the stored transcript (#1710)", () => {
-  it("stores aged file parts and tool strings as lossless attachment pointers", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest();
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000
-    });
-
-    const totals = await agent.runEvictionForTest();
-    expect(totals).toMatchObject({
-      messages: 2,
-      parts: 2,
-      backlogRemains: false
-    });
-    expect(totals?.bytes).toBeGreaterThan(20_000);
-
-    const m0 = await agent.getStoredMessageForTest("m0");
-    expect(m0?.parts[0]).toEqual({
-      type: "text",
-      text: "look at this screenshot"
-    });
-    const filePart = m0?.parts[1] as { type: string; url: string };
-    expect(filePart.type).toBe("file");
-    expect(filePart.url).toMatch(/^attachment:sha256:[0-9a-f]{64}$/);
-    expect(await agent.getAttachmentForTest(filePart.url)).toMatchObject({
-      mediaType: "image/png",
-      bytes: 12_000
-    });
-    expect(await agent.readAttachmentForTest(filePart.url)).toHaveLength(
-      12_000
-    );
-
-    const inlined = await agent.getInlinedMessageForTest("m0");
-    expect(inlined).not.toBeNull();
-    expect((inlined?.parts[1] as { url: string } | undefined)?.url).toBe(
-      `data:image/png;base64,${"A".repeat(16_000)}`
-    );
-
-    const m1 = await agent.getStoredMessageForTest("m1");
-    const toolPart = m1?.parts[0] as {
-      type: string;
-      state: string;
-      output: { mediaType: string; data: string; note: string };
-    };
-    expect(toolPart.type).toBe("tool-screenshot");
-    expect(toolPart.state).toBe("output-available");
-    expect(toolPart.output.mediaType).toBe("image/png");
-    expect(toolPart.output.note).toBe("small structured field");
-    // Media nested in a tool output leaves the row at the media threshold,
-    // wherever the tool put it.
-    const toolPointer = toolPart.output.data.match(
-      /attachment:sha256:[0-9a-f]{64}/
-    )?.[0];
-    expect(toolPointer).toBeDefined();
-    const toolBytes = await agent.readAttachmentForTest(toolPointer ?? "");
-    expect(toolBytes).toHaveLength(12_000);
-
-    const inlinedTool = await agent.getInlinedMessageForTest("m1");
-    expect(
-      (inlinedTool?.parts[0] as { output: { data: string } } | undefined)
-        ?.output.data
-    ).toBe(`data:image/png;base64,${"B".repeat(16_000)}`);
-
-    const m3 = await agent.getStoredMessageForTest("m3");
-    expect(m3?.parts[0]).toEqual({ type: "text", text: "recent answer" });
-  });
-
-  it("emits session:maintenance:completed from the capability", async () => {
-    const name = uniqueName("evict-observability");
-    const events: Array<{ messages?: number; parts?: number; bytes?: number }> =
-      [];
-    // Think no longer re-emits `chat:media:evicted`; the Sessions capability
-    // owns the telemetry and publishes it on the lifecycle channel.
-    const unsubscribe = subscribe("lifecycle", (raw) => {
-      const event = raw as unknown as {
-        type: string;
-        name?: string;
-        payload: { messages?: number; parts?: number; bytes?: number };
-      };
-      if (
-        event.type === "session:maintenance:completed" &&
-        event.name?.startsWith(name)
-      ) {
-        events.push(event.payload);
-      }
-    });
-
-    try {
-      const agent = (await getAgentByName(
-        env.ThinkMediaEvictionAgent,
-        name
-      )) as unknown as MediaEvictionStub;
-      await agent.seedMediaHistoryForTest();
-      await agent.setMediaEvictionForTest({
-        keepRecentMessages: 2,
-        minPartBytes: 10_000
-      });
-      await agent.runEvictionForTest();
-
-      expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ messages: 2, parts: 2 });
-    } finally {
-      unsubscribe();
-    }
-  });
-
-  it("clamps keepRecentMessages to the model full-fidelity window", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-clamp")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest();
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 0,
-      minPartBytes: 10_000
-    });
-
-    expect(await agent.runEvictionForTest()).toMatchObject({ messages: 2 });
-    for (const id of ["m2", "m3", "m4", "m5"]) {
-      const message = await agent.getStoredMessageForTest(id);
-      expect(JSON.stringify(message)).not.toContain("attachment:sha256:");
-    }
-  });
-
-  it("bounds each pass and reports the remaining backlog", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-chain")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest();
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000,
-      maxRowsPerPass: 1
-    });
-
-    // One row per pass, and the capability chains the rest itself once the
-    // first pass reports a backlog.
-    expect(await agent.runEvictionForTest()).toMatchObject({
-      messages: 1,
-      backlogRemains: true
-    });
-    for (let tick = 0; tick < 50; tick++) {
-      const stored = await agent.getStoredMessageForTest("m1");
-      if (JSON.stringify(stored).includes("attachment:sha256:")) break;
-      await scheduler.wait(1);
-    }
-    for (const id of ["m0", "m1"]) {
-      const message = await agent.getStoredMessageForTest(id);
-      expect(JSON.stringify(message)).toContain("attachment:sha256:");
-    }
-  });
-
-  it("a second pass is a cheap no-op", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-idempotent")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest();
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000
-    });
-
-    expect(await agent.runEvictionForTest()).toMatchObject({ messages: 2 });
-    expect(await agent.runEvictionForTest()).toEqual({
-      messages: 0,
-      parts: 0,
-      bytes: 0,
-      backlogRemains: false
-    });
-  });
-
-  it("externalizeToWorkspace:false is inert — payload bytes always survive", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-drop")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest("d");
-    // The old lossy mode is gone. The field is still accepted (it predates
-    // the Sessions capability) but no longer drops bytes: the pass is
-    // lossless, so the row round-trips instead of leaving an "[evicted …]"
-    // marker behind.
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000,
-      externalizeToWorkspace: false
-    });
-
-    expect(await agent.runEvictionForTest()).toMatchObject({
-      messages: 2,
-      parts: 2
-    });
-    const d0 = await agent.getStoredMessageForTest("d0");
-    const stored = d0?.parts[1] as { type: string; url: string };
-    expect(stored.type).toBe("file");
-    expect(stored.url).toMatch(/^attachment:sha256:[0-9a-f]{64}$/);
-    expect(await agent.getAttachmentReferenceCountForTest()).toBeGreaterThan(0);
-
-    const inlined = await agent.getInlinedMessageForTest("d0");
-    expect((inlined?.parts[1] as { url: string } | undefined)?.url).toBe(
-      `data:image/png;base64,${"A".repeat(16_000)}`
-    );
-  });
-
-  it("disabled eviction leaves inline media untouched", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-disabled")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest();
-    expect(await agent.runEvictionForTest()).toBeNull();
-    const m0 = await agent.getStoredMessageForTest("m0");
-    expect(m0).not.toBeNull();
-    expect((m0?.parts[1] as { url: string } | undefined)?.url).toContain(
-      "data:image/png;base64,"
-    );
-  });
-
-  it("a windowed hydration read schedules the maintenance pass", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAutoAgent,
-      uniqueName("evict-auto")
-    )) as unknown as MediaEvictionStub;
-
-    // Seed under a loose policy so the write path leaves the payloads
-    // inline — exactly the shape a legacy transcript has.
-    await agent.setMediaEvictionForTest(false);
-    await agent.seedMediaHistoryForTest("a");
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000
-    });
-
-    // The agent's 1KB hydration budget makes this read window the
-    // transcript, which is what schedules the background pass.
-    await agent.resyncForTest();
-    await vi.waitFor(
-      async () => {
-        for (const id of ["a0", "a1"]) {
-          const message = await agent.getStoredMessageForTest(id);
-          expect(JSON.stringify(message)).toContain("attachment:sha256:");
-        }
-      },
-      { timeout: 10_000, interval: 250 }
     );
   });
 });

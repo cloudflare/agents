@@ -7,16 +7,22 @@ import {
   type SessionChangeEvent,
   type SessionMessage
 } from "../../sessions";
-import type { SessionHarnessObject } from "../capabilities/sessions";
+import {
+  MemoryAttachmentBucket,
+  type SessionHarnessObject
+} from "../capabilities/sessions";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 /**
- * The maintenance pass drains inline payloads out of AGED rows with exactly
- * the policy the write path applies, so a legacy row ends up as if it had
- * been written today. There is no lossy mode any more: nothing is dropped,
- * nothing is truncated, and every payload reconstructs byte for byte after a
- * pass. Recent rows are never touched, so the model's hot window never pays
- * a reconstruction read.
+ * The maintenance pass drains inline payloads out of AGED rows into R2, with
+ * exactly the policy the write path applies, so a legacy row ends up as if it
+ * had been written today. Nothing is dropped or truncated, and every payload
+ * reconstructs byte for byte after a pass. Recent rows are never touched, so
+ * the model's hot window never pays a reconstruction read.
+ *
+ * Without a bucket the pass has nowhere useful to move anything — SQLite
+ * chunks sit in the same Durable Object as the row they came out of — so it
+ * does nothing at all.
  */
 
 function text(id: string, body: string, role = "user"): SessionMessage {
@@ -85,6 +91,7 @@ describe("Sessions maintenance", () => {
   it("externalizes an aged file part and reconstructs it byte for byte", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket();
       const original = imageMessage("aged-image", 4096);
       seedAged(instance, [original]);
 
@@ -117,6 +124,7 @@ describe("Sessions maintenance", () => {
   it("externalizes aged media nested in tool output without reshaping it", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket();
       const screenshot = `data:image/png;base64,${btoa("s".repeat(4096))}`;
       const original: SessionMessage = {
         id: "aged-tool",
@@ -163,12 +171,17 @@ describe("Sessions maintenance", () => {
     });
   });
 
-  it("drains media written under a looser policy", async () => {
+  it("drains payloads written under a looser threshold", async () => {
     await withCapabilityHarness(async ({ install }) => {
-      let inlineThresholdBytes = Number.MAX_SAFE_INTEGER;
+      let r2ThresholdBytes = Number.MAX_SAFE_INTEGER;
+      const bucket = new MemoryAttachmentBucket();
       const { capability, lifecycle } = install(
         new Sessions({
-          attachments: () => ({ inlineThresholdBytes, keepRecentMessages: 2 })
+          attachments: () => ({
+            r2: bucket,
+            r2ThresholdBytes,
+            keepRecentMessages: 2
+          })
         })
       );
       await lifecycle.start();
@@ -183,7 +196,7 @@ describe("Sessions maintenance", () => {
         backlogRemains: false
       });
 
-      inlineThresholdBytes = 1024;
+      r2ThresholdBytes = 1024;
       expect(await session.runMaintenance()).toMatchObject({
         messages: 1,
         parts: 1,
@@ -200,6 +213,7 @@ describe("Sessions maintenance", () => {
   it("leaves recent rows inline", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket();
       const original = imageMessage("recent-image", 4096);
       seedAged(instance, [original]);
 
@@ -216,12 +230,13 @@ describe("Sessions maintenance", () => {
     });
   });
 
-  it("leaves aged conversation text inline and stops rediscovering it", async () => {
+  it("leaves an aged payload below the threshold inline and stops rediscovering it", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket(64 * 1024);
       const session = instance.sessions.session();
-      // Prose is conversation, not media: only the row budget moves it, and
-      // this row is far below it. The candidate hint must be corrected so a
+      // Below the R2 threshold and far below the row budget, so there is
+      // nothing worth moving. The candidate hint must reflect that, so a
       // bounded pass makes progress instead of re-examining the row forever.
       const prose = text("aged-prose", "long ".repeat(1000));
       await session.appendMessage(prose);
@@ -243,6 +258,7 @@ describe("Sessions maintenance", () => {
   it("reports maintenance rewrites on the change feed and in telemetry", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket();
       seedAged(instance, [imageMessage("feed-aged", 4096)]);
       const events: SessionChangeEvent[] = [];
       instance.sessions.subscribe((event) => {
@@ -272,6 +288,7 @@ describe("Sessions maintenance", () => {
   it("is bounded per pass and reports the remaining backlog", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket();
       seedAged(
         instance,
         Array.from({ length: 5 }, (_, index) =>
@@ -301,6 +318,7 @@ describe("Sessions maintenance", () => {
   it("chains its own follow-up passes until the backlog drains", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket();
       seedAged(
         instance,
         Array.from({ length: 5 }, (_, index) =>
@@ -331,6 +349,7 @@ describe("Sessions maintenance", () => {
   it("uses compare-and-swap so maintenance cannot overwrite a live rewrite", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      instance.useAttachmentBucket();
       seedAged(instance, [imageMessage("racy", 4096)]);
       const session = instance.sessions.session();
       await ageOut(session, "race");
@@ -354,15 +373,41 @@ describe("Sessions maintenance", () => {
     });
   });
 
+  it("does nothing at all without a bucket", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // No bucket: chunking these bytes would leave them in this same
+      // Durable Object, so inline is where they belong and the pass is a
+      // no-op no matter how old the row is.
+      const session = instance.sessions.session();
+      const original = imageMessage("no-bucket", 200 * 1024);
+      await session.appendMessage(original);
+      await ageOut(session, "no-bucket");
+
+      expect(await session.runMaintenance()).toEqual({
+        messages: 0,
+        parts: 0,
+        bytes: 0,
+        backlogRemains: false
+      });
+      expect(instance.attachmentBlobCount()).toBe(0);
+      expect(
+        await session.getMessage("no-bucket", { reconstruct: "pointer" })
+      ).toEqual(original);
+    });
+  });
+
   it("can be switched off entirely", async () => {
     await withCapabilityHarness(async ({ install }) => {
+      let r2ThresholdBytes = Number.MAX_SAFE_INTEGER;
       const { capability, lifecycle } = install(
         new Sessions({
-          attachments: {
-            inlineThresholdBytes: Number.MAX_SAFE_INTEGER,
+          attachments: () => ({
+            r2: new MemoryAttachmentBucket(),
+            r2ThresholdBytes,
             keepRecentMessages: 2,
             maintenance: false
-          }
+          })
         })
       );
       await lifecycle.start();
@@ -371,6 +416,9 @@ describe("Sessions maintenance", () => {
       await session.appendMessage(original);
       await ageOut(session, "off");
 
+      // A threshold this row is now over: only `maintenance: false` keeps
+      // the pass from draining it.
+      r2ThresholdBytes = 1024;
       expect(await session.runMaintenance()).toBeNull();
       expect(
         await session.getMessage("off-aged", { reconstruct: "pointer" })

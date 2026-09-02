@@ -37,12 +37,11 @@ An empty read-only block is skipped. Writable, loadable, and searchable blocks a
 
 The provider decides the block's behavior. The checks are structural, not nominal.
 
-| Provider shape          | Block behavior                                      |
-| ----------------------- | --------------------------------------------------- |
-| `get()`                 | Read-only text in the prompt                        |
-| `get()` + `set()`       | Writable through the `set_context` tool             |
-| `get()` + `load(key)`   | Metadata listing in the prompt, `load_context` tool |
-| `get()` + `search(key)` | Summary in the prompt, `search_context` tool        |
+| Provider shape          | Block behavior                               |
+| ----------------------- | -------------------------------------------- |
+| `get()`                 | Read-only text in the prompt                 |
+| `get()` + `set()`       | Writable through the `set_context` tool      |
+| `get()` + `search(key)` | Summary in the prompt, `search_context` tool |
 
 `get()` returns the block's current content, or `null` when it has none. An optional `init(label)` receives the block label before first use, so one provider class can serve several labels.
 
@@ -78,23 +77,6 @@ const context = new ContextBlocks([
 
 The FTS5 table is the only store for these entries. A mirror row table would double the billed writes of every indexed entry to serve a count and a lookup the index already answers. Entries live in `cf_agents_search_fts`, namespaced by label, separate from the Sessions message index.
 
-### Skill blocks
-
-`R2SkillProvider` backs a block with an R2 bucket of keyed documents:
-
-```ts
-import { R2SkillProvider } from "agents/context";
-
-const skills = new R2SkillProvider(env.SKILLS_BUCKET, {
-  prefix: "skills/",
-  keys: ["code-review", "debugging"]
-});
-```
-
-`get()` lists keys and descriptions, so the prompt carries the catalog rather than the content. Descriptions come from the R2 object's `description` custom metadata. `load(key)` fetches one document on demand through the `load_context` tool. `keys`, when given, restricts which prefix-relative keys the provider will list or load.
-
-This is prompt-level loadable context. First-class Agent Skills are a different system and live in `agents/skills`.
-
 ## Frozen prompts
 
 `toSystemPrompt()` renders once and caches. Later calls return the same string, so the provider's prefix cache stays warm across turns. `setBlock()` writes to the provider immediately but deliberately does not update the snapshot. Call `refreshSnapshot()` to re-render from current block state.
@@ -120,26 +102,9 @@ const system = await context.freezeSystemPrompt();
 `tools()` returns an AI SDK `ToolSet` wired from what the blocks can do:
 
 - `set_context` when any block is writable
-- `load_context` and `unload_context` when any block is backed by a skill provider
 - `search_context` when any block is backed by a search provider
 
 An agent with only read-only blocks gets no tools at all.
-
-## Loaded skills across wakes
-
-Loading a skill is a tool call recorded in the transcript, so which skills are loaded is derivable from stored messages rather than from a separate table.
-
-```ts
-import { restoreLoadedSkills, reclaimLoadedSkill } from "agents/context";
-
-await restoreLoadedSkills(context, session);
-```
-
-`restoreLoadedSkills()` scans assistant rows for `load_context` and `unload_context` results and replays them into the block state. It reads in bounded batches with `reconstruct: "pointer"`, so a long transcript never materializes and no attachment bytes are read. It returns immediately when no configured provider is skill-capable.
-
-`reclaimLoadedSkill(session, label, key)` replaces the stored `load_context` tool result with a short `[skill unloaded: <key>]` marker, so the model stops seeing the skill's content after an unload. Register it through `setUnloadCallback()` and `ContextBlocks` calls it on every unload without knowing anything about storage.
-
-Both helpers take a narrow `SkillSession` port: anything with `historyBatches()` and `updateMessage()`. A `Session` from `agents/sessions` satisfies it.
 
 ## Think
 

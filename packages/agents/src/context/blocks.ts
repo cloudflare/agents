@@ -11,7 +11,6 @@
  * Provider type determines behavior:
  * - ContextProvider (get only)        → readonly block in system prompt
  * - WritableContextProvider (get+set) → writable via set_context tool
- * - SkillProvider (get+load+set?)     → metadata in prompt, load_context tool
  * - SearchProvider (get+search+set?)  → searchable via search_context tool
  */
 
@@ -19,7 +18,6 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import { estimateStringTokens } from "../sessions/tokens";
 import { isSearchProvider, type SearchProvider } from "./search";
-import { isSkillProvider, type SkillProvider } from "./skills";
 
 function slugify(text: string): string {
   return text
@@ -93,14 +91,9 @@ export interface ContextConfig {
   /** Storage provider. Determines block behavior:
    *  - ContextProvider (get only) → readonly
    *  - WritableContextProvider (get+set) → writable via set_context
-   *  - SkillProvider (get+load+set?) → on-demand via load_context
    *  - SearchProvider (get+search+set?) → searchable via search_context
    *  If omitted, auto-wired to writable SQLite when using builder. */
-  provider?:
-    | ContextProvider
-    | WritableContextProvider
-    | SkillProvider
-    | SearchProvider;
+  provider?: ContextProvider | WritableContextProvider | SearchProvider;
 }
 
 /**
@@ -114,20 +107,9 @@ export interface ContextBlock {
   maxTokens?: number;
   /** True if provider is writable (has set) */
   writable: boolean;
-  /** True if backed by a SkillProvider */
-  isSkill: boolean;
   /** True if backed by a SearchProvider */
   isSearchable: boolean;
 }
-
-/**
- * Callback for when a skill is unloaded — allows Session to update
- * the stored message without ContextBlocks knowing about storage.
- */
-export type SkillUnloadCallback = (
-  label: string,
-  key: string
-) => void | Promise<void>;
 
 /**
  * Manages context blocks with frozen snapshot support.
@@ -139,8 +121,6 @@ export class ContextBlocks {
   private loaded = false;
   private promptStore: WritableContextProvider | null;
   private defaultProvider: ((label: string) => ContextProvider) | null;
-  private _loadedSkills = new Set<string>();
-  private _onUnloadSkill: SkillUnloadCallback | null = null;
 
   /**
    * @param configs Blocks to load on first use.
@@ -165,14 +145,6 @@ export class ContextBlocks {
     return { ...config, provider: this.defaultProvider(config.label) };
   }
 
-  /**
-   * Register a callback invoked when a skill is unloaded.
-   * Session uses this to update the stored tool result message.
-   */
-  setUnloadCallback(cb: SkillUnloadCallback): void {
-    this._onUnloadSkill = cb;
-  }
-
   isLoaded(): boolean {
     return this.loaded;
   }
@@ -195,13 +167,11 @@ export class ContextBlocks {
         ? ((await config.provider.get()) ?? "")
         : "";
 
-      const skill = config.provider ? isSkillProvider(config.provider) : false;
       const searchable = config.provider
         ? isSearchProvider(config.provider)
         : false;
       const writable = config.provider
         ? isWritableProvider(config.provider) ||
-          (skill && !!(config.provider as SkillProvider).set) ||
           (searchable && !!(config.provider as SearchProvider).set)
         : false;
 
@@ -212,7 +182,6 @@ export class ContextBlocks {
         tokens: estimateStringTokens(content),
         maxTokens: config.maxTokens,
         writable,
-        isSkill: skill,
         isSearchable: searchable
       });
     }
@@ -245,13 +214,11 @@ export class ContextBlocks {
       ? ((await config.provider.get()) ?? "")
       : "";
 
-    const skill = config.provider ? isSkillProvider(config.provider) : false;
     const searchable = config.provider
       ? isSearchProvider(config.provider)
       : false;
     const writable = config.provider
       ? isWritableProvider(config.provider) ||
-        (skill && !!(config.provider as SkillProvider).set) ||
         (searchable && !!(config.provider as SearchProvider).set)
       : false;
 
@@ -262,7 +229,6 @@ export class ContextBlocks {
       tokens: estimateStringTokens(content),
       maxTokens: config.maxTokens,
       writable,
-      isSkill: skill,
       isSearchable: searchable
     };
 
@@ -277,11 +243,6 @@ export class ContextBlocks {
    * Returns true if the block existed and was removed.
    * The snapshot is NOT updated automatically — call
    * `refreshSystemPrompt()` to rebuild.
-   *
-   * Note: loaded skills for this block are cleaned up from the
-   * tracking set but the skill unload callback is NOT fired
-   * (history reclamation is skipped — appropriate for full
-   * extension removal).
    */
   removeBlock(label: string): boolean {
     const idx = this.configs.findIndex((c) => c.label === label);
@@ -289,13 +250,6 @@ export class ContextBlocks {
 
     this.configs.splice(idx, 1);
     this.blocks.delete(label);
-
-    for (const id of this._loadedSkills) {
-      if (id.startsWith(`${label}:`)) {
-        this._loadedSkills.delete(id);
-      }
-    }
-
     return true;
   }
 
@@ -326,9 +280,9 @@ export class ContextBlocks {
       throw new Error(`Block "${label}" is readonly`);
     }
 
-    if (existing.isSkill || existing.isSearchable) {
+    if (existing.isSearchable) {
       throw new Error(
-        `Block "${label}" is a keyed provider. Use setSkill() or setSearchEntry() instead.`
+        `Block "${label}" is a keyed provider. Use setSearchEntry() instead.`
       );
     }
 
@@ -348,7 +302,6 @@ export class ContextBlocks {
       tokens,
       maxTokens,
       writable: true,
-      isSkill: false,
       isSearchable: false
     };
 
@@ -360,90 +313,6 @@ export class ContextBlocks {
     }
 
     return block;
-  }
-
-  /**
-   * Set a skill entry within a skill block.
-   */
-  async setSkill(
-    label: string,
-    key: string,
-    content: string,
-    description?: string
-  ): Promise<void> {
-    if (!this.loaded) await this.load();
-    const config = this.configs.find((c) => c.label === label);
-    const existing = this.blocks.get(label);
-
-    if (!existing?.isSkill) {
-      throw new Error(`Block "${label}" is not a skill provider`);
-    }
-
-    const provider = config?.provider;
-    if (!provider || !isSkillProvider(provider) || !provider.set) {
-      throw new Error(`Block "${label}" does not support writes`);
-    }
-
-    await provider.set(key, content, description);
-
-    // Refresh metadata
-    const metadata = await provider.get();
-    if (metadata) {
-      existing.content = metadata;
-      existing.tokens = estimateStringTokens(metadata);
-    }
-  }
-
-  /**
-   * Load a skill's full content from a skill block.
-   */
-  async loadSkill(label: string, key: string): Promise<string | null> {
-    if (!this.loaded) await this.load();
-    const config = this.configs.find((c) => c.label === label);
-
-    if (!config?.provider || !isSkillProvider(config.provider)) {
-      throw new Error(`Block "${label}" is not a skill provider`);
-    }
-
-    const content = await config.provider.load(key);
-    if (content !== null) {
-      this._loadedSkills.add(`${label}:${key}`);
-    }
-    return content;
-  }
-
-  /**
-   * Unload a previously loaded skill. Updates the stored tool result
-   * message via the unload callback (set by Session).
-   */
-  async unloadSkill(label: string, key: string): Promise<boolean> {
-    const id = `${label}:${key}`;
-    if (!this._loadedSkills.has(id)) return false;
-    this._loadedSkills.delete(id);
-    await this._onUnloadSkill?.(label, key);
-    return true;
-  }
-
-  /**
-   * Get the set of currently loaded skill keys (as "label:key" strings).
-   */
-  getLoadedSkillKeys(): Set<string> {
-    return this._loadedSkills;
-  }
-
-  /**
-   * Restore loaded skill tracking from a set of "label:key" strings.
-   * Used by Session to reconstruct state after hibernation.
-   */
-  restoreLoadedSkills(skillIds: Iterable<string>): void {
-    this._loadedSkills = new Set(skillIds);
-  }
-
-  /**
-   * Clear all loaded skill tracking. Called when messages are cleared.
-   */
-  clearSkillState(): void {
-    this._loadedSkills.clear();
   }
 
   /**
@@ -536,15 +405,9 @@ export class ContextBlocks {
     const sep = "═".repeat(46);
 
     for (const block of this.blocks.values()) {
-      // Skip empty readonly blocks — writable/searchable/skill blocks always
+      // Skip empty readonly blocks — writable and searchable blocks always
       // render so the LLM knows which tools can address them.
-      if (
-        !block.content &&
-        !block.writable &&
-        !block.isSearchable &&
-        !block.isSkill
-      )
-        continue;
+      if (!block.content && !block.writable && !block.isSearchable) continue;
 
       let header = block.label.toUpperCase();
       if (block.description) header += ` (${block.description})`;
@@ -553,7 +416,6 @@ export class ContextBlocks {
         header += ` [${pct}% — ${block.tokens}/${block.maxTokens} tokens]`;
       }
       if (block.isSearchable) header += " [searchable]";
-      else if (block.isSkill) header += " [loadable]";
       else if (!block.writable) header += " [readonly]";
       else header += " [writable]";
 
@@ -573,33 +435,6 @@ export class ContextBlocks {
    */
   getWritableBlocks(): ContextBlock[] {
     return Array.from(this.blocks.values()).filter((b) => b.writable);
-  }
-
-  /**
-   * Check if any skill providers are registered.
-   */
-  hasSkillBlocks(): boolean {
-    return Array.from(this.blocks.values()).some((b) => b.isSkill);
-  }
-
-  /**
-   * Check whether any CONFIGURED provider is skill-capable, without
-   * requiring `load()` to have run. Used by Session to decide whether the
-   * init-time loaded-skill restore scan is needed at all.
-   */
-  hasSkillCapableConfigs(): boolean {
-    return this.configs.some(
-      (c) => c.provider !== undefined && isSkillProvider(c.provider)
-    );
-  }
-
-  /**
-   * Get skill block labels.
-   */
-  getSkillLabels(): string[] {
-    return Array.from(this.blocks.values())
-      .filter((b) => b.isSkill)
-      .map((b) => b.label);
   }
 
   /**
@@ -685,14 +520,12 @@ export class ContextBlocks {
    *
    * Auto-wired based on provider capabilities:
    * - `set_context` — when any block is writable
-   * - `load_context` — when any block is a skill provider
    * - `search_context` — when any block is a search provider
    */
   async tools(): Promise<ToolSet> {
     if (!this.loaded) await this.load();
 
     const writable = this.getWritableBlocks();
-    const hasSkills = this.hasSkillBlocks();
     const hasSearch = this.hasSearchBlocks();
     const toolSet: ToolSet = {};
 
@@ -700,14 +533,10 @@ export class ContextBlocks {
 
     if (writable.length > 0) {
       const blockDescriptions = writable.map((b) => {
-        const kind = b.isSkill
-          ? "skill collection, keyed entries"
-          : b.isSearchable
-            ? "searchable, keyed entries"
-            : "writable";
+        const kind = b.isSearchable ? "searchable, keyed entries" : "writable";
         return `- "${b.label}" (${kind}): ${b.description ?? "no description"}`;
       });
-      const keyedBlocks = writable.filter((b) => b.isSkill || b.isSearchable);
+      const keyedBlocks = writable.filter((b) => b.isSearchable);
 
       const properties: Record<string, unknown> = {
         label: {
@@ -730,11 +559,10 @@ export class ContextBlocks {
         properties.metadata = {
           type: "object" as const,
           description:
-            "Optional metadata for keyed entries (skill collections, searchable blocks: " +
+            "Optional metadata for keyed entries (searchable blocks: " +
             keyedBlocks.map((b) => `"${b.label}"`).join(", ") +
-            "). Short content doesn't need metadata; longer loadable entries (skills) " +
-            "benefit from a title and description so the model can pick the right one " +
-            "without loading it.",
+            "). A title keeps updates stable; a description helps the model " +
+            "pick the right entry.",
           properties: {
             title: {
               type: "string" as const,
@@ -754,10 +582,9 @@ export class ContextBlocks {
 
       const metadataHint =
         keyedBlocks.length > 0
-          ? "\n\nFor keyed blocks (skill collections / searchable), pass " +
-            "`metadata: { title, description }` — title stabilises updates, " +
-            "description helps the model pick entries. Metadata is optional; " +
-            "short content rarely needs it, long loadable entries benefit most."
+          ? "\n\nFor searchable blocks, pass `metadata: { title, description }` " +
+            "— title stabilises updates, description helps the model pick " +
+            "entries. Metadata is optional."
           : "";
 
       toolSet.set_context = {
@@ -782,15 +609,9 @@ export class ContextBlocks {
             const block = this.blocks.get(label);
             if (!block) return `Error: block "${label}" not found`;
 
-            if (block.isSkill || block.isSearchable) {
-              const title = metadata?.title;
-              const description = metadata?.description;
-              const key = contextEntryKey(title, content);
-              if (block.isSkill) {
-                await this.setSkill(label, key, content, description ?? title);
-              } else {
-                await this.setSearchEntry(label, key, content);
-              }
+            if (block.isSearchable) {
+              const key = contextEntryKey(metadata?.title, content);
+              await this.setSearchEntry(label, key, content);
               return `Indexed "${key}" in ${label}.`;
             }
 
@@ -805,81 +626,6 @@ export class ContextBlocks {
           } catch (err) {
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
-        }
-      };
-    }
-
-    // ── load_context ─────────────────────────────────────────────
-
-    if (hasSkills) {
-      const skillLabels = this.getSkillLabels();
-
-      toolSet.load_context = {
-        description:
-          "Load a document from a skill block by key. " +
-          "Available skill blocks: " +
-          skillLabels.map((l) => `"${l}"`).join(", ") +
-          ". Check the system prompt for available keys.",
-        inputSchema: z.fromJSONSchema({
-          type: "object" as const,
-          properties: {
-            label: {
-              type: "string" as const,
-              enum: skillLabels,
-              description: "Skill block label"
-            },
-            key: {
-              type: "string" as const,
-              description: "Skill key to load"
-            }
-          },
-          required: ["label", "key"]
-        }),
-        execute: async ({ label, key }: { label: string; key: string }) => {
-          try {
-            if (!skillLabels.includes(label)) {
-              return `Error: "${label}" is not a skill block. Skill blocks: ${skillLabels.join(", ")}`;
-            }
-            const content = await this.loadSkill(label, key);
-            return content ?? `Not found: ${key}`;
-          } catch (err) {
-            return `Error: ${err instanceof Error ? err.message : String(err)}`;
-          }
-        }
-      };
-
-      const loadedList = [...this._loadedSkills];
-      toolSet.unload_context = {
-        description:
-          "Unload a previously loaded skill to free context space. " +
-          "The skill remains available for re-loading." +
-          (loadedList.length > 0
-            ? " Currently loaded: " + loadedList.join(", ") + "."
-            : " No skills currently loaded."),
-        inputSchema: z.fromJSONSchema({
-          type: "object" as const,
-          properties: {
-            label: {
-              type: "string" as const,
-              enum: skillLabels,
-              description: "Skill block label"
-            },
-            key: {
-              type: "string" as const,
-              description: "Skill key to unload"
-            }
-          },
-          required: ["label", "key"]
-        }),
-        execute: async ({ label, key }: { label: string; key: string }) => {
-          if (!skillLabels.includes(label)) {
-            return `Error: "${label}" is not a skill block. Skill blocks: ${skillLabels.join(", ")}`;
-          }
-          const unloaded = await this.unloadSkill(label, key);
-          if (!unloaded) {
-            return `Skill "${key}" is not currently loaded in "${label}".`;
-          }
-          return `Unloaded "${key}" from ${label}. Context reclaimed.`;
         }
       };
     }

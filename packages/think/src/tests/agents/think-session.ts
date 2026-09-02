@@ -55,6 +55,7 @@ import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
 import {
   Session,
+  type SessionAttachmentBucket,
   type SessionMaintenanceResult,
   type StoredAttachment
 } from "agents/sessions";
@@ -3346,10 +3347,10 @@ export class ThinkSessionTestAgent extends Think {
 
   async getContextBlockDetails(
     label: string
-  ): Promise<{ writable: boolean; isSkill: boolean } | null> {
+  ): Promise<{ writable: boolean; isSearchable: boolean } | null> {
     const block = this.context.getBlock(label);
     if (!block) return null;
-    return { writable: block.writable, isSkill: block.isSkill };
+    return { writable: block.writable, isSearchable: block.isSearchable };
   }
 
   async hostSetContext(label: string, content: string): Promise<void> {
@@ -8406,11 +8407,57 @@ export class ThinkWindowedHydrationAgent extends Think {
 const BIG_MEDIA_CHARS = 16_000;
 
 /**
+ * A module-scoped stand-in for R2, shared by the test agents that need
+ * Sessions to actually extract a payload. R2 is the only tier that reclaims
+ * Durable Object space, so it is the only thing that makes Sessions move a
+ * payload the row could still hold — and module scope means the bytes
+ * survive a Durable Object eviction, exactly as a real bucket would.
+ */
+class TestAttachmentBucket implements SessionAttachmentBucket {
+  readonly objects = new Map<string, Uint8Array>();
+
+  async get(key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> {
+    const stored = this.objects.get(key);
+    if (!stored) return null;
+    const bytes = new Uint8Array(stored);
+    return {
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        }
+      })
+    };
+  }
+
+  async put(key: string, value: ReadableStream<Uint8Array>): Promise<void> {
+    this.objects.set(
+      key,
+      new Uint8Array(await new Response(value).arrayBuffer())
+    );
+  }
+
+  async delete(key: string | string[]): Promise<void> {
+    for (const item of typeof key === "string" ? [key] : key) {
+      this.objects.delete(item);
+    }
+  }
+}
+
+const testAttachmentBucket = new TestAttachmentBucket();
+
+/**
  * Eviction disabled by default so tests can seed deterministically, then
  * enable a specific config and run passes explicitly.
  */
 export class ThinkMediaEvictionAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
+  // A storage tier, so the seeded payloads leave the row as pointers and the
+  // eviction pass has to read them back through `attachments.open()`.
+  override sessionAttachments = {
+    r2: testAttachmentBucket,
+    r2ThresholdBytes: 10_000
+  };
 
   override getModel(): LanguageModel {
     return createMockModel("media eviction agent response");
@@ -8475,7 +8522,18 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
-  async runEvictionForTest(): Promise<SessionMaintenanceResult | null> {
+  /** One bounded Think-owned eviction pass. */
+  async runEvictionForTest(): Promise<{
+    messages: number;
+    parts: number;
+    bytes: number;
+    backlogRemains: boolean;
+  } | null> {
+    return this._evictAgedMediaBestEffort();
+  }
+
+  /** One bounded Sessions-owned attachment maintenance pass. */
+  async runSessionMaintenanceForTest(): Promise<SessionMaintenanceResult | null> {
     return this.session.runMaintenance();
   }
 
@@ -8520,6 +8578,39 @@ export class ThinkMediaEvictionAgent extends Think {
     `[0]?.count ?? 0
     );
   }
+
+  /** Content-addressed blobs still held by Sessions. */
+  async getAttachmentBlobCountForTest(): Promise<number> {
+    return (
+      this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_session_attachment_blobs
+    `[0]?.count ?? 0
+    );
+  }
+
+  /** The workspace file an eviction marker points at. */
+  async readEvictedFileForTest(path: string): Promise<{
+    byteLength: number;
+    mimeType: string | null;
+    firstBytes: number[];
+    allSame: boolean;
+  } | null> {
+    const bytes = await this.workspace.readFileBytes(path);
+    if (bytes === null) return null;
+    const stat = await this.workspace.stat(path);
+    const first = bytes[0] ?? 0;
+    return {
+      byteLength: bytes.byteLength,
+      mimeType: stat?.mimeType ?? null,
+      firstBytes: Array.from(bytes.slice(0, 4)),
+      allSame: bytes.every((b) => b === first)
+    };
+  }
+
+  /** What the model would see for a message: the reconstructed parts. */
+  async getModelVisibleTextForTest(id: string): Promise<string> {
+    return JSON.stringify(await this.session.getMessage(id));
+  }
 }
 
 /**
@@ -8545,10 +8636,14 @@ const PTR_MEDIA_CHARS = 56_000;
  */
 export class ThinkPointerHydrationAgent extends Think {
   override hydrationByteBudget = 64 * 1024;
-  override mediaEviction: MediaEvictionConfig = {
-    keepRecentMessages: 2,
-    minPartBytes: 10_000
+  // Every seeded payload is over this, so each row stores a pointer.
+  override sessionAttachments = {
+    r2: testAttachmentBucket,
+    r2ThresholdBytes: 32 * 1024
   };
+  // Storage-level offload only: this agent is about hydration accounting, so
+  // Think's context-window eviction stays off and the payloads stay stored.
+  override mediaEviction: MediaEvictionConfig | boolean = false;
 
   override async configureSession(session: Session): Promise<Session> {
     const existing = await session.getHistory({ reconstruct: "pointer" });

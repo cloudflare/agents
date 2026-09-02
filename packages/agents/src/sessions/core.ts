@@ -108,7 +108,7 @@ export class SessionsCore {
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         token_estimate INTEGER NOT NULL DEFAULT 0,
-        media_candidate_bytes INTEGER NOT NULL DEFAULT 0,
+        offload_candidate_bytes INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (session_id, id)
       ) WITHOUT ROWID`,
@@ -246,7 +246,7 @@ export class SessionsCore {
     if (legacy("assistant_messages")) {
       this.io.sqlWrite(
         `INSERT OR IGNORE INTO cf_agents_session_messages
-          (session_id, id, seq, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
+          (session_id, id, seq, parent_id, role, content, token_estimate, offload_candidate_bytes, created_at)
          SELECT session_id, id,
            ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at ASC, rowid ASC),
            parent_id, role, content,
@@ -392,7 +392,7 @@ export class SessionsCore {
       SELECT path.id AS id, am.role AS role,
         LENGTH(CAST(am.content AS BLOB)) AS bytes,
         am.token_estimate AS tokenEstimate,
-        am.media_candidate_bytes AS mediaCandidateBytes,
+        am.offload_candidate_bytes AS offloadCandidateBytes,
         COALESCE((
           SELECT SUM(b.bytes) FROM cf_agents_session_attachments r
           JOIN cf_agents_session_attachment_blobs b ON b.hash = r.hash
@@ -783,16 +783,16 @@ export class SessionsCore {
     const hashes = json.includes(ATTACHMENT_URL_PREFIX)
       ? pointerHashes(message)
       : [];
-    const mediaCandidateBytes = maintenanceCandidateBytes(
+    const offloadCandidateBytes = maintenanceCandidateBytes(
       message,
-      byteLength(json)
+      this.attachments.options
     );
     const seq = this.#allocateSeq(sessionId);
     const now = Date.now();
     this.io.transaction(() => {
       this.io.sqlWrite(
         `INSERT INTO cf_agents_session_messages
-          (session_id, id, seq, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
+          (session_id, id, seq, parent_id, role, content, token_estimate, offload_candidate_bytes, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           sessionId,
@@ -802,7 +802,7 @@ export class SessionsCore {
           message.role,
           json,
           tokenEstimate,
-          mediaCandidateBytes,
+          offloadCandidateBytes,
           now
         ]
       );
@@ -854,9 +854,9 @@ export class SessionsCore {
     const json = this.#serialize(message);
     if (old.content === json) return "unchanged";
 
-    const mediaCandidateBytes = maintenanceCandidateBytes(
+    const offloadCandidateBytes = maintenanceCandidateBytes(
       message,
-      byteLength(json)
+      this.attachments.options
     );
     const pointers =
       old.content.includes(ATTACHMENT_URL_PREFIX) ||
@@ -865,13 +865,13 @@ export class SessionsCore {
     this.io.transaction(() => {
       this.io.sqlWrite(
         `UPDATE cf_agents_session_messages
-         SET role = ?, content = ?, token_estimate = ?, media_candidate_bytes = ?
+         SET role = ?, content = ?, token_estimate = ?, offload_candidate_bytes = ?
          WHERE session_id = ? AND id = ?`,
         [
           message.role,
           json,
           tokenEstimate,
-          mediaCandidateBytes,
+          offloadCandidateBytes,
           sessionId,
           message.id
         ]
@@ -918,7 +918,7 @@ export class SessionsCore {
     const rows = this.io.sql<{ id: string; content: string }>(
       `SELECT id, content FROM cf_agents_session_messages
        WHERE session_id = ?
-         AND media_candidate_bytes >= ?
+         AND offload_candidate_bytes >= ?
          AND id IN (SELECT value FROM json_each(?))
        ORDER BY seq ASC
        LIMIT ?`,
@@ -947,7 +947,7 @@ export class SessionsCore {
       this.io.sql<{ present: number }>(
         `SELECT 1 AS present FROM cf_agents_session_messages
          WHERE session_id = ?
-           AND media_candidate_bytes >= ?
+           AND offload_candidate_bytes >= ?
            AND id IN (SELECT value FROM json_each(?))
          LIMIT 1`,
         [sessionId, minBytes, JSON.stringify(messageIds)]
@@ -963,7 +963,7 @@ export class SessionsCore {
     candidateBytes: number
   ): void {
     this.io.sqlWrite(
-      `UPDATE cf_agents_session_messages SET media_candidate_bytes = ?
+      `UPDATE cf_agents_session_messages SET offload_candidate_bytes = ?
        WHERE session_id = ? AND id = ? AND content = ?`,
       [candidateBytes, sessionId, messageId, expectedContent]
     );
@@ -982,21 +982,21 @@ export class SessionsCore {
     tokenEstimate: number
   ): Promise<boolean> {
     const json = this.#serialize(message);
-    const mediaCandidateBytes = maintenanceCandidateBytes(
+    const offloadCandidateBytes = maintenanceCandidateBytes(
       message,
-      byteLength(json)
+      this.attachments.options
     );
     let updated = 0;
     let removed: string[] = [];
     this.io.transaction(() => {
       updated = this.io.sqlWrite(
         `UPDATE cf_agents_session_messages
-         SET content = ?, token_estimate = ?, media_candidate_bytes = ?
+         SET content = ?, token_estimate = ?, offload_candidate_bytes = ?
          WHERE session_id = ? AND id = ? AND content = ?`,
         [
           json,
           tokenEstimate,
-          mediaCandidateBytes,
+          offloadCandidateBytes,
           sessionId,
           message.id,
           expectedContent
@@ -1255,8 +1255,8 @@ export class SessionsCore {
           const copied = { ...parsed.message, id: newId };
           this.io.sqlWrite(
             `INSERT INTO cf_agents_session_messages
-              (session_id, id, seq, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
-             SELECT ?, ?, ?, ?, role, ?, token_estimate, media_candidate_bytes, created_at
+              (session_id, id, seq, parent_id, role, content, token_estimate, offload_candidate_bytes, created_at)
+             SELECT ?, ?, ?, ?, role, ?, token_estimate, offload_candidate_bytes, created_at
              FROM cf_agents_session_messages WHERE session_id = ? AND id = ?`,
             [
               toSessionId,
@@ -1298,7 +1298,7 @@ export class SessionsCore {
     const json = this.#serialize(message);
     const inserted = this.io.sqlWrite(
       `INSERT OR IGNORE INTO cf_agents_session_messages
-        (session_id, id, seq, parent_id, role, content, token_estimate, media_candidate_bytes, created_at)
+        (session_id, id, seq, parent_id, role, content, token_estimate, offload_candidate_bytes, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sessionId,
@@ -1308,7 +1308,7 @@ export class SessionsCore {
         message.role,
         json,
         this.estimateRowTokens(message),
-        maintenanceCandidateBytes(message, byteLength(json)),
+        maintenanceCandidateBytes(message, this.attachments.options),
         options.createdAt
       ]
     );

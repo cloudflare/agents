@@ -68,7 +68,7 @@ export interface SessionRowStat {
   /** Token estimate stamped when the row was written. */
   tokenEstimate: number;
   /** Largest inline payload the maintenance pass could still offload. */
-  mediaCandidateBytes: number;
+  offloadCandidateBytes: number;
   /** Stored bytes of the attachments this row points at (0 when none). */
   attachmentBytes: number;
 }
@@ -265,30 +265,31 @@ export interface SessionsAttachmentOptions {
    */
   readonly r2?: SessionAttachmentBucket;
   /**
-   * Payloads at or above this size use R2 when configured. Smaller payloads
-   * stay in Sessions-owned SQLite chunks. Default 1,500,000 bytes.
+   * The single extraction threshold, and only meaningful when `r2` is set:
+   * a payload at or above this size is moved out of the message row into
+   * one private R2 object. Below it, payloads stay inline in the row unless
+   * the row itself exceeds `MAX_INLINE_ROW_BYTES`.
+   *
+   * Extraction into SQLite chunks does not make the database smaller — the
+   * chunks live in the same Durable Object as the row — so R2 is the only
+   * reason to extract a payload eagerly. Default 1,500,000 bytes.
    */
   readonly r2ThresholdBytes?: number;
   /** Private R2 object-key prefix. Default `cf-agents/sessions/attachments`. */
   readonly r2Prefix?: string;
-  /**
-   * File parts whose decoded payload is at least this many bytes are
-   * offloaded at write time; the maintenance pass applies the same threshold
-   * to every inline payload of aged rows. Default 32 KiB.
-   */
-  readonly inlineThresholdBytes?: number;
   /** Ceiling for one attachment payload. Default 32 MiB. */
   readonly maxAttachmentBytes?: number;
   /** Logical locator prefix exposed to reconstructors. Default "/attachments". */
   readonly basePath?: string;
   /**
    * Rows this many positions from the leaf keep inline payloads untouched;
-   * older rows are drained by the maintenance pass. Default 8.
+   * older rows are drained into R2 by the maintenance pass. Without a
+   * bucket that pass has nothing to do and does not run. Default 8.
    */
   readonly keepRecentMessages?: number;
   /** Maximum aged rows rewritten by one maintenance pass. Default 64. */
   readonly maxMaintenanceRowsPerPass?: number;
-  /** Run the aged-row maintenance pass. Default true. */
+  /** Run the aged-row maintenance pass (a no-op without `r2`). Default true. */
   readonly maintenance?: boolean;
   /** Read-side materialization default for file parts. Default: inline. */
   readonly reconstruct?: AttachmentReconstructor;
