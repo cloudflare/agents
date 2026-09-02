@@ -138,6 +138,12 @@ sequentially. Request handling is middleware dispatch: it stops at the first
 returned `Response`, and returning `undefined` passes the request on. A phase
 failure propagates, and failed startup can be retried.
 
+A capability installed with `{ fallback: true }` dispatches after every
+non-fallback capability, whenever it was installed. This is for a host's
+catch-all: `Agent` installs its WebSockets capability as a fallback, so a
+subclass that installs request or upgrade middleware from its own
+constructor still runs first, even though `Agent`'s constructor ran earlier.
+
 Capabilities extending `LifecycleCapability` receive one standard service
 surface: storage, readiness, startup state, the job queue, a host
 invocation boundary, best-effort events, and capability routing.

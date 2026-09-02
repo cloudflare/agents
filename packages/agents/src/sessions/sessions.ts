@@ -59,11 +59,17 @@ export class Sessions extends LifecycleCapability {
     const core = this.#getCore();
     core.ensureTables();
     if (version < CURRENT_SESSIONS_SCHEMA_VERSION) {
-      core.migrateLegacy();
-      await storage.put(
-        SESSIONS_SCHEMA_VERSION_KEY,
-        CURRENT_SESSIONS_SCHEMA_VERSION
-      );
+      // Stamp the version only when every legacy source was fully lifted. A
+      // partial migration that recorded success would never be retried, and
+      // the rows it left behind would stay unreachable through the new API
+      // forever. The lift is idempotent, so retrying costs reads and nothing
+      // else.
+      if (core.migrateLegacy()) {
+        await storage.put(
+          SESSIONS_SCHEMA_VERSION_KEY,
+          CURRENT_SESSIONS_SCHEMA_VERSION
+        );
+      }
     }
   }
 

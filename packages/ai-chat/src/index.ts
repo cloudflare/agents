@@ -291,13 +291,6 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
 }
 
 /**
- * Floor for byte-budgeted wake hydration: however small the budget, at least
- * this many recent messages are hydrated so a conversation is never woken
- * with an unusably short tail.
- */
-const HYDRATION_MIN_RECENT_MESSAGES = 20;
-
-/**
  * Schema for a client-defined tool sent from the browser.
  * These tools are executed on the client, not the server.
  *
@@ -2247,15 +2240,20 @@ export class AIChatAgent<
       }
     }
 
-    if (imported + skipped === order.length) {
+    // Drop the source ONLY when every row actually landed. A skipped row is
+    // one that could not be parsed or imported, and dropping the table then
+    // would delete it permanently — accounting for a row is not the same as
+    // migrating it. The lift is idempotent (`importMessage` ignores ids it
+    // already has), so leaving the table means a later start retries the rows
+    // that failed rather than losing them.
+    if (skipped === 0 && imported === order.length) {
       this.ctx.storage.sql.exec("DROP TABLE cf_ai_chat_agent_messages");
       return;
     }
-    // Something read differently than it counted. Keep the source table so the
-    // rows remain recoverable, and say so loudly.
     console.error(
-      `[AIChatAgent] Legacy lift accounted for ${imported + skipped} of ` +
-        `${order.length} rows; leaving cf_ai_chat_agent_messages in place.`
+      `[AIChatAgent] Legacy lift imported ${imported} of ${order.length} rows ` +
+        `(${skipped} skipped); leaving cf_ai_chat_agent_messages in place so ` +
+        "they remain recoverable."
     );
   }
 
@@ -2269,12 +2267,7 @@ export class AIChatAgent<
     const budget = this.hydrationByteBudget;
     const stored =
       Number.isFinite(budget) && budget > 0
-        ? (
-            await this.#session.getRecentHistory(
-              budget,
-              HYDRATION_MIN_RECENT_MESSAGES
-            )
-          ).messages
+        ? (await this.#session.getRecentHistory(budget)).messages
         : await this.#session.getHistory();
 
     const messages: UIMessage[] = [];

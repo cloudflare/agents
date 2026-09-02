@@ -1,10 +1,9 @@
 # RFC: User hub with one Durable Object per chat
 
-Status: proposed
+Status: accepted
 
-Proposes replacing the facet-backed chat topology in
-[`rfc-think-multi-session.md`](./rfc-think-multi-session.md). If accepted, that
-RFC should be marked rejected and point here as its replacement.
+Replaces the facet-backed chat topology proposed in
+[`rfc-think-multi-session.md`](./rfc-think-multi-session.md).
 
 Related:
 
@@ -226,19 +225,23 @@ Chat agent's accepted socket back through the User agent and Worker. Once the
 upgrade succeeds, the Chat agent owns the native WebSocket and receives future
 frames directly.
 
-The first implementation phase must prove this with a deployed-runtime spike,
-not only Miniflare:
+A disposable deployed-runtime spike verified this topology. It compared two
+routes over the same User and Chat classes:
 
-- increment a User-agent counter for every request it handles;
-- connect to a Chat through the User route;
-- exchange several frames;
-- verify the counter remains unchanged after the upgrade;
-- evict both objects and verify Chat-socket hibernation and reconnection.
+```text
+nested: Worker -> UserHub.fetch() -> ChatAgent.fetch()
+worker: Worker -> UserHub.resolveChat() RPC -> ChatAgent.fetch()
+```
 
-If the runtime cannot transfer a Chat-owned upgrade through a User DO fetch,
-the fallback is for the Worker to ask the User agent to authorize and resolve
-the chat, then have the Worker call `chat.fetch()` itself. The browser URL and
-socket topology remain the same; only the composition-root hop changes.
+Both returned a Chat-owned WebSocket. Ordinary Chat frames left every User
+counter unchanged, the persistent User socket stayed open while switching Chat
+sockets, and Chat-to-User shared-service RPC worked. After 180 idle seconds on
+the deployed Worker, both User and Chat instance ids changed while both sockets
+remained usable, proving natural edge hibernation and reconnection.
+
+Use the nested route. It keeps catalog lookup inside the User agent without
+putting that agent on the post-upgrade frame path. The Worker-final-hop variant
+has no ownership or hibernation advantage and adds a public resolution RPC.
 
 ## Client chat switching
 
@@ -484,11 +487,12 @@ keeps shared memory and the catalog; each `Chat` becomes a top-level
 
 ## Implementation phases
 
-### Phase 0: deployed routing spike
+### Phase 0: deployed routing spike (complete)
 
-Prove Chat-owned WebSocket upgrade passthrough and hibernation through a
-User-agent route. Record the result in a small design note before adding SDK
-surface.
+The deployed spike proved Chat-owned WebSocket passthrough, forced-eviction
+transfer, natural edge hibernation, Chat switching with the User socket retained,
+and Chat-to-User shared-service RPC. It selected nested User routing. The
+reproduction Worker and its source were deleted after verification.
 
 ### Phase 1: harden the reference pattern
 
@@ -580,9 +584,6 @@ leaving the routing and consistency rules implicit.
 
 ## Open questions
 
-- Should the User DO itself call `chat.fetch()` for the upgrade, or should it
-  return an authorization/routing result so the Worker performs the final
-  `chat.fetch()`? Phase 0 decides this from deployed behavior and wake metrics.
 - What is the smallest projection event shared by `AIChatAgent` and `Think`
   without freezing a product-specific catalog schema?
 - How long should migrated facet storage and deletion tombstones remain for
