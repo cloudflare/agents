@@ -130,11 +130,7 @@ import {
   setSchedulerCallbackResolver,
   setSchedulerRoutedMemoryLimitHandler
 } from "./schedules/scheduler";
-import {
-  Tasks,
-  setTaskDefinitionResolver,
-  setTaskRecoveryLoopDefinitionResolver
-} from "./tasks/tasks";
+import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
 import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
 import type {
   Schedule,
@@ -1779,7 +1775,6 @@ export class Agent<
     string,
     TaskCallbacks[string]
   >();
-  private readonly _recoveryLoopTaskDefinitions = new Set<string>();
 
   readonly mcp: MCPClientManager;
 
@@ -2367,7 +2362,8 @@ export class Agent<
     // Temporary bridge for a legacy routed chat-recovery schedule: the queue
     // and physical alarm live on the root Agent, but the incident and sealing
     // hook live on each owning dynamic agent. Scheduler routes a sealed strike
-    // to owners whose flagged rows were purged. Recovery-on-Tasks removes this.
+    // to owners whose flagged rows were purged. Root recovery runs on Tasks;
+    // this goes away once Tasks supports routed dynamic-agent wakes.
     setSchedulerRoutedMemoryLimitHandler(this.scheduler, (context) => {
       const hook = (
         this as unknown as {
@@ -2394,9 +2390,6 @@ export class Agent<
         this._internalTaskDefinitions.get(name) ?? this.taskDefinitions?.[name];
       return definition as TaskCallbacks[string] | undefined;
     });
-    setTaskRecoveryLoopDefinitionResolver(this.tasks, (name) =>
-      this._recoveryLoopTaskDefinitions.has(name)
-    );
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -5259,19 +5252,14 @@ export class Agent<
    * `tasks` capability. Subclasses (Think, AIChatAgent) call this from
    * their constructors so the definition is rebuilt on every wake; names use
    * the reserved `__cf` prefix so users cannot start them through the public
-   * `tasks.run()`. `recoveryLoop` marks framework definitions whose sibling
-   * runs share alarm memory-limit breaker policy.
+   * `tasks.run()`.
    * @internal
    */
   protected _registerInternalTaskDefinition(
     name: string,
-    definition: TaskCallbacks[string],
-    options?: { readonly recoveryLoop?: boolean }
+    definition: TaskCallbacks[string]
   ): void {
     this._internalTaskDefinitions.set(name, definition);
-    if (options?.recoveryLoop) {
-      this._recoveryLoopTaskDefinitions.add(name);
-    }
   }
 
   /**

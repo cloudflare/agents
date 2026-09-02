@@ -181,8 +181,12 @@ Root-agent continuation attempts run as chained `__cf_internal_chat_recovery`
 Task runs. Initial detection joins by incident identity; stable-state and OOM
 retries enqueue a separate run and express their delay with `step.sleep`. The
 Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
-entry point, which returns at model handoff so a long turn never blocks the
-Lifecycle job loop. A platform failure before handoff propagates through the
+entry point; both hosts run it through the shared
+`dispatchChatRecoveryToHandoff`, which returns at model handoff so a long turn
+never blocks the Lifecycle job loop and registers the turn as tracked alarm
+work (on the root; on a facet `trackAlarmWork` declines, and the detached turn
+stays outside the breaker until Tasks supports routed child wakes). A platform
+failure before handoff propagates through the
 current Task or compatibility schedule; after handoff that execution has
 settled, so the detached continuation enqueues exactly one replacement attempt.
 The incident record remains the recovery state machine.

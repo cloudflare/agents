@@ -9,6 +9,7 @@
  * @internal Sibling-package support for AI Chat and Think.
  */
 
+import { isPlatformFailure } from "../retries";
 import type { TaskRunOptions, TaskStep } from "../tasks/types";
 import type { ChatRecoveryScheduleCallback } from "./recovery-engine";
 
@@ -31,14 +32,61 @@ export type ChatRecoveryTaskReason =
   | "stable_timeout_retry"
   | "redefer";
 
-/** Host operations used by the shared recovery Task definition. */
-export type ChatRecoveryTaskHooks = {
-  /** Dispatch the named continuation through its existing host entry point. */
-  dispatch(
-    callback: ChatRecoveryScheduleCallback,
-    data: Record<string, unknown>
-  ): Promise<void>;
+/** The host's bounded entry point for each continuation callback. */
+export type ChatRecoveryTaskHooks = Record<
+  ChatRecoveryScheduleCallback,
+  (data: Record<string, unknown>) => Promise<void>
+>;
+
+/** How a bounded recovery callback hands its model turn to the alarm domain. */
+export type ChatRecoveryHandoff = {
+  /**
+   * Start the detached continuation. It calls `onTurnStarted` once the model
+   * turn begins — the point after which the bounded callback returns.
+   */
+  readonly detached: (onTurnStarted: () => void) => Promise<void>;
+  /** Keep the detached turn inside the current alarm's breaker domain. */
+  readonly track: (turn: Promise<void>) => void;
+  /** Enqueue exactly one replacement attempt for a detached platform failure. */
+  readonly redefer: () => Promise<void>;
+  /** Report a detached failure the turn's own bookkeeping already handled. */
+  readonly onDetachedError: (error: unknown) => void;
 };
+
+/**
+ * Run a queue-driven recovery callback up to its model handoff, then return.
+ *
+ * The recovered turn can legitimately run for a long time, and awaiting it
+ * would hold the Lifecycle job loop, starving every other job on the object.
+ * A failure before the handoff rejects here, so the executing Task run (or
+ * compatibility schedule row) keeps ownership and the driver's
+ * platform-failure deferral applies (#1730). After the handoff the turn is
+ * detached alarm work: a platform failure enqueues one replacement attempt,
+ * and any other failure belongs to the turn's own incident bookkeeping.
+ */
+export async function dispatchChatRecoveryToHandoff(
+  handoff: ChatRecoveryHandoff
+): Promise<void> {
+  let handedOff = false;
+  let signalHandoff: () => void = () => {};
+  const reachedTurn = new Promise<void>((resolve) => {
+    signalHandoff = () => {
+      handedOff = true;
+      resolve();
+    };
+  });
+  const turn = handoff.detached(signalHandoff);
+  const tracked = reachedTurn.then(() => handoff.track(turn));
+  turn.catch((error) => {
+    if (!handedOff) return;
+    if (isPlatformFailure(error)) {
+      void handoff.redefer().catch(() => {});
+      return;
+    }
+    handoff.onDetachedError(error);
+  });
+  await Promise.race([turn, tracked]);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -122,7 +170,7 @@ export function createChatRecoveryTaskDefinition(
         retries: { limit: 3, delay: 100, backoff: "exponential" },
         timeout: "15 minutes"
       },
-      () => hooks.dispatch(input.callback, input.data)
+      () => hooks[input.callback](input.data)
     );
   };
 }

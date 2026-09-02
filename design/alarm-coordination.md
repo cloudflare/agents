@@ -29,8 +29,6 @@ capabilities push jobs instead of contributing wake times.
   job per run. Task wakes use one job-dispatch attempt because ReplayStep owns
   their durable retry budget; a propagated platform failure must reach a fresh
   alarm invocation instead of entering JobDriver's generic retry loop.
-  Framework definitions may mark sibling runs as one recovery loop; only those
-  disposable wake mirrors carry the queue's recovery flag.
 
 ## How the alarm is derived
 
@@ -53,30 +51,40 @@ them; existing rows receive the policy's safe default.
 `Lifecycle.alarm()` runs the event loop: arm the deadman, drive due jobs in
 due order (single-flight skip/hung-recovery, per-job retry, platform-failure
 deferral, `onJobError` for terminal application failures), run host
-`onAlarm()`, join work registered through `trackAlarmWork`, then clear the
-memory-limit strike counter and re-arm from queue state. Jobs return at bounded
-handoffs so the due batch keeps moving; the pre-armed deadman remains untouched
-until every registered promise settles. All clean settlements make the alarm
-clean. Any memory reset enters the breaker once for the whole alarm. The loop
-stops if teardown disabled alarms mid-phase.
+`onAlarm()`, clear the memory-limit strike counter when no handed-off work is
+outstanding, and re-arm from queue state. A job that must keep working past
+its bounded return registers that work with `trackAlarmWork`; the alarm still
+returns promptly, so other jobs stay live, and the handoff is classified when
+it settles. The loop stops if teardown disabled alarms mid-phase.
 
 The alarm memory-limit circuit breaker (#1825) lives at this boundary. A
 memory-limit reset is intercepted while every other error keeps platform alarm
-retry semantics. Under the strike budget, the executing job and flagged
+retry semantics; a reset reported by handed-off work enters the same breaker
+against the job that handed it off. One reset is one strike even when several
+flows observe it (an in-alarm job plus handed-off work, or several handoffs
+awaiting the same condemned storage): the counter moves once per event, each
+observing job is backed off or purged, and the policy hooks run once per
+observing job. Under the strike budget, the executing job and flagged
 recovery-loop jobs move to a backoff wake. At the budget they are purged.
 Lifecycle then supplies the executing-job identity to capability and host
-policy hooks.
+policy hooks. Strikes clear only when an alarm ends, or the last outstanding
+handoff settles, with no memory reset and nothing still running — a clean
+sibling cannot hide a slower handoff's reset.
 
-Tasks uses that hook to update its authoritative run rows, preventing startup
-reconciliation from undoing queue backoff. At its five-second job handoff it
-registers the still-running attempt with Lifecycle; AI Chat and Think register
-the post-handoff model dispatch, so Task and Scheduler transports remain in the
-same alarm breaker domain. An ordinary definition updates only the run that
-struck. A framework definition marked as a recovery loop updates all active
-runs of every such definition, matching the queue rows that moved as a pack.
-Root chat recovery uses the reserved `__cf_internal_chat_recovery` definition.
-Routed dynamic-agent recovery temporarily keeps its root-owned Scheduler rows
-and receives sealing through the routed compatibility bridge.
+Tasks uses that hook to update the struck run's authoritative row — claim
+stripped, deadline pushed, state kept so the reclaim still sees an interrupted
+attempt — preventing startup reconciliation from undoing queue backoff. At its
+five-second job handoff it registers the still-running attempt with Lifecycle.
+AI Chat and Think register the post-handoff model dispatch when the callback
+runs under the alarm owner's dispatch — root Task runs and legacy root-owned
+Scheduler rows. Root chat recovery uses the reserved
+`__cf_internal_chat_recovery` definition. Routed dynamic-agent recovery
+temporarily keeps its root-owned Scheduler rows; its callback executes on the
+facet's own Lifecycle, outside any alarm, so `trackAlarmWork` declines there
+and the facet's post-handoff turn is bounded by the incident's own memory-reset
+budget rather than the breaker until Tasks can mirror child wakes to the alarm
+owner. A sealing strike still reaches the facet through the routed
+compatibility bridge.
 
 ## Agent integration
 

@@ -82,8 +82,9 @@ export type LifecycleServices = {
    */
   readonly jobs: LifecycleJobs;
   /**
-   * Keep work started by the current alarm inside its memory-limit breaker
-   * boundary after a bounded job callback returns. No-op outside job dispatch.
+   * Keep work this capability hands off at a bounded `onJob` return inside
+   * the current alarm's memory-limit breaker domain (#1825). Returns false,
+   * tracking nothing, outside an alarm invocation.
    */
   readonly trackAlarmWork: (work: Promise<unknown>) => boolean;
   /**

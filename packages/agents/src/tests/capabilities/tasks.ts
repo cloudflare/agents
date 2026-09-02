@@ -1,7 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
 import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
-import { setTaskRecoveryLoopDefinitionResolver } from "../../tasks/tasks";
 import { Scheduler } from "../../schedules";
 
 /**
@@ -272,6 +271,44 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         );
       },
 
+      /**
+       * One condemned attempt observed by two handoffs: the step's own memory
+       * reset plus a sibling promise the handler registered with the alarm
+       * that rejects with the same reset. The breaker must record one strike
+       * for the pair, not one per observer.
+       */
+      twinLateOom: async (_input: undefined, step: TaskStep) => {
+        const sibling = new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  "Durable Object's isolate exceeded its memory limit and was reset."
+                )
+              ),
+            5_050
+          );
+        });
+        this.lifecycle.trackAlarmWork(sibling);
+        await step.do(
+          "twin-oom-step",
+          { retries: { limit: 3 }, timeout: 10_000 },
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 5_050));
+            const remaining =
+              (await this.ctx.storage.get<number>("oomLoopRemaining")) ?? 0;
+            if (remaining > 0) {
+              await this.ctx.storage.put("oomLoopRemaining", remaining - 1);
+              await this.ctx.storage.sync();
+              throw new Error(
+                "Durable Object's isolate exceeded its memory limit and was reset."
+              );
+            }
+            return "recovered";
+          }
+        );
+      },
+
       /** Settles successfully after Tasks' five-second job handoff. */
       lateSuccess: async (_input: undefined, step: TaskStep) => {
         return step.do("late-success-step", { timeout: 10_000 }, async () => {
@@ -280,10 +317,13 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         });
       },
 
-      /** Clean sibling that remains active when the same alarm starts an OOM. */
+      /**
+       * Clean sibling that is still active when the same alarm starts an OOM.
+       * Well under the 2s step timeout so it completes rather than re-parks.
+       */
       alarmSiblingSuccess: async (_input: undefined, step: TaskStep) => {
         return step.do("alarm-sibling", async () => {
-          await new Promise((resolve) => setTimeout(resolve, 2_000));
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
           return "alarm-sibling-success";
         });
       }
@@ -298,14 +338,6 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   });
 
   readonly lifecycle = Lifecycle.install(this).use(this.tasks);
-
-  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-    super(ctx, env);
-    setTaskRecoveryLoopDefinitionResolver(
-      this.tasks,
-      (name) => name === "oomStepLoop" || name === "lateOomStepLoop"
-    );
-  }
 }
 
 /**
@@ -373,7 +405,6 @@ export function seedTaskRun(
     readonly generation?: string;
     readonly attempt?: number;
     readonly nextAt: number;
-    readonly recoveryLoop?: boolean;
     readonly retain?: boolean;
     readonly idempotencyKey?: string;
   }
@@ -418,12 +449,10 @@ export function seedTaskRun(
     )`
   );
   storage.sql.exec(
-    `INSERT OR REPLACE INTO cf_agents_jobs
-       (id, capability, fn, time, recovery_loop)
-     VALUES (?, 'tasks', 'wake', ?, ?)`,
+    `INSERT OR REPLACE INTO cf_agents_jobs (id, capability, fn, time)
+     VALUES (?, 'tasks', 'wake', ?)`,
     `task:${options.runId}`,
-    options.nextAt,
-    options.recoveryLoop ? 1 : 0
+    options.nextAt
   );
 }
 

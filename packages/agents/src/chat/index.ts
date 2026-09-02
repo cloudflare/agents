@@ -62,6 +62,8 @@ export {
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
   createChatRecoveryTaskDefinition,
+  dispatchChatRecoveryToHandoff,
+  type ChatRecoveryHandoff,
   type ChatRecoveryTaskHooks,
   type ChatRecoveryTaskInput,
   type ChatRecoveryTaskReason

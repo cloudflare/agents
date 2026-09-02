@@ -176,8 +176,6 @@ export class Lifecycle<
   #status: "zero" | "starting" | "started" = "zero";
   #alarmRearmQueue: Promise<void> = Promise.resolve();
   #rearmRequestedDuringStart = false;
-  #drivingAlarm = false;
-  #rearmRequestedDuringAlarm = false;
   #pendingEvents: LifecycleEvent[] = [];
   #alarmsDisabled = false;
   #capabilitiesLocked = false;
@@ -726,12 +724,6 @@ export class Lifecycle<
       this.#rearmRequestedDuringStart = true;
       return;
     }
-    if (this.#drivingAlarm) {
-      // Keep JobDriver's deadman alarm armed while the bounded due batch and
-      // its tracked work settle. The final queue state is applied once.
-      this.#rearmRequestedDuringAlarm = true;
-      return;
-    }
 
     const prior = this.#alarmRearmQueue;
     const next = prior
@@ -750,10 +742,11 @@ export class Lifecycle<
   }
 
   /**
-   * Keep work started by the current alarm inside its memory-limit breaker
-   * boundary after a bounded job callback returns.
+   * Keep work a job handed off at a bounded return inside the current
+   * alarm's memory-limit breaker domain (#1825). Hosts call this where a
+   * queue-driven callback detaches long work and returns.
    *
-   * @returns True when called during job dispatch; false outside an alarm.
+   * @returns True when called during an alarm invocation; false otherwise.
    */
   trackAlarmWork(work: Promise<unknown>): boolean {
     return this.#jobDriver.trackAlarmWork(work);
@@ -779,22 +772,13 @@ export class Lifecycle<
    * the host invocation boundary.
    */
   async alarm(): Promise<void> {
-    this.#drivingAlarm = true;
-    try {
-      await this.#jobDriver.runAlarm(
-        () => this.#ensureInitialized(),
-        () =>
-          runInLifecycleHostContext({ host: this.#host }, async () => {
-            await this.#host.onAlarm?.();
-          })
-      );
-    } finally {
-      this.#drivingAlarm = false;
-      if (this.#rearmRequestedDuringAlarm) {
-        this.#rearmRequestedDuringAlarm = false;
-        await this.rearmAlarm();
-      }
-    }
+    await this.#jobDriver.runAlarm(
+      () => this.#ensureInitialized(),
+      () =>
+        runInLifecycleHostContext({ host: this.#host }, async () => {
+          await this.#host.onAlarm?.();
+        })
+    );
   }
 
   /**

@@ -45,11 +45,12 @@ export type ChatRecoveryScheduleCallback =
  *   instead of N duplicates.
  *
  * - `"stable_timeout_retry"` — a reschedule issued from INSIDE the currently-
- *   executing one-shot schedule row (a continuation that timed out waiting for
- *   stable state). `alarm()` deletes that row only AFTER the callback returns,
- *   so an idempotent reschedule would dedup onto the doomed row and be deleted
- *   with it — the retry would never fire. A fresh (non-idempotent) delayed row
- *   survives the deletion.
+ *   executing recovery attempt (a continuation that timed out waiting for
+ *   stable state). That attempt — a `__cf_internal_chat_recovery` Task run on a
+ *   root agent, a one-shot schedule row on the routed fallback — settles only
+ *   AFTER the callback returns, so an idempotent reschedule would dedup onto
+ *   the doomed attempt and settle with it — the retry would never fire. A
+ *   fresh (non-idempotent) delayed attempt survives.
  */
 export type ChatRecoveryScheduleReason = "initial" | "stable_timeout_retry";
 
@@ -659,7 +660,9 @@ export class ChatRecoveryEngine {
 
   /**
    * Reschedule a recovery continuation/retry that timed out waiting for stable
-   * state, INSIDE the currently-executing one-shot schedule row. Reads the
+   * state, from INSIDE the currently-executing recovery attempt (a
+   * `__cf_internal_chat_recovery` Task run for a root agent, the routed
+   * one-shot schedule row for a dynamic agent). Reads the
    * incident; if it is still under the attempt cap, bumps `attempt`, marks it
    * `scheduled` with `reason:"stable_timeout_retry"`, and issues a separate
    * delayed attempt. It must not join the currently executing attempt: Tasks
@@ -712,9 +715,9 @@ export class ChatRecoveryEngine {
    * Bumps the incident's durable `oomAttempts` counter, then:
    *  - if it is still within `maxOomRetries`, issues a delayed, NON-idempotent
    *    reschedule of the SAME callback (same machinery as
-   *    {@link rescheduleAfterStableTimeout}: the executing one-shot row is
-   *    deleted only after the callback returns, so an idempotent reschedule
-   *    would dedup onto that doomed row) and returns `"rescheduled"`. The small
+   *    {@link rescheduleAfterStableTimeout}: the executing attempt settles
+   *    only after the callback returns, so an idempotent reschedule would
+   *    dedup onto that doomed attempt) and returns `"rescheduled"`. The small
    *    delay lets a transient memory spike clear before the re-run;
    *  - otherwise leaves the incremented count persisted (so a begin-path
    *    re-evaluation agrees) and returns `"exhausted"` — the caller then

@@ -188,50 +188,20 @@ describe("Tasks capability", () => {
     }
   });
 
-  it("leaves internal enqueues for the durable wake and flags only recovery definitions", async () => {
+  it("leaves internal enqueues to their durable wake instead of warm-starting", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(
-      stub,
-      async (instance: TaskHarnessObject, state) => {
-        const ordinary = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-          "pipeline",
-          {
-            label: "queued"
-          }
-        );
-        const recovery = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-          "oomStepLoop",
-          undefined
-        );
-        expect((await instance.tasks.get(ordinary.runId))?.state).toBe(
-          "pending"
-        );
-        expect((await instance.tasks.get(recovery.runId))?.state).toBe(
-          "pending"
-        );
-        expect(instance.stepRuns).toEqual([]);
-
-        const flags = state.storage.sql
-          .exec(
-            `SELECT id, recovery_loop FROM cf_agents_jobs
-             WHERE id IN (?, ?) ORDER BY id`,
-            `task:${ordinary.runId}`,
-            `task:${recovery.runId}`
-          )
-          .toArray() as Array<{ id: string; recovery_loop: number }>;
-        expect(
-          new Map(flags.map((row) => [row.id, row.recovery_loop]))
-        ).toEqual(
-          new Map([
-            [`task:${ordinary.runId}`, 0],
-            [`task:${recovery.runId}`, 1]
-          ])
-        );
-      }
-    );
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+        "pipeline",
+        { label: "queued" }
+      );
+      expect((await instance.tasks.get(receipt.runId))?.state).toBe("pending");
+      expect(instance.stepRuns).toEqual([]);
+      await instance.tasks.cancel(receipt.runId);
+    });
   });
 
-  it("upgrades an existing job table before ordinary and recovery-loop pushes", async () => {
+  it("upgrades an existing job table with the recovery-loop column before pushes", async () => {
     const name = crypto.randomUUID();
     const stub = env.TaskHarnessObject.getByName(name);
 
@@ -267,28 +237,19 @@ describe("Tasks capability", () => {
           fn: "ordinary",
           time: future
         });
-        const recovery = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-          "oomStepLoop",
-          undefined
-        );
 
         const rows = state.storage.sql
           .exec(
             `SELECT id, recovery_loop FROM cf_agents_jobs
-             WHERE id IN ('legacy', 'ordinary-upgrade', ?)
-             ORDER BY id`,
-            `task:${recovery.runId}`
+             WHERE id IN ('legacy', 'ordinary-upgrade')
+             ORDER BY id`
           )
           .toArray();
-        expect(rows).toEqual(
-          [
-            { id: "legacy", recovery_loop: 0 },
-            { id: "ordinary-upgrade", recovery_loop: 0 },
-            { id: `task:${recovery.runId}`, recovery_loop: 1 }
-          ].sort((left, right) => left.id.localeCompare(right.id))
-        );
+        expect(rows).toEqual([
+          { id: "legacy", recovery_loop: 0 },
+          { id: "ordinary-upgrade", recovery_loop: 0 }
+        ]);
 
-        await instance.tasks.cancel(recovery.runId);
         await instance.lifecycle.jobs.cancel("ordinary-upgrade");
       }
     );
@@ -318,6 +279,43 @@ describe("Tasks capability", () => {
         ]);
         await instance.lifecycle.jobs.cancel("legacy");
         await instance.lifecycle.jobs.cancel("post-upgrade");
+      }
+    );
+  });
+
+  it("re-arms a lost physical alarm on startup when every wake mirror already matches", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    const future = Date.now() + 60 * 60 * 1000;
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "lost-alarm",
+          definition: "checkpointing",
+          state: "pending",
+          nextAt: future
+        });
+        // Bring the mirror to exactly what #syncWake writes, so the fresh
+        // start below has nothing to push and must re-arm explicitly.
+        state.storage.sql.exec(
+          `UPDATE cf_agents_jobs SET retry_options = ? WHERE id = ?`,
+          JSON.stringify({ maxAttempts: 1 }),
+          "task:lost-alarm"
+        );
+        await state.storage.deleteAlarm();
+        expect(await state.storage.getAlarm()).toBeNull();
+      }
+    );
+
+    await evictDurableObject(stub);
+    await runInDurableObject(
+      env.TaskHarnessObject.getByName(name),
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        expect(await state.storage.getAlarm()).toBe(future);
+        await instance.tasks.cancel("lost-alarm");
       }
     );
   });

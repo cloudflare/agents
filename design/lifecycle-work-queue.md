@@ -161,16 +161,18 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
      complete);
    - the drive result is applied: delete, retime, or leave due.
 4. Run host `onAlarm()`.
-5. Await the promises registered through `trackAlarmWork()` as one bounded
-   alarm batch. The deadman remains armed while they settle.
+5. Clear the memory-limit strike counter, unless work registered through
+   `trackAlarmWork()` is still outstanding.
 6. Re-arm the physical alarm from queue state.
 
 Startup and steps 3–5 run inside the alarm memory-limit circuit breaker
 (initialization included because a severe reset can be thrown during boot
 hydration, before any job runs — the original #1825 case), moved here from
-`Agent.alarm()`. Registered work is aggregated at this boundary: all of it must
-settle without a memory reset before the alarm clears prior strikes; any memory
-reset enters the breaker once for the whole alarm. The durable strike counter
+`Agent.alarm()`. Registered work extends that boundary past the alarm's
+return: a memory reset it reports records a strike against the job that
+registered it (one strike per reset, however many flows observe it), and the
+strike counter clears only once no registered work is outstanding and the last
+of it settled clean. The durable strike counter
 (`cf_agents:oom_alarm_strikes`)
 tolerates `maxAlarmMemoryLimitStrikes` consecutive resets (composition-root
 aperture; default 3), backs off the executing job, then seals — purging the

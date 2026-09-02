@@ -81,8 +81,9 @@ export function setSchedulerCallbackResolver(
  * @internal Temporary compatibility bridge for chat-recovery schedules owned
  * by a routed dynamic agent. The root owns the physical alarm and queue row;
  * this handler lets Scheduler deliver a sealed memory-limit strike to the
- * routed host that owns the incident. Delete with the recovery-on-Tasks
- * migration, when the owning Tasks capability terminalizes its own run.
+ * routed host that owns the incident. Root recovery already runs on Tasks;
+ * remove this once Tasks supports routed dynamic-agent wakes and the legacy
+ * rows have drained.
  */
 export function setSchedulerRoutedMemoryLimitHandler(
   scheduler: Scheduler<never>,
