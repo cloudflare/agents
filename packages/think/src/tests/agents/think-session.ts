@@ -811,12 +811,9 @@ export class ThinkTestAgent extends Think {
   async persistIncomingMessageForTest(msg: UIMessage): Promise<void> {
     await (
       this as unknown as {
-        _persistIncomingMessage(
-          m: UIMessage,
-          serverMessages: readonly UIMessage[]
-        ): Promise<void>;
+        _persistIncomingMessage(m: UIMessage): Promise<void>;
       }
-    )._persistIncomingMessage(msg, this.messages);
+    )._persistIncomingMessage(msg);
   }
 
   async runChannelTurnForTest(options: {

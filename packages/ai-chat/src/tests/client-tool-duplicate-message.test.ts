@@ -81,6 +81,84 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("keeps a later assistant when a toolCallId is reused across turns", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_reused_across_turns";
+    const firstUser: ChatMessage = {
+      id: "user-first",
+      role: "user",
+      parts: [{ type: "text", text: "First turn" }]
+    };
+    const firstAssistant: ChatMessage = {
+      id: "assistant-first",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId,
+          state: "output-available",
+          input: { turn: 1 },
+          output: "first result"
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([firstUser, firstAssistant]);
+
+    const secondUser: ChatMessage = {
+      id: "user-second",
+      role: "user",
+      parts: [{ type: "text", text: "Second turn" }]
+    };
+    const secondAssistant: ChatMessage = {
+      id: "assistant-second",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId,
+          state: "output-available",
+          input: { turn: 2 },
+          output: "second result"
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([
+      firstUser,
+      firstAssistant,
+      secondUser,
+      secondAssistant
+    ]);
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistants = messages.filter(
+      (message) => message.role === "assistant"
+    );
+
+    expect(assistants.map((message) => message.id)).toEqual([
+      "assistant-first",
+      "assistant-second"
+    ]);
+    expect((assistants[0].parts[0] as { output?: unknown }).output).toBe(
+      "first result"
+    );
+    expect((assistants[1].parts[0] as { output?: unknown }).output).toBe(
+      "second result"
+    );
+
+    ws.close(1000);
+  });
+
   it("reconciles client-generated ID with server ID for input-available state (#1094)", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(

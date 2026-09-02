@@ -28,7 +28,6 @@ import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
   reconcileMessages,
-  resolveToolMergeId,
   reconcileOrphanPartial,
   repairInterruptedToolParts,
   persistReconstructedOrphan,
@@ -5543,8 +5542,7 @@ export class AIChatAgent<
     // Compares serialized JSON against a cache of last-persisted versions.
     for (const message of mergedMessages) {
       const sanitizedMessage = this._sanitizeMessageForPersistence(message);
-      const resolved = resolveToolMergeId(sanitizedMessage, this.messages);
-      const safe = this._enforceRowSizeLimit(resolved);
+      const safe = this._enforceRowSizeLimit(sanitizedMessage);
       const json = JSON.stringify(safe);
 
       // Skip SQL write if the message is identical to what's already persisted
