@@ -44,8 +44,9 @@ const HISTORY_CONTENT_CHUNK_SIZE = 50;
 const HISTORY_CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
 
 /**
- * Deepest path a history read follows. A read of a longer branch sees its
- * most recent rows only, and `getRecentHistory` reports that as truncated.
+ * Deepest path a history read follows: the root row is depth 0, so a read
+ * returns at most this many rows plus one. A longer branch shows its most
+ * recent rows only, and `getRecentHistory` reports that as truncated.
  */
 const MAX_PATH_DEPTH = 10_000;
 
@@ -331,6 +332,14 @@ export class SessionsCore {
     return row.content + (this.#continuations(sessionId, [id]).get(id) ?? "");
   }
 
+  #hasParent(sessionId: string, id: string): boolean {
+    const [row] = this.io.sql<{ parent_id: string | null }>(
+      "SELECT parent_id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      [sessionId, id]
+    );
+    return row?.parent_id != null;
+  }
+
   exists(sessionId: string, id: string): boolean {
     return (
       this.io.sql<{ id: string }>(
@@ -607,13 +616,12 @@ export class SessionsCore {
     )) {
       messages.push(message);
     }
-    // The path cap hides older rows exactly as the budget does, so a branch
-    // deeper than the cap is truncated whatever the budget admitted.
-    return {
-      messages,
-      truncated: start > 0 || stats.length > MAX_PATH_DEPTH,
-      totalContentBytes
-    };
+    // The path cap hides older rows exactly as the budget does. A read that
+    // filled the cap is truncated only if the oldest row it returned still
+    // has a parent; a branch of exactly the cap's length is complete.
+    const capped =
+      stats.length > MAX_PATH_DEPTH && this.#hasParent(sessionId, stats[0].id);
+    return { messages, truncated: start > 0 || capped, totalContentBytes };
   }
 
   /**

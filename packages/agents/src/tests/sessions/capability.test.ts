@@ -350,6 +350,38 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("reports truncation from the path cap only when older rows exist", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      // The root is depth 0, so a read follows 10,001 rows. Import is the
+      // cheap write path: no sanitize, no change feed.
+      let parentId: string | null = null;
+      for (let i = 0; i < 10_001; i++) {
+        await session.importMessage(text(`cap-${i}`, "x"), {
+          parentId,
+          createdAt: i
+        });
+        parentId = `cap-${i}`;
+      }
+      const exact = await session.getRecentHistory(Number.MAX_SAFE_INTEGER);
+      expect(exact.messages).toHaveLength(10_001);
+      expect(exact.messages[0].id).toBe("cap-0");
+      expect(exact.truncated).toBe(false);
+
+      // One more row pushes the root past the cap: the read returns the same
+      // number of rows, but the oldest one now has a parent it could not see.
+      await session.importMessage(text("cap-10001", "x"), {
+        parentId,
+        createdAt: 10_001
+      });
+      const over = await session.getRecentHistory(Number.MAX_SAFE_INTEGER);
+      expect(over.messages).toHaveLength(10_001);
+      expect(over.messages[0].id).toBe("cap-1");
+      expect(over.truncated).toBe(true);
+    });
+  }, 120_000);
+
   it("dispatches the change feed in order with stored messages", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
