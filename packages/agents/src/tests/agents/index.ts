@@ -29,6 +29,7 @@ export {
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent
 } from "./schedule";
+export { TestTaskAgent } from "./tasks";
 export {
   TestWorkflowAgent,
   TestWorkflowOnStartSubAgent,
@@ -55,6 +56,8 @@ export {
 } from "./session";
 export { TestMultiSessionAgent } from "./multi-session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
+export { RoutingOwnerAgent, RoutedChatAgent } from "./routed-agents";
+export type { RoutedChatMetadata } from "./routed-agents";
 export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
 export {
   TestSubAgentParent,

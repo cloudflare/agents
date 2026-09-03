@@ -15,11 +15,13 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
 | `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                |
 | `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
-| `agents/mcp/server`          | `src/mcp/server.ts`          | Isolated Agents wrapper for SDK v2 stateless servers                         |
-| `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
+| `agents/mcp/server`          | `src/mcp/server/index.ts`    | Isolated Agents wrapper for SDK v2 stateless servers                         |
+| `agents/mcp/client`          | `src/mcp/client/index.ts`    | MCP client manager (connect to remote MCP servers from an Agent)             |
 | `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
 | `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
-| `agents/schedule`            | `src/schedule.ts`            | Scheduling types                                                             |
+| `agents/schedule`            | `src/schedule.ts`            | Deprecated scheduling-parser compatibility entry point                       |
+| `agents/schedules`           | `src/schedules/index.ts`     | Dependency-light Lifecycle Scheduler primitive and runtime types             |
+| `agents/schedules/parser`    | `src/schedules/parser.ts`    | Zod-based natural-language scheduling prompt and schema helpers              |
 | `agents/observability`       | `src/observability/index.ts` | Observability event types and emitters                                       |
 | `agents/ai-chat-agent`       | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
 | `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
@@ -43,7 +45,8 @@ src/
   sub-routing.ts        # Nested /sub/... routing helpers + getSubAgentByName
   email.ts              # Email routing utilities
   workflows.ts          # AgentWorkflow base class
-  schedule.ts           # Scheduling types and helpers
+  schedule.ts           # Deprecated parser compatibility re-export
+  schedules/            # Scheduler capability, runtime types, and parsing helpers
   serializable.ts       # RPC serialization types
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
@@ -66,25 +69,34 @@ src/
 
   mcp/                  # MCP (Model Context Protocol) subsystem
     index.ts            # Compatibility barrel; public legacy imports stay stable
-    server.ts           # Isolated SDK v2 stateless server entry
-    handler-stateless.ts # SDK v2 Worker wrapper (Stateless + Legacy compatibility)
-    handler-legacy-compat.ts # SDK v2 transport for Legacy compatibility
-    handler-compat.ts   # v1/v2 compatibility overload retained on agents/mcp
-    legacy-agent.ts     # Deprecated SDK v1 McpAgent implementation
-    handler-legacy.ts   # Explicit SDK v1 handler
-    transport.ts        # McpAgent SSE + Streamable HTTP transports
-    client.ts           # MCPClientManager for connecting to remote MCP servers
-    client-connection.ts
-    client-rpc.ts       # Persisted RPC binding restoration
-    client-storage.ts
-    client-transports.ts
-    do-oauth-client-provider.ts
-    x402.ts             # x402 payment protocol for MCP
-    types.ts
-    utils.ts
-    errors.ts
-    auth-context.ts
-    worker-transport.ts
+    types.ts            # Shared MCP types
+    rpc.ts              # RPC transports shared by client + server
+    abort.ts            # Shared abort/race helper
+    client/             # MCP client submodule (agents/mcp/client)
+      index.ts          # MCPClientManager for connecting to remote MCP servers
+      connection.ts
+      rpc.ts            # Persisted RPC binding restoration
+      storage.ts
+      catalog.ts
+      invoker.ts
+      runtime.ts
+      transports.ts
+      errors.ts
+      do-oauth-client-provider.ts
+      x402.ts           # x402 payment protocol for MCP
+    server/             # MCP server submodule (agents/mcp/server)
+      index.ts          # Isolated SDK v2 stateless server entry
+      handler-stateless.ts # SDK v2 Worker wrapper (Stateless + Legacy compatibility)
+      handler-legacy-compat.ts # SDK v2 transport for Legacy compatibility
+      handler-compat.ts # v1/v2 compatibility overload retained on agents/mcp
+      legacy-agent.ts   # Deprecated SDK v1 McpAgent implementation
+      handler-legacy.ts # Explicit SDK v1 handler
+      transport.ts      # McpAgent SSE + Streamable HTTP transports
+      worker-transport.ts
+      auth-context.ts
+      event-store.ts
+      sse-keepalive.ts
+      utils.ts
 
   observability/        # Observability event system
     index.ts
@@ -149,15 +161,17 @@ pnpm run test:workers   # or: pnpm exec vitest -r src/tests
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
 
-### Lifecycle tests (`src/tests/lifecycle/`)
+### Lifecycle and capability tests (`src/tests/lifecycle/`, `src/tests/capabilities/`)
 
-```bash
-pnpm exec vitest --project lifecycle --run
-```
-
-Proves constructor composition on a plain `DurableObject`, ordered capabilities,
-host-hook context, root accessor aliasing, routing, native and migrated identity,
-alarms, and hibernating WebSockets.
+Part of the shared workers project — there is no separate Lifecycle vitest
+project or wrangler config. `src/tests/lifecycle/` holds one test file per
+Lifecycle functionality: runtime handlers, startup (including failure retry),
+alarm arbitration, capability events, capability routing, host context,
+hibernating WebSockets, identity, and disposal. Capability contract tests
+mirror their source module (`src/tests/schedules/capability.test.ts`,
+`src/tests/mcp/client-capability.test.ts`) and drive real harness Durable
+Objects defined one-per-capability in `src/tests/capabilities/` — see
+`src/tests/capabilities/AGENTS.md` for the pattern.
 
 ### React tests (`src/react-tests/`)
 
@@ -242,8 +256,9 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 - **State sync is bidirectional** — `this.setState()` on the server broadcasts to all connected clients; `agent.setState()` from the client sends to the server. Both directions use the same message format (`MessageType.CF_AGENT_STATE`).
 - **Client RPC is decorator-gated** — methods on Agent subclasses must use `@callable()` before clients can invoke them through `agent.call("methodName", args)` or `agent.stub.methodName(...)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
-- **Scheduling uses cron-schedule** — `this.schedule()` accepts delays, Dates, or cron strings. Schedules persist in SQLite and survive hibernation.
-- **MCP has separate package boundaries** — `mcp/server.ts` is the Stateless Worker wrapper; `mcp/client.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/legacy-agent.ts`.
+- **Lifecycle owns the job queue and the physical alarm** — capabilities and the host push jobs (`capability` + `fn` + due time + payload) into the `cf_agents_jobs` table; Lifecycle drives due jobs as an alarm event loop with retry, deferral, and the memory-limit circuit breaker, and derives the physical alarm from queue state. Queue mutations re-arm automatically. Each capability keeps its own durable state rather than depending on Scheduler.
+- **Scheduling uses cron-schedule** — `Scheduler` is the vocabulary over the job queue: it validates schedules, resolves named callbacks, and pushes jobs whose `fn` is the callback name. `Agent` installs the same primitive and delegates `this.schedule()` and related APIs to it. Schedules persist in SQLite and survive hibernation.
+- **MCP has separate package boundaries** — `mcp/server/index.ts` is the Stateless Worker wrapper; `mcp/client/index.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/server/legacy-agent.ts`.
 - **Telemetry has an independent schema version** — `instrumentation_scope.version` is hardcoded to `"1"`; it is not the package version. Notify Workers Observability and any other downstream consumers before bumping it.
 
 ## Boundaries

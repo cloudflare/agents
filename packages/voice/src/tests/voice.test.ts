@@ -56,6 +56,10 @@ function uniquePath() {
   return `/agents/test-voice-agent/voice-test-${++instanceCounter}`;
 }
 
+function uniqueDiagnosticPath() {
+  return `/agents/test-diagnostic-voice-agent/voice-test-${++instanceCounter}`;
+}
+
 function uniqueContextPath() {
   return `/agents/test-context-voice-agent/voice-test-${++instanceCounter}`;
 }
@@ -108,6 +112,7 @@ async function setTranscriberMode(
     | "pending_ready"
     | "pending_ready_no_close_settle"
     | "reject_ready"
+    | "reject_ready_object"
     | "create_throw"
 ): Promise<void> {
   sendJSON(ws, { type: "_set_transcriber_mode", value });
@@ -180,6 +185,32 @@ async function toArrayBuffer(data: unknown): Promise<ArrayBuffer | null> {
 
 function decodeAudio(buffer: ArrayBuffer): string {
   return String.fromCharCode(...new Uint8Array(buffer));
+}
+
+function recordVoiceEvents(ws: WebSocket) {
+  const events: Array<Record<string, unknown> | "audio"> = [];
+  const handler = (event: MessageEvent) => {
+    if (typeof event.data === "string") {
+      events.push(JSON.parse(event.data) as Record<string, unknown>);
+    } else {
+      events.push("audio");
+    }
+  };
+  ws.addEventListener("message", handler);
+
+  return {
+    events,
+    stop: () => ws.removeEventListener("message", handler)
+  };
+}
+
+function statusAndAudioSequence(
+  events: Array<Record<string, unknown> | "audio">
+): unknown[] {
+  return events.flatMap((event) => {
+    if (event === "audio") return [event];
+    return event.type === "status" ? [event.status] : [];
+  });
 }
 
 function collectMessagesUntil(
@@ -272,6 +303,428 @@ describe("VoiceAgent — protocol", () => {
   });
 });
 
+describe("VoiceAgent — diagnostics", () => {
+  it("keeps diagnostics off unless the server mixin enables them", async () => {
+    const { ws } = await connectWS(uniquePath());
+    const welcome = (await waitForType(ws, "welcome")) as Record<
+      string,
+      unknown
+    >;
+    expect(welcome).not.toHaveProperty("diagnostics");
+    await waitForStatus(ws, "idle");
+
+    const messagesPromise = collectMessagesUntil(
+      ws,
+      (message) => message.type === "status" && message.status === "listening"
+    );
+    sendJSON(ws, { type: "start_call" });
+    const messages = await messagesPromise;
+
+    expect(messages.some((message) => message.type === "diagnostic")).toBe(
+      false
+    );
+    ws.close();
+  });
+
+  it("activates forwarding in welcome and reports an ordered safe lifecycle", async () => {
+    const { ws } = await connectWS(uniqueDiagnosticPath());
+    const welcome = (await waitForType(ws, "welcome")) as Record<
+      string,
+      unknown
+    >;
+    expect(welcome).toMatchObject({
+      protocol_version: expect.any(Number),
+      diagnostics: { browser_console: true }
+    });
+    await waitForStatus(ws, "idle");
+
+    const messagesPromise = collectMessagesUntil(
+      ws,
+      (message) => message.type === "turn_metrics"
+    );
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+    for (let i = 0; i < 4; i++) ws.send(new ArrayBuffer(5000));
+    const messages = await messagesPromise;
+    const diagnostics = messages.filter(
+      (message) => message.type === "diagnostic"
+    );
+    const events = diagnostics.map((message) => message.event);
+
+    const expectedOrder = [
+      "call.starting",
+      "stt.starting",
+      "stt.ready",
+      "call.ready",
+      "turn.started",
+      "speech.started",
+      "stt.interim",
+      "stt.utterance",
+      "after_transcribe.completed",
+      "model.started",
+      "model.first_text",
+      "model.completed",
+      "tts.started",
+      "tts.completed",
+      "audio.first_sent",
+      "audio.completed",
+      "turn.ended"
+    ];
+    let cursor = -1;
+    for (const event of expectedOrder) {
+      cursor = events.indexOf(event, cursor + 1);
+      expect(
+        cursor,
+        `missing or unordered diagnostic: ${event}`
+      ).toBeGreaterThan(-1);
+    }
+
+    const turnMetrics = messages.find(
+      (message) => message.type === "turn_metrics"
+    ) as Record<string, unknown>;
+    const correlatedIds = diagnostics
+      .filter((message) =>
+        [
+          "turn.started",
+          "speech.started",
+          "stt.interim",
+          "stt.utterance",
+          "model.started",
+          "tts.started",
+          "audio.first_sent",
+          "turn.ended"
+        ].includes(message.event as string)
+      )
+      .map(
+        (message) =>
+          (message.data as Record<string, unknown> | undefined)?.turn_id
+      );
+    expect(new Set(correlatedIds)).toEqual(new Set([turnMetrics.turnId]));
+    sendJSON(ws, { type: "_get_tts_count" });
+    const ttsCount = (await waitForType(ws, "_tts_count")) as Record<
+      string,
+      unknown
+    >;
+    expect(ttsCount.count).toBe(1);
+
+    for (const diagnostic of diagnostics) {
+      const data = diagnostic.data as Record<string, unknown> | undefined;
+      expect(JSON.stringify(data ?? {})).not.toContain("utterance 1");
+      expect(Object.keys(data ?? {})).not.toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(
+            /transcript|prompt|message|content|tool|argument|result|body|query|stack|token/i
+          )
+        ])
+      );
+      expect(diagnostic).toMatchObject({
+        type: "diagnostic",
+        event: expect.any(String),
+        timestamp: expect.any(Number)
+      });
+    }
+
+    ws.close();
+  });
+
+  it("starts aggregate streaming TTS only at the first provider call", async () => {
+    const { ws } = await connectWS(uniqueDiagnosticPath());
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, {
+      type: "_set_diagnostic_response_mode",
+      value: "pending_multi"
+    });
+    await waitForAck(ws, "_set_diagnostic_response_mode");
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const recording = recordVoiceEvents(ws);
+    sendJSON(ws, { type: "text_message", text: "diagnose timing" });
+    await waitForType(ws, "_turn_stream_pending");
+
+    const beforeTextEvents = recording.events.flatMap((event) =>
+      event !== "audio" && event.type === "diagnostic" ? [event.event] : []
+    );
+    expect(beforeTextEvents).toContain("model.started");
+    expect(beforeTextEvents).not.toContain("model.first_text");
+    expect(beforeTextEvents).not.toContain("tts.started");
+
+    const turnEndedPromise = waitForMessageMatching(
+      ws,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        (message as Record<string, unknown>).type === "diagnostic" &&
+        (message as Record<string, unknown>).event === "turn.ended"
+    );
+    const resolvedAckPromise = waitForAck(ws, "_resolve_turn_stream");
+    sendJSON(ws, { type: "_resolve_turn_stream" });
+    await Promise.all([resolvedAckPromise, turnEndedPromise]);
+    recording.stop();
+
+    const diagnostics = recording.events.flatMap((event) =>
+      event !== "audio" && event.type === "diagnostic" ? [event] : []
+    );
+    const events = diagnostics.map((event) => event.event);
+    expect(events.filter((event) => event === "tts.started")).toHaveLength(1);
+    expect(events.indexOf("model.first_text")).toBeLessThan(
+      events.indexOf("tts.started")
+    );
+
+    const started = diagnostics.find((event) => event.event === "tts.started");
+    const completed = diagnostics.find(
+      (event) => event.event === "tts.completed"
+    );
+    expect(started).toBeDefined();
+    expect(completed).toBeDefined();
+    const duration = (completed!.data as Record<string, unknown>).duration_ms;
+    expect(duration).toEqual(expect.any(Number));
+    expect(duration as number).toBeGreaterThanOrEqual(0);
+    expect(
+      Math.abs(
+        (duration as number) -
+          ((completed!.timestamp as number) - (started!.timestamp as number))
+      )
+    ).toBeLessThanOrEqual(10);
+
+    sendJSON(ws, { type: "_get_tts_count" });
+    const ttsCount = (await waitForType(ws, "_tts_count")) as Record<
+      string,
+      unknown
+    >;
+    expect(ttsCount.count).toBe(2);
+    ws.close();
+  });
+
+  it("reports exposed reasoning before first visible text without content", async () => {
+    const { ws } = await connectWS(uniqueDiagnosticPath());
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, {
+      type: "_set_diagnostic_response_mode",
+      value: "reasoning_stream"
+    });
+    await waitForAck(ws, "_set_diagnostic_response_mode");
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const messagesPromise = collectMessagesUntil(
+      ws,
+      (message) =>
+        message.type === "diagnostic" && message.event === "turn.ended"
+    );
+    sendJSON(ws, { type: "text_message", text: "reason about this" });
+    const messages = await messagesPromise;
+    const diagnostics = messages.filter(
+      (message) => message.type === "diagnostic"
+    );
+    const events = diagnostics.map((message) => message.event);
+
+    expect(
+      events.filter((event) => event === "model.reasoning_started")
+    ).toHaveLength(1);
+    expect(
+      events.filter((event) => event === "model.reasoning_completed")
+    ).toHaveLength(1);
+    expect(events.indexOf("model.reasoning_started")).toBeLessThan(
+      events.indexOf("model.reasoning_completed")
+    );
+    expect(events.indexOf("model.reasoning_completed")).toBeLessThan(
+      events.indexOf("model.first_text")
+    );
+
+    const reasoningCompleted = diagnostics.find(
+      (message) => message.event === "model.reasoning_completed"
+    );
+    expect(reasoningCompleted?.data).toMatchObject({
+      duration_ms: expect.any(Number),
+      outcome: "completed",
+      turn_id: expect.any(String)
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain(
+      "private reasoning content"
+    );
+
+    const turnIds = new Set(
+      diagnostics
+        .filter((message) =>
+          /^(turn|model|tts|audio)\./.test(message.event as string)
+        )
+        .map(
+          (message) =>
+            (message.data as Record<string, unknown> | undefined)?.turn_id
+        )
+    );
+    expect(turnIds.size).toBe(1);
+    expect([...turnIds][0]).toEqual(expect.any(String));
+    ws.close();
+  });
+
+  it("keeps replaced reasoning trackers correlated to their original turns", async () => {
+    const { ws } = await connectWS(uniqueDiagnosticPath());
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, {
+      type: "_set_diagnostic_response_mode",
+      value: "pending_reasoning"
+    });
+    await waitForAck(ws, "_set_diagnostic_response_mode");
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const recording = recordVoiceEvents(ws);
+    sendJSON(ws, { type: "text_message", text: "first turn" });
+    await waitForType(ws, "_reasoning_stream_pending");
+    const firstReasoning = recording.events.find(
+      (event) =>
+        event !== "audio" &&
+        event.type === "diagnostic" &&
+        event.event === "model.reasoning_started"
+    ) as Record<string, unknown>;
+    const firstTurnId = (firstReasoning.data as Record<string, unknown>)
+      .turn_id as string;
+
+    sendJSON(ws, {
+      type: "_set_diagnostic_response_mode",
+      value: "string"
+    });
+    await waitForAck(ws, "_set_diagnostic_response_mode");
+    const secondTurnMessagesPromise = collectMessagesUntil(
+      ws,
+      (message) =>
+        message.type === "diagnostic" &&
+        message.event === "turn.ended" &&
+        (message.data as Record<string, unknown> | undefined)?.turn_id !==
+          firstTurnId
+    );
+    sendJSON(ws, { type: "text_message", text: "second turn" });
+    const secondTurnMessages = await secondTurnMessagesPromise;
+    const secondStarted = secondTurnMessages.find(
+      (message) =>
+        message.type === "diagnostic" &&
+        message.event === "turn.started" &&
+        (message.data as Record<string, unknown> | undefined)?.turn_id !==
+          firstTurnId
+    );
+    const secondTurnId = (
+      secondStarted?.data as Record<string, unknown> | undefined
+    )?.turn_id as string;
+    expect(secondTurnId).toEqual(expect.any(String));
+    expect(secondTurnId).not.toBe(firstTurnId);
+
+    const oldReasoningCompleted = recording.events.filter(
+      (event) =>
+        event !== "audio" &&
+        event.type === "diagnostic" &&
+        event.event === "model.reasoning_completed" &&
+        (event.data as Record<string, unknown> | undefined)?.turn_id ===
+          firstTurnId
+    );
+    expect(oldReasoningCompleted).toHaveLength(1);
+    expect(oldReasoningCompleted[0]).toMatchObject({
+      data: { outcome: "aborted", turn_id: firstTurnId }
+    });
+
+    const oldTurnEndedPromise = waitForMessageMatching(
+      ws,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        (message as Record<string, unknown>).type === "diagnostic" &&
+        (message as Record<string, unknown>).event === "turn.ended" &&
+        ((message as Record<string, unknown>).data as Record<string, unknown>)
+          .turn_id === firstTurnId
+    );
+    const resolvedAckPromise = waitForAck(ws, "_resolve_turn_stream");
+    sendJSON(ws, { type: "_resolve_turn_stream" });
+    await Promise.all([resolvedAckPromise, oldTurnEndedPromise]);
+    recording.stop();
+
+    const successorModelEvents = recording.events.filter(
+      (event): event is Record<string, unknown> =>
+        event !== "audio" &&
+        event.type === "diagnostic" &&
+        String(event.event).startsWith("model.") &&
+        (event.data as Record<string, unknown> | undefined)?.turn_id ===
+          secondTurnId
+    );
+    expect(successorModelEvents.map((event) => event.event)).toEqual(
+      expect.arrayContaining([
+        "model.started",
+        "model.first_text",
+        "model.completed"
+      ])
+    );
+    expect(
+      successorModelEvents.some((event) =>
+        String(event.event).startsWith("model.reasoning_")
+      )
+    ).toBe(false);
+    ws.close();
+  });
+
+  it("does not start TTS when synthesis is skipped or the model has no output", async () => {
+    const { ws } = await connectWS(uniqueDiagnosticPath());
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, { type: "_set_skip_synthesis", value: true });
+    await waitForAck(ws, "_set_skip_synthesis");
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const skippedMessagesPromise = collectMessagesUntil(
+      ws,
+      (message) =>
+        message.type === "diagnostic" && message.event === "turn.ended"
+    );
+    sendJSON(ws, { type: "text_message", text: "skip synthesis" });
+    const skippedMessages = await skippedMessagesPromise;
+    const skippedEvents = skippedMessages.flatMap((message) =>
+      message.type === "diagnostic" ? [message.event] : []
+    );
+    expect(skippedEvents).toContain("tts.skipped");
+    expect(skippedEvents).not.toContain("tts.started");
+    expect(skippedEvents).not.toContain("tts.completed");
+
+    sendJSON(ws, { type: "_get_tts_count" });
+    const skippedCount = (await waitForType(ws, "_tts_count")) as Record<
+      string,
+      unknown
+    >;
+    expect(skippedCount.count).toBe(0);
+    ws.close();
+
+    const { ws: emptyWs } = await connectWS(uniqueDiagnosticPath());
+    await waitForStatus(emptyWs, "idle");
+    sendJSON(emptyWs, {
+      type: "_set_diagnostic_response_mode",
+      value: "empty_stream"
+    });
+    await waitForAck(emptyWs, "_set_diagnostic_response_mode");
+    sendJSON(emptyWs, { type: "start_call" });
+    await waitForStatus(emptyWs, "listening");
+
+    const emptyMessagesPromise = collectMessagesUntil(
+      emptyWs,
+      (message) =>
+        message.type === "diagnostic" && message.event === "turn.ended"
+    );
+    sendJSON(emptyWs, { type: "text_message", text: "return no output" });
+    const emptyMessages = await emptyMessagesPromise;
+    const emptyEvents = emptyMessages.flatMap((message) =>
+      message.type === "diagnostic" ? [message.event] : []
+    );
+    expect(emptyEvents).toContain("tts.skipped");
+    expect(emptyEvents).not.toContain("tts.started");
+    expect(emptyEvents).not.toContain("tts.completed");
+
+    sendJSON(emptyWs, { type: "_get_tts_count" });
+    const emptyCount = (await waitForType(emptyWs, "_tts_count")) as Record<
+      string,
+      unknown
+    >;
+    expect(emptyCount.count).toBe(0);
+    emptyWs.close();
+  });
+});
+
 describe("VoiceAgent — transcriber readiness", () => {
   it("does not send listening or run onCallStart before readiness resolves", async () => {
     const { ws } = await connectWS(uniquePath());
@@ -326,7 +779,10 @@ describe("VoiceAgent — transcriber readiness", () => {
 
       expect(startupMessages).toContainEqual({
         type: "error",
-        message: "Speech recognition failed to start"
+        message: "Speech recognition failed to start",
+        code: "stt_startup_failed",
+        stage: "stt",
+        retryable: false
       });
       expect(startupMessages.at(-1)).toEqual({
         type: "status",
@@ -362,6 +818,168 @@ describe("VoiceAgent — transcriber readiness", () => {
     }
   });
 
+  it("ends only the active call when its ready transcriber reports a fatal runtime error", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setTranscriberMode(ws, "pending_ready");
+
+      sendJSON(ws, { type: "start_call" });
+      await waitForType(ws, "audio_config");
+      sendJSON(ws, { type: "_resolve_transcriber_ready" });
+      await waitForStatus(ws, "listening");
+
+      const terminalMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, {
+        type: "_report_transcriber_fatal",
+        error: { message: "provider socket closed" }
+      });
+      const terminalMessages = await terminalMessagesPromise;
+
+      expect(terminalMessages).toContainEqual({
+        type: "error",
+        message: "Speech recognition connection was lost",
+        code: "stt_connection_lost",
+        stage: "stt",
+        retryable: true
+      });
+      expect(terminalMessages.at(-1)).toEqual({
+        type: "status",
+        status: "idle"
+      });
+      expect(errorLog).toHaveBeenCalledWith({
+        component: "VoiceAgent",
+        stage: "transcriber_runtime",
+        message: "Speech recognition connection was lost",
+        connectionId: expect.any(String),
+        error: expect.objectContaining({
+          name: "Error",
+          message: "provider socket closed"
+        })
+      });
+
+      sendJSON(ws, { type: "_get_counts" });
+      const counts = (await waitForType(ws, "_counts")) as Record<
+        string,
+        unknown
+      >;
+      expect(counts).toMatchObject({
+        callStart: 1,
+        callEnd: 1,
+        keepAliveAcquired: 1,
+        keepAliveReleased: 1
+      });
+
+      await setTranscriberMode(ws, "default");
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("ignores a stale fatal callback from an earlier transcriber session", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setTranscriberMode(ws, "pending_ready");
+
+      sendJSON(ws, { type: "start_call" });
+      await waitForType(ws, "audio_config");
+      sendJSON(ws, { type: "_resolve_transcriber_ready" });
+      await waitForStatus(ws, "listening");
+      sendJSON(ws, { type: "end_call" });
+      await waitForStatus(ws, "idle");
+
+      sendJSON(ws, { type: "start_call" });
+      await waitForType(ws, "audio_config");
+      sendJSON(ws, { type: "_resolve_transcriber_ready" });
+      await waitForStatus(ws, "listening");
+
+      const afterStalePromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "_counts"
+      );
+      sendJSON(ws, {
+        type: "_report_transcriber_fatal_at",
+        index: 0,
+        error: new Error("stale session failure")
+      });
+      sendJSON(ws, { type: "_get_counts" });
+      const afterStale = await afterStalePromise;
+      expect(afterStale.some((msg) => msg.type === "error")).toBe(false);
+      expect(afterStale).not.toContainEqual({ type: "status", status: "idle" });
+
+      const terminalMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, {
+        type: "_report_transcriber_fatal_at",
+        index: 1,
+        error: { message: "current session failure" }
+      });
+      const terminalMessages = await terminalMessagesPromise;
+      expect(
+        terminalMessages.filter((msg) => msg.type === "error")
+      ).toHaveLength(1);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          stage: "transcriber_runtime",
+          error: expect.objectContaining({ message: "current session failure" })
+        })
+      );
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("logs structured readiness detail while preserving the generic client message", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+      await setTranscriberMode(ws, "reject_ready_object");
+
+      const startupMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "start_call" });
+      const startupMessages = await startupMessagesPromise;
+
+      expect(startupMessages).toContainEqual({
+        type: "error",
+        message: "Speech recognition failed to start",
+        code: "stt_startup_failed",
+        stage: "stt",
+        retryable: false
+      });
+      expect(errorLog).toHaveBeenCalledWith({
+        component: "VoiceAgent",
+        stage: "transcriber_startup",
+        message: "Speech recognition failed to start",
+        connectionId: expect.any(String),
+        error: expect.objectContaining({
+          name: "VoiceProviderError",
+          message: "upstream unavailable",
+          code: "provider_unavailable"
+        })
+      });
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
   it("sends a visible error, returns idle, and cleans up when session creation throws", async () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const { ws } = await connectWS(uniquePath());
@@ -378,7 +996,10 @@ describe("VoiceAgent — transcriber readiness", () => {
 
       expect(startupMessages).toContainEqual({
         type: "error",
-        message: "Speech recognition failed to start"
+        message: "Speech recognition failed to start",
+        code: "stt_startup_failed",
+        stage: "stt",
+        retryable: false
       });
       expect(startupMessages.at(-1)).toEqual({
         type: "status",
@@ -868,25 +1489,254 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     ws.close();
   });
 
-  it("sends thinking status before speaking during voice pipeline", async () => {
+  it("emits correlated stable speech metrics without changing legacy metrics", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const legacyPromise = waitForType(ws, "metrics");
+    const turnMetricsPromise = waitForType(ws, "turn_metrics");
+    for (let i = 0; i < 4; i++) ws.send(new ArrayBuffer(5000));
+
+    const [legacy, turnMetrics] = (await Promise.all([
+      legacyPromise,
+      turnMetricsPromise
+    ])) as [Record<string, unknown>, Record<string, unknown>];
+
+    expect(Object.keys(legacy).sort()).toEqual([
+      "first_audio_ms",
+      "llm_ms",
+      "total_ms",
+      "tts_ms",
+      "type"
+    ]);
+    expect(turnMetrics).toMatchObject({
+      type: "turn_metrics",
+      turnId: expect.any(String),
+      source: "speech",
+      outcome: "completed",
+      turnTotalMs: expect.any(Number),
+      speechStartToFirstInterimMs: expect.any(Number),
+      speechStartToFinalMs: expect.any(Number),
+      afterTranscribeMs: expect.any(Number),
+      modelStreamConsumptionMs: expect.any(Number),
+      finalInputToFirstAudioMs: expect.any(Number),
+      ttsWallMs: expect.any(Number),
+      ttsWorkMs: expect.any(Number)
+    });
+    expect(turnMetrics).not.toHaveProperty("finishReason");
+    expect(turnMetrics).not.toHaveProperty("providerTurnIndex");
+    expect(turnMetrics).not.toHaveProperty("endOfTurnConfidence");
+    expect(turnMetrics).not.toHaveProperty("sentenceAttemptCount");
+    expect(turnMetrics).not.toHaveProperty("visibleTextCharacterCount");
+    expect(turnMetrics).not.toHaveProperty("audioByteCount");
+    expect(JSON.stringify(turnMetrics)).not.toMatch(
+      /utterance|Echo:|transcript|reasoning|tool|provider_body/
+    );
+    ws.close();
+  });
+
+  it("reports zero first-audio latency when a speech turn sends no audio", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_set_tts_mode", value: "no_audio" });
+    await waitForAck(ws, "_set_tts_mode");
+
+    const recording = recordVoiceEvents(ws);
+    const metricsPromise = waitForType(ws, "metrics");
+    const turnMetricsPromise = waitForType(ws, "turn_metrics");
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    const [metrics, turnMetrics] = (await Promise.all([
+      metricsPromise,
+      turnMetricsPromise
+    ])) as [Record<string, unknown>, Record<string, unknown>];
+    expect(metrics.first_audio_ms).toBe(0);
+    expect(turnMetrics).toMatchObject({ outcome: "completed" });
+    expect(turnMetrics).not.toHaveProperty("finalInputToFirstAudioMs");
+    expect(turnMetrics).not.toHaveProperty("ttsToFirstAudioMs");
+    expect(statusAndAudioSequence(recording.events)).toEqual([
+      "thinking",
+      "listening"
+    ]);
+
+    recording.stop();
+    ws.close();
+  });
+
+  it("reports overlapping metrics rather than additive stage durations", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_set_turn_delay", value: 50 });
+    await waitForAck(ws, "_set_turn_delay");
+    sendJSON(ws, { type: "_set_tts_mode", value: "pending" });
+    await waitForAck(ws, "_set_tts_mode");
+
+    const transcriptEndPromise = waitForType(ws, "transcript_end");
+    const metricsPromise = waitForType(ws, "metrics");
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    await transcriptEndPromise;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const resolveAckPromise = waitForAck(ws, "_resolve_tts");
+    sendJSON(ws, { type: "_resolve_tts" });
+
+    const [metrics] = (await Promise.all([
+      metricsPromise,
+      resolveAckPromise
+    ])) as [Record<string, unknown>, void];
+    const llmMs = metrics.llm_ms as number;
+    const ttsMs = metrics.tts_ms as number;
+    const firstAudioMs = metrics.first_audio_ms as number;
+    const totalMs = metrics.total_ms as number;
+
+    expect(llmMs).toBeGreaterThan(0);
+    expect(ttsMs).toBeGreaterThan(0);
+    expect(firstAudioMs).toBeGreaterThanOrEqual(llmMs);
+    expect(totalMs).toBeGreaterThanOrEqual(firstAudioMs);
+    expect(totalMs).toBeLessThan(llmMs + ttsMs + firstAudioMs);
+
+    ws.close();
+  });
+
+  it("keeps a transcribed string turn thinking until its first audio", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
 
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    sendJSON(ws, { type: "_set_tts_mode", value: "pending" });
+    await waitForAck(ws, "_set_tts_mode");
+
+    const recording = recordVoiceEvents(ws);
+    const thinkingPromise = waitForStatus(ws, "thinking");
+    const transcriptEndPromise = waitForType(ws, "transcript_end");
     for (let i = 0; i < 4; i++) {
       ws.send(new ArrayBuffer(5000));
     }
+    await Promise.all([thinkingPromise, transcriptEndPromise]);
 
-    // Should see thinking before speaking
-    await waitForStatus(ws, "thinking");
-    await waitForStatus(ws, "speaking");
+    expect(statusAndAudioSequence(recording.events)).toEqual(["thinking"]);
 
-    // Should eventually get back to listening
-    await waitForStatus(ws, "listening");
+    const speakingPromise = waitForStatus(ws, "speaking");
+    const audioPromise = waitForBinary(ws);
+    const listeningPromise = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_resolve_tts" });
+    await Promise.all([speakingPromise, audioPromise, listeningPromise]);
 
+    expect(statusAndAudioSequence(recording.events)).toEqual([
+      "thinking",
+      "speaking",
+      "audio",
+      "listening"
+    ]);
+    recording.stop();
     ws.close();
+  });
+
+  it("keeps an in-call streamed text turn thinking until its first audio", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_set_turn_response_mode", value: "stream" });
+    await waitForAck(ws, "_set_turn_response_mode");
+    sendJSON(ws, { type: "_set_tts_mode", value: "pending" });
+    await waitForAck(ws, "_set_tts_mode");
+
+    const recording = recordVoiceEvents(ws);
+    const thinkingPromise = waitForStatus(ws, "thinking");
+    const transcriptEndPromise = waitForType(ws, "transcript_end");
+    sendJSON(ws, { type: "text_message", text: "Hello from text" });
+    await Promise.all([thinkingPromise, transcriptEndPromise]);
+
+    expect(statusAndAudioSequence(recording.events)).toEqual(["thinking"]);
+
+    const speakingPromise = waitForStatus(ws, "speaking");
+    const audioPromise = waitForBinary(ws);
+    const listeningPromise = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_resolve_tts" });
+    await Promise.all([speakingPromise, audioPromise, listeningPromise]);
+
+    expect(statusAndAudioSequence(recording.events)).toEqual([
+      "thinking",
+      "speaking",
+      "audio",
+      "listening"
+    ]);
+    recording.stop();
+    ws.close();
+  });
+
+  it("does not speak when TTS produces no audio", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_set_tts_mode", value: "no_audio" });
+    await waitForAck(ws, "_set_tts_mode");
+
+    const recording = recordVoiceEvents(ws);
+    const listeningPromise = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "text_message", text: "Hello from text" });
+    await listeningPromise;
+
+    expect(statusAndAudioSequence(recording.events)).toEqual([
+      "thinking",
+      "listening"
+    ]);
+    recording.stop();
+    ws.close();
+  });
+
+  it("does not speak when TTS fails before producing audio", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+    try {
+      await waitForStatus(ws, "idle");
+
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+      sendJSON(ws, { type: "_set_tts_mode", value: "error" });
+      await waitForAck(ws, "_set_tts_mode");
+
+      const recording = recordVoiceEvents(ws);
+      const listeningPromise = waitForStatus(ws, "listening");
+      const turnMetricsPromise = waitForType(ws, "turn_metrics");
+      sendJSON(ws, { type: "text_message", text: "Hello from text" });
+      await listeningPromise;
+
+      expect(statusAndAudioSequence(recording.events)).toEqual([
+        "thinking",
+        "listening"
+      ]);
+      expect(recording.events).toContainEqual({
+        type: "error",
+        message: "test TTS failed"
+      });
+      await expect(turnMetricsPromise).resolves.toMatchObject({
+        source: "text",
+        outcome: "tts_error"
+      });
+      recording.stop();
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
   });
 
   it("handles AI SDK stream responses that include tool calls", async () => {
@@ -931,6 +1781,205 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     );
 
     await waitForStatus(ws, "listening");
+    ws.close();
+  });
+
+  it("reports an empty AI SDK stop finish as no_output", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_mock_response",
+      response: [[{ type: "finish", finishReason: "stop" }]]
+    });
+    await waitForAck(ws, "_set_mock_response");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const terminalMessagesPromise = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "status" && msg.status === "listening"
+    );
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    const terminalMessages = await terminalMessagesPromise;
+
+    expect(terminalMessages).toContainEqual({
+      type: "completion_outcome",
+      code: "no_output",
+      stage: "llm",
+      finishReason: "stop",
+      partialOutput: false
+    });
+    ws.close();
+  });
+
+  it("reports an empty AI SDK content-filter finish as content_filtered", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_mock_response",
+      response: [[{ type: "finish", finishReason: "content-filter" }]]
+    });
+    await waitForAck(ws, "_set_mock_response");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const terminalMessagesPromise = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "status" && msg.status === "listening"
+    );
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    const terminalMessages = await terminalMessagesPromise;
+
+    expect(terminalMessages).toContainEqual({
+      type: "completion_outcome",
+      code: "content_filtered",
+      stage: "llm",
+      finishReason: "content-filter",
+      partialOutput: false
+    });
+    ws.close();
+  });
+
+  it("reports an empty AI SDK length finish as output_limit", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_mock_response",
+      response: [
+        [
+          {
+            type: "finish",
+            finishReason: "length",
+            rawFinishReason: "max_tokens"
+          }
+        ]
+      ]
+    });
+    await waitForAck(ws, "_set_mock_response");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const terminalMessagesPromise = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "status" && msg.status === "listening"
+    );
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    const terminalMessages = await terminalMessagesPromise;
+
+    expect(terminalMessages).toContainEqual({
+      type: "completion_outcome",
+      code: "output_limit",
+      stage: "llm",
+      finishReason: "length",
+      partialOutput: false
+    });
+    expect(terminalMessages).toContainEqual({
+      type: "error",
+      message: "No response generated"
+    });
+    ws.close();
+  });
+
+  it("reports an AI SDK error finish as model_error", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_mock_response",
+      response: [[{ type: "finish", finishReason: "error" }]]
+    });
+    await waitForAck(ws, "_set_mock_response");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const terminalMessagesPromise = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "status" && msg.status === "listening"
+    );
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    const terminalMessages = await terminalMessagesPromise;
+
+    expect(terminalMessages).toContainEqual({
+      type: "completion_outcome",
+      code: "model_error",
+      stage: "llm",
+      finishReason: "error",
+      partialOutput: false
+    });
+    expect(terminalMessages).toContainEqual({
+      type: "error",
+      message: "No response generated"
+    });
+    ws.close();
+  });
+
+  it("keeps non-empty length output while reporting a partial output_limit", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_mock_response",
+      response: [
+        [
+          { type: "text", text: "Truncated response." },
+          { type: "finish", finishReason: "length" }
+        ]
+      ]
+    });
+    await waitForAck(ws, "_set_mock_response");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const audioPromise = waitForBinary(ws);
+    const terminalMessagesPromise = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "status" && msg.status === "listening"
+    );
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    const [audio, terminalMessages] = await Promise.all([
+      audioPromise,
+      terminalMessagesPromise
+    ]);
+
+    expect(decodeAudio(audio)).toBe("Truncated response.");
+    expect(terminalMessages).toContainEqual({
+      type: "transcript_end",
+      text: "Truncated response."
+    });
+    expect(terminalMessages).toContainEqual({
+      type: "completion_outcome",
+      code: "output_limit",
+      stage: "llm",
+      finishReason: "length",
+      partialOutput: true
+    });
+    expect(terminalMessages.some((msg) => msg.type === "metrics")).toBe(true);
+    expect(terminalMessages.some((msg) => msg.type === "error")).toBe(false);
+
+    sendJSON(ws, { type: "_get_message_count" });
+    const messageCount = (await waitForType(ws, "_message_count")) as Record<
+      string,
+      unknown
+    >;
+    expect(messageCount.count).toBe(2);
     ws.close();
   });
 
@@ -1010,23 +2059,200 @@ describe("VoiceAgent — continuous STT pipeline", () => {
       await waitForStatus(ws, "listening");
 
       const audioPromise = waitForBinary(ws, 1000);
+      const turnMetricsPromise = waitForType(ws, "turn_metrics");
+      const terminalMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "listening"
+      );
       for (let i = 0; i < 4; i++) {
         ws.send(new ArrayBuffer(5000));
       }
 
-      const audio = await audioPromise;
+      const [audio, terminalMessages] = await Promise.all([
+        audioPromise,
+        terminalMessagesPromise
+      ]);
       expect(decodeAudio(audio)).toBe("Partial response.");
+      expect(
+        terminalMessages.filter((msg) => msg.type === "transcript_end")
+      ).toEqual([
+        {
+          type: "transcript_end",
+          text: "Partial response."
+        }
+      ]);
+      expect(
+        terminalMessages.filter((msg) => msg.type === "completion_outcome")
+      ).toEqual([
+        {
+          type: "completion_outcome",
+          code: "model_error",
+          stage: "llm",
+          partialOutput: true
+        }
+      ]);
+      expect(terminalMessages.filter((msg) => msg.type === "error")).toEqual([
+        { type: "error", message: "provider failed" }
+      ]);
+      await expect(turnMetricsPromise).resolves.toMatchObject({
+        source: "speech",
+        outcome: "model_error"
+      });
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
 
-      const transcriptEnd = (await waitForType(ws, "transcript_end")) as Record<
-        string,
-        unknown
-      >;
-      expect(transcriptEnd.text).toBe("Partial response.");
+  it("preserves string AI stream errors on the wire and in diagnostics", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    try {
+      await waitForStatus(ws, "idle");
+
+      sendJSON(ws, {
+        type: "_set_mock_response",
+        response: [
+          [
+            {
+              type: "error",
+              message: "ignored test label",
+              asObject: true,
+              cause: "provider unavailable"
+            }
+          ]
+        ]
+      });
+      await waitForAck(ws, "_set_mock_response");
+
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+      for (let i = 0; i < 4; i++) {
+        ws.send(new ArrayBuffer(5000));
+      }
 
       const error = (await waitForType(ws, "error")) as Record<string, unknown>;
-      expect(error.message).toBe("provider failed");
+      expect(error.message).toBe("provider unavailable");
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          component: "VoiceAgent",
+          stage: "pipeline",
+          error: expect.objectContaining({ message: "provider unavailable" })
+        })
+      );
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
 
+  it("does not inspect plain AI stream error objects", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    try {
+      await waitForStatus(ws, "idle");
+
+      sendJSON(ws, {
+        type: "_set_mock_response",
+        response: [
+          [
+            {
+              type: "error",
+              message: "ignored test label",
+              asObject: true,
+              cause: {
+                code: "model_overloaded",
+                error: { message: "provider unavailable" }
+              }
+            }
+          ]
+        ]
+      });
+      await waitForAck(ws, "_set_mock_response");
+
+      sendJSON(ws, { type: "start_call" });
       await waitForStatus(ws, "listening");
+      for (let i = 0; i < 4; i++) {
+        ws.send(new ArrayBuffer(5000));
+      }
+
+      const error = (await waitForType(ws, "error")) as Record<string, unknown>;
+      expect(error.message).toBe("AI SDK stream error");
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          component: "VoiceAgent",
+          stage: "pipeline",
+          error: expect.objectContaining({
+            name: "Error",
+            message: "AI SDK stream error"
+          })
+        })
+      );
+      const voiceLog = errorLog.mock.calls.find(
+        ([record]) =>
+          typeof record === "object" &&
+          record !== null &&
+          (record as Record<string, unknown>).component === "VoiceAgent"
+      );
+      expect(JSON.stringify(voiceLog)).not.toContain("provider unavailable");
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("uses the wire fallback without logging an Error cause payload", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    try {
+      await waitForStatus(ws, "idle");
+
+      sendJSON(ws, {
+        type: "_set_mock_response",
+        response: [
+          [
+            {
+              type: "error",
+              message: "[object Object]",
+              cause: {
+                code: 9999,
+                error: {
+                  message: "context window exceeded",
+                  apiKey: "must-not-leak"
+                }
+              }
+            }
+          ]
+        ]
+      });
+      await waitForAck(ws, "_set_mock_response");
+
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+      for (let i = 0; i < 4; i++) {
+        ws.send(new ArrayBuffer(5000));
+      }
+
+      const error = (await waitForType(ws, "error")) as Record<string, unknown>;
+      expect(error.message).toBe("Voice pipeline failed");
+      expect(errorLog).toHaveBeenCalledWith({
+        component: "VoiceAgent",
+        stage: "pipeline",
+        message: "Voice pipeline failed",
+        connectionId: expect.any(String),
+        error: expect.objectContaining({
+          name: "Error",
+          message: "[object Object]"
+        })
+      });
+      const voiceLog = errorLog.mock.calls.find(
+        ([record]) =>
+          typeof record === "object" &&
+          record !== null &&
+          (record as Record<string, unknown>).component === "VoiceAgent"
+      );
+      expect(JSON.stringify(voiceLog)).not.toContain("context window exceeded");
+      expect(JSON.stringify(voiceLog)).not.toContain("must-not-leak");
     } finally {
       ws.close();
       errorLog.mockRestore();
@@ -1262,6 +2488,7 @@ describe("VoiceAgent — interrupt", () => {
     sendJSON(ws, { type: "text_message", text: "long response" });
     await waitForStatus(ws, "thinking");
 
+    const abortedMetricsPromise = waitForType(ws, "turn_metrics");
     ws.send(new ArrayBuffer(5000));
 
     const interrupt = (await waitForType(ws, "playback_interrupt")) as Record<
@@ -1270,6 +2497,10 @@ describe("VoiceAgent — interrupt", () => {
     >;
     expect(interrupt).toEqual({ type: "playback_interrupt" });
     await waitForStatus(ws, "listening");
+    await expect(abortedMetricsPromise).resolves.toMatchObject({
+      source: "text",
+      outcome: "aborted"
+    });
 
     sendJSON(ws, { type: "_get_counts" });
     const counts = (await waitForType(ws, "_counts")) as Record<
@@ -1324,11 +2555,18 @@ describe("VoiceAgent — interrupt", () => {
     await waitForStatus(ws, "listening");
 
     // Send some audio, then interrupt before utterance threshold
+    const firstMetricsPromise = waitForType(ws, "turn_metrics");
     ws.send(new ArrayBuffer(10000));
     sendJSON(ws, { type: "interrupt" });
     await waitForStatus(ws, "listening");
+    const firstMetrics = (await firstMetricsPromise) as Record<string, unknown>;
+    expect(firstMetrics).toMatchObject({
+      source: "speech",
+      outcome: "aborted"
+    });
 
     // Session should still be alive — send more audio to reach threshold
+    const secondMetricsPromise = waitForType(ws, "turn_metrics");
     ws.send(new ArrayBuffer(10000));
 
     // Should still get a transcript because the session survived
@@ -1342,6 +2580,15 @@ describe("VoiceAgent — interrupt", () => {
     )) as Record<string, unknown>;
 
     expect((transcript.text as string).includes("utterance 1")).toBe(true);
+    const secondMetrics = (await secondMetricsPromise) as Record<
+      string,
+      unknown
+    >;
+    expect(secondMetrics).toMatchObject({
+      source: "speech",
+      outcome: "completed"
+    });
+    expect(secondMetrics.turnId).not.toBe(firstMetrics.turnId);
 
     ws.close();
   });
@@ -1368,6 +2615,133 @@ describe("VoiceAgent — interrupt", () => {
 });
 
 describe("VoiceAgent — text messages", () => {
+  it("reports empty out-of-call text completion outcomes", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_mock_response",
+      response: [[{ type: "finish", finishReason: "length" }]]
+    });
+    await waitForAck(ws, "_set_mock_response");
+
+    const turnMetricsPromise = waitForType(ws, "turn_metrics");
+    const terminalMessagesPromise = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "status" && msg.status === "idle"
+    );
+    sendJSON(ws, { type: "text_message", text: "Answer in text" });
+    const terminalMessages = await terminalMessagesPromise;
+
+    expect(terminalMessages).toContainEqual({
+      type: "completion_outcome",
+      code: "output_limit",
+      stage: "llm",
+      finishReason: "length",
+      partialOutput: false
+    });
+    expect(terminalMessages).toContainEqual({
+      type: "error",
+      message: "No response generated"
+    });
+    await expect(turnMetricsPromise).resolves.toMatchObject({
+      source: "text",
+      outcome: "output_limit"
+    });
+    ws.close();
+  });
+
+  it("flushes partial out-of-call text before a model-error outcome", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    try {
+      await waitForStatus(ws, "idle");
+
+      sendJSON(ws, {
+        type: "_set_mock_response",
+        response: [
+          [
+            { type: "text", text: "Partial text response." },
+            { type: "error", message: "provider failed" }
+          ]
+        ]
+      });
+      await waitForAck(ws, "_set_mock_response");
+
+      const turnMetricsPromise = waitForType(ws, "turn_metrics");
+      const terminalMessagesPromise = collectMessagesUntil(
+        ws,
+        (msg) => msg.type === "status" && msg.status === "idle"
+      );
+      sendJSON(ws, { type: "text_message", text: "Answer in text" });
+      const terminalMessages = await terminalMessagesPromise;
+
+      expect(terminalMessages).toContainEqual({
+        type: "transcript_end",
+        text: "Partial text response."
+      });
+      expect(
+        terminalMessages.filter((msg) => msg.type === "completion_outcome")
+      ).toEqual([
+        {
+          type: "completion_outcome",
+          code: "model_error",
+          stage: "llm",
+          partialOutput: true
+        }
+      ]);
+      expect(terminalMessages.filter((msg) => msg.type === "error")).toEqual([
+        { type: "error", message: "provider failed" }
+      ]);
+      await expect(turnMetricsPromise).resolves.toMatchObject({
+        source: "text",
+        outcome: "model_error"
+      });
+    } finally {
+      ws.close();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("reports empty in-call text completion outcomes", async () => {
+    const { ws } = await connectWS(uniqueAISDKStreamPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_mock_response",
+      response: [[{ type: "finish", finishReason: "content-filter" }]]
+    });
+    await waitForAck(ws, "_set_mock_response");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const turnMetricsPromise = waitForType(ws, "turn_metrics");
+    const terminalMessagesPromise = collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "status" && msg.status === "listening"
+    );
+    sendJSON(ws, { type: "text_message", text: "Answer during call" });
+    const terminalMessages = await terminalMessagesPromise;
+
+    expect(terminalMessages).toContainEqual({
+      type: "completion_outcome",
+      code: "content_filtered",
+      stage: "llm",
+      finishReason: "content-filter",
+      partialOutput: false
+    });
+    expect(terminalMessages).toContainEqual({
+      type: "error",
+      message: "No response generated"
+    });
+    await expect(turnMetricsPromise).resolves.toMatchObject({
+      source: "text",
+      outcome: "content_filtered"
+    });
+    ws.close();
+  });
+
   it("processes text messages through the pipeline", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
@@ -1375,6 +2749,7 @@ describe("VoiceAgent — text messages", () => {
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    const turnMetricsPromise = waitForType(ws, "turn_metrics");
     sendJSON(ws, { type: "text_message", text: "Hello from text" });
 
     const transcript = (await waitForMessageMatching(
@@ -1393,6 +2768,16 @@ describe("VoiceAgent — text messages", () => {
       unknown
     >;
     expect(transcriptEnd.text).toBe("Echo: Hello from text");
+
+    const turnMetrics = (await turnMetricsPromise) as Record<string, unknown>;
+    expect(turnMetrics).toMatchObject({
+      source: "text",
+      outcome: "completed",
+      modelStreamConsumptionMs: expect.any(Number)
+    });
+    expect(turnMetrics).not.toHaveProperty("speechStartToFirstInterimMs");
+    expect(turnMetrics).not.toHaveProperty("speechStartToFinalMs");
+    expect(turnMetrics).not.toHaveProperty("afterTranscribeMs");
 
     ws.close();
   });
@@ -1567,6 +2952,7 @@ describe("VoiceAgent — empty response handling", () => {
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    const turnMetricsPromise = waitForType(ws, "turn_metrics");
     for (let i = 0; i < 4; i++) {
       ws.send(new ArrayBuffer(5000));
     }
@@ -1580,10 +2966,18 @@ describe("VoiceAgent — empty response handling", () => {
       type: "error",
       message: "No response generated"
     });
+    await expect(turnMetricsPromise).resolves.toMatchObject({
+      source: "speech",
+      outcome: "no_output"
+    });
     const types = messages.map((m) => m.type);
     expect(types).not.toContain("transcript_start");
     expect(types).not.toContain("transcript_end");
     expect(types).not.toContain("metrics");
+    expect(messages).not.toContainEqual({
+      type: "status",
+      status: "speaking"
+    });
 
     sendJSON(ws, { type: "_get_message_count" });
     const count = (await waitForType(ws, "_message_count")) as Record<
@@ -1706,6 +3100,10 @@ describe("VoiceAgent — empty response handling", () => {
     });
     expect(messages.map((m) => m.type)).not.toContain("transcript_start");
     expect(messages.map((m) => m.type)).not.toContain("transcript_end");
+    expect(messages).not.toContainEqual({
+      type: "status",
+      status: "speaking"
+    });
 
     // Should go back to listening
     await waitForStatus(ws, "listening");

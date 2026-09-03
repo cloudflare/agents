@@ -1,97 +1,54 @@
 import { DurableObject } from "cloudflare:workers";
-import { nanoid } from "nanoid";
 
+import { publishDiagnosticsEvent } from "../observability/diagnostics";
 import {
   CapabilityRunner,
-  type DurableObjectCapability
+  type DurableObjectCapability,
+  type LifecycleEvent,
+  type LifecycleEventSink
 } from "./capability-runner";
+import { abortWithoutAlarmRetry } from "./abort";
+import { JobDriver, type JobDispatch } from "./job-driver";
 import {
-  createConnection,
-  ConnectionManager,
-  isManagedWebSocket
-} from "./connection";
-
+  HOST_JOB_CAPABILITY,
+  JobQueue,
+  type LifecycleJobs,
+  type LifecycleJobPushOptions
+} from "./job-queue";
+import {
+  bindLifecycleCapability,
+  lifecycleCapabilityId,
+  LifecycleCapability,
+  type LifecycleHostContextScope,
+  type LifecycleRouteAddress,
+  type LifecycleServices
+} from "./capability";
 import {
   runInLifecycleHostContext,
   runWithoutCurrentAgent,
   type LifecycleObject
 } from "./current-agent";
 import { isBenignTeardownError } from "./transport-errors";
-
-import type {
-  Connection,
-  ConnectionSetStateFn,
-  ConnectionState
-} from "./types";
+import type { WSMessage } from "./types";
 
 export {
   type CapabilityRequestContext,
+  type CapabilityWebSocketUpgradeContext,
+  type LifecycleEvent,
   type CapabilityStartContext,
-  type DurableObjectCapability
+  type DurableObjectCapability,
+  type MemoryLimitContext
 } from "./capability-runner";
+export {
+  type LifecycleJobContext,
+  type LifecycleJobs,
+  type LifecycleJob,
+  type LifecycleJobOutcome,
+  type LifecycleJobPushOptions
+} from "./job-queue";
 export * from "./types";
 
-/** Payload delivered to a lifecycle-managed WebSocket callback. */
-export type WSMessage = ArrayBuffer | ArrayBufferView | string;
-
 const LEGACY_NAME_STORAGE_KEY = "__ps_name";
-
-/**
- * Reserved WebSocket close codes the runtime synthesizes when there
- * was no real Close frame from the peer:
- *  - 1005 (NoStatusReceived) — peer's frame had no status code.
- *  - 1006 (AbnormalClosure)  — peer dropped the underlying transport
- *                              without sending a Close frame at all.
- *  - 1015 (TLSHandshake)     — TLS failure during connection setup.
- *
- * These cannot legally appear in an outgoing Close frame, and — more
- * importantly for our reciprocation path — there is no peer left to
- * receive a reciprocating Close frame. Trying to send one anyway can
- * succeed synchronously but fail asynchronously inside the runtime
- * with "WebSocket peer disconnected" / "Network connection lost",
- * which escapes a synchronous try/catch and surfaces as an unhandled
- * promise rejection.
- */
-function isReservedCloseCode(code: number): boolean {
-  return code === 1005 || code === 1006 || code === 1015;
-}
-
-/**
- * Reciprocate a peer-initiated Close frame to complete the handshake.
- *
- * Best-effort: swallows synchronous errors from invalid codes,
- * oversize reasons, or sockets that have already been closed by user
- * code. Skips the reciprocation entirely when the peer didn't
- * actually send a Close frame (reserved codes 1005/1006/1015) — in
- * those cases the underlying transport is already gone and writing
- * to it would fail asynchronously, which we can't catch here.
- *
- * Used by the hibernating close handler to complete real close handshakes.
- */
-function closeQuietly(ws: WebSocket, code: number, reason: string): void {
-  // No real Close frame from the peer → nothing to reciprocate.
-  // Calling `ws.close(...)` here would synchronously succeed but
-  // schedule an outbound write on a dead transport, which the runtime
-  // would later reject with "Network connection lost". That rejection
-  // can't be observed from here (it's not thrown synchronously and
-  // ws.close() doesn't return a Promise to attach a `.catch` to), so
-  // it would surface as an unhandled rejection.
-  if (isReservedCloseCode(code)) return;
-  try {
-    ws.close(code, reason);
-  } catch {
-    // Reasons we end up here:
-    //   - the socket was already closed (user called `connection.close()`
-    //     in `onClose`, or the runtime auto-replied on compat dates
-    //     >= 2026-04-07 for the standard `accept()` API)
-    //   - `reason` exceeds the 123-byte UTF-8 limit (compat date
-    //     >= 2026-03-03)
-    //   - some other invariant violation we don't want to crash the
-    //     handler over
-    // None of these are recoverable here; the handshake is either already
-    // done or the runtime is out of our control.
-  }
-}
 
 function mutableRequest(request: Request): Request {
   return new Request(request);
@@ -118,6 +75,23 @@ function decodeProps(header: string): unknown {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+/** Internal envelope transported between routed Lifecycle instances. */
+export type LifecycleRouteEnvelope = {
+  readonly capability: string;
+  readonly source: LifecycleRouteAddress | undefined;
+  readonly payload: unknown;
+};
+
+/** Internal transport supplied by a host with routed child Lifecycles. */
+export type LifecycleRouteTransport = {
+  readonly source: LifecycleRouteAddress | undefined;
+  readonly toRoot: (envelope: LifecycleRouteEnvelope) => Promise<unknown>;
+  readonly to: (
+    target: LifecycleRouteAddress,
+    envelope: LifecycleRouteEnvelope
+  ) => Promise<unknown>;
+};
+
 type LifecycleHost<
   Env extends object,
   Props extends Record<string, unknown>
@@ -127,11 +101,74 @@ type LifecycleHost<
 };
 
 /**
+ * Boundary wrapping user callbacks that capabilities run through
+ * `LifecycleServices.runInHostContext`. The default boundary is
+ * {@link runInLifecycleHostContext}; a host composition root may substitute
+ * its own invocation wrapper (Agent adds tracing span scope). The optional
+ * scope carries the live connection/request the callback runs on behalf of.
+ */
+export type LifecycleHostInvoker = <T>(
+  run: () => T,
+  scope?: LifecycleHostContextScope
+) => T;
+
+const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
+const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
+const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
+
+/** @internal Adapt the host invocation boundary at a composition root. */
+export function setLifecycleHostInvoker<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, invoker: LifecycleHostInvoker): void {
+  lifecycleHostInvokers.set(lifecycle, invoker);
+}
+
+/** @internal Supply a host's routed Lifecycle transport. */
+export function setLifecycleRouteTransport<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, transport: LifecycleRouteTransport): void {
+  lifecycleRouteTransports.set(lifecycle, transport);
+}
+
+/** @internal Adapt Lifecycle's default diagnostics sink at a composition root. */
+export function setLifecycleEventSink<
+  Env extends object,
+  Props extends Record<string, unknown>
+>(lifecycle: Lifecycle<Env, Props>, sink: LifecycleEventSink): void {
+  lifecycleEventSinks.set(lifecycle, sink);
+}
+
+/** Configuration accepted when constructing a {@link Lifecycle}. */
+export type LifecycleOptions = {
+  /**
+   * Consecutive alarm invocations that may end in a Durable Object
+   * memory-limit reset before the circuit breaker (#1825) seals recovery
+   * work instead of backing it off. Default: 3.
+   */
+  readonly maxAlarmMemoryLimitStrikes?: number;
+};
+
+/** Placement of a capability in the dispatch order. */
+export type LifecycleUseOptions = {
+  /**
+   * Dispatch after every non-fallback capability, whenever it was
+   * installed. For a host's catch-all, such as a WebSockets capability
+   * that claims every upgrade, so middleware installed later still runs
+   * first.
+   */
+  readonly fallback?: boolean;
+};
+
+/**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
  * Construct this as an instance field on a class that directly extends
  * `DurableObject`, then call {@link Lifecycle.installHandlers}
  * from that class's constructor.
+ *
+ * @experimental The API surface may change before stabilizing.
  */
 export class Lifecycle<
   Env extends object = Cloudflare.Env,
@@ -144,10 +181,16 @@ export class Lifecycle<
   readonly #capabilityRunner = new CapabilityRunner<Props>(
     () => this.#capabilities
   );
-  readonly #connectionManager: ConnectionManager;
+  readonly #jobQueue: JobQueue;
+  readonly #jobDriver: JobDriver;
 
   #status: "zero" | "starting" | "started" = "zero";
+  #alarmRearmQueue: Promise<void> = Promise.resolve();
+  #rearmRequestedDuringStart = false;
+  #pendingEvents: LifecycleEvent[] = [];
+  #alarmsDisabled = false;
   #capabilitiesLocked = false;
+  readonly #fallbacks = new Set<DurableObjectCapability<Props>>();
   #handlersInstalled = false;
 
   /**
@@ -159,8 +202,11 @@ export class Lifecycle<
   static install<
     Env extends object,
     Props extends Record<string, unknown> = Record<string, unknown>
-  >(host: DurableObject<Env>): Lifecycle<Env, Props> {
-    const lifecycle = new Lifecycle<Env, Props>(host);
+  >(
+    host: DurableObject<Env>,
+    options?: LifecycleOptions
+  ): Lifecycle<Env, Props> {
+    const lifecycle = new Lifecycle<Env, Props>(host, options);
     lifecycle.installHandlers();
     return lifecycle;
   }
@@ -169,15 +215,40 @@ export class Lifecycle<
    * Bind a lifecycle to a Durable Object instance without mutating its handlers.
    *
    * @param host - The Durable Object whose runtime lifecycle this object owns.
+   * @param options - Policy configuration for this lifecycle.
    */
-  constructor(host: DurableObject<Env>) {
+  constructor(host: DurableObject<Env>, options?: LifecycleOptions) {
     // SAFETY: DurableObject exposes ctx as protected to subclasses. The
     // lifecycle is constructed by that subclass with `this`, so this boundary
     // accesses the same runtime-owned context without exposing it publicly.
     this.#host = host as unknown as LifecycleHost<Env, Props>;
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
-    this.#connectionManager = new ConnectionManager(this.#ctx);
+    this.#jobQueue = new JobQueue(this.#ctx.storage);
+    this.#jobDriver = new JobDriver({
+      queue: this.#jobQueue,
+      storage: this.#ctx.storage,
+      disabled: () => this.#alarmsDisabled,
+      resolveDispatch: (owner) => this.#resolveJobDispatch(owner),
+      maxMemoryLimitStrikes: () => options?.maxAlarmMemoryLimitStrikes,
+      onMemoryLimit: async (context) => {
+        // Capabilities first (each best-effort inside the runner), then the
+        // host hook — a failed capability policy must not silence the host's.
+        await this.#capabilityRunner.memoryLimit(context);
+        await runInLifecycleHostContext({ host: this.#host }, () =>
+          this.#host.onAlarmMemoryLimit?.(context)
+        );
+      },
+      emit: (type, payload) =>
+        this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
+      rearm: () => this.rearmAlarm(),
+      // Deferred a tick so the current invocation settles (its RPC/alarm
+      // completes and its writes confirm) before the instance resets —
+      // `abort()` throws an uncatchable error, mirroring Agent.destroy().
+      reset: (reason) => {
+        setTimeout(() => abortWithoutAlarmRetry(this.#ctx, reason), 0);
+      }
+    });
   }
 
   /**
@@ -214,15 +285,198 @@ export class Lifecycle<
   /**
    * Add a reusable capability before this lifecycle starts.
    *
-   * @param capability - The capability to add in dispatch order.
+   * Capabilities dispatch in registration order, except that fallbacks
+   * always come after non-fallbacks.
+   *
+   * @param capability - The capability to add.
+   * @param options - Dispatch placement.
    * @returns This lifecycle.
    */
-  use(capability: DurableObjectCapability<Props>): this {
+  use(
+    capability: DurableObjectCapability<Props>,
+    options?: LifecycleUseOptions
+  ): this {
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
-    this.#capabilities.push(capability);
+    const capabilityId = lifecycleCapabilityId(capability);
+    if (
+      capabilityId &&
+      this.#capabilities.some(
+        (candidate) => lifecycleCapabilityId(candidate) === capabilityId
+      )
+    ) {
+      throw new Error(
+        `Lifecycle capability ${JSON.stringify(capabilityId)} is already installed`
+      );
+    }
+
+    const firstFallback = this.#capabilities.findIndex((candidate) =>
+      this.#fallbacks.has(candidate)
+    );
+    if (options?.fallback) this.#fallbacks.add(capability);
+    this.#capabilities.splice(
+      options?.fallback || firstFallback === -1
+        ? this.#capabilities.length
+        : firstFallback,
+      0,
+      capability
+    );
+
+    if (capability instanceof LifecycleCapability) {
+      bindLifecycleCapability(
+        capability,
+        this.#servicesForCapability(capability.capabilityId)
+      );
+    }
     return this;
+  }
+
+  #servicesForCapability(capabilityId: string): LifecycleServices {
+    const lifecycle = this;
+    const envelope = (payload: unknown): LifecycleRouteEnvelope => ({
+      capability: capabilityId,
+      source: lifecycleRouteTransports.get(lifecycle)?.source,
+      payload
+    });
+    return Object.freeze({
+      storage: this.#ctx.storage,
+      sockets: Object.freeze({
+        accept: (ws: WebSocket, tags: string[]) =>
+          this.#ctx.acceptWebSocket(ws, tags),
+        get: (tag?: string) => this.#ctx.getWebSockets(tag)
+      }),
+      ready: () => this.#readyForCapabilityOperation(),
+      starting: () => this.#status === "starting",
+      jobs: this.#jobsForOwner(capabilityId),
+      trackAlarmWork: (work: Promise<unknown>) =>
+        this.#jobDriver.trackAlarmWork(work),
+      runInHostContext: async (
+        fn: () => unknown,
+        scope?: LifecycleHostContextScope
+      ) => this.#runInHostBoundary(fn, scope),
+      events: Object.freeze({
+        emit: (type: string, payload: unknown) =>
+          this.#emitCapabilityEvent({ source: capabilityId, type, payload })
+      }),
+      routes: Object.freeze({
+        get source() {
+          return lifecycleRouteTransports.get(lifecycle)?.source;
+        },
+        toRoot: (payload: unknown) => {
+          const transport = lifecycleRouteTransports.get(lifecycle);
+          return transport
+            ? transport.toRoot(envelope(payload))
+            : this.#dispatchRoute(envelope(payload));
+        },
+        to: (target: LifecycleRouteAddress, payload: unknown) => {
+          const transport = lifecycleRouteTransports.get(lifecycle);
+          if (!transport) {
+            throw new Error(
+              "Lifecycle has no transport for routed capabilities"
+            );
+          }
+          return transport.to(target, envelope(payload));
+        }
+      })
+    });
+  }
+
+  /**
+   * Run a user callback inside the host invocation boundary — plain host
+   * context by default, or the composition root's substitute (Agent installs
+   * its tracing invocation scope).
+   */
+  #runInHostBoundary(
+    fn: () => unknown,
+    scope?: LifecycleHostContextScope
+  ): Promise<unknown> {
+    const boundary = lifecycleHostInvokers.get(this);
+    return Promise.resolve(
+      boundary
+        ? boundary(fn, scope)
+        : runInLifecycleHostContext(
+            {
+              host: this.#host,
+              connection: scope?.connection,
+              request: scope?.request
+            },
+            fn
+          )
+    );
+  }
+
+  async #readyForCapabilityOperation(): Promise<void> {
+    if (this.#status === "starting" || this.#status === "started") return;
+    await this.start();
+  }
+
+  async #dispatchRoute(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    await this.#ensureInitialized();
+    return runWithoutCurrentAgent(() =>
+      this.#capabilityRunner.route(envelope.capability, {
+        source: envelope.source,
+        payload: envelope.payload
+      })
+    );
+  }
+
+  /** @internal Deliver a generic capability envelope to this Lifecycle. */
+  route(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    return this.#dispatchRoute(envelope);
+  }
+
+  #emitCapabilityEvent(event: LifecycleEvent): void {
+    if (event.source.trim() === "" || event.type.trim() === "") {
+      throw new Error("Lifecycle events require non-empty source and type");
+    }
+    if (this.#status !== "started") {
+      this.#pendingEvents.push(event);
+      return;
+    }
+    this.#publishCapabilityEvent(event);
+  }
+
+  #publishCapabilityEvent(event: LifecycleEvent): void {
+    runWithoutCurrentAgent(() => {
+      const sink = lifecycleEventSinks.get(this);
+      try {
+        if (!sink) {
+          publishDiagnosticsEvent({
+            source: event.source,
+            type: event.type,
+            agent: this.#parentClassName,
+            name: this.name,
+            payload: event.payload,
+            timestamp: Date.now()
+          });
+          return;
+        }
+        const pending = sink(event);
+        if (pending !== undefined) {
+          this.#ctx.waitUntil(
+            Promise.resolve(pending).catch((error) => {
+              this.#reportEventSinkFailure(event, error);
+            })
+          );
+        }
+      } catch (error) {
+        this.#reportEventSinkFailure(event, error);
+      }
+    });
+  }
+
+  #reportEventSinkFailure(event: LifecycleEvent, error: unknown): void {
+    console.error(
+      `Lifecycle event sink failed for ${event.source}:${event.type}`,
+      error
+    );
+  }
+
+  #deliverPendingEvents(): void {
+    for (const event of this.#pendingEvents.splice(0)) {
+      this.#publishCapabilityEvent(event);
+    }
   }
 
   /**
@@ -254,6 +508,9 @@ export class Lifecycle<
 
   /**
    * Handle an incoming request for the owning Durable Object.
+   *
+   * Non-upgrade requests run through the capability middleware chain first,
+   * then fall through to the host's `onRequest`.
    */
   async fetch(request: Request): Promise<Response> {
     try {
@@ -265,8 +522,6 @@ export class Lifecycle<
       }
 
       await this.#ensureInitialized();
-
-      const url = new URL(request.url);
 
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         const capabilityResponse = await runWithoutCurrentAgent(() =>
@@ -281,49 +536,18 @@ export class Lifecycle<
         }
         return new Response("Not implemented", { status: 404 });
       } else {
-        // Create the websocket pair for the client
-        const { 0: clientWebSocket, 1: serverWebSocket } = new WebSocketPair();
-        let connectionId = url.searchParams.get("_pk");
-        if (!connectionId) {
-          connectionId = nanoid();
-        }
-
-        let connection: Connection = Object.assign(serverWebSocket, {
-          id: connectionId,
-          uri: request.url,
-          tags: [] as string[],
-          state: null as unknown as ConnectionState<unknown>,
-          setState<T = unknown>(setState: T | ConnectionSetStateFn<T>) {
-            let state: T;
-            if (setState instanceof Function) {
-              state = setState(this.state as ConnectionState<T>);
-            } else {
-              state = setState;
-            }
-
-            // TODO: deepFreeze object?
-            this.state = state as ConnectionState<T>;
-            return this.state;
-          }
-        });
-
-        const ctx = { request };
-
-        // getConnectionTags already receives both connection and request
-        // explicitly. TODO: run it in host context if shared callback code
-        // develops a concrete need for getCurrentAgent() in this hook.
-        const tags = this.#host.getConnectionTags
-          ? await this.#host.getConnectionTags(connection, ctx)
-          : [];
-
-        // Hibernating WebSockets remain connected while the object is evicted.
-        connection = this.#connectionManager.accept(connection, { tags });
-        await runInLifecycleHostContext(
-          { host: this.#host, connection, request },
-          () => this.#host.onConnect?.(connection, ctx)
+        // Lifecycle does not model WebSockets. A capability that owns
+        // connection behavior (e.g. the WebSockets capability) claims the
+        // upgrade here; without one, upgrades are not supported.
+        const upgradeResponse = await runWithoutCurrentAgent(() =>
+          this.#capabilityRunner.webSocketUpgrade({ request })
         );
+        if (upgradeResponse !== undefined) return upgradeResponse;
 
-        return new Response(null, { status: 101, webSocket: clientWebSocket });
+        return new Response(
+          "WebSocket upgrades are not enabled on this Durable Object. Install a capability that claims them (e.g. WebSockets).",
+          { status: 404 }
+        );
       }
     } catch (err) {
       console.error(
@@ -348,19 +572,15 @@ export class Lifecycle<
 
   /** @internal Dispatch a hibernating WebSocket message. */
   async webSocketMessage(ws: WebSocket, message: WSMessage): Promise<void> {
-    // Ignore WebSockets accepted outside this lifecycle (e.g. via
-    // `state.acceptWebSocket()` in user code). These sockets do not have the
-    // managed attachment required to rehydrate a Connection.
-    if (!isManagedWebSocket(ws)) {
-      return;
-    }
-
     try {
-      const connection = createConnection(ws);
-
       await this.#ensureInitialized();
-      return runInLifecycleHostContext({ host: this.#host, connection }, () =>
-        this.#host.onMessage?.(connection, message)
+
+      // Sockets are owned by whichever capability claimed their upgrade
+      // (recognized via its own hibernation attachment). Wakes for sockets
+      // no capability owns — e.g. `state.acceptWebSocket()` in user code —
+      // are ignored.
+      await runWithoutCurrentAgent(() =>
+        this.#capabilityRunner.webSocketMessage(ws, message)
       );
     } catch (e) {
       console.error(
@@ -370,64 +590,42 @@ export class Lifecycle<
     }
   }
 
-  /** @internal Dispatch and reciprocate a hibernating WebSocket close. */
+  /** @internal Dispatch a hibernating WebSocket close. */
   async webSocketClose(
     ws: WebSocket,
     code: number,
     reason: string,
     wasClean: boolean
   ): Promise<void> {
-    if (!isManagedWebSocket(ws)) {
-      return;
-    }
-
     try {
-      const connection = createConnection(ws);
-
       await this.#ensureInitialized();
-      await runInLifecycleHostContext({ host: this.#host, connection }, () =>
-        this.#host.onClose?.(connection, code, reason, wasClean)
+      // The owning capability also reciprocates the close handshake, as
+      // the Hibernation API contract requires.
+      await runWithoutCurrentAgent(() =>
+        this.#capabilityRunner.webSocketClose(ws, code, reason, wasClean)
       );
     } catch (e) {
       console.error(
         `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketClose:`,
         e
       );
-    } finally {
-      // Reciprocate the peer's Close frame to complete the handshake.
-      // The Hibernation API requires applications to do this — without it,
-      // clients stay in CLOSING and end up reporting 1006 abnormal closure.
-      // The standard `accept()` API gets this for free on compat dates
-      // >= 2026-04-07 via the `web_socket_auto_reply_to_close` flag, but the
-      // Hibernation API contract is unchanged: see
-      // https://developers.cloudflare.com/durable-objects/api/base/#websocketclose
-      // Calling close() on an already-closed socket is a silent no-op, so
-      // this is safe regardless of compat date or whether user code in
-      // `onClose` already called `connection.close()`.
-      closeQuietly(ws, code, reason);
     }
   }
 
   /** @internal Dispatch a hibernating WebSocket error. */
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
-    if (!isManagedWebSocket(ws)) {
-      return;
-    }
-
     // Suppress retryable transport-teardown errors on an already closing/closed
     // socket — the connection going away during/after the close handshake, not
     // an application error. Genuine mid-connection (OPEN) errors still reach
-    // onError below.
+    // the owning handler below.
     if (isBenignTeardownError(ws, error)) {
       return;
     }
 
     try {
-      const connection = createConnection(ws);
-
       await this.#ensureInitialized();
-      return runInLifecycleHostContext({ host: this.#host, connection }, () =>
-        this.#host.onError?.(connection, error)
+      await runWithoutCurrentAgent(() =>
+        this.#capabilityRunner.webSocketError(ws, error)
       );
     } catch (e) {
       console.error(
@@ -480,7 +678,16 @@ export class Lifecycle<
     });
     // Re-throw outside blockConcurrencyWhile so the input gate is not
     // permanently broken and a later invocation can retry startup.
-    if (error) throw error;
+    if (error) {
+      this.#rearmRequestedDuringStart = false;
+      this.#pendingEvents.length = 0;
+      throw error;
+    }
+    this.#deliverPendingEvents();
+    if (this.#rearmRequestedDuringStart) {
+      this.#rearmRequestedDuringStart = false;
+      await this.rearmAlarm();
+    }
   }
 
   #legacyName: string | undefined;
@@ -505,45 +712,131 @@ export class Lifecycle<
     );
   }
 
-  #sendMessageToConnection(connection: Connection, message: WSMessage): void {
-    try {
-      connection.send(message);
-    } catch (_e) {
-      // close connection
-      connection.close(1011, "Unexpected error");
-    }
-  }
-
-  /** Send a message to all connected clients, except connection ids listed in `without` */
-  broadcast(
-    msg: string | ArrayBuffer | ArrayBufferView,
-    without?: string[] | undefined
-  ): void {
-    for (const connection of this.#connectionManager.getConnections()) {
-      if (!without || !without.includes(connection.id)) {
-        this.#sendMessageToConnection(connection, msg);
-      }
-    }
-  }
-
-  /** Get a connection by connection id */
-  getConnection<TState = unknown>(id: string): Connection<TState> | undefined {
-    return this.#connectionManager.getConnection<TState>(id);
-  }
-
-  /** Get all managed connections, optionally filtered by tag. */
-  getConnections<TState = unknown>(tag?: string): Iterable<Connection<TState>> {
-    return this.#connectionManager.getConnections<TState>(tag);
-  }
-
   #props?: Props;
 
-  /** Dispatch lifecycle and host alarm callbacks after startup. */
+  /**
+   * The host's scoped access to the Lifecycle work queue. Items pushed here
+   * are dispatched to the host's `onJob` inside the host invocation
+   * boundary.
+   */
+  get jobs(): LifecycleJobs {
+    return this.#jobsForOwner(HOST_JOB_CAPABILITY);
+  }
+
+  #jobsForOwner(owner: string): LifecycleJobs {
+    const rearmAfter = async <T>(mutate: () => T): Promise<T> => {
+      const result = mutate();
+      await this.rearmAlarm();
+      return result;
+    };
+    return Object.freeze({
+      push: (options: LifecycleJobPushOptions) =>
+        rearmAfter(() => this.#jobQueue.push(owner, options)),
+      cancel: (id: string) =>
+        rearmAfter(() => this.#jobQueue.cancel(owner, id)),
+      reschedule: (id: string, time: number) =>
+        rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
+      get: (id: string) => this.#jobQueue.get(owner, id),
+      list: () => this.#jobQueue.list(owner),
+      rearm: () => this.rearmAlarm()
+    });
+  }
+
+  /**
+   * Recompute the physical Durable Object alarm from job-queue state.
+   *
+   * Concurrent requests are serialized so a later durable-state change cannot
+   * be overwritten by an earlier alarm calculation. Queue mutations call this
+   * automatically; it stays public for composition roots and tests.
+   */
+  async rearmAlarm(): Promise<void> {
+    if (this.#alarmsDisabled) return;
+    if (this.#status === "starting") {
+      this.#rearmRequestedDuringStart = true;
+      return;
+    }
+
+    const prior = this.#alarmRearmQueue;
+    const next = prior
+      .catch(() => {})
+      .then(async () => {
+        if (this.#alarmsDisabled) return;
+        const alarm = this.#jobQueue.nextAlarmTime(Date.now());
+        if (alarm === null) {
+          await this.#ctx.storage.deleteAlarm();
+        } else {
+          await this.#ctx.storage.setAlarm(alarm);
+        }
+      });
+    this.#alarmRearmQueue = next;
+    await next;
+  }
+
+  /**
+   * Keep work a job handed off at a bounded return inside the current
+   * alarm's memory-limit breaker domain (#1825). Hosts call this where a
+   * queue-driven callback detaches long work and returns.
+   *
+   * @returns True when called during an alarm invocation; false otherwise.
+   */
+  trackAlarmWork(work: Promise<unknown>): boolean {
+    return this.#jobDriver.trackAlarmWork(work);
+  }
+
+  /** Dispose installed capabilities in reverse registration order. */
+  async dispose(): Promise<void> {
+    await runWithoutCurrentAgent(() => this.#capabilityRunner.dispose());
+  }
+
+  /** Permanently disable and clear alarms during explicit object teardown. */
+  async disableAlarms(): Promise<void> {
+    this.#alarmsDisabled = true;
+    await this.#alarmRearmQueue.catch(() => {});
+    await this.#ctx.storage.deleteAlarm();
+  }
+
+  /**
+   * Run one alarm invocation. The job driver owns the event loop — deadman
+   * pre-arm, due-job dispatch with retry and deferral policy, the alarm
+   * memory-limit circuit breaker (#1825) — and re-arms the physical alarm
+   * from queue state. The host's `onAlarm()` runs after due jobs, inside
+   * the host invocation boundary.
+   */
   async alarm(): Promise<void> {
-    await this.#ensureInitialized();
-    await runWithoutCurrentAgent(() => this.#capabilityRunner.alarm());
-    await runInLifecycleHostContext({ host: this.#host }, () =>
-      this.#host.onAlarm?.()
+    await this.#jobDriver.runAlarm(
+      () => this.#ensureInitialized(),
+      () =>
+        runInLifecycleHostContext({ host: this.#host }, async () => {
+          await this.#host.onAlarm?.();
+        })
     );
+  }
+
+  /**
+   * Resolve a job owner to its dispatch hooks. Host jobs run inside the
+   * host invocation boundary; capability jobs run outside ambient host
+   * context, like every other capability hook.
+   */
+  async #resolveJobDispatch(owner: string): Promise<JobDispatch | undefined> {
+    if (owner === HOST_JOB_CAPABILITY) {
+      const host = this.#host;
+      if (!host.onJob) return undefined;
+      // No host onJobError: a host job's terminal application failure
+      // completes it, and the host re-derives its jobs from durable state.
+      return {
+        onJob: async (context) =>
+          runInLifecycleHostContext({ host }, () => host.onJob!(context))
+      };
+    }
+    const capability = await this.#capabilityRunner.findById(owner);
+    if (!capability?.onJob) return undefined;
+    return {
+      onJob: async (context) =>
+        runWithoutCurrentAgent(() => capability.onJob!(context)),
+      onJobError: capability.onJobError
+        ? async (context, error) =>
+            runWithoutCurrentAgent(() => capability.onJobError!(context, error))
+        : undefined
+    };
   }
 }

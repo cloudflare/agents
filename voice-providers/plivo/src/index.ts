@@ -32,6 +32,7 @@
  * ```
  */
 
+import { logVoiceError } from "@cloudflare/voice/errors";
 import {
   meanSquaredEnergy,
   mulawBase64ToPcm16,
@@ -115,9 +116,12 @@ export class PlivoAdapter {
         | DurableObjectNamespace
         | undefined;
       if (!namespace) {
-        console.error(
-          `[PlivoAdapter] DO namespace "${agentName}" not found in env`
-        );
+        logVoiceError({
+          component: "PlivoAdapter",
+          stage: "configuration",
+          message: "VoiceAgent Durable Object namespace not found",
+          error: new Error(`Durable Object namespace "${agentName}" not found`)
+        });
         return;
       }
 
@@ -136,7 +140,12 @@ export class PlivoAdapter {
 
       const ws = agentResp.webSocket;
       if (!ws) {
-        console.error("[PlivoAdapter] Failed to get WebSocket from agent");
+        logVoiceError({
+          component: "PlivoAdapter",
+          stage: "connection",
+          message: "Failed to get WebSocket from VoiceAgent",
+          error: new Error("VoiceAgent did not return a WebSocket")
+        });
         return;
       }
 

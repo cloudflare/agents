@@ -29,6 +29,97 @@ Failures stop the phase and propagate. Failed startup remains retryable. Native
 RPC methods explicitly call `lifecycle.start()` because native Durable Object
 RPC bypasses Lifecycle handlers.
 
+## Alarm ownership and scheduling
+
+Lifecycle owns the one physical Durable Object alarm. A capability can return
+its next requested epoch time from `getNextAlarm()` and request recalculation
+through `this.lifecycle.alarms.rearm()`. Lifecycle serializes
+recalculation, chooses the earliest contribution, runs every capability's
+`onAlarm()` followed by the host's `onAlarm()`, then recalculates once more.
+
+Capabilities own their durable work. Scheduler stores named callback rows in
+its table; the Tasks capability stores replayable runs and step journals in
+its own tables and contributes its earliest run deadline the same way
+([rfc-fibers.md](./rfc-fibers.md)); an MCP capability can store reconnect
+state in its own table. They coordinate only through Lifecycle's alarm
+contract and do not depend on Scheduler.
+
+A host can also implement `getNextAlarm()` for work not yet extracted into a
+capability. Exclusive contributions replace ordinary wake-time candidates,
+which supports teardown without teaching other capabilities about destroy
+semantics; they do not alter alarm hook order. Agent currently uses the host
+contribution for deferred destruction, keep-alive, fiber recovery, and facet-run
+checks. These can move into separate capabilities without changing Scheduler or
+alarm selection.
+
+`Scheduler` is a plain Lifecycle primitive. Its `onStart` hook owns schedule
+schema migration, `onAlarm` owns due-row processing, and `getNextAlarm`
+contributes its earliest runnable row or hung-interval recheck. Agent constructs
+the same Scheduler exposed at `Agent.this.scheduler`; existing Agent scheduling
+methods remain compatibility delegators.
+
+Capabilities extending `LifecycleCapability` receive storage, readiness,
+startup state, alarm coordination, a host invocation boundary, events, and
+generic capability routing. Scheduled callbacks are registered on the
+Scheduler itself, so the typed scheduling surface and the runtime dispatch
+target are the same object by construction. That service surface is the whole
+contract: Scheduler consumes only standard services plus its own callbacks and
+policy options, and a future capability composes the same way with no host
+adapter. Lifecycle routes an
+envelope to the matching capability ID at the destination. Agent supplies an
+internal facet transport through one generic RPC aperture, so Scheduler routes
+owner-scoped CRUD and callbacks without facet-specific methods or an Agent
+adapter. Existing facet rows stay in the root Scheduler table.
+
+Host adaptation happens only at a composition root, through three internal
+apertures: the capability event sink, the routed-capability transport, and the
+host invoker behind the host invocation boundary. Agent uses them to route
+events into its observability interface, carry envelopes between facets, and
+wrap capability-run user callbacks in its tracing invocation boundary. Agent
+adds one Scheduler-specific aperture — a callback-name resolver — so its
+historical name-based scheduling methods keep dispatching to Agent methods.
+A plain Lifecycle Object uses the defaults and configures nothing.
+
+Capabilities publish best-effort telemetry through
+`this.lifecycle.events.emit()`. Lifecycle sends plain Lifecycle Object events to
+the existing diagnostics channels. Agent adapts the terminal sink to its
+existing observability implementation. The bus is not durable; a capability
+that requires guaranteed delivery owns an outbox.
+
+Alarm contribution, capability hooks, and capability-event delivery run outside
+ambient host context.
+Registered scheduled callbacks are user code, so Scheduler runs them through
+the host invocation boundary in Lifecycle Object or Agent context as
+appropriate.
+
+## Testing capabilities
+
+Capabilities are testable at every layer without module mocks or fake
+services. Harness Durable Objects live one-per-capability in `tests/capabilities/`, with
+their pool-only drivers in `tests/shared/` (see `tests/capabilities/AGENTS.md`), so every capability follows the same pattern:
+
+1. **Pure domain logic** (timing parsers, selection rules) lives in
+   dependency-free modules and is unit tested directly, e.g.
+   `tests/schedules/timing.test.ts`.
+2. **The capability in isolation, on a real Durable Object** —
+   `withCapabilityHarness()` binds per-test-constructed capabilities to a
+   real Lifecycle over real SQLite storage inside a bare harness object
+   (the MCP client suites), while a capability whose tests need real
+   platform dispatch gets a dedicated harness object with runtime handlers
+   installed — `SchedulerHarnessObject` driven through real alarms in
+   `tests/schedules/capability.test.ts`. The Workers vitest pool
+   makes real objects cheap, so there is no fake-services seam to keep in
+   sync with Lifecycle semantics.
+3. **Lifecycle integration** proves cross-capability behavior: alarm
+   arbitration across contributors, phase order, context boundaries, and
+   eviction recovery — the per-functionality files in `tests/lifecycle/`.
+4. **Host surface** tests exercise the capability through the complete
+   `Agent` class and its public API — `tests/schedule.test.ts`, the MCP
+   agent suites, and the think/ai-chat packages.
+
+A new capability should arrive with layers 2 and 3; layer 1 applies when it
+owns non-trivial pure rules.
+
 ## Host context
 
 Lifecycle owns the AsyncLocalStorage read by `getCurrentAgent()`. The accessor
@@ -50,6 +141,13 @@ their own `this`, phase arguments, and explicit dependencies. Lifecycle exits
 any inherited current-Agent context before invoking capability startup,
 request, or alarm hooks, so behavior does not depend on the entrypoint that
 triggered the phase.
+
+User callbacks are the exception: when a capability runs one through
+`this.lifecycle.runInHostContext()`, Lifecycle establishes the host
+invocation context around that call. This is the one boundary a host
+composition root may wrap — Agent substitutes its tracing invocation scope —
+so every capability that dispatches user callbacks inherits the host's
+invocation semantics without capability-specific hooks.
 
 ## Agent entry surfaces
 
@@ -79,4 +177,6 @@ a migration fallback. It never writes a duplicate name.
 
 ## History
 
+- [Alarm coordination](./alarm-coordination.md)
 - [Durable Object lifecycle composition](./rfc-durable-object-lifecycle.md)
+- [Tasks (née Fibers): durable replayable execution as a Lifecycle capability](./rfc-fibers.md)

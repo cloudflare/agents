@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -24,6 +24,7 @@
     "@babel/plugin-proposal-decorators": "^8.0.2",
     "@cfworker/json-schema": "^4.1.1",
     "@rolldown/plugin-babel": "^0.2.3",
+    "capnweb": "^0.12.0",
     "cron-schedule": "^6.0.0",
     "esbuild": "^0.28.1",
     "mimetext": "^3.0.28",
@@ -50,7 +51,7 @@
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "valibot": "1.4.1",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
@@ -117,6 +118,21 @@
       "import": "./dist/client.js",
       "require": "./dist/client.js"
     },
+    "./routing": {
+      "types": "./dist/routing/index.d.ts",
+      "import": "./dist/routing/index.js",
+      "require": "./dist/routing/index.js"
+    },
+    "./streams": {
+      "types": "./dist/streams/index.d.ts",
+      "import": "./dist/streams/index.js",
+      "require": "./dist/streams/index.js"
+    },
+    "./tasks": {
+      "types": "./dist/tasks/index.d.ts",
+      "import": "./dist/tasks/index.js",
+      "require": "./dist/tasks/index.js"
+    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",
@@ -138,19 +154,19 @@
       "require": "./dist/mcp/index.js"
     },
     "./mcp/client": {
-      "types": "./dist/mcp/client.d.ts",
-      "import": "./dist/mcp/client.js",
-      "require": "./dist/mcp/client.js"
+      "types": "./dist/mcp/client/index.d.ts",
+      "import": "./dist/mcp/client/index.js",
+      "require": "./dist/mcp/client/index.js"
     },
     "./mcp/server": {
-      "types": "./dist/mcp/server.d.ts",
-      "import": "./dist/mcp/server.js",
-      "require": "./dist/mcp/server.js"
+      "types": "./dist/mcp/server/index.d.ts",
+      "import": "./dist/mcp/server/index.js",
+      "require": "./dist/mcp/server/index.js"
     },
     "./mcp/do-oauth-client-provider": {
-      "types": "./dist/mcp/do-oauth-client-provider.d.ts",
-      "import": "./dist/mcp/do-oauth-client-provider.js",
-      "require": "./dist/mcp/do-oauth-client-provider.js"
+      "types": "./dist/mcp/client/do-oauth-client-provider.d.ts",
+      "import": "./dist/mcp/client/do-oauth-client-provider.js",
+      "require": "./dist/mcp/client/do-oauth-client-provider.js"
     },
     "./observability": {
       "types": "./dist/observability/index.d.ts",
@@ -167,10 +183,25 @@
       "import": "./dist/react.js",
       "require": "./dist/react.js"
     },
+    "./websockets": {
+      "types": "./dist/websockets/index.d.ts",
+      "import": "./dist/websockets/index.js",
+      "require": "./dist/websockets/index.js"
+    },
     "./schedule": {
       "types": "./dist/schedule.d.ts",
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
+    },
+    "./schedules": {
+      "types": "./dist/schedules/index.d.ts",
+      "import": "./dist/schedules/index.js",
+      "require": "./dist/schedules/index.js"
+    },
+    "./schedules/parser": {
+      "types": "./dist/schedules/parser.d.ts",
+      "import": "./dist/schedules/parser.js",
+      "require": "./dist/schedules/parser.js"
     },
     "./workflows": {
       "types": "./dist/workflows.d.ts",
@@ -193,9 +224,9 @@
       "require": "./dist/experimental/webmcp.js"
     },
     "./x402": {
-      "types": "./dist/mcp/x402.d.ts",
-      "import": "./dist/mcp/x402.js",
-      "require": "./dist/mcp/x402.js"
+      "types": "./dist/mcp/client/x402.d.ts",
+      "import": "./dist/mcp/client/x402.js",
+      "require": "./dist/mcp/client/x402.js"
     },
     "./chat": {
       "types": "./dist/chat/index.d.ts",

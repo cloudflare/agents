@@ -78,11 +78,11 @@ export class MyDurableObject extends DurableObject {
 }
 ```
 
-### `alarm()`
+### Alarms
 
-HTTP and RPC requests are not the only entrypoints for a DO. Alarms allow developers to schedule an event to trigger at a later time. Whenever the next alarm is due, the runtime will call the `alarm()` method, which is left to the developer to implement.
+`Lifecycle` owns the Agent's physical Durable Object alarm because schedules, keep-alive, fibers, sub-agents, and other capabilities share the same alarm slot. Do not override `alarm()` or call `this.ctx.storage.setAlarm()` from an Agent feature; one caller could overwrite another feature's wake-up.
 
-To schedule an alarm, you can use the `this.ctx.storage.setAlarm()` method. For more information, check [the documentation](https://developers.cloudflare.com/durable-objects/api/alarms/).
+Use `this.schedule()` for named Agent callbacks. A reusable capability with its own durable work pushes jobs through `this.lifecycle.jobs` and implements `onJob()`; Lifecycle drives due jobs and re-arms the alarm from queue state. See [Durable Object lifecycle](./lifecycle.md#the-job-queue) and [Scheduling](./scheduling.md).
 
 ### `this.ctx`
 
@@ -278,7 +278,7 @@ class MyAgent extends Agent {
 }
 ```
 
-Schedules are stored in the `cf_agents_schedules` SQL table. Cron schedules automatically reschedule themselves after execution, while one-time schedules are deleted.
+Schedules are stored as jobs in the `cf_agents_jobs` SQL table, the Lifecycle-owned job queue. Cron schedules automatically reschedule themselves after execution, while one-time schedules are deleted.
 
 ### `this.mcp` and friends
 

@@ -6,6 +6,11 @@
  */
 
 import type { Transcriber, TranscriberSession } from "@cloudflare/voice";
+import {
+  logVoiceError,
+  toVoiceError,
+  VoiceProviderError
+} from "@cloudflare/voice/errors";
 import { TelnyxClient, type TelnyxClientConfig } from "../client.js";
 
 const DEFAULT_STT_URL = "wss://api.telnyx.com/v2/speech-to-text/transcription";
@@ -73,6 +78,7 @@ export interface TelnyxSTTSessionOptions {
   language?: string;
   onInterim?: (text: string) => void;
   onUtterance?: (transcript: string) => void;
+  onFatalError?: (error: Error) => void;
 }
 
 export class TelnyxSTT implements Transcriber {
@@ -105,7 +111,8 @@ export class TelnyxSTT implements Transcriber {
       interimResults: this.interimResults,
       language,
       onInterim: options?.onInterim,
-      onUtterance: options?.onUtterance
+      onUtterance: options?.onUtterance,
+      onFatalError: options?.onFatalError
     });
   }
 }
@@ -120,21 +127,33 @@ interface SessionParams {
   language: string;
   onInterim?: (text: string) => void;
   onUtterance?: (transcript: string) => void;
+  onFatalError?: (error: Error) => void;
 }
 
 export class TelnyxSTTSession implements TranscriberSession {
   private ws: WebSocket | null = null;
   private pendingChunks: ArrayBuffer[] = [];
   private closed = false;
+  private fatalReported = false;
   private sentWavHeader = false;
   private inputFormat: string;
   private onInterim?: (text: string) => void;
   private onUtterance?: (transcript: string) => void;
+  private onFatalError?: (error: Error) => void;
+  private ready: Promise<void>;
+  private resolveReady: (() => void) | null = null;
+  private rejectReady: ((reason: unknown) => void) | null = null;
 
   constructor(params: SessionParams) {
     this.onInterim = params.onInterim;
     this.onUtterance = params.onUtterance;
+    this.onFatalError = params.onFatalError;
     this.inputFormat = params.inputFormat;
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.resolveReady = resolve;
+      this.rejectReady = reject;
+    });
+    this.ready.catch(() => {});
 
     const url = new URL(params.sttUrl);
     url.searchParams.set("transcription_engine", params.engine);
@@ -149,6 +168,10 @@ export class TelnyxSTTSession implements TranscriberSession {
     this.connect(url.toString(), params.apiKey);
   }
 
+  waitUntilReady(): Promise<void> {
+    return this.ready;
+  }
+
   private async connect(wsUrl: string, apiKey: string): Promise<void> {
     try {
       // Use the Cloudflare Workers fetch-upgrade pattern.
@@ -161,9 +184,10 @@ export class TelnyxSTTSession implements TranscriberSession {
 
       const ws = (resp as unknown as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
-        throw new Error(
+        throw new VoiceProviderError(
           "STT WebSocket requires the Cloudflare Workers runtime. " +
-            "The fetch-upgrade did not return a WebSocket pair."
+            "The fetch-upgrade did not return a WebSocket pair.",
+          { status: resp.status }
         );
       }
 
@@ -174,6 +198,7 @@ export class TelnyxSTTSession implements TranscriberSession {
         } catch {
           // ignore cleanup errors for a session that was closed while connecting
         }
+        this.resolveReadiness();
         return;
       }
 
@@ -184,11 +209,38 @@ export class TelnyxSTTSession implements TranscriberSession {
       });
 
       ws.addEventListener("error", (event: Event) => {
-        console.error("[TelnyxSTT] WebSocket error:", event);
+        const error = new Error("Telnyx STT WebSocket error", {
+          cause: event
+        });
+        logVoiceError({
+          component: "TelnyxSTT",
+          stage: "websocket",
+          message: "Telnyx STT WebSocket error",
+          error
+        });
+        this.reportFatal(error);
+        this.rejectReadiness(error);
         this.closed = true;
       });
 
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (event: CloseEvent) => {
+        if (this.closed) return;
+        const error = new VoiceProviderError(
+          "Telnyx STT WebSocket closed unexpectedly",
+          {
+            closeCode: event.code,
+            closeReason: event.reason,
+            wasClean: event.wasClean
+          }
+        );
+        logVoiceError({
+          component: "TelnyxSTT",
+          stage: "websocket_close",
+          message: "Telnyx STT WebSocket closed unexpectedly",
+          error
+        });
+        this.reportFatal(error);
+        this.rejectReadiness(error);
         this.closed = true;
       });
 
@@ -211,15 +263,20 @@ export class TelnyxSTTSession implements TranscriberSession {
         ws.send(chunk);
       }
       this.pendingChunks = [];
+      this.resolveReadiness();
     } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.includes("Cloudflare Workers")
-      ) {
-        console.error(`[TelnyxSTT] ${error.message}`);
-      } else {
-        console.error("[TelnyxSTT] WebSocket connection failed:", error);
-      }
+      const voiceError = toVoiceError(
+        error,
+        "Telnyx STT WebSocket connection failed"
+      );
+      logVoiceError({
+        component: "TelnyxSTT",
+        stage: "connection",
+        message: "Telnyx STT WebSocket connection failed",
+        error: voiceError
+      });
+      this.reportFatal(voiceError);
+      this.rejectReadiness(voiceError);
       this.closed = true;
     }
   }
@@ -239,6 +296,29 @@ export class TelnyxSTTSession implements TranscriberSession {
     this.closed = true;
     this.pendingChunks = [];
     this.ws?.close();
+    this.resolveReadiness();
+  }
+
+  private resolveReadiness(): void {
+    const resolve = this.resolveReady;
+    if (!resolve) return;
+    this.resolveReady = null;
+    this.rejectReady = null;
+    resolve();
+  }
+
+  private rejectReadiness(reason: unknown): void {
+    const reject = this.rejectReady;
+    if (!reject) return;
+    this.resolveReady = null;
+    this.rejectReady = null;
+    reject(reason);
+  }
+
+  private reportFatal(error: Error): void {
+    if (this.closed || this.fatalReported) return;
+    this.fatalReported = true;
+    this.onFatalError?.(error);
   }
 
   private handleMessage(event: MessageEvent): void {

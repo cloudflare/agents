@@ -3,6 +3,11 @@ import type {
   TranscriberSession,
   TranscriberSessionOptions
 } from "@cloudflare/voice";
+import {
+  logVoiceError,
+  toVoiceError,
+  VoiceProviderError
+} from "@cloudflare/voice/errors";
 
 export interface DeepgramSTTOptions {
   /** Deepgram API key. */
@@ -112,12 +117,17 @@ export class DeepgramSTT implements Transcriber {
 class DeepgramSession implements TranscriberSession {
   #onInterim: ((text: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
+  #onFatalError: TranscriberSessionOptions["onFatalError"];
 
   #ws: WebSocket | null = null;
   #connected = false;
   #closed = false;
+  #fatalReported = false;
 
   #pendingChunks: ArrayBuffer[] = [];
+  #ready: Promise<void>;
+  #resolveReady: (() => void) | null = null;
+  #rejectReady: ((reason: unknown) => void) | null = null;
   #finalizedSegments: string[] = [];
 
   constructor(
@@ -127,7 +137,17 @@ class DeepgramSession implements TranscriberSession {
   ) {
     this.#onInterim = options?.onInterim;
     this.#onUtterance = options?.onUtterance;
+    this.#onFatalError = options?.onFatalError;
+    this.#ready = new Promise<void>((resolve, reject) => {
+      this.#resolveReady = resolve;
+      this.#rejectReady = reject;
+    });
+    this.#ready.catch(() => {});
     this.#connect(url, apiKey);
+  }
+
+  waitUntilReady(): Promise<void> {
+    return this.#ready;
   }
 
   async #connect(url: string, apiKey: string): Promise<void> {
@@ -145,12 +165,24 @@ class DeepgramSession implements TranscriberSession {
           ws.accept();
           ws.close();
         }
+        this.#resolveReadiness();
         return;
       }
 
       const ws = (resp as unknown as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
-        console.error("[DeepgramSTT] Failed to establish WebSocket connection");
+        const error = new VoiceProviderError(
+          "Deepgram did not return a WebSocket",
+          { status: resp.status }
+        );
+        logVoiceError({
+          component: "DeepgramSTT",
+          stage: "connection",
+          message: "Deepgram WebSocket upgrade failed",
+          error
+        });
+        this.#reportFatal(error);
+        this.#rejectReadiness(error);
         return;
       }
 
@@ -162,21 +194,53 @@ class DeepgramSession implements TranscriberSession {
         this.#handleMessage(event);
       });
 
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (event: CloseEvent) => {
         this.#connected = false;
+        if (this.#closed) return;
+        const error = new VoiceProviderError(
+          "Deepgram WebSocket closed unexpectedly",
+          {
+            closeCode: event.code,
+            closeReason: event.reason,
+            wasClean: event.wasClean
+          }
+        );
+        logVoiceError({
+          component: "DeepgramSTT",
+          stage: "websocket_close",
+          message: "Deepgram WebSocket closed unexpectedly",
+          error
+        });
+        this.#reportFatal(error);
       });
 
       ws.addEventListener("error", (event: Event) => {
-        console.error("[DeepgramSTT] WebSocket error:", event);
+        const error = new Error("Deepgram WebSocket error", { cause: event });
+        logVoiceError({
+          component: "DeepgramSTT",
+          stage: "websocket",
+          message: "Deepgram WebSocket error",
+          error
+        });
         this.#connected = false;
+        this.#reportFatal(error);
       });
 
       for (const chunk of this.#pendingChunks) {
         ws.send(chunk);
       }
       this.#pendingChunks = [];
-    } catch (err) {
-      console.error("[DeepgramSTT] Connection error:", err);
+      this.#resolveReadiness();
+    } catch (error) {
+      const voiceError = toVoiceError(error, "Deepgram connection failed");
+      logVoiceError({
+        component: "DeepgramSTT",
+        stage: "connection",
+        message: "Deepgram connection failed",
+        error: voiceError
+      });
+      this.#reportFatal(voiceError);
+      this.#rejectReadiness(voiceError);
     }
   }
 
@@ -212,6 +276,29 @@ class DeepgramSession implements TranscriberSession {
       this.#ws = null;
     }
     this.#connected = false;
+    this.#resolveReadiness();
+  }
+
+  #resolveReadiness(): void {
+    const resolve = this.#resolveReady;
+    if (!resolve) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    resolve();
+  }
+
+  #rejectReadiness(reason: unknown): void {
+    const reject = this.#rejectReady;
+    if (!reject) return;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    reject(reason);
+  }
+
+  #reportFatal(error: Error): void {
+    if (this.#closed || this.#fatalReported) return;
+    this.#fatalReported = true;
+    this.#onFatalError?.(error);
   }
 
   #handleMessage(event: MessageEvent): void {
@@ -247,9 +334,19 @@ class DeepgramSession implements TranscriberSession {
       }
 
       if (data.type === "Error") {
-        console.error(
-          `[DeepgramSTT] Error: ${data.description ?? data.message ?? JSON.stringify(data)}`
-        );
+        const code = data.err_code ?? data.code;
+        const error = new VoiceProviderError("Deepgram server error", {
+          ...(typeof code === "string" || typeof code === "number"
+            ? { code }
+            : {})
+        });
+        logVoiceError({
+          component: "DeepgramSTT",
+          stage: "provider_message",
+          message: "Deepgram server error",
+          error
+        });
+        this.#reportFatal(error);
       }
     } catch {
       // Ignore non-JSON or malformed messages

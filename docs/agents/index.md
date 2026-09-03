@@ -40,8 +40,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 ## Core Concepts
 
 - [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStateChanged()`
-- [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
-- [Sub-agents](./sub-agents.md) - Parent/child DO composition via facets, nested routing, and direct child connections
+- [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works, plus `RoutedAgents` for a hub that routes to many independent Agents
+- [Dynamic agents](./sub-agents.md) - Facet-backed child agents for code the parent supervises (dynamic/generated code, per-run tool agents, sandboxes) — not the recommended primitive for many independent peers like chats
 - [HTTP & WebSockets](./http-websockets.md) - Request handling and real-time connections
 - [Callable Methods](./callable-methods.md) - The `@callable` decorator and client-server method calls
 - [Readonly Connections](./readonly-connections.md) - Restricting which connections can modify state
@@ -141,6 +141,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 ## Reference
 
 - [Durable Object Lifecycle](./lifecycle.md) - Compose reusable durable components outside the Agent base class
+- [Tasks](./tasks.md) - Durable, replayable background work with journaled steps and durable sleeps (experimental)
+- [Streams](./streams.md) - Durable incremental output: chunk log, cursor, replay-then-tail reads (experimental)
 - TODO: [API Reference](./api-reference.md) - Complete API documentation
 - TODO: [FAQ / How is this different from Durable Objects?](./faq.md)
 - TODO: [Resources & Further Reading](./resources.md)

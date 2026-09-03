@@ -2279,6 +2279,33 @@ describe("Think — body persistence", () => {
 // ── chatRecovery ────────────────────────────────────────
 
 describe("Think — chatRecovery", () => {
+  it("keeps pre-handoff failure on the current Task and replaces only post-handoff failure", async () => {
+    for (const callback of [
+      "_chatRecoveryContinue",
+      "_chatRecoveryRetry"
+    ] as const) {
+      const before = await freshRecoveryAgent(
+        `${callback}-before-${crypto.randomUUID()}`
+      ).then((agent) =>
+        agent.testRecoveryDispatchHandoffForTest({
+          callback,
+          phase: "before"
+        })
+      );
+      expect(before).toEqual({ threw: true, tasks: 1, schedules: 0 });
+
+      const after = await freshRecoveryAgent(
+        `${callback}-after-${crypto.randomUUID()}`
+      ).then((agent) =>
+        agent.testRecoveryDispatchHandoffForTest({
+          callback,
+          phase: "after"
+        })
+      );
+      expect(after).toEqual({ threw: false, tasks: 2, schedules: 0 });
+    }
+  });
+
   it("chat turn with recovery=true works normally and cleans up fibers", async () => {
     const agent = await freshRecoveryAgent("recovery-basic");
 
@@ -3374,10 +3401,11 @@ describe("Think — onChatRecovery", () => {
       user: null
     });
 
-    await agent.triggerFiberRecovery();
-    expect(
-      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryRetry")
-    ).toBe(1);
+    // Assert on the counts returned from inside the trigger RPC: the
+    // zero-delay recovery alarm may fire (and consume the job row) as soon as
+    // the RPC releases the DO, so a follow-up count read can race it.
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledRetryCount).toBe(1);
     await agent.runScheduledRecoveryRetryForTest();
 
     const messages = (await agent.getStoredMessages()) as UIMessage[];
@@ -3440,10 +3468,8 @@ describe("Think — onChatRecovery", () => {
       user: null
     });
 
-    await agent.triggerFiberRecovery();
-    expect(
-      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
-    ).toBe(1);
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
 
     await agent.setRequestContextForTest({ mode: "stale" }, [
       { name: "staleTool", description: "Stale" }
@@ -3534,10 +3560,8 @@ describe("Think — onChatRecovery", () => {
       user: null
     });
 
-    await agent.triggerFiberRecovery();
-    expect(
-      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
-    ).toBe(1);
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
     await agent.runScheduledRecoveryContinueForTest();
 
     // Progress was made: the continuation re-ran inference and produced new
@@ -4311,10 +4335,13 @@ describe("Think — onChatRecovery", () => {
     );
     await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-completed");
 
-    await agent.triggerFiberRecovery();
+    const scheduled = await agent.triggerFiberRecovery();
 
     expect(await agent.getTurnCallCount()).toBe(0);
-    expect(await agent.getScheduledChatRecoveryCountForTest()).toBe(0);
+    expect(scheduled).toEqual({
+      scheduledContinueCount: 0,
+      scheduledRetryCount: 0
+    });
 
     const messages = (await agent.getStoredMessages()) as UIMessage[];
     expect(messages).toHaveLength(1);

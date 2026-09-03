@@ -13,6 +13,54 @@
   "durable_objects": {
     "bindings": [
       {
+        "class_name": "CapabilityHarnessObject",
+        "name": "CapabilityHarnessObject"
+      },
+      {
+        "class_name": "PlainLifecycleObject",
+        "name": "PlainLifecycleObject"
+      },
+      {
+        "class_name": "RetryableStartObject",
+        "name": "RetryableStartObject"
+      },
+      {
+        "class_name": "ScheduledLifecycleObject",
+        "name": "ScheduledLifecycleObject"
+      },
+      {
+        "class_name": "SchedulerHarnessObject",
+        "name": "SchedulerHarnessObject"
+      },
+      {
+        "class_name": "SchedulerStartupWarnObject",
+        "name": "SchedulerStartupWarnObject"
+      },
+      {
+        "class_name": "TaskHarnessObject",
+        "name": "TaskHarnessObject"
+      },
+      {
+        "class_name": "TaskSchedulerCoexistObject",
+        "name": "TaskSchedulerCoexistObject"
+      },
+      {
+        "class_name": "StreamHarnessObject",
+        "name": "StreamHarnessObject"
+      },
+      {
+        "class_name": "TaskStreamComposeObject",
+        "name": "TaskStreamComposeObject"
+      },
+      {
+        "class_name": "StreamBenchObject",
+        "name": "StreamBenchObject"
+      },
+      {
+        "class_name": "PlainMcpClientObject",
+        "name": "PlainMcpClientObject"
+      },
+      {
         "class_name": "TestMcpAgent",
         "name": "MCP_OBJECT"
       },
@@ -64,6 +112,10 @@
       {
         "class_name": "TestScheduleAgent",
         "name": "TestScheduleAgent"
+      },
+      {
+        "class_name": "TestTaskAgent",
+        "name": "TestTaskAgent"
       },
       {
         "class_name": "TestOnStartScheduleWarnAgent",
@@ -185,6 +237,14 @@
       {
         "class_name": "TestWaitConnectionsAgent",
         "name": "TestWaitConnectionsAgent"
+      },
+      {
+        "class_name": "RoutingOwnerAgent",
+        "name": "RoutingOwnerAgent"
+      },
+      {
+        "class_name": "RoutedChatAgent",
+        "name": "RoutedChatAgent"
       },
       {
         "class_name": "TestSubAgentParent",
@@ -335,6 +395,18 @@
   "migrations": [
     {
       "new_sqlite_classes": [
+        "CapabilityHarnessObject",
+        "PlainLifecycleObject",
+        "RetryableStartObject",
+        "ScheduledLifecycleObject",
+        "SchedulerHarnessObject",
+        "SchedulerStartupWarnObject",
+        "TaskHarnessObject",
+        "TaskSchedulerCoexistObject",
+        "StreamHarnessObject",
+        "TaskStreamComposeObject",
+        "StreamBenchObject",
+        "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
         "TestEmailAgent",
@@ -349,6 +421,7 @@
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",
         "TestScheduleAgent",
+        "TestTaskAgent",
         "TestOnStartScheduleWarnAgent",
         "TestOnStartScheduleNoWarnAgent",
         "TestOnStartScheduleExplicitFalseAgent",
@@ -376,6 +449,8 @@
         "TestSearchAgent",
         "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
+        "RoutingOwnerAgent",
+        "RoutedChatAgent",
         "TestSubAgentParent",
         "CustomBoundSubAgentParent",
         "TestWorkflowSubAgent",

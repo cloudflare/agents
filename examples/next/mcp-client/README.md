@@ -6,9 +6,7 @@ OAuth in a popup, and invokes discovered tools with JSON arguments.
 
 ```ts
 export class McpClientObject extends DurableObject<Env> {
-  readonly mcp = new MCPClientManager("mcp-client-object", "1.0.0", {
-    storage: this.ctx.storage
-  });
+  readonly mcp = new MCPClientManager("mcp-client-object", "1.0.0");
 
   readonly lifecycle = Lifecycle.install(this).use(this.mcp);
 }

@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/voice",
-  "version": "0.3.6",
+  "version": "0.4.0",
   "description": "Voice pipeline for Cloudflare Agents — STT, TTS, VAD, streaming, and SFU utilities",
   "repository": {
     "directory": "packages/voice",
@@ -33,6 +33,11 @@
       "types": "./dist/voice-client.d.ts",
       "import": "./dist/voice-client.js",
       "require": "./dist/voice-client.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js",
+      "require": "./dist/errors.js"
     },
     "./react": {
       "types": "./dist/voice-react.d.ts",

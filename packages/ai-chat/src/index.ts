@@ -62,8 +62,19 @@ import {
 import {
   ResumableStream,
   cleanupStreamBuffers,
+  createChatStreams,
   STREAM_CLEANUP_DELAY_SECONDS
 } from "agents/chat";
+import type { Streams } from "agents/streams";
+import {
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
+  createChatRecoveryTaskDefinition,
+  createChatTurnTaskDefinition,
+  dispatchChatRecoveryToHandoff,
+  type ChatRecoveryTaskReason
+} from "agents/chat";
+import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
 import { MAX_BOUND_PARAMS, buildInClauseStrings } from "agents/chat";
 import {
   ContinuationState,
@@ -78,7 +89,6 @@ import {
 } from "agents/chat";
 import {
   resolveChatRecoveryConfig,
-  chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
   ChatStreamStalledError,
@@ -317,12 +327,6 @@ type AIChatAgentToolRunRow = {
   progress_json?: string | null;
   last_signal_at?: number | null;
 };
-type AIChatStreamMetadataRow = {
-  id: string;
-  status: string;
-  request_id: string;
-};
-
 /**
  * Options passed to the onChatMessage handler.
  */
@@ -395,6 +399,13 @@ export class AIChatAgent<
    * Used to propagate cancellation signals for any external calls made by the agent.
    */
   private _abortRegistry: AbortRegistry;
+
+  /**
+   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * output lives in the shared durable chunk log, readable by any
+   * `streams.read()` consumer on this Durable Object.
+   */
+  readonly streams: Streams = createChatStreams();
 
   /**
    * Resumable stream manager -- handles chunk buffering, persistence, and replay.
@@ -661,6 +672,112 @@ export class AIChatAgent<
    */
   waitForMcpConnections: boolean | { timeout: number } = { timeout: 10_000 };
 
+  /**
+   * Live chat-turn closures keyed by run nonce. A closure exists only in the
+   * isolate that accepted the turn; recovery after interruption never re-runs
+   * it — the definition's `recover` callback hands the interruption to the
+   * shared ChatRecoveryEngine instead.
+   */
+  private readonly _liveChatTurnClosures = new Map<
+    string,
+    {
+      initial: unknown;
+      wrap: (data: unknown) => unknown;
+      run: () => Promise<unknown>;
+      settle: {
+        resolve: (value: unknown) => void;
+        reject: (error: unknown) => void;
+      };
+    }
+  >();
+
+  /**
+   * Register the shared chat-turn Task definition (see
+   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
+   * host wires its protected internals through the hooks.
+   */
+  private _registerChatTurnTaskDefinition(): void {
+    const chatFiberName = (this.constructor as typeof AIChatAgent)
+      .CHAT_FIBER_NAME;
+    this.tasks.register(
+      chatFiberName,
+      createChatTurnTaskDefinition({
+        definitionName: chatFiberName,
+        storage: this.ctx.storage,
+        getRunCreatedAt: async (runId) =>
+          (await this.tasks.get(runId))?.createdAt ?? null,
+        getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
+        keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+        withStash: (context, fn) => this._withFiberStash(context, fn),
+        handleRecovery: (ctx) => this._handleInternalFiberRecovery(ctx)
+      })
+    );
+  }
+
+  /** Register the shared Tasks transport for recovery continuations. */
+  private _registerChatRecoveryTaskDefinition(): void {
+    // SAFETY: the recovery engine is the sole producer of each callback's
+    // payload and the Task persists it verbatim, so the callback name selects
+    // the matching host input type.
+    this.tasks.register(
+      CHAT_RECOVERY_TASK_NAME,
+      createChatRecoveryTaskDefinition({
+        _chatRecoveryContinue: (data) =>
+          this._chatRecoveryContinue(data as ChatRecoveryContinueData),
+        _chatRecoveryRetry: (data) =>
+          this._chatRecoveryRetry(data as ChatRecoveryRetryData)
+      })
+    );
+  }
+
+  /**
+   * Run a queue-driven recovery callback to its model handoff and return;
+   * the turn continues as tracked alarm work, and a detached platform
+   * failure enqueues one replacement attempt through the same transport.
+   */
+  private _dispatchChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown> | undefined,
+    detached: (onTurnStarted: () => void) => Promise<void>
+  ): Promise<void> {
+    return dispatchChatRecoveryToHandoff({
+      detached,
+      track: (turn) => this.lifecycle.trackAlarmWork(turn),
+      redefer: (dedupeKey) =>
+        this._enqueueChatRecovery(
+          callback,
+          data ?? {},
+          "redefer",
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          dedupeKey
+        ),
+      onDetachedError: (error) =>
+        console.error(`[AIChatAgent] ${callback} dispatch failed`, error)
+    });
+  }
+
+  /**
+   * Enqueue one recovery attempt on the shared Tasks transport. Tasks
+   * mirrors a routed dynamic agent's wake to the root's alarm; the run
+   * itself, and this continuation's replay, still execute here. `dedupeKey`
+   * keys a retried enqueue so it joins its own prior attempt instead of
+   * duplicating it — see {@link chatRecoveryTaskRunOptions}.
+   */
+  private async _enqueueChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown>,
+    reason: ChatRecoveryTaskReason,
+    delaySeconds: number,
+    dedupeKey?: string
+  ): Promise<void> {
+    const input = { callback, data, delaySeconds };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, reason, dedupeKey)
+    );
+  }
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -675,20 +792,51 @@ export class AIChatAgent<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
+    const wrap = (data: unknown) =>
+      wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
 
-    return this._runFiberWithStashWrapper(
-      `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-      async () => fn(),
-      {
-        initialSnapshot: wrapChatFiberSnapshot(
-          "__cfAIChatFiberSnapshot",
-          snapshot,
-          null
-        ),
-        wrapStash: (data) =>
-          wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data)
-      }
-    );
+    // Facet-hosted turns stay on the legacy fiber engine: the Tasks
+    // capability does not accept runs on routed sub-agents yet, and facet
+    // recovery routes through the root's facet-run index.
+    if (this.parentPath.length > 0) {
+      return this._runFiberWithStashWrapper(
+        `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+        async () => fn(),
+        { initialSnapshot: wrap(null), wrapStash: wrap }
+      );
+    }
+
+    const nonce = nanoid();
+    let resolveOutcome!: (value: unknown) => void;
+    let rejectOutcome!: (error: unknown) => void;
+    const outcome = new Promise<unknown>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    // Rejections can land while `runAttached` is still being awaited (before
+    // the outcome listener attaches); mark them handled so workerd does not
+    // report an unhandled rejection the wrapper is about to consume.
+    outcome.catch(() => {});
+    // The turn closure re-enters the caller's invocation context (live
+    // connection/request), exactly as legacy inline fiber execution did: the
+    // capability's host boundary intentionally carries no connection.
+    const ambient = agentContext.getStore();
+    this._liveChatTurnClosures.set(nonce, {
+      initial: wrap(null),
+      wrap,
+      run: ambient ? () => agentContext.run(ambient, fn) : fn,
+      settle: { resolve: resolveOutcome, reject: rejectOutcome }
+    });
+    try {
+      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+        (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
+        { requestId, continuation, nonce },
+        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+      );
+      return (await outcome) as T;
+    } finally {
+      this._liveChatTurnClosures.delete(nonce);
+    }
   }
 
   /**
@@ -799,6 +947,9 @@ export class AIChatAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
+    this.lifecycle.use(this.streams);
+    this._registerChatTurnTaskDefinition();
+    this._registerChatRecoveryTaskDefinition();
     withAgentSpan(
       this,
       "chat_initialization",
@@ -844,7 +995,10 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this._resumableStream = new ResumableStream(this.sql.bind(this));
+            this._resumableStream = new ResumableStream(
+              this.streams,
+              this.sql.bind(this)
+            );
           }
         );
 
@@ -4001,14 +4155,7 @@ export class AIChatAgent<
   }
 
   private _getAgentToolStreamId(requestId: string): string | undefined {
-    const rows = this.sql<AIChatStreamMetadataRow>`
-      select id, status, request_id
-      from cf_ai_chat_stream_metadata
-      where request_id = ${requestId}
-      order by rowid desc
-      limit 1
-    `;
-    return rows[0]?.id;
+    return this._resumableStream.latestStreamInfoForRequest(requestId)?.id;
   }
 
   private _getAgentToolStoredChunks(
@@ -4410,14 +4557,8 @@ export class AIChatAgent<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
-      scheduleRecovery: async (callback, data, reason, delaySeconds) => {
-        await this.schedule(
-          delaySeconds,
-          callback,
-          data,
-          chatRecoverySchedulePolicy(reason)
-        );
-      },
+      scheduleRecovery: (callback, data, reason, delaySeconds) =>
+        this._enqueueChatRecovery(callback, data, reason, delaySeconds),
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
@@ -4684,14 +4825,8 @@ export class AIChatAgent<
   ): ResolvedRecoveryStream {
     let streamId = "";
     if (requestId) {
-      const rows = this.sql<{ id: string }>`
-        SELECT id FROM cf_ai_chat_stream_metadata
-        WHERE request_id = ${requestId}
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (rows.length > 0) {
-        streamId = rows[0].id;
-      }
+      streamId =
+        this._resumableStream.latestStreamInfoForRequest(requestId)?.id ?? "";
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {
       streamId = this._resumableStream.activeStreamId ?? "";
@@ -4844,6 +4979,17 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
+    await this._dispatchChatRecovery(
+      "_chatRecoveryContinue",
+      data,
+      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+    );
+  }
+
+  protected async _chatRecoveryContinueDetached(
+    data?: ChatRecoveryContinueData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -4918,6 +5064,7 @@ export class AIChatAgent<
       // re-enters inference (`_repairInterruptedToolsBeforeTurn`), so the
       // recovered transcript is settled and the next `convertToModelMessages`
       // doesn't 400 with `AI_MissingToolResultsError`.
+      onTurnStarted?.();
       const result = await this.continueLastTurn();
       await this._updateChatRecoveryIncident(
         data?.incidentId,
@@ -4930,8 +5077,9 @@ export class AIChatAgent<
       );
     } catch (error) {
       // AIChatAgent otherwise has no continuation `catch` (a thrown error
-      // propagates to `Agent._executeScheduleCallback`). The ONLY case we
-      // intercept is an OOM thrown out of the turn (#1825): route it through the
+      // propagates to the driving Task attempt, or the routed one-shot
+      // schedule row). The ONLY case we intercept is an OOM thrown out of
+      // the turn (#1825): route it through the
       // tight OOM-retry budget, and rethrow everything else so the existing
       // behavior is byte-identical for non-OOM errors.
       if (await this._handleRecoveryOom("_chatRecoveryContinue", data, error)) {
@@ -5115,28 +5263,35 @@ export class AIChatAgent<
    * Two residual at-least-once edges, both deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
-   *    invocation — every production scheduler carries one): the synthesized
-   *    incident can't be persisted (no key), so the guard can't arm.
+   *    invocation — every production recovery enqueue carries one): the
+   *    synthesized incident can't be persisted (no key), so the guard can't
+   *    arm.
    *  • The record is swept AGAIN between two alarms (the guard re-persists on
    *    the first, so this needs a second independent sweep) — vanishingly
    *    unlikely.
    */
   /**
-   * Recovery continuation callbacks the alarm-boundary OOM circuit breaker may
-   * back off / purge (#1825). See `Agent._cf_handleAlarmMemoryLimitReset`.
+   * Host memory-limit policy hook (#1825), dispatched structurally by
+   * Lifecycle's circuit breaker — protected because it is framework
+   * machinery, not part of the public chat API. Tasks applies the breaker to
+   * root recovery runs; the routed dynamic-agent fallback applies it to
+   * `recoveryLoop` schedule rows (see `RecoveryLoopScheduleOptions`). At the
+   * strike budget this hook seals active incidents via
+   * {@link _cf_sealMemoryLimitedRecovery}.
    */
-  protected override _cf_recoveryAlarmCallbacks(): string[] {
-    return ["_chatRecoveryContinue", "_chatRecoveryRetry"];
+  protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
+    if (!context.sealed) return;
+    await this._cf_sealMemoryLimitedRecovery();
   }
 
   /**
-   * Seal any still-live recovery incident as an out-of-memory exhaustion when
-   * the alarm circuit breaker trips at its strike budget (#1825). Runs at the
-   * outermost alarm frame (post-unwind), so the terminal banner / `onExhausted`
-   * and the sealed-incident write can land where mid-turn writes OOMed. Reuses
-   * the shared give-up spine via the recovery engine.
+   * Seal any still-live recovery incident as an out-of-memory exhaustion
+   * when the alarm circuit breaker trips at its strike budget (#1825). Runs
+   * at the outermost alarm frame (post-unwind), so the terminal banner /
+   * `onExhausted` and the sealed-incident write can land where mid-turn
+   * writes OOMed. Reuses the shared give-up spine via the recovery engine.
    */
-  protected override async _cf_sealMemoryLimitedRecovery(): Promise<void> {
+  private async _cf_sealMemoryLimitedRecovery(): Promise<void> {
     const active = await listActiveChatRecoveryIncidents(this.ctx.storage);
     for (const { incident } of active) {
       const callback: ChatRecoveryScheduleCallback =
@@ -5252,6 +5407,17 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
+    await this._dispatchChatRecovery(
+      "_chatRecoveryRetry",
+      data,
+      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+    );
+  }
+
+  protected async _chatRecoveryRetryDetached(
+    data?: ChatRecoveryRetryData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -5322,6 +5488,7 @@ export class AIChatAgent<
       // (`_repairInterruptedToolsBeforeTurn`). The retry path normally re-runs
       // an unanswered user-message tail (no assistant orphan to repair), so that
       // is a defensive no-op here, but keeps both recovery entrypoints converged.
+      onTurnStarted?.();
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody

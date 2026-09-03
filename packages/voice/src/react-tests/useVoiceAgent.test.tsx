@@ -209,6 +209,7 @@ function TestVoiceComponent({
     result.isMuted,
     result.transcript,
     result.metrics,
+    result.turnMetrics,
     result.audioLevel,
     onResult,
     result
@@ -741,6 +742,35 @@ describe("useVoiceAgent", () => {
   });
 
   describe("voice protocol — metrics", () => {
+    it("should expose the latest stable turn summary", async () => {
+      const { getResult } = await renderHook();
+
+      await vi.waitFor(() => {
+        expect(getResult().connected).toBe(true);
+      });
+
+      act(() => {
+        fireJSON({
+          type: "turn_metrics",
+          turnId: "turn_react",
+          source: "speech",
+          outcome: "completed",
+          turnTotalMs: 125,
+          speechStartToFinalMs: 40
+        });
+      });
+
+      await vi.waitFor(() => {
+        expect(getResult().turnMetrics).toEqual({
+          turnId: "turn_react",
+          source: "speech",
+          outcome: "completed",
+          turnTotalMs: 125,
+          speechStartToFinalMs: 40
+        });
+      });
+    });
+
     it("should store pipeline metrics from server", async () => {
       const { getResult } = await renderHook();
 
@@ -954,6 +984,31 @@ describe("useVoiceAgent", () => {
         expect(
           container.querySelector('[data-testid="status"]')?.textContent
         ).toBe("idle");
+      });
+    });
+
+    it("should clear interim transcript on endCall", async () => {
+      const { getResult } = await renderHook();
+
+      await vi.waitFor(() => {
+        expect(getResult().connected).toBe(true);
+      });
+      await act(async () => {
+        await getResult().startCall();
+      });
+      act(() => {
+        fireJSON({ type: "transcript_interim", text: "unfinished phrase" });
+      });
+      await vi.waitFor(() => {
+        expect(getResult().interimTranscript).toBe("unfinished phrase");
+      });
+
+      act(() => {
+        getResult().endCall();
+      });
+
+      await vi.waitFor(() => {
+        expect(getResult().interimTranscript).toBeNull();
       });
     });
 

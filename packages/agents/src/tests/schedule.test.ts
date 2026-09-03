@@ -1,7 +1,12 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
+import type { RecoveryLoopScheduleOptions } from "../schedules/types";
 import type { TestScheduleAgent } from "./agents/schedule";
 
 describe("schedule operations", () => {
@@ -193,8 +198,8 @@ describe("schedule operations", () => {
       await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
-          const past = Math.floor(Date.now() / 1000) - 1;
-          instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
+          const past = Date.now() - 1_000;
+          instance.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${scheduleId}`;
         }
       );
 
@@ -209,7 +214,7 @@ describe("schedule operations", () => {
             running: number;
             execution_started_at: number | null;
           }>`
-          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+          SELECT running, execution_started_at FROM cf_agents_jobs WHERE id = ${scheduleId}
         `;
           return result[0] ?? null;
         }
@@ -253,9 +258,9 @@ describe("schedule operations", () => {
       await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
-          const recentStart = Math.floor(Date.now() / 1000) - 5;
-          const past = Math.floor(Date.now() / 1000) - 1;
-          instance.sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${recentStart}, time = ${past} WHERE id = ${scheduleId}`;
+          const recentStart = Date.now() - 5_000;
+          const past = Date.now() - 1_000;
+          instance.sql`UPDATE cf_agents_jobs SET running = 1, execution_started_at = ${recentStart}, time = ${past} WHERE id = ${scheduleId}`;
         }
       );
 
@@ -302,14 +307,14 @@ describe("schedule operations", () => {
       const beforeState = await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
-          const past = Math.floor(Date.now() / 1000) - 1;
-          instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
+          const past = Date.now() - 1_000;
+          instance.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${scheduleId}`;
 
           const result = instance.sql<{
             running: number;
             execution_started_at: number | null;
           }>`
-          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+          SELECT running, execution_started_at FROM cf_agents_jobs WHERE id = ${scheduleId}
         `;
           return result[0] ?? null;
         }
@@ -364,7 +369,7 @@ describe("schedule operations", () => {
             running: number;
             execution_started_at: number | null;
           }>`
-          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+          SELECT running, execution_started_at FROM cf_agents_jobs WHERE id = ${scheduleId}
         `;
           return result[0] ?? null;
         }
@@ -396,6 +401,18 @@ describe("schedule operations", () => {
 
       // Clean up
       await agentStub.cancelScheduleById(scheduleId);
+    });
+  });
+
+  describe("fresh-agent schema availability", () => {
+    it("exposes the schedules table synchronously before first startup", async () => {
+      const stub = env.TestScheduleAgent.getByName(crypto.randomUUID());
+      // Construct only — no lifecycle start. The deprecated synchronous
+      // reads must work against the job queue before first startup.
+      await runInDurableObject(stub, (instance: TestScheduleAgent) => {
+        expect(instance.getSchedules()).toEqual([]);
+        expect(instance.getSchedule("missing")).toBeUndefined();
+      });
     });
   });
 
@@ -732,8 +749,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -836,8 +854,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -868,8 +887,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -921,8 +941,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -963,7 +984,8 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules WHERE type = 'interval'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
         `;
           return result[0].count;
         }
@@ -997,8 +1019,9 @@ describe("schedule operations", () => {
         agentStub,
         async (instance: TestScheduleAgent) => {
           const result = instance.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE type = 'interval' AND callback = 'intervalCallback'
+          SELECT COUNT(*) as count FROM cf_agents_jobs
+          WHERE json_extract(payload, '$.type') = 'interval'
+            AND fn = 'intervalCallback'
         `;
           return result[0].count;
         }
@@ -1068,78 +1091,172 @@ describe("schedule operations", () => {
 
   describe("alarm memory-limit circuit breaker (#1825)", () => {
     // A Durable Object memory-limit reset must NOT crash the alarm to the
-    // platform (which auto-retries forever — the OOM loop). The boundary breaker
-    // swallows it (alarm does NOT reject) so the platform stops retrying, while
-    // PRESERVING the looping row under budget so a transient spike can clear on a
-    // fresh isolate. This is a third class, distinct from defer (threw=true,
-    // preserved) and ordinary swallow (threw=false, deleted).
-    it("under budget: swallows the alarm and preserves the row (backed off)", async () => {
-      const agentStub = await getAgentByName(
-        env.TestScheduleAgent,
-        "oom-breaker-under-budget"
-      );
-      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+    // platform (which auto-retries forever — the OOM loop). The boundary
+    // breaker records a durable strike and backs off (under budget) or
+    // purges (sealed) the looping row, returns normally so the platform
+    // stops retrying, then schedules an isolate reset with the alarm retry
+    // suppressed — the next wake is the backoff alarm, on a fresh isolate.
+    // The driving RPC resolves with its result; the instance dies a tick
+    // later, so every subsequent call settles briefly and uses a fresh stub.
+    async function driveOomStrike(name: string, message: string) {
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const result = await stub.runOneShotThrowingForTest(message);
+      // Let the deferred reset land before the next stub call.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return result;
+    }
+
+    it("under budget: records a strike, preserves the row, resets the isolate", async () => {
+      const name = "oom-breaker-under-budget";
+      const result = await driveOomStrike(
+        name,
         "Durable Object's isolate exceeded its memory limit and was reset."
       );
       // Swallowed (loop broken at the boundary, platform won't auto-retry)…
-      expect(threw).toBe(false);
-      // …but the row survives so the breaker can retry it on a fresh isolate.
-      expect(remaining).toBe(1);
+      expect(result).toEqual({ threw: false, remaining: 1 });
+      // …and the fresh instance sees the durable strike and preserved row.
+      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getAlarmStrikesForTest()).toBe(1);
+      expect(
+        await fresh.getScheduleCountByTypeAndCallback(
+          "delayed",
+          "platformErrorCallbackForTest"
+        )
+      ).toBe(1);
     });
 
     it("matches a truncated memory-limit surfacing too", async () => {
-      const agentStub = await getAgentByName(
-        env.TestScheduleAgent,
-        "oom-breaker-truncated"
-      );
-      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+      const result = await driveOomStrike(
+        "oom-breaker-truncated",
         "the isolate exceeded its memory limit"
       );
-      expect(threw).toBe(false);
-      expect(remaining).toBe(1);
+      expect(result).toEqual({ threw: false, remaining: 1 });
     });
 
     it("at the strike budget: seals + purges the looping row so the loop stops", async () => {
-      const agentStub = await getAgentByName(
-        env.TestScheduleAgent,
-        "oom-breaker-seal-at-budget"
-      );
+      const name = "oom-breaker-seal-at-budget";
       const oom =
         "Durable Object's isolate exceeded its memory limit and was reset.";
       // Default maxAlarmMemoryLimitStrikes = 3. Strikes 1 and 2 preserve the
       // row (backed off); strike 3 hits the budget and purges it.
-      const first = await agentStub.runOneShotThrowingForTest(oom);
-      expect(first).toEqual({ threw: false, remaining: 1 });
-      const second = await agentStub.runOneShotThrowingForTest(oom);
-      expect(second).toEqual({ threw: false, remaining: 1 });
-      const third = await agentStub.runOneShotThrowingForTest(oom);
-      // Sealed: the executing row is purged so it can never re-trigger.
-      expect(third).toEqual({ threw: false, remaining: 0 });
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      // Sealed: the executing row is purged so it can never re-trigger, and
+      // the strike counter is cleared for the fresh instance.
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 0
+      });
+      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getAlarmStrikesForTest()).toBe(0);
+    });
+
+    it("seals recovery through the legacy chat-host hook when no new host hook exists", async () => {
+      const name = `oom-breaker-legacy-host-${crypto.randomUUID()}`;
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      await runInDurableObject(stub, async (_instance, state) => {
+        await state.storage.put("cf_agents:oom_alarm_strikes", 2);
+      });
+
+      expect(
+        await driveOomStrike(
+          name,
+          "Durable Object's isolate exceeded its memory limit and was reset."
+        )
+      ).toEqual({ threw: false, remaining: 0 });
+
+      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getLegacyMemoryLimitSealsForTest()).toBe(1);
+    });
+
+    it("backs off pending recovery-loop schedules with the strike and purges them at seal", async () => {
+      const name = "oom-breaker-recovery-loop-pack";
+      const oom =
+        "Durable Object's isolate exceeded its memory limit and was reset.";
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      // A flagged sibling row due before the ~30s backoff wake (but far
+      // enough out that it cannot fire on its own mid-test), and an
+      // unflagged control the breaker must never touch.
+      const flaggedId = await stub.createRecoveryLoopSchedule(20);
+      const controlId = await stub.createSchedule(3600);
+
+      // Strike 1: the flagged row travels with the strike — backed off past
+      // the ~30s backoff wake instead of re-triggering the doomed loop.
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      let fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const backedOff = await fresh.getStoredScheduleById(flaggedId);
+      expect(backedOff).toBeDefined();
+      expect((backedOff?.time ?? 0) * 1000).toBeGreaterThan(
+        Date.now() + 20_000
+      );
+
+      // Strikes 2 and 3: sealing purges every flagged row…
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 0
+      });
+      fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getStoredScheduleById(flaggedId)).toBeUndefined();
+      // …while unrelated schedules survive untouched.
+      expect(await fresh.getStoredScheduleById(controlId)).toBeDefined();
+      await fresh.cancelScheduleById(controlId);
+    });
+
+    it("a memory-limit reset during startup hydration is broken by the breaker", async () => {
+      // The exact #1825 boot-hydration case: the reset is thrown before any
+      // job runs. Initialization runs inside the breaker, so the alarm must
+      // resolve (no platform auto-retry) and record a durable strike.
+      const name = "oom-breaker-startup";
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      await stub.createSchedule(60);
+      await runInDurableObject(stub, async (_instance, ctx) => {
+        await ctx.storage.put("oomOnStartRemaining", 1);
+        await ctx.storage.setAlarm(Date.now() + 1000);
+      });
+      await evictDurableObject(stub);
+
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getAlarmStrikesForTest()).toBe(1);
     });
 
     it("a clean alarm resets the strike counter (consecutive, not lifetime)", async () => {
-      const agentStub = await getAgentByName(
-        env.TestScheduleAgent,
-        "oom-breaker-reset-on-success"
-      );
+      const name = "oom-breaker-reset-on-success";
       const oom =
         "Durable Object's isolate exceeded its memory limit and was reset.";
       // One OOM records a strike and backs the row off (preserved).
-      expect(await agentStub.runOneShotThrowingForTest(oom)).toEqual({
+      expect(await driveOomStrike(name, oom)).toEqual({
         threw: false,
         remaining: 1
       });
-      expect(await agentStub.getAlarmStrikesForTest()).toBe(1);
+      let fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getAlarmStrikesForTest()).toBe(1);
       // A clean alarm clears the counter so spikes must be CONSECUTIVE to seal.
-      await agentStub.runCleanAlarmForTest();
-      expect(await agentStub.getAlarmStrikesForTest()).toBe(0);
+      await fresh.runCleanAlarmForTest();
+      expect(await fresh.getAlarmStrikesForTest()).toBe(0);
       // A later OOM therefore starts again at strike 1 (not accumulating toward
       // the budget across healthy runs).
-      expect(await agentStub.runOneShotThrowingForTest(oom)).toEqual({
+      expect(await driveOomStrike(name, oom)).toEqual({
         threw: false,
         remaining: 1
       });
-      expect(await agentStub.getAlarmStrikesForTest()).toBe(1);
+      fresh = await getAgentByName(env.TestScheduleAgent, name);
+      expect(await fresh.getAlarmStrikesForTest()).toBe(1);
     });
 
     it("a non-memory error still rejects/ swallows as before (breaker is OOM-only)", async () => {
@@ -1157,6 +1274,141 @@ describe("schedule operations", () => {
           "Durable Object reset because its code was updated."
         )
       ).toEqual({ threw: true, remaining: 1 });
+    });
+  });
+
+  describe("legacy schedule migration keeps breaker membership (#1825)", () => {
+    // Same shape as the breaker suite's helper: drive one OOM strike and let
+    // the deferred isolate reset land before the next stub call.
+    async function driveOomStrike(name: string, message: string) {
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const result = await stub.runOneShotThrowingForTest(message);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return result;
+    }
+
+    // Rows migrated from the legacy cf_agents_schedules table predate the
+    // job queue's recovery_loop flag. Chat-recovery rows must come out of the
+    // migration flagged — an unflagged survivor would escape the alarm
+    // memory-limit breaker and could re-trigger the doomed loop it drives.
+    it("flags migrated chat-recovery rows and drives them through backoff and seal", async () => {
+      const name = "legacy-migration-recovery-loop";
+      const oom =
+        "Durable Object's isolate exceeded its memory limit and was reset.";
+      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      await runInDurableObject(stub, async (_instance, ctx) => {
+        ctx.storage.sql.exec(`
+          CREATE TABLE cf_agents_schedules (
+            id TEXT PRIMARY KEY,
+            callback TEXT,
+            payload TEXT,
+            type TEXT,
+            time INTEGER,
+            delayInSeconds INTEGER
+          )
+        `);
+        const nowSec = Math.floor(Date.now() / 1000);
+        ctx.storage.sql.exec(
+          `INSERT INTO cf_agents_schedules
+             (id, callback, payload, type, time, delayInSeconds)
+           VALUES
+             ('legacy-rec-near', '_chatRecoveryContinue', '{"incidentId":"i1"}', 'delayed', ?, 20),
+             ('legacy-rec-far', '_chatRecoveryRetry', '{"incidentId":"i2"}', 'delayed', ?, 3600),
+             ('legacy-plain', 'testCallback', '"x"', 'delayed', ?, 3600)`,
+          nowSec + 20,
+          nowSec + 3600,
+          nowSec + 3600
+        );
+        await ctx.storage.delete("cf_agents:schedules_schema_version");
+      });
+      await evictDurableObject(stub);
+
+      // Any RPC restarts the object; startup runs the migration.
+      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const flags = await runInDurableObject(
+        fresh,
+        async (instance: TestScheduleAgent) =>
+          instance.sql<{ id: string; recovery_loop: number }>`
+            SELECT id, recovery_loop FROM cf_agents_jobs
+            WHERE id IN ('legacy-rec-near', 'legacy-rec-far', 'legacy-plain')
+            ORDER BY id
+          `
+      );
+      expect(flags).toEqual([
+        { id: "legacy-plain", recovery_loop: 0 },
+        { id: "legacy-rec-far", recovery_loop: 1 },
+        { id: "legacy-rec-near", recovery_loop: 1 }
+      ]);
+
+      // Strike 1 (unsealed): the near migrated row is backed off past the
+      // strike's ~30s backoff wake instead of re-triggering the loop.
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      let survivor = await getAgentByName(env.TestScheduleAgent, name);
+      const near = await runInDurableObject(
+        survivor,
+        async (instance: TestScheduleAgent) =>
+          instance.sql<{ time: number }>`
+            SELECT time FROM cf_agents_jobs WHERE id = 'legacy-rec-near'
+          `
+      );
+      expect(near[0].time).toBeGreaterThan(Date.now() + 20_000);
+
+      // Strikes 2 and 3: sealing purges both migrated recovery rows while
+      // the unrelated migrated schedule survives.
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 1
+      });
+      expect(await driveOomStrike(name, oom)).toEqual({
+        threw: false,
+        remaining: 0
+      });
+      survivor = await getAgentByName(env.TestScheduleAgent, name);
+      const after = await runInDurableObject(
+        survivor,
+        async (instance: TestScheduleAgent) =>
+          instance.sql<{ id: string }>`
+            SELECT id FROM cf_agents_jobs
+            WHERE id IN ('legacy-rec-near', 'legacy-rec-far', 'legacy-plain')
+          `
+      );
+      expect(after.map((row) => row.id)).toEqual(["legacy-plain"]);
+    });
+
+    it("an idempotent recovery re-schedule restores membership on an unflagged row", async () => {
+      // The deploy-storm dedup path: an initial recovery schedule dedupes
+      // onto an existing matching row. When that row lost its flag (legacy
+      // migration ran before this fix, or any historical write), the dedup
+      // hit must restore breaker membership rather than return it unflagged
+      // forever.
+      const stub = await getAgentByName(
+        env.TestScheduleAgent,
+        "dedup-restores-recovery-flag"
+      );
+      await runInDurableObject(stub, async (instance: TestScheduleAgent) => {
+        const first = await instance.schedule(60, "testCallback", "seed", {
+          idempotent: true
+        });
+        const flagged: RecoveryLoopScheduleOptions = {
+          idempotent: true,
+          recoveryLoop: true
+        };
+        const second = await instance.schedule(
+          60,
+          "testCallback",
+          "seed",
+          flagged
+        );
+        expect(second.id).toBe(first.id);
+        const rows = instance.sql<{ recovery_loop: number }>`
+          SELECT recovery_loop FROM cf_agents_jobs WHERE id = ${first.id}
+        `;
+        expect(rows[0].recovery_loop).toBe(1);
+        await instance.cancelSchedule(first.id);
+      });
     });
   });
 

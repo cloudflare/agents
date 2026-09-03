@@ -140,7 +140,7 @@ packages/*/docs
 
 # cloudflare/wrangler
 .wrangler
-.wrangler-*-state
+.wrangler-*
 .dev.vars
 
 # e2e recovery harness miniflare/SQLite state

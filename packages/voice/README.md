@@ -131,7 +131,7 @@ function App() {
     status, // "idle" | "listening" | "thinking" | "speaking"
     transcript, // TranscriptMessage[]
     interimTranscript, // string | null (real-time partial transcript)
-    metrics, // VoicePipelineMetrics | null
+    turnMetrics, // VoiceTurnMetrics | null (latest stable terminal summary)
     audioLevel, // number (0-1)
     isMuted, // boolean
     connected, // boolean
@@ -163,8 +163,15 @@ For voice input only:
 ```tsx
 import { useVoiceInput } from "@cloudflare/voice/react";
 
-const { transcript, interimTranscript, isListening, start, stop, clear } =
-  useVoiceInput({ agent: "DictationAgent" });
+const {
+  transcript,
+  interimTranscript,
+  turnMetrics,
+  isListening,
+  start,
+  stop,
+  clear
+} = useVoiceInput({ agent: "DictationAgent" });
 ```
 
 ## Client: vanilla JavaScript

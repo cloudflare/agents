@@ -8,6 +8,22 @@ export class TestCallableAgent extends Agent<
 > {
   initialState = { value: 0 };
 
+  // Served over BOTH wires: natively on the legacy JSON RPC protocol
+  // and, via the decorator-fallback target, on the WebSockets
+  // capability's Cap'n Web endpoint.
+  @callable()
+  multiply(a: number, b: number): number {
+    return a * b;
+  }
+
+  // For client call-timeout tests over the Cap'n Web endpoint.
+  @callable()
+  slowConfig(): Promise<string> {
+    return new Promise<string>((resolve) =>
+      setTimeout(() => resolve("done"), 60_000)
+    );
+  }
+
   // Basic sync method
   @callable()
   add(a: number, b: number): number {

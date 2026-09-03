@@ -24,9 +24,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { MCPClientManager } from "agents/mcp/client";
 
 export class MyObject extends DurableObject<Env> {
-  readonly mcp = new MCPClientManager("my-object", "1.0.0", {
-    storage: this.ctx.storage
-  });
+  readonly mcp = new MCPClientManager("my-object", "1.0.0");
 
   readonly lifecycle = Lifecycle.install(this).use(this.mcp);
 
@@ -59,8 +57,7 @@ resolved after a wake:
 
 ```ts
 readonly mcp = new MCPClientManager("my-object", "1.0.0", {
-  env: this.env,
-  storage: this.ctx.storage
+  env: this.env
 });
 ```
 

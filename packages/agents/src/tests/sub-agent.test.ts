@@ -1517,6 +1517,39 @@ describe("SubAgent", () => {
       expect(error).toBe("");
     });
 
+    it("routes a fresh-context facet broadcast through the root", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const ws = await connectWS(
+        `/agents/test-sub-agent-parent/${parentName}/sub/broadcast-sub-agent/${childName}`
+      );
+      try {
+        await waitForJsonMessage<{ type: MessageType }>(
+          ws,
+          (data) => data.type === MessageType.CF_AGENT_STATE
+        );
+
+        const expected = {
+          type: "fresh-context-facet-broadcast",
+          value: crypto.randomUUID()
+        };
+        const received = waitForJsonMessage<typeof expected>(
+          ws,
+          (data) => data.type === expected.type && data.value === expected.value
+        );
+
+        const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+        await parent.subAgentRelayBroadcastFromFreshContext(
+          childName,
+          JSON.stringify(expected)
+        );
+
+        await expect(received).resolves.toEqual(expected);
+      } finally {
+        ws.close();
+      }
+    });
+
     it("should persist state when setState is called in a sub-agent", async () => {
       const name = uniqueName();
       const agent = await getAgentByName(env.TestSubAgentParent, name);

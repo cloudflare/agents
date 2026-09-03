@@ -601,6 +601,94 @@ Each agent is accessed via its own path:
 
 ---
 
+## Routing to independent Agents
+
+A hub Agent often owns an open-ended set of independent peers: one Durable Object per chat, document, or session for a user. `RoutedAgents` from `agents/routing` codifies that topology as a Lifecycle capability. The hub keeps a durable catalog of public IDs mapped to opaque physical names, and forwards requests under one route segment to the selected Agent:
+
+```typescript
+import { Agent, callable, routeAgentRequest } from "agents";
+import { RoutedAgents } from "agents/routing";
+
+export class ChatAgent extends Agent<Env> {
+  // An ordinary top-level Agent: its own storage, alarms, and placement.
+}
+
+export class UserAgent extends Agent<Env> {
+  readonly chats = new RoutedAgents<ChatAgent, { title: string }>({
+    namespace: this.env.ChatAgent,
+    route: "chats"
+  });
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.chats);
+  }
+
+  @callable()
+  createChat(title: string) {
+    return this.chats.create({ metadata: { title } });
+  }
+
+  @callable()
+  listChats() {
+    return this.chats.list();
+  }
+
+  @callable()
+  deleteChat(id: string) {
+    return this.chats.delete(id);
+  }
+}
+
+export default {
+  async fetch(request: Request, env: Env) {
+    // Routes both /agents/user-agent/{id} and the forwarded
+    // /agents/user-agent/{id}/chats/{id}/... paths — RoutedAgents claims
+    // the latter from inside UserAgent once the request reaches it.
+    return (
+      (await routeAgentRequest(request, env)) ??
+      new Response("Not found", { status: 404 })
+    );
+  }
+} satisfies ExportedHandler<Env>;
+```
+
+The client keeps one connection to the hub and one to the active chat, both addressed through the hub:
+
+```
+/agents/user-agent/alice                    -> UserAgent "alice"
+/agents/user-agent/alice/chats/{id}         -> the ChatAgent behind that entry
+/agents/user-agent/alice/chats/{id}/...     -> same ChatAgent, suffix preserved
+```
+
+```tsx
+const user = useAgent({ agent: "UserAgent", name: "alice" });
+const chat = useAgent({
+  agent: "ChatAgent",
+  basePath: `agents/user-agent/alice/chats/${encodeURIComponent(chatId)}`
+});
+```
+
+What the capability guarantees:
+
+- `create()`, `list()`, and `setMetadata()` touch only the hub's SQLite. No target wakes.
+- `list()` orders most-recently-updated first, ties broken by write order rather than by the random entry ID. Each write scans the route's own entries to derive that order — an intentional trade for a route sized like one owner's own catalog, not a route meant to hold thousands of entries.
+- `get(id)` returns an initialized, typed stub for RPC, or `null` for an unknown or deleted ID.
+- A WebSocket upgrade is answered by the target, which then owns the socket. Chat frames never wake the hub. This is the same two-socket shape as connecting to the chat directly, but the hub stays the authority that resolves an ID, so it can gate, migrate, or redirect entries later.
+- `delete(id)` hides the entry first, condemns the target, then removes the row. The target wipes its own storage on its next wake, moments later, and the condemned marker survives interruption. A failed call leaves a hidden row, and calling `delete` again retries.
+- Physical names are random UUIDs that never leave the hub. Clients only ever see entry IDs.
+- `namespace` is any `DurableObjectNamespace`, including a binding to a class exported by another Worker via `script_name`, so the hub and its targets can be deployed and scaled independently.
+- Destroying the hub retries condemning every remaining entry before its own storage is wiped, but this is best-effort: the platform wipes the hub's storage right after disposal regardless of outcome, so a target that is still unreachable after retries is orphaned, with no catalog row left to retry from later.
+
+The catalog stores existence, ownership, and application metadata. Conversation data stays in the target, and a target that needs its hub calls back with `getAgentByName(this.env.UserAgent, ownerName)`. When to prefer this over facets is covered in [Dynamic agents](./sub-agents.md#when-to-use-dynamic-agents).
+
+Two sharp edges to design around:
+
+- **Pick a route that can't collide.** Forwarding matches every occurrence of the route segment anywhere in the path, so if the hub's own name, class, or another one of its own routes is also literally `"chats"`, a coincidental match with no active entry behind it returns `404` instead of reaching the hub's own handler for that path.
+- **A routed suffix can't address a target's own dynamic agents.** `Agent.fetch()` resolves a `/sub/{class}/{name}` marker against the _hub's_ exported classes before this capability's request handling ever runs, so `/chats/{id}/sub/{class}/{name}` is served as a facet of the hub, not forwarded to the chat. Reach a target's dynamic agents through a direct connection to that target instead of through the hub's route.
+
+---
+
 ## Routing with Authentication
 
 Check authentication before routing to agents:
@@ -736,6 +824,23 @@ Get an agent instance by name for server-side RPC or request forwarding.
 | `options.props`        | `Record<string, unknown>`   | Initialization properties for `onStart` |
 
 **Returns:** `Promise<DurableObjectStub<T>>` - Typed stub for calling agent methods or forwarding requests
+
+### `new RoutedAgents(options)` (from `agents/routing`)
+
+A Lifecycle capability installed on a hub Agent with `this.lifecycle.use(...)`. See [Routing to independent Agents](#routing-to-independent-agents).
+
+| Parameter           | Type                        | Description                                      |
+| ------------------- | --------------------------- | ------------------------------------------------ |
+| `options.namespace` | `DurableObjectNamespace<T>` | Target binding the entries are created in        |
+| `options.route`     | `string`                    | One URL-safe path segment this capability claims |
+
+| Method                      | Returns                                              | Description                                           |
+| --------------------------- | ---------------------------------------------------- | ----------------------------------------------------- |
+| `create(options?)`          | `Promise<RoutedAgentEntry<Metadata>>`                | Create an entry without waking the target             |
+| `get(id)`                   | `Promise<DurableObjectStub<T> \| null>`              | Resolve an active entry to an initialized stub        |
+| `list()`                    | `Promise<ReadonlyArray<RoutedAgentEntry<Metadata>>>` | Active entries, most recently updated first           |
+| `setMetadata(id, metadata)` | `Promise<boolean>`                                   | Replace an active entry's metadata                    |
+| `delete(id)`                | `Promise<boolean>`                                   | Hide the entry, condemn the target, then drop the row |
 
 ### `useAgent(options)` / `AgentClient` Options
 

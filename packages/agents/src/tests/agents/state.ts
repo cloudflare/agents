@@ -1,5 +1,5 @@
 import { Agent, type AgentContext, type Connection } from "../../index.ts";
-import { MCPConnectionState } from "../../mcp/client-connection.ts";
+import { MCPConnectionState } from "../../mcp/client/connection.ts";
 
 // Test Agent for state management tests
 export type TestState = {
@@ -124,8 +124,8 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     return rows[0].cnt > 0;
   }
 
-  dropInternalTablesForDestroyTest(): string[] {
-    this._dropInternalTablesForDestroy();
+  async dropInternalTablesForDestroyTest(): Promise<string[]> {
+    await this.ctx.storage.deleteAll();
     const rows = this.ctx.storage.sql
       .exec(
         "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cf_agents_%' ORDER BY name"

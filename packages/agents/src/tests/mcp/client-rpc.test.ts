@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MCPClientManager } from "../../mcp/client";
-import { restoreRpcConnections } from "../../mcp/client-rpc";
-import type { MCPServerRow } from "../../mcp/client-storage";
+import { restoreRpcConnections } from "../../mcp/client/rpc";
+import type { MCPServerRow } from "../../mcp/client/storage";
 
 const server: MCPServerRow = {
   id: "rpc-server",

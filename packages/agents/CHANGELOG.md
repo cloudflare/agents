@@ -1,5 +1,58 @@
 # @cloudflare/agents
 
+## 0.22.0
+
+### Minor Changes
+
+- [#2071](https://github.com/cloudflare/agents/pull/2071) [`9620b58`](https://github.com/cloudflare/agents/commit/9620b58fcc78035e1dd9a65a647455f83328bc28) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Make durable chat recovery unconditional for `AIChatAgent` and `Think`.
+
+  Every chat turn now runs in a recovery fiber, including WebSocket, programmatic, retry, and continuation paths. `chatRecovery` accepts `true` or a configuration object; `false` is no longer supported. Previously compiled JavaScript that still supplies `false` safely receives the default recovery configuration.
+
+  To keep durable bookkeeping while preventing automatic inference after an interruption, return `{ continue: false }` from `onChatRecovery()`. Use durable cancellation, side-effect, or spend state in that hook and tune `chatRecovery` budgets when retries must be bounded.
+
+- [#2133](https://github.com/cloudflare/agents/pull/2133) [`d536067`](https://github.com/cloudflare/agents/commit/d536067ce69dfbe82db6c31f4b4d5042792088de) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Vendor the required PartyServer runtime into `agents/lifecycle` and add a reusable Durable Object lifecycle for startup, request interception, alarms, and WebSockets. `Agent` now directly extends Cloudflare's `DurableObject` and composes the same lifecycle used by standalone objects; standalone hosts use the explicit `Lifecycle.install(this)` factory (or the expanded `new ...` plus `installHandlers()` form). Both Agent subclasses and standalone hosts use the existing `routeAgentRequest()` API and `/agents` URL prefix; the lifecycle entry point does not introduce a second public router.
+
+  Lifecycle WebSockets always use Cloudflare's Hibernation API; the `static options.hibernate` switch and in-memory connection mode are removed. Named Durable Objects use native `ctx.id.name`, while a read-only `__ps_name` fallback migrates objects created by older releases without writing new compatibility state.
+
+- [#2058](https://github.com/cloudflare/agents/pull/2058) [`381b9bb`](https://github.com/cloudflare/agents/commit/381b9bb319e2123771eaa82ad485d0f2d28652f1) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Throttle chat UI updates by default in `useAgentChat`
+
+  Streaming writes chat state once per chunk, and each write re-renders. When
+  chunks arrive in a burst — a resumed stream replaying a long turn, for
+  example — React reaches its 50-render limit and throws "Maximum update depth
+  exceeded", which the AI SDK reports as a failed turn even though the server
+  completed it ([#1913](https://github.com/cloudflare/agents/issues/1913)).
+
+  `useAgentChat` now coalesces those updates every 50ms, which removes about 78%
+  of renders on a fast stream and matches the value the AI SDK documents. The
+  first chunk of a stream is never delayed. Pass `throttle: false` to render
+  every chunk as it arrives, or a number to change the interval. The deprecated
+  `experimental_throttle` is still honoured. Message snapshots, functional
+  updates, and streamed continuations resolve against the current chat store, so
+  coalescing renders cannot roll assistant content back to an older snapshot.
+
+- [#1897](https://github.com/cloudflare/agents/pull/1897) [`29b0107`](https://github.com/cloudflare/agents/commit/29b01079e4cf1ae82918b019f97a247317f49912) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `Scheduler`, a reusable Lifecycle capability for persistent delayed, dated, cron, and interval callbacks, under `agents/schedules`. Scheduled callbacks are registered on the Scheduler itself (`new Scheduler({ callbacks: { ... } })`), and `set()` / `every()` type both the callback name and the payload against that registration, so the typed scheduling surface and the runtime dispatch target are the same object. `LifecycleCapability` supplies every capability with storage, readiness, startup state, alarm coordination, a host invocation boundary, best-effort events, and generic capability routing — Scheduler consumes only that standard surface plus its callbacks and policy options, so any host that installs it configures nothing else. Lifecycle owns the physical Durable Object alarm and routes matching capability messages between Agent facets through one internal transport aperture, preserving existing root-owned facet schedule rows without Scheduler-specific Agent RPC methods or an Agent adapter. `Agent` uses the same Scheduler behind its existing APIs — name-based `this.schedule(60, "methodName")` keeps dispatching to Agent methods through a composition-root resolver — and preserves callback context, observability, retries, OOM handling, and alarm behavior. MCP now receives storage from Lifecycle when installed. Explicit destruction disposes live capability resources once, then clears shared Durable Object storage with `deleteAll()`. Think workflow notifications now contribute their wake time through Lifecycle instead of writing the physical alarm directly. The previous `agents/schedule` parser entry point remains as a deprecated compatibility alias. Agent exposes the composition root as experimental `this.lifecycle` and `this.scheduler` properties. The `agents/lifecycle` entry point and the capability surfaces built on it (`Scheduler`, installing `MCPClientManager` directly as a capability) are experimental and may change between releases; Agent's established APIs are unaffected.
+
+  Compatibility notes: `MCPClientManagerOptions.storage` is removed — the manager receives storage from the Lifecycle it is installed on, so standalone construction with an explicit `DurableObjectStorage` is no longer supported. Scheduled callbacks now receive the documented parsed `Schedule` object as their second argument (previously the raw storage row, whose `payload` was an unparsed JSON string). The internal `_cf_*ForFacet` schedule RPC methods are replaced by the generic `_cf_routeLifecycle` capability aperture; facets always run the same deployed script, so no coordination is required.
+
+- [#2161](https://github.com/cloudflare/agents/pull/2161) [`ded09c6`](https://github.com/cloudflare/agents/commit/ded09c6f7b35326b8907ae3552ce9228b88089d2) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Remove the published `agents` command-line binary. Its advertised `init`, `dev`, `deploy`, and `mcp` commands were placeholders that printed "not implemented yet" and exited successfully. Use the documented C3 starter, Vite and Wrangler commands, and MCP APIs instead.
+
+- [#1895](https://github.com/cloudflare/agents/pull/1895) [`4ba9a37`](https://github.com/cloudflare/agents/commit/4ba9a375208c2e8209fb407aa3567553e3644067) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Make `MCPClientManager` a reusable Durable Object lifecycle capability. It now owns schema initialization, persisted HTTP and RPC connection restoration, and OAuth callback interception when installed with `Lifecycle.use()`, while preserving `Agent.this.mcp` and the existing Agent MCP APIs. `agents/lifecycle` exports the `LifecycleObject` host interface and canonical `getCurrentAgent()` accessor; Lifecycle supplies that context to host hooks while capability hooks remain self-contained.
+
+### Patch Changes
+
+- [#2027](https://github.com/cloudflare/agents/pull/2027) [`e87ad62`](https://github.com/cloudflare/agents/commit/e87ad62bb6df735cc2910f7dc20edd62111b6410) Thanks [@cjol](https://github.com/cjol)! - Route asynchronous callable and streaming responses through the facet WebSocket frame that originated each RPC.
+
+- [#1978](https://github.com/cloudflare/agents/pull/1978) [`b7c7696`](https://github.com/cloudflare/agents/commit/b7c76964b329b9b5911c0c9a34b8b0f514fffafd) Thanks [@Ankcorn](https://github.com/Ankcorn)! - Add Agents SDK instrumentation and agent instance identity attributes to SDK-created spans.
+
+- [#2050](https://github.com/cloudflare/agents/pull/2050) [`3b43c33`](https://github.com/cloudflare/agents/commit/3b43c337f468688f30d7ea0ff78fdff37d9a5163) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Batch replayed chunks during stream resume so long turns do not exceed React's
+  update limit and report a false error.
+
+- [#2120](https://github.com/cloudflare/agents/pull/2120) [`b038440`](https://github.com/cloudflare/agents/commit/b0384407915cacc9d81951e369466feae4389db0) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Keep Session compaction overlays scoped to their selected conversation branch and preserve deterministic ordering for overlays created in the same second.
+
+- [#2090](https://github.com/cloudflare/agents/pull/2090) [`2f957bc`](https://github.com/cloudflare/agents/commit/2f957bc2a3ffb7aee14792bb3cb658ad3176ed93) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Keep sub-agent WebSocket operations routable and ordered across live and delayed contexts and before broadcasts, report routing failures, and preserve nested sub-agent broadcasts across RPC callbacks.
+
+- [#2131](https://github.com/cloudflare/agents/pull/2131) [`bf94bb2`](https://github.com/cloudflare/agents/commit/bf94bb2f8242f2ad46f6c6c88e56ee5e196cc706) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Fall back to no-op tracing when an older Workers runtime exposes tracing without `startActiveSpan`, preventing Agent initialization from failing.
+
 ## 0.21.0
 
 ### Minor Changes

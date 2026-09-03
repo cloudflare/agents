@@ -405,7 +405,7 @@ describe("runFiber", () => {
   // ── Recovery follow-up alarm (re-arm + backoff) ───────────────
   //
   // Fast, deterministic coverage of the alarm-scheduling behavior that backs
-  // multi-pass fiber recovery. These drive `_checkRunFibers` + `_scheduleNextAlarm`
+  // multi-pass fiber recovery. These drive `_checkRunFibers` + `_syncHostJobs`
   // directly (no process kill / timers) and inspect the physical alarm, so the
   // starvation re-arm and the exponential backoff are guarded on every PR rather
   // than only by the nightly e2e suite.
@@ -419,7 +419,7 @@ describe("runFiber", () => {
 
       // No keepAlive lease, no schedules, no facet runs: the ONLY reason to arm
       // an alarm here is the pending (retained) recovery row. Before the
-      // starvation fix `_scheduleNextAlarm` left this null and the orphan
+      // starvation fix `_syncHostJobs` left this null and the orphan
       // starved.
       await agent.insertInterruptedFiber(
         "poison-1",

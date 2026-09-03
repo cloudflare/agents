@@ -9,6 +9,11 @@ import type {
   TranscriberSession,
   TranscriberSessionOptions
 } from "@cloudflare/voice";
+import {
+  logVoiceError,
+  toVoiceError,
+  VoiceProviderError
+} from "@cloudflare/voice/errors";
 
 /**
  * Latency/accuracy preset → `mode`. `balanced` (the server default) is best for
@@ -329,6 +334,7 @@ class AssemblyAISession implements TranscriberSession {
   #ws: WebSocket | null = null;
   #connected = false;
   #closed = false;
+  #fatalReported = false;
   #ready: Promise<void>;
   #readyResolve!: () => void;
   #readyReject!: (error: Error) => void;
@@ -381,10 +387,20 @@ class AssemblyAISession implements TranscriberSession {
       const ws = (resp as unknown as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
         // Auth and config failures arrive as a plain HTTP response (e.g. 401)
-        // instead of an upgrade — surface the status and body.
-        const body = await resp.text().catch(() => "");
-        const message = `AssemblyAISTT: failed to establish WebSocket connection (HTTP ${resp.status})${body ? `: ${body.slice(0, 300)}` : "."}`;
-        console.error(message);
+        // instead of an upgrade. Preserve status, but never read or log the
+        // arbitrary provider response body.
+        const message = `AssemblyAISTT: failed to establish WebSocket connection (HTTP ${resp.status}).`;
+        const error = new VoiceProviderError(
+          "AssemblyAI WebSocket upgrade failed",
+          { status: resp.status }
+        );
+        logVoiceError({
+          component: "AssemblyAISTT",
+          stage: "connection",
+          message: "AssemblyAI WebSocket upgrade failed",
+          error
+        });
+        this.#reportFatal(error);
         this.#rejectReady(new Error(message));
         this.#closed = true;
         return;
@@ -412,24 +428,38 @@ class AssemblyAISession implements TranscriberSession {
             "AssemblyAISTT: WebSocket closed before connection established."
           )
         );
-        // Surface an unexpected close — fatal failures (auth `1008`, session
-        // errors `3xxx`, network drops) arrive only as close frames, since the
-        // shared `TranscriberSession` interface has no error callback. Skip
-        // teardown we initiated (`close()`) and clean `1000` closures.
-        if (!this.#closed && event.code !== 1000) {
-          console.error(
-            `[AssemblyAISTT] WebSocket closed: code=${event.code} reason=${event.reason || "(none)"}`
+        if (!this.#closed) {
+          const error = new VoiceProviderError(
+            "AssemblyAI WebSocket closed unexpectedly",
+            {
+              closeCode: event.code,
+              closeReason: event.reason,
+              wasClean: event.wasClean
+            }
           );
+          logVoiceError({
+            component: "AssemblyAISTT",
+            stage: "websocket_close",
+            message: "AssemblyAI WebSocket closed unexpectedly",
+            error
+          });
+          this.#reportFatal(error);
         }
       });
       ws.addEventListener("error", (event: Event) => {
-        console.error("[AssemblyAISTT] WebSocket error:", event);
+        logVoiceError({
+          component: "AssemblyAISTT",
+          stage: "websocket",
+          message: "AssemblyAI WebSocket error",
+          error: new Error("AssemblyAI WebSocket error", { cause: event })
+        });
         this.#connected = false;
-        this.#rejectReady(
-          new Error(
-            "AssemblyAISTT: WebSocket error before connection established."
-          )
+        const error = new Error(
+          "AssemblyAISTT: WebSocket error before connection established.",
+          { cause: event }
         );
+        this.#reportFatal(error);
+        this.#rejectReady(error);
       });
 
       // Apply any agent_context queued before the socket was ready, then flush
@@ -442,11 +472,17 @@ class AssemblyAISession implements TranscriberSession {
       this.#pendingChunks = [];
       this.#pendingBytes = 0;
       this.#resolveReady();
-    } catch (err) {
-      console.error("[AssemblyAISTT] Connection error:", err);
-      const message = err instanceof Error ? err.message : String(err);
+    } catch (error) {
+      const voiceError = toVoiceError(error, "AssemblyAI connection failed");
+      logVoiceError({
+        component: "AssemblyAISTT",
+        stage: "connection",
+        message: "AssemblyAI connection failed",
+        error: voiceError
+      });
+      this.#reportFatal(voiceError);
       this.#rejectReady(
-        new Error(`AssemblyAISTT: connection failed: ${message}`)
+        new Error(`AssemblyAISTT: connection failed: ${voiceError.message}`)
       );
       this.#closed = true;
     }
@@ -464,6 +500,12 @@ class AssemblyAISession implements TranscriberSession {
     this.#readyReject(error);
   }
 
+  #reportFatal(error: Error): void {
+    if (this.#closed || this.#fatalReported) return;
+    this.#fatalReported = true;
+    this.#sessionOpts?.onFatalError?.(error);
+  }
+
   feed(chunk: ArrayBuffer): void {
     if (this.#closed) return;
     if (this.#connected && this.#ws) {
@@ -473,9 +515,12 @@ class AssemblyAISession implements TranscriberSession {
     if (this.#pendingBytes + chunk.byteLength > MAX_PENDING_BYTES) {
       if (!this.#pendingOverflowLogged) {
         this.#pendingOverflowLogged = true;
-        console.error(
-          "[AssemblyAISTT] Pending audio buffer full — dropping audio until the socket connects."
-        );
+        logVoiceError({
+          component: "AssemblyAISTT",
+          stage: "audio_buffer",
+          message: "AssemblyAI pending audio buffer full",
+          error: new Error("Dropping audio until the socket connects")
+        });
       }
       return;
     }
@@ -519,9 +564,14 @@ class AssemblyAISession implements TranscriberSession {
   #wsSend(data: ArrayBuffer | string): void {
     try {
       this.#ws?.send(data);
-    } catch (err) {
+    } catch (error) {
       if (!this.#closed) {
-        console.error("[AssemblyAISTT] WebSocket send failed:", err);
+        logVoiceError({
+          component: "AssemblyAISTT",
+          stage: "websocket_send",
+          message: "AssemblyAI WebSocket send failed",
+          error: toVoiceError(error, "AssemblyAI WebSocket send failed")
+        });
       }
     }
   }
@@ -638,18 +688,27 @@ class AssemblyAISession implements TranscriberSession {
     }
 
     // The server reports failures as an Error message before closing the
-    // socket — without logging it, only the (less specific) close code
-    // survives. The shared TranscriberSession interface has no error callback,
-    // so the console is the only surface.
+    // socket. Report it immediately; the later close is deduplicated by the
+    // session fatal callback guard.
     if (data.type === "Error") {
-      console.error(
-        `[AssemblyAISTT] Server error (code=${data.error_code ?? "?"}): ${data.error ?? JSON.stringify(data)}`
-      );
+      const code = data.error_code ?? data.code;
+      const error = new VoiceProviderError("AssemblyAI server error", {
+        ...(typeof code === "string" || typeof code === "number"
+          ? { code }
+          : {})
+      });
+      logVoiceError({
+        component: "AssemblyAISTT",
+        stage: "provider_message",
+        message: "AssemblyAI server error",
+        error
+      });
+      this.#reportFatal(error);
       return;
     }
     if (data.type === "Warning") {
       console.warn(
-        `[AssemblyAISTT] Server warning (code=${data.warning_code ?? "?"}): ${data.warning ?? JSON.stringify(data)}`
+        `[AssemblyAISTT] Server warning (code=${data.warning_code ?? "?"}): ${data.warning ?? "Unknown warning"}`
       );
       return;
     }

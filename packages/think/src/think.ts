@@ -165,6 +165,10 @@ import type {
   RetryOptions,
   WSMessage
 } from "agents";
+import type {
+  LifecycleJobContext,
+  LifecycleJobOutcome
+} from "agents/lifecycle";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -173,6 +177,7 @@ import {
   TurnQueue,
   ResumableStream,
   cleanupStreamBuffers,
+  createChatStreams,
   STREAM_CLEANUP_DELAY_SECONDS,
   ContinuationState,
   PreStreamTurns,
@@ -202,13 +207,17 @@ import {
   persistReconstructedOrphan,
   reconcileMessages,
   resolveToolMergeId,
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
+  createChatRecoveryTaskDefinition,
+  createChatTurnTaskDefinition,
+  dispatchChatRecoveryToHandoff,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
   wrapChatFiberSnapshot,
   MAX_BOUND_PARAMS,
   buildInClauseStrings,
   resolveChatRecoveryConfig,
-  chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
   ChatStreamStalledError,
@@ -232,9 +241,12 @@ import {
   type ClassifyRecoveredTurnInput,
   type DispatchRecoveredTurnInput,
   type ChatRecoveryScheduleCallback,
+  type ChatRecoveryTaskReason,
   type ChatRecoveryIncident,
   type ChatRecoveryKind
 } from "agents/chat";
+import type { Streams } from "agents/streams";
+import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
@@ -284,6 +296,7 @@ import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
+import { MESSENGER_REPLY_FIBER_NAME } from "./messengers";
 import type {
   DeliveryKind,
   MessengerContext,
@@ -1904,6 +1917,7 @@ type ThinkWorkflowPromptContext = {
 };
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
+const THINK_WORKFLOW_NOTIFICATIONS_JOB_ID = "think:workflow-notifications";
 
 /**
  * Message-metadata keys that are server-written turn context (stamped by
@@ -2667,6 +2681,14 @@ export type ThinkModelId =
  */
 export type ThinkModel = LanguageModel | ThinkModelId;
 
+/**
+ * Definition name for messenger reply runs on the Tasks capability. The
+ * reserved prefix keeps it outside the public `fibers.run()` surface; the
+ * recovery context still carries the historical `MESSENGER_REPLY_FIBER_NAME`
+ * so the messenger runtime's recovery gate is unchanged.
+ */
+const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -2934,6 +2956,11 @@ export class Think<
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
+    this.lifecycle.use(this.streams);
+    this._registerChatTurnTaskDefinition();
+    this._registerChatRecoveryTaskDefinition();
+    this._registerMessengerReplyTaskDefinition();
+
     const _onStart = this.onStart.bind(this);
     const startThink = async (
       props: Props | undefined,
@@ -3040,7 +3067,10 @@ export class Think<
         "startup",
         { "cloudflare.agents.component": "think" },
         async () => {
-          this._resumableStream = new ResumableStream(this.sql.bind(this));
+          this._resumableStream = new ResumableStream(
+            this.streams,
+            this.sql.bind(this)
+          );
           this._restoreClientTools();
           this._restoreBody();
           this._setupProtocolHandlers();
@@ -3680,6 +3710,13 @@ export class Think<
 
   private _aborts = new AbortRegistry();
   private _turnQueue = new TurnQueue();
+  /**
+   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * output lives in the shared durable chunk log, readable by any
+   * `streams.read()` consumer on this Durable Object.
+   */
+  readonly streams: Streams = createChatStreams();
+
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   /** Lazily-built shared resume-handshake driver (Tier-2). */
@@ -4459,6 +4496,210 @@ export class Think<
     return undefined;
   }
 
+  /**
+   * Live chat-turn closures keyed by run nonce. A closure exists only in the
+   * isolate that accepted the turn; recovery after interruption never re-runs
+   * it — the definition's `recover` callback hands the interruption to the
+   * shared ChatRecoveryEngine instead.
+   */
+  private readonly _liveChatTurnClosures = new Map<
+    string,
+    {
+      initial: unknown;
+      wrap: (data: unknown) => unknown;
+      run: () => Promise<unknown>;
+      settle: {
+        resolve: (value: unknown) => void;
+        reject: (error: unknown) => void;
+      };
+    }
+  >();
+
+  /**
+   * Register the shared chat-turn Task definition (see
+   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
+   * host wires its protected internals through the hooks.
+   */
+  private _registerChatTurnTaskDefinition(): void {
+    const chatFiberName = (this.constructor as typeof Think).CHAT_FIBER_NAME;
+    this.tasks.register(
+      chatFiberName,
+      createChatTurnTaskDefinition({
+        definitionName: chatFiberName,
+        storage: this.ctx.storage,
+        getRunCreatedAt: async (runId) =>
+          (await this.tasks.get(runId))?.createdAt ?? null,
+        getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
+        keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+        withStash: (context, fn) => this._withFiberStash(context, fn),
+        handleRecovery: (ctx) => this._handleInternalFiberRecovery(ctx)
+      })
+    );
+  }
+
+  /** Register the shared Tasks transport for recovery continuations. */
+  private _registerChatRecoveryTaskDefinition(): void {
+    // SAFETY: the recovery engine is the sole producer of each callback's
+    // payload and the Task persists it verbatim, so the callback name selects
+    // the matching host input type.
+    this.tasks.register(
+      CHAT_RECOVERY_TASK_NAME,
+      createChatRecoveryTaskDefinition({
+        _chatRecoveryContinue: (data) =>
+          this._chatRecoveryContinue(data as ChatRecoveryContinueData),
+        _chatRecoveryRetry: (data) =>
+          this._chatRecoveryRetry(data as ChatRecoveryRetryData)
+      })
+    );
+  }
+
+  /**
+   * Run a queue-driven recovery callback to its model handoff and return;
+   * the turn continues as tracked alarm work, and a detached platform
+   * failure enqueues one replacement attempt through the same transport.
+   */
+  private _dispatchChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown> | undefined,
+    detached: (onTurnStarted: () => void) => Promise<void>
+  ): Promise<void> {
+    return dispatchChatRecoveryToHandoff({
+      detached,
+      track: (turn) => this.lifecycle.trackAlarmWork(turn),
+      redefer: (dedupeKey) =>
+        this._enqueueChatRecovery(
+          callback,
+          data ?? {},
+          "redefer",
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          dedupeKey
+        ),
+      onDetachedError: (error) =>
+        console.error(`[Think] ${callback} dispatch failed`, error)
+    });
+  }
+
+  /**
+   * Enqueue one recovery attempt on the shared Tasks transport. Tasks
+   * mirrors a routed dynamic agent's wake to the root's alarm; the run
+   * itself, and this continuation's replay, still execute here. `dedupeKey`
+   * keys a retried enqueue so it joins its own prior attempt instead of
+   * duplicating it — see {@link chatRecoveryTaskRunOptions}.
+   */
+  private async _enqueueChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown>,
+    reason: ChatRecoveryTaskReason,
+    delaySeconds: number,
+    dedupeKey?: string
+  ): Promise<void> {
+    const input = { callback, data, delaySeconds };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, reason, dedupeKey)
+    );
+  }
+
+  /**
+   * The messenger-reply Task definition. A live webhook reply executes as
+   * one journaled step through the runtime's closure registry, persisting
+   * its re-entry snapshot in host storage; a replay whose closure is gone
+   * is recovered on wake by the same
+   * `ThinkMessengerRuntime.handleFiberRecovery` the legacy scan used.
+   */
+  private _registerMessengerReplyTaskDefinition(): void {
+    this.tasks.register(
+      MESSENGER_REPLY_TASK_DEFINITION,
+      async (input, step) => {
+        const { nonce } = input as { nonce: string };
+        await step.do(
+          "deliver",
+          { retries: { limit: 1 }, timeout: "1 day" },
+          async ({ signal }) => {
+            const runtime = this._messengerRuntime;
+            if (!runtime) {
+              throw new Error("Messenger runtime is unavailable");
+            }
+            const runId = `msgr_${nonce}`;
+            const persistKey = `__cf_messenger_recovery:${runId}`;
+            if (!runtime.hasLiveReply(nonce)) {
+              // Replay after an unclean interruption: recover through the
+              // runtime seam, preferring the snapshot a prior attempt (live
+              // or recovering) persisted before being interrupted itself.
+              const persisted = await this.ctx.storage.get(persistKey);
+              const createdAt =
+                (await this.tasks.get(runId))?.createdAt ?? Date.now();
+              const ctx: FiberRecoveryContext = {
+                id: runId,
+                name: MESSENGER_REPLY_FIBER_NAME,
+                snapshot: (persisted ?? null) as unknown,
+                createdAt,
+                recoveryReason: "interrupted"
+              };
+              await runtime.handleFiberRecovery(ctx, {
+                persistRecoverySnapshot: async (snapshot) => {
+                  await this.ctx.storage.put(persistKey, snapshot);
+                }
+              });
+              await this.ctx.storage.delete(persistKey);
+              return undefined;
+            }
+            // The initial "accepted" snapshot must be durable before any
+            // delivery work begins: an isolate lost mid-answer recovers
+            // through this snapshot, and without it replay could neither
+            // deliver nor apologize.
+            const initial = runtime.initialReplySnapshot(nonce);
+            if (initial !== undefined) {
+              await this.ctx.storage.put(persistKey, initial);
+            }
+            // Later fire-and-forget stash writes are safe: Durable Object
+            // storage applies same-key operations in issuance order, so the
+            // delete below can never be overtaken by an earlier put. A crash
+            // loses only the unflushed tail, which recovery tolerates by
+            // design (the snapshot is a hint; stream evidence is
+            // authoritative).
+            await runtime.executeLiveReply(nonce, {
+              id: runId,
+              signal,
+              stash: (data) =>
+                void this.ctx.storage.put(persistKey, data).catch(() => {}),
+              snapshot: null
+            });
+            await this.ctx.storage.delete(persistKey);
+            return undefined;
+          }
+        );
+      }
+    );
+  }
+
+  /**
+   * Host seam for {@link ThinkMessengerRuntime}: durably accept one reply
+   * run on the Tasks capability and execute it inline while this isolate
+   * lives.
+   * @internal
+   */
+  async _runMessengerReplyTask(input: {
+    nonce: string;
+    idempotencyKey: string;
+    metadata: Record<string, unknown>;
+  }): Promise<{ accepted: boolean }> {
+    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      MESSENGER_REPLY_TASK_DEFINITION,
+      { nonce: input.nonce },
+      {
+        runId: `msgr_${input.nonce}`,
+        idempotencyKey: input.idempotencyKey,
+        metadata: input.metadata as Record<
+          string,
+          import("agents/tasks").TaskJson
+        >
+      }
+    );
+    return { accepted: receipt.accepted };
+  }
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -4473,20 +4714,51 @@ export class Think<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
+    const wrap = (data: unknown) =>
+      wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, data);
 
-    return this._runFiberWithStashWrapper(
-      `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-      async () => fn(),
-      {
-        initialSnapshot: wrapChatFiberSnapshot(
-          "__cfThinkChatFiberSnapshot",
-          snapshot,
-          null
-        ),
-        wrapStash: (data) =>
-          wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, data)
-      }
-    );
+    // Facet-hosted turns stay on the legacy fiber engine: the Tasks
+    // capability does not accept runs on routed sub-agents yet, and facet
+    // recovery routes through the root's facet-run index.
+    if (this.parentPath.length > 0) {
+      return this._runFiberWithStashWrapper(
+        `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+        async () => fn(),
+        { initialSnapshot: wrap(null), wrapStash: wrap }
+      );
+    }
+
+    const nonce = crypto.randomUUID();
+    let resolveOutcome!: (value: unknown) => void;
+    let rejectOutcome!: (error: unknown) => void;
+    const outcome = new Promise<unknown>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    // Rejections can land while `runAttached` is still being awaited (before
+    // the outcome listener attaches); mark them handled so workerd does not
+    // report an unhandled rejection the wrapper is about to consume.
+    outcome.catch(() => {});
+    // The turn closure re-enters the caller's invocation context (live
+    // connection/request), exactly as legacy inline fiber execution did: the
+    // capability's host boundary intentionally carries no connection.
+    const ambient = agentContext.getStore();
+    this._liveChatTurnClosures.set(nonce, {
+      initial: wrap(null),
+      wrap,
+      run: ambient ? () => agentContext.run(ambient, fn) : fn,
+      settle: { resolve: resolveOutcome, reject: rejectOutcome }
+    });
+    try {
+      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+        (this.constructor as typeof Think).CHAT_FIBER_NAME,
+        { requestId, continuation, nonce },
+        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+      );
+      return (await outcome) as T;
+    } finally {
+      this._liveChatTurnClosures.delete(nonce);
+    }
   }
 
   private _systemPromptForTurn(baseSystem: string, tools: ToolSet): string {
@@ -9910,7 +10182,7 @@ export class Think<
     void this.keepAliveWhile(() => this._drainWorkflowNotifications()).catch(
       (error) => {
         console.error("[Think] Failed to drain workflow notifications", error);
-        void this._scheduleWorkflowNotificationAlarm();
+        void this._rearmWorkflowNotificationAlarm();
       }
     );
   }
@@ -9973,28 +10245,59 @@ export class Think<
     } finally {
       this._drainingWorkflowNotifications = false;
     }
-    await this._scheduleWorkflowNotificationAlarm();
+    await this._rearmWorkflowNotificationAlarm();
   }
 
-  private async _scheduleWorkflowNotificationAlarm(): Promise<void> {
+  private _nextWorkflowNotificationAlarm(): number | null {
     this._ensureWorkflowNotificationTable();
-    const pending = this.sql<{ attempts: number }>`
-      SELECT attempts
+    const pending = this.sql<{ attempts: number; updated_at: number }>`
+      SELECT attempts, updated_at
       FROM cf_think_workflow_notifications
       WHERE delivered_at IS NULL
       ORDER BY created_at ASC, notification_id ASC
       LIMIT 1
     `;
-    if (!pending[0]) return;
+    if (!pending[0]) return null;
     const delayMs = Math.min(
       5 * 60 * 1000,
       1000 * 2 ** Math.min(pending[0].attempts, 8)
     );
-    const nextAlarm = Date.now() + delayMs;
-    const existingAlarm = await this.ctx.storage.getAlarm();
-    if (existingAlarm === null || existingAlarm > nextAlarm) {
-      await this.ctx.storage.setAlarm(nextAlarm);
+    return Math.max(pending[0].updated_at + delayMs, Date.now() + 1);
+  }
+
+  /**
+   * Drive the Think-owned workflow-notification host job. Unknown fns
+   * delegate to Agent's dispatch.
+   */
+  protected override _onHostJob(
+    fn: string,
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    if (fn === "thinkWorkflowNotifications") {
+      this._startWorkflowNotificationDrain();
+      const next = this._nextWorkflowNotificationAlarm();
+      return next === null ? undefined : { rescheduleAt: next };
     }
+    return super._onHostJob(fn, context);
+  }
+
+  /**
+   * Sync the workflow-notification wake job with pending-notification state.
+   * Replaces the pull-based `_getExtensionAlarm()` contribution.
+   */
+  private async _rearmWorkflowNotificationAlarm(): Promise<void> {
+    const next = this._nextWorkflowNotificationAlarm();
+    if (next === null) {
+      if (this.lifecycle.jobs.get(THINK_WORKFLOW_NOTIFICATIONS_JOB_ID)) {
+        await this.lifecycle.jobs.cancel(THINK_WORKFLOW_NOTIFICATIONS_JOB_ID);
+      }
+      return;
+    }
+    await this.lifecycle.jobs.push({
+      id: THINK_WORKFLOW_NOTIFICATIONS_JOB_ID,
+      fn: "thinkWorkflowNotifications",
+      time: next
+    });
   }
 
   async inspectSubmission(
@@ -10514,7 +10817,7 @@ export class Think<
         row.request_id &&
         ((this._hasRecoverableChatTurn(row.request_id) &&
           this._hasFreshRecoverableSubmissionEvidence(row)) ||
-          this._hasScheduledRecoveredContinuation(row.request_id))
+          (await this._hasScheduledRecoveredContinuation(row.request_id)))
       ) {
         continue;
       }
@@ -10549,6 +10852,22 @@ export class Think<
     return applied === messages.length ? "all" : "partial";
   }
 
+  /**
+   * Wall-clock creation time of a non-terminal chat-turn run on the Tasks
+   * capability, or null. The metadata column holds the exact JSON the chat
+   * wrapper wrote, so string equality matches the requestId.
+   */
+  private _recoverableChatTurnTaskCreatedAt(requestId: string): number | null {
+    const rows = this.sql<{ created_at: number }>`
+      SELECT created_at FROM cf_agents_task_runs
+      WHERE definition = ${(this.constructor as typeof Think).CHAT_FIBER_NAME}
+        AND state IN ('pending', 'running', 'waiting', 'recovering')
+        AND metadata = ${JSON.stringify({ requestId })}
+      LIMIT 1
+    `;
+    return rows[0]?.created_at ?? null;
+  }
+
   private _hasRecoverableChatTurn(requestId: string): boolean {
     const fiberRows = this.sql<{ id: string }>`
       SELECT id FROM cf_agents_runs
@@ -10556,14 +10875,13 @@ export class Think<
       LIMIT 1
     `;
     if (fiberRows.length > 0) return true;
+    if (this._recoverableChatTurnTaskCreatedAt(requestId) !== null) {
+      return true;
+    }
 
-    const streamRows = this.sql<{ id: string }>`
-      SELECT id FROM cf_ai_chat_stream_metadata
-      WHERE request_id = ${requestId}
-        AND status = 'streaming'
-      LIMIT 1
-    `;
-    return streamRows.length > 0;
+    return (
+      this._resumableStream.latestActiveStreamInfoForRequest(requestId) !== null
+    );
   }
 
   private _hasFreshRecoverableSubmissionEvidence(row: ThinkSubmissionRow) {
@@ -10578,35 +10896,49 @@ export class Think<
     `;
     if (fiberRows[0] && fiberRows[0].created_at >= cutoff) return true;
 
-    const streamRows = this.sql<{ created_at: number }>`
-      SELECT created_at FROM cf_ai_chat_stream_metadata
-      WHERE request_id = ${row.request_id}
-        AND status = 'streaming'
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    return streamRows[0] ? streamRows[0].created_at >= cutoff : false;
+    const capabilityCreatedAt = this._recoverableChatTurnTaskCreatedAt(
+      row.request_id
+    );
+    if (capabilityCreatedAt !== null && capabilityCreatedAt >= cutoff) {
+      return true;
+    }
+
+    const streamInfo = this._resumableStream.latestActiveStreamInfoForRequest(
+      row.request_id
+    );
+    return streamInfo ? streamInfo.createdAt >= cutoff : false;
   }
 
-  private _hasScheduledRecoveredContinuation(requestId: string): boolean {
-    const rows = this.sql<{ payload: string | null }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
-    `;
-    return rows.some((row) => {
-      if (!row.payload) return false;
-      try {
-        const payload = JSON.parse(row.payload) as unknown;
-        return (
-          payload !== null &&
-          typeof payload === "object" &&
-          "recoveredRequestId" in payload &&
-          (payload as { recoveredRequestId?: unknown }).recoveredRequestId ===
-            requestId
-        );
-      } catch {
-        return false;
-      }
+  private async _hasScheduledRecoveredContinuation(
+    requestId: string
+  ): Promise<boolean> {
+    const recoveryRuns = await this.tasks.list({
+      definition: CHAT_RECOVERY_TASK_NAME,
+      status: ["pending", "running", "waiting"],
+      limit: Number.MAX_SAFE_INTEGER
+    });
+    if (
+      recoveryRuns.some(
+        (run) =>
+          run.metadata?.callback === "_chatRecoveryContinue" &&
+          run.metadata.recoveredRequestId === requestId
+      )
+    ) {
+      return true;
+    }
+
+    // Dynamic-agent recovery still uses root-owned routed schedules until
+    // Tasks can mirror a child run's wake to its alarm owner.
+    return (await this.listSchedules()).some((schedule) => {
+      if (schedule.callback !== "_chatRecoveryContinue") return false;
+      const payload: unknown = schedule.payload;
+      return (
+        payload !== null &&
+        typeof payload === "object" &&
+        "recoveredRequestId" in payload &&
+        (payload as { recoveredRequestId?: unknown }).recoveredRequestId ===
+          requestId
+      );
     });
   }
 
@@ -13970,14 +14302,8 @@ export class Think<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
-      scheduleRecovery: async (callback, data, reason, delaySeconds) => {
-        await this.schedule(
-          delaySeconds,
-          callback,
-          data,
-          chatRecoverySchedulePolicy(reason)
-        );
-      },
+      scheduleRecovery: (callback, data, reason, delaySeconds) =>
+        this._enqueueChatRecovery(callback, data, reason, delaySeconds),
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
@@ -14251,17 +14577,10 @@ export class Think<
     let streamId = "";
     let streamStatus: "streaming" | "completed" | "error" | undefined;
     if (requestId) {
-      const rows = this.sql<{
-        id: string;
-        status: "streaming" | "completed" | "error";
-      }>`
-        SELECT id, status FROM cf_ai_chat_stream_metadata
-        WHERE request_id = ${requestId}
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (rows.length > 0) {
-        streamId = rows[0].id;
-        streamStatus = rows[0].status;
+      const info = this._resumableStream.latestStreamInfoForRequest(requestId);
+      if (info) {
+        streamId = info.id;
+        streamStatus = info.status;
       }
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {
@@ -14590,10 +14909,10 @@ export class Think<
    * `_exhaustChatRecovery` entirely — so an app relying on `onExhausted` for the
    * terminal banner regressed to an eternal spinner when recovery gave up under
    * extreme churn. The error path matters just as much: a non-transient throw
-   * in a recovery callback is SWALLOWED by `Agent._executeScheduleCallback`
-   * (only a platform transient is re-thrown to preserve the one-shot row), so
-   * without routing it here the alarm row is deleted with no terminal UX at
-   * all — the half-finished message wedges silently. Shared by
+   * in a recovery callback is SWALLOWED by the driving Task attempt (or the
+   * routed one-shot schedule row) — only a platform transient is re-thrown to
+   * preserve it — so without routing it here the run/row settles with no
+   * terminal UX at all — the half-finished message wedges silently. Shared by
    * `_chatRecoveryRetry` and `_chatRecoveryContinue`.
    *
    * Exactly-once terminalization is defended by two independent guards:
@@ -14611,8 +14930,9 @@ export class Think<
    * Residual at-least-once edges, all deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
-   *    invocation — every production scheduler carries one): the synthesized
-   *    incident can't be persisted (no key), so guard #1 can't arm.
+   *    invocation — every production recovery enqueue carries one): the
+   *    synthesized incident can't be persisted (no key), so guard #1 can't
+   *    arm.
    *  • The record is swept AGAIN between two alarms (guard #1 re-persists on the
    *    first, so this needs a second independent sweep) — vanishingly unlikely.
    *  • A platform transient interrupts `_exhaustChatRecovery` after the banner
@@ -14620,21 +14940,28 @@ export class Think<
    *    (the terminal writes themselves are idempotent).
    */
   /**
-   * Recovery continuation callbacks the alarm-boundary OOM circuit breaker may
-   * back off / purge (#1825). See `Agent._cf_handleAlarmMemoryLimitReset`.
+   * Host memory-limit policy hook (#1825), dispatched structurally by
+   * Lifecycle's circuit breaker — protected because it is framework
+   * machinery, not part of the public Think API. Tasks applies the breaker to
+   * root recovery runs; the routed dynamic-agent fallback applies it to
+   * `recoveryLoop` schedule rows (see `RecoveryLoopScheduleOptions`). At the
+   * strike budget this hook seals active incidents via
+   * {@link _cf_sealMemoryLimitedRecovery}.
    */
-  protected override _cf_recoveryAlarmCallbacks(): string[] {
-    return ["_chatRecoveryContinue", "_chatRecoveryRetry"];
+  protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
+    if (!context.sealed) return;
+    await this._cf_sealMemoryLimitedRecovery();
   }
 
   /**
-   * Seal any still-live recovery incident as an out-of-memory exhaustion when
-   * the alarm circuit breaker trips at its strike budget (#1825). Runs at the
-   * outermost alarm frame (post-unwind), so the terminal banner / `onExhausted`
-   * and the sealed-incident write can land where the mid-turn give-up's writes
-   * OOMed. Reuses the shared give-up spine via `_exhaustRecoveryGiveUp`.
+   * Seal any still-live recovery incident as an out-of-memory exhaustion
+   * when the alarm circuit breaker trips at its strike budget (#1825). Runs
+   * at the outermost alarm frame (post-unwind), so the terminal banner /
+   * `onExhausted` and the sealed-incident write can land where the mid-turn
+   * give-up's writes OOMed. Reuses the shared give-up spine via
+   * `_exhaustRecoveryGiveUp`.
    */
-  protected override async _cf_sealMemoryLimitedRecovery(): Promise<void> {
+  private async _cf_sealMemoryLimitedRecovery(): Promise<void> {
     const active = await listActiveChatRecoveryIncidents(this.ctx.storage);
     for (const { incident } of active) {
       const callback: ChatRecoveryScheduleCallback =
@@ -14742,9 +15069,9 @@ export class Think<
    *   deploy code-update reset / script supersede, a `retryable`-flagged
    *   platform error, or "Network connection lost.", looking through wrappers
    *   like `SqlError` via the `cause` chain) is re-thrown (after best-effort
-   *   marking the incident `failed` for observability) so
-   *   `Agent._executeScheduleCallback` preserves the one-shot alarm row and
-   *   the platform re-runs recovery once it is healthy again — the turn can
+   *   marking the incident `failed` for observability) so the current
+   *   attempt (the driving Task run, or the routed one-shot schedule row) is
+   *   preserved and the platform re-runs recovery once it is healthy again — the turn can
    *   still recover, so it must NOT terminalize. Terminalizing here was the
    *   #1730 freeze: the give-up's own seal needs the very storage that is
    *   down, so it throws too, burns the in-process retry budget inside the
@@ -14755,11 +15082,11 @@ export class Think<
    *   `submission_not_running` no-op skip (a self-defeating defer).
    * - Any OTHER (application) error is terminalized through the give-up path
    *   (`onExhausted` + the `terminalMessage` banner) and NOT re-thrown. This is
-   *   the fix for the silent-seal failure mode: `_executeScheduleCallback`
-   *   swallows a non-transient throw and then `alarm()` deletes the one-shot
-   *   row, so without terminalizing here the half-finished turn is dropped
-   *   with no terminal event and no banner (the user stares at a frozen
-   *   message until they send something new).
+   *   the fix for the silent-seal failure mode: the driving attempt swallows
+   *   a non-transient throw and settles without terminalizing, so without
+   *   terminalizing here the half-finished turn is dropped with no terminal
+   *   event and no banner (the user stares at a frozen message until they
+   *   send something new).
    */
   private async _handleRecoveryCallbackError(
     callback: ChatRecoveryScheduleCallback,
@@ -14794,8 +15121,7 @@ export class Think<
     }
     // Preserve the underlying error for operators — the give-up path records
     // only the `recovery_error` category on the incident / `onExhausted` ctx,
-    // so without this log the actual cause would be lost. Mirrors
-    // `Agent._executeScheduleCallback`'s own logging.
+    // so without this log the actual cause would be lost.
     console.error(
       `[Think] ${callback} threw during recovery; terminalizing instead of leaving the turn wedged`,
       error
@@ -14807,6 +15133,17 @@ export class Think<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
+    await this._dispatchChatRecovery(
+      "_chatRecoveryRetry",
+      data,
+      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+    );
+  }
+
+  protected async _chatRecoveryRetryDetached(
+    data?: ChatRecoveryRetryData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
@@ -14907,6 +15244,7 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      onTurnStarted?.();
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody,
@@ -15049,6 +15387,17 @@ export class Think<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
+    await this._dispatchChatRecovery(
+      "_chatRecoveryContinue",
+      data,
+      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+    );
+  }
+
+  protected async _chatRecoveryContinueDetached(
+    data?: ChatRecoveryContinueData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
@@ -15147,6 +15496,7 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      onTurnStarted?.();
       const result = await this.continueLastTurn(
         undefined,
         controller

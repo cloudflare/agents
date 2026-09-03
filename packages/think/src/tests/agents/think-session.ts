@@ -3,6 +3,7 @@ import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think } from "../../think";
 import { Agent } from "agents";
 import type {
+  Connection,
   AgentToolEventMessage,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
@@ -45,6 +46,9 @@ import type {
   ChunkContext
 } from "../../think";
 import {
+  CHAT_MESSAGE_TYPES,
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator
@@ -73,6 +77,99 @@ export type RpcJsonObject = Record<
   | null
   | ReadonlyArray<string | number | boolean | null>
 >;
+
+function recoveryTransportCountsForTest(
+  agent: Think,
+  callback: string
+): { tasks: number; schedules: number } {
+  const scheduled = agent.sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM cf_agents_jobs
+    WHERE capability = 'scheduler' AND fn = ${callback}
+  `;
+  const tasks = agent.sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND state IN ('pending', 'running', 'waiting')
+      AND json_extract(metadata, '$.callback') = ${callback}
+  `;
+  return {
+    tasks: tasks[0]?.count ?? 0,
+    schedules: scheduled[0]?.count ?? 0
+  };
+}
+
+function recoveryWorkCountForTest(agent: Think, callback: string): number {
+  const counts = recoveryTransportCountsForTest(agent, callback);
+  return counts.tasks + counts.schedules;
+}
+
+async function runQueuedRecoveryTaskForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<boolean> {
+  const rows = agent.sql<{ run_id: string }>`
+    SELECT run_id FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND state IN ('pending', 'running', 'waiting')
+      AND json_extract(metadata, '$.callback') = ${callback}
+    ORDER BY created_at ASC
+    LIMIT 1
+  `;
+  const runId = rows[0]?.run_id;
+  if (!runId) return false;
+  const past = Date.now() - 1_000;
+  agent.sql`
+    UPDATE cf_agents_task_runs
+    SET next_at = ${past}, input = json_set(input, '$.delaySeconds', 0)
+    WHERE run_id = ${runId}
+  `;
+  agent.sql`
+    UPDATE cf_agents_task_steps SET next_at = ${past}
+    WHERE run_id = ${runId} AND kind = 'sleep'
+  `;
+  agent.sql`
+    UPDATE cf_agents_jobs SET time = ${past}
+    WHERE id = ${`task:${runId}`}
+  `;
+  await agent.alarm();
+  return true;
+}
+
+async function waitForThinkIdleForTest(agent: Think): Promise<void> {
+  await (
+    agent as unknown as { _turnQueue: { waitForIdle(): Promise<void> } }
+  )._turnQueue.waitForIdle();
+}
+
+async function runRecoveryWorkForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<void> {
+  if (await runQueuedRecoveryTaskForTest(agent, callback)) {
+    await waitForThinkIdleForTest(agent);
+    return;
+  }
+  const rows = agent.sql<{ payload: string }>`
+    SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+    WHERE capability = 'scheduler' AND fn = ${callback}
+    ORDER BY time ASC
+    LIMIT 1
+  `;
+  const payload = rows[0]?.payload;
+  if (!payload) {
+    await waitForThinkIdleForTest(agent);
+    return;
+  }
+  const host = agent as unknown as {
+    _chatRecoveryContinueDetached(data: unknown): Promise<void>;
+    _chatRecoveryRetryDetached(data: unknown): Promise<void>;
+  };
+  if (callback === "_chatRecoveryContinue") {
+    await host._chatRecoveryContinueDetached(JSON.parse(payload));
+  } else {
+    await host._chatRecoveryRetryDetached(JSON.parse(payload));
+  }
+}
 
 // ── Mock LanguageModel (v3 format) ──────────────────────────────
 
@@ -500,6 +597,7 @@ class TestCollectingCallback implements StreamCallback {
 
 export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
+  private _nextSubAgentConnectionSendDelayMs = 0;
   private _chatErrorLog: string[] = [];
   private _errorConfig: {
     afterChunks: number;
@@ -528,6 +626,23 @@ export class ThinkTestAgent extends Think {
     progressBody: string;
     milestoneBody: string;
   } | null = null;
+
+  /** Delay the next root-owned sub-agent send to expose routing races. */
+  async delayNextSubAgentConnectionSendForTest(delayMs: number): Promise<void> {
+    this._nextSubAgentConnectionSendDelayMs = delayMs;
+  }
+
+  override async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    if (this._nextSubAgentConnectionSendDelayMs > 0) {
+      const delayMs = this._nextSubAgentConnectionSendDelayMs;
+      this._nextSubAgentConnectionSendDelayMs = 0;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    await super._cf_sendToSubAgentConnection(connectionId, message);
+  }
 
   /** Slow the streamed turn so the parent tails it while it's still live. */
   async setStreamChunkDelayForTest(ms: number): Promise<void> {
@@ -723,6 +838,9 @@ export class ThinkTestAgent extends Think {
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
+  private _beforeStepGate: Promise<void> | null = null;
+  private _releaseBeforeStepGate: (() => void) | null = null;
+  private _beforeStepGateEntered = false;
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
@@ -882,6 +1000,10 @@ export class ThinkTestAgent extends Think {
     if (this._beforeStepAsyncDelayMs > 0) {
       await new Promise((r) => setTimeout(r, this._beforeStepAsyncDelayMs));
     }
+    if (this._beforeStepGate) {
+      this._beforeStepGateEntered = true;
+      await this._beforeStepGate;
+    }
     if (this._stepConfigOverride) return this._stepConfigOverride;
   }
 
@@ -895,6 +1017,31 @@ export class ThinkTestAgent extends Think {
 
   async setBeforeStepAsyncDelay(ms: number): Promise<void> {
     this._beforeStepAsyncDelayMs = ms;
+  }
+
+  /**
+   * Arm a promise gate that parks the next `beforeStep` until released. Tests
+   * use it to hold a turn deterministically in flight — instead of racing a
+   * wall-clock delay — while they reset or cancel from outside the turn.
+   */
+  async holdBeforeStepForTest(): Promise<void> {
+    this._beforeStepGateEntered = false;
+    this._beforeStepGate = new Promise((resolve) => {
+      this._releaseBeforeStepGate = resolve;
+    });
+  }
+
+  /** Whether a turn is currently parked inside the armed `beforeStep` gate. */
+  async hasEnteredBeforeStepForTest(): Promise<boolean> {
+    return this._beforeStepGateEntered;
+  }
+
+  /** Release the parked turn (and disarm the gate for later steps). */
+  async releaseBeforeStepForTest(): Promise<void> {
+    const release = this._releaseBeforeStepGate;
+    this._beforeStepGate = null;
+    this._releaseBeforeStepGate = null;
+    release?.();
   }
 
   async resetTurnStateForTest(): Promise<void> {
@@ -1075,6 +1222,34 @@ export class ThinkTestAgent extends Think {
     this._resumableStream.flushBuffer();
   }
 
+  /** Emit the real resume notification followed by a terminal broadcast. */
+  async testSendStreamResumingBeforeTerminal(requestId: string): Promise<void> {
+    const streamId = this._resumableStream.start(requestId);
+    const [connection] = [...this.getConnections()];
+    if (!connection) {
+      throw new Error(
+        "ThinkTestAgent.testSendStreamResumingBeforeTerminal requires a connection"
+      );
+    }
+
+    // SAFETY: This test-only method drives Think's private resume path with a
+    // real connection returned by this Agent instance.
+    (
+      this as unknown as {
+        _notifyStreamResuming(connection: Connection): void;
+      }
+    )._notifyStreamResuming(connection);
+    this._resumableStream.complete(streamId);
+    this.broadcast(
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        id: requestId,
+        done: true,
+        body: ""
+      })
+    );
+  }
+
   /** Pair with `testStartResumableStream` — clean up the simulated stream. */
   async testCompleteResumableStream(streamId: string): Promise<void> {
     this._resumableStream.complete(streamId);
@@ -1111,13 +1286,7 @@ export class ThinkTestAgent extends Think {
   }
 
   async getLatestStreamStatusForTest(): Promise<string | null> {
-    const streams = this.sql<{ status: string }>`
-      SELECT status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    return streams[0]?.status ?? null;
+    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -1170,11 +1339,13 @@ export class ThinkTestAgent extends Think {
     if (path === "continue") {
       // A non-leaf `targetAssistantId` → benign "conversation_changed" skip
       // that still reaches the `finally`.
-      await this._chatRecoveryContinue({ targetAssistantId: "no-such-leaf" });
+      await this._chatRecoveryContinueDetached({
+        targetAssistantId: "no-such-leaf"
+      });
     } else {
       // No `recoveredRequestId` (avoids the pre-`try` early return) + a non-user
       // leaf (or empty transcript) → benign skip that still reaches `finally`.
-      await this._chatRecoveryRetry({});
+      await this._chatRecoveryRetryDetached({});
     }
     return { before, after: this._readChildRunStatusForTest(runId) };
   }
@@ -1362,24 +1533,14 @@ export class ThinkTestAgent extends Think {
     this.chatStreamStallTimeoutMs = timeoutMs;
     try {
       const first = await this.testChat("trigger stall then recover");
-      const scheduled = this.sql<{ payload: string }>`
-        SELECT payload FROM cf_agents_schedules
-        WHERE callback = '_chatRecoveryContinue'
-        ORDER BY time ASC LIMIT 1
-      `;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
-      // Drive the scheduled continuation — this inference streams normally (the
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      // Drive the queued continuation — this inference streams normally (the
       // stall budget is exhausted), so the turn completes.
-      if (scheduled[0]) {
-        await (
-          this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
-          }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
       }
 
       const messages = await this.getMessages();
@@ -1426,22 +1587,12 @@ export class ThinkTestAgent extends Think {
     this._stallAttemptsRemaining = 1;
     try {
       const first = await this.testChat("per-turn stall override");
-      const scheduled = this.sql<{ payload: string }>`
-        SELECT payload FROM cf_agents_schedules
-        WHERE callback = '_chatRecoveryContinue'
-        ORDER BY time ASC LIMIT 1
-      `;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
-      if (scheduled[0]) {
-        await (
-          this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
-          }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
       }
       const messages = await this.getMessages();
       const assistant = messages.filter((m) => m.role === "assistant");
@@ -1527,11 +1678,10 @@ export class ThinkTestAgent extends Think {
       const coalesceTimerArmedAfterStall =
         internal._autoContinuation._timer !== null;
       const streamingAssistantCleared = internal._streamingAssistant === null;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
       return {
         firstError: first.error,
         scheduledContinues,
@@ -2041,6 +2191,25 @@ export class ThinkTestAgent extends Think {
   async getLastBeforeTurnSystem(): Promise<string | null> {
     const log = this._beforeTurnLog;
     return log.length > 0 ? log[log.length - 1].system : null;
+  }
+
+  /** Insert a fiber-ledger row so `_checkRunFibers` finds it interrupted. */
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${crypto.randomUUID()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  /** Drive this facet's own fiber-recovery scan, exactly as a real wake would. */
+  async triggerFiberRecovery(): Promise<void> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
   }
 }
 
@@ -4761,42 +4930,32 @@ export class ThinkToolsTestAgent extends Think {
     `;
   }
 
-  async triggerFiberRecovery(): Promise<void> {
+  async triggerFiberRecovery(): Promise<{
+    scheduledContinueCount: number;
+    scheduledRetryCount: number;
+  }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+    // Read recovery state synchronously inside the same invocation: an
+    // immediate alarm may consume it after this RPC releases the object.
+    return {
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
+    };
   }
 
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE callback = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+    return recoveryWorkCountForTest(this, callback);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await (
-      this as unknown as {
-        _chatRecoveryRetry(d: {
-          targetUserId?: string;
-          lastBody?: Record<string, unknown>;
-        }): Promise<void>;
-      }
-    )._chatRecoveryRetry(
-      JSON.parse(rows[0].payload) as {
-        targetUserId?: string;
-        lastBody?: Record<string, unknown>;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
   async insertInterruptedStream(
@@ -4806,42 +4965,24 @@ export class ThinkToolsTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
       `;
     }
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await (
-      this as unknown as {
-        _chatRecoveryContinue(d: {
-          targetAssistantId?: string;
-          lastBody?: Record<string, unknown> | null;
-          lastClientTools?: ClientToolSchema[] | null;
-        }): Promise<void>;
-      }
-    )._chatRecoveryContinue(
-      JSON.parse(rows[0].payload) as {
-        targetAssistantId?: string;
-        lastBody?: Record<string, unknown> | null;
-        lastClientTools?: ClientToolSchema[] | null;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
@@ -5473,34 +5614,38 @@ export class ThinkProgrammaticTestAgent extends Think {
   }> {
     const submissionId = `alarm-owned-${crypto.randomUUID()}`;
     const internal = this as unknown as {
-      _cf_executingScheduleRowId?: string;
+      _drainThinkSubmissions(): Promise<void>;
       _drainSubmissions(): Promise<void>;
       _scheduleSubmissionDrain(): Promise<void>;
     };
-    const originalDrain = internal._drainSubmissions;
+    const originalScheduledDrain = internal._drainThinkSubmissions;
+    const originalInlineDrain = internal._drainSubmissions;
     let alarmDrainCalls = 0;
     let inlineDrainCalls = 0;
+
+    // Probe the two domain entrypoints directly. The named callback is the
+    // alarm-owned path; _drainSubmissions is the private inline implementation.
+    internal._drainThinkSubmissions = async () => {
+      alarmDrainCalls += 1;
+    };
     internal._drainSubmissions = async () => {
-      if (internal._cf_executingScheduleRowId === undefined) {
-        inlineDrainCalls += 1;
-      } else {
-        alarmDrainCalls += 1;
-      }
+      inlineDrainCalls += 1;
     };
 
     try {
       const submission = await this.testSubmitMessages("alarm owned", {
         submissionId
       });
-      // A DO alarm may interleave while this RPC awaits. The base Agent sets
-      // _cf_executingScheduleRowId only around an awaited schedule callback,
-      // which distinguishes the correct owner from the old inline starter.
-      for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      // The drain is delivered by a platform-scheduled alarm whose firing
+      // latency is not bounded by our timer ticks — give it a generous (~5s)
+      // deadline; the happy path still exits on the first tick after it fires.
+      for (let attempt = 0; attempt < 200 && alarmDrainCalls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
       return { alarmDrainCalls, inlineDrainCalls, submission };
     } finally {
-      internal._drainSubmissions = originalDrain;
+      internal._drainThinkSubmissions = originalScheduledDrain;
+      internal._drainSubmissions = originalInlineDrain;
       // The probe's no-op alarm consumed its schedule row while leaving the
       // submission pending. Re-arm the real drain for the eventual assertion.
       await internal._scheduleSubmissionDrain();
@@ -5699,7 +5844,9 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   async continueRecoveredChatForTest(requestId: string): Promise<void> {
-    await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+    await this._chatRecoveryContinueDetached({
+      recoveredRequestId: requestId
+    });
   }
 
   /**
@@ -5712,7 +5859,9 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string
   ): Promise<string | null> {
     try {
-      await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+      await this._chatRecoveryContinueDetached({
+        recoveredRequestId: requestId
+      });
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
@@ -5723,7 +5872,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string,
     delayMs: number
   ): Promise<void> {
-    const continuation = this._chatRecoveryContinue({
+    const continuation = this._chatRecoveryContinueDetached({
       recoveredRequestId: requestId
     });
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -6759,7 +6908,7 @@ export class ThinkRecoveryTestAgent extends Think {
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+        SELECT COUNT(*) as count FROM cf_agents_stream_chunks
         WHERE stream_id = ${streamId}
       `;
       return rows[0]?.count ?? 0;
@@ -7493,17 +7642,7 @@ export class ThinkRecoveryTestAgent extends Think {
     chunkCount: number;
     text: string;
   } | null> {
-    const streams = this.sql<{
-      id: string;
-      request_id: string;
-      status: "streaming" | "completed" | "error";
-    }>`
-      SELECT id, request_id, status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    const stream = streams[0];
+    const stream = this._resumableStream.getAllStreamMetadata()[0] ?? null;
     if (!stream) return null;
 
     // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
@@ -7532,7 +7671,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     return {
       requestId: stream.request_id,
-      status: stream.status,
+      status: stream.status as "streaming" | "completed" | "error",
       chunkCount: chunks.length,
       text
     };
@@ -7568,40 +7707,15 @@ export class ThinkRecoveryTestAgent extends Think {
     targetUserId?: string;
     lastBody?: Record<string, unknown>;
   }): Promise<void> {
-    await this._chatRecoveryRetry(options);
+    await this._chatRecoveryRetryDetached(options);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await this._chatRecoveryRetry(
-      JSON.parse(rows[0].payload) as {
-        targetUserId?: string;
-        lastBody?: Record<string, unknown>;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await this._chatRecoveryContinue(
-      JSON.parse(rows[0].payload) as {
-        targetAssistantId?: string;
-        lastBody?: Record<string, unknown> | null;
-        lastClientTools?: ClientToolSchema[] | null;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
   async setRequestContextForTest(
@@ -7651,15 +7765,18 @@ export class ThinkRecoveryTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
       `;
     }
   }
@@ -7667,12 +7784,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count
-      FROM cf_agents_schedules
-      WHERE callback = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+    return recoveryWorkCountForTest(this, callback);
   }
 
   /** Insert a stream-metadata row aged `ageMs` in the past (for cleanup tests). */
@@ -7684,18 +7796,18 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<void> {
     const createdAt = Date.now() - ageMs;
     const completedAt = status === "streaming" ? null : createdAt + 1000;
+    const state = status === "error" ? "errored" : status;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${createdAt}, ${completedAt})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              0, ${createdAt}, ${completedAt ?? createdAt}, ${completedAt})
     `;
   }
 
-  /** Status of a single stream-metadata row, or null if absent. */
+  /** Status of a single stream row, or null if absent. */
   async getStreamStatusForTest(streamId: string): Promise<string | null> {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_ai_chat_stream_metadata WHERE id = ${streamId}
-    `;
-    return rows[0]?.status ?? null;
+    return this._resumableStream.getStreamMetadata(streamId)?.status ?? null;
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
@@ -7749,9 +7861,9 @@ export class ThinkRecoveryTestAgent extends Think {
    */
   async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
     const rows = this.sql<{ delayInSeconds: number | null }>`
-      SELECT delayInSeconds
-      FROM cf_agents_schedules
-      WHERE callback = '_cleanupStreamBuffers'
+      SELECT json_extract(payload, '$.delayInSeconds') AS delayInSeconds
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
       LIMIT 1
     `;
     return rows[0]?.delayInSeconds ?? null;
@@ -7765,9 +7877,9 @@ export class ThinkRecoveryTestAgent extends Think {
    */
   async fireDueCleanupAlarmForTest(): Promise<void> {
     this.sql`
-      UPDATE cf_agents_schedules
-      SET time = ${Math.floor(Date.now() / 1000) - 1}
-      WHERE callback = '_cleanupStreamBuffers'
+      UPDATE cf_agents_jobs
+      SET time = ${Date.now() - 1_000}
+      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
     `;
     await this.alarm();
   }
@@ -7783,10 +7895,31 @@ export class ThinkRecoveryTestAgent extends Think {
     `;
   }
 
-  async triggerFiberRecovery(): Promise<void> {
+  async triggerFiberRecovery(): Promise<{
+    scheduledContinueCount: number;
+    scheduledRetryCount: number;
+  }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+    // Read recovery state synchronously inside the same invocation: an
+    // immediate alarm may consume it after this RPC releases the object.
+    return {
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
+    };
+  }
+
+  async triggerFiberRecoveryWithTransportForTest(
+    callback: string
+  ): Promise<{ tasks: number; schedules: number }> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+    return recoveryTransportCountsForTest(this, callback);
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
@@ -7971,13 +8104,81 @@ export class ThinkRecoveryTestAgent extends Think {
     )._chatRecoveryRetry(data);
   }
 
+  /** Exercise platform failure ownership on either side of model handoff. */
+  async testRecoveryDispatchHandoffForTest(options: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    phase: "before" | "after";
+  }): Promise<{ threw: boolean; tasks: number; schedules: number }> {
+    const data = { incidentId: crypto.randomUUID() };
+    if (options.callback === "_chatRecoveryContinue") {
+      await this.preScheduleRecoveryContinueForTest(data);
+    } else {
+      await this.preScheduleRecoveryRetryForTest(data);
+    }
+
+    type ContinueData = Parameters<Think["_chatRecoveryContinue"]>[0];
+    type RetryData = Parameters<Think["_chatRecoveryRetry"]>[0];
+    const host = this as unknown as {
+      _chatRecoveryContinueDetached(
+        data?: ContinueData,
+        onTurnStarted?: () => void
+      ): Promise<void>;
+      _chatRecoveryRetryDetached(
+        data?: RetryData,
+        onTurnStarted?: () => void
+      ): Promise<void>;
+    };
+    const originalContinue = host._chatRecoveryContinueDetached.bind(this);
+    const originalRetry = host._chatRecoveryRetryDetached.bind(this);
+    const fail = async (onTurnStarted?: () => void): Promise<never> => {
+      if (options.phase === "after") {
+        onTurnStarted?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      throw new Error("Network connection lost.");
+    };
+    host._chatRecoveryContinueDetached = (_data, onTurnStarted) =>
+      fail(onTurnStarted);
+    host._chatRecoveryRetryDetached = (_data, onTurnStarted) =>
+      fail(onTurnStarted);
+
+    let threw = false;
+    try {
+      if (options.callback === "_chatRecoveryContinue") {
+        await this._chatRecoveryContinue(data);
+      } else {
+        await this._chatRecoveryRetry(data);
+      }
+    } catch (error) {
+      threw =
+        error instanceof Error &&
+        error.message.includes("Network connection lost");
+    } finally {
+      host._chatRecoveryContinueDetached = originalContinue;
+      host._chatRecoveryRetryDetached = originalRetry;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      threw,
+      ...recoveryTransportCountsForTest(this, options.callback)
+    };
+  }
+
   /** Retry-path twin of `preScheduleRecoveryContinueForTest`. */
   async preScheduleRecoveryRetryForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryRetry", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<{
@@ -7999,17 +8200,20 @@ export class ThinkRecoveryTestAgent extends Think {
       : null;
   }
 
-  /**
-   * Pre-insert a matching `_chatRecoveryContinue` schedule row to simulate the
-   * not-yet-deleted one-shot row that `alarm()` is executing — so a reschedule
-   * with `idempotent: true` would (incorrectly) dedup onto it.
-   */
+  /** Pre-insert a recovery Task representing the current dispatch. */
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryContinue", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryContinue" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getScheduledChatRecoveryPayloadForTest(
@@ -8020,14 +8224,24 @@ export class ThinkRecoveryTestAgent extends Think {
     // `payload` as `never`. The scheduled payload only needs its recovery-link
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = ${callback}
+    const taskRows = this.sql<{ payload: string }>`
+      SELECT json_extract(input, '$.data') AS payload
+      FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+        AND json_extract(metadata, '$.callback') = ${callback}
+      ORDER BY created_at ASC
+      LIMIT 1
+    `;
+    const scheduledRows = this.sql<{ payload: string }>`
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
       ORDER BY time ASC
       LIMIT 1
     `;
-    return rows[0]
-      ? (JSON.parse(rows[0].payload) as {
+    const payload = taskRows[0]?.payload ?? scheduledRows[0]?.payload;
+    return payload
+      ? (JSON.parse(payload) as {
           recoveredRequestId?: string;
           requestId?: string;
         })

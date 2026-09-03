@@ -71,6 +71,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 | File                                    | Type       | Scope                                                                                                                                                                           |
 | --------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `alarm-coordination.md`                 | design doc | Lifecycle-owned physical alarm, capability contributions, Scheduler, and Agent adaptation                                                                                       |
 | `chat-shared-layer.md`                  | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat                                                                                             |
 | `durable-streams-comparison.md`         | analysis   | Durable Streams (ElectricSQL) vs the Agents SDK — layer mapping, what each has, strategic takeaways                                                                             |
 | `think.md`                              | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions                                                                                           |
@@ -89,7 +90,8 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-sub-agent-routing.md`              | RFC        | Sub-agent external addressability — nested URLs, `onBeforeSubAgent`, per-call bridge                                                                                            |
 | `rfc-helper-sub-agent-orchestration.md` | RFC        | Agent tool orchestration — `runAgentTool`, `agentTool`, event forwarding                                                                                                        |
 | `rfc-detached-agent-tools.md`           | RFC        | Detached ("background") agent-tool runs — `detached` mode, durable named-method completion hook                                                                                 |
-| `rfc-think-multi-session.md`            | RFC        | Multi-session Think / Chats pattern — parent directory + per-chat child DOs                                                                                                     |
+| `rfc-think-multi-session.md`            | RFC        | Proposed `Chats` base-class pattern using facet-backed chat children                                                                                                            |
+| `rfc-user-chat-durable-objects.md`      | RFC        | Proposed replacement topology — one user hub plus one independent top-level Durable Object per chat                                                                             |
 | `rfc-chat-recovery-work-budget.md`      | RFC        | Decouple chat-recovery duration from the runaway guard — work budget + `shouldKeepRecovering` (accepted)                                                                        |
 | `rfc-chat-recovery-foundation.md`       | RFC        | Shared chat recovery foundation — internal engine, adapters, behavior convergence, and testing strategy                                                                         |
 | `rfc-ai-chat-maintenance.md`            | RFC        | AIChatAgent first-class stance, shared chat toolkit, multi-session example direction                                                                                            |
@@ -99,8 +101,10 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-coding-agent.md`                   | RFC        | `CodingAgent` — new `@cloudflare/coding-agent` package (extends AIChatAgent), CLI coding agents in Sandbox, pluggable engine (Cli/Harness), two-lifecycle durability (proposed) |
 | `test-coverage-matrix.md`               | design doc | Feature × test-layer coverage rollup, CI→layer mapping, skipped-test debt, nightly hygiene                                                                                      |
 | `mcp.md`                                | design doc | Stateless, Legacy compatibility, Legacy sessionful, client, package boundary, and conformance architecture                                                                      |
-| `durable-object-lifecycle.md`           | design doc | Lifecycle Objects, capability and host phases, host context, identity, and always-hibernating WebSockets                                                                        |
+| `durable-object-lifecycle.md`           | design doc | Lifecycle Objects, capability and host phases, Scheduler/alarm ownership, host context, identity, and always-hibernating WebSockets                                             |
 | `rfc-durable-object-lifecycle.md`       | RFC        | Constructor-composed Durable Object lifecycle with reusable components and always-hibernating WebSockets                                                                        |
+| `rfc-fibers.md`                         | RFC        | Tasks (née Fibers) — durable replayable execution as one Lifecycle capability: named definitions, journaled steps, sleeps, optional recovery callback (accepted, amended)       |
+| `rfc-streams.md`                        | RFC        | Streams — durable incremental output as a Lifecycle capability: chunk log, cursor, replay-then-tail reads, composed with Tasks via checkpointed cursors (proposed)              |
 
 ## Relationship to `/docs`
 
