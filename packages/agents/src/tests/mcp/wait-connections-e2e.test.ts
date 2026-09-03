@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
-import { getAgentByName } from "../..";
+import { getStubByName } from "../..";
 
 /**
  * E2E tests for waitForConnections() through the full Agent lifecycle.
@@ -143,7 +143,7 @@ describe("waitForConnections E2E", () => {
   describe("Agent startup restoration after eviction", () => {
     it("should settle connections when waiting after onStart", async () => {
       const name = "hibernation-roundtrip";
-      let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      let stub = await getStubByName(env.TestWaitConnectionsAgent, name);
 
       // Insert an MCP server row (simulating state from before hibernation).
       await stub.insertMcpServer(
@@ -157,7 +157,7 @@ describe("waitForConnections E2E", () => {
       // Eviction tears down the instance while retaining SQLite. Resolving the
       // Agent again runs the real lifecycle capability startup path.
       await evictDurableObject(stub);
-      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      stub = await getStubByName(env.TestWaitConnectionsAgent, name);
       const result = await stub.waitAndReport(5000);
 
       expect(result.connectionIds).toContain("roundtrip-server");
@@ -168,7 +168,7 @@ describe("waitForConnections E2E", () => {
 
     it("should show race condition without waiting after onStart", async () => {
       const name = "hibernation-race";
-      let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      let stub = await getStubByName(env.TestWaitConnectionsAgent, name);
 
       await stub.insertMcpServer(
         "race-roundtrip-server",
@@ -179,7 +179,7 @@ describe("waitForConnections E2E", () => {
       );
 
       await evictDurableObject(stub);
-      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      stub = await getStubByName(env.TestWaitConnectionsAgent, name);
       const result = await stub.reportWithoutWait();
 
       expect(result.connectionIds).toContain("race-roundtrip-server");
@@ -190,7 +190,7 @@ describe("waitForConnections E2E", () => {
 
     it("should handle mixed server types through onStart lifecycle", async () => {
       const name = "hibernation-mixed";
-      let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      let stub = await getStubByName(env.TestWaitConnectionsAgent, name);
 
       await stub.insertMcpServer(
         "regular-server",
@@ -208,7 +208,7 @@ describe("waitForConnections E2E", () => {
       );
 
       await evictDurableObject(stub);
-      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      stub = await getStubByName(env.TestWaitConnectionsAgent, name);
       const result = await stub.waitAndReport(5000);
 
       expect(result.connectionIds).toContain("regular-server");
@@ -221,7 +221,7 @@ describe("waitForConnections E2E", () => {
     // not natural idle-hibernation eligibility.
     it("automatically restores MCP connections after forced eviction", async () => {
       const name = `forced-evict-${crypto.randomUUID()}`;
-      let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      let stub = await getStubByName(env.TestWaitConnectionsAgent, name);
 
       await stub.insertMcpServer(
         "evict-roundtrip-server",
@@ -236,10 +236,10 @@ describe("waitForConnections E2E", () => {
 
       await evictDurableObject(stub);
 
-      // Re-routing through getAgentByName runs the normal Agent startup wrapper.
+      // Re-routing through getStubByName runs the normal Agent startup wrapper.
       // waitAndReport only waits for that lifecycle-started restore; it does not
       // manually invoke onStart() or restoreConnectionsFromStorage().
-      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      stub = await getStubByName(env.TestWaitConnectionsAgent, name);
       const result = await stub.waitAndReport(5000);
 
       expect(result.connectionIds).toContain("evict-roundtrip-server");

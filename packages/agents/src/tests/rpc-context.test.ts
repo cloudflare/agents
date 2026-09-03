@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { getAgentByName, getSubAgentByName, nativeAgentStub } from "../index";
+import { getAgentByName, getStubByName, getSubAgentByName } from "../index";
 import { RpcContextChildAgent } from "./agents/rpc-context-facets";
 
 function unique(prefix: string): string {
@@ -12,10 +13,7 @@ describe("contextual RPC via getAgentByName", () => {
     const callee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
       unique("callee"),
-      {
-        rpc: "contextual",
-        context: { requestId: "req-1", attempt: 2, dryRun: true }
-      }
+      { context: { requestId: "req-1", attempt: 2, dryRun: true } }
     );
 
     await expect(callee.ping("hello")).resolves.toBe("pong:hello");
@@ -75,8 +73,8 @@ describe("contextual RPC via getAgentByName", () => {
     expect(call?.caller?.context).toEqual({});
   });
 
-  it("leaves caller undefined on the default (native) stub", async () => {
-    const callee = await getAgentByName(
+  it("leaves caller undefined on a raw stub from getStubByName", async () => {
+    const callee = await getStubByName(
       env.TestRpcContextCalleeAgent,
       unique("callee")
     );
@@ -91,8 +89,7 @@ describe("contextual RPC via getAgentByName", () => {
   it("surfaces callee errors as rejections", async () => {
     const callee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
-      unique("callee"),
-      { rpc: "contextual" }
+      unique("callee")
     );
     await expect(callee.throwing()).rejects.toThrow("callee failed on purpose");
   });
@@ -100,8 +97,7 @@ describe("contextual RPC via getAgentByName", () => {
   it("refuses JS-internal probes and non-methods like a native stub", async () => {
     const callee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
-      unique("callee"),
-      { rpc: "contextual" }
+      unique("callee")
     );
     // SAFETY: deliberately reaching past the typed surface to probe dispatch.
     const loose = callee as unknown as Record<
@@ -112,25 +108,20 @@ describe("contextual RPC via getAgentByName", () => {
     await expect(loose.hasOwnProperty("x")).rejects.toThrow(/not callable/);
   });
 
-  it("unwraps to the native stub for runtime APIs", async () => {
-    const callee = await getAgentByName(
-      env.TestRpcContextCalleeAgent,
-      unique("callee"),
-      { rpc: "contextual" }
-    );
-    const raw = nativeAgentStub(callee);
-    expect(raw).not.toBe(callee);
-    expect(nativeAgentStub(raw)).toBe(raw);
+  it("getStubByName returns a runtime Fetcher usable with runtime APIs", async () => {
+    const name = unique("callee");
+    const raw = await getStubByName(env.TestRpcContextCalleeAgent, name);
+    const wrapped = await getAgentByName(env.TestRpcContextCalleeAgent, name);
+    expect(raw).not.toBe(wrapped);
     await raw.ping("raw");
-    const [call] = await callee.observedCalls();
-    expect(call?.caller).toBeUndefined();
+    // The pool helper type-checks its argument as a real stub.
+    await evictDurableObject(raw);
+    await expect(evictDurableObject(wrapped)).rejects.toThrow(/Fetcher/);
   });
 
   it("keeps native stub members intact", async () => {
     const name = unique("callee");
-    const callee = await getAgentByName(env.TestRpcContextCalleeAgent, name, {
-      rpc: "contextual"
-    });
+    const callee = await getAgentByName(env.TestRpcContextCalleeAgent, name);
     expect(callee.id.toString()).toBe(
       env.TestRpcContextCalleeAgent.idFromName(name).toString()
     );
@@ -143,7 +134,7 @@ describe("contextual RPC on a plain Lifecycle Object", () => {
     const stub = await getAgentByName(
       env.RpcContextLifecycleObject,
       unique("lifecycle"),
-      { rpc: "contextual", context: { requestId: "req-lc" } }
+      { context: { requestId: "req-lc" } }
     );
     await expect(stub.ping("x")).resolves.toBe("pong:x");
 
@@ -162,8 +153,7 @@ describe("contextual RPC on a plain Lifecycle Object", () => {
     // invocation, so enter it through a contextual stub.
     const caller = await getAgentByName(
       env.RpcContextLifecycleObject,
-      callerName,
-      { rpc: "contextual" }
+      callerName
     );
     await expect(caller.callPeer(calleeName, { hop: 1 })).resolves.toBe(
       "pong:from-lifecycle-object"
@@ -187,9 +177,9 @@ describe("contextual RPC on a plain Lifecycle Object", () => {
   it("reports external from a Lifecycle Object method reached over a raw stub", async () => {
     // Unlike Agent, a plain Lifecycle Object does not wrap its RPC methods in
     // an invocation context, so an outbound call from a method reached over
-    // the default native stub cannot identify itself.
+    // a raw stub cannot identify itself.
     const calleeName = unique("lifecycle-callee");
-    const caller = await getAgentByName(
+    const caller = await getStubByName(
       env.RpcContextLifecycleObject,
       unique("lifecycle-caller")
     );
@@ -207,8 +197,7 @@ describe("contextual RPC on a plain Lifecycle Object", () => {
     const agentName = unique("agent");
     const lifecycle = await getAgentByName(
       env.RpcContextLifecycleObject,
-      lifecycleName,
-      { rpc: "contextual" }
+      lifecycleName
     );
     const agentCallee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
@@ -255,15 +244,6 @@ describe("contextual RPC across facets", () => {
     });
   });
 
-  it("default subAgent() stub is native and carries no caller", async () => {
-    const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
-    await expect(root.childPingNative("c0")).resolves.toBe(
-      "pong:from-root-native"
-    );
-    const [call] = await root.childObserved("c0");
-    expect(call?.caller).toBeUndefined();
-  });
-
   it("root sees the child as caller through parentAgent() (top-level branch)", async () => {
     const rootName = unique("root");
     const root = await getAgentByName(env.RpcContextRootAgent, rootName);
@@ -303,9 +283,7 @@ describe("contextual RPC across facets", () => {
 
   it("getSubAgentByName reports the Worker, not the parent, as caller", async () => {
     const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
-    const child = await getSubAgentByName(root, RpcContextChildAgent, "c5", {
-      rpc: "contextual"
-    });
+    const child = await getSubAgentByName(root, RpcContextChildAgent, "c5");
     await expect(child.ping("from-worker")).resolves.toBe("pong:from-worker");
 
     const [call] = await root.childObserved("c5");

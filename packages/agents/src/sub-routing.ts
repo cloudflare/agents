@@ -18,8 +18,7 @@
  */
 
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
-import { bridgedCaller, type AgentRpcOptions } from "./agent-stub";
-import type { AgentCaller } from "./lifecycle/current-agent";
+import { currentCaller, wrapAgentStub } from "./agent-stub";
 import type { Agent, SubAgentClass, SubAgentStub } from "./index";
 
 /**
@@ -471,8 +470,7 @@ interface SubAgentInvokeEndpoint {
     className: string,
     name: string,
     method: string,
-    args: unknown[],
-    caller?: AgentCaller
+    args: unknown[]
   ): Promise<unknown>;
 }
 
@@ -505,8 +503,7 @@ interface SubAgentInvokeEndpoint {
 export async function getSubAgentByName<T extends Agent>(
   parent: unknown,
   cls: SubAgentClass<T>,
-  name: string,
-  options?: AgentRpcOptions
+  name: string
 ): Promise<SubAgentStub<T>> {
   if (name.includes("\0")) {
     throw new Error(
@@ -523,10 +520,7 @@ export async function getSubAgentByName<T extends Agent>(
     );
   }
 
-  // Resolved once: the bridge runs inside the parent's `_cf_` framework call,
-  // so without this the child would see the parent as its caller.
-  const caller = bridgedCaller(options);
-  return new Proxy(
+  const bridged = new Proxy(
     {},
     {
       get(_target, prop) {
@@ -552,8 +546,17 @@ export async function getSubAgentByName<T extends Agent>(
           };
         }
         return async (...args: unknown[]) =>
-          bridge._cf_invokeSubAgent(className, name, prop, args, caller);
+          bridge._cf_invokeSubAgent(className, name, prop, args);
       }
     }
   ) as SubAgentStub<T>;
+  // The bridge runs inside the parent's `_cf_` framework call, so without
+  // this the child would see the parent as its caller. Wrapping sends
+  // `_cf_invoke` through the bridge with the Worker-side caller resolved here.
+  // SAFETY: SubAgentStub is the RPC-only projection of the Durable Object
+  // stub; the wrapper only intercepts method names, which both share.
+  return wrapAgentStub(bridged as unknown as DurableObjectStub<T>, {
+    targetName: name,
+    caller: currentCaller({})
+  }) as unknown as SubAgentStub<T>;
 }

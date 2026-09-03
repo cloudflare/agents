@@ -7,9 +7,6 @@ export type FacetObservedCall = {
   readonly caller: AgentCaller | undefined;
 };
 
-/** Every hop in these fixtures opts into contextual RPC. */
-const CONTEXTUAL = { rpc: "contextual" } as const;
-
 /** Shared recorder: every class in the tree records who called `ping`. */
 class RecordingAgent extends Agent {
   readonly observed: FacetObservedCall[] = [];
@@ -27,7 +24,7 @@ class RecordingAgent extends Agent {
 /** Grandchild facet: calls its facet parent through the root bridge. */
 export class RpcContextGrandchildAgent extends RecordingAgent {
   async callParent(): Promise<string> {
-    const parent = await this.parentAgent(RpcContextChildAgent, CONTEXTUAL);
+    const parent = await this.parentAgent(RpcContextChildAgent);
     return parent.ping("from-grandchild");
   }
 }
@@ -35,15 +32,14 @@ export class RpcContextGrandchildAgent extends RecordingAgent {
 /** Child facet: calls its top-level parent, and spawns a grandchild. */
 export class RpcContextChildAgent extends RecordingAgent {
   async callParent(): Promise<string> {
-    const parent = await this.parentAgent(RpcContextRootAgent, CONTEXTUAL);
+    const parent = await this.parentAgent(RpcContextRootAgent);
     return parent.ping("from-child");
   }
 
   async grandchildCallsMe(grandchildName: string): Promise<string> {
     const grandchild = await this.subAgent(
       RpcContextGrandchildAgent,
-      grandchildName,
-      CONTEXTUAL
+      grandchildName
     );
     return grandchild.callParent();
   }
@@ -51,8 +47,7 @@ export class RpcContextChildAgent extends RecordingAgent {
   async grandchildPing(grandchildName: string): Promise<string> {
     const grandchild = await this.dynamicAgents.get(
       RpcContextGrandchildAgent,
-      grandchildName,
-      CONTEXTUAL
+      grandchildName
     );
     return grandchild.ping("from-child");
   }
@@ -62,8 +57,7 @@ export class RpcContextChildAgent extends RecordingAgent {
   ): Promise<FacetObservedCall[]> {
     const grandchild = await this.subAgent(
       RpcContextGrandchildAgent,
-      grandchildName,
-      CONTEXTUAL
+      grandchildName
     );
     return grandchild.observedCalls();
   }
@@ -72,35 +66,17 @@ export class RpcContextChildAgent extends RecordingAgent {
 /** Top-level root of the facet tree. */
 export class RpcContextRootAgent extends RecordingAgent {
   async childPing(childName: string): Promise<string> {
-    const child = await this.subAgent(
-      RpcContextChildAgent,
-      childName,
-      CONTEXTUAL
-    );
+    const child = await this.subAgent(RpcContextChildAgent, childName);
     return child.ping("from-root");
   }
 
-  /** Default `subAgent()` stays native: the child sees no caller. */
-  async childPingNative(childName: string): Promise<string> {
-    const child = await this.subAgent(RpcContextChildAgent, childName);
-    return child.ping("from-root-native");
-  }
-
   async childObserved(childName: string): Promise<FacetObservedCall[]> {
-    const child = await this.subAgent(
-      RpcContextChildAgent,
-      childName,
-      CONTEXTUAL
-    );
+    const child = await this.subAgent(RpcContextChildAgent, childName);
     return child.observedCalls();
   }
 
   async childCallsMe(childName: string): Promise<string> {
-    const child = await this.subAgent(
-      RpcContextChildAgent,
-      childName,
-      CONTEXTUAL
-    );
+    const child = await this.subAgent(RpcContextChildAgent, childName);
     return child.callParent();
   }
 
@@ -108,11 +84,7 @@ export class RpcContextRootAgent extends RecordingAgent {
     childName: string,
     grandchildName: string
   ): Promise<string> {
-    const child = await this.subAgent(
-      RpcContextChildAgent,
-      childName,
-      CONTEXTUAL
-    );
+    const child = await this.subAgent(RpcContextChildAgent, childName);
     return child.grandchildCallsMe(grandchildName);
   }
 
@@ -120,11 +92,7 @@ export class RpcContextRootAgent extends RecordingAgent {
     childName: string,
     grandchildName: string
   ): Promise<FacetObservedCall[]> {
-    const child = await this.subAgent(
-      RpcContextChildAgent,
-      childName,
-      CONTEXTUAL
-    );
+    const child = await this.subAgent(RpcContextChildAgent, childName);
     await child.grandchildPing(grandchildName);
     return child.grandchildObserved(grandchildName);
   }

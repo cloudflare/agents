@@ -5,12 +5,12 @@ import {
   runDurableObjectAlarm
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "..";
+import { getStubByName } from "..";
 import type { TestAlarmInitAgent } from "./agents/schedule";
 
 describe("scheduled destroys", () => {
   it("should not throw when a scheduled callback nukes storage", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestDestroyScheduleAgent,
       "alarm-destroy-repro"
     );
@@ -31,10 +31,7 @@ describe("scheduled destroys", () => {
 describe("alarm initialization", () => {
   it("should have this.name accessible during scheduled callback", async () => {
     const instanceName = "alarm-name-test";
-    const agentStub = await getAgentByName(
-      env.TestAlarmInitAgent,
-      instanceName
-    );
+    const agentStub = await getStubByName(env.TestAlarmInitAgent, instanceName);
 
     // Verify onStart was called during initial RPC — read instance field directly
     await runInDurableObject(
@@ -67,10 +64,7 @@ describe("alarm initialization", () => {
 
   it("restores the scheduling capability after real eviction", async () => {
     const instanceName = "alarm-eviction-test";
-    const agentStub = await getAgentByName(
-      env.TestAlarmInitAgent,
-      instanceName
-    );
+    const agentStub = await getStubByName(env.TestAlarmInitAgent, instanceName);
 
     const scheduleId = await agentStub.scheduleNameCheck(86400);
     await agentStub.clearStoredAlarm();
@@ -99,7 +93,7 @@ describe("alarm initialization", () => {
   });
 
   it("keeps capability hooks context-free and callback/host hooks contextual", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestAlarmInitAgent,
       "alarm-context-boundaries"
     );
@@ -132,7 +126,7 @@ describe("alarm initialization", () => {
   });
 
   it("should call onStart before executing scheduled callbacks", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestAlarmInitAgent,
       "alarm-onstart-test"
     );

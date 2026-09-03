@@ -1,4 +1,3 @@
-import type { AgentCaller } from "../lifecycle/current-agent";
 import type {
   Connection,
   WSMessage,
@@ -39,8 +38,7 @@ export type DynamicAgentPathInvokeEndpoint = {
   _cf_invokeSubAgentPath(
     path: ReadonlyArray<{ className: string; name: string }>,
     method: string,
-    args: unknown[],
-    caller?: AgentCaller
+    args: unknown[]
   ): Promise<unknown>;
 };
 

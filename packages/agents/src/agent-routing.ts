@@ -1,6 +1,9 @@
 import type { Agent } from "./index";
-import { applyRpcOptions, type AgentRpcOptions } from "./agent-stub";
-import type { LifecycleObject } from "./lifecycle/current-agent";
+import { currentCaller, wrapAgentStub } from "./agent-stub";
+import type {
+  LifecycleObject,
+  RpcCallContext
+} from "./lifecycle/current-agent";
 import { camelCaseToKebabCase } from "./utils";
 
 const namespaceMapCache = new WeakMap<
@@ -96,8 +99,14 @@ export type AgentGetOptions<
 > = Pick<
   AgentRouteOptions<Env, Props>,
   "jurisdiction" | "locationHint" | "props" | "routingRetry"
-> &
-  AgentRpcOptions;
+> & {
+  /**
+   * Hints forwarded with every call on the returned stub, such as a request
+   * id or tenant hint. Untrusted on the callee: correlation only, never
+   * authorization.
+   */
+  context?: RpcCallContext;
+};
 
 interface ResolvedRoutingRetryOptions extends Required<
   Omit<RoutingRetryOptions, "onRetry">
@@ -390,14 +399,16 @@ export async function routeAgentRequest<Env>(
  * Lifecycle Object qualifies, not only Agents: `Lifecycle.install` gives every
  * host class the entry points this resolver and its stub rely on.
  *
- * Pass `rpc: "contextual"` for a stub whose method calls carry the caller's
- * identity (or `external` from a Worker) plus any `context` hints to the
- * callee, where `getCurrentAgent().caller` exposes them, and open an
- * `agents.rpc.call` span. The default is the raw Durable Object stub.
+ * Method calls on the returned stub carry the caller's identity (or
+ * `external` from a Worker) plus any `context` hints to the callee, where
+ * `getCurrentAgent().caller` exposes them, and open an `agents.rpc.call`
+ * span. The stub is a Proxy over the native stub, so it cannot be passed to
+ * a runtime API that takes a stub or sent as an RPC argument; use
+ * {@link getStubByName} for those cases.
  *
  * @param namespace - Agent Durable Object namespace.
  * @param name - Agent instance name.
- * @param options - Placement, startup properties, retry, and RPC options.
+ * @param options - Placement, startup properties, retry, and caller context.
  * @returns The initialized Agent stub.
  */
 export async function getAgentByName<
@@ -408,6 +419,33 @@ export async function getAgentByName<
   namespace: DurableObjectNamespace<T>,
   name: string,
   options?: AgentGetOptions<Env, Props>
+): Promise<DurableObjectStub<T>> {
+  const stub = await getStubByName<Env, T, Props>(namespace, name, options);
+  return wrapAgentStub(stub, {
+    targetName: name,
+    caller: currentCaller(options?.context ?? {})
+  });
+}
+
+/**
+ * Get a named Agent's raw Durable Object stub after its lifecycle startup
+ * has completed. Method calls carry no caller context. Use this when the stub
+ * must remain a runtime `Fetcher`: passing it to a runtime API such as
+ * `evictDurableObject`, or sending it as an RPC argument.
+ *
+ * @param namespace - Agent Durable Object namespace.
+ * @param name - Agent instance name.
+ * @param options - Placement, startup properties, and retry options.
+ * @returns The initialized native stub.
+ */
+export async function getStubByName<
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  T extends Agent<Env> | LifecycleObject<Env> = Agent<Env>,
+  Props extends Record<string, unknown> = Record<string, unknown>
+>(
+  namespace: DurableObjectNamespace<T>,
+  name: string,
+  options?: Omit<AgentGetOptions<Env, Props>, "context">
 ): Promise<DurableObjectStub<T>> {
   const target = options?.jurisdiction
     ? namespace.jurisdiction(options.jurisdiction)
@@ -426,5 +464,5 @@ export async function getAgentByName<
     options?.routingRetry
   );
 
-  return applyRpcOptions(stub, name, options);
+  return stub;
 }

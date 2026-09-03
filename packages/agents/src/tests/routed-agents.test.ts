@@ -1,7 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAgentByName } from "../index";
+import { getStubByName } from "../index";
 import type { RoutingOwnerAgent } from "./agents/routed-agents";
 
 const openSockets = new Set<WebSocket>();
@@ -57,7 +57,7 @@ function waitForString(
 
 describe("RoutedAgents", () => {
   it("creates and lists opaque independent Agent entries", async () => {
-    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const owner = await getStubByName(env.RoutingOwnerAgent, ownerName());
     const created = await owner.createChat("First chat");
 
     expect(created).toMatchObject({
@@ -73,7 +73,7 @@ describe("RoutedAgents", () => {
   });
 
   it("agrees with list() on the JSON round-trip of metadata create() returns", async () => {
-    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const owner = await getStubByName(env.RoutingOwnerAgent, ownerName());
     // NaN only survives JSON as null, so this catches create() returning
     // the caller's object verbatim instead of the encoded-then-decoded copy.
     const created = await owner.createChatRaw({
@@ -86,7 +86,7 @@ describe("RoutedAgents", () => {
   });
 
   it("condemns every remaining entry when the owner is destroyed", async () => {
-    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const owner = await getStubByName(env.RoutingOwnerAgent, ownerName());
     const first = await owner.createChat("First");
     const second = await owner.createChat("Second");
     const firstName = await owner.physicalName(first.id);
@@ -100,14 +100,14 @@ describe("RoutedAgents", () => {
 
     for (const name of [firstName, secondName]) {
       await vi.waitFor(async () => {
-        const revived = await getAgentByName(env.RoutedChatAgent, name);
+        const revived = await getStubByName(env.RoutedChatAgent, name);
         expect(await revived.getValue("message")).toBeNull();
       }, 10_000);
     }
   });
 
   it("condemns a stuck 'deleting' entry too, not only active ones", async () => {
-    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const owner = await getStubByName(env.RoutingOwnerAgent, ownerName());
     const stuck = await owner.createChat("Stuck mid-delete");
     const stuckName = await owner.physicalName(stuck.id);
     if (!stuckName) throw new Error("Expected a physical name");
@@ -122,13 +122,13 @@ describe("RoutedAgents", () => {
     await (owner.destroy() as Promise<void>).catch(() => {});
 
     await vi.waitFor(async () => {
-      const revived = await getAgentByName(env.RoutedChatAgent, stuckName);
+      const revived = await getStubByName(env.RoutedChatAgent, stuckName);
       expect(await revived.getValue("message")).toBeNull();
     }, 10_000);
   });
 
   it("updates metadata without waking unrelated child Agents", async () => {
-    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const owner = await getStubByName(env.RoutingOwnerAgent, ownerName());
     const first = await owner.createChat("First");
     const second = await owner.createChat("Second");
 
@@ -145,7 +145,7 @@ describe("RoutedAgents", () => {
   });
 
   it("orders same-millisecond updates by write order, not by random id", async () => {
-    const owner = await getAgentByName(env.RoutingOwnerAgent, ownerName());
+    const owner = await getStubByName(env.RoutingOwnerAgent, ownerName());
     const first = await owner.createChat("First");
     const second = await owner.createChat("Second");
 
@@ -167,7 +167,7 @@ describe("RoutedAgents", () => {
 
   it("forwards HTTP requests and preserves the suffix", async () => {
     const name = ownerName();
-    const owner = await getAgentByName(env.RoutingOwnerAgent, name);
+    const owner = await getStubByName(env.RoutingOwnerAgent, name);
     const created = await owner.createChat("Routed");
     const physicalName = await owner.physicalName(created.id);
 
@@ -189,7 +189,7 @@ describe("RoutedAgents", () => {
 
   it("routes by the owning entry when the route segment repeats in the path", async () => {
     const name = "chats";
-    const owner = await getAgentByName(env.RoutingOwnerAgent, name);
+    const owner = await getStubByName(env.RoutingOwnerAgent, name);
     const created = await owner.createChat("Collision");
     const physicalName = await owner.physicalName(created.id);
 
@@ -211,7 +211,7 @@ describe("RoutedAgents", () => {
   // facet name on the owner, not the target's physical name.
   it("does not forward a /sub/ marker inside a routed suffix (known limitation)", async () => {
     const name = ownerName();
-    const owner = await getAgentByName(env.RoutingOwnerAgent, name);
+    const owner = await getStubByName(env.RoutingOwnerAgent, name);
     const created = await owner.createChat("Has a sub marker");
     const physicalName = await owner.physicalName(created.id);
 
@@ -225,7 +225,7 @@ describe("RoutedAgents", () => {
 
   it("returns a child-owned WebSocket that survives child eviction", async () => {
     const name = ownerName();
-    const owner = await getAgentByName(env.RoutingOwnerAgent, name);
+    const owner = await getStubByName(env.RoutingOwnerAgent, name);
     const created = await owner.createChat("Socket");
     const physicalName = await owner.physicalName(created.id);
     if (!physicalName) throw new Error("Expected a physical Agent name");
@@ -235,7 +235,7 @@ describe("RoutedAgents", () => {
       await waitForString(socket, (message) => message.startsWith("connected:"))
     ).toBe(`connected:${physicalName}`);
 
-    const child = await getAgentByName(env.RoutedChatAgent, physicalName);
+    const child = await getStubByName(env.RoutedChatAgent, physicalName);
     await evictDurableObject(child);
 
     socket.send("after-eviction");
@@ -246,7 +246,7 @@ describe("RoutedAgents", () => {
 
   it("makes an entry unreachable, then its Agent storage is wiped", async () => {
     const name = ownerName();
-    const owner = await getAgentByName(env.RoutingOwnerAgent, name);
+    const owner = await getStubByName(env.RoutingOwnerAgent, name);
     const created = await owner.createChat("Delete me");
     const physicalName = await owner.physicalName(created.id);
     if (!physicalName) throw new Error("Expected a physical Agent name");
@@ -264,7 +264,7 @@ describe("RoutedAgents", () => {
     expect(route.status).toBe(404);
 
     await vi.waitFor(async () => {
-      const recreated = await getAgentByName(env.RoutedChatAgent, physicalName);
+      const recreated = await getStubByName(env.RoutedChatAgent, physicalName);
       expect(await recreated.getValue("message")).toBeNull();
     }, 10_000);
   });

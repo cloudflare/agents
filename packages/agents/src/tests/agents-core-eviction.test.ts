@@ -13,7 +13,7 @@ import {
   runInDurableObject
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "..";
+import { getStubByName } from "..";
 import type { FiberRecoveryContext } from "..";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestScheduleAgent } from "./agents/schedule";
@@ -24,7 +24,7 @@ function uniqueName(prefix: string): string {
 
 describe("Agent recovery after forced Durable Object eviction", () => {
   it("drops instance state while restoring persisted Agent state", async () => {
-    const agent = await getAgentByName(
+    const agent = await getStubByName(
       env.TestStateAgent,
       uniqueName("evict-state")
     );
@@ -52,7 +52,7 @@ describe("Agent recovery after forced Durable Object eviction", () => {
   });
 
   it("runs a persisted interval schedule on the reconstructed instance", async () => {
-    const agent = await getAgentByName(
+    const agent = await getStubByName(
       env.TestScheduleAgent,
       uniqueName("evict-schedule")
     );
@@ -94,7 +94,7 @@ describe("Agent recovery after forced Durable Object eviction", () => {
   });
 
   it("recovers an interrupted unmanaged fiber from SQL", async () => {
-    const stub = await getAgentByName(
+    const stub = await getStubByName(
       env.TestRunFiberAgent,
       uniqueName("evict-fiber")
     );
@@ -127,7 +127,7 @@ describe("Agent recovery after forced Durable Object eviction", () => {
   });
 
   it("applies managed-fiber recovery on a fresh instance", async () => {
-    const stub = await getAgentByName(
+    const stub = await getStubByName(
       env.TestRunFiberAgent,
       uniqueName("evict-managed-fiber")
     );

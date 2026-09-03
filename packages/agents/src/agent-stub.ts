@@ -24,29 +24,6 @@ import { isInternalJsStubProp } from "./utils";
  * tenancy hints. It is never proof of identity or authorization.
  */
 
-/** Property a wrapped stub answers with its native stub. */
-const NATIVE_STUB = Symbol.for("cloudflare.agents.nativeStub");
-
-/**
- * The raw Durable Object stub behind a contextual stub.
- *
- * A contextual stub is a Proxy, not a runtime `Fetcher`, so it cannot be
- * passed as an RPC argument or to runtime APIs that demand a real stub. Unwrap
- * it for those cases; calls on the returned stub carry no caller context.
- *
- * @template T - The Agent class the stub targets.
- * @param stub - A stub from `getAgentByName`, contextual or native.
- * @returns The native stub, or `stub` itself when it was never wrapped.
- */
-export function nativeAgentStub<T extends Rpc.DurableObjectBranded | undefined>(
-  stub: DurableObjectStub<T>
-): DurableObjectStub<T> {
-  // SAFETY: symbol lookup on the stub; a contextual stub answers with its
-  // native target and a native stub answers undefined.
-  const unwrapped = (stub as unknown as Record<symbol, unknown>)[NATIVE_STUB];
-  return unwrapped === undefined ? stub : (unwrapped as DurableObjectStub<T>);
-}
-
 /** Members the wrapper forwards to the native stub untouched. */
 const NATIVE_STUB_MEMBERS: ReadonlySet<string> = new Set([
   "id",
@@ -96,67 +73,6 @@ export function currentCaller(context: RpcCallContext): AgentCaller {
   return { kind: "agent", ...agent._cf_rpcIdentity(), context };
 }
 
-/**
- * How method calls on a resolved stub travel.
- *
- * - `native` (default): the raw Durable Object stub, with no caller context.
- * - `contextual`: calls carry the caller's identity and `context` hints,
- *   readable on the callee via `getCurrentAgent().caller`, and open a client
- *   span per call. The stub is then a Proxy rather than a runtime `Fetcher`;
- *   use `nativeAgentStub()` before handing it to a runtime API or sending it
- *   as an RPC argument.
- */
-export type AgentRpcMode = "contextual" | "native";
-
-/** RPC options accepted wherever the SDK hands out a stub. */
-export type AgentRpcOptions = {
-  /** How method calls on the returned stub travel. Default: `native`. */
-  readonly rpc?: AgentRpcMode;
-  /**
-   * Hints forwarded with every call on the returned stub, such as a request
-   * id or tenant hint. Untrusted on the callee: correlation only, never
-   * authorization. Ignored unless `rpc` is `contextual`.
-   */
-  readonly context?: RpcCallContext;
-};
-
-/**
- * Wrap `stub` when `options` opt into contextual RPC; otherwise return it
- * untouched.
- *
- * @template T - The Agent class the stub targets.
- * @param stub - The native stub.
- * @param targetName - Instance name the stub was resolved for.
- * @param options - The caller's RPC options.
- * @returns The stub to hand out.
- */
-export function applyRpcOptions<T extends Rpc.DurableObjectBranded | undefined>(
-  stub: DurableObjectStub<T>,
-  targetName: string,
-  options: AgentRpcOptions | undefined
-): DurableObjectStub<T> {
-  if (options?.rpc !== "contextual") return stub;
-  return wrapAgentStub(stub, {
-    targetName,
-    caller: currentCaller(options.context ?? {})
-  });
-}
-
-/**
- * The caller record for a bridged call, or `undefined` when `options` do not
- * opt into contextual RPC.
- *
- * @param options - The caller's RPC options.
- * @returns The caller to thread through the bridge, if any.
- */
-export function bridgedCaller(
-  options: AgentRpcOptions | undefined
-): AgentCaller | undefined {
-  return options?.rpc === "contextual"
-    ? currentCaller(options.context ?? {})
-    : undefined;
-}
-
 /** How a wrapped stub identifies its target in spans. */
 export type WrapAgentStubOptions = {
   /** Instance name the stub was resolved for. */
@@ -175,6 +91,10 @@ export type WrapAgentStubOptions = {
  * as a method call; reading a remote property (a native-stub quirk) is not
  * forwarded.
  *
+ * The result is a Proxy, not a runtime `Fetcher`: it cannot be passed to a
+ * runtime API that takes a stub or sent as an RPC argument. Resolve a raw
+ * stub with `getStubByName` for those cases.
+ *
  * @template T - The Agent class the stub targets.
  * @param stub - The native stub returned by the namespace.
  * @param options - Target identity and caller record.
@@ -191,7 +111,6 @@ export function wrapAgentStub<T extends Rpc.DurableObjectBranded | undefined>(
 
   return new Proxy(stub, {
     get(native, prop) {
-      if (prop === NATIVE_STUB) return native;
       // JS-internal probes (`constructor`, `then`, `toJSON`, …) must see the
       // native value untouched so brand checks and thenable checks behave
       // exactly as they do on the raw stub.

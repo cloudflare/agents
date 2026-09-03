@@ -37,17 +37,13 @@ export class TestRpcContextCallerAgent extends Agent {
     const peer = await getAgentByName(
       this.env.TestRpcContextCalleeAgent,
       peerName,
-      { rpc: "contextual", context }
+      { context }
     );
     return peer.ping("from-agent");
   }
 
   async callLifecycleObject(name: string): Promise<string> {
-    const peer = await getAgentByName(
-      this.env.RpcContextLifecycleObject,
-      name,
-      { rpc: "contextual" }
-    );
+    const peer = await getAgentByName(this.env.RpcContextLifecycleObject, name);
     return peer.ping("from-agent");
   }
 }

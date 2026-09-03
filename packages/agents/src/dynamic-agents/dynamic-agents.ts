@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { dispatchWithCaller, resolveRpcMethod } from "../lifecycle/rpc-entry";
-import type { AgentCaller } from "../lifecycle/current-agent";
+import { resolveRpcMethod } from "../lifecycle/rpc-entry";
 import { nanoid } from "nanoid";
 import type {
   Connection,
@@ -1501,11 +1500,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     className: string,
     name: string,
     method: string,
-    args: unknown[],
-    caller?: AgentCaller
+    args: unknown[]
   ): Promise<unknown> {
     const stub = await this.resolve(className, name);
-    return await this.invokeStubMethod(stub, className, method, args, caller);
+    return await this.invokeStubMethod(stub, className, method, args);
   }
 
   /**
@@ -1517,8 +1515,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   async invokePath(
     path: ReadonlyArray<{ className: string; name: string }>,
     method: string,
-    args: unknown[],
-    caller?: AgentCaller
+    args: unknown[]
   ): Promise<unknown> {
     const [self, next, ...rest] = path;
     if (!self) {
@@ -1536,15 +1533,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     }
 
     if (!next) {
-      if (caller !== undefined && method !== "fetch") {
-        return await dispatchWithCaller(
-          this.#host,
-          method,
-          args,
-          caller,
-          "local"
-        );
-      }
       return await this.invokeStubMethod(
         this.#host,
         ownClassName,
@@ -1555,42 +1543,24 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
     const child = await this.resolve(next.className, next.name);
     if (rest.length === 0) {
-      return await this.invokeStubMethod(
-        child,
-        next.className,
-        method,
-        args,
-        caller
-      );
+      return await this.invokeStubMethod(child, next.className, method, args);
     }
 
     const bridge = child as DynamicAgentPathInvokeEndpoint;
-    return await bridge._cf_invokeSubAgentPath(
-      [next, ...rest],
-      method,
-      args,
-      caller
-    );
+    return await bridge._cf_invokeSubAgentPath([next, ...rest], method, args);
   }
 
   /**
-   * Dispatch one method on a resolved facet stub. With a `caller`, the call
-   * goes through the child's contextual entry point so the original caller
-   * reaches it; without one, the raw RPC member is called (framework paths
-   * such as workflow callbacks keep native semantics). `fetch` is always the
-   * stub's native fetch: it is an HTTP subrequest, not an RPC method, and its
-   * Request must not cross an isolate as an RPC argument.
+   * Dispatch one method on a resolved facet stub. A contextual stub over a
+   * bridge sends `_cf_invoke` as the method name, so the original caller
+   * reaches the final object without any per-hop plumbing here.
    */
   async invokeStubMethod(
     stub: unknown,
     className: string,
     method: string,
-    args: unknown[],
-    caller?: AgentCaller
+    args: unknown[]
   ): Promise<unknown> {
-    if (caller !== undefined && method !== "fetch") {
-      return await dispatchWithCaller(stub, method, args, caller, "stub");
-    }
     // Must call `handle[method](...)` in one expression — extracting
     // via `const fn = handle[method]; fn.apply(handle, args)` breaks
     // the workerd RpcProperty binding. (Confirmed by the spike.)

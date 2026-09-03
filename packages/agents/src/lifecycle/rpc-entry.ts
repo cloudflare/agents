@@ -128,33 +128,6 @@ export function invokeWithCaller(
   );
 }
 
-/**
- * Dispatch one contextual call to `target`: directly when it is a local
- * object, through `_cf_invoke` when it is an RPC stub. Facet paths use this
- * at every hop so the original caller reaches the final object unchanged.
- *
- * @param target - A local Lifecycle Object or a stub to one.
- * @param method - The requested method name.
- * @param args - The call's arguments.
- * @param caller - The caller record the callee will observe.
- * @param local - Whether `target` is the object itself rather than a stub.
- * @returns The method's result.
- */
-export function dispatchWithCaller(
-  target: unknown,
-  method: string,
-  args: ReadonlyArray<unknown>,
-  caller: AgentCaller,
-  local: "local" | "stub"
-): Promise<unknown> {
-  if (local === "local") {
-    return invokeWithCaller(target as object, method, args, caller);
-  }
-  // SAFETY: every Lifecycle Object's class carries `_cf_invoke` after
-  // `Lifecycle.install`; a stub to one reaches it over native RPC.
-  return (target as ContextualRpcHost)._cf_invoke(method, args, caller);
-}
-
 /** Identity of a plain Lifecycle Object: class name and Durable Object id. */
 function lifecycleObjectIdentity(host: EntryHost): AgentCallerIdentity {
   return {

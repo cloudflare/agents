@@ -140,9 +140,10 @@ For child workflow origins, `AgentWorkflow.agent` is RPC-only. Use it to call Ag
 
 ### Shared identity
 
-Calls in both directions can carry the caller: pass `{ rpc: "contextual" }`
-to `dynamicAgents.get()`, `subAgent()`, or `parentAgent()` and the called
-method's `getCurrentAgent().caller` names the calling agent. See
+Calls in both directions carry the caller: inside a child method reached
+through `dynamicAgents.get()` or `subAgent()`, and inside a parent method
+reached through `parentAgent()`, `getCurrentAgent().caller` names the calling
+agent. See
 [Calls between Agents](./get-current-agent.md#calls-between-agents).
 
 Dynamic agents know who their parent is via `this.parentPath` (root-first ancestor chain) and `this.parentAgent(ParentClass)` (typed stub). A child with no parent (top-level agent) has `parentPath === []`.
