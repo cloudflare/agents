@@ -3,6 +3,8 @@ packages:
   - "examples/*"
   - "!examples/next"
   - "examples/next/*"
+  - "!examples/next/harnesses"
+  - "examples/next/harnesses/*"
   - "packages/*"
   - "voice-providers/*"
   - "guides/*"

@@ -1,0 +1,7 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["../src/kernel-types.ts", "../src/language-model-v4.ts", "."]
+}

@@ -1,0 +1,43 @@
+{
+  "name": "@cloudflare/agents-next-codex-harness-example",
+  "description": "Static Codex Rust/Wasm harness with LanguageModelV4 and Lifecycle",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "build:kernel": "RUSTC=\"$(rustup which --toolchain 1.95.0 rustc)\" rustup run 1.95.0 cargo build --manifest-path wasm-kernel/Cargo.toml --target wasm32-unknown-unknown --release",
+    "start": "pnpm run build:kernel && vite dev",
+    "build": "pnpm run build:kernel && vite build",
+    "deploy": "pnpm run build && wrangler deploy",
+    "smoke": "node smoke.mjs",
+    "test": "tsc --noEmit --project tests/tsconfig.json && tsx --test tests/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "^4.0.0",
+    "@cloudflare/kumo": "^2.6.0",
+    "@cloudflare/shell": "*",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
+    "agents": "*",
+    "ai": "^7.0.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "streamdown": "^2.5.0",
+    "workers-ai-provider": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.48.0",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@tailwindcss/vite": "^4",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.3.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0",
+    "wrangler": "^4.115.0"
+  }
+}
