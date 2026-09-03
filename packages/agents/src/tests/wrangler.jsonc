@@ -204,6 +204,18 @@
         "name": "TestRpcContextCallerAgent"
       },
       {
+        "class_name": "RpcContextRootAgent",
+        "name": "RpcContextRootAgent"
+      },
+      {
+        "class_name": "RpcContextChildAgent",
+        "name": "RpcContextChildAgent"
+      },
+      {
+        "class_name": "RpcContextGrandchildAgent",
+        "name": "RpcContextGrandchildAgent"
+      },
+      {
         "class_name": "TestChatSdkStateHostAgent",
         "name": "TestChatSdkStateHostAgent"
       },
@@ -454,6 +466,9 @@
         "TestQueueAgent",
         "TestRpcContextCalleeAgent",
         "TestRpcContextCallerAgent",
+        "RpcContextRootAgent",
+        "RpcContextChildAgent",
+        "RpcContextGrandchildAgent",
         "TestChatSdkStateHostAgent",
         "TestRetryAgent",
         "TestRetryDefaultsAgent",

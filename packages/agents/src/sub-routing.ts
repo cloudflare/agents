@@ -18,6 +18,8 @@
  */
 
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
+import { currentCaller } from "./agent-stub";
+import type { AgentCaller } from "./lifecycle/current-agent";
 import type { Agent, SubAgentClass, SubAgentStub } from "./index";
 
 /**
@@ -469,7 +471,8 @@ interface SubAgentInvokeEndpoint {
     className: string,
     name: string,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    caller?: AgentCaller
   ): Promise<unknown>;
 }
 
@@ -519,6 +522,9 @@ export async function getSubAgentByName<T extends Agent>(
     );
   }
 
+  // Resolved once: the bridge runs inside the parent's `_cf_` framework call,
+  // so without this the child would see the parent as its caller.
+  const caller = currentCaller({});
   return new Proxy(
     {},
     {
@@ -545,7 +551,7 @@ export async function getSubAgentByName<T extends Agent>(
           };
         }
         return async (...args: unknown[]) =>
-          bridge._cf_invokeSubAgent(className, name, prop, args);
+          bridge._cf_invokeSubAgent(className, name, prop, args, caller);
       }
     }
   ) as SubAgentStub<T>;

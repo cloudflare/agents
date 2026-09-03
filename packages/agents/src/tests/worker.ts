@@ -131,6 +131,12 @@ import type {
   TestRpcContextCalleeAgent,
   TestRpcContextCallerAgent
 } from "./agents/rpc-context.ts";
+export {
+  RpcContextRootAgent,
+  RpcContextChildAgent,
+  RpcContextGrandchildAgent
+} from "./agents/rpc-context-facets.ts";
+import type { RpcContextRootAgent } from "./agents/rpc-context-facets.ts";
 export { ChatSdkStateAgent } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
@@ -257,6 +263,7 @@ export type Env = {
   TestQueueAgent: DurableObjectNamespace<TestQueueAgent>;
   TestRpcContextCalleeAgent: DurableObjectNamespace<TestRpcContextCalleeAgent>;
   TestRpcContextCallerAgent: DurableObjectNamespace<TestRpcContextCallerAgent>;
+  RpcContextRootAgent: DurableObjectNamespace<RpcContextRootAgent>;
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
   TestRunFiberAgent: DurableObjectNamespace<TestRunFiberAgent>;

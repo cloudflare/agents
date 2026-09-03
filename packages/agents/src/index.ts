@@ -98,7 +98,10 @@ import {
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
 export { nativeAgentStub } from "./agent-stub";
-import type { AgentCallerIdentity } from "./lifecycle/current-agent";
+import type {
+  AgentCaller,
+  AgentCallerIdentity
+} from "./lifecycle/current-agent";
 import { callablesFromDecorated, WebSockets } from "./websockets";
 export {
   getAgentByName,
@@ -5562,9 +5565,10 @@ export class Agent<
     className: string,
     name: string,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    caller?: AgentCaller
   ): Promise<unknown> {
-    return this._dynamicAgents.invoke(className, name, method, args);
+    return this._dynamicAgents.invoke(className, name, method, args, caller);
   }
 
   /**
@@ -5578,9 +5582,10 @@ export class Agent<
   _cf_invokeSubAgentPath(
     path: ReadonlyArray<{ className: string; name: string }>,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    caller?: AgentCaller
   ): Promise<unknown> {
-    return this._dynamicAgents.invokePath(path, method, args);
+    return this._dynamicAgents.invokePath(path, method, args, caller);
   }
 
   // ── Sub-agent (facet) management ────────────────────────────────────────
@@ -5796,10 +5801,23 @@ export class Agent<
       root.name
     );
     const targetPath = parentPath.map((step) => ({ ...step }));
+    // The bridge hops root → … → parent inside `_cf_` framework calls, so the
+    // parent would otherwise see the root as its caller. Carry this facet's
+    // own identity through every hop instead.
+    const caller: AgentCaller = {
+      kind: "agent",
+      ...this._cf_rpcIdentity(),
+      context: {}
+    };
     const invokeBridge = async (method: string, args: unknown[]) => {
       const rootStub = await rootStubPromise;
       const bridge = rootStub as unknown as SubAgentPathInvokeEndpoint;
-      return await bridge._cf_invokeSubAgentPath(targetPath, method, args);
+      return await bridge._cf_invokeSubAgentPath(
+        targetPath,
+        method,
+        args,
+        caller
+      );
     };
     const owner = this;
     return new Proxy(

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { getAgentByName, nativeAgentStub } from "../index";
+import { getAgentByName, getSubAgentByName, nativeAgentStub } from "../index";
+import { RpcContextChildAgent } from "./agents/rpc-context-facets";
 
 function unique(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -208,5 +209,66 @@ describe("contextual RPC on a plain Lifecycle Object", () => {
       className: "TestRpcContextCallerAgent",
       sessionName: agentName
     });
+  });
+});
+
+describe("contextual RPC across facets", () => {
+  it("child sees the root as caller through subAgent()", async () => {
+    const rootName = unique("root");
+    const root = await getAgentByName(env.RpcContextRootAgent, rootName);
+    await expect(root.childPing("c1")).resolves.toBe("pong:from-root");
+
+    const [call] = await root.childObserved("c1");
+    expect(call?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextRootAgent",
+      sessionName: rootName
+    });
+  });
+
+  it("root sees the child as caller through parentAgent() (top-level branch)", async () => {
+    const rootName = unique("root");
+    const root = await getAgentByName(env.RpcContextRootAgent, rootName);
+    await expect(root.childCallsMe("c2")).resolves.toBe("pong:from-child");
+
+    const [call] = await root.observedCalls();
+    expect(call?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextChildAgent",
+      sessionName: "c2"
+    });
+  });
+
+  it("child sees the grandchild as caller through parentAgent() (facet-parent bridge)", async () => {
+    const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
+    await expect(root.grandchildCallsChild("c3", "g3")).resolves.toBe(
+      "pong:from-grandchild"
+    );
+
+    const [call] = await root.childObserved("c3");
+    expect(call?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextGrandchildAgent",
+      sessionName: "g3"
+    });
+  });
+
+  it("grandchild sees the child as caller through dynamicAgents.get()", async () => {
+    const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
+    const [call] = await root.childPingsGrandchild("c4", "g4");
+    expect(call?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextChildAgent",
+      sessionName: "c4"
+    });
+  });
+
+  it("getSubAgentByName reports the Worker, not the parent, as caller", async () => {
+    const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
+    const child = await getSubAgentByName(root, RpcContextChildAgent, "c5");
+    await expect(child.ping("from-worker")).resolves.toBe("pong:from-worker");
+
+    const [call] = await root.childObserved("c5");
+    expect(call?.caller).toEqual({ kind: "external", context: {} });
   });
 });

@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { dispatchWithCaller, resolveRpcMethod } from "../lifecycle/rpc-entry";
+import type { AgentCaller } from "../lifecycle/current-agent";
 import { nanoid } from "nanoid";
 import type {
   Connection,
@@ -15,7 +17,7 @@ import {
   type AgentPathStep
 } from "../sub-routing";
 import { getAgentByName } from "../agent-routing";
-import { camelCaseToKebabCase, isInternalJsStubProp } from "../utils";
+import { camelCaseToKebabCase } from "../utils";
 import type { Agent } from "../index";
 import { agentPathKey, isValidParentPath } from "./identity";
 import { DynamicAgentRegistry } from "./registry";
@@ -435,31 +437,16 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     }
 
     if (selfPath.length === targetPath.length) {
-      // Match real DO-stub RPC semantics: refuse JS-internal probes
-      // (`constructor`, `toString`, symbol keys, thenable checks, …) and
-      // anything inherited from `Object.prototype` so a facet-origin workflow
-      // cannot reach a method surface a top-level workflow's stub would deny.
-      // The framework's own `_workflow_*` / `_cf_*` RPC methods and any
-      // user-defined Agent methods live on the subclass prototype, not
-      // `Object.prototype`, so they remain callable.
-      const target = this.#host as unknown as Record<string, unknown>;
-      const fn = target[method];
-      if (
-        isInternalJsStubProp(method) ||
-        method in Object.prototype ||
-        typeof fn !== "function"
-      ) {
+      // Same member rule as a native stub and as `_cf_invoke`: JS-internal
+      // probes, `Object.prototype` members, and non-functions are refused so
+      // a facet-origin workflow reaches nothing a top-level stub would deny.
+      const resolved = resolveRpcMethod(this.#host, method);
+      if (resolved.kind === "err") {
         throw new Error(
-          `Workflow origin method "${method}" is not callable on ${
-            (this.#host as unknown as { constructor: { name: string } })
-              .constructor.name
-          }.`
+          `Workflow origin method "${method}" is not callable on ${resolved.error.hostClassName}.`
         );
       }
-      return await (fn as (...methodArgs: unknown[]) => unknown).apply(
-        this.#host,
-        args
-      );
+      return await resolved.value.apply(this.#host, args);
     }
 
     const next = targetPath[selfPath.length];
@@ -1514,10 +1501,11 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     className: string,
     name: string,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    caller?: AgentCaller
   ): Promise<unknown> {
     const stub = await this.resolve(className, name);
-    return await this.invokeStubMethod(stub, className, method, args);
+    return await this.invokeStubMethod(stub, className, method, args, caller);
   }
 
   /**
@@ -1529,7 +1517,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   async invokePath(
     path: ReadonlyArray<{ className: string; name: string }>,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    caller?: AgentCaller
   ): Promise<unknown> {
     const [self, next, ...rest] = path;
     if (!self) {
@@ -1547,6 +1536,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     }
 
     if (!next) {
+      if (caller !== undefined && method !== "fetch") {
+        return await dispatchWithCaller(
+          this.#host,
+          method,
+          args,
+          caller,
+          "local"
+        );
+      }
       return await this.invokeStubMethod(
         this.#host,
         ownClassName,
@@ -1557,19 +1555,42 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
     const child = await this.resolve(next.className, next.name);
     if (rest.length === 0) {
-      return await this.invokeStubMethod(child, next.className, method, args);
+      return await this.invokeStubMethod(
+        child,
+        next.className,
+        method,
+        args,
+        caller
+      );
     }
 
     const bridge = child as DynamicAgentPathInvokeEndpoint;
-    return await bridge._cf_invokeSubAgentPath([next, ...rest], method, args);
+    return await bridge._cf_invokeSubAgentPath(
+      [next, ...rest],
+      method,
+      args,
+      caller
+    );
   }
 
+  /**
+   * Dispatch one method on a resolved facet stub. With a `caller`, the call
+   * goes through the child's contextual entry point so the original caller
+   * reaches it; without one, the raw RPC member is called (framework paths
+   * such as workflow callbacks keep native semantics). `fetch` is always the
+   * stub's native fetch: it is an HTTP subrequest, not an RPC method, and its
+   * Request must not cross an isolate as an RPC argument.
+   */
   async invokeStubMethod(
     stub: unknown,
     className: string,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    caller?: AgentCaller
   ): Promise<unknown> {
+    if (caller !== undefined && method !== "fetch") {
+      return await dispatchWithCaller(stub, method, args, caller, "stub");
+    }
     // Must call `handle[method](...)` in one expression — extracting
     // via `const fn = handle[method]; fn.apply(handle, args)` breaks
     // the workerd RpcProperty binding. (Confirmed by the spike.)

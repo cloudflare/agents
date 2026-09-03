@@ -162,9 +162,13 @@ tracing, never to decide identity, tenancy, or authorization. Each call also
 opens an `agents.rpc.call` span, and the Workers runtime links the callee's
 spans to the caller's trace on its own.
 
+Dynamic agents behave the same way: stubs from `dynamicAgents.get()`,
+`subAgent()`, `parentAgent()`, and `getSubAgentByName()` all carry the caller,
+and a bridged `parentAgent()` call from a nested facet still reports the facet
+that called, not the root that relayed it.
+
 Pass `rpc: "native"` to `getAgentByName()` for the raw Durable Object stub;
-`caller` is then `undefined` on the callee. Stubs from `dynamicAgents.get()`
-and `parentAgent()` are not yet contextual.
+`caller` is then `undefined` on the callee.
 
 ## When context is lost
 
