@@ -15,10 +15,12 @@ import type {
 /** Run one Codex model action through an AI SDK LanguageModelV4. */
 export async function completeCodexModel(
   model: LanguageModelV4,
-  action: Extract<KernelAction, { type: "model" }>
+  action: Extract<KernelAction, { type: "model" }>,
+  abortSignal?: AbortSignal
 ): Promise<KernelEffectResult> {
   const request = parseResponsesRequest(action.request);
   const result = await model.doStream({
+    abortSignal,
     prompt: responsesInputToPrompt(request.instructions, request.input),
     tools: responsesToolsToLanguageModelTools(request.tools),
     toolChoice: { type: "auto" },

@@ -702,8 +702,10 @@ CREATE TABLE cf_codex_rollout (
 ) WITHOUT ROWID;
 ```
 
-The current proof uses the first two concepts plus an event table in
-[`src/codex-harness.ts`](../examples/next/harnesses/codex/src/codex-harness.ts).
+The current proof keeps the operation row and an event table in
+[`src/codex-harness.ts`](../examples/next/harnesses/codex/src/codex-harness.ts)
+and journals effects through Tasks `step.do()` rather than its own effect
+table.
 
 ### Transition transaction
 
@@ -719,10 +721,16 @@ The checkpoint and action therefore always describe the same kernel state.
 
 ### Effect transaction
 
-An effect has two transaction points:
+Each effect runs as one named Tasks step keyed by its stable effect ID.
+Tasks records the intent when the step starts and journals the result when it
+settles, so a replayed attempt returns the stored result instead of running
+the effect again. The step attempt's `AbortSignal` reaches the model call and
+tool adapters, so cancellation interrupts in-flight work.
 
-1. intent: insert `pending` with the full normalized request;
-2. settlement: update the same row with a terminal result and timestamp.
+A step interrupted between external completion and journal write is re-run on
+the next attempt. Workspace tools are idempotent. A model round is re-issued
+and the rare duplicate call is accepted; a harness that must never double a
+paid call should fail the turn instead and surface it.
 
 Workspace writes will carry the stable effect ID into their adapter. The first
 Workspace implementation uses operation-specific paths or postcondition reads
@@ -994,21 +1002,21 @@ from its latest checkpoint.
 
 Recovery behavior is selected by durable evidence:
 
-| Stored evidence                          | Next action                                             |
-| ---------------------------------------- | ------------------------------------------------------- |
-| operation queued, no checkpoint          | run `start_turn` transition                             |
-| checkpoint requests model, no effect row | record model intent and connect                         |
-| model effect completed                   | feed stored frames into the kernel                      |
-| workspace read pending                   | execute the read again                                  |
-| workspace write pending                  | inspect its path and expected hash, then settle         |
-| Code Mode pending                        | inspect the Codemode execution by ID and resume its log |
-| transition terminal, stream live         | settle the projection and stream                        |
-| operation terminal                       | return the immutable result                             |
+| Stored evidence                    | Next action                                             |
+| ---------------------------------- | ------------------------------------------------------- |
+| operation queued, no checkpoint    | run `start_turn` transition                             |
+| checkpoint requests model, no step | run the model step                                      |
+| model step journaled               | feed stored frames into the kernel                      |
+| workspace step interrupted         | run the idempotent tool again                           |
+| model step interrupted             | re-issue the round and accept a rare duplicate call     |
+| Code Mode pending                  | inspect the Codemode execution by ID and resume its log |
+| transition terminal, stream live   | settle the projection and stream                        |
+| operation terminal                 | return the immutable result                             |
 
 ### Cancellation
 
-`abort()` records cancellation through Tasks and aborts the process-local model
-socket or tool adapter. The kernel receives the cancellation result at the next
+Cancellation is recorded through Tasks, whose step attempt signal aborts the
+in-flight model call or tool adapter. The kernel receives the cancellation result at the next
 boundary and emits the terminal Codex event. Streams retains all events emitted
 before cancellation. The operation result identifies cancellation separately
 from a model or tool failure.

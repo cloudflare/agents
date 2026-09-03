@@ -64,7 +64,6 @@ type OperationRow = {
 };
 
 type EventRow = { seq: number; event: string };
-type EffectRow = { status: "pending" | "completed"; result: string | null };
 type DriverInput = { operationId: string };
 
 /** Dependencies the host composes around a Codex harness. */
@@ -82,8 +81,9 @@ export type CodexHarnessOptions = {
 /**
  * Worker-only Codex-derived harness hosted as a Lifecycle capability.
  *
- * The capability owns durable operation and effect state. The Rust/Wasm kernel
- * is pure and asks the capability to perform model or Workspace effects. Tasks
+ * The capability owns durable operation state. The Rust/Wasm kernel is pure
+ * and asks the capability to perform model or Workspace effects, each run as
+ * a journaled Tasks step so a replayed attempt reuses settled results. Tasks
  * supplies wake delivery, Streams supplies replayable output, and Workspace
  * remains a filesystem with no harness or session responsibilities.
  */
@@ -123,17 +123,6 @@ export class CodexHarness extends LifecycleCapability {
         output TEXT,
         error TEXT
       );
-      CREATE TABLE IF NOT EXISTS cf_codex_effects (
-        operation_id TEXT NOT NULL,
-        effect_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        request TEXT NOT NULL,
-        result TEXT,
-        created_at INTEGER NOT NULL,
-        completed_at INTEGER,
-        PRIMARY KEY (operation_id, effect_id)
-      ) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS cf_codex_events (
         operation_id TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -245,7 +234,7 @@ export class CodexHarness extends LifecycleCapability {
           await this.#flushEvents(operation, true);
           return projectTaskResult(operation);
         }
-        const effectResult = await this.#performEffect(operation, action);
+        const effectResult = await this.#performEffect(action, step);
         command = {
           type: "resolve_effect",
           checkpoint: parseCheckpoint(operation.checkpoint),
@@ -282,7 +271,7 @@ export class CodexHarness extends LifecycleCapability {
           return projectTaskResult(operation);
         }
 
-        const result = await this.#performEffect(operation, transition.action);
+        const result = await this.#performEffect(transition.action, step);
         command = {
           type: "resolve_effect",
           checkpoint: transition.checkpoint,
@@ -304,41 +293,24 @@ export class CodexHarness extends LifecycleCapability {
     }
   }
 
-  async #performEffect(
-    operation: OperationRow,
-    action: Extract<KernelAction, { type: "model" | "tool" }>
+  /**
+   * Run one kernel-requested effect as a journaled Tasks step. A settled
+   * effect replays its stored result instead of running again, and the
+   * attempt's signal cancels in-flight model calls when the run is cancelled.
+   *
+   * An effect interrupted mid-flight is re-run on the next attempt. Workspace
+   * tools are idempotent, and a model round that finished after its isolate
+   * died is accepted as a rare duplicate call rather than failing the turn.
+   */
+  #performEffect(
+    action: Extract<KernelAction, { type: "model" | "tool" }>,
+    step: TaskStep
   ): Promise<KernelEffectResult> {
-    const existing = this.#effect(operation.operation_id, action.effect_id);
-    if (existing?.status === "completed" && existing.result !== null) {
-      return parseEffectResult(existing.result);
-    }
-    if (!existing) {
-      this.lifecycle.storage.sql.exec(
-        `INSERT INTO cf_codex_effects
-         (operation_id, effect_id, kind, status, request, created_at)
-         VALUES (?, ?, ?, 'pending', ?, ?)`,
-        operation.operation_id,
-        action.effect_id,
-        action.type,
-        JSON.stringify(action),
-        Date.now()
-      );
-    }
-
-    const result =
+    return step.do(`effect:${action.effect_id}`, ({ signal }) =>
       action.type === "model"
-        ? await completeCodexModel(this.model, action)
-        : await performWorkspaceTool(this.workspace, action);
-    this.lifecycle.storage.sql.exec(
-      `UPDATE cf_codex_effects
-       SET status = 'completed', result = ?, completed_at = ?
-       WHERE operation_id = ? AND effect_id = ?`,
-      JSON.stringify(result),
-      Date.now(),
-      operation.operation_id,
-      action.effect_id
+        ? completeCodexModel(this.model, action, signal)
+        : performWorkspaceTool(this.workspace, action)
     );
-    return result;
   }
 
   #recordTransition(
@@ -430,17 +402,6 @@ export class CodexHarness extends LifecycleCapability {
     if (!row) throw new Error(`Codex operation ${operationId} does not exist`);
     return row;
   }
-
-  #effect(operationId: string, effectId: string): EffectRow | undefined {
-    return [
-      ...this.lifecycle.storage.sql.exec<EffectRow>(
-        `SELECT status, result FROM cf_codex_effects
-         WHERE operation_id = ? AND effect_id = ?`,
-        operationId,
-        effectId
-      )
-    ][0];
-  }
 }
 
 function parseDriverInput(value: unknown): DriverInput {
@@ -469,16 +430,6 @@ function parseAction(value: string | null): KernelAction {
   // SAFETY: The Rust kernel is the only action writer and its discriminator
   // was checked before narrowing to the shared action union.
   return parsed as KernelAction;
-}
-
-function parseEffectResult(value: string): KernelEffectResult {
-  const parsed = JSON.parse(value) as unknown;
-  if (!isRecord(parsed) || typeof parsed.type !== "string") {
-    throw new Error("Stored Codex effect result is malformed");
-  }
-  // SAFETY: CodexHarness is the only effect writer and writes one declared
-  // KernelEffectResult variant after checking the action kind.
-  return parsed as KernelEffectResult;
 }
 
 function parseKernelJson(value: string): KernelJson {
