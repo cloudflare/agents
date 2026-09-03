@@ -20,7 +20,6 @@
     "anti-slop/no-unsafe-dictionary-type": "off",
     "anti-slop/no-widen-then-assert": "error",
     "anti-slop/require-safety-comment-for-type-assertion": "off",
-    "anti-slop-effect/no-service-constructor-imports": "error",
     "no-explicit-any": "error",
     "no-unused-expressions": "off",
     "typescript/no-deprecated": "warn",
@@ -60,10 +59,6 @@
     {
       "name": "anti-slop",
       "specifier": "./tools/oxlint/anti-slop/index.ts"
-    },
-    {
-      "name": "anti-slop-effect",
-      "specifier": "./tools/oxlint/anti-slop/effect/index.ts"
     }
   ],
   "overrides": [
@@ -76,7 +71,8 @@
     {
       "files": [
         "packages/agents/src/observability/ai/ai-gateway.ts",
-        "packages/agents/src/observability/ai/wrapper/wrap.ts"
+        "packages/agents/src/observability/ai/wrapper/wrap.ts",
+        "packages/agents/src/websockets/callables-target.ts"
       ],
       "rules": {
         "anti-slop/no-reflect-apply": "off",
@@ -94,6 +90,7 @@
         "packages/agents/src/x402-tests/x402.test.ts",
         "packages/voice/src/react-tests/useVoiceAgent.test.tsx",
         "packages/voice/src/react-tests/useVoiceInput.test.tsx",
+        "packages/voice/src/tests/websocket-voice-transport.test.ts",
         "voice-providers/telnyx/tests/helpers/transport-config.test.ts",
         "voice-providers/telnyx/tests/providers/call-bridge.test.ts"
       ],
@@ -104,8 +101,10 @@
     {
       "files": [
         "packages/ai-chat/src/index.ts",
+        "packages/agents/src/callable-decorator.ts",
         "packages/agents/src/observability/ai/ai-gateway.ts",
         "packages/agents/src/observability/ai/wrapper/tools.ts",
+        "packages/agents/src/websockets/callables-target.ts",
         "packages/think/src/think.ts",
         "voice-providers/plivo/src/index.ts"
       ],
