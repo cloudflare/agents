@@ -445,9 +445,13 @@ function App() {
   const busy = active !== null;
   const turns = snapshot?.turns ?? [];
 
+  const eventCount = Object.values(events).reduce(
+    (sum, list) => sum + list.length,
+    0
+  );
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [snapshot?.turns, events]);
+  }, [turns.length, eventCount, active?.state]);
 
   const send = (text = prompt) => {
     const trimmed = text.trim();

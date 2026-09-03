@@ -48,11 +48,16 @@ export function useHarnessSession(name: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
   const stateRef = useRef(state);
   stateRef.current = state;
+  /** Turns this connection already subscribed to; reset on every open. */
+  const subscribedRef = useRef(new Set<string>());
 
   const agent = useAgent({
     agent: "self-modifying-harness",
     name,
-    onOpen: () => setState((current) => ({ ...current, status: "open" })),
+    onOpen: () => {
+      subscribedRef.current.clear();
+      setState((current) => ({ ...current, status: "open" }));
+    },
     onClose: () => setState((current) => ({ ...current, status: "closed" })),
     onMessage: (event) => {
       let message: HarnessServerMessage;
@@ -69,6 +74,8 @@ export function useHarnessSession(name: string) {
             error: undefined
           }));
           for (const turn of message.snapshot.turns) {
+            if (subscribedRef.current.has(turn.turnId)) continue;
+            subscribedRef.current.add(turn.turnId);
             const from = stateRef.current.events[turn.turnId]?.length ?? 0;
             subscribeRef.current(turn.turnId, from);
           }
@@ -80,7 +87,11 @@ export function useHarnessSession(name: string) {
               ? upsertTurn(current.snapshot, message.turn)
               : current.snapshot
           }));
-          if (isActive(message.turn)) {
+          if (
+            isActive(message.turn) &&
+            !subscribedRef.current.has(message.turn.turnId)
+          ) {
+            subscribedRef.current.add(message.turn.turnId);
             subscribeRef.current(message.turn.turnId, 0);
           }
           return;
@@ -107,9 +118,17 @@ export function useHarnessSession(name: string) {
             };
           });
           return;
-        case "stream_end":
-          sendRef.current({ type: "snapshot", id: crypto.randomUUID() });
+        case "stream_end": {
+          // Only a turn we were tailing live needs its settled state; a
+          // replayed closed stream ends immediately and must not loop.
+          const turn = stateRef.current.snapshot?.turns.find(
+            (candidate) => candidate.turnId === message.turnId
+          );
+          if (turn && isActive(turn)) {
+            sendRef.current({ type: "snapshot", id: crypto.randomUUID() });
+          }
           return;
+        }
         case "error":
           setState((current) => ({ ...current, error: message.message }));
           return;
