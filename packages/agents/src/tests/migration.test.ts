@@ -2,6 +2,7 @@ import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
+import { nativeAgentStub } from "../index";
 
 describe("schema migration: legacy schedules into the job queue", () => {
   it("migrates pre-interval legacy rows and drops the table", async () => {
@@ -11,7 +12,7 @@ describe("schema migration: legacy schedules into the job queue", () => {
     );
 
     await agent.simulateOldSchema();
-    await evictDurableObject(agent);
+    await evictDurableObject(nativeAgentStub(agent));
     await agent.runMigration();
 
     expect(await agent.legacyTableExists()).toBe(false);
@@ -43,7 +44,7 @@ describe("schema migration: legacy schedules into the job queue", () => {
     );
 
     await agent.simulateFullLegacySchema();
-    await evictDurableObject(agent);
+    await evictDurableObject(nativeAgentStub(agent));
     await agent.runMigration();
 
     expect(await agent.legacyTableExists()).toBe(false);
@@ -83,9 +84,9 @@ describe("schema migration: legacy schedules into the job queue", () => {
     );
 
     await agent.simulateOldSchema();
-    await evictDurableObject(agent);
+    await evictDurableObject(nativeAgentStub(agent));
     await agent.runMigration();
-    await evictDurableObject(agent);
+    await evictDurableObject(nativeAgentStub(agent));
     await agent.runMigration();
 
     expect(await agent.legacyTableExists()).toBe(false);

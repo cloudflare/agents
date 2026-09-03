@@ -15,7 +15,10 @@ export {
 } from "./capability";
 export {
   getCurrentAgent,
+  type AgentCaller,
+  type AgentCallerIdentity,
   type CurrentAgentContext,
+  type RpcCallContext,
   type LifecycleObject
 } from "./current-agent";
 export {

@@ -192,6 +192,14 @@
         "name": "TestQueueAgent"
       },
       {
+        "class_name": "TestRpcContextCalleeAgent",
+        "name": "TestRpcContextCalleeAgent"
+      },
+      {
+        "class_name": "TestRpcContextCallerAgent",
+        "name": "TestRpcContextCallerAgent"
+      },
+      {
         "class_name": "TestChatSdkStateHostAgent",
         "name": "TestChatSdkStateHostAgent"
       },
@@ -439,6 +447,8 @@
         "TestCallableAgent",
         "TestChildAgent",
         "TestQueueAgent",
+        "TestRpcContextCalleeAgent",
+        "TestRpcContextCallerAgent",
         "TestChatSdkStateHostAgent",
         "TestRetryAgent",
         "TestRetryDefaultsAgent",

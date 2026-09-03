@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "../..";
+import { nativeAgentStub } from "../../index";
 
 describe("addMcpServer with RPC binding — stable supplied ids", () => {
   it("uses a caller-supplied stable id as the server id", async () => {
@@ -217,7 +218,7 @@ describe("addMcpServer with RPC binding", () => {
     expect(before.connectionCount).toBe(1);
     expect(before.tools.length).toBeGreaterThan(0);
 
-    await evictDurableObject(agentStub);
+    await evictDurableObject(nativeAgentStub(agentStub));
 
     // Fetch is a lifecycle-managed wake. Reconstructing the Agent invokes the
     // MCP capability's onStart automatically before the host request handler.

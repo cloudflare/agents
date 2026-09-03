@@ -10,6 +10,7 @@ import { env } from "cloudflare:workers";
 import { evictAllDurableObjects, evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../../..";
+import { nativeAgentStub } from "../../../index";
 
 interface SessionAgentStub {
   appendMessage(message: UIMessage, parentId?: string | null): Promise<void>;
@@ -29,7 +30,9 @@ async function getAgent(name: string): Promise<SessionAgentStub> {
 }
 
 async function evict(agent: SessionAgentStub): Promise<void> {
-  await evictDurableObject(agent as unknown as DurableObjectStub);
+  await evictDurableObject(
+    nativeAgentStub(agent as unknown as DurableObjectStub)
+  );
 }
 
 function uniqueName(prefix: string): string {

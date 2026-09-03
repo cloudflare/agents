@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../..";
 import worker from "../worker";
 import { initializeStreamableHTTPServer } from "../shared/test-utils";
+import { nativeAgentStub } from "../../index";
 
 describe("McpAgent recovery after forced Durable Object eviction", () => {
   it("restores the initialize request and continues the HTTP session", async () => {
@@ -22,7 +23,7 @@ describe("McpAgent recovery after forced Durable Object eviction", () => {
     const initializeRequest = await stub.getInitializeRequest();
     expect(initializeRequest).toBeDefined();
 
-    await evictDurableObject(stub);
+    await evictDurableObject(nativeAgentStub(stub));
 
     stub = await getAgentByName(env.MCP_OBJECT, name);
     expect(await stub.getInitializeRequest()).toEqual(initializeRequest);

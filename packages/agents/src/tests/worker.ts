@@ -121,6 +121,14 @@ export {
   BodyProbeSubAgent,
   BodyProbeRootAgent
 } from "./agents";
+export {
+  TestRpcContextCalleeAgent,
+  TestRpcContextCallerAgent
+} from "./agents/rpc-context.ts";
+import type {
+  TestRpcContextCalleeAgent,
+  TestRpcContextCallerAgent
+} from "./agents/rpc-context.ts";
 export { ChatSdkStateAgent } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
@@ -244,6 +252,8 @@ export type Env = {
   TestChildAgent: DurableObjectNamespace<TestChildAgent>;
   TestChatSdkStateHostAgent: DurableObjectNamespace<TestChatSdkStateHostAgent>;
   TestQueueAgent: DurableObjectNamespace<TestQueueAgent>;
+  TestRpcContextCalleeAgent: DurableObjectNamespace<TestRpcContextCalleeAgent>;
+  TestRpcContextCallerAgent: DurableObjectNamespace<TestRpcContextCallerAgent>;
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
   TestRunFiberAgent: DurableObjectNamespace<TestRunFiberAgent>;

@@ -514,6 +514,10 @@ class OrchestratorAgent extends Agent {
 }
 ```
 
+> Stubs from `getAgentByName()` are contextual by default: the callee can read
+> who called it via `getCurrentAgent().caller`, and each call opens an
+> `agents.rpc.call` span. See [Calls between Agents](./get-current-agent.md#calls-between-agents).
+
 ### Why the Distinction?
 
 | RPC Type    | Transport | Use Case                          |

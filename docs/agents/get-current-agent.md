@@ -124,6 +124,46 @@ export class MyAgent extends AIChatAgent {
 }
 ```
 
+## Calls between Agents
+
+A stub from `getAgentByName()` is contextual: every method call tells the
+callee who is calling. Inside the called method, `getCurrentAgent().caller`
+is the calling Agent's class name, Durable Object id, and instance name, plus
+any `context` hints the caller attached. A call from a Worker handler shows
+up as `external`.
+
+```typescript
+import { Agent, getAgentByName, getCurrentAgent } from "agents";
+
+export class Coordinator extends Agent<Env> {
+  async delegate(taskId: string) {
+    const worker = await getAgentByName(this.env.WorkerAgent, taskId, {
+      context: { requestId: crypto.randomUUID() }
+    });
+    return worker.run();
+  }
+}
+
+export class WorkerAgent extends Agent<Env> {
+  async run() {
+    const { caller } = getCurrentAgent();
+    if (caller?.kind === "agent") {
+      console.log(`called by ${caller.className} ${caller.sessionName}`);
+      console.log(`request ${caller.context.requestId}`);
+    }
+  }
+}
+```
+
+The caller record is untrusted metadata. Use it for correlation, logging, and
+tracing, never to decide identity, tenancy, or authorization. Each call also
+opens an `agents.rpc.call` span, and the Workers runtime links the callee's
+spans to the caller's trace on its own.
+
+Pass `rpc: "native"` to `getAgentByName()` for the raw Durable Object stub;
+`caller` is then `undefined` on the callee. Stubs from `dynamicAgents.get()`
+and `parentAgent()` are not yet contextual.
+
 ## When context is lost
 
 The agent context only propagates along the call tree of the original
@@ -184,9 +224,13 @@ Gets the current agent from any context where it's available.
 {
   agent: T | undefined,
   connection: Connection | undefined,
-  request: Request | undefined
+  request: Request | undefined,
+  caller: AgentCaller | undefined
 }
 ```
+
+`caller` is set only while handling a method call from a contextual stub
+returned by `getAgentByName()`. See [Calls between Agents](#calls-between-agents).
 
 **Usage:**
 

@@ -5,6 +5,7 @@ import { getAgentByName } from "..";
 import { subscribe, type ObservabilityEvent } from "../observability";
 import type { FiberInspection, FiberRecoveryContext } from "..";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
+import { nativeAgentStub } from "../index";
 
 async function waitForFiberStatus(
   agent: {
@@ -223,7 +224,7 @@ describe("runFiber", () => {
       // lifecycle restores MCP before Agent fiber recovery runs.
       await agent.seedMcpServerRow("mcp-seeded");
       await agent.insertInterruptedFiber("fiber-mcp", "mcp-ordering");
-      await evictDurableObject(agent);
+      await evictDurableObject(nativeAgentStub(agent));
       agent = await getAgentByName(env.TestRunFiberAgent, name);
 
       const recovered =

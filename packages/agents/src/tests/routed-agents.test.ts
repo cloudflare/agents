@@ -1,7 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAgentByName } from "../index";
+import { getAgentByName, nativeAgentStub } from "../index";
 import type { RoutingOwnerAgent } from "./agents/routed-agents";
 
 const openSockets = new Set<WebSocket>();
@@ -236,7 +236,8 @@ describe("RoutedAgents", () => {
     ).toBe(`connected:${physicalName}`);
 
     const child = await getAgentByName(env.RoutedChatAgent, physicalName);
-    await evictDurableObject(child);
+    // Runtime-internal APIs need the raw stub, not the contextual wrapper.
+    await evictDurableObject(nativeAgentStub(child));
 
     socket.send("after-eviction");
     expect(

@@ -17,6 +17,7 @@ import { getAgentByName } from "..";
 import type { FiberRecoveryContext } from "..";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestScheduleAgent } from "./agents/schedule";
+import { nativeAgentStub } from "../index";
 
 function uniqueName(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -44,7 +45,7 @@ describe("Agent recovery after forced Durable Object eviction", () => {
     }
     expect(calls.length).toBeGreaterThanOrEqual(1);
 
-    await evictDurableObject(agent);
+    await evictDurableObject(nativeAgentStub(agent));
 
     // The hook log is instance-only, while the Agent state is SQL-backed.
     expect(await agent.getStateUpdateCalls()).toEqual([]);
@@ -65,7 +66,7 @@ describe("Agent recovery after forced Durable Object eviction", () => {
         Math.floor(Date.now() / 1000) - 1
       );
 
-      await evictDurableObject(agent);
+      await evictDurableObject(nativeAgentStub(agent));
 
       expect(
         await runInDurableObject(
@@ -106,7 +107,7 @@ describe("Agent recovery after forced Durable Object eviction", () => {
     await agent.runSimple("warm");
     expect(await agent.getExecutionLog()).toContain("executed:warm");
 
-    await evictDurableObject(stub);
+    await evictDurableObject(nativeAgentStub(stub));
 
     expect(await agent.getExecutionLog()).not.toContain("executed:warm");
     expect(await agent.getRunningFiberCount()).toBe(1);
@@ -139,7 +140,7 @@ describe("Agent recovery after forced Durable Object eviction", () => {
       { progress: 42 }
     );
 
-    await evictDurableObject(stub);
+    await evictDurableObject(nativeAgentStub(stub));
 
     expect(await agent.getRecoveredFibers()).toEqual([]);
     await agent.simulateAlarmCycle();

@@ -97,14 +97,26 @@ import {
   type CurrentAgentContext
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
+import { resolveRpcMethod } from "./agent-stub";
+export { nativeAgentStub } from "./agent-stub";
+import type {
+  AgentCaller,
+  AgentCallerIdentity
+} from "./lifecycle/current-agent";
 import { callablesFromDecorated, WebSockets } from "./websockets";
 export {
   getAgentByName,
   routeAgentRequest,
   type AgentGetOptions,
   type AgentOptions,
+  type AgentRpcMode,
   type RoutingRetryOptions
 } from "./agent-routing";
+export type {
+  AgentCaller,
+  AgentCallerIdentity,
+  RpcCallContext
+} from "./lifecycle/current-agent";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 export { camelCaseToKebabCase } from "./utils";
 import { SqlError } from "./sql-error";
@@ -1228,6 +1240,61 @@ export class Agent<
   /** @internal Ensure lifecycle startup before a native RPC implementation. */
   async __unsafe_ensureInitialized(props?: Props): Promise<void> {
     await this.lifecycle.start(props);
+  }
+
+  /**
+   * Contextual RPC entry point used by the stubs `getAgentByName` returns.
+   * Runs `method` inside a fresh invocation whose context records `caller`,
+   * so `getCurrentAgent().caller` is readable throughout the call. No native
+   * I/O handles cross the hop. Like native RPC, this does not force lifecycle
+   * startup: `getAgentByName` already did that when it resolved the stub, and
+   * a method called on a re-created instance sees the same startup timing it
+   * would over a raw stub.
+   *
+   * @internal
+   */
+  async _cf_invoke(
+    method: string,
+    args: ReadonlyArray<unknown>,
+    caller: AgentCaller
+  ): Promise<unknown> {
+    const resolved = resolveRpcMethod(this, method);
+    if (resolved.kind === "err") {
+      // Native RPC has no error channel besides rejection; the tagged error
+      // becomes the rejection so the caller sees the same message a native
+      // stub would produce for an unreachable member.
+      throw resolved.error;
+    }
+    return runInInvocation(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined,
+        caller
+      },
+      () => resolved.value.apply(this, [...args])
+    );
+  }
+
+  /**
+   * How this Agent identifies itself on outbound contextual RPC calls.
+   * @internal
+   */
+  _cf_rpcIdentity(): AgentCallerIdentity {
+    // The instance name is not always readable (unnamed DOs, facets before
+    // their handshake); an outbound call must still be able to describe us.
+    let sessionName: string | undefined;
+    try {
+      sessionName = this.name;
+    } catch {
+      sessionName = undefined;
+    }
+    return {
+      className: this._ParentClass.name,
+      sessionId: this.ctx.id.toString(),
+      sessionName
+    };
   }
 
   private _state = DEFAULT_STATE as State;
