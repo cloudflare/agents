@@ -51,10 +51,11 @@ pnpm install
 ```
 
 Start the Vite app. It builds the Wasm kernel first. The Workers AI binding is
-remote, so Wrangler may ask you to select or authenticate a Cloudflare account.
+remote, so Wrangler needs a Cloudflare account. If your login has access to
+more than one account, set it explicitly:
 
 ```sh
-pnpm run start
+CLOUDFLARE_ACCOUNT_ID=<account id> pnpm run start
 ```
 
 Open the printed local URL. The chat UI shows reasoning, tool calls, the
