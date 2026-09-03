@@ -26,7 +26,8 @@ pnpm run start
 ```
 
 The example uses the remote Workers AI binding and may incur Workers AI usage.
-It needs no API key.
+It needs no API key. If your Wrangler login has access to more than one
+account, set `CLOUDFLARE_ACCOUNT_ID` when starting.
 
 ## What to try
 
