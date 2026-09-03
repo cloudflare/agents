@@ -8,6 +8,8 @@ import {
 // Capability test fixtures (harness Durable Objects); see
 // tests/capabilities/AGENTS.md for the capability testing pattern.
 export { CapabilityHarnessObject } from "./capabilities/harness.ts";
+export { RpcContextLifecycleObject } from "./capabilities/rpc-context.ts";
+import type { RpcContextLifecycleObject } from "./capabilities/rpc-context.ts";
 import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
 export {
   PlainLifecycleObject,
@@ -210,6 +212,7 @@ export type Env = {
   LOADER: WorkerLoader;
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
+  RpcContextLifecycleObject: DurableObjectNamespace<RpcContextLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;

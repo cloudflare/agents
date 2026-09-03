@@ -128,9 +128,11 @@ export class MyAgent extends AIChatAgent {
 
 A stub from `getAgentByName()` is contextual: every method call tells the
 callee who is calling. Inside the called method, `getCurrentAgent().caller`
-is the calling Agent's class name, Durable Object id, and instance name, plus
-any `context` hints the caller attached. A call from a Worker handler shows
-up as `external`.
+is the caller's class name, Durable Object id, and instance name, plus any
+`context` hints the caller attached. A call from a Worker handler shows up as
+`external`. This works for any [Lifecycle Object](./lifecycle.md), not only
+Agents: `Lifecycle.install` gives the host class the entry points the stub
+relies on, and `getAgentByName()` accepts any such object.
 
 ```typescript
 import { Agent, getAgentByName, getCurrentAgent } from "agents";

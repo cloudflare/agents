@@ -15,9 +15,10 @@ import { isInternalJsStubProp } from "./utils";
  * without help. What native RPC cannot carry is the Agents SDK's own
  * invocation context: which Agent made the call and any caller-supplied
  * hints. This module wraps a stub so every method call travels through one
- * library entry point on the callee (`_cf_invoke`) that re-enters the SDK
- * invocation context with that caller attached, making it readable via
- * `getCurrentAgent().caller`.
+ * library entry point on the callee (`_cf_invoke`, installed on every
+ * Lifecycle Object's class by `Lifecycle.install`, see `lifecycle/rpc-entry.ts`)
+ * that re-enters the SDK invocation context with that caller attached, making
+ * it readable via `getCurrentAgent().caller`.
  *
  * Caller context is untrusted metadata: correlation ids, tracing hints,
  * tenancy hints. It is never proof of identity or authorization.
@@ -93,53 +94,6 @@ export function currentCaller(context: RpcCallContext): AgentCaller {
     return { kind: "external", context };
   }
   return { kind: "agent", ...agent._cf_rpcIdentity(), context };
-}
-
-/** A method resolved on an RPC host, ready to apply. */
-type RpcMethod = (this: unknown, ...args: ReadonlyArray<unknown>) => unknown;
-
-/** Why a method name could not be dispatched on an RPC host. */
-export class RpcMethodNotCallable extends Error {
-  readonly _tag = "RpcMethodNotCallable" as const;
-
-  constructor(
-    readonly method: string,
-    readonly hostClassName: string
-  ) {
-    super(`"${method}" is not callable on ${hostClassName} over RPC.`);
-  }
-}
-
-/**
- * Resolve a method name on an RPC host with native-stub semantics: JS-internal
- * probes, `Object.prototype` members, and non-functions are refused so a
- * caller reaches nothing a native stub would deny.
- *
- * @param host - The object receiving the call.
- * @param method - The requested method name.
- * @returns The bound-able function, or `RpcMethodNotCallable`.
- */
-export function resolveRpcMethod(
-  host: object,
-  method: string
-):
-  | { readonly kind: "ok"; readonly value: RpcMethod }
-  | { readonly kind: "err"; readonly error: RpcMethodNotCallable } {
-  // SAFETY: property lookup by name on an arbitrary host; the value is checked
-  // to be a function before it is treated as one.
-  const value = (host as Record<string, unknown>)[method];
-  if (
-    isInternalJsStubProp(method) ||
-    method in Object.prototype ||
-    typeof value !== "function"
-  ) {
-    return {
-      kind: "err",
-      error: new RpcMethodNotCallable(method, host.constructor.name)
-    };
-  }
-  // SAFETY: checked above to be a function; parameters are the RPC args.
-  return { kind: "ok", value: value as RpcMethod };
 }
 
 /** How a wrapped stub identifies its target in spans. */

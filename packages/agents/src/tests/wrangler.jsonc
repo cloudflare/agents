@@ -21,6 +21,10 @@
         "name": "PlainLifecycleObject"
       },
       {
+        "class_name": "RpcContextLifecycleObject",
+        "name": "RpcContextLifecycleObject"
+      },
+      {
         "class_name": "RetryableStartObject",
         "name": "RetryableStartObject"
       },
@@ -405,6 +409,7 @@
       "new_sqlite_classes": [
         "CapabilityHarnessObject",
         "PlainLifecycleObject",
+        "RpcContextLifecycleObject",
         "RetryableStartObject",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",

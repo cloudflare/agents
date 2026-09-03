@@ -129,3 +129,84 @@ describe("contextual RPC via getAgentByName", () => {
     expect(typeof callee.fetch).toBe("function");
   });
 });
+
+describe("contextual RPC on a plain Lifecycle Object", () => {
+  it("starts the object and reports an external caller from a Worker", async () => {
+    const stub = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      unique("lifecycle"),
+      { context: { requestId: "req-lc" } }
+    );
+    await expect(stub.ping("x")).resolves.toBe("pong:x");
+
+    const [call] = await stub.observedCalls();
+    expect(call).toEqual({
+      caller: { kind: "external", context: { requestId: "req-lc" } },
+      hostIsSelf: true,
+      started: true
+    });
+  });
+
+  it("identifies a Lifecycle Object caller by class, id, and name", async () => {
+    const callerName = unique("lifecycle-caller");
+    const calleeName = unique("lifecycle-callee");
+    const caller = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      callerName
+    );
+    await expect(caller.callPeer(calleeName, { hop: 1 })).resolves.toBe(
+      "pong:from-lifecycle-object"
+    );
+
+    const callee = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      calleeName
+    );
+    const [call] = await callee.observedCalls();
+    expect(call?.caller).toEqual({
+      kind: "agent",
+      className: "RpcContextLifecycleObject",
+      sessionId:
+        env.RpcContextLifecycleObject.idFromName(callerName).toString(),
+      sessionName: callerName,
+      context: { hop: 1 }
+    });
+  });
+
+  it("crosses between a Lifecycle Object and an Agent in both directions", async () => {
+    const lifecycleName = unique("lifecycle");
+    const agentName = unique("agent");
+    const lifecycle = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      lifecycleName
+    );
+    const agentCallee = await getAgentByName(
+      env.TestRpcContextCalleeAgent,
+      agentName
+    );
+    const agentCaller = await getAgentByName(
+      env.TestRpcContextCallerAgent,
+      agentName
+    );
+
+    await expect(lifecycle.callAgent(agentName)).resolves.toBe(
+      "pong:from-lifecycle-object"
+    );
+    const [toAgent] = await agentCallee.observedCalls();
+    expect(toAgent?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextLifecycleObject",
+      sessionName: lifecycleName
+    });
+
+    await expect(agentCaller.callLifecycleObject(lifecycleName)).resolves.toBe(
+      "pong:from-agent"
+    );
+    const [toLifecycle] = await lifecycle.observedCalls();
+    expect(toLifecycle?.caller).toMatchObject({
+      kind: "agent",
+      className: "TestRpcContextCallerAgent",
+      sessionName: agentName
+    });
+  });
+});

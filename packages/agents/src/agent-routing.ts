@@ -1,6 +1,9 @@
 import type { Agent } from "./index";
 import { currentCaller, wrapAgentStub } from "./agent-stub";
-import type { RpcCallContext } from "./lifecycle/current-agent";
+import type {
+  LifecycleObject,
+  RpcCallContext
+} from "./lifecycle/current-agent";
 import { camelCaseToKebabCase } from "./utils";
 
 const namespaceMapCache = new WeakMap<
@@ -404,7 +407,9 @@ export async function routeAgentRequest<Env>(
 }
 
 /**
- * Get a named Agent stub after its lifecycle startup has completed.
+ * Get a named Agent stub after its lifecycle startup has completed. Any
+ * Lifecycle Object qualifies, not only Agents: `Lifecycle.install` gives every
+ * host class the entry points this resolver and its stub rely on.
  *
  * By default the stub is contextual: each method call carries the calling
  * Agent's identity (or `external` from a Worker) plus any `context` hints to
@@ -418,7 +423,7 @@ export async function routeAgentRequest<Env>(
  */
 export async function getAgentByName<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  T extends Agent<Env> = Agent<Env>,
+  T extends Agent<Env> | LifecycleObject<Env> = Agent<Env>,
   Props extends Record<string, unknown> = Record<string, unknown>
 >(
   namespace: DurableObjectNamespace<T>,
