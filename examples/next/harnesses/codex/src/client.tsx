@@ -515,7 +515,7 @@ function App() {
               <Empty
                 icon={<TerminalIcon size={32} />}
                 title="What should Codex change?"
-                description="Describe a file task. Codex calls Workspace tools through a durable Rust/Wasm turn and every step streams here. Reload mid-turn and it resumes."
+                description="Describe a file task."
               />
             </div>
           )}
