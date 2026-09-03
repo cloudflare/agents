@@ -58,7 +58,9 @@ file and an activation, with no registry edit.
 
 ## Run
 
-Worker Loader access is required for this early-access example.
+Worker Loader access is required for this early-access example. The Workers
+AI binding is remote, so if your Wrangler login has access to more than one
+account, set `CLOUDFLARE_ACCOUNT_ID` when starting.
 
 ```sh
 pnpm install
