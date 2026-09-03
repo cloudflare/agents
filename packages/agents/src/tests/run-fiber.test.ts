@@ -1,7 +1,7 @@
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "..";
+import { getStubByName } from "..";
 import { subscribe, type ObservabilityEvent } from "../observability";
 import type { FiberInspection, FiberRecoveryContext } from "..";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
@@ -28,7 +28,7 @@ async function waitForFiberStatus(
 }
 
 async function freshManagedAgent(name: string): Promise<TestRunFiberAgent> {
-  return (await getAgentByName(
+  return (await getStubByName(
     env.TestRunFiberAgent,
     name
   )) as unknown as TestRunFiberAgent;
@@ -39,7 +39,7 @@ describe("runFiber", () => {
 
   describe("execution", () => {
     it("should run a fiber and return the result", async () => {
-      const agent = await getAgentByName(env.TestRunFiberAgent, "run-basic");
+      const agent = await getStubByName(env.TestRunFiberAgent, "run-basic");
 
       const result = (await agent.runSimple("hello")) as unknown as string;
       expect(result).toBe("hello");
@@ -49,7 +49,7 @@ describe("runFiber", () => {
     });
 
     it("should delete the fiber row on completion", async () => {
-      const agent = await getAgentByName(env.TestRunFiberAgent, "run-cleanup");
+      const agent = await getStubByName(env.TestRunFiberAgent, "run-cleanup");
 
       await agent.runSimple("cleanup-test");
 
@@ -58,7 +58,7 @@ describe("runFiber", () => {
     });
 
     it("should delete the fiber row on error", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "run-error-cleanup"
       );
@@ -74,10 +74,7 @@ describe("runFiber", () => {
     });
 
     it("should hold a keepAlive ref during execution", async () => {
-      const agent = await getAgentByName(
-        env.TestRunFiberAgent,
-        "run-keepalive"
-      );
+      const agent = await getStubByName(env.TestRunFiberAgent, "run-keepalive");
 
       // Hold a fiber open via an explicit release signal — avoids racing
       // the assertion against a wall-clock setTimeout in CI.
@@ -100,7 +97,7 @@ describe("runFiber", () => {
 
   describe("stash", () => {
     it("should checkpoint via ctx.stash()", async () => {
-      const agent = await getAgentByName(env.TestRunFiberAgent, "stash-ctx");
+      const agent = await getStubByName(env.TestRunFiberAgent, "stash-ctx");
 
       const result = (await agent.runWithCheckpoint([
         "a",
@@ -114,7 +111,7 @@ describe("runFiber", () => {
     });
 
     it("should checkpoint via this.stash()", async () => {
-      const agent = await getAgentByName(env.TestRunFiberAgent, "stash-this");
+      const agent = await getStubByName(env.TestRunFiberAgent, "stash-this");
 
       const result = (await agent.runWithThisStash(
         "this-test"
@@ -123,7 +120,7 @@ describe("runFiber", () => {
     });
 
     it("should route this.stash() to the correct fiber via ALS with concurrent fibers", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "stash-concurrent-this"
       );
@@ -141,7 +138,7 @@ describe("runFiber", () => {
     });
 
     it("should apply internal stash wrappers to initial and user checkpoints", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "stash-internal-wrapper"
       );
@@ -162,7 +159,7 @@ describe("runFiber", () => {
     });
 
     it("should not leak an internal stash wrapper into concurrent plain fibers", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "stash-wrapper-concurrent"
       );
@@ -181,7 +178,7 @@ describe("runFiber", () => {
     });
 
     it("should clean up fiber rows when a fiber fails after writing an internal initial snapshot", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "stash-wrapper-initial-then-throw"
       );
@@ -200,10 +197,7 @@ describe("runFiber", () => {
     });
 
     it("should throw when this.stash() is called outside a fiber", async () => {
-      const agent = await getAgentByName(
-        env.TestRunFiberAgent,
-        "stash-outside"
-      );
+      const agent = await getStubByName(env.TestRunFiberAgent, "stash-outside");
 
       const error = (await agent.stashOutsideFiber()) as unknown as string;
       expect(error).toBe("stash() called outside a fiber");
@@ -217,14 +211,14 @@ describe("runFiber", () => {
       // Unique name: DO storage persists across test runs, and a leftover
       // server row would make the ordering assertion vacuous.
       const name = `recovery-mcp-ordering-${crypto.randomUUID()}`;
-      let agent = await getAgentByName(env.TestRunFiberAgent, name);
+      let agent = await getStubByName(env.TestRunFiberAgent, name);
 
       // Simulate pre-eviction state, then force a real reconstruction. The
       // lifecycle restores MCP before Agent fiber recovery runs.
       await agent.seedMcpServerRow("mcp-seeded");
       await agent.insertInterruptedFiber("fiber-mcp", "mcp-ordering");
       await evictDurableObject(agent);
-      agent = await getAgentByName(env.TestRunFiberAgent, name);
+      agent = await getStubByName(env.TestRunFiberAgent, name);
 
       const recovered =
         (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
@@ -237,7 +231,7 @@ describe("runFiber", () => {
     });
 
     it("should detect an interrupted fiber and call onFiberRecovered", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-basic"
       );
@@ -260,7 +254,7 @@ describe("runFiber", () => {
     });
 
     it("should pass snapshot data to recovery", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-snapshot"
       );
@@ -278,7 +272,7 @@ describe("runFiber", () => {
     });
 
     it("should delete the row after recovery", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-cleanup"
       );
@@ -291,7 +285,7 @@ describe("runFiber", () => {
     });
 
     it("should not recover fibers that are actively running", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-active"
       );
@@ -312,7 +306,7 @@ describe("runFiber", () => {
     });
 
     it("should recover multiple interrupted fibers", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-multiple"
       );
@@ -331,10 +325,7 @@ describe("runFiber", () => {
     });
 
     it("should not trigger recovery again after rows are cleaned up", async () => {
-      const agent = await getAgentByName(
-        env.TestRunFiberAgent,
-        "recovery-once"
-      );
+      const agent = await getStubByName(env.TestRunFiberAgent, "recovery-once");
 
       await agent.insertInterruptedFiber("fiber-once", "once");
       await agent.triggerRecoveryCheck();
@@ -346,7 +337,7 @@ describe("runFiber", () => {
     });
 
     it("retains a fresh unmanaged row when onFiberRecovered throws (retryable)", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-retain-throw"
       );
@@ -364,7 +355,7 @@ describe("runFiber", () => {
     });
 
     it("evicts an aged unmanaged row whose recovery keeps throwing", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-evict-aged"
       );
@@ -412,7 +403,7 @@ describe("runFiber", () => {
 
   describe("recovery follow-up alarm", () => {
     it("arms a follow-up alarm while a retained recovery row is pending", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-alarm-rearm"
       );
@@ -434,7 +425,7 @@ describe("runFiber", () => {
     });
 
     it("backs off exponentially across consecutive no-progress scans", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-alarm-backoff"
       );
@@ -466,7 +457,7 @@ describe("runFiber", () => {
     });
 
     it("resets the backoff when a scan makes forward progress", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-alarm-reset"
       );
@@ -497,7 +488,7 @@ describe("runFiber", () => {
     });
 
     it("arms no follow-up alarm once recovery has fully drained", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "recovery-alarm-drained"
       );
@@ -519,7 +510,7 @@ describe("runFiber", () => {
 
   describe("concurrency", () => {
     it("should run multiple fire-and-forget fibers concurrently", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "concurrent-run"
       );
@@ -541,7 +532,7 @@ describe("runFiber", () => {
 
   describe("errors", () => {
     it("should propagate errors to the caller", async () => {
-      const agent = await getAgentByName(
+      const agent = await getStubByName(
         env.TestRunFiberAgent,
         "error-propagate"
       );

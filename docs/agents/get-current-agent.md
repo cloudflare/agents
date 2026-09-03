@@ -124,6 +124,67 @@ export class MyAgent extends AIChatAgent {
 }
 ```
 
+## Calls between Agents
+
+A stub from `getAgentByName()` tells the callee who is calling on every
+method call. Inside the called method,
+`getCurrentAgent().caller` is the caller's class name, Durable Object id, and
+instance name, plus any `context` hints the caller attached. A call from a
+Worker handler shows up as `external`. This works for any
+[Lifecycle Object](./lifecycle.md), not only Agents: `Lifecycle.install` gives
+the host class the entry points the stub relies on, and `getAgentByName()`
+accepts any such object. A plain Lifecycle Object identifies itself on
+outbound calls only while running inside a Lifecycle invocation, such as a
+handler, a hook, or a call received through a contextual stub. Agent wraps its
+own RPC methods in that context; a plain object's method reached over a raw
+native stub has none and reports `external`.
+
+```typescript
+import { Agent, getAgentByName, getCurrentAgent } from "agents";
+
+export class Coordinator extends Agent<Env> {
+  async delegate(taskId: string) {
+    const worker = await getAgentByName(this.env.WorkerAgent, taskId, {
+      context: { requestId: crypto.randomUUID() }
+    });
+    return worker.run();
+  }
+}
+
+export class WorkerAgent extends Agent<Env> {
+  async run() {
+    const { caller } = getCurrentAgent();
+    if (caller?.kind === "agent") {
+      console.log(`called by ${caller.className} ${caller.sessionName}`);
+      console.log(`request ${caller.context.requestId}`);
+    }
+  }
+}
+```
+
+The caller record is untrusted metadata. Use it for correlation, logging, and
+tracing, never to decide identity, tenancy, or authorization. Each call also
+opens an `agents.rpc.call` span, and the Workers runtime links the callee's
+spans to the caller's trace on its own.
+
+Dynamic agents behave the same way: stubs from `dynamicAgents.get()`,
+`subAgent()`, `parentAgent()`, and `getSubAgentByName()` all carry the caller,
+and a bridged `parentAgent()` call from a nested facet still reports the facet
+that called, not the root that relayed it.
+
+The stub `getAgentByName()` returns is a Proxy over the native Durable Object
+stub, not a runtime `Fetcher`. It cannot be passed to a runtime API that takes
+a stub, such as `evictDurableObject()`, or sent as an RPC argument or return
+value. For those cases resolve the raw stub with `getStubByName()`, which has
+the same startup guarantee and no caller context:
+
+```typescript
+import { getStubByName } from "agents";
+
+const raw = await getStubByName(env.WorkerAgent, taskId);
+await other.adopt(raw); // a real stub crosses RPC; caller is undefined inside
+```
+
 ## When context is lost
 
 The agent context only propagates along the call tree of the original
@@ -184,9 +245,14 @@ Gets the current agent from any context where it's available.
 {
   agent: T | undefined,
   connection: Connection | undefined,
-  request: Request | undefined
+  request: Request | undefined,
+  caller: AgentCaller | undefined
 }
 ```
+
+`caller` is set only while handling a method call from a stub returned by
+`getAgentByName()` or a dynamic-agent helper. See
+[Calls between Agents](#calls-between-agents).
 
 **Usage:**
 

@@ -1,0 +1,292 @@
+import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+import { getAgentByName, getStubByName, getSubAgentByName } from "../index";
+import { RpcContextChildAgent } from "./agents/rpc-context-facets";
+
+function unique(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+describe("contextual RPC via getAgentByName", () => {
+  it("marks a Worker-side caller as external and carries context hints", async () => {
+    const callee = await getAgentByName(
+      env.TestRpcContextCalleeAgent,
+      unique("callee"),
+      { context: { requestId: "req-1", attempt: 2, dryRun: true } }
+    );
+
+    await expect(callee.ping("hello")).resolves.toBe("pong:hello");
+
+    const [call] = await callee.observedCalls();
+    expect(call).toMatchObject({
+      method: "ping",
+      agentIsSelf: true,
+      caller: {
+        kind: "external",
+        context: { requestId: "req-1", attempt: 2, dryRun: true }
+      }
+    });
+  });
+
+  it("identifies an Agent caller by class, session id, and name", async () => {
+    const callerName = unique("caller");
+    const calleeName = unique("callee");
+    const caller = await getAgentByName(
+      env.TestRpcContextCallerAgent,
+      callerName
+    );
+
+    await expect(caller.callPeer(calleeName, { turn: "t-9" })).resolves.toBe(
+      "pong:from-agent"
+    );
+
+    const callee = await getAgentByName(
+      env.TestRpcContextCalleeAgent,
+      calleeName
+    );
+    const [call] = await callee.observedCalls();
+    expect(call?.caller).toEqual({
+      kind: "agent",
+      className: "TestRpcContextCallerAgent",
+      sessionId:
+        env.TestRpcContextCallerAgent.idFromName(callerName).toString(),
+      sessionName: callerName,
+      context: { turn: "t-9" }
+    });
+  });
+
+  it("defaults context to an empty record when none is supplied", async () => {
+    const calleeName = unique("callee");
+    const caller = await getAgentByName(
+      env.TestRpcContextCallerAgent,
+      unique("caller")
+    );
+    await caller.callPeer(calleeName);
+
+    const callee = await getAgentByName(
+      env.TestRpcContextCalleeAgent,
+      calleeName
+    );
+    const [call] = await callee.observedCalls();
+    expect(call?.caller?.kind).toBe("agent");
+    expect(call?.caller?.context).toEqual({});
+  });
+
+  it("leaves caller undefined on a raw stub from getStubByName", async () => {
+    const callee = await getStubByName(
+      env.TestRpcContextCalleeAgent,
+      unique("callee")
+    );
+    await callee.ping("raw");
+
+    const [call] = await callee.observedCalls();
+    expect(call?.caller).toBeUndefined();
+    // The Agent context itself is still established for native RPC.
+    expect(call?.agentIsSelf).toBe(true);
+  });
+
+  it("surfaces callee errors as rejections", async () => {
+    const callee = await getAgentByName(
+      env.TestRpcContextCalleeAgent,
+      unique("callee")
+    );
+    await expect(callee.throwing()).rejects.toThrow("callee failed on purpose");
+  });
+
+  it("refuses JS-internal probes and non-methods like a native stub", async () => {
+    const callee = await getAgentByName(
+      env.TestRpcContextCalleeAgent,
+      unique("callee")
+    );
+    // SAFETY: deliberately reaching past the typed surface to probe dispatch.
+    const loose = callee as unknown as Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    >;
+    await expect(loose.observed()).rejects.toThrow(/not callable/);
+    await expect(loose.hasOwnProperty("x")).rejects.toThrow(/not callable/);
+  });
+
+  it("getStubByName returns a runtime Fetcher usable with runtime APIs", async () => {
+    const name = unique("callee");
+    const raw = await getStubByName(env.TestRpcContextCalleeAgent, name);
+    const wrapped = await getAgentByName(env.TestRpcContextCalleeAgent, name);
+    expect(raw).not.toBe(wrapped);
+    await raw.ping("raw");
+    // The pool helper type-checks its argument as a real stub.
+    await evictDurableObject(raw);
+    await expect(evictDurableObject(wrapped)).rejects.toThrow(/Fetcher/);
+  });
+
+  it("keeps native stub members intact", async () => {
+    const name = unique("callee");
+    const callee = await getAgentByName(env.TestRpcContextCalleeAgent, name);
+    expect(callee.id.toString()).toBe(
+      env.TestRpcContextCalleeAgent.idFromName(name).toString()
+    );
+    expect(typeof callee.fetch).toBe("function");
+  });
+});
+
+describe("contextual RPC on a plain Lifecycle Object", () => {
+  it("starts the object and reports an external caller from a Worker", async () => {
+    const stub = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      unique("lifecycle"),
+      { context: { requestId: "req-lc" } }
+    );
+    await expect(stub.ping("x")).resolves.toBe("pong:x");
+
+    const [call] = await stub.observedCalls();
+    expect(call).toEqual({
+      caller: { kind: "external", context: { requestId: "req-lc" } },
+      hostIsSelf: true,
+      started: true
+    });
+  });
+
+  it("identifies a Lifecycle Object caller by class, id, and name", async () => {
+    const callerName = unique("lifecycle-caller");
+    const calleeName = unique("lifecycle-callee");
+    // A plain Lifecycle Object has ambient context only inside a Lifecycle
+    // invocation, so enter it through a contextual stub.
+    const caller = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      callerName
+    );
+    await expect(caller.callPeer(calleeName, { hop: 1 })).resolves.toBe(
+      "pong:from-lifecycle-object"
+    );
+
+    const callee = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      calleeName
+    );
+    const [call] = await callee.observedCalls();
+    expect(call?.caller).toEqual({
+      kind: "agent",
+      className: "RpcContextLifecycleObject",
+      sessionId:
+        env.RpcContextLifecycleObject.idFromName(callerName).toString(),
+      sessionName: callerName,
+      context: { hop: 1 }
+    });
+  });
+
+  it("reports external from a Lifecycle Object method reached over a raw stub", async () => {
+    // Unlike Agent, a plain Lifecycle Object does not wrap its RPC methods in
+    // an invocation context, so an outbound call from a method reached over
+    // a raw stub cannot identify itself.
+    const calleeName = unique("lifecycle-callee");
+    const caller = await getStubByName(
+      env.RpcContextLifecycleObject,
+      unique("lifecycle-caller")
+    );
+    await caller.callPeer(calleeName);
+    const callee = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      calleeName
+    );
+    const [call] = await callee.observedCalls();
+    expect(call?.caller).toEqual({ kind: "external", context: {} });
+  });
+
+  it("crosses between a Lifecycle Object and an Agent in both directions", async () => {
+    const lifecycleName = unique("lifecycle");
+    const agentName = unique("agent");
+    const lifecycle = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      lifecycleName
+    );
+    const agentCallee = await getAgentByName(
+      env.TestRpcContextCalleeAgent,
+      agentName
+    );
+    const agentCaller = await getAgentByName(
+      env.TestRpcContextCallerAgent,
+      agentName
+    );
+
+    await expect(lifecycle.callAgent(agentName)).resolves.toBe(
+      "pong:from-lifecycle-object"
+    );
+    const [toAgent] = await agentCallee.observedCalls();
+    expect(toAgent?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextLifecycleObject",
+      sessionName: lifecycleName
+    });
+
+    await expect(agentCaller.callLifecycleObject(lifecycleName)).resolves.toBe(
+      "pong:from-agent"
+    );
+    const [toLifecycle] = await lifecycle.observedCalls();
+    expect(toLifecycle?.caller).toMatchObject({
+      kind: "agent",
+      className: "TestRpcContextCallerAgent",
+      sessionName: agentName
+    });
+  });
+});
+
+describe("contextual RPC across facets", () => {
+  it("child sees the root as caller through subAgent()", async () => {
+    const rootName = unique("root");
+    const root = await getAgentByName(env.RpcContextRootAgent, rootName);
+    await expect(root.childPing("c1")).resolves.toBe("pong:from-root");
+
+    const [call] = await root.childObserved("c1");
+    expect(call?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextRootAgent",
+      sessionName: rootName
+    });
+  });
+
+  it("root sees the child as caller through parentAgent() (top-level branch)", async () => {
+    const rootName = unique("root");
+    const root = await getAgentByName(env.RpcContextRootAgent, rootName);
+    await expect(root.childCallsMe("c2")).resolves.toBe("pong:from-child");
+
+    const [call] = await root.observedCalls();
+    expect(call?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextChildAgent",
+      sessionName: "c2"
+    });
+  });
+
+  it("child sees the grandchild as caller through parentAgent() (facet-parent bridge)", async () => {
+    const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
+    await expect(root.grandchildCallsChild("c3", "g3")).resolves.toBe(
+      "pong:from-grandchild"
+    );
+
+    const [call] = await root.childObserved("c3");
+    expect(call?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextGrandchildAgent",
+      sessionName: "g3"
+    });
+  });
+
+  it("grandchild sees the child as caller through dynamicAgents.get()", async () => {
+    const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
+    const [call] = await root.childPingsGrandchild("c4", "g4");
+    expect(call?.caller).toMatchObject({
+      kind: "agent",
+      className: "RpcContextChildAgent",
+      sessionName: "c4"
+    });
+  });
+
+  it("getSubAgentByName reports the Worker, not the parent, as caller", async () => {
+    const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
+    const child = await getSubAgentByName(root, RpcContextChildAgent, "c5");
+    await expect(child.ping("from-worker")).resolves.toBe("pong:from-worker");
+
+    const [call] = await root.childObserved("c5");
+    expect(call?.caller).toEqual({ kind: "external", context: {} });
+  });
+});

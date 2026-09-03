@@ -8,6 +8,8 @@ import {
 // Capability test fixtures (harness Durable Objects); see
 // tests/capabilities/AGENTS.md for the capability testing pattern.
 export { CapabilityHarnessObject } from "./capabilities/harness.ts";
+export { RpcContextLifecycleObject } from "./capabilities/rpc-context.ts";
+import type { RpcContextLifecycleObject } from "./capabilities/rpc-context.ts";
 import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
 export {
   PlainLifecycleObject,
@@ -121,6 +123,20 @@ export {
   BodyProbeSubAgent,
   BodyProbeRootAgent
 } from "./agents";
+export {
+  TestRpcContextCalleeAgent,
+  TestRpcContextCallerAgent
+} from "./agents/rpc-context.ts";
+import type {
+  TestRpcContextCalleeAgent,
+  TestRpcContextCallerAgent
+} from "./agents/rpc-context.ts";
+export {
+  RpcContextRootAgent,
+  RpcContextChildAgent,
+  RpcContextGrandchildAgent
+} from "./agents/rpc-context-facets.ts";
+import type { RpcContextRootAgent } from "./agents/rpc-context-facets.ts";
 export { ChatSdkStateAgent } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
@@ -202,6 +218,7 @@ export type Env = {
   LOADER: WorkerLoader;
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
+  RpcContextLifecycleObject: DurableObjectNamespace<RpcContextLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
@@ -244,6 +261,9 @@ export type Env = {
   TestChildAgent: DurableObjectNamespace<TestChildAgent>;
   TestChatSdkStateHostAgent: DurableObjectNamespace<TestChatSdkStateHostAgent>;
   TestQueueAgent: DurableObjectNamespace<TestQueueAgent>;
+  TestRpcContextCalleeAgent: DurableObjectNamespace<TestRpcContextCalleeAgent>;
+  TestRpcContextCallerAgent: DurableObjectNamespace<TestRpcContextCallerAgent>;
+  RpcContextRootAgent: DurableObjectNamespace<RpcContextRootAgent>;
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
   TestRunFiberAgent: DurableObjectNamespace<TestRunFiberAgent>;

@@ -9,7 +9,7 @@ import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { evictAllDurableObjects, evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "../../..";
+import { getStubByName } from "../../..";
 
 interface SessionAgentStub {
   appendMessage(message: UIMessage, parentId?: string | null): Promise<void>;
@@ -22,7 +22,7 @@ interface SessionAgentStub {
 }
 
 async function getAgent(name: string): Promise<SessionAgentStub> {
-  return getAgentByName(
+  return getStubByName(
     env.TestSessionAgent,
     name
   ) as unknown as Promise<SessionAgentStub>;

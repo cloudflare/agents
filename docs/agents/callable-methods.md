@@ -514,6 +514,11 @@ class OrchestratorAgent extends Agent {
 }
 ```
 
+> Stubs from `getAgentByName()` carry caller context: the callee can read who
+> called it via `getCurrentAgent().caller`, and each call opens an
+> `agents.rpc.call` span. Use `getStubByName()` when you need the raw stub.
+> See [Calls between Agents](./get-current-agent.md#calls-between-agents).
+
 ### Why the Distinction?
 
 | RPC Type    | Transport | Use Case                          |

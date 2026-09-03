@@ -28,6 +28,7 @@ import {
   runWithoutCurrentAgent,
   type LifecycleObject
 } from "./current-agent";
+import { installContextualRpcEntry } from "./rpc-entry";
 import { isBenignTeardownError } from "./transport-errors";
 import type { WSMessage } from "./types";
 
@@ -265,6 +266,7 @@ export class Lifecycle<
       );
     }
     this.#handlersInstalled = true;
+    installContextualRpcEntry(this.#host);
 
     const handlers = {
       fetch: this.fetch.bind(this),

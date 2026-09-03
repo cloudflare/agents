@@ -97,14 +97,22 @@ import {
   type CurrentAgentContext
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
+import { wrapAgentStub } from "./agent-stub";
+import type { AgentCallerIdentity } from "./lifecycle/current-agent";
 import { callablesFromDecorated, WebSockets } from "./websockets";
 export {
   getAgentByName,
+  getStubByName,
   routeAgentRequest,
   type AgentGetOptions,
   type AgentOptions,
   type RoutingRetryOptions
 } from "./agent-routing";
+export type {
+  AgentCaller,
+  AgentCallerIdentity,
+  RpcCallContext
+} from "./lifecycle/current-agent";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 export { camelCaseToKebabCase } from "./utils";
 import { SqlError } from "./sql-error";
@@ -1228,6 +1236,26 @@ export class Agent<
   /** @internal Ensure lifecycle startup before a native RPC implementation. */
   async __unsafe_ensureInitialized(props?: Props): Promise<void> {
     await this.lifecycle.start(props);
+  }
+
+  /**
+   * How this Agent identifies itself on outbound contextual RPC calls.
+   * @internal
+   */
+  _cf_rpcIdentity(): AgentCallerIdentity {
+    // The instance name is not always readable (unnamed DOs, facets before
+    // their handshake); an outbound call must still be able to describe us.
+    let sessionName: string | undefined;
+    try {
+      sessionName = this.name;
+    } catch {
+      sessionName = undefined;
+    }
+    return {
+      className: this._ParentClass.name,
+      sessionId: this.ctx.id.toString(),
+      sessionName
+    };
   }
 
   private _state = DEFAULT_STATE as State;
@@ -5774,7 +5802,10 @@ export class Agent<
       return await bridge._cf_invokeSubAgentPath(targetPath, method, args);
     };
     const owner = this;
-    return new Proxy(
+    // The bridge hops root → … → parent inside `_cf_` framework calls, so the
+    // parent would otherwise see the root as its caller. Wrapping the bridge
+    // sends `_cf_invoke` through it with this facet's own identity instead.
+    const bridged = new Proxy(
       {},
       {
         get(_target, prop) {
@@ -5798,6 +5829,10 @@ export class Agent<
         }
       }
     ) as DurableObjectStub<T>;
+    return wrapAgentStub(bridged, {
+      targetName: parentPath[parentPath.length - 1]?.name ?? className,
+      caller: { kind: "agent", ...this._cf_rpcIdentity(), context: {} }
+    });
   }
 
   private _cf_isWebSocketUpgradeRequest(

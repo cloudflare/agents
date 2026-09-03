@@ -1,11 +1,11 @@
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "..";
+import { getStubByName } from "..";
 
 describe("schema migration: legacy schedules into the job queue", () => {
   it("migrates pre-interval legacy rows and drops the table", async () => {
-    const agent = await getAgentByName(
+    const agent = await getStubByName(
       env.TestMigrationAgent,
       "legacy-pre-interval"
     );
@@ -37,7 +37,7 @@ describe("schema migration: legacy schedules into the job queue", () => {
   });
 
   it("migrates every schedule kind, keeps retry options, and marks intervals single-flight", async () => {
-    const agent = await getAgentByName(
+    const agent = await getStubByName(
       env.TestMigrationAgent,
       "legacy-full-schema"
     );
@@ -77,7 +77,7 @@ describe("schema migration: legacy schedules into the job queue", () => {
   });
 
   it("is idempotent (safe to run twice)", async () => {
-    const agent = await getAgentByName(
+    const agent = await getStubByName(
       env.TestMigrationAgent,
       "legacy-idempotent"
     );

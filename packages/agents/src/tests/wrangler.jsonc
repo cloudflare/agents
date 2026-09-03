@@ -21,6 +21,10 @@
         "name": "PlainLifecycleObject"
       },
       {
+        "class_name": "RpcContextLifecycleObject",
+        "name": "RpcContextLifecycleObject"
+      },
+      {
         "class_name": "RetryableStartObject",
         "name": "RetryableStartObject"
       },
@@ -190,6 +194,26 @@
       {
         "class_name": "TestQueueAgent",
         "name": "TestQueueAgent"
+      },
+      {
+        "class_name": "TestRpcContextCalleeAgent",
+        "name": "TestRpcContextCalleeAgent"
+      },
+      {
+        "class_name": "TestRpcContextCallerAgent",
+        "name": "TestRpcContextCallerAgent"
+      },
+      {
+        "class_name": "RpcContextRootAgent",
+        "name": "RpcContextRootAgent"
+      },
+      {
+        "class_name": "RpcContextChildAgent",
+        "name": "RpcContextChildAgent"
+      },
+      {
+        "class_name": "RpcContextGrandchildAgent",
+        "name": "RpcContextGrandchildAgent"
       },
       {
         "class_name": "TestChatSdkStateHostAgent",
@@ -397,6 +421,7 @@
       "new_sqlite_classes": [
         "CapabilityHarnessObject",
         "PlainLifecycleObject",
+        "RpcContextLifecycleObject",
         "RetryableStartObject",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
@@ -439,6 +464,11 @@
         "TestCallableAgent",
         "TestChildAgent",
         "TestQueueAgent",
+        "TestRpcContextCalleeAgent",
+        "TestRpcContextCallerAgent",
+        "RpcContextRootAgent",
+        "RpcContextChildAgent",
+        "RpcContextGrandchildAgent",
         "TestChatSdkStateHostAgent",
         "TestRetryAgent",
         "TestRetryDefaultsAgent",

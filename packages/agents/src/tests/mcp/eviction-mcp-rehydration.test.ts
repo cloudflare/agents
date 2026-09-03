@@ -7,7 +7,7 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext, evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "../..";
+import { getStubByName } from "../..";
 import worker from "../worker";
 import { initializeStreamableHTTPServer } from "../shared/test-utils";
 
@@ -17,14 +17,14 @@ describe("McpAgent recovery after forced Durable Object eviction", () => {
     const baseUrl = "http://example.com/mcp";
     const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
     const name = `streamable-http:${sessionId}`;
-    let stub = await getAgentByName(env.MCP_OBJECT, name);
+    let stub = await getStubByName(env.MCP_OBJECT, name);
 
     const initializeRequest = await stub.getInitializeRequest();
     expect(initializeRequest).toBeDefined();
 
     await evictDurableObject(stub);
 
-    stub = await getAgentByName(env.MCP_OBJECT, name);
+    stub = await getStubByName(env.MCP_OBJECT, name);
     expect(await stub.getInitializeRequest()).toEqual(initializeRequest);
 
     const response = await worker.fetch(

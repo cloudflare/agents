@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { getAgentByName } from "../..";
+import { getStubByName } from "../..";
 
 describe("addMcpServer with RPC binding — stable supplied ids", () => {
   it("uses a caller-supplied stable id as the server id", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-stable-id"
     );
@@ -27,7 +27,7 @@ describe("addMcpServer with RPC binding — stable supplied ids", () => {
   });
 
   it("normalizes a caller-supplied id (e.g. 'GitHub MCP!' → 'github-mcp')", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-normalize-id"
     );
@@ -46,7 +46,7 @@ describe("addMcpServer with RPC binding — stable supplied ids", () => {
   });
 
   it("JIT-migrates an existing (name,url) row to a newly supplied stable id", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-migrate-id"
     );
@@ -85,7 +85,7 @@ describe("addMcpServer with RPC binding — stable supplied ids", () => {
   });
 
   it("dedups when the same stable id is re-supplied for the same (name,url)", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-dedup-stable"
     );
@@ -107,7 +107,7 @@ describe("addMcpServer with RPC binding — stable supplied ids", () => {
   });
 
   it("throws when a caller-supplied id collides with a different server", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-collide-id"
     );
@@ -132,7 +132,7 @@ describe("addMcpServer with RPC binding — stable supplied ids", () => {
 
 describe("addMcpServer with RPC binding", () => {
   it("should connect to McpAgent via RPC and discover tools", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-discover"
     );
@@ -153,7 +153,7 @@ describe("addMcpServer with RPC binding", () => {
   });
 
   it("should call a tool on McpAgent via RPC and get correct response", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-call-tool"
     );
@@ -174,7 +174,7 @@ describe("addMcpServer with RPC binding", () => {
   });
 
   it("should persist RPC server info to storage for hibernation recovery", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-persist"
     );
@@ -197,7 +197,7 @@ describe("addMcpServer with RPC binding", () => {
   });
 
   it("restores RPC connections through Agent startup after eviction", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-hibernate"
     );
@@ -246,7 +246,7 @@ describe("addMcpServer with RPC binding", () => {
   });
 
   it("should deduplicate repeated addMcpServer calls for the same server", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-dedup"
     );
@@ -268,7 +268,7 @@ describe("addMcpServer with RPC binding", () => {
   });
 
   it("should clean up connection and storage when removing an RPC server", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-remove"
     );
@@ -294,7 +294,7 @@ describe("addMcpServer with RPC binding", () => {
   });
 
   it("should pass props to McpAgent via RPC and verify they arrive", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-props"
     );
@@ -316,7 +316,7 @@ describe("addMcpServer with RPC binding", () => {
 
 describe("addMcpServer with RPC binding — Worker-safe JSON Schema validator", () => {
   it("applies CfWorkerJsonSchemaValidator by default and handles outputSchema tools", async () => {
-    const agentStub = await getAgentByName(
+    const agentStub = await getStubByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-validator-default"
     );

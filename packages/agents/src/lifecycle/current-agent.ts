@@ -39,6 +39,38 @@ export interface LifecycleObject<
   onAlarmMemoryLimit?(context: MemoryLimitContext): void | Promise<void>;
 }
 
+/**
+ * Caller-supplied hints carried on a contextual RPC call. JSON scalars only,
+ * so the record survives the wire unchanged.
+ */
+export type RpcCallContext = Readonly<
+  Record<string, string | number | boolean>
+>;
+
+/** How a Lifecycle host identifies itself to the objects it calls. */
+export type AgentCallerIdentity = {
+  /** Exported class name of the calling host. */
+  readonly className: string;
+  /** Durable Object id of the calling host, as a string. */
+  readonly sessionId: string;
+  /** Instance name of the calling host, when it has one. */
+  readonly sessionName: string | undefined;
+};
+
+/**
+ * Who made the contextual RPC call now being handled.
+ *
+ * Untrusted metadata: suitable for correlation and tracing, never for
+ * identity, tenancy, or authorization decisions. Derive those from data the
+ * callee authenticates itself.
+ */
+export type AgentCaller =
+  | ({
+      readonly kind: "agent";
+      readonly context: RpcCallContext;
+    } & AgentCallerIdentity)
+  | { readonly kind: "external"; readonly context: RpcCallContext };
+
 /** Values associated with the currently executing Lifecycle host. */
 export type AgentContextStore = {
   /** Lifecycle host selected for this invocation. */
@@ -49,6 +81,8 @@ export type AgentContextStore = {
   request: Request | undefined;
   /** Extension-owned value selected for this invocation, when applicable. */
   email: unknown;
+  /** Caller of the contextual RPC call being handled, when applicable. */
+  caller?: AgentCaller;
 };
 
 /** Values returned by {@link getCurrentAgent}. */
@@ -60,6 +94,11 @@ export type CurrentAgentContext<
   connection: Connection | undefined;
   request: Request | undefined;
   email: Email | undefined;
+  /**
+   * The caller of the contextual RPC call being handled, or `undefined` for
+   * every other entry point (fetch, alarms, native RPC on an unwrapped stub).
+   */
+  caller: AgentCaller | undefined;
 };
 
 /**
@@ -90,7 +129,8 @@ export function getCurrentAgent<
       agent: undefined,
       connection: undefined,
       request: undefined,
-      email: undefined
+      email: undefined,
+      caller: undefined
     };
   }
 
@@ -98,7 +138,8 @@ export function getCurrentAgent<
     agent: store.agent as Host,
     connection: store.connection,
     request: store.request,
-    email: store.email
+    email: store.email,
+    caller: store.caller
   };
 }
 

@@ -5,14 +5,14 @@ import {
   runInDurableObject
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "..";
+import { getStubByName } from "..";
 import type { RecoveryLoopScheduleOptions } from "../schedules/types";
 import type { TestScheduleAgent } from "./agents/schedule";
 
 describe("schedule operations", () => {
   describe("cancelSchedule", () => {
     it("should return false when cancelling a non-existent schedule", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "cancel-nonexistent-test"
       );
@@ -23,7 +23,7 @@ describe("schedule operations", () => {
     });
 
     it("should return true when cancelling an existing schedule", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "cancel-existing-test"
       );
@@ -39,7 +39,7 @@ describe("schedule operations", () => {
 
   describe("getSchedule", () => {
     it("should return undefined when getting a non-existent schedule", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "get-nonexistent-test"
       );
@@ -49,7 +49,7 @@ describe("schedule operations", () => {
     });
 
     it("should return schedule when getting an existing schedule", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "get-existing-test"
       );
@@ -64,7 +64,7 @@ describe("schedule operations", () => {
     });
 
     it("should not expose internal storage columns on returned schedules", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "get-public-shape-test"
       );
@@ -86,7 +86,7 @@ describe("schedule operations", () => {
 
   describe("scheduleEvery (interval scheduling)", () => {
     it("should create an interval schedule with correct type", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "interval-create-test"
       );
@@ -106,7 +106,7 @@ describe("schedule operations", () => {
     });
 
     it("should cancel an interval schedule", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "interval-cancel-test"
       );
@@ -127,7 +127,7 @@ describe("schedule operations", () => {
     });
 
     it("should filter schedules by interval type", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "interval-filter-test"
       );
@@ -154,7 +154,7 @@ describe("schedule operations", () => {
     });
 
     it("should persist interval schedule after callback throws", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "interval-error-resilience-test"
       );
@@ -175,7 +175,7 @@ describe("schedule operations", () => {
     });
 
     it("should reset running flag to 0 after interval execution completes", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "running-flag-reset-test"
       );
@@ -236,7 +236,7 @@ describe("schedule operations", () => {
     });
 
     it("should skip execution when running flag is already set (concurrent prevention)", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "concurrent-prevention-test"
       );
@@ -283,7 +283,7 @@ describe("schedule operations", () => {
     });
 
     it("should force-reset hung interval schedule after 30 seconds", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "hung-reset-test"
       );
@@ -341,7 +341,7 @@ describe("schedule operations", () => {
     });
 
     it("should handle legacy schedules with NULL execution_started_at", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "legacy-hung-test"
       );
@@ -418,7 +418,7 @@ describe("schedule operations", () => {
 
   describe("schedule() onStart() warning", () => {
     it("should warn when schedule() is called inside onStart() without idempotent", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestOnStartScheduleWarnAgent,
         "onstart-warn-test"
       );
@@ -433,7 +433,7 @@ describe("schedule operations", () => {
     });
 
     it("should not warn when schedule() is called inside onStart() with idempotent: false (explicit opt-out)", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestOnStartScheduleExplicitFalseAgent,
         "onstart-explicit-false-test"
       );
@@ -443,7 +443,7 @@ describe("schedule operations", () => {
     });
 
     it("should not warn when schedule() is called inside onStart() with idempotent", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestOnStartScheduleNoWarnAgent,
         "onstart-no-warn-test"
       );
@@ -458,7 +458,7 @@ describe("schedule operations", () => {
 
   describe("schedule() cron idempotency (default)", () => {
     it("should return existing schedule when called with same cron, callback, and payload", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "cron-idempotent-same-args-test"
       );
@@ -478,7 +478,7 @@ describe("schedule operations", () => {
     });
 
     it("should not create duplicates when called many times (simulating repeated onStart)", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "cron-idempotent-repeated-test"
       );
@@ -502,7 +502,7 @@ describe("schedule operations", () => {
     });
 
     it("should create a new row when cron expression differs", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "cron-idempotent-different-cron-test"
       );
@@ -523,7 +523,7 @@ describe("schedule operations", () => {
     });
 
     it("should create a new row when payload differs", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "cron-idempotent-different-payload-test"
       );
@@ -550,7 +550,7 @@ describe("schedule operations", () => {
     });
 
     it("should allow duplicate cron rows when idempotent is explicitly false", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "cron-non-idempotent-test"
       );
@@ -575,7 +575,7 @@ describe("schedule operations", () => {
 
   describe("schedule() delayed/scheduled idempotency (opt-in)", () => {
     it("should return existing delayed schedule when idempotent is true", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "delayed-idempotent-test"
       );
@@ -595,7 +595,7 @@ describe("schedule operations", () => {
     });
 
     it("should not create duplicates across many calls (simulating crash loop)", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "delayed-idempotent-crash-loop-test"
       );
@@ -619,7 +619,7 @@ describe("schedule operations", () => {
     });
 
     it("should create separate rows for different payloads even with idempotent", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "delayed-idempotent-different-payload-test"
       );
@@ -642,7 +642,7 @@ describe("schedule operations", () => {
     });
 
     it("should still create duplicates when idempotent is not set (default)", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "delayed-non-idempotent-default-test"
       );
@@ -663,7 +663,7 @@ describe("schedule operations", () => {
     });
 
     it("should return existing scheduled (Date) schedule when idempotent is true", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "scheduled-idempotent-test"
       );
@@ -690,7 +690,7 @@ describe("schedule operations", () => {
 
   describe("alarm() duplicate schedule warning", () => {
     it("should warn when processing many stale one-shot rows for the same callback", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "alarm-duplicate-warning-test"
       );
@@ -710,7 +710,7 @@ describe("schedule operations", () => {
     });
 
     it("should not warn when stale one-shot count is below threshold", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "alarm-no-warning-test"
       );
@@ -730,7 +730,7 @@ describe("schedule operations", () => {
 
   describe("scheduleEvery idempotency", () => {
     it("should return existing schedule when called with same callback and interval", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "idempotent-same-args-test"
       );
@@ -763,7 +763,7 @@ describe("schedule operations", () => {
     });
 
     it("should re-arm a lost alarm when idempotency returns an existing interval schedule", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "idempotent-rearm-lost-alarm-test"
       );
@@ -784,7 +784,7 @@ describe("schedule operations", () => {
     });
 
     it("should immediately re-arm an overdue interval schedule when idempotency returns the existing row", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "idempotent-rearm-overdue-interval-test"
       );
@@ -830,7 +830,7 @@ describe("schedule operations", () => {
     });
 
     it("should return existing schedule when called with same callback, interval, and payload", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "idempotent-same-payload-test"
       );
@@ -868,7 +868,7 @@ describe("schedule operations", () => {
     });
 
     it("should create a new row when interval changes for same callback", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "idempotent-interval-change-test"
       );
@@ -916,7 +916,7 @@ describe("schedule operations", () => {
     });
 
     it("should create a new row when payload changes for same callback", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "idempotent-payload-change-test"
       );
@@ -965,7 +965,7 @@ describe("schedule operations", () => {
     });
 
     it("should allow different callbacks to have their own interval schedules", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "idempotent-different-callbacks-test"
       );
@@ -998,7 +998,7 @@ describe("schedule operations", () => {
     });
 
     it("should not create duplicates when called many times (simulating repeated onStart)", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "idempotent-repeated-calls-test"
       );
@@ -1039,7 +1039,7 @@ describe("schedule operations", () => {
     // platform re-runs it on the new code — not swallowed + deleted, which
     // would orphan the work (e.g. a queued submission's drain alarm).
     it('preserves the row + rejects alarm for "reset because its code was updated" (deploy bounce)', async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "defer-code-update-reset"
       );
@@ -1051,7 +1051,7 @@ describe("schedule operations", () => {
     });
 
     it('preserves the row + rejects alarm for "This script has been upgraded" (superseded script)', async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "defer-script-upgraded"
       );
@@ -1063,7 +1063,7 @@ describe("schedule operations", () => {
     });
 
     it("swallows + deletes the row for an ordinary (non-supersede) error", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "swallow-ordinary-error"
       );
@@ -1077,7 +1077,7 @@ describe("schedule operations", () => {
     it("does NOT treat an ordinary error that merely mentions an upgraded script as a supersede", async () => {
       // Guards the tightened matcher: only the verbatim platform phrase ("this
       // script has been upgraded") defers; a lookalike app error is swallowed.
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "no-defer-lookalike"
       );
@@ -1099,7 +1099,7 @@ describe("schedule operations", () => {
     // The driving RPC resolves with its result; the instance dies a tick
     // later, so every subsequent call settles briefly and uses a fresh stub.
     async function driveOomStrike(name: string, message: string) {
-      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const stub = await getStubByName(env.TestScheduleAgent, name);
       const result = await stub.runOneShotThrowingForTest(message);
       // Let the deferred reset land before the next stub call.
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1115,7 +1115,7 @@ describe("schedule operations", () => {
       // Swallowed (loop broken at the boundary, platform won't auto-retry)…
       expect(result).toEqual({ threw: false, remaining: 1 });
       // …and the fresh instance sees the durable strike and preserved row.
-      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const fresh = await getStubByName(env.TestScheduleAgent, name);
       expect(await fresh.getAlarmStrikesForTest()).toBe(1);
       expect(
         await fresh.getScheduleCountByTypeAndCallback(
@@ -1153,13 +1153,13 @@ describe("schedule operations", () => {
         threw: false,
         remaining: 0
       });
-      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const fresh = await getStubByName(env.TestScheduleAgent, name);
       expect(await fresh.getAlarmStrikesForTest()).toBe(0);
     });
 
     it("seals recovery through the legacy chat-host hook when no new host hook exists", async () => {
       const name = `oom-breaker-legacy-host-${crypto.randomUUID()}`;
-      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const stub = await getStubByName(env.TestScheduleAgent, name);
       await runInDurableObject(stub, async (_instance, state) => {
         await state.storage.put("cf_agents:oom_alarm_strikes", 2);
       });
@@ -1171,7 +1171,7 @@ describe("schedule operations", () => {
         )
       ).toEqual({ threw: false, remaining: 0 });
 
-      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const fresh = await getStubByName(env.TestScheduleAgent, name);
       expect(await fresh.getLegacyMemoryLimitSealsForTest()).toBe(1);
     });
 
@@ -1179,7 +1179,7 @@ describe("schedule operations", () => {
       const name = "oom-breaker-recovery-loop-pack";
       const oom =
         "Durable Object's isolate exceeded its memory limit and was reset.";
-      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const stub = await getStubByName(env.TestScheduleAgent, name);
       // A flagged sibling row due before the ~30s backoff wake (but far
       // enough out that it cannot fire on its own mid-test), and an
       // unflagged control the breaker must never touch.
@@ -1192,7 +1192,7 @@ describe("schedule operations", () => {
         threw: false,
         remaining: 1
       });
-      let fresh = await getAgentByName(env.TestScheduleAgent, name);
+      let fresh = await getStubByName(env.TestScheduleAgent, name);
       const backedOff = await fresh.getStoredScheduleById(flaggedId);
       expect(backedOff).toBeDefined();
       expect((backedOff?.time ?? 0) * 1000).toBeGreaterThan(
@@ -1208,7 +1208,7 @@ describe("schedule operations", () => {
         threw: false,
         remaining: 0
       });
-      fresh = await getAgentByName(env.TestScheduleAgent, name);
+      fresh = await getStubByName(env.TestScheduleAgent, name);
       expect(await fresh.getStoredScheduleById(flaggedId)).toBeUndefined();
       // …while unrelated schedules survive untouched.
       expect(await fresh.getStoredScheduleById(controlId)).toBeDefined();
@@ -1220,7 +1220,7 @@ describe("schedule operations", () => {
       // job runs. Initialization runs inside the breaker, so the alarm must
       // resolve (no platform auto-retry) and record a durable strike.
       const name = "oom-breaker-startup";
-      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const stub = await getStubByName(env.TestScheduleAgent, name);
       await stub.createSchedule(60);
       await runInDurableObject(stub, async (_instance, ctx) => {
         await ctx.storage.put("oomOnStartRemaining", 1);
@@ -1231,7 +1231,7 @@ describe("schedule operations", () => {
       expect(await runDurableObjectAlarm(stub)).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const fresh = await getStubByName(env.TestScheduleAgent, name);
       expect(await fresh.getAlarmStrikesForTest()).toBe(1);
     });
 
@@ -1244,7 +1244,7 @@ describe("schedule operations", () => {
         threw: false,
         remaining: 1
       });
-      let fresh = await getAgentByName(env.TestScheduleAgent, name);
+      let fresh = await getStubByName(env.TestScheduleAgent, name);
       expect(await fresh.getAlarmStrikesForTest()).toBe(1);
       // A clean alarm clears the counter so spikes must be CONSECUTIVE to seal.
       await fresh.runCleanAlarmForTest();
@@ -1255,12 +1255,12 @@ describe("schedule operations", () => {
         threw: false,
         remaining: 1
       });
-      fresh = await getAgentByName(env.TestScheduleAgent, name);
+      fresh = await getStubByName(env.TestScheduleAgent, name);
       expect(await fresh.getAlarmStrikesForTest()).toBe(1);
     });
 
     it("a non-memory error still rejects/ swallows as before (breaker is OOM-only)", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "oom-breaker-passthrough"
       );
@@ -1281,7 +1281,7 @@ describe("schedule operations", () => {
     // Same shape as the breaker suite's helper: drive one OOM strike and let
     // the deferred isolate reset land before the next stub call.
     async function driveOomStrike(name: string, message: string) {
-      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const stub = await getStubByName(env.TestScheduleAgent, name);
       const result = await stub.runOneShotThrowingForTest(message);
       await new Promise((resolve) => setTimeout(resolve, 100));
       return result;
@@ -1295,7 +1295,7 @@ describe("schedule operations", () => {
       const name = "legacy-migration-recovery-loop";
       const oom =
         "Durable Object's isolate exceeded its memory limit and was reset.";
-      const stub = await getAgentByName(env.TestScheduleAgent, name);
+      const stub = await getStubByName(env.TestScheduleAgent, name);
       await runInDurableObject(stub, async (_instance, ctx) => {
         ctx.storage.sql.exec(`
           CREATE TABLE cf_agents_schedules (
@@ -1324,7 +1324,7 @@ describe("schedule operations", () => {
       await evictDurableObject(stub);
 
       // Any RPC restarts the object; startup runs the migration.
-      const fresh = await getAgentByName(env.TestScheduleAgent, name);
+      const fresh = await getStubByName(env.TestScheduleAgent, name);
       const flags = await runInDurableObject(
         fresh,
         async (instance: TestScheduleAgent) =>
@@ -1346,7 +1346,7 @@ describe("schedule operations", () => {
         threw: false,
         remaining: 1
       });
-      let survivor = await getAgentByName(env.TestScheduleAgent, name);
+      let survivor = await getStubByName(env.TestScheduleAgent, name);
       const near = await runInDurableObject(
         survivor,
         async (instance: TestScheduleAgent) =>
@@ -1366,7 +1366,7 @@ describe("schedule operations", () => {
         threw: false,
         remaining: 0
       });
-      survivor = await getAgentByName(env.TestScheduleAgent, name);
+      survivor = await getStubByName(env.TestScheduleAgent, name);
       const after = await runInDurableObject(
         survivor,
         async (instance: TestScheduleAgent) =>
@@ -1384,7 +1384,7 @@ describe("schedule operations", () => {
       // migration ran before this fix, or any historical write), the dedup
       // hit must restore breaker membership rather than return it unflagged
       // forever.
-      const stub = await getAgentByName(
+      const stub = await getStubByName(
         env.TestScheduleAgent,
         "dedup-restores-recovery-flag"
       );
@@ -1421,7 +1421,7 @@ describe("schedule operations", () => {
     // PRESERVED (alarm rejected → platform re-runs it in the healthy window
     // that follows), not consumed.
     it('defers "Network connection lost." on exhaustion instead of consuming the row', async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "exhaust-defer-connection-lost"
       );
@@ -1445,7 +1445,7 @@ describe("schedule operations", () => {
       // The production #1730 shape: `SqlError: SQL query failed: Network
       // connection lost.` — the wrapper prefixes the message and drops the CF
       // `retryable` flag, keeping the platform error only in `cause`.
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "exhaust-defer-sqlerror"
       );
@@ -1461,7 +1461,7 @@ describe("schedule operations", () => {
     });
 
     it("defers a retryable-flagged platform error on exhaustion", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "exhaust-defer-retryable-flag"
       );
@@ -1477,7 +1477,7 @@ describe("schedule operations", () => {
     });
 
     it('still retries "Network connection lost." in-process first (a momentary blip heals without deferral)', async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "ncl-in-process-retry-heals"
       );
@@ -1498,7 +1498,7 @@ describe("schedule operations", () => {
     it("still abandons the row when the FINAL error is an application error", async () => {
       // Mixed shapes ending in an app error: the callback itself failed on a
       // healthy platform, so the existing swallow-and-delete semantics hold.
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "exhaust-consume-app-error"
       );
@@ -1516,7 +1516,7 @@ describe("schedule operations", () => {
     });
 
     it("still abandons the row on exhaustion of a pure application error", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "exhaust-consume-pure-app-error"
       );
@@ -1535,7 +1535,7 @@ describe("schedule operations", () => {
     });
 
     it("a supersede error mid-sequence still defers IMMEDIATELY without burning the remaining budget", async () => {
-      const agentStub = await getAgentByName(
+      const agentStub = await getStubByName(
         env.TestScheduleAgent,
         "supersede-immediate-defer-budget"
       );

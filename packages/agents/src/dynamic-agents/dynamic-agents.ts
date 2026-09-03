@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { resolveRpcMethod } from "../lifecycle/rpc-entry";
 import { nanoid } from "nanoid";
 import type {
   Connection,
@@ -15,7 +16,7 @@ import {
   type AgentPathStep
 } from "../sub-routing";
 import { getAgentByName } from "../agent-routing";
-import { camelCaseToKebabCase, isInternalJsStubProp } from "../utils";
+import { camelCaseToKebabCase } from "../utils";
 import type { Agent } from "../index";
 import { agentPathKey, isValidParentPath } from "./identity";
 import { DynamicAgentRegistry } from "./registry";
@@ -435,31 +436,16 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     }
 
     if (selfPath.length === targetPath.length) {
-      // Match real DO-stub RPC semantics: refuse JS-internal probes
-      // (`constructor`, `toString`, symbol keys, thenable checks, …) and
-      // anything inherited from `Object.prototype` so a facet-origin workflow
-      // cannot reach a method surface a top-level workflow's stub would deny.
-      // The framework's own `_workflow_*` / `_cf_*` RPC methods and any
-      // user-defined Agent methods live on the subclass prototype, not
-      // `Object.prototype`, so they remain callable.
-      const target = this.#host as unknown as Record<string, unknown>;
-      const fn = target[method];
-      if (
-        isInternalJsStubProp(method) ||
-        method in Object.prototype ||
-        typeof fn !== "function"
-      ) {
+      // Same member rule as a native stub and as `_cf_invoke`: JS-internal
+      // probes, `Object.prototype` members, and non-functions are refused so
+      // a facet-origin workflow reaches nothing a top-level stub would deny.
+      const resolved = resolveRpcMethod(this.#host, method);
+      if (resolved.kind === "err") {
         throw new Error(
-          `Workflow origin method "${method}" is not callable on ${
-            (this.#host as unknown as { constructor: { name: string } })
-              .constructor.name
-          }.`
+          `Workflow origin method "${method}" is not callable on ${resolved.error.hostClassName}.`
         );
       }
-      return await (fn as (...methodArgs: unknown[]) => unknown).apply(
-        this.#host,
-        args
-      );
+      return await resolved.value.apply(this.#host, args);
     }
 
     const next = targetPath[selfPath.length];
@@ -1564,6 +1550,11 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     return await bridge._cf_invokeSubAgentPath([next, ...rest], method, args);
   }
 
+  /**
+   * Dispatch one method on a resolved facet stub. A contextual stub over a
+   * bridge sends `_cf_invoke` as the method name, so the original caller
+   * reaches the final object without any per-hop plumbing here.
+   */
   async invokeStubMethod(
     stub: unknown,
     className: string,

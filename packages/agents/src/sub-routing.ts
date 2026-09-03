@@ -18,6 +18,7 @@
  */
 
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
+import { currentCaller, wrapAgentStub } from "./agent-stub";
 import type { Agent, SubAgentClass, SubAgentStub } from "./index";
 
 /**
@@ -519,7 +520,7 @@ export async function getSubAgentByName<T extends Agent>(
     );
   }
 
-  return new Proxy(
+  const bridged = new Proxy(
     {},
     {
       get(_target, prop) {
@@ -549,4 +550,13 @@ export async function getSubAgentByName<T extends Agent>(
       }
     }
   ) as SubAgentStub<T>;
+  // The bridge runs inside the parent's `_cf_` framework call, so without
+  // this the child would see the parent as its caller. Wrapping sends
+  // `_cf_invoke` through the bridge with the Worker-side caller resolved here.
+  // SAFETY: SubAgentStub is the RPC-only projection of the Durable Object
+  // stub; the wrapper only intercepts method names, which both share.
+  return wrapAgentStub(bridged as unknown as DurableObjectStub<T>, {
+    targetName: name,
+    caller: currentCaller({})
+  }) as unknown as SubAgentStub<T>;
 }
