@@ -8,7 +8,6 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
 import type { RecoveryLoopScheduleOptions } from "../schedules/types";
 import type { TestScheduleAgent } from "./agents/schedule";
-import { nativeAgentStub } from "../index";
 
 describe("schedule operations", () => {
   describe("cancelSchedule", () => {
@@ -1227,7 +1226,7 @@ describe("schedule operations", () => {
         await ctx.storage.put("oomOnStartRemaining", 1);
         await ctx.storage.setAlarm(Date.now() + 1000);
       });
-      await evictDurableObject(nativeAgentStub(stub));
+      await evictDurableObject(stub);
 
       expect(await runDurableObjectAlarm(stub)).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1322,7 +1321,7 @@ describe("schedule operations", () => {
         );
         await ctx.storage.delete("cf_agents:schedules_schema_version");
       });
-      await evictDurableObject(nativeAgentStub(stub));
+      await evictDurableObject(stub);
 
       // Any RPC restarts the object; startup runs the migration.
       const fresh = await getAgentByName(env.TestScheduleAgent, name);

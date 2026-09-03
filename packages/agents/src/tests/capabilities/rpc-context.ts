@@ -47,7 +47,7 @@ export class RpcContextLifecycleObject extends DurableObject<Cloudflare.Env> {
     const peer = await getAgentByName(
       this.env.RpcContextLifecycleObject,
       peerName,
-      context === undefined ? undefined : { context }
+      { rpc: "contextual", context }
     );
     return peer.ping("from-lifecycle-object");
   }
@@ -55,7 +55,8 @@ export class RpcContextLifecycleObject extends DurableObject<Cloudflare.Env> {
   async callAgent(agentName: string): Promise<string> {
     const agent = await getAgentByName(
       this.env.TestRpcContextCalleeAgent,
-      agentName
+      agentName,
+      { rpc: "contextual" }
     );
     return agent.ping("from-lifecycle-object");
   }

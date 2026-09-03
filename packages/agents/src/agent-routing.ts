@@ -1,9 +1,6 @@
 import type { Agent } from "./index";
-import { currentCaller, wrapAgentStub } from "./agent-stub";
-import type {
-  LifecycleObject,
-  RpcCallContext
-} from "./lifecycle/current-agent";
+import { applyRpcOptions, type AgentRpcOptions } from "./agent-stub";
+import type { LifecycleObject } from "./lifecycle/current-agent";
 import { camelCaseToKebabCase } from "./utils";
 
 const namespaceMapCache = new WeakMap<
@@ -92,16 +89,6 @@ interface AgentRouteOptions<
 /** Configuration options for {@link routeAgentRequest}. */
 export type AgentOptions<Env> = AgentRouteOptions<Env>;
 
-/**
- * How method calls on a resolved stub travel.
- *
- * - `contextual` (default): calls carry the caller's identity and `context`
- *   hints, readable on the callee via `getCurrentAgent().caller`, and open a
- *   client span per call.
- * - `native`: the raw Durable Object stub, with no caller context.
- */
-export type AgentRpcMode = "contextual" | "native";
-
 /** Options for resolving and starting a named Agent. */
 export type AgentGetOptions<
   Env,
@@ -109,16 +96,8 @@ export type AgentGetOptions<
 > = Pick<
   AgentRouteOptions<Env, Props>,
   "jurisdiction" | "locationHint" | "props" | "routingRetry"
-> & {
-  /** How method calls on the returned stub travel. Default: `contextual`. */
-  rpc?: AgentRpcMode;
-  /**
-   * Hints forwarded with every call on the returned stub, such as a request
-   * id or tenant hint. Untrusted on the callee: correlation only, never
-   * authorization. Ignored when `rpc` is `native`.
-   */
-  context?: RpcCallContext;
-};
+> &
+  AgentRpcOptions;
 
 interface ResolvedRoutingRetryOptions extends Required<
   Omit<RoutingRetryOptions, "onRetry">
@@ -411,10 +390,10 @@ export async function routeAgentRequest<Env>(
  * Lifecycle Object qualifies, not only Agents: `Lifecycle.install` gives every
  * host class the entry points this resolver and its stub rely on.
  *
- * By default the stub is contextual: each method call carries the calling
- * Agent's identity (or `external` from a Worker) plus any `context` hints to
- * the callee, where `getCurrentAgent().caller` exposes them, and opens an
- * `agents.rpc.call` span. Pass `rpc: "native"` for the raw stub.
+ * Pass `rpc: "contextual"` for a stub whose method calls carry the caller's
+ * identity (or `external` from a Worker) plus any `context` hints to the
+ * callee, where `getCurrentAgent().caller` exposes them, and open an
+ * `agents.rpc.call` span. The default is the raw Durable Object stub.
  *
  * @param namespace - Agent Durable Object namespace.
  * @param name - Agent instance name.
@@ -447,11 +426,5 @@ export async function getAgentByName<
     options?.routingRetry
   );
 
-  if (options?.rpc === "native") {
-    return stub;
-  }
-  return wrapAgentStub(stub, {
-    targetName: name,
-    caller: currentCaller(options?.context ?? {})
-  });
+  return applyRpcOptions(stub, name, options);
 }

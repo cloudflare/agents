@@ -357,8 +357,8 @@ async runTask(): Promise<void> {
 Agent's internal RPC entry points already enforce this boundary.
 
 `getAgentByName()` works for any Lifecycle Object, not only Agents: it starts
-the object, then returns a contextual stub whose calls carry the caller's
-identity and `context` hints to the callee. Inside a called method,
+the object before returning its stub. With `rpc: "contextual"` the stub's
+calls carry the caller's identity and `context` hints to the callee, where
 `getCurrentAgent().caller` reports who called. `Lifecycle.install` defines the
 entry points this relies on on the host class once. See
 [Calls between Agents](./get-current-agent.md#calls-between-agents).

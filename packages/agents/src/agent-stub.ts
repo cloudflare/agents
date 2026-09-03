@@ -96,6 +96,67 @@ export function currentCaller(context: RpcCallContext): AgentCaller {
   return { kind: "agent", ...agent._cf_rpcIdentity(), context };
 }
 
+/**
+ * How method calls on a resolved stub travel.
+ *
+ * - `native` (default): the raw Durable Object stub, with no caller context.
+ * - `contextual`: calls carry the caller's identity and `context` hints,
+ *   readable on the callee via `getCurrentAgent().caller`, and open a client
+ *   span per call. The stub is then a Proxy rather than a runtime `Fetcher`;
+ *   use `nativeAgentStub()` before handing it to a runtime API or sending it
+ *   as an RPC argument.
+ */
+export type AgentRpcMode = "contextual" | "native";
+
+/** RPC options accepted wherever the SDK hands out a stub. */
+export type AgentRpcOptions = {
+  /** How method calls on the returned stub travel. Default: `native`. */
+  readonly rpc?: AgentRpcMode;
+  /**
+   * Hints forwarded with every call on the returned stub, such as a request
+   * id or tenant hint. Untrusted on the callee: correlation only, never
+   * authorization. Ignored unless `rpc` is `contextual`.
+   */
+  readonly context?: RpcCallContext;
+};
+
+/**
+ * Wrap `stub` when `options` opt into contextual RPC; otherwise return it
+ * untouched.
+ *
+ * @template T - The Agent class the stub targets.
+ * @param stub - The native stub.
+ * @param targetName - Instance name the stub was resolved for.
+ * @param options - The caller's RPC options.
+ * @returns The stub to hand out.
+ */
+export function applyRpcOptions<T extends Rpc.DurableObjectBranded | undefined>(
+  stub: DurableObjectStub<T>,
+  targetName: string,
+  options: AgentRpcOptions | undefined
+): DurableObjectStub<T> {
+  if (options?.rpc !== "contextual") return stub;
+  return wrapAgentStub(stub, {
+    targetName,
+    caller: currentCaller(options.context ?? {})
+  });
+}
+
+/**
+ * The caller record for a bridged call, or `undefined` when `options` do not
+ * opt into contextual RPC.
+ *
+ * @param options - The caller's RPC options.
+ * @returns The caller to thread through the bridge, if any.
+ */
+export function bridgedCaller(
+  options: AgentRpcOptions | undefined
+): AgentCaller | undefined {
+  return options?.rpc === "contextual"
+    ? currentCaller(options.context ?? {})
+    : undefined;
+}
+
 /** How a wrapped stub identifies its target in spans. */
 export type WrapAgentStubOptions = {
   /** Instance name the stub was resolved for. */

@@ -18,7 +18,7 @@
  */
 
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
-import { currentCaller } from "./agent-stub";
+import { bridgedCaller, type AgentRpcOptions } from "./agent-stub";
 import type { AgentCaller } from "./lifecycle/current-agent";
 import type { Agent, SubAgentClass, SubAgentStub } from "./index";
 
@@ -505,7 +505,8 @@ interface SubAgentInvokeEndpoint {
 export async function getSubAgentByName<T extends Agent>(
   parent: unknown,
   cls: SubAgentClass<T>,
-  name: string
+  name: string,
+  options?: AgentRpcOptions
 ): Promise<SubAgentStub<T>> {
   if (name.includes("\0")) {
     throw new Error(
@@ -524,7 +525,7 @@ export async function getSubAgentByName<T extends Agent>(
 
   // Resolved once: the bridge runs inside the parent's `_cf_` framework call,
   // so without this the child would see the parent as its caller.
-  const caller = currentCaller({});
+  const caller = bridgedCaller(options);
   return new Proxy(
     {},
     {

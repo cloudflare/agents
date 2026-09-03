@@ -12,7 +12,10 @@ describe("contextual RPC via getAgentByName", () => {
     const callee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
       unique("callee"),
-      { context: { requestId: "req-1", attempt: 2, dryRun: true } }
+      {
+        rpc: "contextual",
+        context: { requestId: "req-1", attempt: 2, dryRun: true }
+      }
     );
 
     await expect(callee.ping("hello")).resolves.toBe("pong:hello");
@@ -72,11 +75,10 @@ describe("contextual RPC via getAgentByName", () => {
     expect(call?.caller?.context).toEqual({});
   });
 
-  it("leaves caller undefined on a native stub", async () => {
+  it("leaves caller undefined on the default (native) stub", async () => {
     const callee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
-      unique("callee"),
-      { rpc: "native" }
+      unique("callee")
     );
     await callee.ping("raw");
 
@@ -89,7 +91,8 @@ describe("contextual RPC via getAgentByName", () => {
   it("surfaces callee errors as rejections", async () => {
     const callee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
-      unique("callee")
+      unique("callee"),
+      { rpc: "contextual" }
     );
     await expect(callee.throwing()).rejects.toThrow("callee failed on purpose");
   });
@@ -97,7 +100,8 @@ describe("contextual RPC via getAgentByName", () => {
   it("refuses JS-internal probes and non-methods like a native stub", async () => {
     const callee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
-      unique("callee")
+      unique("callee"),
+      { rpc: "contextual" }
     );
     // SAFETY: deliberately reaching past the typed surface to probe dispatch.
     const loose = callee as unknown as Record<
@@ -111,7 +115,8 @@ describe("contextual RPC via getAgentByName", () => {
   it("unwraps to the native stub for runtime APIs", async () => {
     const callee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
-      unique("callee")
+      unique("callee"),
+      { rpc: "contextual" }
     );
     const raw = nativeAgentStub(callee);
     expect(raw).not.toBe(callee);
@@ -123,7 +128,9 @@ describe("contextual RPC via getAgentByName", () => {
 
   it("keeps native stub members intact", async () => {
     const name = unique("callee");
-    const callee = await getAgentByName(env.TestRpcContextCalleeAgent, name);
+    const callee = await getAgentByName(env.TestRpcContextCalleeAgent, name, {
+      rpc: "contextual"
+    });
     expect(callee.id.toString()).toBe(
       env.TestRpcContextCalleeAgent.idFromName(name).toString()
     );
@@ -136,7 +143,7 @@ describe("contextual RPC on a plain Lifecycle Object", () => {
     const stub = await getAgentByName(
       env.RpcContextLifecycleObject,
       unique("lifecycle"),
-      { context: { requestId: "req-lc" } }
+      { rpc: "contextual", context: { requestId: "req-lc" } }
     );
     await expect(stub.ping("x")).resolves.toBe("pong:x");
 
@@ -151,9 +158,12 @@ describe("contextual RPC on a plain Lifecycle Object", () => {
   it("identifies a Lifecycle Object caller by class, id, and name", async () => {
     const callerName = unique("lifecycle-caller");
     const calleeName = unique("lifecycle-callee");
+    // A plain Lifecycle Object has ambient context only inside a Lifecycle
+    // invocation, so enter it through a contextual stub.
     const caller = await getAgentByName(
       env.RpcContextLifecycleObject,
-      callerName
+      callerName,
+      { rpc: "contextual" }
     );
     await expect(caller.callPeer(calleeName, { hop: 1 })).resolves.toBe(
       "pong:from-lifecycle-object"
@@ -174,12 +184,31 @@ describe("contextual RPC on a plain Lifecycle Object", () => {
     });
   });
 
+  it("reports external from a Lifecycle Object method reached over a raw stub", async () => {
+    // Unlike Agent, a plain Lifecycle Object does not wrap its RPC methods in
+    // an invocation context, so an outbound call from a method reached over
+    // the default native stub cannot identify itself.
+    const calleeName = unique("lifecycle-callee");
+    const caller = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      unique("lifecycle-caller")
+    );
+    await caller.callPeer(calleeName);
+    const callee = await getAgentByName(
+      env.RpcContextLifecycleObject,
+      calleeName
+    );
+    const [call] = await callee.observedCalls();
+    expect(call?.caller).toEqual({ kind: "external", context: {} });
+  });
+
   it("crosses between a Lifecycle Object and an Agent in both directions", async () => {
     const lifecycleName = unique("lifecycle");
     const agentName = unique("agent");
     const lifecycle = await getAgentByName(
       env.RpcContextLifecycleObject,
-      lifecycleName
+      lifecycleName,
+      { rpc: "contextual" }
     );
     const agentCallee = await getAgentByName(
       env.TestRpcContextCalleeAgent,
@@ -226,6 +255,15 @@ describe("contextual RPC across facets", () => {
     });
   });
 
+  it("default subAgent() stub is native and carries no caller", async () => {
+    const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
+    await expect(root.childPingNative("c0")).resolves.toBe(
+      "pong:from-root-native"
+    );
+    const [call] = await root.childObserved("c0");
+    expect(call?.caller).toBeUndefined();
+  });
+
   it("root sees the child as caller through parentAgent() (top-level branch)", async () => {
     const rootName = unique("root");
     const root = await getAgentByName(env.RpcContextRootAgent, rootName);
@@ -265,7 +303,9 @@ describe("contextual RPC across facets", () => {
 
   it("getSubAgentByName reports the Worker, not the parent, as caller", async () => {
     const root = await getAgentByName(env.RpcContextRootAgent, unique("root"));
-    const child = await getSubAgentByName(root, RpcContextChildAgent, "c5");
+    const child = await getSubAgentByName(root, RpcContextChildAgent, "c5", {
+      rpc: "contextual"
+    });
     await expect(child.ping("from-worker")).resolves.toBe("pong:from-worker");
 
     const [call] = await root.childObserved("c5");

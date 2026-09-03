@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { getAgentByName } from "../..";
-import { nativeAgentStub } from "../../index";
 
 /**
  * E2E tests for waitForConnections() through the full Agent lifecycle.
@@ -157,7 +156,7 @@ describe("waitForConnections E2E", () => {
 
       // Eviction tears down the instance while retaining SQLite. Resolving the
       // Agent again runs the real lifecycle capability startup path.
-      await evictDurableObject(nativeAgentStub(stub));
+      await evictDurableObject(stub);
       stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
       const result = await stub.waitAndReport(5000);
 
@@ -179,7 +178,7 @@ describe("waitForConnections E2E", () => {
         null
       );
 
-      await evictDurableObject(nativeAgentStub(stub));
+      await evictDurableObject(stub);
       stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
       const result = await stub.reportWithoutWait();
 
@@ -208,7 +207,7 @@ describe("waitForConnections E2E", () => {
         "https://auth.example.com/authorize"
       );
 
-      await evictDurableObject(nativeAgentStub(stub));
+      await evictDurableObject(stub);
       stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
       const result = await stub.waitAndReport(5000);
 
@@ -235,7 +234,7 @@ describe("waitForConnections E2E", () => {
       await stub.restoreAndWait(5000);
       expect(await stub.hasMcpConnection("evict-roundtrip-server")).toBe(true);
 
-      await evictDurableObject(nativeAgentStub(stub));
+      await evictDurableObject(stub);
 
       // Re-routing through getAgentByName runs the normal Agent startup wrapper.
       // waitAndReport only waits for that lifecycle-started restore; it does not

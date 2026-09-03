@@ -126,13 +126,18 @@ export class MyAgent extends AIChatAgent {
 
 ## Calls between Agents
 
-A stub from `getAgentByName()` is contextual: every method call tells the
-callee who is calling. Inside the called method, `getCurrentAgent().caller`
-is the caller's class name, Durable Object id, and instance name, plus any
-`context` hints the caller attached. A call from a Worker handler shows up as
-`external`. This works for any [Lifecycle Object](./lifecycle.md), not only
-Agents: `Lifecycle.install` gives the host class the entry points the stub
-relies on, and `getAgentByName()` accepts any such object.
+Pass `rpc: "contextual"` to `getAgentByName()` for a stub whose method calls
+tell the callee who is calling. Inside the called method,
+`getCurrentAgent().caller` is the caller's class name, Durable Object id, and
+instance name, plus any `context` hints the caller attached. A call from a
+Worker handler shows up as `external`. This works for any
+[Lifecycle Object](./lifecycle.md), not only Agents: `Lifecycle.install` gives
+the host class the entry points the stub relies on, and `getAgentByName()`
+accepts any such object. A plain Lifecycle Object identifies itself on
+outbound calls only while running inside a Lifecycle invocation, such as a
+handler, a hook, or a call received through a contextual stub. Agent wraps its
+own RPC methods in that context; a plain object's method reached over a raw
+native stub has none and reports `external`.
 
 ```typescript
 import { Agent, getAgentByName, getCurrentAgent } from "agents";
@@ -140,6 +145,7 @@ import { Agent, getAgentByName, getCurrentAgent } from "agents";
 export class Coordinator extends Agent<Env> {
   async delegate(taskId: string) {
     const worker = await getAgentByName(this.env.WorkerAgent, taskId, {
+      rpc: "contextual",
       context: { requestId: crypto.randomUUID() }
     });
     return worker.run();
@@ -162,13 +168,15 @@ tracing, never to decide identity, tenancy, or authorization. Each call also
 opens an `agents.rpc.call` span, and the Workers runtime links the callee's
 spans to the caller's trace on its own.
 
-Dynamic agents behave the same way: stubs from `dynamicAgents.get()`,
-`subAgent()`, `parentAgent()`, and `getSubAgentByName()` all carry the caller,
+Dynamic agents take the same option: `dynamicAgents.get()`, `subAgent()`,
+`parentAgent()`, and `getSubAgentByName()` accept `{ rpc: "contextual" }`,
 and a bridged `parentAgent()` call from a nested facet still reports the facet
 that called, not the root that relayed it.
 
-Pass `rpc: "native"` to `getAgentByName()` for the raw Durable Object stub;
-`caller` is then `undefined` on the callee.
+Without the option every stub is the raw Durable Object stub and `caller` is
+`undefined` on the callee. A contextual stub is a Proxy rather than a runtime
+`Fetcher`, so unwrap it with `nativeAgentStub()` before passing it to a
+runtime API or sending it as an RPC argument.
 
 ## When context is lost
 
@@ -235,8 +243,8 @@ Gets the current agent from any context where it's available.
 }
 ```
 
-`caller` is set only while handling a method call from a contextual stub
-returned by `getAgentByName()`. See [Calls between Agents](#calls-between-agents).
+`caller` is set only while handling a method call from a stub resolved with
+`rpc: "contextual"`. See [Calls between Agents](#calls-between-agents).
 
 **Usage:**
 

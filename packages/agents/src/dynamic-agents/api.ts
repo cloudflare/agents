@@ -1,5 +1,5 @@
 import type { Agent } from "../index";
-import { currentCaller, wrapAgentStub } from "../agent-stub";
+import { applyRpcOptions, type AgentRpcOptions } from "../agent-stub";
 import type { DynamicAgentsInternal } from "./dynamic-agents";
 import type { DynamicAgentClass, DynamicAgentStub } from "./types";
 
@@ -33,18 +33,17 @@ export class DynamicAgents {
    */
   async get<T extends Agent>(
     cls: DynamicAgentClass<T>,
-    name: string
+    name: string,
+    options?: AgentRpcOptions
   ): Promise<DynamicAgentStub<T>> {
     const stub = (await this.#internal.resolve(
       cls.name,
       name
     )) as DurableObjectStub<T>;
     // Facet stubs are ordinary Fetchers on the same JS RPC path as namespace
-    // stubs, so the child sees `getCurrentAgent().caller` the same way.
-    return wrapAgentStub(stub, {
-      targetName: name,
-      caller: currentCaller({})
-    }) as DynamicAgentStub<T>;
+    // stubs, so `rpc: "contextual"` gives the child `getCurrentAgent().caller`
+    // the same way.
+    return applyRpcOptions(stub, name, options) as DynamicAgentStub<T>;
   }
 
   /**

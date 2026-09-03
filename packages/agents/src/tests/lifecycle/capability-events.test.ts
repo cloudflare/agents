@@ -6,7 +6,6 @@ import {
 } from "node:diagnostics_channel";
 import { describe, expect, it } from "vitest";
 import { getCurrentAgent } from "../../lifecycle";
-import { nativeAgentStub } from "../../index";
 
 describe("Lifecycle capability events", () => {
   it("buffers capability events emitted during startup", async () => {
@@ -62,7 +61,7 @@ describe("Lifecycle capability events", () => {
     try {
       const scheduleId = await stub.scheduleReminder("hello from Scheduler");
 
-      await evictDurableObject(nativeAgentStub(stub));
+      await evictDurableObject(stub);
       expect(await runDurableObjectAlarm(stub)).toBe(true);
 
       expect(await stub.getSchedulerResult()).toEqual({

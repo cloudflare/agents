@@ -1,7 +1,6 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { nativeAgentStub } from "../../index";
 
 describe("MCPClientManager capability", () => {
   it("starts OAuth for a fresh standalone registration", async () => {
@@ -27,7 +26,7 @@ describe("MCPClientManager capability", () => {
     const stub = env.PlainMcpClientObject.getByName(crypto.randomUUID());
     await stub.prepareRestorableServer();
 
-    await evictDurableObject(nativeAgentStub(stub));
+    await evictDurableObject(stub);
 
     const response = await stub.fetch(new Request("https://example.com"));
     expect(await response.json()).toEqual({

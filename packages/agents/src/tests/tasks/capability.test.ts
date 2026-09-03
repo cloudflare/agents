@@ -14,7 +14,6 @@ import {
 } from "../capabilities/tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 import type { Tasks, TaskRunSnapshot, TaskValue } from "../../tasks";
-import { nativeAgentStub } from "../../index";
 
 /**
  * Capability-level Tasks tests: the capability installed on a minimal real
@@ -347,7 +346,7 @@ describe("Tasks capability", () => {
       }
     );
 
-    await evictDurableObject(nativeAgentStub(stub));
+    await evictDurableObject(stub);
     await runInDurableObject(
       env.TaskHarnessObject.getByName(name),
       async (instance: TaskHarnessObject, state) => {
@@ -374,7 +373,7 @@ describe("Tasks capability", () => {
       }
     );
 
-    await evictDurableObject(nativeAgentStub(stub));
+    await evictDurableObject(stub);
     const fresh = env.TaskHarnessObject.getByName(name);
     await runInDurableObject(
       fresh,

@@ -97,7 +97,7 @@ import {
   type CurrentAgentContext
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
-export { nativeAgentStub } from "./agent-stub";
+import { bridgedCaller, type AgentRpcOptions } from "./agent-stub";
 import type {
   AgentCaller,
   AgentCallerIdentity
@@ -108,9 +108,13 @@ export {
   routeAgentRequest,
   type AgentGetOptions,
   type AgentOptions,
-  type AgentRpcMode,
   type RoutingRetryOptions
 } from "./agent-routing";
+export {
+  nativeAgentStub,
+  type AgentRpcMode,
+  type AgentRpcOptions
+} from "./agent-stub";
 export type {
   AgentCaller,
   AgentCallerIdentity,
@@ -5714,7 +5718,8 @@ export class Agent<
    * ```
    */
   async parentAgent<T extends Agent>(
-    cls: SubAgentClass<T>
+    cls: SubAgentClass<T>,
+    options?: AgentRpcOptions
   ): Promise<DurableObjectStub<T>> {
     // `_parentPath` is root-first, so the *direct* parent is the
     // last entry. Destructuring with `[parent] = ...` would grab the
@@ -5738,7 +5743,8 @@ export class Agent<
     if (this._parentPath.length > 1) {
       return await this._cf_parentAgentFacetProxy<T>(
         cls.name,
-        this._parentPath
+        this._parentPath,
+        options
       );
     }
 
@@ -5750,7 +5756,10 @@ export class Agent<
           `exported under that class name and registered as a Durable Object binding.`
       );
     }
-    return await getAgentByName<Cloudflare.Env, T>(binding, parent.name);
+    return await getAgentByName<Cloudflare.Env, T>(binding, parent.name, {
+      rpc: options?.rpc,
+      context: options?.context
+    });
   }
 
   private _cf_getTopLevelNamespaceByClassName<T extends Agent>(
@@ -5778,7 +5787,8 @@ export class Agent<
 
   private async _cf_parentAgentFacetProxy<T extends Agent>(
     className: string,
-    parentPath: ReadonlyArray<{ className: string; name: string }>
+    parentPath: ReadonlyArray<{ className: string; name: string }>,
+    options: AgentRpcOptions | undefined
   ): Promise<DurableObjectStub<T>> {
     const [root] = parentPath;
     if (!root) {
@@ -5802,13 +5812,9 @@ export class Agent<
     );
     const targetPath = parentPath.map((step) => ({ ...step }));
     // The bridge hops root → … → parent inside `_cf_` framework calls, so the
-    // parent would otherwise see the root as its caller. Carry this facet's
-    // own identity through every hop instead.
-    const caller: AgentCaller = {
-      kind: "agent",
-      ...this._cf_rpcIdentity(),
-      context: {}
-    };
+    // parent would otherwise see the root as its caller. When contextual RPC
+    // is requested, carry this facet's own identity through every hop.
+    const caller = bridgedCaller(options);
     const invokeBridge = async (method: string, args: unknown[]) => {
       const rootStub = await rootStubPromise;
       const bridge = rootStub as unknown as SubAgentPathInvokeEndpoint;
@@ -5883,9 +5889,10 @@ export class Agent<
    */
   async subAgent<T extends Agent>(
     cls: SubAgentClass<T>,
-    name: string
+    name: string,
+    options?: AgentRpcOptions
   ): Promise<SubAgentStub<T>> {
-    return this.dynamicAgents.get(cls, name);
+    return this.dynamicAgents.get(cls, name, options);
   }
 
   /** Maximum number of non-terminal agent-tool runs this parent may own at once. */

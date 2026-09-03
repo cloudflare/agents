@@ -7,7 +7,6 @@ import {
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
 import type { TestAlarmInitAgent } from "./agents/schedule";
-import { nativeAgentStub } from "../index";
 
 describe("scheduled destroys", () => {
   it("should not throw when a scheduled callback nukes storage", async () => {
@@ -85,7 +84,7 @@ describe("alarm initialization", () => {
       }
     );
     await agentStub.setStoredAlarm(Date.now() + 1000);
-    await evictDurableObject(nativeAgentStub(agentStub));
+    await evictDurableObject(agentStub);
 
     await runDurableObjectAlarm(agentStub);
 
