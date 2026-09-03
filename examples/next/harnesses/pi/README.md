@@ -80,7 +80,8 @@ settlement. Every operation's events land in one `Streams` stream, and
 `harness.webSockets()` returns the options for a `WebSockets` capability that
 serves a small JSON protocol: a lane snapshot on connect, `subscribe` to
 replay-then-tail an operation's stream from a client cursor, and `submit`,
-`abort`, and `steer` to drive it. `src/use-pi-session.ts` is the client side.
+`abort`, and `steer` to drive it. The browser connects with `useAgent` from
+`agents/react`; `src/use-pi-session.ts` layers the protocol on that socket.
 
 ## Pi source
 

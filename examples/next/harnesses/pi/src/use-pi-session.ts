@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useAgent } from "agents/react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   ClientMessage,
   MessageDelta,
@@ -29,11 +30,6 @@ const INITIAL_STATE: State = {
   error: undefined
 };
 
-function socketUrl(session: string): string {
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${location.host}/agents/pi-agent/${encodeURIComponent(session)}?lane=main`;
-}
-
 function applyDelta(
   message: TranscriptMessage,
   delta: MessageDelta
@@ -63,13 +59,6 @@ function applyDelta(
       };
       break;
     case "toolcall_start":
-      parts[delta.index] = {
-        type: "tool-call",
-        id: delta.id,
-        name: delta.name,
-        arguments: delta.arguments
-      };
-      break;
     case "toolcall_end":
       parts[delta.index] = {
         type: "tool-call",
@@ -100,8 +89,6 @@ function reduce(state: State, event: TranscriptEvent): State {
           ? { error: event.error.message }
           : {})
       };
-    case "operation_abort":
-      return state;
     case "message_start":
       return { ...state, live: event.message };
     case "message_delta":
@@ -120,16 +107,12 @@ function reduce(state: State, event: TranscriptEvent): State {
         ...state,
         runningTools: [...state.runningTools, event.toolName]
       };
-    case "tool_end":
-      return {
-        ...state,
-        runningTools: (() => {
-          const next = [...state.runningTools];
-          const index = next.indexOf(event.toolName);
-          if (index >= 0) next.splice(index, 1);
-          return next;
-        })()
-      };
+    case "tool_end": {
+      const next = [...state.runningTools];
+      const index = next.indexOf(event.toolName);
+      if (index >= 0) next.splice(index, 1);
+      return { ...state, runningTools: next };
+    }
     case "fault":
       return { ...state, error: event.message };
     default:
@@ -138,117 +121,90 @@ function reduce(state: State, event: TranscriptEvent): State {
 }
 
 /**
- * A live pi lane over the harness's WebSocket protocol: a durable transcript
- * plus a token-by-token streaming view of the operation in flight. Replays
- * from the server's own durable stream on connect and on reconnect, so a
- * refresh mid-turn resumes exactly where the last chunk left off.
+ * A live pi lane over the harness's WebSocket protocol, connected with
+ * `useAgent`: a durable transcript plus a token-by-token streaming view of
+ * the operation in flight. Replays from the server's own durable stream on
+ * connect and on reconnect, so a refresh mid-turn resumes exactly where the
+ * last chunk left off.
  */
-export function usePiSession(session: string) {
+export function usePiSession(session: string, lane = "main") {
   const [state, setState] = useState<State>(INITIAL_STATE);
-  const socketRef = useRef<WebSocket | null>(null);
+
+  const agent = useAgent({
+    agent: "pi-agent",
+    name: session,
+    query: { lane },
+    onOpen: () => setState((current) => ({ ...current, status: "open" })),
+    onClose: () => setState((current) => ({ ...current, status: "closed" })),
+    onMessage: (event) => {
+      let message: ServerMessage;
+      try {
+        message = JSON.parse(String(event.data)) as ServerMessage;
+      } catch {
+        return;
+      }
+      switch (message.type) {
+        case "snapshot":
+          setState((current) => ({
+            ...current,
+            messages: message.snapshot.messages,
+            running: message.snapshot.operation !== null,
+            runningTools:
+              message.snapshot.operation?.runningTools.map(
+                (tool) => tool.toolName
+              ) ?? [],
+            live: message.snapshot.operation?.streaming ?? null
+          }));
+          if (message.snapshot.stream && message.snapshot.stream.cursor > 0) {
+            const resume: ClientMessage = {
+              type: "subscribe",
+              streamId: message.snapshot.stream.streamId,
+              from: message.snapshot.stream.cursor
+            };
+            agent.send(JSON.stringify(resume));
+          }
+          return;
+        case "events":
+          setState((current) =>
+            message.events.reduce((next, event) => reduce(next, event), current)
+          );
+          return;
+        case "error":
+          setState((current) => ({ ...current, error: message.message }));
+          return;
+        default:
+          return;
+      }
+    }
+  });
 
   useEffect(() => {
-    let cancelled = false;
-    let retryDelayMs = 500;
-    let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    let socket: WebSocket | undefined;
-
-    const connect = () => {
-      if (cancelled) return;
-      setState((current) => ({ ...current, status: "connecting" }));
-      socket = new WebSocket(socketUrl(session));
-      socketRef.current = socket;
-
-      socket.addEventListener("open", () => {
-        retryDelayMs = 500;
-        setState((current) => ({ ...current, status: "open" }));
-      });
-
-      socket.addEventListener("message", (messageEvent) => {
-        let message: ServerMessage;
-        try {
-          message = JSON.parse(String(messageEvent.data)) as ServerMessage;
-        } catch {
-          return;
-        }
-        switch (message.type) {
-          case "snapshot":
-            setState((current) => ({
-              ...current,
-              messages: message.snapshot.messages,
-              running: message.snapshot.operation !== null,
-              runningTools:
-                message.snapshot.operation?.runningTools.map(
-                  (tool) => tool.toolName
-                ) ?? [],
-              live: message.snapshot.operation?.streaming ?? null
-            }));
-            if (message.snapshot.stream && message.snapshot.stream.cursor > 0) {
-              const resume: ClientMessage = {
-                type: "subscribe",
-                streamId: message.snapshot.stream.streamId,
-                from: message.snapshot.stream.cursor
-              };
-              socket?.send(JSON.stringify(resume));
-            }
-            return;
-          case "events":
-            setState((current) =>
-              message.events.reduce(
-                (next, event) => reduce(next, event),
-                current
-              )
-            );
-            return;
-          case "error":
-            setState((current) => ({
-              ...current,
-              error: message.message
-            }));
-            return;
-          default:
-            return;
-        }
-      });
-
-      socket.addEventListener("close", () => {
-        if (cancelled) return;
-        setState((current) => ({ ...current, status: "closed" }));
-        retryTimer = setTimeout(connect, retryDelayMs);
-        retryDelayMs = Math.min(retryDelayMs * 2, 10_000);
-      });
-    };
-
-    connect();
-    return () => {
-      cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      socket?.close();
-      socketRef.current = null;
-    };
+    setState(INITIAL_STATE);
   }, [session]);
 
-  const send = useCallback((message: ClientMessage) => {
-    const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(message));
-    }
-  }, []);
+  const send = useCallback(
+    (message: ClientMessage) => {
+      if (agent.readyState === WebSocket.OPEN) {
+        agent.send(JSON.stringify(message));
+      }
+    },
+    [agent]
+  );
 
   const submit = useCallback(
-    (prompt: string) => {
+    (prompt: string) =>
       send({
         type: "submit",
         id: crypto.randomUUID(),
         request: { kind: "prompt", prompt }
-      });
-    },
+      }),
     [send]
   );
 
-  const abort = useCallback(() => {
-    send({ type: "abort", id: crypto.randomUUID() });
-  }, [send]);
+  const abort = useCallback(
+    () => send({ type: "abort", id: crypto.randomUUID() }),
+    [send]
+  );
 
   return { ...state, submit, abort };
 }
