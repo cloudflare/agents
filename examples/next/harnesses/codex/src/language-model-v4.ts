@@ -397,6 +397,13 @@ function startToolBlock(
 
 function blocksToFrames(blocks: StreamBlock[]): KernelJson[] {
   const frames: KernelJson[] = [];
+  // Text blocks are joined before trimming so whitespace at block boundaries
+  // ("Hello " + "world") is preserved as one assistant message.
+  const text = blocks
+    .filter((block) => block.type === "text")
+    .map((block) => block.value)
+    .join("")
+    .trim();
   for (const block of blocks) {
     if (block.type === "reasoning") {
       if (block.value.length > 0) {
@@ -407,22 +414,7 @@ function blocksToFrames(blocks: StreamBlock[]): KernelJson[] {
       }
       continue;
     }
-    if (block.type === "text") {
-      const text = block.value.trim();
-      if (text.length === 0) continue;
-      frames.push(
-        { type: "response.output_text.delta", delta: text },
-        {
-          type: "response.output_item.done",
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text }]
-          }
-        }
-      );
-      continue;
-    }
+    if (block.type === "text") continue;
     if (!block.complete) continue;
     frames.push({
       type: "response.output_item.done",
@@ -433,6 +425,19 @@ function blocksToFrames(blocks: StreamBlock[]): KernelJson[] {
         arguments: block.input
       }
     });
+  }
+  if (text.length > 0) {
+    frames.push(
+      { type: "response.output_text.delta", delta: text },
+      {
+        type: "response.output_item.done",
+        item: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text }]
+        }
+      }
+    );
   }
   return frames;
 }

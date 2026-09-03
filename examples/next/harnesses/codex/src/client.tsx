@@ -452,7 +452,7 @@ function RunDetails({
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-kumo-line pt-3">
           <span className="text-[11px] text-kumo-inactive">
-            {events.length} durable events · static Wasm
+            {events.length} durable events
           </span>
           <Button
             variant="secondary"
@@ -533,13 +533,15 @@ function App() {
         setSnapshot(next);
         setEvents(eventResult.events);
         if (next.status === "completed") {
-          const fileResult = await api<WorkspaceFile>(
-            "/file?path=/codex/result.txt"
-          );
           if (runGeneration.current === generation) {
-            setFile(fileResult);
             setRunState({ type: "completed", operationId });
           }
+          // The Workspace file is a demo detail; a turn that never wrote it
+          // is still a completed turn.
+          const fileResult = await api<WorkspaceFile>(
+            "/file?path=/codex/result.txt"
+          ).catch(() => null);
+          if (runGeneration.current === generation) setFile(fileResult);
           return;
         }
         if (next.status === "failed") {

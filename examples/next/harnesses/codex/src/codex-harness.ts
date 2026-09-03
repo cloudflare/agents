@@ -32,18 +32,6 @@ export type CodexSubmissionReceipt = {
   readonly accepted: boolean;
 };
 
-/** Terminal result returned by the example harness. */
-export type CodexOperationResult = {
-  readonly operationId: string;
-  readonly status: "completed" | "failed";
-  readonly output?: string;
-  readonly error?: string;
-  readonly transitions: number;
-  readonly kernelMs: number;
-  readonly startedAt: number;
-  readonly completedAt: number;
-};
-
 /** Point-in-time view of a harness operation. */
 export type CodexOperationSnapshot = {
   readonly operationId: string;
@@ -124,7 +112,6 @@ export class CodexHarness extends LifecycleCapability {
       CREATE TABLE IF NOT EXISTS cf_codex_operations (
         operation_id TEXT PRIMARY KEY,
         stream_id TEXT NOT NULL UNIQUE,
-        mode TEXT NOT NULL,
         status TEXT NOT NULL,
         prompt TEXT NOT NULL,
         checkpoint TEXT,
@@ -170,59 +157,33 @@ export class CodexHarness extends LifecycleCapability {
           `Codex operation ${operationId} already exists with different input`
         );
       }
+      // The row is written before the wake is enqueued, so a retry after an
+      // enqueue failure must re-sync the wake instead of stranding the turn.
+      if (existing.status === "queued") await this.#enqueueDriver(operationId);
       return { operationId, streamId: existing.stream_id, accepted: false };
     }
 
-    await this.streams.open(streamId, {
-      tag: operationId,
-      metadata: {
-        runtime: "static-wasm",
-        protocol: "codex-responses-wasm-v1"
-      }
-    });
+    await this.streams.open(streamId, { tag: operationId });
     this.lifecycle.storage.sql.exec(
       `INSERT INTO cf_codex_operations
-       (operation_id, stream_id, mode, status, prompt, started_at)
-       VALUES (?, ?, 'static-wasm', 'queued', ?, ?)`,
+       (operation_id, stream_id, status, prompt, started_at)
+       VALUES (?, ?, 'queued', ?, ?)`,
       operationId,
       streamId,
       prompt,
       Date.now()
     );
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      DRIVER_DEFINITION,
-      { operationId },
-      {
-        runId: `codex:${operationId}`,
-        metadata: { operationId, runtime: "static-wasm" }
-      }
-    );
+    await this.#enqueueDriver(operationId);
     return { operationId, streamId, accepted: true };
   }
 
-  /** Submit a prompt and wait for its terminal result. */
-  async prompt(input: CodexPromptInput): Promise<CodexOperationResult> {
-    const receipt = await this.submit(input);
-    return this.waitForResult(receipt.operationId);
-  }
-
-  /** Wait for one accepted operation to settle. */
-  async waitForResult(operationId: string): Promise<CodexOperationResult> {
-    for (;;) {
-      const result = await this.getResult(operationId);
-      if (result) return result;
-      await scheduler.wait(25);
-    }
-  }
-
-  /** Read one immutable terminal result. */
-  async getResult(operationId: string): Promise<CodexOperationResult | null> {
-    await this.lifecycle.ready();
-    const row = this.#operation(operationId);
-    if (!row || (row.status !== "completed" && row.status !== "failed")) {
-      return null;
-    }
-    return projectResult(row);
+  #enqueueDriver(operationId: string): Promise<unknown> {
+    // Tasks dedupes on runId, so re-enqueueing an accepted operation is safe.
+    return this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      DRIVER_DEFINITION,
+      { operationId },
+      { runId: `codex:${operationId}`, metadata: { operationId } }
+    );
   }
 
   /** Inspect one operation and its serialized kernel state. */
@@ -230,12 +191,6 @@ export class CodexHarness extends LifecycleCapability {
     await this.lifecycle.ready();
     const row = this.#operation(operationId);
     return row ? projectSnapshot(row) : null;
-  }
-
-  /** Cancel the Tasks driver for one operation. */
-  async abort(operationId: string): Promise<boolean> {
-    await this.lifecycle.ready();
-    return this.tasks.cancel(`codex:${operationId}`, "aborted");
   }
 
   /** Read the durable event journal currently available without tailing. */
@@ -256,7 +211,8 @@ export class CodexHarness extends LifecycleCapability {
     await step.status("Running Codex kernel");
     let operation = this.#requiredOperation(input.operationId);
     if (operation.status === "completed" || operation.status === "failed") {
-      await this.#flushEvents(operation);
+      // Replayed after settling: make sure the stream is closed and finish.
+      await this.#flushEvents(operation, true);
       return projectTaskResult(operation);
     }
 
@@ -278,7 +234,16 @@ export class CodexHarness extends LifecycleCapability {
       } else {
         const action = parseAction(operation.action);
         if (action.type === "completed" || action.type === "failed") {
-          throw new Error("Terminal Codex action was not settled");
+          // The previous incarnation recorded the terminal transition but was
+          // interrupted before settling the row. Settle it now.
+          if (action.type === "completed") {
+            this.#settleCompleted(operation.operation_id, action.output);
+          } else {
+            this.#settleFailed(operation.operation_id, action.message);
+          }
+          operation = this.#requiredOperation(input.operationId);
+          await this.#flushEvents(operation, true);
+          return projectTaskResult(operation);
         }
         const effectResult = await this.#performEffect(operation, action);
         command = {
@@ -535,24 +500,6 @@ function projectSnapshot(row: OperationRow): CodexOperationSnapshot {
     kernelMs: row.kernel_ms,
     startedAt: row.started_at,
     ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
-    ...(row.output === null ? {} : { output: row.output }),
-    ...(row.error === null ? {} : { error: row.error })
-  };
-}
-
-function projectResult(row: OperationRow): CodexOperationResult {
-  if (row.completed_at === null) {
-    throw new Error(
-      `Terminal Codex operation ${row.operation_id} has no completion time`
-    );
-  }
-  return {
-    operationId: row.operation_id,
-    status: row.status === "completed" ? "completed" : "failed",
-    transitions: row.transitions,
-    kernelMs: row.kernel_ms,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
     ...(row.output === null ? {} : { output: row.output }),
     ...(row.error === null ? {} : { error: row.error })
   };

@@ -1067,9 +1067,7 @@ explicit Durable Object restart during local and production testing.
 
 ### Vite React frontend
 
-The deployed example includes a Vite React frontend at
-[`next-codex-harness.mattzcarey.workers.dev`](https://next-codex-harness.mattzcarey.workers.dev).
-Its implementation is
+The example includes a Vite React frontend. Its implementation is
 [`examples/next/harnesses/codex/src/client.tsx`](../examples/next/harnesses/codex/src/client.tsx),
 with the Cloudflare Vite integration in
 [`vite.config.ts`](../examples/next/harnesses/codex/vite.config.ts).
@@ -1097,21 +1095,6 @@ session creates a fresh object identity and clears the local transcript. The
 frontend uses Kumo components and semantic color tokens, includes the standard
 theme toggle and `PoweredByCloudflare`, and remains a thin HTTP client. The
 Durable Object and Lifecycle capability own all durable behavior.
-
-The production Vite build produced:
-
-| Artifact          |          Raw |       Gzip |
-| ----------------- | -----------: | ---------: |
-| Client JavaScript | 1,113.66 KiB | 345.97 KiB |
-| Client CSS        |   152.41 KiB |  23.99 KiB |
-| Codex Wasm        |   187.87 KiB |  70.30 KiB |
-| Worker upload     |   541.52 KiB | 155.10 KiB |
-
-LanguageModelV4 deployment version `7f985224-e947-414f-8ded-252dae8de2f3`
-reported a 13 ms Worker startup time. A production Chromium smoke observed two
-events before completion, then all 12 compact events, both Workspace tools, the
-persisted file, and `Recovered` after restarting the Durable Object. The direct
-production smoke completed in 8.41 seconds.
 
 ## Scaling and cost
 
@@ -1198,8 +1181,7 @@ Metrics will include:
 - time to terminal result.
 
 The proof records transition count and aggregate kernel time in its operation
-row. Its health response reports `kernelDynamicWorkers: 0`. The direct local
-run used six transitions and 11 events.
+row.
 
 ## Security and authority
 
@@ -1260,7 +1242,7 @@ source mapping to `provenance.json`.
 ### Phase 3: LanguageModelV4 transport
 
 The Codex codec translates between Codex Responses records and AI SDK
-`LanguageModelV4`. A live Workers AI smoke routed through AI Gateway verifies:
+`LanguageModelV4`. A live Workers AI turn routed through AI Gateway verifies:
 
 - account-authenticated inference through the AI binding;
 - V4 messages and function tools;
@@ -1322,45 +1304,18 @@ The first direct proof has these properties:
 - 12 compact durable public events;
 - zero Dynamic Workers in the direct design.
 
-The example is deployed at
-[`next-codex-harness.mattzcarey.workers.dev`](https://next-codex-harness.mattzcarey.workers.dev).
-The initial deterministic deployment reported a 15 ms Worker startup time and a
-408.06 KiB upload, 115.43 KiB compressed. Its post-deploy eight-object smoke
-completed every turn, deduplicated every repeated submission, and retained the
-checked object after restart at 1,171.56 ms mean wall time. The current live
-model deployment and browser verification are recorded in the frontend section
-above.
+Live Kimi K2.7 Code turns exercise `LanguageModelV4` through
+`workers-ai-provider`, Workers AI, and AI Gateway. A typical turn makes three
+model calls, invokes `workspace_write` and `workspace_read`, verifies the exact
+file contents, deduplicates a repeated submission, and retains the result and
+file across a Durable Object restart. Model latency dominates; the Wasm
+transitions take a few milliseconds each.
 
-Each concurrency probe created fresh named Durable Objects. Every operation
-completed six kernel transitions, emitted 11 events, deduplicated a repeated
-submission, wrote and verified `/codex/result.txt`, then retained its terminal
-result and file across an explicit `ctx.abort()` restart.
-
-| Concurrent fresh objects | Mean wall time |         p50 |         p95 |                Range |
-| -----------------------: | -------------: | ----------: | ----------: | -------------------: |
-|                        1 |    1,215.78 ms | 1,215.78 ms | 1,215.78 ms |          1,215.78 ms |
-|                        8 |    1,226.73 ms | 1,149.92 ms | 1,769.49 ms | 1,038.50–1,769.49 ms |
-|                       32 |    1,196.12 ms | 1,175.24 ms | 1,393.23 ms |   933.15–1,510.82 ms |
-
-The queued Tasks wake dominates these wall times. `performance.now()` reported
-0 ms of aggregate kernel time in production at its available resolution. The
-flat mean from one through 32 independent objects shows the expected Durable
-Object scale-out shape for the deterministic turn.
-
-Live Kimi K2.7 Code turns now exercise `LanguageModelV4` through
-`workers-ai-provider`, Workers AI, and AI Gateway. The first relocated example
-probe completed in 7.15 seconds; a second completed in 20.54 seconds. Each made
-three model calls, invoked `workspace_write` and `workspace_read`, verified the
-exact file contents, deduplicated a repeated submission, and retained the result
-and file across a Durable Object restart. Model latency dominated. The six Wasm
-transitions took 2 to 4 ms in these local measurements.
-
-The raw V4 stream in the first probe contained token-level reasoning and text
-deltas. Coalescing completed V4 blocks before the pure kernel reduced the next
-probe's durable event count from 151 to 12 without dropping content. Focused
-TypeScript tests feed four V4 tool calls through the codec and assert that none
-are dropped. Rust tests then settle the four-call batch sequentially and prove
-the next model request starts only after all four results exist.
+The raw V4 stream contains token-level reasoning and text deltas. Coalescing
+completed V4 blocks before the pure kernel keeps the durable event count to
+roughly a dozen per turn without dropping content. The codec preserves every
+tool call in a model response, and the kernel settles a multi-call batch
+sequentially before the next model request starts.
 
 The Rust fixture is in
 [`wasm-kernel/src/lib.rs`](../examples/next/harnesses/codex/wasm-kernel/src/lib.rs).
@@ -1368,8 +1323,6 @@ The Worker host is in
 [`src/server.ts`](../examples/next/harnesses/codex/src/server.ts). The
 Lifecycle capability is in
 [`src/codex-harness.ts`](../examples/next/harnesses/codex/src/codex-harness.ts).
-The deployed smoke driver is in
-[`smoke.mjs`](../examples/next/harnesses/codex/smoke.mjs).
 
 ## Acceptance criteria
 

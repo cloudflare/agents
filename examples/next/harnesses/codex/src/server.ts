@@ -4,18 +4,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
 import { createWorkersAI } from "workers-ai-provider";
-import {
-  CodexHarness,
-  type CodexOperationResult,
-  type CodexOperationSnapshot
-} from "./codex-harness";
-import type { KernelJson } from "./kernel-types";
-
-type HarnessHost = {
-  readonly codex: CodexHarness;
-  readonly workspace: Workspace;
-  restart(): void;
-};
+import { CodexHarness } from "./codex-harness";
 
 type PromptRequest = {
   readonly prompt?: unknown;
@@ -24,7 +13,7 @@ type PromptRequest = {
 
 const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
-/** Plain Durable Object composed with the static Codex Lifecycle capability. */
+/** Plain Durable Object composed with the Codex Lifecycle capability. */
 export class Coder extends DurableObject<Env> {
   readonly tasks = new Tasks();
   readonly streams = new Streams();
@@ -32,156 +21,93 @@ export class Coder extends DurableObject<Env> {
     sql: this.ctx.storage.sql,
     namespace: "codex"
   });
-  readonly model = createWorkersAI({
-    binding: this.env.AI,
-    gateway: {
-      id: "default",
-      metadata: { codex_transport: "language-model-v4" }
-    }
-  })(MODEL);
   readonly codex = new CodexHarness({
     tasks: this.tasks,
     streams: this.streams,
     workspace: this.workspace,
-    model: this.model
+    model: createWorkersAI({
+      binding: this.env.AI,
+      gateway: { id: "default" }
+    })(MODEL)
   });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.tasks)
     .use(this.streams)
     .use(this.codex);
 
-  onRequest(request: Request): Promise<Response> {
-    return handleHarnessRequest(this, request);
-  }
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    // /sessions/:session/<route>/<operationId?>
+    const [route, operationId] = url.pathname
+      .split("/")
+      .filter(Boolean)
+      .slice(2);
 
-  restart(): void {
-    this.ctx.abort("codex harness restart verification");
+    if (request.method === "POST" && route === "submit") {
+      const body = (await request.json().catch(() => ({}))) as PromptRequest;
+      if (typeof body.prompt !== "string") {
+        return json({ error: "prompt must be a string" }, 400);
+      }
+      const receipt = await this.codex.submit({
+        prompt: body.prompt,
+        ...(typeof body.operationId === "string"
+          ? { operationId: body.operationId }
+          : {})
+      });
+      return json(receipt, receipt.accepted ? 202 : 200);
+    }
+
+    if (request.method === "GET" && route === "operations" && operationId) {
+      const snapshot = await this.codex.snapshot(operationId);
+      return snapshot
+        ? json(snapshot)
+        : json({ error: "operation not found" }, 404);
+    }
+
+    if (request.method === "GET" && route === "events" && operationId) {
+      const snapshot = await this.codex.snapshot(operationId);
+      return snapshot
+        ? json({ events: await this.codex.events(operationId) })
+        : json({ error: "operation not found" }, 404);
+    }
+
+    if (request.method === "GET" && route === "file") {
+      const path = url.searchParams.get("path");
+      if (!path) return json({ error: "path is required" }, 400);
+      const content = await this.workspace.readFile(path);
+      return json(
+        content === null
+          ? { path, found: false }
+          : { path, found: true, content }
+      );
+    }
+
+    if (request.method === "POST" && route === "restart") {
+      // Abort the Durable Object after the response is sent so the demo can
+      // show the operation and Workspace surviving a fresh incarnation.
+      setTimeout(() => this.ctx.abort("restart requested from the demo"), 50);
+      return json({ restarting: true });
+    }
+
+    return json({ error: "unknown route" }, 404);
   }
 }
 
-async function handleHarnessRequest(
-  host: HarnessHost,
-  request: Request
-): Promise<Response> {
-  const url = new URL(request.url);
-  const parts = url.pathname.split("/").filter(Boolean).slice(2);
-  const operationId = parts.at(1);
-
-  if (request.method === "POST" && parts[0] === "submit") {
-    const body = (await request.json().catch(() => ({}))) as PromptRequest;
-    if (typeof body.prompt !== "string") {
-      return json({ error: "prompt must be a string" }, { status: 400 });
-    }
-    const receipt = await host.codex.submit({
-      prompt: body.prompt,
-      ...(typeof body.operationId === "string"
-        ? { operationId: body.operationId }
-        : {})
-    });
-    return json(receipt, { status: receipt.accepted ? 202 : 200 });
-  }
-
-  if (
-    request.method === "GET" &&
-    parts[0] === "operations" &&
-    operationId !== undefined
-  ) {
-    const snapshot = await host.codex.snapshot(operationId);
-    return snapshot
-      ? json(snapshot)
-      : json({ error: "operation not found" }, { status: 404 });
-  }
-
-  if (
-    request.method === "GET" &&
-    parts[0] === "results" &&
-    operationId !== undefined
-  ) {
-    const result = await host.codex.getResult(operationId);
-    return result
-      ? json(result)
-      : json({ error: "result not ready" }, { status: 404 });
-  }
-
-  if (
-    request.method === "GET" &&
-    parts[0] === "events" &&
-    operationId !== undefined
-  ) {
-    const snapshot = await host.codex.snapshot(operationId);
-    if (!snapshot) {
-      return json({ error: "operation not found" }, { status: 404 });
-    }
-    return json({ events: await host.codex.events(operationId) });
-  }
-
-  if (
-    request.method === "POST" &&
-    parts[0] === "abort" &&
-    operationId !== undefined
-  ) {
-    return json({ aborted: await host.codex.abort(operationId) });
-  }
-
-  if (request.method === "GET" && parts[0] === "file") {
-    const path = url.searchParams.get("path") ?? "/codex/result.txt";
-    const content = await host.workspace.readFile(path);
-    return content === null
-      ? json({ path, found: false }, { status: 404 })
-      : json({ path, found: true, content });
-  }
-
-  if (request.method === "POST" && parts[0] === "restart") {
-    setTimeout(() => host.restart(), 50);
-    return json({ restarting: true });
-  }
-
-  return json({
-    runtime: "static-wasm",
-    routes: [
-      "POST submit",
-      "GET operations/:operationId",
-      "GET results/:operationId",
-      "GET events/:operationId",
-      "POST abort/:operationId",
-      "GET file?path=/codex/result.txt",
-      "POST restart"
-    ]
+function json(value: unknown, status = 200): Response {
+  return Response.json(value, {
+    status,
+    headers: { "cache-control": "no-store" }
   });
 }
 
-function json(
-  value:
-    | KernelJson
-    | CodexOperationSnapshot
-    | CodexOperationResult
-    | Record<string, unknown>,
-  init: ResponseInit = {}
-): Response {
-  const headers = new Headers(init.headers);
-  headers.set("cache-control", "no-store");
-  return Response.json(value, { ...init, headers });
-}
-
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/health") {
-      return json({
-        ok: true,
-        name: "next-codex-harness",
-        codexCommit: "5e26f7621c1c470fe62350d61c9eb4d6c772a0da",
-        runtime: "static-wasm",
-        modelProtocol: "ai-sdk-language-model-v4",
-        model: MODEL,
-        aiGateway: "default",
-        kernelDynamicWorkers: 0
-      });
-    }
-
     const [root, session] = url.pathname.split("/").filter(Boolean);
     if (root !== "sessions" || session === undefined) {
-      return json({ error: "use /sessions/:session" }, { status: 404 });
+      return Promise.resolve(
+        json({ error: "use /sessions/:session/<route>" }, 404)
+      );
     }
     return env.Coder.getByName(session).fetch(request);
   }

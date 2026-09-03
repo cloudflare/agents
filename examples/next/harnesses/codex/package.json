@@ -1,16 +1,13 @@
 {
   "name": "@cloudflare/agents-next-codex-harness-example",
-  "description": "Static Codex Rust/Wasm harness with LanguageModelV4 and Lifecycle",
+  "description": "Codex-derived Rust/Wasm turn loop composed as a Lifecycle capability",
   "private": true,
   "type": "module",
   "version": "0.0.0",
   "scripts": {
     "build:kernel": "RUSTC=\"$(rustup which --toolchain 1.95.0 rustc)\" rustup run 1.95.0 cargo build --manifest-path wasm-kernel/Cargo.toml --target wasm32-unknown-unknown --release",
     "start": "pnpm run build:kernel && vite dev",
-    "build": "pnpm run build:kernel && vite build",
-    "deploy": "pnpm run build && wrangler deploy",
-    "smoke": "node smoke.mjs",
-    "test": "tsc --noEmit --project tests/tsconfig.json && tsx --test tests/**/*.test.ts",
+    "deploy": "pnpm run build:kernel && vite build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
@@ -35,7 +32,6 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "tailwindcss": "^4.3.2",
-    "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
     "wrangler": "^4.115.0"

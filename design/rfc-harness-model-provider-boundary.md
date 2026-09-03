@@ -458,7 +458,8 @@ except for tool batches.
 ### Phase 2: use workers-ai-provider
 
 Compose Kimi through the existing Workers AI provider and AI Gateway settings.
-Run local and deployed tool-call, storage, and recovery smokes.
+Verify tool calls, storage, and restart recovery in the example locally and
+deployed.
 
 ### Phase 3: keep Pi native
 
