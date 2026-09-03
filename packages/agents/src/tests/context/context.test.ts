@@ -42,16 +42,16 @@ describe("Sessions context blocks", () => {
     ]);
     await blocks.load();
 
-    const frozen = blocks.toSystemPrompt();
+    const frozen = await blocks.freezeSystemPrompt();
     await blocks.setBlock("memory", "likes Workers");
 
-    expect(blocks.toSystemPrompt()).toBe(frozen);
+    expect(await blocks.freezeSystemPrompt()).toBe(frozen);
     expect(frozen).toContain("SOUL");
     expect(frozen).toContain("You are helpful.");
     expect(frozen).toContain("likes TypeScript");
     expect(frozen).not.toContain("<context_block");
 
-    const refreshed = blocks.refreshSnapshot();
+    const refreshed = await blocks.refreshSystemPrompt();
     expect(refreshed).toContain("likes Workers");
     expect(refreshed).not.toContain("likes TypeScript");
   });

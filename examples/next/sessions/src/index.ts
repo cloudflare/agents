@@ -52,7 +52,7 @@ function historyResponse(
 
 /** A plain Durable Object with durable conversation history. */
 export class SessionObject extends DurableObject<Env> {
-  readonly sessions = new Sessions({ searchIndexing: true });
+  readonly sessions = new Sessions();
 
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
   readonly session = this.sessions.session();
@@ -124,10 +124,16 @@ export class SessionObject extends DurableObject<Env> {
       return new Response(null, { status: 204 });
     }
 
+    if (request.method === "GET" && url.pathname.endsWith("/search")) {
+      const query = url.searchParams.get("q") ?? "";
+      return Response.json(await this.session.search(query));
+    }
+
+    const rows = await this.session.getHistoryRowStats();
     return Response.json({
       name: this.lifecycle.name,
-      sessions: await this.sessions.listSessions(),
-      stats: await this.session.stats()
+      messages: rows.length,
+      leaf: rows.at(-1)?.id ?? null
     });
   }
 }

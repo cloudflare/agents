@@ -4,7 +4,7 @@
 
 Add the experimental `agents/sessions` Lifecycle capability and the `agents/context` module.
 
-Sessions owns durable conversation storage: a tree of messages with branches and compaction overlays, streamed and byte-budgeted reads, and opt-in full-text search. Every table is `WITHOUT ROWID` with no secondary index, so a text append bills one row.
+Sessions owns durable conversation storage: a tree of messages with branches and compaction overlays, streamed and byte-budgeted reads, and full-text search whose index is built by the first `search()` call. Every table is `WITHOUT ROWID` with no secondary index, so a text append bills one row on an object that has never searched.
 
 Sessions stores MESSAGES; it is not a file store. A message rides in one SQLite row until its serialized JSON exceeds the 1.5 MiB row budget, and a message larger than that is split across continuation rows in `cf_agents_session_message_chunks` and reassembled on read. Nothing is truncated and nothing is too large to store, so there is no size error to catch and nothing to configure. Slices are cut on UTF-8 byte boundaries and never inside a surrogate pair.
 

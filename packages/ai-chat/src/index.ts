@@ -5760,18 +5760,23 @@ export class AIChatAgent<
     // Snapshot the pre-write transcript: `this.messages` is mirrored from the
     // change feed and therefore mutates as the loop below writes.
     const priorMessages = [...this.messages];
+    const priorById = new Map(priorMessages.map((m) => [m.id, m]));
     const mergedMessages = reconcileMessages(messages, priorMessages, (msg) =>
       this._sanitizeMessageForPersistence(msg)
     );
 
     for (const message of mergedMessages) {
-      const sanitizedMessage = this._sanitizeMessageForPersistence(message);
-      // An identical row writes nothing and dispatches no event; there is no
-      // in-process cache to keep in step, and no message-shaped truncation —
-      // Sessions offloads an oversized row losslessly instead.
-      await this.#session.upsertMessage(
-        resolveToolMergeId(sanitizedMessage, priorMessages)
+      const resolved = resolveToolMergeId(
+        this._sanitizeMessageForPersistence(message),
+        priorMessages
       );
+      // The live array mirrors storage, so a message serializing to what it
+      // already holds is already stored. Comparing here is a string compare;
+      // letting Sessions discover it would cost a row read and, for media, a
+      // decode and hash of every payload on every turn.
+      const prior = priorById.get(resolved.id);
+      if (prior && JSON.stringify(prior) === JSON.stringify(resolved)) continue;
+      await this.#session.upsertMessage(resolved);
     }
 
     // Regeneration can submit a strict subset of the server transcript. Keep
@@ -5792,14 +5797,16 @@ export class AIChatAgent<
       }
     }
 
-    if (
-      this.maxPersistedMessages != null &&
-      this.messages.length > this.maxPersistedMessages
-    ) {
-      const excess = this.messages.length - this.maxPersistedMessages;
-      await this._deleteMessagesByIds(
-        this.messages.slice(0, excess).map((message) => message.id)
-      );
+    // Retention counts STORED rows, not the hydrated window: a transcript
+    // larger than the hydration budget holds rows this.messages never saw.
+    if (this.maxPersistedMessages != null) {
+      const stored = await this.#session.getHistoryRowStats();
+      const excess = stored.length - this.maxPersistedMessages;
+      if (excess > 0) {
+        await this._deleteMessagesByIds(
+          stored.slice(0, excess).map((row) => row.id)
+        );
+      }
     }
 
     this._broadcastChatMessage(

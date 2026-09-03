@@ -3,16 +3,15 @@ import { DurableObject } from "cloudflare:workers";
 import { ContextBlocks, type ContextProvider } from "../context";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
-  MAX_INLINE_ROW_BYTES,
   Sessions,
   createCompactFunction,
   type AppendResult,
   type SessionMessage,
-  type SessionStats
+  type SessionRowStat
 } from "../sessions";
 
 class ConversationObject extends DurableObject {
-  readonly sessions = new Sessions({ searchIndexing: true });
+  readonly sessions = new Sessions({ reservedMetadataKeys: ["channel"] });
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
 }
 
@@ -53,15 +52,13 @@ session.appendMessage(aiMessage) satisfies Promise<AppendResult>;
 session.updateMessage(message) satisfies Promise<SessionMessage | null>;
 session.getMessage(message.id) satisfies Promise<SessionMessage | null>;
 session.getHistory() satisfies Promise<SessionMessage[]>;
+session.getHistoryRowStats() satisfies Promise<SessionRowStat[]>;
 session.getRecentHistory(1024) satisfies Promise<{
   messages: SessionMessage[];
   truncated: boolean;
   totalContentBytes: number;
 }>;
-session.stats() satisfies Promise<SessionStats>;
-object.sessions.listSessions() satisfies Promise<
-  Array<{ sessionId: string; messageCount: number; lastMessageAt: number }>
->;
+session.search("query") satisfies Promise<Array<{ id: string }>>;
 
 async function consumeHistory(): Promise<void> {
   for await (const item of session.history({ leafId: null })) {
@@ -76,9 +73,12 @@ async function consumeHistory(): Promise<void> {
 }
 void consumeHistory;
 
-MAX_INLINE_ROW_BYTES satisfies number;
-
 new Sessions({
   // @ts-expect-error Sessions is a message store: there is no attachment tier.
   attachments: {}
+});
+
+new Sessions({
+  // @ts-expect-error The FTS index is built by the first search, not by option.
+  searchIndexing: true
 });

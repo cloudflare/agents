@@ -261,9 +261,9 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
-/** Opt-in FTS search coverage. */
+/** FTS coverage: the index exists only once something has searched. */
 export class SessionSearchHarnessObject extends DurableObject<Cloudflare.Env> {
-  readonly sessions = new Sessions({ searchIndexing: true });
+  readonly sessions = new Sessions();
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
   readonly #billed = new BilledRows(this.ctx.storage.sql);
 
@@ -284,13 +284,13 @@ export class SessionSearchHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Billed rows for one text append and one text-changing update with the
-   * FTS index maintained.
+   * Billed rows for one text append and one text-changing update once the
+   * FTS index exists, which the first search brings about.
    */
   async benchIndexedWrites(): Promise<{ append: number; update: number }> {
     await this.lifecycle.start();
     const session = this.sessions.session();
-    await session.stats();
+    await session.search("warm");
 
     this.#billed.start();
     await session.appendMessage({
@@ -313,8 +313,9 @@ export class SessionSearchHarnessObject extends DurableObject<Cloudflare.Env> {
 
 /**
  * Storage-ops benchmark harness. Every number below is BILLED rows: the sum
- * of `rowsWritten` over every cursor a measured window produced. Search
- * indexing is off, which is the default and the shape most hosts run.
+ * of `rowsWritten` over every cursor a measured window produced. Nothing
+ * here searches, so no FTS index exists: the shape every host runs until
+ * something calls `search()`.
  */
 export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
   readonly sessions = new Sessions();
@@ -340,9 +341,9 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
   ): Promise<{ rowsWritten: number }> {
     await this.lifecycle.start();
     const session = this.sessions.session();
-    // Warm the leaf/stats caches outside the measured window, as a live host
-    // would be after its first turn.
-    await session.stats();
+    // Warm the tail cache outside the measured window, as a live host would
+    // be after its first turn.
+    await session.getLatestLeaf();
     const filler = "x".repeat(textBytes);
     this.#billed.start();
     for (let i = 0; i < count; i++) {
@@ -413,7 +414,7 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
   ): Promise<{ rowsWritten: number }> {
     await this.lifecycle.start();
     const session = this.sessions.session();
-    await session.stats();
+    await session.getLatestLeaf();
     const payload = btoa("y".repeat(payloadBytes));
     this.#billed.start();
     await session.appendMessage({

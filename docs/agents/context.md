@@ -24,8 +24,7 @@ const context = new ContextBlocks([
   }
 ]);
 
-await context.load();
-const system = context.toSystemPrompt();
+const system = await context.freezeSystemPrompt();
 const tools = await context.tools();
 ```
 
@@ -79,9 +78,9 @@ The FTS5 table is the only store for these entries. A mirror row table would dou
 
 ## Frozen prompts
 
-`toSystemPrompt()` renders once and caches. Later calls return the same string, so the provider's prefix cache stays warm across turns. `setBlock()` writes to the provider immediately but deliberately does not update the snapshot. Call `refreshSnapshot()` to re-render from current block state.
+`freezeSystemPrompt()` renders once and returns the same string on every later call, so the provider's prefix cache stays warm across turns. `setBlock()` writes to the provider immediately but deliberately does not change the frozen prompt; call `refreshSystemPrompt()` to re-render from current block state.
 
-`freezeSystemPrompt()` adds durability. Pass a `promptStore` (any writable provider) as the second constructor argument and the frozen prompt is persisted:
+Pass a `promptStore` (any writable provider) as the second constructor argument and the frozen prompt is persisted:
 
 ```ts
 const context = new ContextBlocks(
@@ -95,7 +94,7 @@ const system = await context.freezeSystemPrompt();
 
 `freezeSystemPrompt()` returns the stored prompt when one exists, and otherwise loads providers, renders, and persists. So a cold wake reuses the exact prompt string the model already cached instead of re-rendering a subtly different one.
 
-`getSystemPromptForEstimate()` reads the same cached prompt for token estimation without persisting a new one. `refreshSystemPrompt()` reloads every provider, re-renders, and overwrites the stored prompt.
+`refreshSystemPrompt()` reloads every provider, re-renders, and overwrites the stored prompt.
 
 ## Tools
 

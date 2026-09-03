@@ -18,7 +18,7 @@ describe("Sessions storage-ops benchmark", () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
       // 20 appends x (1 message row) = 20. No secondary index, no counter
-      // row, and no FTS row with search indexing off.
+      // row, and no FTS row because nothing has searched.
       const appends = await instance.benchLinearAppends(20, 120);
       expect(appends.rowsWritten).toBe(20);
 
@@ -36,7 +36,7 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
-  it("adds an FTS delete and insert per changed row when indexing is on", async () => {
+  it("adds an FTS delete and insert per changed row once the index exists", async () => {
     const stub = env.SessionSearchHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,

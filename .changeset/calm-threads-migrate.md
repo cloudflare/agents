@@ -8,6 +8,6 @@ Store AIChatAgent messages through `agents/sessions` while preserving the mutabl
 
 **`this.messages` is empty until `onStart`.** Boot no longer loads the transcript synchronously in the constructor. The legacy lift and a single bounded hydration run in `onStart`, so a subclass that read `this.messages` in its constructor now sees `[]`; read it from `onStart` or later. The array is then mirrored from the Sessions change feed.
 
-`hydrationByteBudget` (32 MiB) bounds wake-time hydration. `get-messages` streams its response instead of serializing the whole transcript; clients calling `.json()` on it are unaffected.
+`hydrationByteBudget` (32 MiB) bounds wake-time hydration. `maxPersistedMessages` counts stored rows rather than the hydrated window, so retention trims the oldest stored messages even when the transcript is larger than the budget. `get-messages` streams its response instead of serializing the whole transcript; clients calling `.json()` on it are unaffected.
 
 There is nothing to configure about how a message is stored: a message too large for one SQLite row is split across continuation rows and reassembled on read, and a stored row is exactly what the write returned.

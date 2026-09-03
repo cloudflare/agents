@@ -4,7 +4,7 @@
 
 Keep attachments out of the message row.
 
-A part that declares a non-text media type and carries its bytes inline is now stored separately, addressed by its SHA-256, and put back verbatim on read. The message keeps a pointer and its `mediaType`, so a round trip is exact and a message row stays small however large its payloads are. Read with `{ attachments: "pointer" }` to see the references instead.
+A part that declares a non-text media type and carries its bytes inline is now stored separately, addressed by its SHA-256, and put back verbatim on read. The message keeps a pointer and its `mediaType`, so a round trip is exact and a message row stays small however large its payloads are. This is invisible: there is no pointer-mode read.
 
 The rule is typed rather than sized: an image is extracted at any size, and text is never extracted at any size — long prose still splits across continuation rows. The two mechanisms are independent, so media leaves before the row is measured and a message carrying a large image usually has no continuation rows at all.
 
@@ -14,6 +14,4 @@ Payload lifetime is derived from message references; the bytes go when the last 
 
 Also fixes two migration faults that could lose data: `AIChatAgent` dropped its legacy table when rows were merely _accounted for_ rather than imported, deleting any row that failed to parse; and Sessions stamped its schema version even when a legacy lift was incomplete, so it never retried. Both lifts are idempotent, so the source now survives until every row has actually landed.
 
-`SessionStats` loses `totalContentBytes` and `pathLength`. Nothing read either, and both measured only the active branch — excluding other branches, other sessions in the object, and the attachment tables — so as a size signal they answered a different question than the one anyone would ask them. The token estimate that gates auto-compaction is what remains.
-
-`appendMessage` now returns the same inlined message whether it inserted or found a duplicate. It previously returned pointer form on the duplicate paths, so hosts saw one shape or the other depending on whether the row already existed, and compensated by scanning every message for a pointer prefix before deciding whether to re-read.
+`appendMessage` returns the same message whether it inserted or found a duplicate, and dispatches its `append` event before any auto-compaction runs, so a cache mirror never misses the row that triggered a compaction. A change-feed listener that throws is reported through the `session:error` capability event instead of rejecting the write it was told about.

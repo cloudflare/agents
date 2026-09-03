@@ -34,7 +34,6 @@ import type {
   Session,
   SessionMessage,
   SessionRowStat,
-  SessionStats,
   StoredCompaction,
   WriteOptions
 } from "agents/sessions";
@@ -216,10 +215,6 @@ export class ThinkSession {
     return this.#handle.getBranches(messageId);
   }
 
-  stats(): Promise<SessionStats> {
-    return this.#handle.stats();
-  }
-
   search(query: string, options?: { limit?: number }): Promise<SearchResult[]> {
     return this.#handle.search(query, options);
   }
@@ -238,13 +233,6 @@ export class ThinkSession {
       message,
       appendOptions(parentIdOrOptions)
     );
-  }
-
-  appendMany(
-    messages: SessionMessage[],
-    options?: AppendOptions
-  ): Promise<string | null> {
-    return this.#handle.appendMany(messages, options);
   }
 
   updateMessage(
@@ -277,13 +265,6 @@ export class ThinkSession {
 
   clearMessages(): Promise<void> {
     return this.#handle.clearMessages();
-  }
-
-  fork(options?: {
-    atMessageId?: string;
-    toSessionId?: string;
-  }): Promise<{ sessionId: string; leafId: string | null }> {
-    return this.#handle.fork(options);
   }
 
   // ── Compaction ───────────────────────────────────────────────────────────

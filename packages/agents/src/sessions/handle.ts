@@ -21,7 +21,6 @@ import type {
   SearchResult,
   SessionMessage,
   SessionRowStat,
-  SessionStats,
   StoredCompaction,
   WriteOptions
 } from "./types";
@@ -33,12 +32,8 @@ export type CompactionFunction = (
 
 export class Session {
   readonly sessionId: string;
-  readonly #coreProvider: () => SessionsCore;
+  readonly #core: SessionsCore;
   readonly #ready: () => Promise<void>;
-
-  get #core(): SessionsCore {
-    return this.#coreProvider();
-  }
 
   #compactionFn: CompactionFunction | null = null;
   #tokenThreshold: number | undefined;
@@ -46,11 +41,11 @@ export class Session {
   /** @internal Constructed by the Sessions capability only. */
   constructor(
     sessionId: string,
-    core: () => SessionsCore,
+    core: SessionsCore,
     ready: () => Promise<void>
   ) {
     this.sessionId = sessionId;
-    this.#coreProvider = core;
+    this.#core = core;
     this.#ready = ready;
   }
 
@@ -64,8 +59,8 @@ export class Session {
 
   /**
    * Auto-compact after an append once the estimated token count crosses the
-   * threshold. Requires `onCompaction()`. The trigger reads the O(1) stamped
-   * estimate, never the transcript.
+   * threshold. Requires `onCompaction()`. The estimate is derived from the
+   * stamped per-row estimates, never from the transcript.
    */
   compactAfter(tokenThreshold: number): this {
     this.#tokenThreshold = tokenThreshold;
@@ -153,9 +148,9 @@ export class Session {
   }
 
   /**
-   * Per-row stored sizes (row plus continuation rows) and stamped token
-   * estimates for the active branch path (root → leaf) WITHOUT loading
-   * message content.
+   * Per-row stored sizes (row plus continuation rows and attachments) and
+   * stamped token estimates for the active branch path (root → leaf)
+   * WITHOUT loading message content.
    */
   async getHistoryRowStats(leafId?: string | null): Promise<SessionRowStat[]> {
     await this.#ready();
@@ -177,12 +172,10 @@ export class Session {
     return this.#core.getBranches(this.sessionId, messageId);
   }
 
-  /** O(1)-maintained aggregate stats for the active branch path. */
-  async stats(): Promise<SessionStats> {
-    await this.#ready();
-    return this.#core.stats(this.sessionId);
-  }
-
+  /**
+   * Full-text search over this session's text parts. The index is built on
+   * the first call and maintained from then on.
+   */
   async search(
     query: string,
     options?: { limit?: number }
@@ -193,84 +186,31 @@ export class Session {
 
   // ── Writes ───────────────────────────────────────────────────────────────
 
+  /**
+   * Append one message. Idempotent on id: a repeated append returns the row
+   * already stored and dispatches an `append` event with `inserted: false`.
+   */
   async appendMessage(
     message: SessionMessage,
     options: AppendOptions = {}
   ): Promise<AppendResult> {
     await this.#ready();
-    // Inlined, not raw: what a caller and the change feed receive must be the
-    // same shape whether the append inserted or found a duplicate. Handing
-    // back pointer form here is what forced hosts to sniff for
-    // `attachment:sha256:` and re-read.
-    const existing = this.#core.getMessage(this.sessionId, message.id);
-    if (existing) {
-      await this.#core.notify({
-        type: "append",
-        sessionId: this.sessionId,
-        message: existing,
-        parentId: options.parentId,
-        inserted: false
-      });
-      return { inserted: false, message: existing };
-    }
-
     const prepared = this.#prepare(message, options.source);
-    const { inserted } = this.#core.append(
+    const result = this.#core.append(
       this.sessionId,
       prepared.message,
       options.parentId,
       prepared.tokenEstimate
     );
-    if (!inserted) {
-      const stored =
-        this.#core.getMessage(this.sessionId, message.id) ?? prepared.message;
-      await this.#core.notify({
-        type: "append",
-        sessionId: this.sessionId,
-        message: stored,
-        parentId: options.parentId,
-        inserted: false
-      });
-      return { inserted: false, message: stored };
-    }
-
-    // Everything Sessions hands back is inlined, whatever the caller passed.
-    // A caller that read with `attachments: "pointer"` and wrote the result
-    // back would otherwise put pointer form into the change feed and into its
-    // own cache, and the same append would return one shape when it inserted
-    // and another when it found a duplicate. No-op by reference for the
-    // ordinary inline write.
-    const emitted = this.#core.inlineMessage(prepared.message);
-
-    let compacted = false;
-    if (this.#tokenThreshold != null && this.#compactionFn) {
-      compacted = await this.#maybeAutoCompact();
-    }
-    if (!compacted) {
-      await this.#core.notify({
-        type: "append",
-        sessionId: this.sessionId,
-        message: emitted,
-        parentId: options.parentId,
-        inserted: true
-      });
-    }
-    return { inserted: true, message: emitted };
-  }
-
-  /** Append a chain of messages; returns the last appended id. */
-  async appendMany(
-    messages: SessionMessage[],
-    options: AppendOptions = {}
-  ): Promise<string | null> {
-    let parentId = options.parentId;
-    let lastId: string | null = null;
-    for (const message of messages) {
-      await this.appendMessage(message, { ...options, parentId });
-      parentId = message.id;
-      lastId = message.id;
-    }
-    return lastId;
+    await this.#core.notify({
+      type: "append",
+      sessionId: this.sessionId,
+      message: result.message,
+      parentId: options.parentId,
+      inserted: result.inserted
+    });
+    if (result.inserted) await this.#maybeAutoCompact();
+    return result;
   }
 
   /**
@@ -284,24 +224,20 @@ export class Session {
   ): Promise<SessionMessage | null> {
     await this.#ready();
     const prepared = this.#prepare(message, options.source);
-    const outcome = await this.#core.update(
+    const outcome = this.#core.update(
       this.sessionId,
       prepared.message,
       prepared.tokenEstimate
     );
-    // Bail before inlining: a write against a row that is gone returns null,
-    // and materializing its payloads first would load megabytes to throw them
-    // away.
     if (outcome === "missing") return null;
-
-    const emitted = this.#core.inlineMessage(prepared.message);
-    if (outcome !== "updated") return emitted;
-    await this.#core.notify({
-      type: "update",
-      sessionId: this.sessionId,
-      message: emitted
-    });
-    return emitted;
+    if (outcome === "updated") {
+      await this.#core.notify({
+        type: "update",
+        sessionId: this.sessionId,
+        message: prepared.message
+      });
+    }
+    return prepared.message;
   }
 
   async upsertMessage(
@@ -309,7 +245,7 @@ export class Session {
     options: AppendOptions = {}
   ): Promise<AppendResult> {
     await this.#ready();
-    if (!this.#core.getMessageRaw(this.sessionId, message.id)) {
+    if (!this.#core.exists(this.sessionId, message.id)) {
       return this.appendMessage(message, options);
     }
     const stored = await this.updateMessage(message, {
@@ -332,7 +268,7 @@ export class Session {
 
   async deleteMessages(messageIds: string[]): Promise<void> {
     await this.#ready();
-    await this.#core.deleteMessages(this.sessionId, messageIds);
+    this.#core.deleteMessages(this.sessionId, messageIds);
     await this.#core.notify({
       type: "delete",
       sessionId: this.sessionId,
@@ -342,24 +278,8 @@ export class Session {
 
   async clearMessages(): Promise<void> {
     await this.#ready();
-    await this.#core.clearMessages(this.sessionId);
+    this.#core.clearMessages(this.sessionId);
     await this.#core.notify({ type: "clear", sessionId: this.sessionId });
-  }
-
-  /**
-   * Copy the path ending at `atMessageId` (default: the active leaf) into a
-   * new session. Message rows get fresh ids, continuation rows and all.
-   * Compaction overlays are not copied.
-   */
-  async fork(
-    options: { atMessageId?: string; toSessionId?: string } = {}
-  ): Promise<{ sessionId: string; leafId: string | null }> {
-    await this.#ready();
-    return this.#core.fork(
-      this.sessionId,
-      options.toSessionId ?? crypto.randomUUID(),
-      options.atMessageId
-    );
   }
 
   // ── Compaction ───────────────────────────────────────────────────────────
@@ -386,8 +306,9 @@ export class Session {
   /**
    * Run the registered compaction function and store the result as an
    * overlay. When `leafId` is given, compact that root-to-leaf branch instead
-   * of the active branch. Requires `onCompaction()`.
-   *
+   * of the active branch. Requires `onCompaction()`. A compaction function
+   * that throws is reported through the `session:error` capability event and
+   * the call returns `null`.
    */
   async compact(leafId?: string | null): Promise<CompactResult | null> {
     await this.#ready();
@@ -415,12 +336,14 @@ export class Session {
     if (!historyIds.has(result.toMessageId)) return null;
 
     // Iterative compaction extends only an overlay visible on this branch.
-    const existing = (await this.getCompactions()).filter(
-      (compaction) =>
-        historyIds.has(`${COMPACTION_PREFIX}${compaction.id}`) ||
-        (historyIds.has(compaction.fromMessageId) &&
-          historyIds.has(compaction.toMessageId))
-    );
+    const existing = this.#core
+      .getCompactions(this.sessionId)
+      .filter(
+        (compaction) =>
+          historyIds.has(`${COMPACTION_PREFIX}${compaction.id}`) ||
+          (historyIds.has(compaction.fromMessageId) &&
+            historyIds.has(compaction.toMessageId))
+      );
     const fromId =
       existing.length > 0 ? existing[0].fromMessageId : result.fromMessageId;
 
@@ -456,15 +379,13 @@ export class Session {
     };
   }
 
-  /** Gate on the stamped estimate, then compact. Failures are non-fatal. */
-  async #maybeAutoCompact(): Promise<boolean> {
+  /** Gate on the derived estimate, then compact. Failures are non-fatal. */
+  async #maybeAutoCompact(): Promise<void> {
     const threshold = this.#tokenThreshold;
-    if (threshold == null || !this.#compactionFn) return false;
-    if (this.#core.stats(this.sessionId).tokenEstimate <= threshold) {
-      return false;
-    }
+    if (threshold == null || !this.#compactionFn) return;
+    if (this.#core.tokenEstimate(this.sessionId) <= threshold) return;
     try {
-      return Boolean(await this.compact());
+      await this.compact();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       console.warn(`[Sessions] auto-compaction failed: ${detail}`);
@@ -472,7 +393,6 @@ export class Session {
         sessionId: this.sessionId,
         error: detail
       });
-      return false;
     }
   }
 }

@@ -194,7 +194,7 @@ describe("Sessions legacy migration", () => {
     });
   });
 
-  it("lifts legacy FTS rows only when search indexing is enabled", async () => {
+  it("rebuilds the search index from lifted rows on the first search", async () => {
     const stub = env.SessionSearchHarnessObject.getByName(crypto.randomUUID());
 
     await runInDurableObject(

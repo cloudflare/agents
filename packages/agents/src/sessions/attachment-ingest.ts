@@ -22,18 +22,18 @@ import { hashPayload, type AttachmentBytes } from "./attachment-store";
 import type { SessionMessage, SessionMessagePart } from "./types";
 
 /** Pointer scheme written into a stored part in place of its payload. */
-export const ATTACHMENT_URL_PREFIX = "attachment:sha256:";
+const ATTACHMENT_URL_PREFIX = "attachment:sha256:";
 
 /** Hostile or deeply nested tool output stops here rather than recursing forever. */
 const MAX_WALK_DEPTH = 8;
 
 /** Build the pointer for a content address. */
-export function attachmentUrl(hash: string): string {
+function attachmentUrl(hash: string): string {
   return `${ATTACHMENT_URL_PREFIX}${hash}`;
 }
 
 /** The content address in a pointer, or `null` when the value is not one. */
-export function parseAttachmentUrl(url: unknown): string | null {
+function parseAttachmentUrl(url: unknown): string | null {
   if (typeof url !== "string" || !url.startsWith(ATTACHMENT_URL_PREFIX)) {
     return null;
   }
@@ -94,7 +94,7 @@ function encodeBase64(bytes: Uint8Array): string {
 }
 
 /** Rebuild the exact `data:` URL a payload was extracted from. */
-export function dataUrl(mediaType: string, bytes: Uint8Array): string {
+function dataUrl(mediaType: string, bytes: Uint8Array): string {
   return `data:${mediaType};base64,${encodeBase64(bytes)}`;
 }
 
@@ -207,29 +207,6 @@ export function extractAttachments(message: SessionMessage): ExtractionResult {
   const parts = walk(message.parts, 0) as SessionMessagePart[];
   if (parts === message.parts) return { message, attachments };
   return { message: { ...message, parts }, attachments };
-}
-
-/** Every content address a stored message points at. */
-export function referencedAttachments(message: SessionMessage): string[] {
-  const hashes = new Set<string>();
-  const walk = (value: unknown, depth: number): void => {
-    if (depth > MAX_WALK_DEPTH || value === null || typeof value !== "object")
-      return;
-    if (Array.isArray(value)) {
-      for (const entry of value) walk(entry, depth + 1);
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    const hash =
-      parseAttachmentUrl(record.url) ?? parseAttachmentUrl(record.data);
-    if (hash) {
-      hashes.add(hash);
-      return;
-    }
-    for (const entry of Object.values(record)) walk(entry, depth + 1);
-  };
-  walk(message.parts, 0);
-  return [...hashes];
 }
 
 /**

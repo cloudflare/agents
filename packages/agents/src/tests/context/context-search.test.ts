@@ -114,7 +114,7 @@ describe("Search blocks in system prompt", () => {
       }
     ]);
     await blocks.load();
-    const prompt = blocks.toSystemPrompt();
+    const prompt = await blocks.freezeSystemPrompt();
     expect(prompt).toContain("KNOWLEDGE");
     expect(prompt).toContain("[searchable]");
     expect(prompt).toContain("Product docs");
@@ -128,7 +128,7 @@ describe("Search blocks in system prompt", () => {
       }
     ]);
     await blocks.load();
-    const prompt = blocks.toSystemPrompt();
+    const prompt = await blocks.freezeSystemPrompt();
     // Empty search provider returns null → content is ""
     // But isSearchable means it still renders
     expect(prompt).toContain("KNOWLEDGE");

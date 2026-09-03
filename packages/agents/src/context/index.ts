@@ -12,15 +12,10 @@
 
 export {
   ContextBlocks,
-  isWritableProvider,
   type ContextBlock,
   type ContextConfig,
   type ContextProvider,
   type WritableContextProvider
 } from "./blocks";
-export {
-  AgentSearchProvider,
-  isSearchProvider,
-  type SearchProvider
-} from "./search";
+export { AgentSearchProvider, type SearchProvider } from "./search";
 export { AgentContextProvider, type SqlProvider } from "./sqlite-provider";

@@ -26,15 +26,7 @@ import type { SessionsIo } from "./io";
  * larger row means fewer billed writes; this leaves headroom below SQLite's
  * 2 MiB ceiling for the row key and record overhead.
  */
-export const ATTACHMENT_CHUNK_BYTES = MAX_INLINE_ROW_BYTES;
-
-/** Metadata for one stored payload. */
-export interface AttachmentRecord {
-  /** SHA-256 hex of the raw bytes — the content address. */
-  hash: string;
-  mediaType: string;
-  bytes: number;
-}
+const ATTACHMENT_CHUNK_BYTES = MAX_INLINE_ROW_BYTES;
 
 /** @internal Bytes plus the type they were declared with. */
 export interface AttachmentBytes {
@@ -155,16 +147,6 @@ export class AttachmentStore {
       }
     }
     return { mediaType: meta.media_type, bytes: out };
-  }
-
-  /** Metadata without the bytes — enough to size a payload or label a pointer. */
-  describe(hash: string): AttachmentRecord | undefined {
-    const [meta] = this.#io.sql<{ bytes: number; media_type: string }>(
-      "SELECT bytes, media_type FROM cf_agents_session_attachment_meta WHERE hash = ?",
-      [hash]
-    );
-    if (!meta) return undefined;
-    return { hash, mediaType: meta.media_type, bytes: meta.bytes };
   }
 
   /** Record that one message references these payloads. */

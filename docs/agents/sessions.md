@@ -89,7 +89,6 @@ Other writes:
 ```ts
 await session.updateMessage(message); // SessionMessage | null
 await session.upsertMessage(message);
-await session.appendMany(messages);
 await session.deleteMessages([messageId]);
 await session.clearMessages();
 ```
@@ -100,7 +99,7 @@ Deleting a message splices its children to its parent. Removing a message in the
 
 ### Row budget
 
-Sessions stores messages. One SQLite row holds up to `MAX_INLINE_ROW_BYTES` (1.5 MiB) of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
+Sessions stores messages. One SQLite row holds up to 1.5 MiB of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
 
 A message that does not fit is split across continuation rows and reassembled on read. Nothing is truncated, nothing is summarized, and no message is too large to store — a 5 MB message is one message row plus three continuation rows, and reads back byte for byte. There is no error to catch and nothing to configure.
 
@@ -166,12 +165,11 @@ await session.getMessage(id);
 await session.getLatestLeaf();
 await session.getBranches(parentId);
 await session.getHistoryRowStats();
-await session.stats();
 ```
 
-`getHistoryRowStats()` returns per-row stored bytes (row plus continuation rows) and stamped token estimates, without loading message content. `stats()` derives path length, stored content bytes, and a heuristic token estimate for the active path with compaction overlays applied.
+`getHistoryRowStats()` returns per-row stored bytes (row, continuation rows, and attachments) and stamped token estimates, without loading message content.
 
-## Branches and forks
+## Branches
 
 A message can have multiple children. Read one root-to-leaf path by selecting its leaf:
 
@@ -179,17 +177,6 @@ A message can have multiple children. Read one root-to-leaf path by selecting it
 const branch = await session.getHistory({ leafId: alternativeReply.id });
 const alternatives = await session.getBranches(userMessage.id);
 ```
-
-Fork a path into another session in the same Durable Object:
-
-```ts
-const fork = await session.fork({
-  atMessageId: alternativeReply.id,
-  toSessionId: "draft-copy"
-});
-```
-
-Forked messages receive new IDs, continuation rows and all. Compaction overlays are not copied.
 
 To move a conversation between Durable Objects, export the source with `history()` and replay it with `importMessage()` on the destination:
 
@@ -269,7 +256,7 @@ Sessions is a message store, not a file store. Attaching a file is convenient an
 
 ## Attachments
 
-A part that declares a non-text media type and carries its bytes inline — an image, an audio clip, a PDF — is stored outside the message. The part keeps its shape and its `mediaType`; only the payload is replaced, by an `attachment:sha256:<hex>` pointer. Reads put the payload back, so this is invisible unless you ask to see it:
+A part that declares a non-text media type and carries its bytes inline — an image, an audio clip, a PDF — is stored outside the message. The part keeps its shape and its `mediaType`; only the payload is replaced, by an `attachment:sha256:<hex>` pointer. Reads put the payload back, so this is invisible from the outside:
 
 ```ts
 await session.appendMessage(messageWithImage);
@@ -277,13 +264,6 @@ const stored = await session.getMessage(messageWithImage.id); // byte-identical
 ```
 
 The rule is about **type, not size**. An image is stored this way whether it is 8 KB or 8 MB, and text is never stored this way at any size — long prose is split across continuation rows instead. The two mechanisms never interact: media leaves the message before the row is measured, so a message carrying a large image usually has no continuation rows at all.
-
-To see the pointers rather than the payloads — when scanning a transcript, or assembling context where materializing megabytes would be wasted — read in pointer mode:
-
-```ts
-const history = await session.getHistory({ attachments: "pointer" });
-// parts carry url: "attachment:sha256:…" and their original mediaType
-```
 
 Identical payloads are stored once. That is a consequence of addressing bytes by their hash, which mainly means a retried write costs nothing; do not rely on it as a space optimization.
 
@@ -299,14 +279,11 @@ That budget is a hard ceiling with no message-count floor beneath it. `getRecent
 
 ## Full-text search
 
-Message search is opt-in because FTS adds writes to every append:
-
 ```ts
-const sessions = new Sessions({ searchIndexing: true });
-const results = await sessions.session().search("deployment failed");
+const results = await session.search("deployment failed");
 ```
 
-With indexing disabled, `search()` throws `SessionSearchDisabledError`. Enabling it on an object with existing messages performs a one-time SQL-only backfill.
+The index is built by the first `search()` call on an object, with a one-time SQL-only backfill of the messages already stored, and maintained on every write from then on. An object that never searches never pays for an index: maintaining one costs an extra billed row on every append, so it exists only where something actually reads it.
 
 Search indexes text parts only. File contents, reasoning, and tool payloads are not indexed automatically.
 
@@ -322,11 +299,11 @@ Every Sessions table is `WITHOUT ROWID` with a composite primary key and no seco
 | `cf_agents_session_message_chunks` | `(session_id, id, idx)` | Continuation slices of a message too large for one row                                          |
 | `cf_agents_session_compactions`    | `(session_id, id)`      | Non-destructive summary ranges                                                                  |
 | `cf_agents_session_config`         | `(session_id, key)`     | Lifted session configuration                                                                    |
-| `cf_agents_session_fts`            | virtual                 | Optional FTS5 index, created only when `searchIndexing` is enabled                              |
+| `cf_agents_session_fts`            | virtual                 | FTS5 index, created by the first `search()`                                                     |
 
-A text append with search disabled bills exactly one row write. The `seq` column carries ordering and `type` distinguishes row kinds, so neither needs an index. A continuation row carries its slice and nothing else — no hash, no media type, no size — so an over-budget message costs one billed row per slice and nothing more.
+A text append bills exactly one row write on an object that has never searched. The `seq` column carries ordering and `type` distinguishes row kinds, so neither needs an index. A continuation row carries its slice and nothing else — no hash, no media type, no size — so an over-budget message costs one billed row per slice and nothing more.
 
-State is derived rather than maintained. The active leaf is the session's max-`seq` row, token totals come from per-row stamped estimates, and session summaries are derived from message rows. No counter row, registry row, or refcount is written on the append path.
+State is derived rather than maintained. The active leaf is the session's max-`seq` row and token totals come from per-row stamped estimates. No counter row, registry row, or refcount is written on the append path.
 
 ## Observe changes
 
@@ -353,14 +330,7 @@ This is a local cache-coherence feed, not a cross-object event log. Capability d
 
 ## Errors
 
-Each error carries a stable `name`, so hosts and tests can classify failures without matching message text.
-
-| Error                        | Thrown when                                         |
-| ---------------------------- | --------------------------------------------------- |
-| `SessionSerializationError`  | A message is not JSON-serializable                  |
-| `SessionSearchDisabledError` | `search()` is called without `searchIndexing: true` |
-
-There is no "message too large" error. A message that exceeds the row budget is split across continuation rows instead.
+Sessions defines no error classes. A message that is not JSON-serializable fails with the `TypeError` that `JSON.stringify` throws, and there is no "message too large" error. A message that exceeds the row budget is split across continuation rows instead.
 
 ## Multiple sessions
 
@@ -371,9 +341,7 @@ const support = sessions.session("support");
 const sales = sessions.session("sales");
 ```
 
-Handles are cached, so per-session configuration such as the compaction trigger survives repeated `session()` calls.
-
-`listSessions()` derives summaries from message rows. There is no registry table.
+Handles are cached, so per-session configuration such as the compaction trigger survives repeated `session()` calls. There is no registry table: a directory of conversations belongs to the application.
 
 For user-facing chat applications, prefer one Durable Object per conversation. This isolates storage and failure domains and allows conversations to hibernate independently. Use multiple handles inside one object for local branches, drafts, or application-specific namespaces.
 

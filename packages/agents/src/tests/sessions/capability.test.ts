@@ -1,18 +1,9 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type {
-  SessionHarnessObject,
-  SessionSearchHarnessObject
-} from "../capabilities/sessions";
-import {
-  MAX_INLINE_ROW_BYTES,
-  SessionSearchDisabledError,
-  estimateStringTokens,
-  type SessionChangeEvent,
-  type SessionMessage
-} from "../../sessions";
-import { splitContent } from "../../sessions/chunking";
+import type { SessionHarnessObject } from "../capabilities/sessions";
+import type { SessionChangeEvent, SessionMessage } from "../../sessions";
+import { MAX_INLINE_ROW_BYTES, splitContent } from "../../sessions/chunking";
 
 /**
  * Capability-level Sessions tests: the capability installed on a minimal
@@ -158,28 +149,23 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("creates FTS tables only when search indexing is enabled", async () => {
-    const plain = env.SessionHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(plain, async (instance: SessionHarnessObject) => {
-      await instance.sessions.session().appendMessage(text("plain", "text"));
-      expect(instance.tableNames()).not.toContain("cf_agents_session_fts");
+  it("builds the FTS index on the first search, never on append", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("plain", "the quick brown fox"));
+      // An object that has never searched pays nothing for an index.
       expect(
         instance
           .tableNames()
-          .some((name) => name.startsWith("cf_agents_session_fts_"))
+          .some((name) => name.startsWith("cf_agents_session_fts"))
       ).toBe(false);
-    });
 
-    const searchable = env.SessionSearchHarnessObject.getByName(
-      crypto.randomUUID()
-    );
-    await runInDurableObject(
-      searchable,
-      async (instance: SessionSearchHarnessObject) => {
-        await instance.sessions.session().appendMessage(text("search", "text"));
-        expect(instance.tableNames()).toContain("cf_agents_session_fts");
-      }
-    );
+      // The first search creates the index and backfills existing rows.
+      const hits = await session.search("quick brown");
+      expect(hits.map((hit) => hit.id)).toEqual(["plain"]);
+      expect(instance.tableNames()).toContain("cf_agents_session_fts");
+    });
   });
 
   it("splices children to the grandparent on mid-chain delete", async () => {
@@ -280,7 +266,7 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("auto-compacts past the threshold using the O(1) stats gate", async () => {
+  it("auto-compacts past the threshold using the derived token estimate", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
@@ -432,66 +418,6 @@ describe("Sessions capability", () => {
       expect((await session.getMessage("server-msg"))?.metadata).toEqual({
         other: 3
       });
-    });
-  });
-
-  it("keeps O(1) stats coherent with a from-scratch recompute", async () => {
-    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-      const session = instance.sessions.session();
-      for (let i = 0; i < 5; i++) {
-        await session.appendMessage(text(`m${i}`, `body number ${i}`));
-      }
-      await session.updateMessage(text("m2", "a much longer rewritten body"));
-      await session.addCompaction("stats summary", "m0", "m1");
-
-      const stats = await session.stats();
-      const rows = await session.getHistoryRowStats();
-      const raw = rows.reduce((sum, row) => sum + row.tokenEstimate, 0);
-      const covered = rows
-        .filter((row) => row.id === "m0" || row.id === "m1")
-        .reduce((sum, row) => sum + row.tokenEstimate, 0);
-      const expected = Math.max(
-        0,
-        Math.ceil(raw - covered + estimateStringTokens("stats summary"))
-      );
-      expect(stats.tokenEstimate).toBe(expected);
-    });
-  });
-
-  it("lists sessions with derived summaries", async () => {
-    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-      await instance.sessions.session().appendMessage(text("d1", "default"));
-      await instance.sessions.session("side").appendMessage(text("s1", "side"));
-      await instance.sessions.session("side").appendMessage(text("s2", "side"));
-      const sessions = await instance.sessions.listSessions();
-      expect(sessions).toHaveLength(2);
-      const side = sessions.find((row) => row.sessionId === "side");
-      expect(side?.messageCount).toBe(2);
-    });
-  });
-
-  it("forks a path, copying continuation rows with the message", async () => {
-    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-      const session = instance.sessions.session();
-      await session.appendMessage(text("f1", "one"));
-      const original = bigText("f2");
-      await session.appendMessage(original);
-
-      const fork = await session.fork({ toSessionId: "forked" });
-      expect(fork.sessionId).toBe("forked");
-      const forkedSession = instance.sessions.session("forked");
-      const forked = await forkedSession.getHistory();
-      expect(forked).toHaveLength(2);
-      expect(forked.map((m) => m.id)).not.toContain("f1");
-      // The copy is re-split under its own fresh id and reads back exactly.
-      expect(forked[1].parts[0].text).toBe(original.parts[0].text);
-      expect(instance.contentChunks("forked", forked[1].id)).toBeGreaterThan(0);
-      expect(
-        instance.continuationRows("forked", forked[1].id).length
-      ).toBeGreaterThan(0);
     });
   });
 
@@ -765,34 +691,25 @@ describe("Sessions capability", () => {
   });
 
   describe("search", () => {
-    it("throws a stable error when indexing is disabled", async () => {
+    it("maintains the index once it exists", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
         const session = instance.sessions.session();
-        await session.appendMessage(text("q1", "findable body"));
-        await expect(session.search("findable")).rejects.toBeInstanceOf(
-          SessionSearchDisabledError
-        );
+        await session.appendMessage(text("s1", "the quick brown fox"));
+        expect((await session.search("quick brown")).map((h) => h.id)).toEqual([
+          "s1"
+        ]);
+        // Rows written after the first search are indexed as they land...
+        await session.appendMessage(text("s2", "a lazy dog"));
+        expect((await session.search("lazy dog")).map((h) => h.id)).toEqual([
+          "s2"
+        ]);
+        // ...updates replace the entry, and deletes drop it.
+        await session.updateMessage(text("s2", "an alert cat"));
+        expect(await session.search("lazy dog")).toEqual([]);
+        await session.deleteMessages(["s1"]);
+        expect(await session.search("quick brown")).toEqual([]);
       });
-    });
-
-    it("finds text when indexing is enabled", async () => {
-      const stub = env.SessionSearchHarnessObject.getByName(
-        crypto.randomUUID()
-      );
-      await runInDurableObject(
-        stub,
-        async (instance: SessionSearchHarnessObject) => {
-          const session = instance.sessions.session();
-          await session.appendMessage(text("s1", "the quick brown fox"));
-          await session.appendMessage(text("s2", "unrelated content"));
-          const hits = await session.search("quick brown");
-          expect(hits.map((hit) => hit.id)).toEqual(["s1"]);
-          // Deletes drop the FTS entry too.
-          await session.deleteMessages(["s1"]);
-          expect(await session.search("quick brown")).toEqual([]);
-        }
-      );
     });
   });
 
@@ -941,15 +858,12 @@ describe("Sessions capability", () => {
         instance.sessions.subscribe((event) => {
           events.push(event);
         });
-        const before = await session.stats();
-
         // The stored form is byte-identical, so nothing is written and the
         // host cache is never invalidated. `storage-ops-bench` pins the
         // billed cost of this path at zero rows.
         const result = await session.updateMessage(text("noop", "same body"));
         expect(result?.parts[0].text).toBe("same body");
         expect(events).toEqual([]);
-        expect(await session.stats()).toEqual(before);
       });
     });
   });

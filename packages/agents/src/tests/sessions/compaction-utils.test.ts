@@ -5,12 +5,11 @@ import {
   enforceRowSizeLimit,
   ROW_MAX_BYTES
 } from "../../chat/sanitize";
+import { createCompactFunction, type SessionMessage } from "../../sessions";
 import {
   COMPACTION_PREFIX,
-  createCompactFunction,
-  isCompactionMessage,
-  type SessionMessage
-} from "../../sessions";
+  isCompactionMessage
+} from "../../sessions/compaction-helpers";
 
 function textMessage(id: string, text: string, role = "user"): SessionMessage {
   return { id, role, parts: [{ type: "text", text }] };

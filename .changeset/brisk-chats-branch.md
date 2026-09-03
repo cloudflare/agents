@@ -17,7 +17,7 @@ Replatform Think conversation storage onto `agents/sessions` and prompt context 
 - **Storage migrates on first wake and cannot be rolled back.** Each Durable Object lifts its `assistant_messages`, `assistant_compactions`, and `assistant_config` rows into the `cf_agents_session_*` tables, verifies every row landed, and drops the old tables. An object that has woken on this version has an empty conversation if you roll back to the previous release; rolling forward again is safe. Deploy behind a canary if you need a rollback path.
 - `hydrationByteBudget` defaults to 32 MiB (was 24 MiB) and is now a hard ceiling that charges each row its full stored size, attachments included. There is no message-count floor, so an unusually large recent window can hydrate fewer than four messages. `getHistory()` still reads the full path.
 - Context blocks load during `onStart`, as before the replatform, so `this.context.getBlock()` answers as soon as the object has started.
-- `session.search()` is always available; Think enables the Sessions FTS index.
+- `session.search()` still works. Its index is now built by the first search on an object rather than maintained on every append, so a Think that never searches stops paying a second billed row per message.
 - Think no longer reads Sessions tables with raw SQL. If you queried `assistant_messages` yourself, use `this.session.history()` or `getHistory()`.
 
 **Removed**

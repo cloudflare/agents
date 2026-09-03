@@ -145,47 +145,35 @@ export class ContextBlocks {
     return { ...config, provider: this.defaultProvider(config.label) };
   }
 
-  isLoaded(): boolean {
-    return this.loaded;
-  }
-
   /**
-   * Load all blocks from their providers.
-   * Called once at session init.
+   * Load all blocks from their providers. Hosts call this once at startup;
+   * every other entry point loads lazily.
    */
   async load(): Promise<void> {
     this.configs = this.configs.map((config) =>
       this.withDefaultProvider(config)
     );
     for (const config of this.configs) {
-      // Pass the label to the provider before first use
-      if (config.provider?.init) {
-        config.provider.init(config.label);
-      }
-
-      const content = config.provider
-        ? ((await config.provider.get()) ?? "")
-        : "";
-
-      const searchable = config.provider
-        ? isSearchProvider(config.provider)
-        : false;
-      const writable = config.provider
-        ? isWritableProvider(config.provider) ||
-          (searchable && !!(config.provider as SearchProvider).set)
-        : false;
-
-      this.blocks.set(config.label, {
-        label: config.label,
-        description: config.description,
-        content,
-        tokens: estimateStringTokens(content),
-        maxTokens: config.maxTokens,
-        writable,
-        isSearchable: searchable
-      });
+      this.blocks.set(config.label, await this.loadBlock(config));
     }
     this.loaded = true;
+  }
+
+  /** Initialize a block's provider and read its current content. */
+  private async loadBlock(config: ContextConfig): Promise<ContextBlock> {
+    const provider = config.provider;
+    provider?.init?.(config.label);
+    const content = provider ? ((await provider.get()) ?? "") : "";
+    const searchable = isSearchProvider(provider);
+    return {
+      label: config.label,
+      description: config.description,
+      content,
+      tokens: estimateStringTokens(content),
+      maxTokens: config.maxTokens,
+      writable: isWritableProvider(provider) || (searchable && !!provider?.set),
+      isSearchable: searchable
+    };
   }
 
   /**
@@ -205,33 +193,7 @@ export class ContextBlocks {
 
     const config = this.withDefaultProvider(input);
     this.configs.push(config);
-
-    if (config.provider?.init) {
-      config.provider.init(config.label);
-    }
-
-    const content = config.provider
-      ? ((await config.provider.get()) ?? "")
-      : "";
-
-    const searchable = config.provider
-      ? isSearchProvider(config.provider)
-      : false;
-    const writable = config.provider
-      ? isWritableProvider(config.provider) ||
-        (searchable && !!(config.provider as SearchProvider).set)
-      : false;
-
-    const block: ContextBlock = {
-      label: config.label,
-      description: config.description,
-      content,
-      tokens: estimateStringTokens(content),
-      maxTokens: config.maxTokens,
-      writable,
-      isSearchable: searchable
-    };
-
+    const block = await this.loadBlock(config);
     this.blocks.set(config.label, block);
     return block;
   }
@@ -315,10 +277,8 @@ export class ContextBlocks {
     return block;
   }
 
-  /**
-   * Index a search entry within a searchable block.
-   */
-  async setSearchEntry(
+  /** Index a search entry within a searchable block. */
+  private async setSearchEntry(
     label: string,
     key: string,
     content: string
@@ -344,10 +304,11 @@ export class ContextBlocks {
     existing.tokens = estimateStringTokens(existing.content);
   }
 
-  /**
-   * Search a searchable block.
-   */
-  async searchContext(label: string, query: string): Promise<string | null> {
+  /** Search a searchable block. */
+  private async searchContext(
+    label: string,
+    query: string
+  ): Promise<string | null> {
     if (!this.loaded) await this.load();
     const config = this.configs.find((c) => c.label === label);
 
@@ -372,32 +333,6 @@ export class ContextBlocks {
       label,
       existing.content + (needsSep ? "\n" : "") + content
     );
-  }
-
-  /**
-   * Get the system prompt string with context blocks.
-   *
-   * Returns a frozen snapshot: first call renders and caches,
-   * subsequent calls return the same string (preserves LLM prefix cache).
-   * Call refreshSnapshot() to re-render after block changes take effect.
-   */
-  toSystemPrompt(): string {
-    if (!this.loaded) {
-      throw new Error("Context blocks not loaded. Call load() first.");
-    }
-
-    if (this.snapshot !== null) {
-      return this.snapshot;
-    }
-
-    return this.captureSnapshot();
-  }
-
-  /**
-   * Force re-render the snapshot from current block state.
-   */
-  refreshSnapshot(): string {
-    return this.captureSnapshot();
   }
 
   private renderPrompt(): string {
@@ -425,94 +360,37 @@ export class ContextBlocks {
     return parts.join("\n\n");
   }
 
-  private captureSnapshot(): string {
-    this.snapshot = this.renderPrompt();
-    return this.snapshot;
-  }
-
-  /**
-   * Get writable blocks (for tool description).
-   */
-  getWritableBlocks(): ContextBlock[] {
-    return Array.from(this.blocks.values()).filter((b) => b.writable);
-  }
-
-  /**
-   * Check if any search providers are registered.
-   */
-  hasSearchBlocks(): boolean {
-    return Array.from(this.blocks.values()).some((b) => b.isSearchable);
-  }
-
-  /**
-   * Get searchable block labels.
-   */
-  getSearchLabels(): string[] {
-    return Array.from(this.blocks.values())
-      .filter((b) => b.isSearchable)
-      .map((b) => b.label);
-  }
-
   // ── Public API ──────────────────────────────────────────────────
 
   /**
-   * Return the cached system prompt. If no cached prompt exists,
-   * loads blocks from providers, renders, and persists to the store.
-   * Subsequent calls return the stored value without re-rendering.
+   * The frozen system prompt. The first call renders the blocks and stores
+   * the result; every later call returns that same string, so the model
+   * provider's prefix cache stays warm. Block edits do not change it until
+   * `refreshSystemPrompt()` is called.
    */
   async freezeSystemPrompt(): Promise<string> {
     if (this.promptStore) {
       const stored = await this.promptStore.get();
       if (stored !== null) return stored;
     }
+    if (this.snapshot !== null) return this.snapshot;
 
     if (!this.loaded) await this.load();
-    const prompt = this.toSystemPrompt();
-
-    if (this.promptStore) {
-      await this.promptStore.set(prompt);
-    }
-
-    return prompt;
+    this.snapshot = this.renderPrompt();
+    await this.promptStore?.set(this.snapshot);
+    return this.snapshot;
   }
 
   /**
-   * Return the prompt text used for token estimation without persisting a new
-   * frozen prompt to the prompt store.
-   *
-   * This still reads an existing cached prompt when present, so estimates match
-   * the prompt that inference would reuse. If no cached prompt exists, it loads
-   * providers and renders the current blocks without freezing the snapshot.
-   */
-  async getSystemPromptForEstimate(): Promise<string> {
-    if (this.snapshot !== null) {
-      return this.snapshot;
-    }
-
-    if (this.promptStore) {
-      const stored = await this.promptStore.get();
-      if (stored !== null) return stored;
-    }
-
-    if (!this.loaded) await this.load();
-    return this.renderPrompt();
-  }
-
-  /**
-   * Force reload blocks from providers, re-render the system prompt,
-   * and persist to the store. Use this after block content has changed
-   * or to invalidate the cached prompt.
+   * Reload every block from its provider, re-render the system prompt, and
+   * persist it. Use this after block content has changed.
    */
   async refreshSystemPrompt(): Promise<string> {
     this.loaded = false;
     await this.load();
-    const prompt = this.refreshSnapshot();
-
-    if (this.promptStore) {
-      await this.promptStore.set(prompt);
-    }
-
-    return prompt;
+    this.snapshot = this.renderPrompt();
+    await this.promptStore?.set(this.snapshot);
+    return this.snapshot;
   }
 
   /**
@@ -525,8 +403,11 @@ export class ContextBlocks {
   async tools(): Promise<ToolSet> {
     if (!this.loaded) await this.load();
 
-    const writable = this.getWritableBlocks();
-    const hasSearch = this.hasSearchBlocks();
+    const blocks = Array.from(this.blocks.values());
+    const writable = blocks.filter((b) => b.writable);
+    const searchLabels = blocks
+      .filter((b) => b.isSearchable)
+      .map((b) => b.label);
     const toolSet: ToolSet = {};
 
     // ── set_context ──────────────────────────────────────────────
@@ -632,9 +513,7 @@ export class ContextBlocks {
 
     // ── search_context ────────────────────────────────────────────
 
-    if (hasSearch) {
-      const searchLabels = this.getSearchLabels();
-
+    if (searchLabels.length > 0) {
       toolSet.search_context = {
         description:
           "Search for information in a searchable context block. " +

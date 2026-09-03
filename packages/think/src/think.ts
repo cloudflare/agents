@@ -2865,8 +2865,7 @@ export class Think<
 
   /** Durable conversation history installed on this Agent's Lifecycle. */
   readonly sessions = new Sessions({
-    reservedMetadataKeys: RESERVED_MESSAGE_METADATA_KEYS,
-    searchIndexing: true
+    reservedMetadataKeys: RESERVED_MESSAGE_METADATA_KEYS
   });
 
   /**
