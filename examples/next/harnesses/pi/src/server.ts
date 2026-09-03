@@ -222,6 +222,27 @@ const skills = fromManifest({
   ]
 });
 
+type ToolCallEvent = { readonly toolName: string; readonly args: unknown };
+
+function toolCallOf(event: unknown): ToolCallEvent | undefined {
+  return typeof event === "object" &&
+    event !== null &&
+    "toolName" in event &&
+    typeof event.toolName === "string" &&
+    "args" in event
+    ? { toolName: event.toolName, args: event.args }
+    : undefined;
+}
+
+function memoryKeyOf(call: ToolCallEvent): string {
+  return typeof call.args === "object" &&
+    call.args !== null &&
+    "key" in call.args &&
+    typeof call.args.key === "string"
+    ? call.args.key
+    : "";
+}
+
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
   readonly tasks = new Tasks();
@@ -244,18 +265,12 @@ export class PiAgent extends DurableObject<Env> {
       keepRecentTokens: 12000
     },
     configure: (hooks) => {
+      // Pi hooks are process-local and re-registered on every wake.
       hooks.on("before_tool", (event) => {
+        const call = toolCallOf(event);
         if (
-          typeof event === "object" &&
-          event !== null &&
-          "toolName" in event &&
-          event.toolName === "remember" &&
-          "args" in event &&
-          typeof event.args === "object" &&
-          event.args !== null &&
-          "key" in event.args &&
-          typeof event.args.key === "string" &&
-          event.args.key.startsWith("_")
+          call?.toolName === "remember" &&
+          memoryKeyOf(call).startsWith("_")
         ) {
           return { block: { reason: "Memory names cannot start with _." } };
         }

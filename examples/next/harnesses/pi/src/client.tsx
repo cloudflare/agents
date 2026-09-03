@@ -1,34 +1,59 @@
 import {
   Badge,
   Button,
+  Empty,
+  InputArea,
   PoweredByCloudflare,
-  Surface,
-  Text,
-  Textarea
+  Surface
 } from "@cloudflare/kumo";
 import {
   BrainIcon,
   CalculatorIcon,
+  CheckCircleIcon,
   ClockIcon,
   DiceFiveIcon,
-  InfoIcon,
+  GearIcon,
   MoonIcon,
   PaperPlaneRightIcon,
   PlusIcon,
+  StopIcon,
   SunIcon,
-  WrenchIcon
+  XCircleIcon
 } from "@phosphor-icons/react";
 import { code } from "@streamdown/code";
 import { useEffect, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
 import type { TranscriptMessage, TranscriptPart } from "./protocol";
 import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
-const SESSION_KEY = "pi-harness-playground-session";
+const SESSION_KEY = "pi-harness-session";
 const MODEL = "@cf/moonshotai/kimi-k2.7-code";
+
+const SUGGESTIONS = [
+  {
+    icon: <DiceFiveIcon size={15} />,
+    label: "Roll 4d12",
+    value: "Roll four 12-sided dice and tell me the total."
+  },
+  {
+    icon: <CalculatorIcon size={15} />,
+    label: "Calculate 47 × 19",
+    value: "Use the calculator to multiply 47 by 19."
+  },
+  {
+    icon: <BrainIcon size={15} />,
+    label: "Remember a fact",
+    value: "Remember that my favourite launch snack is stroopwafels."
+  },
+  {
+    icon: <ClockIcon size={15} />,
+    label: "What time is it?",
+    value: "Use a tool to tell me the current UTC time."
+  }
+] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
 
 function getSession(): string {
   const existing = localStorage.getItem(SESSION_KEY);
@@ -60,139 +85,235 @@ function ModeToggle() {
   );
 }
 
-function ToolPart({
-  part
-}: {
-  part: Extract<TranscriptPart, { type: "tool-call" }>;
-}) {
+function JsonBlock({ value }: { value: unknown }) {
   return (
-    <div className="tool-card">
-      <div className="flex items-center gap-2 text-xs font-medium">
-        <WrenchIcon size={14} />
-        {part.name}
-      </div>
-      <pre>{JSON.stringify(part.arguments, null, 2)}</pre>
-    </div>
+    <pre className="max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap break-words">
+      {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+    </pre>
   );
 }
 
-function ToolResult({
+function ToolCallCard({
+  part,
+  running
+}: {
+  part: Extract<TranscriptPart, { type: "tool-call" }>;
+  running: boolean;
+}) {
+  return (
+    <details className="rounded-xl border border-kumo-line bg-kumo-base">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
+        {running ? (
+          <GearIcon size={14} className="animate-spin text-kumo-inactive" />
+        ) : (
+          <CheckCircleIcon size={14} className="text-kumo-success" />
+        )}
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold">
+          {part.name}
+        </span>
+        <Badge variant="secondary">{running ? "Running" : "Called"}</Badge>
+      </summary>
+      <div className="border-t border-kumo-line px-3 py-3">
+        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+          Arguments
+        </p>
+        <JsonBlock value={part.arguments} />
+      </div>
+    </details>
+  );
+}
+
+function ToolResultCard({
   part
 }: {
   part: Extract<TranscriptPart, { type: "tool-result" }>;
 }) {
+  const text = part.content
+    .filter((content) => content.type === "text")
+    .map((content) => (content.type === "text" ? content.text : ""))
+    .join("\n");
+  const images = part.content.filter((content) => content.type === "image");
   return (
-    <div className={`tool-card ${part.error ? "tool-error" : ""}`}>
-      <div className="flex items-center gap-2 text-xs font-medium">
-        <WrenchIcon size={14} />
-        {part.name} result
-      </div>
-      {part.content.map((content, index) =>
-        content.type === "text" ? (
-          <p key={index}>{content.text}</p>
+    <details className="rounded-xl border border-kumo-line bg-kumo-base">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
+        {part.error ? (
+          <XCircleIcon size={14} className="text-kumo-danger" />
         ) : (
-          <img
-            key={index}
-            src={`data:${content.mimeType};base64,${content.data}`}
-            alt={`${part.name} output`}
-          />
-        )
-      )}
-      {part.details !== undefined ? (
-        <details>
-          <summary>Details</summary>
-          <pre>{JSON.stringify(part.details, null, 2)}</pre>
+          <CheckCircleIcon size={14} className="text-kumo-success" />
+        )}
+        <span className="min-w-0 flex-1 truncate text-xs">
+          <span className="font-semibold">{part.name}</span>
+          {text ? <span className="ml-2 text-kumo-subtle">{text}</span> : null}
+        </span>
+        <Badge variant={part.error ? "destructive" : "secondary"}>
+          {part.error ? "Failed" : "Done"}
+        </Badge>
+      </summary>
+      <div className="space-y-3 border-t border-kumo-line px-3 py-3">
+        {text ? (
+          <div>
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+              Result
+            </p>
+            <JsonBlock value={text} />
+          </div>
+        ) : null}
+        {images.map((image, index) =>
+          image.type === "image" ? (
+            <img
+              key={index}
+              src={`data:${image.mimeType};base64,${image.data}`}
+              alt={`${part.name} output`}
+              className="max-w-full rounded-lg"
+            />
+          ) : null
+        )}
+        {part.details !== undefined ? (
+          <div>
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+              Details
+            </p>
+            <JsonBlock value={part.details} />
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function AssistantPart({
+  part,
+  running
+}: {
+  part: TranscriptPart;
+  running: boolean;
+}) {
+  switch (part.type) {
+    case "text":
+      return (
+        <Streamdown
+          className="sd-theme text-sm leading-6"
+          plugins={{ code }}
+          controls={false}
+        >
+          {part.text}
+        </Streamdown>
+      );
+    case "thinking":
+      return (
+        <details className="rounded-xl border border-kumo-line px-3 py-2">
+          <summary className="cursor-pointer list-none text-xs font-semibold text-kumo-subtle">
+            Thinking
+          </summary>
+          <p className="mt-2 whitespace-pre-wrap text-xs italic leading-5 text-kumo-subtle">
+            {part.text}
+          </p>
         </details>
-      ) : null}
+      );
+    case "tool-call":
+      return <ToolCallCard part={part} running={running} />;
+    case "tool-result":
+      return <ToolResultCard part={part} />;
+    case "image":
+      return (
+        <img
+          src={`data:${part.mimeType};base64,${part.data}`}
+          alt=""
+          className="max-w-full rounded-lg"
+        />
+      );
+  }
+}
+
+function UserMessage({ message }: { message: TranscriptMessage }) {
+  const text = message.parts
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("");
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse">
+        {text}
+      </div>
     </div>
   );
 }
 
-function MessagePart({
-  part,
-  assistant
-}: {
-  part: TranscriptPart;
-  assistant: boolean;
-}) {
-  switch (part.type) {
-    case "text":
-      return assistant ? (
-        <Streamdown className="sd-theme" plugins={{ code }} controls={false}>
-          {part.text}
-        </Streamdown>
-      ) : (
-        <p className="whitespace-pre-wrap">{part.text}</p>
-      );
-    case "thinking":
-      return (
-        <details className="thinking">
-          <summary>Thinking</summary>
-          <p className="whitespace-pre-wrap">{part.text}</p>
-        </details>
-      );
-    case "tool-call":
-      return <ToolPart part={part} />;
-    case "tool-result":
-      return <ToolResult part={part} />;
-  }
-}
-
-function Message({
+function AssistantMessage({
   message,
-  streaming = false
+  streaming = false,
+  runningTools
 }: {
   message: TranscriptMessage;
   streaming?: boolean;
+  runningTools: readonly string[];
 }) {
-  const label =
-    message.role === "user"
-      ? "You"
-      : message.role === "assistant"
-        ? "Pi"
-        : "Tool";
   return (
-    <article className={`message message-${message.role}`}>
-      <div className="message-label">{label}</div>
-      <div className="space-y-3">
+    <div className="flex items-start gap-3">
+      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
+        <BrainIcon size={17} weight="bold" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-3">
         {message.parts.map((part, index) => (
-          <MessagePart
+          <AssistantPart
             key={`${message.id}-${index}`}
             part={part}
-            assistant={message.role === "assistant"}
+            running={
+              streaming &&
+              part.type === "tool-call" &&
+              runningTools.includes(part.name)
+            }
           />
         ))}
         {streaming ? <span className="streaming-cursor" /> : null}
         {message.error ? (
-          <p className="text-kumo-danger">{message.error}</p>
+          <div
+            role="alert"
+            className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
+          >
+            {message.error}
+          </div>
         ) : null}
       </div>
-    </article>
+    </div>
   );
 }
 
-const prompts = [
-  {
-    icon: <DiceFiveIcon size={15} />,
-    label: "Roll 4d12 and total them",
-    value: "Roll four 12-sided dice and tell me the total."
-  },
-  {
-    icon: <CalculatorIcon size={15} />,
-    label: "Calculate 47 × 19",
-    value: "Use the calculator to multiply 47 by 19."
-  },
-  {
-    icon: <BrainIcon size={15} />,
-    label: "Remember a fact",
-    value: "Remember that my favourite launch snack is stroopwafels."
-  },
-  {
-    icon: <ClockIcon size={15} />,
-    label: "What time is it?",
-    value: "Use a tool to tell me the current UTC time."
+function ToolMessage({ message }: { message: TranscriptMessage }) {
+  return (
+    <div className="ml-11 space-y-2">
+      {message.parts.map((part, index) =>
+        part.type === "tool-result" ? (
+          <ToolResultCard key={`${message.id}-${index}`} part={part} />
+        ) : null
+      )}
+    </div>
+  );
+}
+
+function Message({
+  message,
+  streaming = false,
+  runningTools
+}: {
+  message: TranscriptMessage;
+  streaming?: boolean;
+  runningTools: readonly string[];
+}) {
+  switch (message.role) {
+    case "user":
+      return <UserMessage message={message} />;
+    case "assistant":
+      return (
+        <AssistantMessage
+          message={message}
+          streaming={streaming}
+          runningTools={runningTools}
+        />
+      );
+    case "tool":
+      return <ToolMessage message={message} />;
   }
-] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
+}
 
 function App() {
   const [session, setSession] = useState(getSession);
@@ -211,12 +332,13 @@ function App() {
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, live]);
+  }, [messages, live, running]);
 
-  const submit = (event?: FormEvent) => {
-    event?.preventDefault();
+  const connected = status === "open";
+
+  const submit = () => {
     const text = prompt.trim();
-    if (!text || running) return;
+    if (!text || running || !connected) return;
     setPrompt("");
     submitPrompt(text);
   };
@@ -227,155 +349,173 @@ function App() {
     setSession(next);
   };
 
+  const empty = messages.length === 0 && !live && !running;
+
   return (
     <div className="flex h-dvh flex-col bg-kumo-elevated text-kumo-default">
-      <header className="shrink-0 border-b border-kumo-line bg-kumo-base px-5 py-4">
-        <div className="mx-auto flex max-w-4xl items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-kumo-accent p-2 text-white">
-              <BrainIcon size={21} weight="bold" />
+      <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
+        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-5 py-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
+              <BrainIcon size={20} weight="bold" />
             </div>
-            <div>
-              <h1 className="text-lg font-semibold">Pi harness playground</h1>
-              <p className="text-xs text-kumo-subtle">
-                Durable Object + Lifecycle + pi AgentHarness
+            <div className="min-w-0">
+              <h1 className="truncate text-base font-semibold">Pi harness</h1>
+              <p className="truncate text-xs text-kumo-subtle">
+                Session <code>{session.slice(0, 8)}</code>
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary">{MODEL.split("/").at(-1)}</Badge>
-            <Badge variant={status === "open" ? "success" : "secondary"}>
-              {status === "open"
-                ? "live"
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Badge variant="secondary" className="hidden sm:inline-flex">
+              {MODEL.split("/").at(-1)}
+            </Badge>
+            <Badge variant={connected ? "success" : "secondary"}>
+              {connected
+                ? "Live"
                 : status === "connecting"
-                  ? "connecting…"
-                  : "reconnecting…"}
+                  ? "Connecting"
+                  : "Reconnecting"}
             </Badge>
             <Button
               variant="ghost"
-              size="sm"
-              icon={<PlusIcon size={15} />}
+              shape="square"
+              aria-label="New session"
               onClick={newSession}
-            >
-              New session
-            </Button>
+              disabled={running}
+              icon={<PlusIcon size={16} />}
+            />
             <ModeToggle />
           </div>
         </div>
       </header>
 
-      {/* Only this column scrolls; the header above and the input bar below
-          stay pinned to the viewport regardless of transcript length. */}
-      <main className="mx-auto flex w-full min-w-0 max-w-4xl flex-1 flex-col gap-4 overflow-hidden px-5 py-5">
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
-          <Surface className="rounded-xl p-4 ring ring-kumo-line">
-            <div className="flex gap-3">
-              <InfoIcon
-                size={20}
-                weight="bold"
-                className="mt-0.5 shrink-0 text-kumo-accent"
+      <main className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
+          {empty ? (
+            <div className="py-10 sm:py-16">
+              <Empty
+                icon={<BrainIcon size={32} />}
+                title="Ask Pi something that needs a tool"
+                description="Every model call and tool result is persisted in this Durable Object. Reload mid-turn and the reply resumes from the durable stream."
               />
-              <div>
-                <Text size="sm" bold>
-                  A real pi session on Workers AI
-                </Text>
-                <span className="mt-1 block">
-                  <Text size="xs" variant="secondary">
-                    Ask Pi to calculate, roll dice, read UTC time, or remember
-                    and recall facts. Model calls and every tool intent/result
-                    are persisted in the Durable Object.
-                  </Text>
-                </span>
+              <div className="mt-6 flex flex-wrap justify-center gap-2">
+                {SUGGESTIONS.map((suggestion) => (
+                  <Button
+                    key={suggestion.label}
+                    variant="secondary"
+                    size="sm"
+                    icon={suggestion.icon}
+                    disabled={!connected}
+                    onClick={() => setPrompt(suggestion.value)}
+                  >
+                    {suggestion.label}
+                  </Button>
+                ))}
               </div>
             </div>
-          </Surface>
+          ) : null}
 
-          <div className="flex flex-wrap gap-2">
-            {prompts.map((example) => (
-              <Button
-                key={example.label}
-                variant="secondary"
-                size="sm"
-                icon={example.icon}
-                disabled={running}
-                onClick={() => setPrompt(example.value)}
-              >
-                {example.label}
-              </Button>
-            ))}
-          </div>
+          {messages.map((message) => (
+            <Message
+              key={message.id}
+              message={message}
+              runningTools={runningTools}
+            />
+          ))}
 
-          <Surface className="min-h-72 rounded-xl p-4 ring ring-kumo-line">
-            {messages.length === 0 && !live ? (
-              <div className="flex min-h-64 items-center justify-center text-center text-sm text-kumo-subtle">
-                Pick a prompt or ask Pi something that needs a tool.
+          {live ? (
+            <Message message={live} streaming runningTools={runningTools} />
+          ) : null}
+
+          {running && !live ? (
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
+                <BrainIcon size={17} weight="bold" />
               </div>
-            ) : (
-              <div className="space-y-4">
-                {messages.map((message) => (
-                  <Message key={message.id} message={message} />
-                ))}
-                {live ? <Message message={live} streaming /> : null}
-              </div>
-            )}
-            {running ? (
-              <div className="mt-4 flex items-center gap-2 text-sm text-kumo-subtle">
-                <span className="loading-dot" />
-                {runningTools.length > 0
-                  ? `Running ${runningTools.join(", ")}…`
-                  : "Pi is running. Output streams in as it's generated."}
-                <Button variant="ghost" size="sm" onClick={abort}>
-                  Stop
-                </Button>
-              </div>
-            ) : null}
-            <div ref={endRef} />
-          </Surface>
+              <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
+                <div className="flex items-center gap-2 text-sm text-kumo-subtle">
+                  <GearIcon size={15} className="animate-spin" />
+                  {runningTools.length > 0
+                    ? `Running ${runningTools.join(", ")}`
+                    : "Waking the durable operation"}
+                </div>
+              </Surface>
+            </div>
+          ) : null}
 
           {error ? (
-            <Surface className="rounded-xl p-3 text-sm text-kumo-danger ring ring-kumo-danger">
+            <div
+              role="alert"
+              className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
+            >
               {error}
-            </Surface>
+            </div>
           ) : null}
-        </div>
 
+          <div ref={endRef} />
+        </div>
+      </main>
+
+      <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
         <form
-          onSubmit={(event) => submit(event)}
-          className="flex shrink-0 items-end gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+          className="mx-auto max-w-3xl px-5 pt-4"
         >
-          <label className="min-w-0 flex-1" htmlFor="prompt">
-            <span className="sr-only">Message Pi</span>
-            <Textarea
-              id="prompt"
+          <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
+            <InputArea
               value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Ask Pi to use a tool…"
-              className="min-h-20 w-full resize-y"
+              onValueChange={setPrompt}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
                   submit();
                 }
               }}
+              placeholder="Ask Pi to use a tool"
+              aria-label="Message Pi"
+              disabled={!connected || running}
+              rows={2}
+              className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
             />
-          </label>
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={running || prompt.trim() === ""}
-            icon={<PaperPlaneRightIcon size={16} />}
-          >
-            Send
-          </Button>
+            {running ? (
+              <Button
+                type="button"
+                variant="secondary"
+                shape="square"
+                aria-label="Stop"
+                onClick={abort}
+                icon={<StopIcon size={18} weight="fill" />}
+                className="mb-0.5"
+              />
+            ) : (
+              <Button
+                type="submit"
+                variant="primary"
+                shape="square"
+                aria-label="Send message"
+                disabled={!connected || prompt.trim() === ""}
+                icon={<PaperPlaneRightIcon size={18} />}
+                className="mb-0.5"
+              />
+            )}
+          </div>
         </form>
-
-        <footer className="flex shrink-0 items-center justify-between gap-3 pb-2 text-xs text-kumo-subtle">
-          <span>Session {session.slice(0, 8)}</span>
-          <PoweredByCloudflare />
-        </footer>
-      </main>
+        <div className="flex items-center justify-center gap-2 px-5 py-3">
+          <span className="hidden text-[10px] text-kumo-inactive sm:inline">
+            Enter to send · Shift+Enter for a new line
+          </span>
+          <span className="hidden text-kumo-line sm:inline">·</span>
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
+        </div>
+      </div>
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const root = document.getElementById("root");
+if (!root) throw new Error("Missing #root element");
+createRoot(root).render(<App />);

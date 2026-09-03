@@ -5,70 +5,84 @@ Status: proposed
 ## The problem
 
 Pi's `AgentHarness` has the operation state machine we need for durable model
-and tool execution. It does not own platform storage or scheduling. Rebuilding
-its transcript, tool-intent, and crash-recovery logic in the Agents SDK would
-create two competing authorities.
+and tool execution: transcript, tool intent and settlement, retries,
+cancellation, and crash recovery. It does not own platform storage, scheduling,
+or client transport. Rebuilding its logic in the Agents SDK would create two
+competing authorities for the same effects.
 
 ## The proposal
 
-Export `PiHarness` from `agents/harness` as a Lifecycle capability:
+Prove the composition as an example first. `examples/next/harnesses/pi` hosts
+pi's harness on a plain Durable Object using only the SDK's existing durable
+primitives:
 
 ```ts
-readonly pi = new PiHarness(config);
-readonly lifecycle = Lifecycle.install(this).use(this.sessions).use(this.pi);
+readonly tasks = new Tasks();
+readonly streams = new Streams();
+readonly harness = new PiHarness({ models, model, tasks, streams, tools });
+readonly webSockets = new WebSockets(this.harness.webSockets());
+readonly lifecycle = Lifecycle.install(this)
+  .use(this.tasks)
+  .use(this.streams)
+  .use(this.webSockets)
+  .use(this.harness);
 ```
 
-Each Durable Object owns one pi Session, and that Session is stored in the
-`agents/sessions` capability the host already composes: `PiHarness` implements
-pi's `Storage` contract over the `cf_agents_session_*` tables rather than a
-vendored SQLite backend of its own. Entries and the usage ledger are rows of
-`cf_agents_session_messages` (its `type` column carries pi's entry kind);
-values and list elements are keys in `cf_agents_session_config`. Payloads that
-would otherwise sit inline — prompt and tool images — ride the capability's
-attachment offload path. There is one message store per object: no second
-schema, no new table, and no index.
+`PiHarness` is example-local code. Nothing in this RFC adds an export to the
+`agents` package.
 
-- **Alternative considered.** Keep pi's `@earendil-works/pi-session-backend-sqlite-node`
-  behind a Durable Object SQLite shim (the v0.1 implementation): 7 tables,
-  6 indexes, and a transcript no other capability can read. Rejected once
-  `agents/sessions` had the same tree-structured entry model, because two
-  message stores in one object is the cost, and pi ships a runner-independent
-  conformance suite that makes the adapter's correctness checkable.
+Responsibilities are split by authority:
 
-Pi remains authoritative for operation acceptance, transcript state, provider
-attempts, tool intent and settlement, retry waits, and recovery. Lifecycle jobs
-only provide durable wakes. `submit()` writes the wake before asking pi to
-accept the operation, so a crash cannot leave accepted work without a wake.
-`prompt()` is the waiting convenience over the same path.
+- **Pi** owns operation acceptance, transcript state, provider attempts, tool
+  intent and settlement, retry waits, and recovery. Its session is stored in
+  this object's SQLite database through a small adapter that namespaces pi's
+  tables under `cf_agents_pi_*`.
+- **Tasks** delivers durable wakes. Each lane's work is one Task run whose
+  journaled steps drive pi to settlement and replay after eviction. Tasks
+  never re-executes a model or tool effect itself; pi's session is the
+  recovery evidence.
+- **Streams** is the durable output log. Every operation's live events land in
+  one stream, batched per chunk, so a client replays then tails from its
+  cursor.
+- **WebSockets** serves the browser protocol: a lane snapshot on connect,
+  `subscribe` to replay-then-tail an operation stream, and `submit`, `abort`,
+  and `steer` to drive it.
+- **Skills** from `agents/skills` become pi resources plus `activate_skill`
+  and `read_skill_resource` tools, the same tools `@cloudflare/think` offers.
 
-Tool code is process-local. `config.tools` may be a callback and is resolved
-before each operation that owns its lane. `config.configure` rebuilds pi hooks
-after each isolate wake. Tool functions are never stored.
+Submission is durable before the caller sees a receipt: `submit()` writes an
+intake row and enqueues the lane driver before pi accepts the operation, so a
+crash cannot leave accepted work without a wake.
 
-The v0.1 wrapper supports string prompt operations. `prompt()` returns the
-operation outcome and display-ready messages, while `getMessages()` reads that
-stable projection without another model turn. Raw entries and terminal results
-remain available through pi-aligned `findEntries()` and `getResult()` methods.
-The Workers AI adapter is
-exported separately from `agents/providers/pi`, keeping the harness
-provider-independent. More operation kinds and a client transport can be added
-after this path has real users.
+## Known costs
 
-Until pi publishes the completed harness, the build pins
-`earendil-works/pi@c4b0e35a`. The required MIT-licensed runtime is bundled into
-`agents/harness`; it is not installed by SDK consumers.
+- The pi session adapter carries pi's own schema: seven tables and their
+  indexes. Once `agents/sessions` (#2196) lands, pi's `Storage` contract
+  should be implemented over the sessions tables instead, leaving one message
+  store per object.
+- The harness uses the framework-internal Tasks apertures (`register` with a
+  reserved name and the queued enqueue). A public way for a capability to add
+  a driver to host-owned Tasks is still to be designed.
+- The build pins an unreleased pi commit (`c4b0e35a`) as vendored archives.
+  Replace them with published versions when a pi release contains the
+  completed harness API.
+
+## Before this becomes a package export
+
+- `agents/sessions` merged, and pi's session stored there.
+- A pi release with the harness API, so no vendored archives ship.
+- Public Tasks support for capability-owned drivers.
+- Eviction and recovery tests promoted from the example into the package.
 
 ## Alternatives
 
-- Reimplement execution on `Tasks`. Rejected because Tasks and pi would both
-  own replay and effect recovery. Lifecycle jobs are enough for wake delivery.
-- Wrap pi's older in-memory `Agent`. Rejected because it would require another
+- Reimplement execution on `Tasks` steps. Rejected because Tasks and pi would
+  both own replay and effect recovery.
+- Wrap pi's older in-memory `Agent`. Rejected because it needs another
   transcript and recovery implementation.
-- Wait for the next pi release. Rejected for this experimental v0.1; replace the
-  vendored build when a release contains the completed harness.
-- Keep pi's vendored SQLite session backend. Rejected: see the storage note
-  above.
+- Ship `agents/harness` now. Rejected until the items above land; the example
+  lets the composition get real use without committing the package API.
 
 ## The decision
 
-Pending experience from the v0.1 implementation and eviction tests.
+Pending experience from the example.

@@ -24,8 +24,7 @@ import {
   LifecycleCapability,
   type CapabilityStartContext,
   type LifecycleJobContext,
-  type LifecycleJobOutcome,
-  type LifecycleRouteContext
+  type LifecycleJobOutcome
 } from "agents/lifecycle";
 import type { Streams } from "agents/streams";
 import type { Tasks, TaskStep } from "agents/tasks";
@@ -54,12 +53,10 @@ import type {
   PiHarnessConfig,
   PiHookRegistry,
   PiJson,
-  PiLane,
   PiLaneOptions,
   PiLaneSnapshot,
   PiMessage,
   PiMessageInput,
-  PiModelIdentity,
   PiOperationKind,
   PiOperationRequest,
   PiOperationResult,
@@ -71,7 +68,6 @@ import type {
   PiResources,
   PiSubmissionReceipt,
   PiSubmitOptions,
-  PiThinkingLevel,
   PiTool,
   PiTranscriptOptions
 } from "./types";
@@ -392,31 +388,6 @@ export class PiHarness<
     }
   }
 
-  /** Handle routed result and inspection calls. */
-  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
-    const message = context.payload;
-    if (!isRecord(message) || typeof message.type !== "string") {
-      throw new TypeError("Invalid PiHarness route message");
-    }
-    switch (message.type) {
-      case "result":
-        if (
-          typeof message.operationId !== "string" ||
-          typeof message.lane !== "string"
-        ) {
-          throw new TypeError("Invalid PiHarness result route");
-        }
-        return this.getResult(message.operationId, { lane: message.lane });
-      case "snapshot":
-        if (typeof message.lane !== "string") {
-          throw new TypeError("Invalid PiHarness snapshot route");
-        }
-        return this.snapshot({ lane: message.lane });
-      default:
-        throw new TypeError(`Unknown PiHarness route ${message.type}`);
-    }
-  }
-
   /** Close process-local pi resources without changing durable state. */
   async dispose(): Promise<void> {
     const attaching = this.#attaching;
@@ -550,77 +521,20 @@ export class PiHarness<
     return { entryId: queued.value.entryId };
   }
 
-  /** Queue a message the running operation reads once it would otherwise end. */
-  async followUp(
-    message: PiMessageInput,
-    options: PiLaneOptions = {}
-  ): Promise<PiQueueReceipt> {
-    const { text, images } = messageInput(message);
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    const queued = await upstream.followUp(text, images, context);
-    if (!queued.ok) throw queued.error;
-    return { entryId: queued.value.entryId };
-  }
-
-  /** Queue a message for the next operation accepted on the lane. */
-  async nextRun(
-    message: PiMessageInput,
-    options: PiLaneOptions = {}
-  ): Promise<PiQueueReceipt> {
-    const { text, images } = messageInput(message);
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    const queued = await upstream.nextRun(text, images, context);
-    if (!queued.ok) throw queued.error;
-    return { entryId: queued.value.entryId };
-  }
-
-  /** Remove a queued message that has not been consumed. */
-  async cancelQueued(
-    entryId: string,
-    options: PiLaneOptions = {}
-  ): Promise<"cancelled" | "already_consumed" | "not_found"> {
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    const cancelled = await upstream.cancelQueued(entryId, context);
-    if (!cancelled.ok) throw cancelled.error;
-    return cancelled.value.kind;
-  }
-
   // ── Reads ────────────────────────────────────────────────────────────────
 
   /** Read one lane's durable transcript as display-ready chat messages. */
   async getMessages(options: PiTranscriptOptions = {}): Promise<PiMessage[]> {
-    const entries = await this.findEntries({
-      ...options,
-      order: options.order ?? "oldestFirst"
-    });
-    // SAFETY: findEntries() returns pi Entry values; the unknown return type
-    // keeps the pinned upstream shape out of the public declarations.
-    return projectMessages(entries as Entry[]);
-  }
-
-  /** Read one lane's raw durable entries. */
-  async findEntries(options: PiTranscriptOptions = {}): Promise<unknown[]> {
     const context = asUpstreamContext(options.context);
     const upstream = await this.#upstreamLane(
       options.lane ?? this.#defaultLane,
       context
     );
-    return upstream.findEntries(
-      { order: options.order ?? "newestFirst" },
+    const entries: Entry[] = await upstream.findEntries(
+      { order: options.order ?? "oldestFirst" },
       context
     );
+    return projectMessages(entries);
   }
 
   /** Read one immutable terminal operation result. */
@@ -675,54 +589,6 @@ export class PiHarness<
   /** The durable stream id of one operation's live events. */
   streamId(operationId: string, lane = this.#defaultLane): string {
     return `pi:${lane}:${operationId}`;
-  }
-
-  /** Get or create a pi lane. */
-  async lane(name = this.#defaultLane, context?: PiContext): Promise<PiLane> {
-    const upstream = await this.#upstreamLane(name, asUpstreamContext(context));
-    // SAFETY: PiLane is the narrow public projection of AgentLane.
-    return upstream as PiLane;
-  }
-
-  // ── Lane configuration ───────────────────────────────────────────────────
-
-  /** Durably switch the lane's model for its next generation. */
-  async setModel(
-    model: PiModelIdentity,
-    options: PiLaneOptions = {}
-  ): Promise<void> {
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    await upstream.setModel(model, context);
-  }
-
-  /** Durably switch the lane's thinking level for its next generation. */
-  async setThinkingLevel(
-    level: PiThinkingLevel,
-    options: PiLaneOptions = {}
-  ): Promise<void> {
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    await upstream.setThinkingLevel(level, context);
-  }
-
-  /** Durably restrict the tools offered to the lane's next generation. */
-  async setActiveTools(
-    names: readonly string[],
-    options: PiLaneOptions = {}
-  ): Promise<void> {
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    await upstream.setActiveTools([...names], context);
   }
 
   // ── Live ─────────────────────────────────────────────────────────────────
@@ -1310,16 +1176,9 @@ export class PiHarness<
       defaultLane: this.#defaultLane,
       streams: this.#streams,
       snapshot: (options) => this.snapshot(options),
-      getMessages: (options) => this.getMessages(options),
       submit: (request, options) => this.submit(request, options),
       abort: (options) => this.abort(options),
-      steer: (message, options) => this.steer(message, options),
-      followUp: (message, options) => this.followUp(message, options),
-      nextRun: (message, options) => this.nextRun(message, options),
-      cancelQueued: (entryId, options) => this.cancelQueued(entryId, options),
-      setModel: (model, options) => this.setModel(model, options),
-      setThinkingLevel: (level, options) =>
-        this.setThinkingLevel(level, options)
+      steer: (message, options) => this.steer(message, options)
     };
   }
 }

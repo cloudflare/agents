@@ -206,211 +206,6 @@ export type PiCompactionSettings = {
   readonly keepRecentTokens: number;
 };
 
-// ── Execution environment ─────────────────────────────────────────────────
-
-/** Outcome of a fallible execution-environment call; failures are values. */
-export type PiResult<Value, Failure> =
-  | { readonly ok: true; readonly value: Value }
-  | { readonly ok: false; readonly error: Failure };
-
-/** Kind of filesystem object. Symlinks are never followed implicitly. */
-export type PiFileKind = "file" | "directory" | "symlink";
-
-/** Backend-independent file failure codes. */
-export type PiFileErrorCode =
-  | "aborted"
-  | "not_found"
-  | "permission_denied"
-  | "not_directory"
-  | "is_directory"
-  | "invalid"
-  | "not_supported"
-  | "unknown";
-
-/** Backend-independent shell failure codes. */
-export type PiExecutionErrorCode =
-  | "aborted"
-  | "timeout"
-  | "shell_unavailable"
-  | "spawn_error"
-  | "callback_error"
-  | "unknown";
-
-/** Failure returned by a {@link PiFileSystem} operation. */
-export class PiFileError extends Error {
-  readonly code: PiFileErrorCode;
-  /** Absolute addressed path associated with the failure, when known. */
-  readonly path: string | undefined;
-
-  constructor(
-    code: PiFileErrorCode,
-    message: string,
-    path?: string,
-    cause?: Error
-  ) {
-    super(message, cause === undefined ? undefined : { cause });
-    this.name = "PiFileError";
-    this.code = code;
-    this.path = path;
-  }
-}
-
-/** Failure returned by {@link PiShell.exec}. */
-export class PiExecutionError extends Error {
-  readonly code: PiExecutionErrorCode;
-
-  constructor(code: PiExecutionErrorCode, message: string, cause?: Error) {
-    super(message, cause === undefined ? undefined : { cause });
-    this.name = "PiExecutionError";
-    this.code = code;
-  }
-}
-
-/** Metadata for one filesystem object. */
-export type PiFileInfo = {
-  /** Basename of `path`. */
-  readonly name: string;
-  /** Absolute, normalized addressed path. */
-  readonly path: string;
-  readonly kind: PiFileKind;
-  readonly size: number;
-  readonly mtimeMs: number;
-};
-
-/**
- * Filesystem used by pi's built-in `read`, `write`, and `edit` tools and by
- * its skill and prompt-template loaders.
- *
- * Paths may be absolute or relative to `cwd`. Methods must never throw or
- * reject: every failure, including unexpected backend failures, is returned
- * as a {@link PiResult} error.
- */
-export interface PiFileSystem {
-  /** Current working directory for relative paths. */
-  cwd: string;
-  absolutePath(
-    path: string,
-    context: PiContext
-  ): Promise<PiResult<string, PiFileError>>;
-  joinPath(
-    parts: readonly string[],
-    context: PiContext
-  ): Promise<PiResult<string, PiFileError>>;
-  readTextFile(
-    path: string,
-    context: PiContext
-  ): Promise<PiResult<string, PiFileError>>;
-  readTextLines(
-    path: string,
-    options: { readonly maxLines?: number } | undefined,
-    context: PiContext
-  ): Promise<PiResult<string[], PiFileError>>;
-  readBinaryFile(
-    path: string,
-    context: PiContext
-  ): Promise<PiResult<Uint8Array, PiFileError>>;
-  /** Create or overwrite a file, creating parent directories. */
-  writeFile(
-    path: string,
-    content: string | Uint8Array,
-    context: PiContext
-  ): Promise<PiResult<void, PiFileError>>;
-  appendFile(
-    path: string,
-    content: string | Uint8Array,
-    context: PiContext
-  ): Promise<PiResult<void, PiFileError>>;
-  renameFile(
-    sourcePath: string,
-    destinationPath: string,
-    context: PiContext
-  ): Promise<PiResult<void, PiFileError>>;
-  /** Metadata for the addressed path without following symlinks. */
-  fileInfo(
-    path: string,
-    context: PiContext
-  ): Promise<PiResult<PiFileInfo, PiFileError>>;
-  listDir(
-    path: string,
-    context: PiContext
-  ): Promise<PiResult<PiFileInfo[], PiFileError>>;
-  /** Canonical path of an existing path; may return `not_supported`. */
-  canonicalPath(
-    path: string,
-    context: PiContext
-  ): Promise<PiResult<string, PiFileError>>;
-  exists(
-    path: string,
-    context: PiContext
-  ): Promise<PiResult<boolean, PiFileError>>;
-  createDir(
-    path: string,
-    options: { readonly recursive?: boolean } | undefined,
-    context: PiContext
-  ): Promise<PiResult<void, PiFileError>>;
-  remove(
-    path: string,
-    options:
-      | { readonly recursive?: boolean; readonly force?: boolean }
-      | undefined,
-    context: PiContext
-  ): Promise<PiResult<void, PiFileError>>;
-  createTempDir(
-    prefix: string | undefined,
-    context: PiContext
-  ): Promise<PiResult<string, PiFileError>>;
-  createTempFile(
-    options: { readonly prefix?: string; readonly suffix?: string } | undefined,
-    context: PiContext
-  ): Promise<PiResult<string, PiFileError>>;
-  /** Release resources. Best-effort; must not throw or reject. */
-  cleanup(context: PiContext): Promise<void>;
-}
-
-/** Options for {@link PiShell.exec}. */
-export type PiShellExecOptions = {
-  /** Working directory; defaults to the environment's `cwd`. */
-  readonly cwd?: string;
-  readonly env?: Readonly<Record<string, string>>;
-  /** Inherit the environment's default variables. @default true */
-  readonly inheritEnv?: boolean;
-  /** Timeout in seconds. Defaults to no timeout. */
-  readonly timeout?: number;
-  readonly onStdout?: (chunk: string, context: PiContext) => void;
-  readonly onStderr?: (chunk: string, context: PiContext) => void;
-};
-
-/** Shell used by pi's built-in `bash` tool. */
-export interface PiShell {
-  exec(
-    command: string,
-    options: PiShellExecOptions | undefined,
-    context: PiContext
-  ): Promise<
-    PiResult<
-      {
-        readonly stdout: string;
-        readonly stderr: string;
-        readonly exitCode: number;
-      },
-      PiExecutionError
-    >
-  >;
-  /** Release resources. Best-effort; must not throw or reject. */
-  cleanup(context: PiContext): Promise<void>;
-}
-
-/**
- * Filesystem plus shell: the computer pi's built-in tools operate on. A
- * container, a remote sandbox, or a SQLite-backed workspace can implement it.
- */
-export interface PiExecutionEnv extends PiFileSystem, PiShell {}
-
-/** Tool context required by pi's built-in execution tools. */
-export type PiExecutionToolContext = {
-  readonly env: PiExecutionEnv;
-};
-
 // ── Resources ─────────────────────────────────────────────────────────────
 
 /** Skill available to the model and to explicit skill operations. */
@@ -437,14 +232,6 @@ export type PiPromptTemplate = {
 export type PiResources = {
   readonly skills?: readonly PiSkill[];
   readonly promptTemplates?: readonly PiPromptTemplate[];
-};
-
-/** Diagnostic produced while loading skills or prompt templates from files. */
-export type PiResourceDiagnostic = {
-  readonly type: "warning";
-  readonly code: string;
-  readonly message: string;
-  readonly path: string;
 };
 
 // ── Configuration ─────────────────────────────────────────────────────────
@@ -882,22 +669,6 @@ export type PiAbortResult = {
   readonly newlyRequested: boolean;
 } | null;
 
-/** Minimal lane access exposed for advanced use. */
-export interface PiLane {
-  /** Read transcript entries newest first unless the query overrides it. */
-  findEntries(
-    query: { readonly order?: "newestFirst" | "oldestFirst" } | undefined,
-    context: PiContext
-  ): Promise<unknown[]>;
-  /** Read one immutable terminal operation result. */
-  getResult(
-    operationId: string,
-    context: PiContext
-  ): Promise<PiOperationResult | undefined>;
-  /** Inspect current operation identity and status. */
-  inspectExecution(context: PiContext): Promise<unknown>;
-}
-
 /** Wire message sent by a browser client over the WebSockets transport. */
 export type PiClientMessage =
   | {
@@ -913,7 +684,6 @@ export type PiClientMessage =
       readonly streamId: string;
     }
   | { readonly type: "snapshot"; readonly id: string }
-  | { readonly type: "messages"; readonly id: string }
   | {
       readonly type: "submit";
       readonly id: string;
@@ -925,24 +695,10 @@ export type PiClientMessage =
       readonly operationId?: string;
     }
   | {
-      readonly type: "steer" | "follow_up" | "next_run";
+      /** Queue a message the running operation reads at its next turn. */
+      readonly type: "steer";
       readonly id: string;
       readonly message: PiMessageInput;
-    }
-  | {
-      readonly type: "cancel_queued";
-      readonly id: string;
-      readonly entryId: string;
-    }
-  | {
-      readonly type: "set_model";
-      readonly id: string;
-      readonly model: PiModelIdentity;
-    }
-  | {
-      readonly type: "set_thinking_level";
-      readonly id: string;
-      readonly level: PiThinkingLevel;
     };
 
 /** Wire message sent to a browser client over the WebSockets transport. */

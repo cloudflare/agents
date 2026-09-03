@@ -11,14 +11,11 @@ import type {
   PiEvent,
   PiJson,
   PiLaneSnapshot,
-  PiMessage,
   PiMessageInput,
-  PiModelIdentity,
   PiOperationRequest,
   PiQueueReceipt,
   PiServerMessage,
-  PiSubmissionReceipt,
-  PiThinkingLevel
+  PiSubmissionReceipt
 } from "./types";
 
 /** The harness surface the transport drives. */
@@ -26,7 +23,6 @@ export interface PiTransportHost {
   readonly defaultLane: string;
   readonly streams: Streams;
   snapshot(options: { lane: string }): Promise<PiLaneSnapshot>;
-  getMessages(options: { lane: string }): Promise<PiMessage[]>;
   submit(
     request: PiOperationRequest,
     options: { lane: string }
@@ -39,23 +35,6 @@ export interface PiTransportHost {
     message: PiMessageInput,
     options: { lane: string }
   ): Promise<PiQueueReceipt>;
-  followUp(
-    message: PiMessageInput,
-    options: { lane: string }
-  ): Promise<PiQueueReceipt>;
-  nextRun(
-    message: PiMessageInput,
-    options: { lane: string }
-  ): Promise<PiQueueReceipt>;
-  cancelQueued(
-    entryId: string,
-    options: { lane: string }
-  ): Promise<"cancelled" | "already_consumed" | "not_found">;
-  setModel(model: PiModelIdentity, options: { lane: string }): Promise<void>;
-  setThinkingLevel(
-    level: PiThinkingLevel,
-    options: { lane: string }
-  ): Promise<void>;
 }
 
 const LANE_TAG_PREFIX = "pi:";
@@ -236,8 +215,6 @@ export class PiTransport {
         return SUBSCRIPTION;
       case "snapshot":
         return this.#host.snapshot({ lane });
-      case "messages":
-        return this.#host.getMessages({ lane });
       case "submit":
         return this.#host.submit(message.request, { lane });
       case "abort":
@@ -249,18 +226,6 @@ export class PiTransport {
         });
       case "steer":
         return this.#host.steer(message.message, { lane });
-      case "follow_up":
-        return this.#host.followUp(message.message, { lane });
-      case "next_run":
-        return this.#host.nextRun(message.message, { lane });
-      case "cancel_queued":
-        return this.#host.cancelQueued(message.entryId, { lane });
-      case "set_model":
-        await this.#host.setModel(message.model, { lane });
-        return null;
-      case "set_thinking_level":
-        await this.#host.setThinkingLevel(message.level, { lane });
-        return null;
       default:
         throw new Error(
           `Unknown pi message type ${JSON.stringify((message as { type: string }).type)}`

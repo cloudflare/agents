@@ -1,16 +1,26 @@
-# Pi harness playground
+# Pi harness
 
-A playable pi `AgentHarness` composed from the SDK's durable primitives on
-one Lifecycle Durable Object: `Tasks` drives each conversation lane to
-settlement and replays it after eviction, `Streams` durably records every
-operation's live output, and the `WebSockets` capability serves it to the
-browser — so the UI streams tokens as pi generates them, not just the
-finished turn, and a page refresh mid-turn resumes exactly where the last
-chunk left off.
+An experimental example that runs pi's durable `AgentHarness` inside a plain
+Durable Object, composed from the SDK's Lifecycle capabilities. Nothing here is
+exported from the `agents` package yet; `PiHarness` and the Workers AI provider
+live in this example's `src/` and pin an unreleased pi build.
+
+The example composes:
+
+- `PiHarness extends LifecycleCapability` for the durable agent loop;
+- `Tasks` to drive each conversation lane to settlement and replay after
+  eviction;
+- `Streams` to durably record every operation's live output;
+- `WebSockets` to serve that output to the browser;
+- `agents/skills` for a bundled `trip-planning` skill;
+- pi-ai's Workers AI provider, transported over the `AI` binding.
+
+Pi owns the transcript, tool intents and results, retries, and recovery. The
+SDK supplies durable wakes, the output log, and the client transport.
 
 ## Run locally
 
-```bash
+```sh
 pnpm install
 pnpm run start
 ```
@@ -24,17 +34,21 @@ It needs no API key.
 - `Use the calculator to multiply 47 by 19.`
 - `Remember that my favourite launch snack is stroopwafels.`
 - `What did I tell you my favourite launch snack was?`
-- `List everything you remember.`
-- `Use a tool to tell me the current UTC time.`
-- `I want to plan a trip.` — activates the bundled `trip-planning` skill via
-  `agents/skills`.
+- `I want to plan a trip.` activates the bundled skill.
 
-The model can call `calculate`, `roll_dice`, `remember`, `recall`,
-`list_memories`, and `current_time`, plus `activate_skill` and
-`read_skill_resource` for the bundled skill. Tool calls and results render
-live as they happen. Reload the page mid-turn — the transcript and the
-in-flight response resume from the durable stream. Use **New session** to
-start with a new Durable Object.
+Tool calls and results render live as they happen. Reload the page mid-turn
+and the transcript and in-flight reply resume from the durable stream. Use the
+new-session button to start with a fresh Durable Object.
+
+## Test
+
+```sh
+pnpm test
+```
+
+The test runs a real Durable Object with pi-ai's faux provider, drives a tool
+call to settlement, evicts the object, and checks the transcript and a second
+turn survive.
 
 ## Core pattern
 
@@ -45,14 +59,10 @@ export class PiAgent extends DurableObject<Env> {
 
   readonly harness = new PiHarness({
     models: createModels({ providers: [workersAI(this.env.AI)] }),
-    model: {
-      provider: "cloudflare-workers-ai",
-      modelId: "@cf/moonshotai/kimi-k2.7-code"
-    },
+    model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
     tasks: this.tasks,
     streams: this.streams,
-    tools: () => tools,
-    toolContext: { storage: this.ctx.storage }
+    tools: () => tools
   });
 
   readonly webSockets = new WebSockets(this.harness.webSockets());
@@ -65,19 +75,17 @@ export class PiAgent extends DurableObject<Env> {
 }
 ```
 
-Import `PiHarness` from `agents/harness` and `createModels`/`workersAI` from
-`agents/providers/pi`. Each lane's work runs as one `Tasks` run whose
-replayable step drives pi to settlement — the run replays after eviction
-using pi's own durable session as recovery evidence. Every operation's live
-events (message deltas, tool progress, turn boundaries) land in one `Streams`
-stream, and `harness.webSockets()` returns the options for a `WebSockets`
-capability that serves a small JSON protocol: connect for a lane snapshot,
-`subscribe` to replay-then-tail an operation's stream from a client cursor,
-`submit`/`abort`/`steer` to drive it. See `src/use-pi-session.ts` for the
-client side of that protocol.
+Each lane's work runs as one `Tasks` run whose replayable step drives pi to
+settlement. Every operation's events land in one `Streams` stream, and
+`harness.webSockets()` returns the options for a `WebSockets` capability that
+serves a small JSON protocol: a lane snapshot on connect, `subscribe` to
+replay-then-tail an operation's stream from a client cursor, and `submit`,
+`abort`, and `steer` to drive it. `src/use-pi-session.ts` is the client side.
 
-`createModels()` starts with an empty provider registry — register
-`workersAI()` for the zero-config Workers AI binding. pi-ai's complete
-built-in catalog (Anthropic, OpenAI, Google, and the rest) is available from
-`agents/providers/pi/catalog`, kept off the default import path since some
-providers pull in vendor SDKs a Workers build can't always resolve.
+## Pi source
+
+The build pins `earendil-works/pi` commit `c4b0e35a` as vendored archives under
+`vendor/pi-dev`. Pi is MIT licensed; see
+[`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt). The design
+and the work left before this can become a package export are in
+[`design/rfc-pi-harness-example.md`](../../../design/rfc-pi-harness-example.md).
