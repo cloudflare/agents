@@ -526,7 +526,7 @@ function App() {
                 <Empty
                   icon={<CodeIcon size={32} />}
                   title="Ask it to change itself"
-                  description="System tools let the agent inspect its source and activate a revision. Custom tools are files it writes under /harness/src/tools and run in the next turn's fresh isolate."
+                  description="It can rewrite its own tools and activate a new revision."
                 />
                 <div className="mt-6 flex flex-wrap justify-center gap-2">
                   {SUGGESTIONS.map((suggestion) => (
@@ -613,8 +613,8 @@ function App() {
           </form>
           <div className="flex items-center justify-center gap-2 px-5 py-3">
             <span className="hidden text-[10px] text-kumo-inactive sm:inline">
-              This message runs revision {snapshot?.active.revisionId ?? "…"}.
-              Activations apply to the next message.
+              Revision {snapshot?.active.revisionId ?? "…"} runs your next
+              message
             </span>
             <span className="hidden text-kumo-line sm:inline">·</span>
             <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
