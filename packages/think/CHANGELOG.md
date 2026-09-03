@@ -1,5 +1,141 @@
 # @cloudflare/think
 
+## 0.18.0
+
+### Minor Changes
+
+- [#2196](https://github.com/cloudflare/agents/pull/2196) [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Replatform Think conversation storage onto `agents/sessions` and prompt context onto `agents/context`.
+
+  **Existing subclasses keep compiling and running.** `configureSession(session)` still accepts the `withContext()` / `withCachedPrompt()` chain, `this.session` still carries `addContext`, `getContextBlock`, `replaceContextBlock`, `refreshSystemPrompt`, `freezeSystemPrompt`, `tools()`, and the rest, and `appendMessage(message, parentId)` / `getHistory(leafId)` still take their positional arguments. Those context methods are deprecated forwards to the new `this.context`; new code should declare blocks in `configureContext()` and read `this.context` directly. `withCachedPrompt()` is a no-op because the frozen prompt is always persisted now.
+
+  **What you may want to change**
+
+  - Declare prompt blocks with the new `configureContext()` hook instead of `withContext()`. Blocks from both are merged, `configureContext()` first.
+  - Read context through `this.context` (a `ContextBlocks` from `agents/context`) instead of `this.session`.
+  - Import `Session` from `@cloudflare/think` when you annotate a `configureSession` override. The class exported from `agents/sessions` is the raw storage handle and is not assignable to Think's.
+
+  **Behaviour changes on upgrade**
+
+  - **Storage migrates on first wake and cannot be rolled back.** Each Durable Object lifts its `assistant_messages`, `assistant_compactions`, and `assistant_config` rows into the `cf_agents_session_*` tables, verifies every row landed, and drops the old tables. An object that has woken on this version has an empty conversation if you roll back to the previous release; rolling forward again is safe. Deploy behind a canary if you need a rollback path.
+  - `hydrationByteBudget` defaults to 32 MiB (was 24 MiB) and is now a hard ceiling that charges each row its full stored size, attachments included. There is no message-count floor, so an unusually large recent window can hydrate fewer than four messages. `getHistory()` still reads the full path.
+  - Context blocks load during `onStart`, as before the replatform, so `this.context.getBlock()` answers as soon as the object has started.
+  - `session.search()` still works. Its index is now built by the first search on an object rather than maintained on every append, so a Think that never searches stops paying a second billed row per message.
+  - Think no longer reads Sessions tables with raw SQL. If you queried `assistant_messages` yourself, use `this.session.history()` or `getHistory()`.
+
+  **Removed**
+
+  - `sessionAttachments`. There is nothing to configure about how Sessions stores a message: media leaves the row into a content-addressed attachment store and a message larger than one SQLite row is split across continuation rows, losslessly.
+  - `getRecentHistory(budget, minRecentMessages)`: the second argument is accepted and ignored.
+  - `compactAfter(threshold, { tokenCounter })`: the counter option is accepted and ignored; the trigger reads the estimate Sessions stamps on each row.
+
+- [#2175](https://github.com/cloudflare/agents/pull/2175) [`8ffb3ad`](https://github.com/cloudflare/agents/commit/8ffb3ad14a0aed72b047b8968981f10b141c700b) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Lifecycle owns a durable job queue, driven as an alarm event loop.
+
+  The thing in the queue is a job: a serialisable callback address — the
+  owning capability plus a function name — with a due time and a payload.
+  Capabilities and the host push jobs through the scoped `jobs` surface;
+  Lifecycle drives due jobs in timestamp order when the alarm fires, owns
+  dispatch retries and platform-failure deferral, arms a deadman pre-alarm
+  before driving so an isolate death mid-drive still wakes the object, and
+  derives the physical alarm purely from queue state (queue mutations re-arm
+  automatically; an exclusive job suppresses ordinary candidates).
+
+  ```ts
+  class Cleanup extends LifecycleCapability {
+    async scheduleSweep(time: number) {
+      await this.lifecycle.jobs.push({ id: "sweep", fn: "sweep", time });
+    }
+    onJob({ job }: LifecycleJobContext) {
+      // drive result: nothing = complete, { rescheduleAt } = suspend,
+      // "yield" = leave due and wake again immediately
+    }
+  }
+  ```
+
+  The pull-based alarm-contribution model is removed: capability
+  `getNextAlarm()`/`onAlarm()`, host `getNextAlarm()`,
+  `LifecycleServices.alarms` (`rearm`/`disabled`), and `AlarmContribution`
+  are gone. Host `onAlarm()` remains and runs once per alarm invocation
+  after due jobs are driven. Terminal application failures reach the
+  owner's `onJobError()`, whose drive result decides advancement.
+
+  The alarm memory-limit circuit breaker ([#1825](https://github.com/cloudflare/agents/issues/1825)) moves from `Agent.alarm()`
+  into the Lifecycle event loop, targeting the exact executing job; Agent
+  contributes domain policy through the new `onAlarmMemoryLimit()` host
+  hook, and Scheduler's `__DO_NOT_USE_WILL_BREAK__handleAlarmMemoryLimit`
+  escape hatch is gone. After recording a strike the breaker now finishes by
+  resetting the isolate with `ctx.abort(reason, { retryAlarm: false })`
+  (retry of the handled alarm suppressed; the backoff alarm owns the next
+  wake), and `Agent.destroy()` uses the same no-retry abort so a completed
+  teardown's alarm cannot be retried into a fresh constructor that recreates
+  the deleted schema.
+
+  Scheduler keeps its entire public API and loses its storage and due-row
+  loop: a schedule is one job whose `fn` is the callback name, and interval
+  schedules are single-flight jobs. Existing `cf_agents_schedules` rows are
+  migrated into the `cf_agents_jobs` queue on startup and the legacy table
+  is dropped. Agent's public scheduling and `keepAlive()` APIs are
+  unchanged; its keep-alive, fiber-recovery/facet housekeeping, and
+  deferred-destroy wakes are now host jobs, and Think's
+  workflow-notification wake replaces the removed `_getExtensionAlarm()`.
+
+- [#2196](https://github.com/cloudflare/agents/pull/2196) [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Keep media eviction a context-window technique, separate from how Sessions stores a message.
+
+  How Sessions lays a message out in rows is invisible and lossless: a message too large for one row is split across continuation rows and reassembled byte for byte. Media eviction is a decision about the model's context: once media has aged past `mediaEviction.keepRecentMessages` on the active path, Think removes it from the conversation so the model stops re-reading a large image every turn, and leaves `[evicted image/png, 812004 bytes; preserved at /attachments/evicted/<messageId>-<n>.png]` in its place. The raw bytes are written to the Workspace at that path with their real mime type, so the workspace `read` tool puts the actual image back in context when the agent deliberately reads it. The rewritten message no longer carries the payload, so the bytes live in exactly one place.
+
+  `mediaEviction: false` now means the model keeps seeing aged media. It no longer changes where Sessions keeps the bytes.
+
+  `minPartBytes` is Think's context threshold and is no longer passed to Sessions as a storage setting. The marker text and the `/attachments/evicted/<id>-<n>.<ext>` paths are unchanged, so old markers keep resolving.
+
+  `MediaEvictionConfig.externalizeToWorkspace` is deprecated and ignored: evicted bytes are always preserved. Existing configurations keep compiling.
+
+  `WorkspaceLike.writeFileBytes` is optional. Eviction and skills projection need it to write raw bytes; a custom workspace without it keeps working and those two features log once and stand down.
+
+### Patch Changes
+
+- [#2194](https://github.com/cloudflare/agents/pull/2194) [`6da4c44`](https://github.com/cloudflare/agents/commit/6da4c44ba4ba778c2fd981b40adbba2b4f02ba37) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Run root-agent chat recovery continuations as chained Tasks instead of schedule rows. Initial recovery attempts deduplicate by incident, delayed retries use durable Task sleeps, and platform failures replay through Task claims. AI Chat and Think share one reserved recovery definition and preserve their existing bounded callback handoff behavior: a failure before handoff stays with the current queue execution, while a detached post-handoff platform failure enqueues exactly one replacement.
+
+  Tasks now propagate condemned-isolate failures out of journaled steps and apply alarm memory-limit backoff and sealing to the run whose wake struck — claim stripped and deadline pushed, so startup reconciliation cannot resurrect it and the reclaim still sees an interrupted attempt. Task wake jobs are pushed with a single dispatch attempt so a platform failure rejects the alarm instead of being retried into a silent reschedule of the still-claimed run. Lifecycle gains `trackAlarmWork()`: work a job hands off at a bounded return stays inside that alarm's memory-limit breaker domain after the alarm returns, so other jobs stay live while a memory reset from the handoff still records a strike — one strike per reset however many flows observe it — and strikes clear only once no handed-off work is outstanding and the last of it settled clean. `retain: false` now removes failed and cancelled runs as well as completed runs, releasing journals and idempotency keys after every terminal outcome. Routed dynamic agents temporarily retain the root-owned schedule transport until Tasks supports routed child wakes.
+
+  AI Chat and Think require `agents >=0.23.0`, the pending release batch containing the shared recovery Task definition and internal enqueue support.
+
+- [#2173](https://github.com/cloudflare/agents/pull/2173) [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Replatform chat's resumable streams onto the `agents/streams` capability.
+
+  `ResumableStream` is now a thin adapter over `Streams`: chat's in-flight turn output lives in the shared durable chunk log (`cf_agents_streams` / `cf_agents_stream_chunks`), packed ~10 wire chunks per stored segment for write economy, with completion/error mapped onto stream settlement and retention keyed off the stream row's `updated_at` (sweeps no longer scan the chunk table). Existing `cf_ai_chat_stream_*` tables migrate wholesale — including an in-flight stream — on first construction after upgrade, then are dropped. `AIChatAgent` and `Think` expose the backing capability as `readonly streams`, so any `streams.read()` consumer on the same Durable Object can observe chat streams. The chat wire protocol, replay handshake, and recovery behavior are unchanged.
+
+- [#2190](https://github.com/cloudflare/agents/pull/2190) [`58c586a`](https://github.com/cloudflare/agents/commit/58c586aa179690f78a4327288fe27ee9875e8624) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Make the alarm memory-limit circuit breaker ([#1825](https://github.com/cloudflare/agents/issues/1825)) a self-contained
+  Lifecycle concern instead of an Agent-mediated one.
+
+  Recovery-loop membership is now a property of the job row
+  (`LifecycleJobPushOptions.recoveryLoop`): flagged jobs are backed off by
+  the breaker on a strike and purged when it seals at the strike budget,
+  without disturbing unrelated rows — a recovery schedule can no longer
+  silently escape the breaker. The public `ScheduleOptions` vocabulary is
+  unchanged: schedules only shape future work, and chat recovery reaches the
+  flag through internal scaffolding (`RecoveryLoopScheduleOptions`) retained
+  only for legacy rows and routed dynamic agents. Root recovery moves to Tasks;
+  the scaffolding can be deleted when Tasks supports routed child wakes.
+  Capabilities can react to a strike through the new optional `onMemoryLimit`
+  hook, hosts through `onAlarmMemoryLimit`, and the context identifies the job
+  that was executing when one exists. The strike budget is real Lifecycle
+  configuration (`Lifecycle.install(host, { maxAlarmMemoryLimitStrikes })`)
+  rather than a composition-root side channel. Until Tasks supports routed
+  child wakes, a sealed recovery schedule also forwards the seal to its owning
+  dynamic agent so a chat child under a plain Agent root persists its exhausted
+  incident and terminal notification.
+
+  Removed accordingly: `Agent.onAlarmMemoryLimit`'s policy relay, the
+  `_cf_recoveryAlarmCallbacks` template hook, `Scheduler.applyMemoryLimitPolicy`,
+  and
+  `setLifecycleAlarmMemoryLimitStrikes`. `AIChatAgent` and `Think` flag their
+  routed recovery fallback via `chatRecoverySchedulePolicy` and seal in-flight
+  incidents from their own protected `onAlarmMemoryLimit` hooks; both now
+  require `agents >= 0.23.0` from the pending release batch (they consume its
+  new `agents/chat` recovery exports and no longer implement the old
+  template-method breaker hooks). Agent retains a
+  sealed-only call to `_cf_sealMemoryLimitedRecovery` so already-published chat
+  packages whose peer ranges accept agents 0.23 keep terminal notifications;
+  that fallback carries no callback-name or queue policy.
+
 ## 0.17.0
 
 ### Minor Changes

@@ -1,5 +1,262 @@
 # @cloudflare/agents
 
+## 0.23.0
+
+### Minor Changes
+
+- [#2193](https://github.com/cloudflare/agents/pull/2193) [`87bd594`](https://github.com/cloudflare/agents/commit/87bd59401f4644d1fd2c82cae439e9848ce437b1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Extract facet ("sub-agent") machinery into `packages/agents/src/dynamic-agents/`, add the `this.dynamicAgents` capability facade, and reposition facets as an isolation primitive rather than the recommended way to model many chat sessions.
+
+  `Agent`'s facet routing, WebSocket forwarding, virtual connections, and registry (~2,400 of `index.ts`'s ~12,150 lines) move into a dedicated module registered as a Lifecycle capability (`capabilityId: "dynamic-agents"`); its hot paths stay composition-root wired since the capability-runner hook contract can't express request-rewrite-and-continue or post-claim WebSocket forwarding. No wire- or storage-visible identifier changes.
+
+  The public surface gains `this.dynamicAgents.{get,abort,delete,has,list}` plus the `DynamicAgentClass` and `DynamicAgentStub` type names. `SubAgentClass` and `SubAgentStub` remain as compatibility aliases. `subAgent()` / `abortSubAgent()` / `deleteSubAgent()` / `hasSubAgent()` / `listSubAgents()` are unchanged in behavior and now delegate to the same capability — `@deprecated` in place, not removed. `/sub/` URLs, `useAgent({ sub })`, `parentAgent()`, and `onBeforeSubAgent` are untouched.
+
+  `docs/agents/sub-agents.md` is rewritten: verified workerd facet semantics (separate isolate, own SQLite, no independent alarms, bounded nesting depth, machine-pinned tree), a corrected claim about WebSocket frame forwarding (every frame wakes the root parent — it was never true that frames go directly to the child post-upgrade), and an explicit decision rule for facets vs. independent Durable Objects. Two new examples: `examples/next/dynamic-agents` (a supervisor running user-submitted Durable Object code as facets via Worker Loader — what facets are for) and `examples/next/chats` (one top-level DO per chat plus a per-user push-based index — the recommended many-chats pattern), both with a React + Vite UI and workers-pool tests.
+
+- [#2175](https://github.com/cloudflare/agents/pull/2175) [`8ffb3ad`](https://github.com/cloudflare/agents/commit/8ffb3ad14a0aed72b047b8968981f10b141c700b) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Lifecycle owns a durable job queue, driven as an alarm event loop.
+
+  The thing in the queue is a job: a serialisable callback address — the
+  owning capability plus a function name — with a due time and a payload.
+  Capabilities and the host push jobs through the scoped `jobs` surface;
+  Lifecycle drives due jobs in timestamp order when the alarm fires, owns
+  dispatch retries and platform-failure deferral, arms a deadman pre-alarm
+  before driving so an isolate death mid-drive still wakes the object, and
+  derives the physical alarm purely from queue state (queue mutations re-arm
+  automatically; an exclusive job suppresses ordinary candidates).
+
+  ```ts
+  class Cleanup extends LifecycleCapability {
+    async scheduleSweep(time: number) {
+      await this.lifecycle.jobs.push({ id: "sweep", fn: "sweep", time });
+    }
+    onJob({ job }: LifecycleJobContext) {
+      // drive result: nothing = complete, { rescheduleAt } = suspend,
+      // "yield" = leave due and wake again immediately
+    }
+  }
+  ```
+
+  The pull-based alarm-contribution model is removed: capability
+  `getNextAlarm()`/`onAlarm()`, host `getNextAlarm()`,
+  `LifecycleServices.alarms` (`rearm`/`disabled`), and `AlarmContribution`
+  are gone. Host `onAlarm()` remains and runs once per alarm invocation
+  after due jobs are driven. Terminal application failures reach the
+  owner's `onJobError()`, whose drive result decides advancement.
+
+  The alarm memory-limit circuit breaker ([#1825](https://github.com/cloudflare/agents/issues/1825)) moves from `Agent.alarm()`
+  into the Lifecycle event loop, targeting the exact executing job; Agent
+  contributes domain policy through the new `onAlarmMemoryLimit()` host
+  hook, and Scheduler's `__DO_NOT_USE_WILL_BREAK__handleAlarmMemoryLimit`
+  escape hatch is gone. After recording a strike the breaker now finishes by
+  resetting the isolate with `ctx.abort(reason, { retryAlarm: false })`
+  (retry of the handled alarm suppressed; the backoff alarm owns the next
+  wake), and `Agent.destroy()` uses the same no-retry abort so a completed
+  teardown's alarm cannot be retried into a fresh constructor that recreates
+  the deleted schema.
+
+  Scheduler keeps its entire public API and loses its storage and due-row
+  loop: a schedule is one job whose `fn` is the callback name, and interval
+  schedules are single-flight jobs. Existing `cf_agents_schedules` rows are
+  migrated into the `cf_agents_jobs` queue on startup and the legacy table
+  is dropped. Agent's public scheduling and `keepAlive()` APIs are
+  unchanged; its keep-alive, fiber-recovery/facet housekeeping, and
+  deferred-destroy wakes are now host jobs, and Think's
+  workflow-notification wake replaces the removed `_getExtensionAlarm()`.
+
+- [#2198](https://github.com/cloudflare/agents/pull/2198) [`99e5e2e`](https://github.com/cloudflare/agents/commit/99e5e2ecfed8ffb94b5d8fab1a80e3a62d7d9ee9) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `RoutedAgents` (`agents/routing`), a Lifecycle capability that codifies the "user hub with one Durable Object per chat" topology: an owning Agent keeps a durable catalog of independent top-level Agents and routes to them by public ID.
+
+  ```ts
+  class UserAgent extends Agent<Env> {
+    readonly chats = new RoutedAgents<ChatAgent, { title: string }>({
+      namespace: this.env.ChatAgent,
+      route: "chats",
+    });
+
+    constructor(ctx: DurableObjectState, env: Env) {
+      super(ctx, env);
+      this.lifecycle.use(this.chats);
+    }
+  }
+  ```
+
+  `create()`, `list()`, and `setMetadata()` never wake a target; `get()` returns an initialized typed stub; `delete()` hides the entry, condemns the target through Agent's deferred teardown, then drops the row, so a failed call is retryable and a clean teardown never surfaces as an abort error. Requests and WebSocket upgrades under `/agents/user-agent/{user}/chats/{id}` are forwarded to the target with the suffix preserved, and the target owns the upgraded socket, so chat frames never wake the user hub. Physical Durable Object names are opaque UUIDs held only in the catalog. `create()` returns the same JSON round-trip of `metadata` that `list()` does, and `list()` breaks equal-timestamp ties by write order rather than by the random entry ID — derived from a `MAX(seq)` read of the route's own entries each write, a deliberate trade for a route sized like one owner's catalog: DO SQLite bills ~1000 writes for the cost of 1000 reads, so this is cheaper than a maintained counter row (or an index on `seq`, which would cost a write on every call too) until a route holds several thousand entries.
+
+  Destroying the hub retries condemning every remaining entry (active or still `deleting`) before its own storage is wiped — this is best-effort, not a durability guarantee: the platform wipes the hub's storage right after disposal regardless of outcome, so a target still unreachable after retries is orphaned, with no catalog row left to retry from later. That tradeoff is documented on the class and in the docs.
+
+  Two documented sharp edges: pick a route that can't collide with the hub's own path segments (a coincidental match with no active entry behind it 404s instead of reaching the hub), and a routed suffix can't address a target's own dynamic agents — `Agent.fetch()` resolves a `/sub/{class}/{name}` marker against the hub's exported classes before this capability ever sees the request, so it is served as a facet of the hub instead of being forwarded. Both are called out on the class and in the docs; the second is pinned by a regression test.
+
+  `examples/next/chats` is rebuilt on `RoutedAgents`: the hub creates, lists, searches, and deletes chats through the capability, the browser reaches each chat through the hub's route, a failed `init()` handshake rolls back the catalog entry instead of leaving an ownerless chat, malformed message bodies get a `400` instead of an uncaught exception, and pushed activity is fenced by each message's own strictly-increasing ordinal (not a wall-clock timestamp, which can tie within a millisecond and silently discard a genuinely newer push) inside `blockConcurrencyWhile`, so neither a delayed push nor two concurrent ones can overwrite one that already landed.
+
+  `Lifecycle.use()` accepts `{ fallback: true }` to dispatch a capability after every non-fallback one regardless of installation order. `Agent` installs its WebSockets capability as a fallback, so middleware a subclass installs from its constructor runs before the upgrade catch-all.
+
+- [#2196](https://github.com/cloudflare/agents/pull/2196) [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add the experimental `agents/sessions` Lifecycle capability and the `agents/context` module.
+
+  Sessions owns durable conversation storage: a tree of messages with branches and compaction overlays, streamed and byte-budgeted reads, and full-text search whose index is built by the first `search()` call. Every table is `WITHOUT ROWID` with no secondary index, so a text append bills one row on an object that has never searched.
+
+  Sessions stores MESSAGES; it is not a file store. A message rides in one SQLite row until its serialized JSON exceeds the 1.5 MiB row budget, and a message larger than that is split across continuation rows in `cf_agents_session_message_chunks` and reassembled on read. Nothing is truncated and nothing is too large to store, so there is no size error to catch and nothing to configure. Slices are cut on UTF-8 byte boundaries and never inside a surrogate pair.
+
+  Splitting is not a way to shrink the database: continuation rows live in the same Durable Object as the message, inside the same 10 GB. Sessions imposes no upper bound on a single message, so `appendMessage(msg, { source: "client" })` sanitizes and strips reserved metadata but does not limit size; bounding untrusted input is the application's job. An application that handles files should keep them in a file store and put a reference in the message, as Think does with its Workspace.
+
+  A byte budget bounds hydrated memory rather than the first slice: `getRecentHistory()` charges each row its full stored size, continuation rows and attachments included.
+
+  Prompt context moves out of conversation storage into `agents/context`: `ContextBlocks`, the frozen system prompt, `AgentContextProvider`, `AgentSearchProvider`, and the skill providers. The `Session` handle stores messages and nothing else.
+
+  **Breaking: the experimental memory stack is removed.** The `agents/experimental/memory/session` and `agents/experimental/memory/utils` subpaths no longer exist, taking `Session.create()`, `SessionManager`, `PostgresSessionProvider`, `PostgresContextProvider`, `PostgresSearchProvider`, `R2SkillProvider`, and the `SessionProvider` interface with them. Replacements:
+
+  - `Session.create(this).withContext(...)` → install `new Sessions()` on the Lifecycle and declare blocks with `new ContextBlocks([...])` from `agents/context`.
+  - `createCompactFunction`, `truncateOlderMessages`, and the token estimators → `agents/sessions` and `agents/chat`.
+  - `AgentSearchProvider`, `AgentContextProvider` → `agents/context`.
+  - `SessionManager` → one `Sessions` capability holds many sessions by id; a user-facing conversation directory belongs to a parent or router Durable Object.
+  - Postgres providers have no replacement; Sessions is Durable Object SQLite only.
+
+  **Legacy `assistant_*` tables are lifted and dropped.** On the first wake of a Sessions-backed object, `assistant_messages` and `assistant_compactions` are copied in SQL, verified row by row, and dropped; `assistant_sessions` and `assistant_fts` are dropped. A source whose rows do not all verify is left in place with a `session:migration:incomplete` event and the schema version is not stamped, so the lift retries on a later start. There are no tombstone copies, so rolling back after a migration loses that object's conversation.
+
+  Also add Computer and legacy Shell projection to `SkillRegistry` so Agent Skills can be read and edited as workspace files without making Workspace own conversation data.
+
+- [#2190](https://github.com/cloudflare/agents/pull/2190) [`58c586a`](https://github.com/cloudflare/agents/commit/58c586aa179690f78a4327288fe27ee9875e8624) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Make the alarm memory-limit circuit breaker ([#1825](https://github.com/cloudflare/agents/issues/1825)) a self-contained
+  Lifecycle concern instead of an Agent-mediated one.
+
+  Recovery-loop membership is now a property of the job row
+  (`LifecycleJobPushOptions.recoveryLoop`): flagged jobs are backed off by
+  the breaker on a strike and purged when it seals at the strike budget,
+  without disturbing unrelated rows — a recovery schedule can no longer
+  silently escape the breaker. The public `ScheduleOptions` vocabulary is
+  unchanged: schedules only shape future work, and chat recovery reaches the
+  flag through internal scaffolding (`RecoveryLoopScheduleOptions`) retained
+  only for legacy rows and routed dynamic agents. Root recovery moves to Tasks;
+  the scaffolding can be deleted when Tasks supports routed child wakes.
+  Capabilities can react to a strike through the new optional `onMemoryLimit`
+  hook, hosts through `onAlarmMemoryLimit`, and the context identifies the job
+  that was executing when one exists. The strike budget is real Lifecycle
+  configuration (`Lifecycle.install(host, { maxAlarmMemoryLimitStrikes })`)
+  rather than a composition-root side channel. Until Tasks supports routed
+  child wakes, a sealed recovery schedule also forwards the seal to its owning
+  dynamic agent so a chat child under a plain Agent root persists its exhausted
+  incident and terminal notification.
+
+  Removed accordingly: `Agent.onAlarmMemoryLimit`'s policy relay, the
+  `_cf_recoveryAlarmCallbacks` template hook, `Scheduler.applyMemoryLimitPolicy`,
+  and
+  `setLifecycleAlarmMemoryLimitStrikes`. `AIChatAgent` and `Think` flag their
+  routed recovery fallback via `chatRecoverySchedulePolicy` and seal in-flight
+  incidents from their own protected `onAlarmMemoryLimit` hooks; both now
+  require `agents >= 0.23.0` from the pending release batch (they consume its
+  new `agents/chat` recovery exports and no longer implement the old
+  template-method breaker hooks). Agent retains a
+  sealed-only call to `_cf_sealMemoryLimitedRecovery` so already-published chat
+  packages whose peer ranges accept agents 0.23 keep terminal notifications;
+  that fallback carries no callback-name or queue policy.
+
+- [#2169](https://github.com/cloudflare/agents/pull/2169) [`b12dc0b`](https://github.com/cloudflare/agents/commit/b12dc0b9c1293e8ce8c417de1de43f4661067854) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Move WebSockets out of Lifecycle into the opt-in `WebSockets`
+  capability, with callables served from an `RpcTarget`.
+
+  Lifecycle no longer models WebSockets — many hosts never use sockets.
+  Hosts that want connections install the capability, which owns the
+  subsystem end to end:
+
+  ```ts
+  new WebSockets({
+    handlers: { onConnect, onMessage, onClose },
+    callables: new RoomCallables(),
+  });
+  ```
+
+  The capability claims WebSocket upgrades, accepts hibernating sockets,
+  dispatches handlers inside the host invocation boundary, reciprocates
+  close handshakes, closes owned connections on host destruction, and
+  answers `getConnections()`/`getConnection()`. Without it installed,
+  upgrades are declined.
+
+  `callables` exposes an `RpcTarget`'s prototype methods to remote
+  callers over a Cap'n Web session (`?__agents_rpc=capnweb`), with native
+  `ReadableStream` streaming. `Agent` adds no new surface for this: its
+  `@callable()`-decorated methods are its interface, served on every wire
+  — natively over the legacy JSON RPC protocol and, through the
+  decorator-derived target, over the Cap'n Web endpoint. There is no
+  separate browser client either: `useAgent().stub`/`call` reach the
+  same interface, and a plain host's endpoint is one
+  `newWebSocketRpcSession(new WebSocket(callablesRpcUrl(url)))` away.
+
+  `Agent` installs the capability itself, so its `onConnect`/`onMessage`/
+  `onClose`/`onError`/`getConnectionTags` overrides and connection APIs
+  behave exactly as before (same wire, same hibernation attachment
+  format). The Lifecycle host contract drops the WebSocket hooks and
+  Lifecycle's `getConnections`/`getConnection`/`broadcast` are removed.
+
+  Lifecycle keeps only generic platform pass-throughs —
+  `onWebSocketUpgrade` plus `onWebSocketMessage`/`Close`/`Error` for
+  capability-owned hibernation wakes — and `LifecycleServices` gains a
+  narrow `sockets` surface (accept/get) and a connection/request scope on
+  `runInHostContext`. The capability interaction contract (three
+  channels: hooks, services, composition-root apertures) is now
+  documented on `DurableObjectCapability`.
+
+### Patch Changes
+
+- [#2173](https://github.com/cloudflare/agents/pull/2173) [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Define the Lifecycle job dispatch contract. Job ids are now scoped to their
+  owning capability: a cross-owner id collision throws instead of silently
+  replacing the other owner's job. A same-id `push()` or `reschedule()` made
+  while a job is dispatching supersedes the returned drive result, so a wake
+  pushed mid-drive can no longer be lost — and each due job is refetched
+  before dispatch, so a job replaced earlier in the same alarm cycle is
+  skipped instead of dispatched from its stale snapshot. A dispatch that
+  outlives its job's
+  hung timeout logs a warning and emits `job:slow_dispatch` telemetry —
+  `onJob` must stay bounded and detach unbounded work.
+
+- [#2194](https://github.com/cloudflare/agents/pull/2194) [`6da4c44`](https://github.com/cloudflare/agents/commit/6da4c44ba4ba778c2fd981b40adbba2b4f02ba37) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Run root-agent chat recovery continuations as chained Tasks instead of schedule rows. Initial recovery attempts deduplicate by incident, delayed retries use durable Task sleeps, and platform failures replay through Task claims. AI Chat and Think share one reserved recovery definition and preserve their existing bounded callback handoff behavior: a failure before handoff stays with the current queue execution, while a detached post-handoff platform failure enqueues exactly one replacement.
+
+  Tasks now propagate condemned-isolate failures out of journaled steps and apply alarm memory-limit backoff and sealing to the run whose wake struck — claim stripped and deadline pushed, so startup reconciliation cannot resurrect it and the reclaim still sees an interrupted attempt. Task wake jobs are pushed with a single dispatch attempt so a platform failure rejects the alarm instead of being retried into a silent reschedule of the still-claimed run. Lifecycle gains `trackAlarmWork()`: work a job hands off at a bounded return stays inside that alarm's memory-limit breaker domain after the alarm returns, so other jobs stay live while a memory reset from the handoff still records a strike — one strike per reset however many flows observe it — and strikes clear only once no handed-off work is outstanding and the last of it settled clean. `retain: false` now removes failed and cancelled runs as well as completed runs, releasing journals and idempotency keys after every terminal outcome. Routed dynamic agents temporarily retain the root-owned schedule transport until Tasks supports routed child wakes.
+
+  AI Chat and Think require `agents >=0.23.0`, the pending release batch containing the shared recovery Task definition and internal enqueue support.
+
+- [#2173](https://github.com/cloudflare/agents/pull/2173) [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Replatform chat's resumable streams onto the `agents/streams` capability.
+
+  `ResumableStream` is now a thin adapter over `Streams`: chat's in-flight turn output lives in the shared durable chunk log (`cf_agents_streams` / `cf_agents_stream_chunks`), packed ~10 wire chunks per stored segment for write economy, with completion/error mapped onto stream settlement and retention keyed off the stream row's `updated_at` (sweeps no longer scan the chunk table). Existing `cf_ai_chat_stream_*` tables migrate wholesale — including an in-flight stream — on first construction after upgrade, then are dropped. `AIChatAgent` and `Think` expose the backing capability as `readonly streams`, so any `streams.read()` consumer on the same Durable Object can observe chat streams. The chat wire protocol, replay handshake, and recovery behavior are unchanged.
+
+- [#2191](https://github.com/cloudflare/agents/pull/2191) [`b40bc5b`](https://github.com/cloudflare/agents/commit/b40bc5bbbfb96151baf7c524834cae27bcae0b6a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Cut storage row writes across Streams, the chat adapter, and Tasks — the streaming hot path now writes exactly what the pre-capability chat pattern wrote.
+
+  Streams: the append fence is a read instead of a guarded UPDATE (a Durable Object executes one synchronous block at a time, so state-check + tail-read + INSERT is exactly as atomic), removing one stream-row write per append. The stream row is written only at open and settle; settlement stamps the final cursor, and live cursors/liveness derive from the chunk log's tail. `readBatches` termination and the reader liveness checks moved to narrow reads.
+
+  Chat adapter: the retention sweep decides abandonment in two phases (coarse row cutoff, then one indexed chunk-tail read per candidate) so an actively appending stream is never swept; the legacy migration imports rows complete (final count and last-activity stamped up front, chunk imports are bare INSERTs — 1+N writes instead of 1+2N); `destroy()` no longer flushes chunks it deletes in the same call; the cleanup alarm no longer scans the table twice; dead `_segmentIndex` state removed.
+
+  Tasks: claim refreshes amortize to one row write per half claim-slack of wall time instead of one per step; already-elapsed sleeps journal born-completed in one INSERT; duplicate status messages skip their write; startup reconcile skips job-queue upserts that already match; a parked-run cancel settles in one row write; settle paths only re-sync the wake mirror when their write actually landed.
+
+  Replay memory is bounded: the chat adapter's chunk replay iterates the stored log in pages (a generator over paged reads) instead of materializing the whole turn per reconnecting client.
+
+  Schema: the hot-write capability tables (stream chunks, task runs, task steps, jobs — none released) are now WITHOUT ROWID. Cloudflare bills index maintenance as rows written, and an ordinary rowid table's PRIMARY KEY is a hidden UNIQUE index — so every chunk append was billing 2 rows despite being one table write. WITHOUT ROWID makes it exactly 1. The stream metadata table deliberately stays a rowid table: rowid is the insertion-order tiebreak that keeps newest-first deterministic for same-millisecond rows, at one billed row per stream open. The task runs table also drops its `(state, next_at)` index, which taxed every claim/refresh/settle write to speed one startup scan.
+
+  The in-suite storage-ops benchmark now pins adapter/legacy write parity exactly (12 table rows per 100-chunk turn, ~8.5× under naive per-chunk appends), models the two-phase sweep, and a write-accounting test pins the billed model per statement (a 100-chunk turn bills 14 rows vs the legacy schema's 33).
+
+- [#2173](https://github.com/cloudflare/agents/pull/2173) [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `agents/streams`: durable incremental output as a Lifecycle capability (experimental).
+
+  One `Streams` instance per Durable Object owns an ordered, durable chunk log per stream with a monotonic cursor: `open()` (idempotent on the id), synchronous durable `append()` that wakes live readers, `close()`/`error()` settlement, replay-then-tail `read({ from, signal })` plus its batched form `readBatches({ from, signal, batchSize, onUpToDate })` (arrays per replay slice and per live-tail wakeup, with a caught-up-to-tail signal), indexed non-unique `tag`s for find-the-latest-stream-of-an-operation lookups (`open(id, { tag })` / `list({ tag })`), `sseResponse()` for one-call SSE serving with native `Last-Event-ID` resume and `up-to-date`/`done`/`error` control events, and `status()` reporting state, cursor, and last activity. Reads are independent of producer liveness; the capability needs no alarm, so it also works on facets.
+
+  Streams is the incremental-output half of the pattern the Tasks migration validated, composed without coupling: a task step appends to a stream and checkpoints `{ streamId, cursor }`, and its `recover` callback reads `streams.status()` as durable interruption evidence — proven across a real SIGKILL by the e2e suite, where recovery finalizes the stream at exactly the chunks that survived. Design record: `design/rfc-streams.md`.
+
+- [#2196](https://github.com/cloudflare/agents/pull/2196) [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Keep attachments out of the message row.
+
+  A part that declares a non-text media type and carries its bytes inline is now stored separately, addressed by its SHA-256, and put back verbatim on read. The message keeps a pointer and its `mediaType`, so a round trip is exact and a message row stays small however large its payloads are. This is invisible: there is no pointer-mode read.
+
+  The rule is typed rather than sized: an image is extracted at any size, and text is never extracted at any size — long prose still splits across continuation rows. The two mechanisms are independent, so media leaves before the row is measured and a message carrying a large image usually has no continuation rows at all.
+
+  Payload lifetime is derived from message references; the bytes go when the last reference does. Identical payloads store once, which makes a retried write free.
+
+  `getRecentHistory()` loses its `minRecentMessages` argument. The byte budget is now a hard ceiling: a message-count floor admitted rows whatever their size, so a window of media-heavy messages could hydrate far past the limit meant to bound it. The newest message is always returned.
+
+  Also fixes two migration faults that could lose data: `AIChatAgent` dropped its legacy table when rows were merely _accounted for_ rather than imported, deleting any row that failed to parse; and Sessions stamped its schema version even when a legacy lift was incomplete, so it never retried. Both lifts are idempotent, so the source now survives until every row has actually landed.
+
+  `appendMessage` returns the same message whether it inserted or found a duplicate, and dispatches its `append` event before any auto-compaction runs, so a cache mirror never misses the row that triggered a compaction. A change-feed listener that throws is reported through the `session:error` capability event instead of rejecting the write it was told about.
+
+- [#2173](https://github.com/cloudflare/agents/pull/2173) [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `agents/tasks`: durable, replayable background execution as a Lifecycle capability (experimental).
+
+  One `Tasks` instance per Durable Object owns any number of named Task definitions declared in its constructor (`new Tasks({ definitions: {...} })`, mirroring the Scheduler's callbacks map), so the registry is rebuilt on every wake and recovery of in-flight runs is correct by construction. Runs start with the typed `tasks.run(name, input, options)`, and `tasks.handle(name)` gives a typed lens scoped to one definition. A run survives process loss and deployments by replaying its handler from the top: completed `step.do()` steps return journaled results, `step.sleep()` / `step.sleepUntil()` consult persisted deadlines, and execution continues from the first unfinished step under generation fencing. Steps carry per-attempt retry and timeout policy, stable idempotency keys for external deduplication, and `step.status()` progress with a replay live gate that never re-publishes old progress as new.
+
+  There is no separate recovery mode: an unclean interruption replays the handler on the next wake, and handlers make replay safe with step idempotency keys for external writes and durable evidence (a stream's cursor, a rows-written count) read at the top of the work. The interrupted step is first-class evidence: `step.interrupted` is `{ name, attempt }` on a replay after process loss (`null` on clean attempts), and a `task:attempt:interrupted` event carries the same step. Clean step failures are not interruptions; the retry policy owns them.
+
+  `Agent` installs the capability automatically as experimental `this.tasks`, with subclass definitions declared on the overridable `taskDefinitions` field and framework-internal definitions attached through a composition-root aperture. The internal chat frameworks now run on it: Think and AIChatAgent chat turns and Think's messenger replies each execute as a journaled step with `stash()` persisted in host storage, and a replay whose live closure is gone branches into the unchanged ChatRecoveryEngine (and messenger recovery) on durable evidence. The legacy `runFiber()`/`startFiber()` APIs are unchanged and still recovered by their own scan; facet-hosted turns stay on the legacy engine until routed Fibers land.
+
+  Runs are durably accepted (`tasks.run()` returns a receipt; idempotency keys join existing runs), inspectable (`get`, `getByIdempotencyKey`, `list`), cooperatively cancellable, and retained until deleted. The capability stores run deadlines in its own tables and mirrors each non-terminal run as one job in the Lifecycle work queue (never touching the physical alarm), so it composes with the Scheduler and other capabilities on one shared, queue-derived alarm. Design record: `design/rfc-fibers.md` (shipped under the name Tasks).
+
 ## 0.22.0
 
 ### Minor Changes
