@@ -214,7 +214,12 @@ export class PiTransport {
         this.#tails.get(connection)?.get(message.streamId)?.abort();
         return SUBSCRIPTION;
       case "snapshot":
-        return this.#host.snapshot({ lane });
+        send(connection, {
+          type: "snapshot",
+          id: message.id,
+          snapshot: await this.#host.snapshot({ lane })
+        });
+        return SUBSCRIPTION;
       case "submit":
         return this.#host.submit(message.request, { lane });
       case "abort":
