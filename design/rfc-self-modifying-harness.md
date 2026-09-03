@@ -274,20 +274,23 @@ a file.
 
 ## Product UI
 
-The deployed app presents chat as the main product. A compact header badge shows
-the active revision and source hash. Each assistant message records the pinned
-revision that produced it. The composer submits turns through the durable Tasks
-path and polls their terminal state while the message remains visible.
+The app presents chat as the main product. The header shows the active
+revision. Each assistant message records the pinned revision that produced it
+and shows its tool calls as they happen. The browser connects through the
+`WebSockets` capability with `useAgent`: it receives an object snapshot on
+connect, subscribes to each turn's Streams log to replay-then-tail its events,
+and submits turns through the durable Tasks path. There is no HTTP polling.
 
 A side inspector, available from the chat header, has three read-only views:
 
 - Code shows every file from the exact active revision snapshot.
-- Revisions shows activation notes, source hashes, and the active revision.
+- Revisions shows activation notes, source hashes, the active revision, and a
+  restore action that activates an older snapshot as a new forward revision.
 - Activity shows the trusted append-only journal.
 
-The inspector intentionally does not mutate source. The agent changes its code
-through normal chat tool calls, so source edits and activation remain part of
-the model-visible turn and its durable journal.
+The inspector does not edit source. The agent changes its code through normal
+chat tool calls, so source edits and activation remain part of the
+model-visible turn and its durable journal.
 
 ## Current evidence
 
@@ -325,10 +328,8 @@ used by Worker Bundler, and the Kumo chat client:
 | Client CSS      |    150.58 KiB |    23.83 KiB |
 
 Streamdown's code plugin emits syntax languages as separate lazy chunks rather
-than including them in the client entry. A deployed smoke reported a 41 ms
-Worker startup and only three bindings: the Durable Object, Workers AI, and
-Worker Loader. The deployed automatic-discovery and `LanguageModelV4` evidence
-is recorded above.
+than including them in the client entry. The deployed Worker has three
+bindings: the Durable Object, Workers AI, and Worker Loader.
 
 ## Scope
 

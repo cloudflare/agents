@@ -1,11 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { Workspace } from "@cloudflare/shell";
+import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
+import { WebSockets } from "agents/websockets";
 import { createWorkersAI } from "workers-ai-provider";
 import { SelfModifyingHarness } from "./self-modifying-harness";
-import { handleSelfModifyingHarnessRequest } from "./http";
 
 /** Plain Durable Object hosting the self-modifying Lifecycle capability. */
 export class SelfModifyingHarnessObject extends DurableObject<Env> {
@@ -23,37 +24,19 @@ export class SelfModifyingHarnessObject extends DurableObject<Env> {
     loader: this.env.LOADER,
     model: this.workersAI("@cf/moonshotai/kimi-k2.7-code")
   });
+  readonly webSockets = new WebSockets(this.harness.webSockets());
   readonly lifecycle = Lifecycle.install(this)
     .use(this.tasks)
     .use(this.streams)
+    .use(this.webSockets)
     .use(this.harness);
-
-  /** Serve the operator API and durable turn streams. */
-  onRequest(request: Request): Promise<Response> {
-    return handleSelfModifyingHarnessRequest(
-      this.harness,
-      this.streams,
-      request
-    );
-  }
-}
-
-function objectRoute(url: URL): { name: string; path: string } | null {
-  const match = url.pathname.match(/^\/api\/objects\/([^/]+)(\/.*)?$/);
-  if (!match) return null;
-  const name = decodeURIComponent(match[1] ?? "");
-  if (name.trim() === "") return null;
-  return { name, path: match[2] ?? "/state" };
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    const route = objectRoute(url);
-    if (!route) return new Response("Not found", { status: 404 });
-    const id = env.SELF_MODIFYING_HARNESS.idFromName(route.name);
-    const stub = env.SELF_MODIFYING_HARNESS.get(id);
-    url.pathname = route.path;
-    return stub.fetch(new Request(url, request));
+    return (
+      (await routeAgentRequest(request, env)) ??
+      new Response("Not found", { status: 404 })
+    );
   }
 } satisfies ExportedHandler<Env>;

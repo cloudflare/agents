@@ -21,9 +21,12 @@ readonly harness = new SelfModifyingHarness({
   model: this.workersAI("@cf/moonshotai/kimi-k2.7-code")
 });
 
+readonly webSockets = new WebSockets(this.harness.webSockets());
+
 readonly lifecycle = Lifecycle.install(this)
   .use(this.tasks)
   .use(this.streams)
+  .use(this.webSockets)
   .use(this.harness);
 ```
 
@@ -71,8 +74,16 @@ and tell me the new revision.
 ```
 
 The next chat message runs the new revision and can call `roll_die`. The header
-shows the active revision. The read-only inspector shows its exact code,
-revision history, and trusted activity journal.
+shows the active revision. The inspector shows the active revision's exact
+code, the revision history with a restore action, and the trusted activity
+journal.
+
+The browser connects with `useAgent` from `agents/react`.
+`src/use-harness-session.ts` layers the harness protocol on that socket: an
+object snapshot on connect, `subscribe` to replay-then-tail a turn's `Streams`
+log, and `submit`, `activate`, and `restore` to drive it. Turn and revision
+changes broadcast to every open connection. `harness.webSockets()` returns the
+options for the `WebSockets` capability that serves it.
 
 ## Test
 
@@ -93,7 +104,8 @@ Custom tool discovery, use on the next revision, and forward restore.
 - `src/host-bridge.ts`: turn-scoped RPC authority and effect journal
 - `src/model-runner.ts`: trusted `LanguageModelV4` projection
 - `src/seed.ts`: editable genesis harness
-- `src/client.tsx`: chat and active-revision inspector
+- `src/transport.ts`: the WebSocket protocol over the `WebSockets` capability
+- `src/client.tsx` and `src/use-harness-session.ts`: chat and inspector
 
 The design rationale and measured evidence are in
 [`design/rfc-self-modifying-harness.md`](../../../../design/rfc-self-modifying-harness.md).

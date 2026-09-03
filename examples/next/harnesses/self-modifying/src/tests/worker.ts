@@ -8,8 +8,14 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
-import { handleSelfModifyingHarnessRequest } from "../http";
+import { HarnessBuildError } from "../harness-runtime";
 import type { JsonObject, JsonValue } from "../json";
+import type {
+  HarnessRevision,
+  HarnessSnapshot,
+  HarnessTurn,
+  HarnessTurnReceipt
+} from "../protocol";
 import { toJsonValue } from "../json";
 import type {
   HarnessInferenceResult,
@@ -238,32 +244,97 @@ class TestLanguageModel implements LanguageModelV4 {
 
 /** Test-only Durable Object with a deterministic LanguageModelV4. */
 export class TestSelfModifyingHarnessObject extends DurableObject<Env> {
-  readonly workspace = new Workspace({
+  private readonly workspace = new Workspace({
     sql: this.ctx.storage.sql,
     namespace: "self_modifying"
   });
-  readonly tasks = new Tasks();
-  readonly streams = new Streams();
-  readonly harness = new SelfModifyingHarness({
+  private readonly tasks = new Tasks();
+  private readonly streams = new Streams();
+  private readonly harness = new SelfModifyingHarness({
     tasks: this.tasks,
     streams: this.streams,
     workspace: this.workspace,
     loader: this.env.LOADER,
     model: new TestLanguageModel()
   });
-  readonly lifecycle = Lifecycle.install(this)
+  private readonly lifecycle = Lifecycle.install(this)
     .use(this.tasks)
     .use(this.streams)
     .use(this.harness);
 
-  /** Serve the same HTTP adapter as production with a deterministic model. */
-  onRequest(request: Request): Promise<Response> {
-    return handleSelfModifyingHarnessRequest(
-      this.harness,
-      this.streams,
-      request
-    );
+  /** The snapshot without the recursive JSON journal, which RPC typing chokes on. */
+  async snapshot(): Promise<TestSnapshot> {
+    const { journal: _journal, ...rest } = await this.harness.snapshot();
+    return rest;
   }
+
+  /** Admit and run a turn to settlement in this invocation. */
+  prompt(text: string): Promise<HarnessTurn> {
+    return this.harness.prompt(text);
+  }
+
+  /** Admit a turn for queued execution and return its receipt. */
+  submit(text: string, turnId: string): Promise<HarnessTurnReceipt> {
+    return this.harness.submit(text, turnId);
+  }
+
+  turn(turnId: string): Promise<HarnessTurn | null> {
+    return this.harness.getTurn(turnId);
+  }
+
+  async writeSource(path: string, content: string): Promise<Outcome<null>> {
+    try {
+      await this.harness.writeSource(path, content);
+      return { ok: true, value: null };
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
+  async activate(note: string): Promise<Outcome<HarnessRevision>> {
+    try {
+      return { ok: true, value: await this.harness.activate(note) };
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
+  restore(revisionId: number): Promise<HarnessRevision> {
+    return this.harness.restore(revisionId);
+  }
+
+  /** Every event type appended to one turn's durable stream, in order. */
+  async streamEventTypes(streamId: string): Promise<string[]> {
+    const types: string[] = [];
+    for await (const chunk of this.streams.read(streamId)) {
+      const event = chunk.chunk;
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        typeof event.type === "string"
+      ) {
+        types.push(event.type);
+      }
+    }
+    return types;
+  }
+}
+
+/** The harness snapshot minus its journal. */
+export type TestSnapshot = Omit<HarnessSnapshot, "journal">;
+
+/** A fallible operation's outcome, so tests can assert on rejections. */
+export type Outcome<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: string; readonly phase?: string };
+
+function failure(error: unknown): Outcome<never> {
+  return {
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+    ...(error instanceof HarnessBuildError ? { phase: error.phase } : {})
+  };
 }
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };

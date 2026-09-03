@@ -3,6 +3,7 @@ import type { Workspace } from "@cloudflare/shell";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { Streams, StreamWriter } from "agents/streams";
 import type { Tasks, TaskStep } from "agents/tasks";
+import type { WebSocketsOptions } from "agents/websockets";
 import {
   compileHarness,
   HarnessBuildError,
@@ -17,14 +18,11 @@ import type {
 } from "./host-bridge";
 import type { JsonObject, JsonValue } from "./json";
 import type { HarnessTurnResult } from "./runtime-types";
+import type { HarnessSnapshot, HarnessTurnReceipt } from "./protocol";
 import { SEED_HARNESS_FILES } from "./seed";
 import { SelfModifyingHarnessStore } from "./store";
-import type {
-  HarnessBuild,
-  HarnessRevision,
-  HarnessTurn,
-  JournalRecord
-} from "./store";
+import { HarnessTransport } from "./transport";
+import type { HarnessBuild, HarnessRevision, HarnessTurn } from "./store";
 
 const TURN_TASK = "__cf_self_modifying_turn_v1";
 
@@ -40,31 +38,10 @@ type TurnTaskOutcome =
   | { ok: false; error: string };
 
 /** Snapshot consumed by the inspection UI. */
-export type SelfModifyingHarnessSnapshot = {
-  readonly active: HarnessRevision;
-  readonly activeFiles: readonly {
-    readonly path: string;
-    readonly size: number;
-    readonly content: string;
-  }[];
-  readonly revisions: readonly HarnessRevision[];
-  readonly files: readonly {
-    readonly path: string;
-    readonly size: number;
-    readonly updatedAt: number;
-    readonly content: string | null;
-  }[];
-  readonly turns: readonly HarnessTurn[];
-  readonly journal: readonly JournalRecord[];
-};
+export type SelfModifyingHarnessSnapshot = HarnessSnapshot;
 
 /** Receipt returned once a turn and its Tasks wake are durable. */
-export type SelfModifyingTurnReceipt = {
-  readonly turnId: string;
-  readonly streamId: string;
-  readonly revisionId: number;
-  readonly accepted: boolean;
-};
+export type SelfModifyingTurnReceipt = HarnessTurnReceipt;
 
 /** Configuration for the self-modifying Lifecycle capability. */
 export type SelfModifyingHarnessOptions = {
@@ -159,6 +136,7 @@ export class SelfModifyingHarness extends LifecycleCapability {
   readonly #model: LanguageModelV4;
   #storeInstance: SelfModifyingHarnessStore | undefined;
   #sourceOperation: Promise<void> = Promise.resolve();
+  #transport: HarnessTransport | undefined;
 
   /** Create the capability and register its durable turn driver. */
   constructor(options: SelfModifyingHarnessOptions) {
@@ -270,19 +248,11 @@ export class SelfModifyingHarness extends LifecycleCapability {
     return this.#store.turn(turnId);
   }
 
-  /** Return source, revisions, turns, and journal for inspection. */
+  /** Return the active source, revisions, turns, and journal for the UI. */
   async snapshot(): Promise<SelfModifyingHarnessSnapshot> {
     await this.lifecycle.ready();
     const active = this.#store.activeBuild();
     if (!active) throw new Error("Harness genesis has not been activated");
-    const files = Object.entries(active.source)
-      .map(([path, content]) => ({
-        path,
-        size: new TextEncoder().encode(content).byteLength,
-        updatedAt: active.createdAt,
-        content
-      }))
-      .sort((left, right) => left.path.localeCompare(right.path));
     return {
       active: {
         revisionId: active.revisionId,
@@ -291,7 +261,7 @@ export class SelfModifyingHarness extends LifecycleCapability {
         note: active.note,
         createdAt: active.createdAt
       },
-      activeFiles: Object.entries(active.source)
+      files: Object.entries(active.source)
         .map(([path, content]) => ({
           path,
           size: new TextEncoder().encode(content).byteLength,
@@ -299,10 +269,34 @@ export class SelfModifyingHarness extends LifecycleCapability {
         }))
         .sort((left, right) => left.path.localeCompare(right.path)),
       revisions: this.#store.revisions(),
-      files,
-      turns: this.#store.turns(),
+      turns: this.#store.turns().reverse(),
       journal: this.#store.journalTail()
     };
+  }
+
+  /**
+   * Options for a `WebSockets` capability serving this harness's protocol:
+   * `new WebSockets(this.harness.webSockets())`.
+   */
+  webSockets(): WebSocketsOptions {
+    this.#transport ??= new HarnessTransport(
+      {
+        streams: this.#streams,
+        snapshot: () => this.snapshot(),
+        submit: (prompt) => this.submit(prompt),
+        getTurn: (turnId) => this.getTurn(turnId),
+        writeSource: (path, content) => this.writeSource(path, content),
+        activate: (note) => this.activate(note),
+        restore: (revisionId) => this.restore(revisionId)
+      },
+      () => this.lifecycle.sockets
+    );
+    return this.#transport.webSocketOptions();
+  }
+
+  #turnChanged(turnId: string): void {
+    const turn = this.#store.turn(turnId);
+    if (turn) this.#transport?.turnChanged(turn);
   }
 
   async #activate(
@@ -413,6 +407,7 @@ export class SelfModifyingHarness extends LifecycleCapability {
         tag: "self-modifying-turn",
         metadata: { turnId, revisionId }
       });
+      this.#turnChanged(turnId);
     }
     return {
       turnId,
@@ -473,6 +468,7 @@ export class SelfModifyingHarness extends LifecycleCapability {
       metadata: { turnId: input.turnId, revisionId: input.revisionId }
     });
     this.#store.markRunning(input.turnId);
+    this.#turnChanged(input.turnId);
     this.#emit(writer, input.turnId, "turn:start", {
       type: "turn_started",
       turnId: input.turnId,
@@ -512,6 +508,9 @@ export class SelfModifyingHarness extends LifecycleCapability {
       });
       writer.error(parsed.error);
     }
+    this.#turnChanged(input.turnId);
+    // A turn may have activated a revision; refresh connected inspectors.
+    await this.#transport?.stateChanged();
     return outcome;
   }
 

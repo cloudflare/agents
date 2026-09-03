@@ -6,7 +6,7 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "SELF_MODIFYING_HARNESS",
+        "name": "SELF_MODIFYING_HARNESS_TEST",
         "class_name": "TestSelfModifyingHarnessObject"
       }
     ]

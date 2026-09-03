@@ -89,10 +89,6 @@ type JournalRow = {
   created_at: number;
 };
 
-type TableColumnRow = {
-  name: string;
-};
-
 type EffectRow = {
   request_hash: string;
   state: string;
@@ -216,17 +212,6 @@ export class SelfModifyingHarnessStore {
         PRIMARY KEY (turn_id, event_key)
       ) WITHOUT ROWID;
     `);
-    const journalColumns = this.#sql
-      .exec<TableColumnRow>("PRAGMA table_info(self_modifying_journal)")
-      .toArray();
-    if (!journalColumns.some((column) => column.name === "event_key")) {
-      this.#sql.exec(
-        "ALTER TABLE self_modifying_journal ADD COLUMN event_key TEXT"
-      );
-    }
-    this.#sql.exec(
-      "CREATE UNIQUE INDEX IF NOT EXISTS self_modifying_journal_event_key ON self_modifying_journal(event_key)"
-    );
   }
 
   /** Return the active compiled revision, or null before genesis. */
