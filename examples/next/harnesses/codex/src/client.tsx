@@ -445,9 +445,13 @@ function App() {
   const busy = active !== null;
   const latest = operations.at(-1) ?? null;
 
+  const eventCount = Object.values(events).reduce(
+    (sum, list) => sum + list.length,
+    0
+  );
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [operations, events]);
+  }, [operations.length, eventCount, active?.status]);
 
   useEffect(() => {
     if (recovered) setRestarting(false);

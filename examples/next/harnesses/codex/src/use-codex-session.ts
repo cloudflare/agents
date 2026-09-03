@@ -73,11 +73,16 @@ function isActive(operation: CodexOperationSnapshot): boolean {
 export function useCodexSession(session: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
   const restartingRef = useRef(false);
+  /** Operations this connection already subscribed to; reset on every open. */
+  const subscribedRef = useRef(new Set<string>());
 
   const agent = useAgent({
     agent: "coder",
     name: session,
-    onOpen: () => setState((current) => ({ ...current, status: "open" })),
+    onOpen: () => {
+      subscribedRef.current.clear();
+      setState((current) => ({ ...current, status: "open" }));
+    },
     onClose: () => setState((current) => ({ ...current, status: "closed" })),
     onMessage: (event) => {
       let message: CodexServerMessage;
@@ -99,6 +104,8 @@ export function useCodexSession(session: string) {
             error: undefined
           }));
           for (const operation of operations) {
+            if (subscribedRef.current.has(operation.operationId)) continue;
+            subscribedRef.current.add(operation.operationId);
             const from = stateEventsLength(operation.operationId);
             subscribeRef.current(operation.operationId, from);
           }
@@ -109,7 +116,11 @@ export function useCodexSession(session: string) {
             ...current,
             operations: upsert(current.operations, message.operation)
           }));
-          if (isActive(message.operation)) {
+          if (
+            isActive(message.operation) &&
+            !subscribedRef.current.has(message.operation.operationId)
+          ) {
+            subscribedRef.current.add(message.operation.operationId);
             subscribeRef.current(message.operation.operationId, 0);
           }
           return;
@@ -133,10 +144,17 @@ export function useCodexSession(session: string) {
             };
           });
           return;
-        case "stream_end":
-          // The operation settled; ask for the durable state and file.
-          sendRef.current({ type: "snapshot", id: crypto.randomUUID() });
+        case "stream_end": {
+          // Only an operation we were tailing live needs its settled state
+          // and file; a replayed closed stream ends immediately.
+          const operation = stateRef.current.operations.find(
+            (candidate) => candidate.operationId === message.operationId
+          );
+          if (operation && isActive(operation)) {
+            sendRef.current({ type: "snapshot", id: crypto.randomUUID() });
+          }
           return;
+        }
         case "error":
           setState((current) => ({ ...current, error: message.message }));
           return;
