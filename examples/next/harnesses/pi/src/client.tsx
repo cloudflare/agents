@@ -397,7 +397,7 @@ function App() {
               <Empty
                 icon={<BrainIcon size={32} />}
                 title="Ask Pi something that needs a tool"
-                description="Every model call and tool result is persisted in this Durable Object. Reload mid-turn and the reply resumes from the durable stream."
+                description="Tool calls and results stream in as they happen."
               />
               <div className="mt-6 flex flex-wrap justify-center gap-2">
                 {SUGGESTIONS.map((suggestion) => (

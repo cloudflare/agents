@@ -96,6 +96,9 @@ function reduce(state: State, event: TranscriptEvent): State {
         ? { ...state, live: applyDelta(state.live, event.delta) }
         : state;
     case "message":
+      if (state.messages.some((known) => known.id === event.message.id)) {
+        return state;
+      }
       return {
         ...state,
         messages: [...state.messages, event.message],
@@ -168,6 +171,19 @@ export function usePiSession(session: string, lane = "main") {
           setState((current) =>
             message.events.reduce((next, event) => reduce(next, event), current)
           );
+          // The durable transcript is authoritative at operation boundaries:
+          // the user's prompt entry and the settled messages come from it.
+          if (
+            message.events.some(
+              (event) =>
+                event.type === "operation_start" ||
+                event.type === "operation_end"
+            )
+          ) {
+            agent.send(
+              JSON.stringify({ type: "snapshot", id: crypto.randomUUID() })
+            );
+          }
           return;
         case "error":
           setState((current) => ({ ...current, error: message.message }));
