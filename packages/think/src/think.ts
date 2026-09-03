@@ -268,7 +268,8 @@ import type {
   OrphanPersistStore
 } from "agents/chat";
 import { truncateOlderMessages } from "agents/chat";
-import { Session, Sessions, type SessionMessage } from "agents/sessions";
+import { Sessions, type SessionMessage } from "agents/sessions";
+import { ThinkSession } from "./session";
 import {
   AgentContextProvider,
   ContextBlocks,
@@ -281,15 +282,23 @@ import {
  * `truncateOlderMessages`' default `keepRecent` (see `_assembleModelMessages`).
  *
  * Both memory bounds are anchored to this window (#1710):
- * - budgeted hydration never shrinks `this.messages` below it (the floor
- *   passed to `session.getRecentHistory`), so windowing cannot starve the
- *   model's context;
+ * - budgeted hydration (`hydrationByteBudget`) is a hard byte ceiling, so a
+ *   window of unusually large messages can be shorter than this; the model
+ *   then sees what fits rather than exhausting isolate memory;
  * - media eviction never rewrites messages inside it (the
  *   `keepRecentMessages` clamp), so the rows the model replays at full
  *   fidelity are never stripped.
  */
 const MODEL_RECENT_WINDOW = 4;
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+
+/** Whether a workspace can receive raw bytes, which skills projection needs. */
+function hasWriteFileBytes(
+  workspace: WorkspaceLike
+): workspace is WorkspaceLike &
+  Required<Pick<WorkspaceLike, "writeFileBytes">> {
+  return typeof workspace.writeFileBytes === "function";
+}
 const ACTION_OUTPUT_MAX_CHARS = 20_000;
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
@@ -340,7 +349,12 @@ export type {
   ThinkChannels
 } from "./channels";
 export type { DeliveryKind, DeliveryTag } from "./messengers";
-export { Session } from "agents/sessions";
+export { ThinkSession, ThinkSession as Session } from "./session";
+export type {
+  CompactAfterOptions,
+  CompactionErrorHandler,
+  SessionContextOptions
+} from "./session";
 export type { SessionMessage } from "agents/sessions";
 export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
@@ -2855,8 +2869,12 @@ export class Think<
     searchIndexing: true
   });
 
-  /** The default conversation handle configured by `configureSession()`. */
-  session!: Session;
+  /**
+   * The default conversation handle configured by `configureSession()`.
+   * Storage lives on the `agents/sessions` handle it wraps; the context
+   * methods it still carries forward to {@link Think.context}.
+   */
+  session!: ThinkSession;
 
   /** Prompt context blocks for this agent, built from `configureContext()`. */
   #contextBlocks: ContextBlocks | undefined;
@@ -3028,13 +3046,26 @@ export class Think<
             });
           }
 
-          // 2. Session configuration (builder phase: context, compaction, skills)
-          this.session = await this.configureSession(this.sessions.session());
+          // 2. Session configuration (builder phase: compaction, and the
+          //    pre-Sessions `withContext()` chain, folded into the blocks
+          //    `configureContext()` declares).
+          this.session = await this.configureSession(
+            new ThinkSession(this.sessions.session(), () => this.context)
+          );
           this.#contextBlocks = new ContextBlocks(
-            await this.configureContext(),
-            this.#contextProvider("_system_prompt"),
+            [
+              ...(await this.configureContext()),
+              ...this.session.internal_takePendingContext()
+            ],
+            this.session.internal_promptStore() ??
+              this.#contextProvider("_system_prompt"),
             (label) => this.#contextProvider(label)
           );
+          // Load blocks now rather than on the first turn, as Think always
+          // has: the synchronous accessors (`this.context.getBlock()` and the
+          // pre-Sessions `session.getContextBlock()`) are expected to answer
+          // as soon as the object has started.
+          await this.#contextBlocks.load();
           this._unsubscribeSessionChanges?.();
           this._unsubscribeSessionChanges = this.sessions.subscribe(
             async (event) => {
@@ -3399,6 +3430,7 @@ export class Think<
 
   private _mediaEvictionRunning = false;
   private _mediaEvictionScheduled = false;
+  private _warnedEvictionUnsupported = false;
 
   /**
    * Schedule a bounded media-eviction pass (see `mediaEviction`).
@@ -3467,6 +3499,23 @@ export class Think<
       backlogRemains: false
     };
     try {
+      // A custom `WorkspaceLike` may predate `writeFileBytes`. Eviction needs
+      // it to preserve the bytes, so without it the pass is a no-op rather
+      // than a lossy one.
+      const writeFileBytes = this.workspace.writeFileBytes?.bind(
+        this.workspace
+      );
+      if (!writeFileBytes) {
+        if (!this._warnedEvictionUnsupported) {
+          this._warnedEvictionUnsupported = true;
+          console.warn(
+            "[Think] mediaEviction is enabled but the configured workspace " +
+              "does not implement writeFileBytes; media eviction is a no-op " +
+              "for this agent."
+          );
+        }
+        return null;
+      }
       const stats = await this.session.getHistoryRowStats();
       const keepRecent = Math.max(
         config.keepRecentMessages,
@@ -3495,7 +3544,7 @@ export class Think<
           minPartBytes: config.minPartBytes,
           write: async (index, bytes, mediaType) => {
             const path = evictedFilePath(message.id, index, mediaType);
-            await this.workspace.writeFileBytes(
+            await writeFileBytes(
               path,
               bytes,
               mediaType ?? "application/octet-stream"
@@ -5035,6 +5084,10 @@ export class Think<
    * set the compaction policy; prompt context is declared by
    * {@link Think.configureContext} instead.
    *
+   * The handle still accepts the pre-Sessions `withContext()` and
+   * `withCachedPrompt()` chain, so an existing override keeps working; those
+   * blocks are appended after the ones `configureContext()` returns.
+   *
    * @example
    * ```typescript
    * configureSession(session: Session) {
@@ -5044,7 +5097,9 @@ export class Think<
    * }
    * ```
    */
-  configureSession(session: Session): Session | Promise<Session> {
+  configureSession(
+    session: ThinkSession
+  ): ThinkSession | Promise<ThinkSession> {
     return session;
   }
 
@@ -5132,14 +5187,24 @@ export class Think<
     registry: SkillRegistry
   ): Promise<void> {
     if (this.skillWorkspace === false) return;
+    const workspace = this.workspace;
+    if (!hasWriteFileBytes(workspace)) {
+      const warning =
+        "skillWorkspace is enabled but the configured workspace does not implement writeFileBytes; skills stay source-backed.";
+      if (!this._loggedSkillWarnings.has(warning)) {
+        this._loggedSkillWarnings.add(warning);
+        console.warn(`[think] ${warning}`);
+      }
+      return;
+    }
     try {
       const key = "skillsWorkspaceFingerprint";
       if (this._configGet(key) === registry.fingerprint) {
-        await registry.useWorkspace(this.workspace, this.skillWorkspace);
+        await registry.useWorkspace(workspace, this.skillWorkspace);
         return;
       }
       const seeded = await registry.seedWorkspace(
-        this.workspace,
+        workspace,
         this.skillWorkspace
       );
       for (const warning of seeded.warnings) {

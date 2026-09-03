@@ -53,6 +53,12 @@ export interface MediaEvictionConfig {
    * @default 64
    */
   maxRowsPerPass?: number;
+  /**
+   * @deprecated Ignored. Evicted bytes are always preserved in the Workspace
+   * under `/attachments/evicted/`; there is no drop-the-bytes mode. Accepted
+   * so existing configurations keep compiling.
+   */
+  externalizeToWorkspace?: boolean;
 }
 
 export interface ResolvedMediaEvictionConfig {

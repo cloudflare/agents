@@ -1,6 +1,6 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { action, skills, Think } from "../../think";
+import { action, skills, Think, type ThinkSession } from "../../think";
 import { Agent } from "agents";
 import type {
   Connection,
@@ -55,7 +55,7 @@ import {
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
-import { Session } from "agents/sessions";
+import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
 import { z } from "zod";
 
@@ -8732,5 +8732,109 @@ export class ThinkPointerHydrationAgent extends Think {
         (m.parts.find((p) => p.type === "file") as { url?: string } | undefined)
           ?.url ?? ""
     );
+  }
+}
+
+/**
+ * A subclass written against the pre-Sessions Think API: context declared
+ * through `configureSession(session).withContext(...)`, the context
+ * accessors read off `this.session`, and the positional `appendMessage` /
+ * `getHistory` forms. Every call here must keep compiling and behaving.
+ */
+export class ThinkLegacySessionApiAgent extends Think {
+  private _response = "Hello from legacy session agent!";
+  private _compactionErrors: string[] = [];
+
+  override configureSession(session: ThinkSession): ThinkSession {
+    return session
+      .withContext("soul", {
+        provider: { get: async () => "You are a legacy-configured agent." }
+      })
+      .withContext("memory", {
+        description: "Important facts learned during conversation.",
+        maxTokens: 2000
+      })
+      .withCachedPrompt()
+      .onCompaction(async () => {
+        throw new Error("summarizer down");
+      })
+      .onCompactionError((error) => {
+        this._compactionErrors.push(
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel(this._response);
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  async legacyBlockLabels(): Promise<string[]> {
+    return this.session.getContextBlocks().map((block) => block.label);
+  }
+
+  async legacyBlockContent(label: string): Promise<string | null> {
+    return this.session.getContextBlock(label)?.content ?? null;
+  }
+
+  async legacyReplaceBlock(label: string, content: string): Promise<void> {
+    await this.session.replaceContextBlock(label, content);
+  }
+
+  async legacyFreezeSystemPrompt(): Promise<string> {
+    return this.session.freezeSystemPrompt();
+  }
+
+  async legacyAddAndRemoveContext(label: string): Promise<boolean> {
+    await this.session.addContext(label, { description: "Dynamic block" });
+    await this.session.refreshSystemPrompt();
+    return this.session.removeContext(label);
+  }
+
+  async legacyToolNames(): Promise<string[]> {
+    return Object.keys(await this.session.tools());
+  }
+
+  /** Positional `appendMessage(message, parentId)` and `getHistory(leafId)`. */
+  async legacyPositionalWrites(): Promise<{
+    rootLength: number;
+    branchLength: number;
+  }> {
+    const text = (id: string, content: string): UIMessage => ({
+      id,
+      role: "user",
+      parts: [{ type: "text", text: content }]
+    });
+    await this.session.appendMessage(text("legacy-root", "root"), null);
+    await this.session.appendMessage(text("legacy-a", "a"), "legacy-root");
+    await this.session.appendMessage(text("legacy-b", "b"), "legacy-root");
+    const branch = await this.session.getHistory("legacy-a");
+    const root = await this.session.getHistory(null);
+    return { rootLength: root.length, branchLength: branch.length };
+  }
+
+  /** `getRecentHistory(budget, minRecentMessages)` still accepts two args. */
+  async legacyRecentHistoryLength(): Promise<number> {
+    const recent = await this.session.getRecentHistory(1024 * 1024, 4);
+    return recent.messages.length;
+  }
+
+  async legacyCompact(): Promise<{
+    result: unknown;
+    errors: string[];
+  }> {
+    const result = await this.session.compact();
+    return { result, errors: [...this._compactionErrors] };
   }
 }

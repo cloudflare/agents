@@ -27,13 +27,18 @@ export type WorkspaceLike = Pick<
   | "readFile"
   | "readFileBytes"
   | "writeFile"
-  | "writeFileBytes"
   | "readDir"
   | "rm"
   | "glob"
   | "mkdir"
   | "stat"
->;
+> &
+  /**
+   * Optional so a custom workspace written before it existed still
+   * satisfies the type. Media eviction and skills projection need it and
+   * become no-ops (with a warning) when it is absent.
+   */
+  Partial<Pick<Workspace, "writeFileBytes">>;
 
 // ── Operations interfaces ─────────────────────────────────────────
 // Abstractions over file I/O so the same tools can work against

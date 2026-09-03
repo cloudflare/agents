@@ -803,6 +803,19 @@ The assembled blocks are available as `this.context` once the Lifecycle has
 started. See [Context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md)
 for providers, tools, and frozen-prompt behavior.
 
+### Upgrading from 0.17
+
+A subclass written against 0.17 keeps compiling and running. `configureSession(session)` still accepts the `withContext()` / `withCachedPrompt()` chain, and `this.session` still carries the context methods (`addContext`, `getContextBlock`, `replaceContextBlock`, `refreshSystemPrompt`, `freezeSystemPrompt`, `tools()`), which now forward to `this.context`. They are deprecated; move blocks into `configureContext()` and read `this.context` at your own pace. Blocks from both hooks are merged, `configureContext()` first.
+
+Two things do change on upgrade:
+
+- **Storage migrates on first wake and cannot be rolled back.** Each Durable Object lifts its `assistant_*` tables into `cf_agents_session_*`, verifies every row, and drops the old tables. An object that has woken on this version has an empty conversation if you roll back; rolling forward again is safe. Canary the deploy if you need a rollback path.
+- **Hydration has no message-count floor.** `hydrationByteBudget` (now 32 MiB) is a hard ceiling that charges each row its stored size plus attachments, so a run of very large messages can hydrate fewer than four. `getHistory()` still reads the full path.
+
+Annotate a `configureSession` override with `Session` imported from `@cloudflare/think`. The `Session` class exported by `agents/sessions` is the raw storage handle and is not assignable to Think's.
+
+`sessionAttachments` is gone (Sessions stores media out of the row on its own), `MediaEvictionConfig.externalizeToWorkspace` is ignored (bytes are always preserved), and `WorkspaceLike.writeFileBytes` is optional (a workspace without it disables media eviction and skills projection with a one-time warning).
+
 #### Dynamic context blocks
 
 Blocks can be added at runtime, for example by extensions:
