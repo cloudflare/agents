@@ -1486,14 +1486,16 @@ export class ThinkTestAgent extends Think {
   ): Promise<void> {
     const parent = path.replace(/\/[^/]+$/, "");
     const workspace = this.workspace;
-    const writeFileBytes = Reflect.get(workspace, "writeFileBytes");
-    if (typeof writeFileBytes !== "function") {
+    if (
+      !("writeFileBytes" in workspace) ||
+      typeof workspace.writeFileBytes !== "function"
+    ) {
       throw new Error("Test workspace does not support writeFileBytes");
     }
     if (parent && parent !== "/") {
       await workspace.mkdir(parent, { recursive: true });
     }
-    await writeFileBytes.call(workspace, path, new Uint8Array(bytes), mimeType);
+    await workspace.writeFileBytes(path, new Uint8Array(bytes), mimeType);
   }
 
   async testChatWithError(errorMessage?: string): Promise<TestChatResult> {

@@ -683,7 +683,7 @@ export class ContextBlocks {
       });
       const keyedBlocks = writable.filter((b) => b.isSkill || b.isSearchable);
 
-      const properties: Record<string, unknown> = {
+      const baseProperties = {
         label: {
           type: "string" as const,
           enum: writable.map((b) => b.label),
@@ -699,32 +699,35 @@ export class ContextBlocks {
           description: "replace (default) or append"
         }
       };
-
-      if (keyedBlocks.length > 0) {
-        properties.metadata = {
-          type: "object" as const,
-          description:
-            "Optional metadata for keyed entries (skill collections, searchable blocks: " +
-            keyedBlocks.map((b) => `"${b.label}"`).join(", ") +
-            "). Short content doesn't need metadata; longer loadable entries (skills) " +
-            "benefit from a title and description so the model can pick the right one " +
-            "without loading it.",
-          properties: {
-            title: {
-              type: "string" as const,
-              description:
-                "Short title. Used as a stable identifier — entries with the " +
-                "same title are updated in place, different titles create new entries."
-            },
-            description: {
-              type: "string" as const,
-              description:
-                "One-line summary shown alongside the title in the system prompt " +
-                "so the model can decide when to load the entry."
+      const properties =
+        keyedBlocks.length > 0
+          ? {
+              ...baseProperties,
+              metadata: {
+                type: "object" as const,
+                description:
+                  "Optional metadata for keyed entries (skill collections, searchable blocks: " +
+                  keyedBlocks.map((b) => `"${b.label}"`).join(", ") +
+                  "). Short content doesn't need metadata; longer loadable entries (skills) " +
+                  "benefit from a title and description so the model can pick the right one " +
+                  "without loading it.",
+                properties: {
+                  title: {
+                    type: "string" as const,
+                    description:
+                      "Short title. Used as a stable identifier — entries with the " +
+                      "same title are updated in place, different titles create new entries."
+                  },
+                  description: {
+                    type: "string" as const,
+                    description:
+                      "One-line summary shown alongside the title in the system prompt " +
+                      "so the model can decide when to load the entry."
+                  }
+                }
+              }
             }
-          }
-        };
-      }
+          : baseProperties;
 
       const metadataHint =
         keyedBlocks.length > 0
@@ -738,7 +741,7 @@ export class ContextBlocks {
         description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.${metadataHint}`,
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
-          properties: properties as Record<string, Record<string, unknown>>,
+          properties,
           required: ["label", "content"]
         }),
         execute: async ({

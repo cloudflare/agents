@@ -12,6 +12,14 @@ This project incorporates code from the following open-source projects.
 - **Full License**: [licenses/isc-partyserver.txt](licenses/isc-partyserver.txt)
 - **Vendored from**: [cloudflare/partykit@f0a2e97d](https://github.com/cloudflare/partykit/commit/f0a2e97d233f24545b2648aec2ed6a191e11074e)
 
+### Anti-slop
+
+- **License**: MIT License
+- **Repository**: https://github.com/dmmulroy/anti-slop
+- **Copyright**: Copyright (c) 2026 Dillon Mulroy
+- **Full License**: [licenses/mit-dmmulroy-anti-slop.txt](licenses/mit-dmmulroy-anti-slop.txt)
+- **Vendored from**: [dmmulroy/anti-slop@6d538555](https://github.com/dmmulroy/anti-slop/commit/6d538555cb151d4121ed51a27db81890eacf8ae9)
+
 ### Anthropic MCP TS SDK
 
 - **License**: Apache License 2.0

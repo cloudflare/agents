@@ -5715,7 +5715,7 @@ export class Think<
    * Idempotent (the finalizer is removed before it runs); the drain rides
    * `ctx.waitUntil` so it survives turn completion without blocking it.
    */
-  private _drainInferenceStream(result: object): void {
+  private _drainInferenceStream(result: StreamableResult): void {
     const finalizer = inferenceStreamFinalizers.get(result);
     inferenceStreamFinalizers.delete(result);
     if (!finalizer || finalizer.started) {

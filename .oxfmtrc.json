@@ -7,6 +7,18 @@
     "packages/agents/CHANGELOG.md",
     "site/agents/.astro",
     "**/routeTree.gen.ts",
-    "**/think.d.ts"
+    "**/think.d.ts",
+    ".agent/**",
+    ".agents/**",
+    ".claude/**",
+    ".codex/**",
+    ".continue/**",
+    ".cursor/**",
+    ".gemini/**",
+    ".opencode/**",
+    ".pi/**",
+    ".roo/**",
+    ".windsurf/**",
+    "tools/oxlint/anti-slop/**"
   ]
 }
