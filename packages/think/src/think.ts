@@ -2771,11 +2771,14 @@ export class Think<
   storeTools = false;
 
   /**
-   * Project `getSkills()` into the active workspace. Computer workspaces use
-   * `/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`. Existing
-   * edits are preserved. Set `false` to keep source-only skill loading.
+   * Project `getSkills()` into the active workspace so the agent can read
+   * and edit skills as files. Computer workspaces use
+   * `/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`.
+   * Existing edits are preserved. Off by default: skills load from their
+   * sources and nothing is written to the Workspace, as before. Set `{}` to
+   * project with the defaults.
    */
-  skillWorkspace: false | SkillWorkspaceSeedOptions = {};
+  skillWorkspace: false | SkillWorkspaceSeedOptions = false;
 
   private _skillRegistry: SkillRegistry | null = null;
   private _loggedSkillWarnings = new Set<string>();

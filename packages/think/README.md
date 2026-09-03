@@ -261,17 +261,19 @@ plain `@cloudflare/ai-chat` `onChatMessage`, can build a `SkillRegistry`);
 `@cloudflare/think` re-exports it as `skills` and wires `getSkills()` into the
 turn automatically.
 
-Think also projects each resolved `SKILL.md` into the active workspace. Computer
-uses `/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`. Existing
+Think can also project each resolved `SKILL.md` into the active workspace so
+the agent can read and edit skills as files. This is off by default: skills
+load from their sources and nothing is written to the Workspace. Computer uses
+`/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`. Existing
 workspace edits are preserved and affect later activation. Resources copy into
 the workspace on first use rather than at startup. Think records a durable
 source fingerprint, so unchanged cold wakes do not stat or rewrite every skill
 file.
 
-Disable projection or override its path with:
+Enable projection, or override its path, with:
 
 ```ts
-skillWorkspace = false;
+skillWorkspace = {};
 // or, for a custom Computer proxy that presents legacy direct methods:
 skillWorkspace = { root: "/workspace/.agents/skills" };
 ```
@@ -370,7 +372,7 @@ Script execution requires a Worker Loader binding:
 | `hydrationByteBudget`      | 32 MiB                             | Byte budget for startup transcript hydration. Charges each row its full stored size, including the continuation rows a large message is split across                                                                         |
 | `mediaEviction`            | `true`                             | Media eviction policy: aged media leaves the conversation and is preserved as a Workspace file. `false` keeps aged media in the conversation                                                                                 |
 | `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                                                                                             |
-| `skillWorkspace`           | `{}`                               | Project skills into Computer or legacy Shell; `false` disables projection                                                                                                                                                    |
+| `skillWorkspace`           | `false`                            | Project skills into the Workspace as files; `{}` enables with defaults                                                                                                                                                      |
 | `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |

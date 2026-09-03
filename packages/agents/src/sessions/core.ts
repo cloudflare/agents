@@ -43,6 +43,12 @@ import type {
 const HISTORY_CONTENT_CHUNK_SIZE = 50;
 const HISTORY_CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Deepest path a history read follows. A read of a longer branch sees its
+ * most recent rows only, and `getRecentHistory` reports that as truncated.
+ */
+const MAX_PATH_DEPTH = 10_000;
+
 /** The newest row of a session: what an append attaches to and numbers from. */
 type Tail = { leafId: string | null; nextSeq: number };
 
@@ -418,7 +424,7 @@ export class SessionsCore {
         UNION ALL
         SELECT m.id, m.parent_id, p.depth + 1 FROM cf_agents_session_messages m
         JOIN path p ON m.id = p.parent_id
-        WHERE m.session_id = ? AND p.depth < 10000
+        WHERE m.session_id = ? AND p.depth < ${MAX_PATH_DEPTH}
       )
       SELECT path.id AS id, am.role AS role,
         LENGTH(CAST(am.content AS BLOB)) + CASE WHEN am.content_chunks = 0 THEN 0
@@ -601,7 +607,13 @@ export class SessionsCore {
     )) {
       messages.push(message);
     }
-    return { messages, truncated: start > 0, totalContentBytes };
+    // The path cap hides older rows exactly as the budget does, so a branch
+    // deeper than the cap is truncated whatever the budget admitted.
+    return {
+      messages,
+      truncated: start > 0 || stats.length > MAX_PATH_DEPTH,
+      totalContentBytes
+    };
   }
 
   /**
