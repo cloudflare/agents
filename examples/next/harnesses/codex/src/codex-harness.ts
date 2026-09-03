@@ -4,8 +4,11 @@ import { LifecycleCapability } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { Tasks, type TaskStep } from "agents/tasks";
 import codexKernelModule from "../wasm-kernel/target/wasm32-unknown-unknown/release/codex_worker_kernel.wasm";
+import type { WebSocketsOptions } from "agents/websockets";
 import { DirectKernelRuntime } from "./kernel-runtime";
 import { completeCodexModel } from "./language-model-v4";
+import { CodexTransport } from "./transport";
+import type { CodexSessionSnapshot, CodexWorkspaceFile } from "./protocol";
 import type {
   KernelAction,
   KernelCheckpoint,
@@ -93,6 +96,9 @@ export class CodexHarness extends LifecycleCapability {
   private readonly workspace: Workspace;
   private readonly kernel: KernelRuntime;
   private readonly model: LanguageModelV4;
+  private transport: CodexTransport | undefined;
+  /** Demo file the UI shows; tools may write anywhere in the Workspace. */
+  static readonly DEMO_FILE = "/codex/result.txt";
 
   constructor(options: CodexHarnessOptions) {
     super("codex-harness");
@@ -163,7 +169,54 @@ export class CodexHarness extends LifecycleCapability {
       Date.now()
     );
     await this.#enqueueDriver(operationId);
+    const accepted = this.#requiredOperation(operationId);
+    this.transport?.operationChanged(projectSnapshot(accepted));
     return { operationId, streamId, accepted: true };
+  }
+
+  /** Every operation in this session, oldest first. */
+  async list(): Promise<CodexOperationSnapshot[]> {
+    await this.lifecycle.ready();
+    return [
+      ...this.lifecycle.storage.sql.exec<OperationRow>(
+        "SELECT * FROM cf_codex_operations ORDER BY started_at, operation_id"
+      )
+    ].map(projectSnapshot);
+  }
+
+  /** Read one Workspace file for the UI. */
+  async readFile(path: string): Promise<CodexWorkspaceFile> {
+    const content = await this.workspace.readFile(path);
+    return content === null
+      ? { path, found: false }
+      : { path, found: true, content };
+  }
+
+  /** Everything a connecting client needs. */
+  async sessionSnapshot(): Promise<CodexSessionSnapshot> {
+    return {
+      operations: await this.list(),
+      file: await this.readFile(CodexHarness.DEMO_FILE)
+    };
+  }
+
+  /**
+   * Options for a `WebSockets` capability serving this harness's protocol:
+   * `new WebSockets(this.codex.webSockets({ restart }))`.
+   */
+  webSockets(options: { restart(): void }): WebSocketsOptions {
+    this.transport ??= new CodexTransport(
+      {
+        streams: this.streams,
+        snapshot: () => this.sessionSnapshot(),
+        submit: (input) => this.submit(input),
+        operation: (operationId) => this.snapshot(operationId),
+        readFile: (path) => this.readFile(path),
+        restart: options.restart
+      },
+      () => this.lifecycle.sockets
+    );
+    return this.transport.webSocketOptions();
   }
 
   #enqueueDriver(operationId: string): Promise<unknown> {
@@ -209,6 +262,7 @@ export class CodexHarness extends LifecycleCapability {
       "UPDATE cf_codex_operations SET status = 'running' WHERE operation_id = ? AND status = 'queued'",
       operation.operation_id
     );
+    this.#broadcast(operation.operation_id);
 
     try {
       let command: KernelCommand;
@@ -375,6 +429,7 @@ export class CodexHarness extends LifecycleCapability {
       Date.now(),
       operationId
     );
+    this.#broadcast(operationId);
   }
 
   #settleFailed(operationId: string, error: string): void {
@@ -386,6 +441,12 @@ export class CodexHarness extends LifecycleCapability {
       Date.now(),
       operationId
     );
+    this.#broadcast(operationId);
+  }
+
+  #broadcast(operationId: string): void {
+    const row = this.#operation(operationId);
+    if (row) this.transport?.operationChanged(projectSnapshot(row));
   }
 
   #operation(operationId: string): OperationRow | undefined {

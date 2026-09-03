@@ -1,0 +1,67 @@
+/**
+ * Wire contract between the browser and the Codex harness. This module is
+ * imported by both the client and the Durable Object, so it must stay free of
+ * runtime imports.
+ */
+import type { CodexOperationSnapshot } from "./codex-harness";
+import type { KernelJson } from "./kernel-types";
+
+export type { CodexOperationSnapshot } from "./codex-harness";
+export type { KernelJson } from "./kernel-types";
+
+/** A Workspace file read for the demo. */
+export type CodexWorkspaceFile = {
+  readonly path: string;
+  readonly found: boolean;
+  readonly content?: string;
+};
+
+/** Everything the client needs to render a session on connect. */
+export type CodexSessionSnapshot = {
+  readonly operations: readonly CodexOperationSnapshot[];
+  readonly file: CodexWorkspaceFile;
+};
+
+/** Messages a browser sends over the WebSockets capability. */
+export type CodexClientMessage =
+  | { readonly type: "snapshot"; readonly id: string }
+  | {
+      readonly type: "submit";
+      readonly id: string;
+      readonly prompt: string;
+      readonly operationId?: string;
+    }
+  | {
+      /** Replay an operation's durable event stream from `from`, then tail it. */
+      readonly type: "subscribe";
+      readonly operationId: string;
+      readonly from?: number;
+    }
+  | {
+      /** Abort the Durable Object so the client can watch it recover. */
+      readonly type: "restart";
+      readonly id: string;
+    };
+
+/** Messages the Durable Object sends to a browser. */
+export type CodexServerMessage =
+  | { readonly type: "snapshot"; readonly snapshot: CodexSessionSnapshot }
+  | {
+      /** An operation was accepted or settled. */
+      readonly type: "operation";
+      readonly operation: CodexOperationSnapshot;
+    }
+  | {
+      readonly type: "events";
+      readonly operationId: string;
+      readonly seq: number;
+      readonly lastSeq: number;
+      readonly events: readonly KernelJson[];
+    }
+  | { readonly type: "stream_end"; readonly operationId: string }
+  | {
+      readonly type: "result";
+      readonly id: string;
+      readonly result: KernelJson;
+    }
+  | { readonly type: "error"; readonly id?: string; readonly message: string };

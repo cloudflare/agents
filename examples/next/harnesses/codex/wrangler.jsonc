@@ -7,7 +7,7 @@
   "ai": { "binding": "AI", "remote": true },
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/health", "/sessions/*"]
+    "run_worker_first": ["/agents/*"]
   },
   "durable_objects": {
     "bindings": [{ "name": "Coder", "class_name": "Coder" }]

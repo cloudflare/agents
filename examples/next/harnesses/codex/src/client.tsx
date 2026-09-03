@@ -17,60 +17,20 @@ import {
   GearIcon,
   MoonIcon,
   PaperPlaneRightIcon,
+  PlusIcon,
   SunIcon,
   TerminalIcon,
   XCircleIcon
 } from "@phosphor-icons/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { code } from "@streamdown/code";
 import { Streamdown } from "streamdown";
+import type { CodexOperationSnapshot, CodexWorkspaceFile } from "./protocol";
+import { useCodexSession, type KernelEvent } from "./use-codex-session";
 
-type OperationStatus = "queued" | "running" | "completed" | "failed";
-
-type OperationSnapshot = {
-  operationId: string;
-  streamId: string;
-  status: OperationStatus;
-  prompt: string;
-  checkpoint: Record<string, unknown> | null;
-  action: Record<string, unknown> | null;
-  transitions: number;
-  kernelMs: number;
-  startedAt: number;
-  completedAt?: number;
-  output?: string;
-  error?: string;
-};
-
-type KernelEvent = {
-  seq: number;
-  type: string;
-  [key: string]: unknown;
-};
-
-type WorkspaceFile = {
-  path: string;
-  found: boolean;
-  content?: string;
-};
-
-type RunState =
-  | { type: "idle" }
-  | { type: "submitting" }
-  | { type: "running"; operationId: string }
-  | { type: "completed"; operationId: string }
-  | { type: "failed"; operationId?: string; message: string };
-
-type ArchivedTurn = {
-  operationId: string;
-  prompt: string;
-  status: "completed" | "failed";
-  output?: string;
-  error?: string;
-  events: KernelEvent[];
-};
+type OperationStatus = CodexOperationSnapshot["status"];
 
 type ToolActivity = {
   callId: string;
@@ -80,13 +40,20 @@ type ToolActivity = {
   output?: unknown;
 };
 
+const SESSION_KEY = "codex-session";
 const DEFAULT_PROMPT =
   "Use workspace_write to save a short note in /codex/result.txt. Then use workspace_read to verify the exact contents before you finish.";
-const POLL_INTERVAL_MS = 400;
-const POLL_LIMIT = 300;
 
 function randomSession(): string {
   return `demo-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function getSession(): string {
+  const existing = localStorage.getItem(SESSION_KEY);
+  if (existing) return existing;
+  const created = randomSession();
+  localStorage.setItem(SESSION_KEY, created);
+  return created;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -130,7 +97,7 @@ function StatusBadge({ status }: { status: OperationStatus }) {
   return <Badge variant="secondary">Queued</Badge>;
 }
 
-function collectToolActivity(events: KernelEvent[]): ToolActivity[] {
+function collectToolActivity(events: readonly KernelEvent[]): ToolActivity[] {
   const tools = new Map<string, ToolActivity>();
   for (const event of events) {
     if (event.type === "tool_started") {
@@ -157,11 +124,11 @@ function collectToolActivity(events: KernelEvent[]): ToolActivity[] {
   return [...tools.values()];
 }
 
-function modelRounds(events: KernelEvent[]): number {
+function modelRounds(events: readonly KernelEvent[]): number {
   return events.filter((event) => event.type === "model_requested").length;
 }
 
-function reasoningText(events: KernelEvent[]): string {
+function reasoningText(events: readonly KernelEvent[]): string {
   return events
     .filter((event) => event.type === "reasoning_delta")
     .map((event) => String(event.delta ?? ""))
@@ -185,6 +152,14 @@ function toolSummary(tool: ToolActivity): string {
   return path ? `${verb} ${path}` : verb;
 }
 
+function JsonBlock({ value }: { value: unknown }) {
+  return (
+    <pre className="max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap break-words">
+      {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+    </pre>
+  );
+}
+
 function ToolCard({ tool }: { tool: ToolActivity }) {
   const icon =
     tool.status === "running" ? (
@@ -196,7 +171,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
     );
 
   return (
-    <details className="tool-card rounded-xl border border-kumo-line bg-kumo-base">
+    <details className="rounded-xl border border-kumo-line bg-kumo-base">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
         {icon}
         <span className="min-w-0 flex-1">
@@ -220,20 +195,14 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
           <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
             Arguments
           </p>
-          <pre className="max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap break-words">
-            {JSON.stringify(tool.arguments, null, 2)}
-          </pre>
+          <JsonBlock value={tool.arguments} />
         </div>
         {tool.output !== undefined && (
           <div>
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
               Result
             </p>
-            <pre className="max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap break-words">
-              {typeof tool.output === "string"
-                ? tool.output
-                : JSON.stringify(tool.output, null, 2)}
-            </pre>
+            <JsonBlock value={tool.output} />
           </div>
         )}
       </div>
@@ -244,166 +213,47 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
 function UserMessage({ text }: { text: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[88%] rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-6 text-kumo-inverse sm:max-w-[78%]">
+      <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse">
         {text}
       </div>
     </div>
   );
 }
 
-function AssistantMessage({
-  status,
-  events,
-  output,
-  error,
-  children
-}: {
-  status: OperationStatus | "submitting";
-  events: KernelEvent[];
-  output?: string;
-  error?: string;
-  children?: ReactNode;
-}) {
-  const tools = useMemo(() => collectToolActivity(events), [events]);
-  const reasoning = useMemo(() => reasoningText(events), [events]);
-  const rounds = modelRounds(events);
-  const running =
-    status === "submitting" || status === "queued" || status === "running";
-
-  return (
-    <div className="flex items-start gap-3">
-      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
-        <CodeIcon size={17} weight="bold" />
-      </div>
-      <div className="min-w-0 flex-1 space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Text size="sm" bold>
-            Codex
-          </Text>
-          {running ? (
-            <span className="flex items-center gap-1.5 text-xs text-kumo-subtle">
-              <span className="size-1.5 animate-pulse rounded-full bg-kumo-accent" />
-              {status === "submitting" ? "Starting turn" : "Working"}
-            </span>
-          ) : status === "completed" ? (
-            <span className="text-xs font-medium text-kumo-success">
-              Turn completed
-            </span>
-          ) : (
-            <span className="text-xs font-medium text-kumo-danger">
-              Turn failed
-            </span>
-          )}
-        </div>
-
-        {running && events.length === 0 && (
-          <Surface className="max-w-xl rounded-xl px-4 py-3 ring ring-kumo-line">
-            <div className="flex items-center gap-2 text-sm text-kumo-subtle">
-              <GearIcon size={15} className="animate-spin" />
-              Waking the durable operation...
-            </div>
-          </Surface>
-        )}
-
-        {reasoning.length > 0 && (
-          <Surface className="max-w-xl rounded-xl px-4 py-3 ring ring-kumo-line">
-            <div className="mb-1 flex items-center gap-2">
-              <GearIcon size={14} className="text-kumo-inactive" />
-              <Text size="xs" variant="secondary" bold>
-                Reasoning
-              </Text>
-            </div>
-            <p className="whitespace-pre-wrap text-xs italic leading-5 text-kumo-subtle">
-              {reasoning}
-            </p>
-          </Surface>
-        )}
-
-        {tools.length > 0 && (
-          <div className="max-w-xl space-y-2">
-            {tools.map((tool) => (
-              <ToolCard key={tool.callId} tool={tool} />
-            ))}
-          </div>
-        )}
-
-        {output && (
-          <Streamdown
-            className="sd-theme max-w-xl text-sm leading-6 text-kumo-default"
-            controls={false}
-            plugins={{ code }}
-          >
-            {output}
-          </Streamdown>
-        )}
-
-        {error && (
-          <div
-            role="alert"
-            className="max-w-xl rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-          >
-            {error}
-          </div>
-        )}
-
-        {events.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 text-[11px] text-kumo-inactive">
-            <span>
-              {rounds} model {rounds === 1 ? "round" : "rounds"}
-            </span>
-            <span aria-hidden="true">·</span>
-            <Badge variant="secondary">{events.length} events</Badge>
-          </div>
-        )}
-
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function JsonInspector({ value }: { value: unknown }) {
-  return (
-    <pre className="max-h-72 overflow-auto rounded-lg bg-kumo-elevated p-3 text-xs leading-5 text-kumo-default ring ring-kumo-line whitespace-pre-wrap break-words">
-      {value === null ? "No checkpoint yet" : JSON.stringify(value, null, 2)}
-    </pre>
-  );
-}
-
 function RunDetails({
-  snapshot,
+  operation,
   file,
   events,
   recovered,
   restarting,
-  onVerifyRestart
+  onRestart
 }: {
-  snapshot: OperationSnapshot;
-  file: WorkspaceFile | null;
-  events: KernelEvent[];
+  operation: CodexOperationSnapshot;
+  file: CodexWorkspaceFile | null;
+  events: readonly KernelEvent[];
   recovered: boolean;
   restarting: boolean;
-  onVerifyRestart: () => void;
+  onRestart: () => void;
 }) {
   const duration =
-    snapshot.completedAt === undefined
+    operation.completedAt === undefined
       ? null
-      : snapshot.completedAt - snapshot.startedAt;
+      : operation.completedAt - operation.startedAt;
 
   return (
-    <details className="run-details max-w-xl overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+    <details className="max-w-xl overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
         <DatabaseIcon size={14} className="text-kumo-inactive" />
         <span className="flex-1 text-xs font-semibold">Run details</span>
         {recovered && <Badge variant="success">Recovered</Badge>}
-        <StatusBadge status={snapshot.status} />
+        <StatusBadge status={operation.status} />
       </summary>
       <div className="space-y-4 border-t border-kumo-line p-3">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[
             ["Model", "Kimi K2.7"],
-            ["Transitions", String(snapshot.transitions)],
-            ["Kernel", `${snapshot.kernelMs.toFixed(3)} ms`],
+            ["Transitions", String(operation.transitions)],
+            ["Kernel", `${operation.kernelMs.toFixed(3)} ms`],
             ["Duration", duration === null ? "Running" : `${duration} ms`]
           ].map(([label, value]) => (
             <div key={label} className="rounded-lg bg-kumo-elevated p-2.5">
@@ -446,7 +296,7 @@ function RunDetails({
             Kernel checkpoint
           </summary>
           <div className="mt-2">
-            <JsonInspector value={snapshot.checkpoint} />
+            <JsonBlock value={operation.checkpoint ?? "No checkpoint yet"} />
           </div>
         </details>
 
@@ -457,9 +307,9 @@ function RunDetails({
           <Button
             variant="secondary"
             size="sm"
-            onClick={onVerifyRestart}
+            onClick={onRestart}
             loading={restarting}
-            disabled={snapshot.status !== "completed" || restarting}
+            disabled={operation.status !== "completed" || restarting}
             icon={<ArrowCounterClockwiseIcon size={14} />}
           >
             Restart and verify
@@ -470,229 +320,180 @@ function RunDetails({
   );
 }
 
-function App() {
-  const [session, setSession] = useState(
-    () => localStorage.getItem("codex-demo-session") || randomSession()
-  );
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [activePrompt, setActivePrompt] = useState<string | null>(null);
-  const [archivedTurns, setArchivedTurns] = useState<ArchivedTurn[]>([]);
-  const [runState, setRunState] = useState<RunState>({ type: "idle" });
-  const [snapshot, setSnapshot] = useState<OperationSnapshot | null>(null);
-  const [events, setEvents] = useState<KernelEvent[]>([]);
-  const [file, setFile] = useState<WorkspaceFile | null>(null);
-  const [restarting, setRestarting] = useState(false);
-  const [recovered, setRecovered] = useState(false);
-  const runGeneration = useRef(0);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+function AssistantMessage({
+  operation,
+  events,
+  children
+}: {
+  operation: CodexOperationSnapshot;
+  events: readonly KernelEvent[];
+  children?: ReactNode;
+}) {
+  const tools = useMemo(() => collectToolActivity(events), [events]);
+  const reasoning = useMemo(() => reasoningText(events), [events]);
+  const rounds = modelRounds(events);
+  const running =
+    operation.status === "queued" || operation.status === "running";
 
-  useEffect(() => {
-    localStorage.setItem("codex-demo-session", session);
-  }, [session]);
+  return (
+    <div className="flex items-start gap-3">
+      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
+        <CodeIcon size={17} weight="bold" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Text size="sm" bold>
+            Codex
+          </Text>
+          {running ? (
+            <span className="flex items-center gap-1.5 text-xs text-kumo-subtle">
+              <span className="size-1.5 animate-pulse rounded-full bg-kumo-accent" />
+              Working
+            </span>
+          ) : operation.status === "completed" ? (
+            <span className="text-xs font-medium text-kumo-success">
+              Turn completed
+            </span>
+          ) : (
+            <span className="text-xs font-medium text-kumo-danger">
+              Turn failed
+            </span>
+          )}
+        </div>
+
+        {running && events.length === 0 && (
+          <Surface className="max-w-xl rounded-xl px-4 py-3 ring ring-kumo-line">
+            <div className="flex items-center gap-2 text-sm text-kumo-subtle">
+              <GearIcon size={15} className="animate-spin" />
+              Waking the durable operation
+            </div>
+          </Surface>
+        )}
+
+        {reasoning.length > 0 && (
+          <details className="max-w-xl rounded-xl border border-kumo-line px-3 py-2">
+            <summary className="cursor-pointer list-none text-xs font-semibold text-kumo-subtle">
+              Reasoning
+            </summary>
+            <p className="mt-2 whitespace-pre-wrap text-xs italic leading-5 text-kumo-subtle">
+              {reasoning}
+            </p>
+          </details>
+        )}
+
+        {tools.length > 0 && (
+          <div className="max-w-xl space-y-2">
+            {tools.map((tool) => (
+              <ToolCard key={tool.callId} tool={tool} />
+            ))}
+          </div>
+        )}
+
+        {operation.output && (
+          <Streamdown
+            className="sd-theme max-w-xl text-sm leading-6 text-kumo-default"
+            controls={false}
+            plugins={{ code }}
+          >
+            {operation.output}
+          </Streamdown>
+        )}
+
+        {operation.error && (
+          <div
+            role="alert"
+            className="max-w-xl rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
+          >
+            {operation.error}
+          </div>
+        )}
+
+        {events.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-kumo-inactive">
+            <span>
+              {rounds} model {rounds === 1 ? "round" : "rounds"}
+            </span>
+            <span aria-hidden="true">·</span>
+            <Badge variant="secondary">{events.length} events</Badge>
+          </div>
+        )}
+
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [session, setSession] = useState(getSession);
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [restarting, setRestarting] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const {
+    status,
+    operations,
+    events,
+    file,
+    error,
+    recovered,
+    active,
+    submit,
+    restart
+  } = useCodexSession(session);
+
+  const connected = status === "open";
+  const busy = active !== null;
+  const latest = operations.at(-1) ?? null;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [archivedTurns.length, events.length, runState.type, snapshot?.output]);
+  }, [operations, events]);
 
-  const api = useCallback(
-    async <T,>(path: string, init?: RequestInit): Promise<T> => {
-      const response = await fetch(
-        `/sessions/${encodeURIComponent(session)}${path}`,
-        init
-      );
-      const body: unknown = await response.json();
-      if (!response.ok) {
-        const message =
-          typeof body === "object" &&
-          body !== null &&
-          "error" in body &&
-          typeof body.error === "string"
-            ? body.error
-            : `Request failed with ${response.status}`;
-        throw new Error(message);
-      }
-      // SAFETY: Each call site supplies the response type for one owned API
-      // route. The server and client live in this package and change together.
-      return body as T;
-    },
-    [session]
-  );
+  useEffect(() => {
+    if (recovered) setRestarting(false);
+  }, [recovered]);
 
-  const pollOperation = useCallback(
-    async (operationId: string, generation: number) => {
-      for (let attempt = 0; attempt < POLL_LIMIT; attempt++) {
-        if (runGeneration.current !== generation) return;
-        const [next, eventResult] = await Promise.all([
-          api<OperationSnapshot>(
-            `/operations/${encodeURIComponent(operationId)}`
-          ),
-          api<{ events: KernelEvent[] }>(
-            `/events/${encodeURIComponent(operationId)}`
-          )
-        ]);
-        setSnapshot(next);
-        setEvents(eventResult.events);
-        if (next.status === "completed") {
-          if (runGeneration.current === generation) {
-            setRunState({ type: "completed", operationId });
-          }
-          // The Workspace file is a demo detail; a turn that never wrote it
-          // is still a completed turn.
-          const fileResult = await api<WorkspaceFile>(
-            "/file?path=/codex/result.txt"
-          ).catch(() => null);
-          if (runGeneration.current === generation) setFile(fileResult);
-          return;
-        }
-        if (next.status === "failed") {
-          if (runGeneration.current === generation) {
-            setRunState({
-              type: "failed",
-              operationId,
-              message: next.error ?? "Codex turn failed"
-            });
-          }
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      }
-      if (runGeneration.current === generation) {
-        setRunState({
-          type: "failed",
-          operationId,
-          message: "Timed out while waiting for the durable turn"
-        });
-      }
-    },
-    [api]
-  );
-
-  const submit = useCallback(async () => {
+  const send = () => {
     const trimmed = prompt.trim();
-    if (trimmed.length === 0) return;
-
-    if (
-      activePrompt !== null &&
-      snapshot !== null &&
-      (snapshot.status === "completed" || snapshot.status === "failed")
-    ) {
-      const archived: ArchivedTurn = {
-        operationId: snapshot.operationId,
-        prompt: activePrompt,
-        status: snapshot.status,
-        events,
-        ...(snapshot.output === undefined ? {} : { output: snapshot.output }),
-        ...(snapshot.error === undefined ? {} : { error: snapshot.error })
-      };
-      setArchivedTurns((current) => [...current, archived]);
-    }
-
-    const generation = ++runGeneration.current;
-    setActivePrompt(trimmed);
+    if (trimmed.length === 0 || busy || !connected) return;
     setPrompt("");
-    setRunState({ type: "submitting" });
-    setSnapshot(null);
-    setEvents([]);
-    setFile(null);
-    setRecovered(false);
-    try {
-      const receipt = await api<{
-        operationId: string;
-        streamId: string;
-        accepted: boolean;
-      }>("/submit", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: trimmed })
-      });
-      setRunState({ type: "running", operationId: receipt.operationId });
-      await pollOperation(receipt.operationId, generation);
-    } catch (error) {
-      if (runGeneration.current === generation) {
-        setRunState({
-          type: "failed",
-          message: error instanceof Error ? error.message : String(error)
-        });
-      }
-    }
-  }, [activePrompt, api, events, pollOperation, prompt, snapshot]);
+    submit(trimmed);
+  };
 
-  const verifyRestart = useCallback(async () => {
-    if (!snapshot || snapshot.status !== "completed") return;
-    setRestarting(true);
-    setRecovered(false);
-    try {
-      await api<{ restarting: boolean }>("/restart", { method: "POST" });
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      const restored = await api<OperationSnapshot>(
-        `/operations/${encodeURIComponent(snapshot.operationId)}`
-      );
-      const restoredFile = await api<WorkspaceFile>(
-        "/file?path=/codex/result.txt"
-      );
-      setSnapshot(restored);
-      setFile(restoredFile);
-      setRecovered(restored.status === "completed" && restoredFile.found);
-    } catch (error) {
-      setRunState({
-        type: "failed",
-        operationId: snapshot.operationId,
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setRestarting(false);
-    }
-  }, [api, snapshot]);
-
-  const newSession = useCallback(() => {
-    runGeneration.current += 1;
-    setSession(randomSession());
+  const newSession = () => {
+    const next = randomSession();
+    localStorage.setItem(SESSION_KEY, next);
+    setSession(next);
     setPrompt(DEFAULT_PROMPT);
-    setActivePrompt(null);
-    setArchivedTurns([]);
-    setRunState({ type: "idle" });
-    setSnapshot(null);
-    setEvents([]);
-    setFile(null);
-    setRecovered(false);
-  }, []);
-
-  const busy = runState.type === "submitting" || runState.type === "running";
-  const currentStatus: OperationStatus | "submitting" =
-    snapshot?.status ??
-    (runState.type === "submitting"
-      ? "submitting"
-      : runState.type === "failed"
-        ? "failed"
-        : "queued");
-  const currentError =
-    runState.type === "failed"
-      ? runState.message
-      : snapshot?.status === "failed"
-        ? snapshot.error
-        : undefined;
+  };
 
   return (
     <div className="flex h-dvh flex-col bg-kumo-elevated text-kumo-default">
       <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
-        <div className="mx-auto flex max-w-4xl items-center justify-between gap-3 px-4 py-3 sm:px-5">
+        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-5 py-4">
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
               <CodeIcon size={20} weight="bold" />
             </div>
             <div className="min-w-0">
               <h1 className="truncate text-base font-semibold">
-                Codex Harness
+                Codex harness
               </h1>
               <p className="truncate text-xs text-kumo-subtle">
-                <span className="hidden sm:inline">Workspace session </span>
-                <code>{session}</code>
+                Session <code>{session}</code>
               </p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             <Badge variant="secondary" className="hidden sm:inline-flex">
-              LanguageModelV4 · Kimi K2.7
+              Kimi K2.7
+            </Badge>
+            <Badge variant={connected ? "success" : "secondary"}>
+              {connected
+                ? "Live"
+                : status === "connecting"
+                  ? "Connecting"
+                  : "Reconnecting"}
             </Badge>
             <Button
               variant="ghost"
@@ -700,7 +501,7 @@ function App() {
               aria-label="New session"
               onClick={newSession}
               disabled={busy}
-              icon={<ArrowCounterClockwiseIcon size={16} />}
+              icon={<PlusIcon size={16} />}
             />
             <ModeToggle />
           </div>
@@ -708,49 +509,47 @@ function App() {
       </header>
 
       <main className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-5 sm:py-8">
-          {archivedTurns.length === 0 && activePrompt === null && (
+        <div className="mx-auto max-w-3xl space-y-6 px-5 py-6">
+          {operations.length === 0 && (
             <div className="py-10 sm:py-16">
               <Empty
                 icon={<TerminalIcon size={32} />}
                 title="What should Codex change?"
-                description="Describe a file task. Codex will call Workspace tools through a durable Rust/Wasm turn and show each step here."
+                description="Describe a file task. Codex calls Workspace tools through a durable Rust/Wasm turn and every step streams here. Reload mid-turn and it resumes."
               />
             </div>
           )}
 
-          {archivedTurns.map((turn) => (
-            <div key={turn.operationId} className="space-y-5">
-              <UserMessage text={turn.prompt} />
+          {operations.map((operation) => (
+            <div key={operation.operationId} className="space-y-5">
+              <UserMessage text={operation.prompt} />
               <AssistantMessage
-                status={turn.status}
-                events={turn.events}
-                output={turn.output}
-                error={turn.error}
-              />
-            </div>
-          ))}
-
-          {activePrompt !== null && (
-            <div className="space-y-5">
-              <UserMessage text={activePrompt} />
-              <AssistantMessage
-                status={currentStatus}
-                events={events}
-                output={snapshot?.output}
-                error={currentError}
+                operation={operation}
+                events={events[operation.operationId] ?? []}
               >
-                {snapshot && (
+                {operation.operationId === latest?.operationId && (
                   <RunDetails
-                    snapshot={snapshot}
+                    operation={operation}
                     file={file}
-                    events={events}
+                    events={events[operation.operationId] ?? []}
                     recovered={recovered}
                     restarting={restarting}
-                    onVerifyRestart={() => void verifyRestart()}
+                    onRestart={() => {
+                      setRestarting(true);
+                      restart();
+                    }}
                   />
                 )}
               </AssistantMessage>
+            </div>
+          ))}
+
+          {error && (
+            <div
+              role="alert"
+              className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
+            >
+              {error}
             </div>
           )}
 
@@ -762,23 +561,22 @@ function App() {
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            void submit();
+            send();
           }}
-          className="mx-auto max-w-3xl px-4 pt-3 sm:px-5 sm:pt-4"
+          className="mx-auto max-w-3xl px-5 pt-4"
         >
-          <div className="flex items-end gap-2 rounded-xl border border-kumo-line bg-kumo-base p-2.5 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
+          <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
             <InputArea
-              id="codex-prompt"
               value={prompt}
               onValueChange={setPrompt}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
-                  void submit();
+                  send();
                 }
               }}
               rows={2}
-              disabled={busy}
+              disabled={busy || !connected}
               aria-label="Message Codex"
               placeholder="Describe a coding task"
               className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
@@ -789,13 +587,13 @@ function App() {
               shape="square"
               aria-label="Run turn"
               loading={busy}
-              disabled={busy || prompt.trim().length === 0}
+              disabled={busy || !connected || prompt.trim().length === 0}
               icon={<PaperPlaneRightIcon size={18} />}
               className="mb-0.5"
             />
           </div>
         </form>
-        <div className="flex items-center justify-center gap-2 px-4 py-2.5">
+        <div className="flex items-center justify-center gap-2 px-5 py-3">
           <span className="hidden text-[10px] text-kumo-inactive sm:inline">
             Enter to send · Shift+Enter for a new line
           </span>

@@ -8,6 +8,7 @@ The example composes:
 - `CodexHarness extends LifecycleCapability` for the durable agent loop;
 - `Tasks` for wake delivery and replay;
 - `Streams` for ordered operation events;
+- `WebSockets` to serve those events to the browser;
 - `@cloudflare/shell` Workspace for durable files;
 - AI SDK `LanguageModelV4` for model calls;
 - `workers-ai-provider` for Kimi K2.7 Code through Workers AI and AI Gateway.
@@ -59,6 +60,12 @@ pnpm run start
 Open the printed local URL. The chat UI shows reasoning, tool calls, the
 persisted Workspace file, kernel timing, and a "Restart and verify" action that
 aborts the Durable Object and reloads the operation from durable state.
+
+The browser connects with `useAgent` from `agents/react`. `src/use-codex-session.ts`
+layers the harness protocol on that socket: a session snapshot on connect,
+`subscribe` to replay-then-tail an operation's `Streams` log, and `submit` and
+`restart` to drive it. `harness.webSockets()` returns the options for the
+`WebSockets` capability that serves it.
 
 ## Deploy
 

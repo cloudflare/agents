@@ -1092,11 +1092,11 @@ time, terminal wall time, Workspace file contents, checkpoint JSON, and the
 restart verification action. Tool cards show a concise read or write summary
 and expand to the complete arguments and result.
 
-The browser polls both the operation snapshot and the finite event journal
-while the Task runs. This makes model rounds and tool calls appear before the
-turn completes. The event route reads the current `cf_codex_events` rows rather
-than tailing the live Streams reader. Streams remains the durable ordered output
-record and recovery mechanism.
+The browser connects through the `WebSockets` capability with `useAgent`. On
+connect it receives a session snapshot, then subscribes to each operation's
+Streams log and replays-then-tails it, so model rounds and tool calls appear
+before the turn completes and a reload resumes from the last event. Streams is
+the only output path; there is no HTTP polling route.
 
 The selected session is retained in browser local storage. Starting a new
 session creates a fresh object identity and clears the local transcript. The
