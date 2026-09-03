@@ -1,5 +1,6 @@
-import { Think, type Session, type SkillSource } from "@cloudflare/think";
-import { configureAgentThinkSession, type RunContext } from "../src/agent";
+import { Think, type SkillSource } from "@cloudflare/think";
+import type { ContextConfig } from "agents/context";
+import { agentThinkContext, type RunContext } from "../src/agent";
 
 const promptTestSkillSource: SkillSource = {
   id: "agent-think-prompt-test",
@@ -32,8 +33,8 @@ export class AgentThinkPromptTestAgent extends Think<Env> {
     commentId: 123
   };
 
-  override configureSession(session: Session): Session {
-    return configureAgentThinkSession(session, () => this.#runContext);
+  override configureContext(): ContextConfig[] {
+    return agentThinkContext(() => this.#runContext);
   }
 
   override getSkills(): SkillSource[] {
@@ -41,12 +42,12 @@ export class AgentThinkPromptTestAgent extends Think<Env> {
   }
 
   async getFrozenPrompt(): Promise<string> {
-    return this.session.freezeSystemPrompt();
+    return this.context.freezeSystemPrompt();
   }
 
   async setInstruction(instruction: string): Promise<void> {
     this.#runContext = { ...this.#runContext, instruction };
-    await this.session.refreshSystemPrompt();
+    await this.context.refreshSystemPrompt();
   }
 }
 

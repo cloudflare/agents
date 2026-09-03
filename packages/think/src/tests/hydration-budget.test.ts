@@ -1,13 +1,11 @@
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { describe, expect, it, vi } from "vitest";
-import type { UIMessage } from "ai";
 import { subscribe } from "agents/observability";
+import { describe, expect, it } from "vitest";
 import type {
   OnStartDegradationForTest,
   TestChatResult
 } from "./agents/think-session";
-import type { MediaEvictionConfig } from "../think";
 
 /**
  * Steps 2 and 3 of #1710.
@@ -16,10 +14,7 @@ import type { MediaEvictionConfig } from "../think";
  * as a bounded recent window instead of materializing fully in memory on
  * every wake.
  *
- * Step 3 — `mediaEviction`: oversized inline media (data-URL file parts,
- * large strings in tool outputs) is evicted from AGED stored messages and
- * preserved as workspace files, so the persisted footprint stops growing
- * with session age.
+ * Media eviction itself lives in `media-eviction.test.ts`.
  */
 
 type WindowedHydrationStub = {
@@ -37,17 +32,19 @@ type WindowedHydrationStub = {
 };
 
 type MediaEvictionStub = {
-  setMediaEvictionForTest(config: MediaEvictionConfig | boolean): Promise<void>;
-  seedMediaHistoryForTest(prefix?: string): Promise<void>;
-  runEvictionForTest(): Promise<{
-    messages: number;
-    parts: number;
-    bytes: number;
-    externalizedBytes: number;
+  getHydrationBudgetForTest(): Promise<number>;
+};
+
+type PointerHydrationStub = {
+  getHydrationInfoForTest(): Promise<{
+    truncated: boolean;
+    totalContentBytes: number;
+    hydratedMessages: number;
   } | null>;
-  getStoredMessageForTest(id: string): Promise<UIMessage | null>;
-  readWorkspaceFileForTest(path: string): Promise<string | null>;
-  getSessionStatusBroadcastsForTest(): Promise<number>;
+  getCachedMessageIdsForTest(): Promise<string[]>;
+  getFullHistoryIdsForTest(): Promise<string[]>;
+  getStoredPathBytesForTest(): Promise<number>;
+  getCachedFileUrlsForTest(): Promise<string[]>;
 };
 
 function uniqueName(prefix: string): string {
@@ -69,11 +66,12 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(info!.truncated).toBe(true);
     // ~300KB stored vs 64KB budget.
     expect(info!.totalContentBytes).toBeGreaterThan(250_000);
-    // The window floor: never fewer than the read-time truncation span the
-    // model sees at full fidelity (4 messages), even though 4 × 30KB
-    // overshoots the 64KB budget — windowing must not starve the model.
-    expect(info!.hydratedMessages).toBeGreaterThanOrEqual(4);
-    expect(info!.hydratedMessages).toBeLessThan(10);
+    // The budget is a hard ceiling with no message-count floor beneath it. A
+    // floor that admitted rows regardless of size would defeat the bound it
+    // sits under, so a window of unusually large messages is simply shorter:
+    // 4 × 30KB does not fit 64KB, and is not admitted because it does not.
+    expect(info!.hydratedMessages).toBeGreaterThanOrEqual(1);
+    expect(info!.hydratedMessages).toBeLessThan(4);
 
     // The in-memory view is the SUFFIX of the seeded chain, ending at the
     // leaf — and durable storage still holds the full transcript.
@@ -172,256 +170,52 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
       Array.from({ length: 10 }, (_, i) => `seed-${i}`)
     );
   });
-});
 
-describe("mediaEviction — aged media leaves the stored transcript (#1710)", () => {
-  it("evicts data-URL file parts and large tool-output strings from aged messages", async () => {
+  it("defaults the budget to 32 MiB", async () => {
+    // Read off an agent that does not override the field.
     const agent = (await getAgentByName(
       env.ThinkMediaEvictionAgent,
-      uniqueName("evict")
+      uniqueName("default-budget")
     )) as unknown as MediaEvictionStub;
 
-    await agent.seedMediaHistoryForTest();
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000
-    });
+    expect(await agent.getHydrationBudgetForTest()).toBe(32 * 1024 * 1024);
+  });
 
-    const totals = await agent.runEvictionForTest();
-    expect(totals).not.toBeNull();
-    expect(totals!.messages).toBe(2);
-    expect(totals!.parts).toBe(2);
-    expect(totals!.bytes).toBeGreaterThan(20_000);
-    expect(totals!.externalizedBytes).toBe(totals!.bytes);
+  it("charges a message the payloads it points at, not just its row", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkPointerHydrationAgent,
+      uniqueName("pointer-hydration")
+    )) as unknown as PointerHydrationStub;
 
-    // m0: the data-URL file part became a text marker pointing at the
-    // workspace file; the small text part is untouched.
-    const m0 = await agent.getStoredMessageForTest("m0");
-    expect(m0!.parts[0]).toEqual({
-      type: "text",
-      text: "look at this screenshot"
-    });
-    const marker = m0!.parts[1] as { type: string; text: string };
-    expect(marker.type).toBe("text");
-    expect(marker.text).toContain("[evicted image/png");
-    expect(marker.text).toContain("/attachments/evicted/m0-0.png");
+    // Ten messages, each carrying a 1.6 MB image. The image is an attachment,
+    // so each message ROW is a few hundred bytes — but a read inlines the
+    // payload again, so the memory a hydration actually takes is the whole
+    // 16 MB. Row stats charge the payload for exactly that reason; counting
+    // rows alone would let the budget admit a window far larger than it
+    // measured.
+    const storedBytes = await agent.getStoredPathBytesForTest();
+    expect(storedBytes).toBeGreaterThan(10 * 1_600_000);
 
-    // m1: the tool part keeps its shape; only the oversized string was
-    // replaced, small structured fields survive.
-    const m1 = await agent.getStoredMessageForTest("m1");
-    const toolPart = m1!.parts[0] as {
-      type: string;
-      state: string;
-      output: { mediaType: string; data: string; note: string };
-    };
-    expect(toolPart.type).toBe("tool-screenshot");
-    expect(toolPart.state).toBe("output-available");
-    expect(toolPart.output.mediaType).toBe("image/png");
-    expect(toolPart.output.note).toBe("small structured field");
-    expect(toolPart.output.data).toContain("[evicted");
-    expect(toolPart.output.data).toContain("/attachments/evicted/m1-0.txt");
+    const info = await agent.getHydrationInfoForTest();
+    expect(info).not.toBeNull();
+    expect(info!.truncated).toBe(true);
+    expect(info!.totalContentBytes).toBe(storedBytes);
+    // One row × 1.6 MB already overshoots 64KB, so nothing beyond the newest
+    // message can be admitted. Durable storage is untouched — this bounds what
+    // a wake materializes, not what is stored.
+    expect(info!.hydratedMessages).toBe(1);
 
-    // Recent messages (inside keepRecentMessages) are untouched.
-    const m3 = await agent.getStoredMessageForTest("m3");
-    expect(m3!.parts[0]).toEqual({ type: "text", text: "recent answer" });
-
-    // The evicted bytes were preserved as workspace files BEFORE the rows
-    // were rewritten.
-    const filePart = await agent.readWorkspaceFileForTest(
-      "/attachments/evicted/m0-0.png"
+    const cached = await agent.getCachedMessageIdsForTest();
+    expect(cached).toEqual(["ptr-9"]);
+    // Durable storage still holds every row.
+    expect(await agent.getFullHistoryIdsForTest()).toEqual(
+      Array.from({ length: 10 }, (_, i) => `ptr-${i}`)
     );
-    expect(filePart).toBe(`data:image/png;base64,${"A".repeat(12_000)}`);
-    const toolBlob = await agent.readWorkspaceFileForTest(
-      "/attachments/evicted/m1-0.txt"
-    );
-    expect(toolBlob).toBe("B".repeat(12_000));
-  });
 
-  it("rewrites rows via the silent maintenance path (no per-row status broadcast) and emits chat:media:evicted", async () => {
-    const evictedEvents: Array<{
-      type: string;
-      payload: { messages?: number; parts?: number; bytes?: number };
-    }> = [];
-    const unsubscribe = subscribe("chat", (event) => {
-      if (event.type === "chat:media:evicted") {
-        evictedEvents.push(
-          event as unknown as {
-            type: string;
-            payload: { messages?: number; parts?: number; bytes?: number };
-          }
-        );
-      }
-    });
-
-    try {
-      const agent = (await getAgentByName(
-        env.ThinkMediaEvictionAgent,
-        uniqueName("evict-silent")
-      )) as unknown as MediaEvictionStub;
-
-      await agent.seedMediaHistoryForTest();
-      await agent.setMediaEvictionForTest({
-        keepRecentMessages: 2,
-        minPartBytes: 10_000
-      });
-
-      const before = await agent.getSessionStatusBroadcastsForTest();
-      const totals = await agent.runEvictionForTest();
-      expect(totals!.messages).toBe(2);
-      // Each rewritten row must NOT go through the public updateMessage
-      // side effects: a status broadcast per row also runs a FULL-history
-      // token estimate, reintroducing the memory pressure the eviction
-      // pass exists to remove.
-      const after = await agent.getSessionStatusBroadcastsForTest();
-      expect(after).toBe(before);
-
-      // The pass reports what it did exactly once.
-      expect(evictedEvents).toHaveLength(1);
-      expect(evictedEvents[0].payload).toMatchObject({
-        messages: 2,
-        parts: 2
-      });
-    } finally {
-      unsubscribe();
-    }
-  });
-
-  it("clamps keepRecentMessages to the model's full-fidelity window", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-clamp")
-    )) as unknown as MediaEvictionStub;
-
-    // 6 seeded messages; keepRecentMessages: 0 would age ALL of them, but
-    // the clamp protects the last 4 (the span the model replays at full
-    // fidelity each turn) — only m0/m1 are evictable.
-    await agent.seedMediaHistoryForTest();
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 0,
-      minPartBytes: 10_000
-    });
-
-    const totals = await agent.runEvictionForTest();
-    expect(totals!.messages).toBe(2);
-
-    for (const id of ["m2", "m3", "m4", "m5"]) {
-      const msg = await agent.getStoredMessageForTest(id);
-      const text = (msg!.parts[0] as { text: string }).text;
-      expect(text).not.toContain("[evicted");
-    }
-  });
-
-  it("chains passes automatically when maxRowsPerPass leaves a backlog", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-chain")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest();
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000,
-      maxRowsPerPass: 1
-    });
-
-    // First pass stops at the cap with one oversized row remaining…
-    const first = await agent.runEvictionForTest();
-    expect(first!.messages).toBe(1);
-
-    // …and schedules a follow-up pass itself — the backlog drains without
-    // waiting for new appends.
-    await vi.waitFor(
-      async () => {
-        const m1 = await agent.getStoredMessageForTest("m1");
-        const toolPart = m1!.parts[0] as { output: { data: string } };
-        expect(toolPart.output.data).toContain("[evicted");
-      },
-      { timeout: 10_000, interval: 250 }
-    );
-  });
-
-  it("a second pass is a cheap no-op (rewritten rows skip the size gate)", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-idempotent")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest();
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000
-    });
-
-    const first = await agent.runEvictionForTest();
-    expect(first!.messages).toBe(2);
-
-    const second = await agent.runEvictionForTest();
-    expect(second).toEqual({
-      messages: 0,
-      parts: 0,
-      bytes: 0,
-      externalizedBytes: 0
-    });
-  });
-
-  it("externalizeToWorkspace: false drops the bytes with a size-only marker", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-drop")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest("d");
-    await agent.setMediaEvictionForTest({
-      keepRecentMessages: 2,
-      minPartBytes: 10_000,
-      externalizeToWorkspace: false
-    });
-
-    const totals = await agent.runEvictionForTest();
-    expect(totals!.messages).toBe(2);
-    expect(totals!.externalizedBytes).toBe(0);
-
-    const d0 = await agent.getStoredMessageForTest("d0");
-    const marker = d0!.parts[1] as { type: string; text: string };
-    expect(marker.text).toContain("[evicted image/png");
-    expect(marker.text).not.toContain("preserved at");
-    expect(
-      await agent.readWorkspaceFileForTest("/attachments/evicted/d0-0.png")
-    ).toBeNull();
-  });
-
-  it("disabled eviction leaves everything untouched", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAgent,
-      uniqueName("evict-disabled")
-    )) as unknown as MediaEvictionStub;
-
-    await agent.seedMediaHistoryForTest();
-    expect(await agent.runEvictionForTest()).toBeNull();
-
-    const m0 = await agent.getStoredMessageForTest("m0");
-    expect((m0!.parts[1] as { url: string }).url).toContain(
-      "data:image/png;base64,"
-    );
-  });
-
-  it("background pass triggered by conversation growth evicts automatically", async () => {
-    const agent = (await getAgentByName(
-      env.ThinkMediaEvictionAutoAgent,
-      uniqueName("evict-auto")
-    )) as unknown as MediaEvictionStub;
-
-    // Appends fire the message-change hook, which schedules a pass.
-    await agent.seedMediaHistoryForTest("a");
-
-    await vi.waitFor(
-      async () => {
-        const a0 = await agent.getStoredMessageForTest("a0");
-        const part = a0!.parts[1] as { type: string; text?: string };
-        expect(part.type).toBe("text");
-        expect(part.text).toContain("[evicted image/png");
-      },
-      { timeout: 10_000, interval: 250 }
-    );
+    // What the window does hold reads back byte for byte.
+    const urls = await agent.getCachedFileUrlsForTest();
+    expect(urls).toEqual([
+      `data:image/png;base64,${String.fromCharCode(65 + 9).repeat(1_600_000)}`
+    ]);
   });
 });

@@ -1,6 +1,6 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { action, skills, Think } from "../../think";
+import { action, skills, Think, type ThinkSession } from "../../think";
 import { Agent } from "agents";
 import type {
   Connection,
@@ -55,7 +55,8 @@ import {
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
-import { Session } from "agents/experimental/memory/session";
+import type { Session } from "../../think";
+import type { ContextConfig } from "agents/context";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────
@@ -3360,13 +3361,14 @@ export class ThinkPropsTestAgent extends Think<
 export class ThinkSessionTestAgent extends Think {
   private _response = "Hello from session agent!";
 
-  override configureSession(session: Session) {
-    return session
-      .withContext("memory", {
+  override configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "memory",
         description: "Important facts learned during conversation.",
         maxTokens: 2000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3393,50 +3395,50 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async getSystemPromptSnapshot(): Promise<string> {
-    return this.session.freezeSystemPrompt();
+    return this.context.freezeSystemPrompt();
   }
 
   async setContextBlock(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
 
   async addDynamicContext(label: string, description?: string): Promise<void> {
-    await this.session.addContext(label, { description });
+    await this.context.addBlock({ label, description });
   }
 
   async removeDynamicContext(label: string): Promise<boolean> {
-    return this.session.removeContext(label);
+    return this.context.removeBlock(label);
   }
 
   async refreshPrompt(): Promise<string> {
-    return this.session.refreshSystemPrompt();
+    return this.context.refreshSystemPrompt();
   }
 
   async getContextLabels(): Promise<string[]> {
-    return this.session.getContextBlocks().map((b) => b.label);
+    return this.context.getBlocks().map((b) => b.label);
   }
 
   async getSessionToolNames(): Promise<string[]> {
-    const tools = await this.session.tools();
+    const tools = await this.context.tools();
     return Object.keys(tools);
   }
 
   async getContextBlockDetails(
     label: string
-  ): Promise<{ writable: boolean; isSkill: boolean } | null> {
-    const block = this.session.getContextBlock(label);
+  ): Promise<{ writable: boolean; isSearchable: boolean } | null> {
+    const block = this.context.getBlock(label);
     if (!block) return null;
-    return { writable: block.writable, isSkill: block.isSkill };
+    return { writable: block.writable, isSearchable: block.isSearchable };
   }
 
   async hostSetContext(label: string, content: string): Promise<void> {
@@ -3493,14 +3495,15 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
 // Tests async configureSession — simulates reading config before setup.
 
 export class ThinkAsyncConfigSessionAgent extends Think {
-  override async configureSession(session: Session): Promise<Session> {
+  override async configureContext(): Promise<ContextConfig[]> {
     await new Promise((resolve) => setTimeout(resolve, 10));
-    return session
-      .withContext("memory", {
+    return [
+      {
+        label: "memory",
         description: "Async-configured memory block.",
         maxTokens: 1000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3523,16 +3526,16 @@ export class ThinkAsyncConfigSessionAgent extends Think {
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async setContextBlock(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
 }
@@ -3611,14 +3614,15 @@ type ConfigInSessionConfig = {
 };
 
 export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
-  override configureSession(session: Session) {
+  override configureContext(): ContextConfig[] {
     const persona =
       this.getConfig<ConfigInSessionConfig>()?.persona || "default persona";
-    return session
-      .withContext("memory", {
+    return [
+      {
+        label: "memory",
         description: `Agent persona: ${persona}`
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -8359,17 +8363,17 @@ export class ThinkOnStartHydrationFailureAgent extends Think {
       throw new Error("SQL query failed: out of memory: SQLITE_NOMEM");
     };
     const originalHistory = session.getHistory.bind(session);
-    session.getHistory = async (leafId?: string | null) => {
+    session.getHistory = async (options) => {
       failFirstRead();
-      return originalHistory(leafId);
+      return originalHistory(options);
     };
     const originalRecent = session.getRecentHistory.bind(session);
     session.getRecentHistory = async (
       maxContentBytes: number,
-      minRecentMessages?: number
+      options?: Parameters<typeof originalRecent>[1]
     ) => {
       failFirstRead();
-      return originalRecent(maxContentBytes, minRecentMessages);
+      return originalRecent(maxContentBytes, options);
     };
     return session;
   }
@@ -8493,7 +8497,18 @@ export class ThinkWindowedHydrationAgent extends Think {
 
 // ── Media eviction agents (#1710, step 3) ───────────────────────
 
-const BIG_MEDIA_CHARS = 12_000;
+/**
+ * A payload the message row CAN hold, so it stays inline as a `data:` URL.
+ * Think's eviction has to decode it in place.
+ */
+const BIG_MEDIA_CHARS = 16_000;
+
+/**
+ * A payload the message row CANNOT hold, so Sessions splits the message
+ * across continuation rows. The part is still an inline `data:` URL, so
+ * eviction decodes it exactly as it does a small one.
+ */
+export const POINTER_MEDIA_CHARS = 1_600_000;
 
 /**
  * Eviction disabled by default so tests can seed deterministically, then
@@ -8501,7 +8516,6 @@ const BIG_MEDIA_CHARS = 12_000;
  */
 export class ThinkMediaEvictionAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
-
   override getModel(): LanguageModel {
     return createMockModel("media eviction agent response");
   }
@@ -8513,43 +8527,16 @@ export class ThinkMediaEvictionAgent extends Think {
   }
 
   /**
-   * Frames broadcast by Session status updates (`cf_agent_session`) — the
-   * side effect of a PUBLIC `updateMessage`. Eviction rewrites rows via the
-   * silent maintenance path (`internal_rewriteMessage`), which must NOT add
-   * to this count (each status emit also runs a full-history token
-   * estimate, reintroducing the memory pressure eviction removes).
-   */
-  private _sessionStatusBroadcasts = 0;
-
-  override broadcast(
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void {
-    if (typeof message === "string") {
-      try {
-        const parsed = JSON.parse(message) as { type?: string };
-        if (parsed.type === "cf_agent_session") {
-          this._sessionStatusBroadcasts++;
-        }
-      } catch {
-        // non-JSON frame — not a session status broadcast
-      }
-    }
-    super.broadcast(message, without);
-  }
-
-  async getSessionStatusBroadcastsForTest(): Promise<number> {
-    return this._sessionStatusBroadcasts;
-  }
-
-  /**
    * Seed: 2 aged messages with oversized media (a data-URL file part and a
-   * tool output with a nested big string) + 4 small filler messages. The
+   * tool output with a nested data-URL string) + 4 small filler messages. The
    * eviction cutoff clamps `keepRecentMessages` to the model's read-time
    * window (4), so with 6 seeded messages the 2 media messages are aged
    * and the 4 fillers are protected.
    */
-  async seedMediaHistoryForTest(prefix = "m"): Promise<void> {
+  async seedMediaHistoryForTest(
+    prefix = "m",
+    mediaChars = BIG_MEDIA_CHARS
+  ): Promise<void> {
     await this.appendMessageToHistory({
       id: `${prefix}0`,
       role: "user",
@@ -8558,7 +8545,7 @@ export class ThinkMediaEvictionAgent extends Think {
         {
           type: "file",
           mediaType: "image/png",
-          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+          url: `data:image/png;base64,${"A".repeat(mediaChars)}`
         }
       ]
     } as UIMessage);
@@ -8573,7 +8560,9 @@ export class ThinkMediaEvictionAgent extends Think {
           input: {},
           output: {
             mediaType: "image/png",
-            data: "B".repeat(BIG_MEDIA_CHARS),
+            // A screenshot is media wherever a tool put it: eviction finds
+            // a nested `data:` URL or pointer just as readily.
+            data: `data:image/png;base64,${"B".repeat(mediaChars)}`,
             note: "small structured field"
           }
         }
@@ -8593,28 +8582,259 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
+  /** One bounded Think-owned eviction pass. */
   async runEvictionForTest(): Promise<{
     messages: number;
     parts: number;
     bytes: number;
-    externalizedBytes: number;
+    backlogRemains: boolean;
   } | null> {
     return this._evictAgedMediaBestEffort();
+  }
+
+  /**
+   * This class does NOT override `hydrationByteBudget`, so this reads the
+   * framework default.
+   */
+  async getHydrationBudgetForTest(): Promise<number> {
+    return this.hydrationByteBudget;
+  }
+
+  /** Re-run the budgeted cache refresh (a windowed read schedules eviction). */
+  async resyncForTest(): Promise<number> {
+    return (await this.syncMessagesFromStorage()).length;
   }
 
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
     return (await this.session.getMessage(id)) as UIMessage | null;
   }
 
-  async readWorkspaceFileForTest(path: string): Promise<string | null> {
-    return this.workspace.readFile(path);
+  /** Continuation rows the object currently holds. */
+  async getContinuationRowCountForTest(): Promise<number> {
+    return (
+      this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_session_message_chunks
+    `[0]?.count ?? 0
+    );
+  }
+
+  /** The workspace file an eviction marker points at. */
+  async readEvictedFileForTest(path: string): Promise<{
+    byteLength: number;
+    mimeType: string | null;
+    firstBytes: number[];
+    allSame: boolean;
+  } | null> {
+    const bytes = await this.workspace.readFileBytes(path);
+    if (bytes === null) return null;
+    const stat = await this.workspace.stat(path);
+    const first = bytes[0] ?? 0;
+    return {
+      byteLength: bytes.byteLength,
+      mimeType: stat?.mimeType ?? null,
+      firstBytes: Array.from(bytes.slice(0, 4)),
+      allSame: bytes.every((b) => b === first)
+    };
+  }
+
+  /** What the model would see for a message: the reconstructed parts. */
+  async getModelVisibleTextForTest(id: string): Promise<string> {
+    return JSON.stringify(await this.session.getMessage(id));
   }
 }
 
-/** Eviction enabled with tiny thresholds — exercises the background pass. */
+/**
+ * A hydration budget small enough that any seeded transcript boots windowed.
+ * A truncated read is the trigger that schedules the background eviction
+ * pass, so this agent exercises that path end to end.
+ */
 export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
-  override mediaEviction: MediaEvictionConfig = {
-    keepRecentMessages: 2,
-    minPartBytes: 10_000
-  };
+  override hydrationByteBudget = 1024;
+}
+
+// ── Pointer-inflation hydration (#1710) ─────────────────────────
+
+/**
+ * Over the row budget, so every seeded row stores a pointer:
+ * 1_600_000 base64 chars decode to 1_200_000 bytes.
+ */
+export const PTR_MEDIA_CHARS = 1_600_000;
+
+/**
+ * Every seeded row overflows the row budget, so it is chunked out on the
+ * WRITE path: its stored bytes are ~a few hundred while the attachment it
+ * points at inflates back to 1.2 MB. A budget that counted only stored
+ * bytes would hydrate all ten rows (~2KB) and blow past its own ceiling on
+ * reconstruction; a budget that counts the reconstructed attachment bytes
+ * hydrates a window instead.
+ */
+export class ThinkPointerHydrationAgent extends Think {
+  override hydrationByteBudget = 64 * 1024;
+  // Storage-level offload only: this agent is about hydration accounting, so
+  // Think's context-window eviction stays off and the payloads stay stored.
+  override mediaEviction: MediaEvictionConfig | boolean = false;
+
+  override async configureSession(session: Session): Promise<Session> {
+    const existing = await session.getHistory();
+    if (existing.length === 0) {
+      for (let i = 0; i < 10; i++) {
+        await session.appendMessage({
+          id: `ptr-${i}`,
+          role: i % 2 === 0 ? "user" : "assistant",
+          parts: [
+            { type: "text", text: `ptr ${i}` },
+            {
+              type: "file",
+              mediaType: "image/png",
+              // Distinct per row: content-addressed storage must not
+              // dedupe ten rows down to one blob.
+              url: `data:image/png;base64,${String.fromCharCode(65 + i).repeat(
+                PTR_MEDIA_CHARS
+              )}`
+            }
+          ]
+        });
+      }
+    }
+    return session;
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("pointer hydration agent response");
+  }
+
+  async getHydrationInfoForTest(): Promise<{
+    truncated: boolean;
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null> {
+    return this._lastHydration;
+  }
+
+  async getCachedMessageIdsForTest(): Promise<string[]> {
+    return this.messages.map((m) => m.id);
+  }
+
+  async getFullHistoryIdsForTest(): Promise<string[]> {
+    return (await this.session.getHistory()).map((m) => m.id);
+  }
+
+  /** Stored bytes of the whole path — the on-disk footprint. */
+  async getStoredPathBytesForTest(): Promise<number> {
+    const stats = await this.session.getHistoryRowStats();
+    return stats.reduce((sum, row) => sum + row.bytes, 0);
+  }
+
+  /** The `data:` URLs the hydrated window reconstructed, in cache order. */
+  async getCachedFileUrlsForTest(): Promise<string[]> {
+    return this.messages.map(
+      (m) =>
+        (m.parts.find((p) => p.type === "file") as { url?: string } | undefined)
+          ?.url ?? ""
+    );
+  }
+}
+
+/**
+ * A subclass written against the pre-Sessions Think API: context declared
+ * through `configureSession(session).withContext(...)`, the context
+ * accessors read off `this.session`, and the positional `appendMessage` /
+ * `getHistory` forms. Every call here must keep compiling and behaving.
+ */
+export class ThinkLegacySessionApiAgent extends Think {
+  private _response = "Hello from legacy session agent!";
+  private _compactionErrors: string[] = [];
+
+  override configureSession(session: ThinkSession): ThinkSession {
+    return session
+      .withContext("soul", {
+        provider: { get: async () => "You are a legacy-configured agent." }
+      })
+      .withContext("memory", {
+        description: "Important facts learned during conversation.",
+        maxTokens: 2000
+      })
+      .withCachedPrompt()
+      .onCompaction(async () => {
+        throw new Error("summarizer down");
+      })
+      .onCompactionError((error) => {
+        this._compactionErrors.push(
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel(this._response);
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  async legacyBlockLabels(): Promise<string[]> {
+    return this.session.getContextBlocks().map((block) => block.label);
+  }
+
+  async legacyBlockContent(label: string): Promise<string | null> {
+    return this.session.getContextBlock(label)?.content ?? null;
+  }
+
+  async legacyReplaceBlock(label: string, content: string): Promise<void> {
+    await this.session.replaceContextBlock(label, content);
+  }
+
+  async legacyFreezeSystemPrompt(): Promise<string> {
+    return this.session.freezeSystemPrompt();
+  }
+
+  async legacyAddAndRemoveContext(label: string): Promise<boolean> {
+    await this.session.addContext(label, { description: "Dynamic block" });
+    await this.session.refreshSystemPrompt();
+    return this.session.removeContext(label);
+  }
+
+  async legacyToolNames(): Promise<string[]> {
+    return Object.keys(await this.session.tools());
+  }
+
+  /** Positional `appendMessage(message, parentId)` and `getHistory(leafId)`. */
+  async legacyPositionalWrites(): Promise<{
+    rootLength: number;
+    branchLength: number;
+  }> {
+    const text = (id: string, content: string): UIMessage => ({
+      id,
+      role: "user",
+      parts: [{ type: "text", text: content }]
+    });
+    await this.session.appendMessage(text("legacy-root", "root"), null);
+    await this.session.appendMessage(text("legacy-a", "a"), "legacy-root");
+    await this.session.appendMessage(text("legacy-b", "b"), "legacy-root");
+    const branch = await this.session.getHistory("legacy-a");
+    const root = await this.session.getHistory(null);
+    return { rootLength: root.length, branchLength: branch.length };
+  }
+
+  /** `getRecentHistory(budget, minRecentMessages)` still accepts two args. */
+  async legacyRecentHistoryLength(): Promise<number> {
+    const recent = await this.session.getRecentHistory(1024 * 1024, 4);
+    return recent.messages.length;
+  }
+
+  async legacyCompact(): Promise<{
+    result: unknown;
+    errors: string[];
+  }> {
+    const result = await this.session.compact();
+    return { result, errors: [...this._compactionErrors] };
+  }
 }
