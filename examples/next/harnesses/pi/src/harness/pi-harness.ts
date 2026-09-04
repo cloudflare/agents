@@ -582,6 +582,11 @@ export class PiHarness<
       model: snapshot.configuration.model,
       thinkingLevel: snapshot.configuration.thinkingLevel,
       activeTools: snapshot.configuration.activeToolNames,
+      tools: (await this.#resolveTools(context)).map((tool) => ({
+        name: tool.name,
+        label: tool.label,
+        description: tool.description
+      })),
       usage: snapshot.stats.usage
     };
   }

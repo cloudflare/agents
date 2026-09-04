@@ -4,7 +4,8 @@ import {
   Empty,
   InputArea,
   PoweredByCloudflare,
-  Surface
+  Surface,
+  Text
 } from "@cloudflare/kumo";
 import {
   BrainIcon,
@@ -18,14 +19,16 @@ import {
   PlusIcon,
   StopIcon,
   SunIcon,
-  XCircleIcon
+  WrenchIcon,
+  XCircleIcon,
+  XIcon
 } from "@phosphor-icons/react";
 import { code } from "@streamdown/code";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
-import type { TranscriptMessage, TranscriptPart } from "./protocol";
+import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
 import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
@@ -315,9 +318,60 @@ function Message({
   }
 }
 
+function Sidebar({
+  tools,
+  activeTools,
+  onClose
+}: {
+  tools: readonly ToolInfo[];
+  activeTools: readonly string[];
+  onClose: () => void;
+}) {
+  return (
+    <aside
+      className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
+      aria-label="Tools"
+    >
+      <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
+        <Text size="sm" bold>
+          Tools
+        </Text>
+        <Button
+          variant="ghost"
+          shape="square"
+          aria-label="Close tools"
+          onClick={onClose}
+          icon={<XIcon size={16} />}
+        />
+      </div>
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+        {tools.map((tool) => (
+          <Surface
+            key={tool.name}
+            className="rounded-lg p-3 ring ring-kumo-line"
+          >
+            <div className="flex items-center gap-2">
+              {activeTools.includes(tool.name) ? (
+                <GearIcon size={14} className="animate-spin text-kumo-accent" />
+              ) : (
+                <WrenchIcon size={14} className="text-kumo-inactive" />
+              )}
+              <code className="text-xs font-semibold">{tool.name}</code>
+            </div>
+            <p className="mt-1 text-xs text-kumo-subtle">{tool.description}</p>
+          </Surface>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
 function App() {
   const [session, setSession] = useState(getSession);
   const [prompt, setPrompt] = useState("");
+  const [toolsOpen, setToolsOpen] = useState(
+    () => window.matchMedia("(min-width: 1100px)").matches
+  );
   const endRef = useRef<HTMLDivElement>(null);
   const {
     status,
@@ -325,6 +379,7 @@ function App() {
     live,
     running,
     runningTools,
+    tools,
     error,
     submit: submitPrompt,
     abort
@@ -352,166 +407,190 @@ function App() {
   const empty = messages.length === 0 && !live && !running;
 
   return (
-    <div className="flex h-dvh flex-col bg-kumo-elevated text-kumo-default">
-      <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
-        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-5 py-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
-              <BrainIcon size={20} weight="bold" />
+    <div
+      className={`grid h-dvh overflow-hidden bg-kumo-elevated text-kumo-default ${
+        toolsOpen
+          ? "lg:grid-cols-[minmax(520px,1fr)_minmax(300px,26vw)]"
+          : "grid-cols-1"
+      }`}
+    >
+      <section className="flex min-h-0 min-w-0 flex-col" aria-label="Chat">
+        <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
+          <div className="mx-auto flex h-[68px] max-w-3xl items-center justify-between gap-3 px-5">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
+                <BrainIcon size={20} weight="bold" />
+              </div>
+              <div className="min-w-0">
+                <h1 className="truncate text-base font-semibold">Pi harness</h1>
+                <p className="truncate text-xs text-kumo-subtle">
+                  Session <code>{session.slice(0, 8)}</code>
+                </p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold">Pi harness</h1>
-              <p className="truncate text-xs text-kumo-subtle">
-                Session <code>{session.slice(0, 8)}</code>
-              </p>
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <Badge variant="secondary" className="hidden sm:inline-flex">
-              {MODEL.split("/").at(-1)}
-            </Badge>
-            <Badge variant={connected ? "success" : "secondary"}>
-              {connected
-                ? "Live"
-                : status === "connecting"
-                  ? "Connecting"
-                  : "Reconnecting"}
-            </Badge>
-            <Button
-              variant="ghost"
-              shape="square"
-              aria-label="New session"
-              onClick={newSession}
-              disabled={running}
-              icon={<PlusIcon size={16} />}
-            />
-            <ModeToggle />
-          </div>
-        </div>
-      </header>
-
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
-          {empty ? (
-            <div className="py-10 sm:py-16">
-              <Empty
-                icon={<BrainIcon size={32} />}
-                title="Ask Pi something that needs a tool"
-                description="Tool calls and results stream in as they happen."
+            <div className="flex shrink-0 items-center gap-1.5">
+              <Badge variant="secondary" className="hidden sm:inline-flex">
+                {MODEL.split("/").at(-1)}
+              </Badge>
+              <Badge variant={connected ? "success" : "secondary"}>
+                {connected
+                  ? "Live"
+                  : status === "connecting"
+                    ? "Connecting"
+                    : "Reconnecting"}
+              </Badge>
+              <Button
+                variant="ghost"
+                shape="square"
+                aria-label="Tools"
+                aria-expanded={toolsOpen}
+                onClick={() => setToolsOpen((open) => !open)}
+                icon={<WrenchIcon size={16} />}
               />
-              <div className="mt-6 flex flex-wrap justify-center gap-2">
-                {SUGGESTIONS.map((suggestion) => (
-                  <Button
-                    key={suggestion.label}
-                    variant="secondary"
-                    size="sm"
-                    icon={suggestion.icon}
-                    disabled={!connected}
-                    onClick={() => setPrompt(suggestion.value)}
-                  >
-                    {suggestion.label}
-                  </Button>
-                ))}
-              </div>
+              <Button
+                variant="ghost"
+                shape="square"
+                aria-label="New session"
+                onClick={newSession}
+                disabled={running}
+                icon={<PlusIcon size={16} />}
+              />
+              <ModeToggle />
             </div>
-          ) : null}
+          </div>
+        </header>
 
-          {messages.map((message) => (
-            <Message
-              key={message.id}
-              message={message}
-              runningTools={runningTools}
-            />
-          ))}
-
-          {live ? (
-            <Message message={live} streaming runningTools={runningTools} />
-          ) : null}
-
-          {running && !live ? (
-            <div className="flex items-start gap-3">
-              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
-                <BrainIcon size={17} weight="bold" />
-              </div>
-              <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
-                <div className="flex items-center gap-2 text-sm text-kumo-subtle">
-                  <GearIcon size={15} className="animate-spin" />
-                  {runningTools.length > 0
-                    ? `Running ${runningTools.join(", ")}`
-                    : "Waking the durable operation"}
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
+            {empty ? (
+              <div className="py-10 sm:py-16">
+                <Empty
+                  icon={<BrainIcon size={32} />}
+                  title="Ask Pi something that needs a tool"
+                  description="Tool calls and results stream in as they happen."
+                />
+                <div className="mt-6 flex flex-wrap justify-center gap-2">
+                  {SUGGESTIONS.map((suggestion) => (
+                    <Button
+                      key={suggestion.label}
+                      variant="secondary"
+                      size="sm"
+                      icon={suggestion.icon}
+                      disabled={!connected}
+                      onClick={() => setPrompt(suggestion.value)}
+                    >
+                      {suggestion.label}
+                    </Button>
+                  ))}
                 </div>
-              </Surface>
-            </div>
-          ) : null}
+              </div>
+            ) : null}
 
-          {error ? (
-            <div
-              role="alert"
-              className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-            >
-              {error}
-            </div>
-          ) : null}
-
-          <div ref={endRef} />
-        </div>
-      </main>
-
-      <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            submit();
-          }}
-          className="mx-auto max-w-3xl px-5 pt-4"
-        >
-          <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
-            <InputArea
-              value={prompt}
-              onValueChange={setPrompt}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
-              placeholder="Ask Pi to use a tool"
-              aria-label="Message Pi"
-              disabled={!connected || running}
-              rows={2}
-              className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
-            />
-            {running ? (
-              <Button
-                type="button"
-                variant="secondary"
-                shape="square"
-                aria-label="Stop"
-                onClick={abort}
-                icon={<StopIcon size={18} weight="fill" />}
-                className="mb-0.5"
+            {messages.map((message) => (
+              <Message
+                key={message.id}
+                message={message}
+                runningTools={runningTools}
               />
-            ) : (
-              <Button
-                type="submit"
-                variant="primary"
-                shape="square"
-                aria-label="Send message"
-                disabled={!connected || prompt.trim() === ""}
-                icon={<PaperPlaneRightIcon size={18} />}
-                className="mb-0.5"
-              />
-            )}
+            ))}
+
+            {live ? (
+              <Message message={live} streaming runningTools={runningTools} />
+            ) : null}
+
+            {running && !live ? (
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
+                  <BrainIcon size={17} weight="bold" />
+                </div>
+                <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
+                  <div className="flex items-center gap-2 text-sm text-kumo-subtle">
+                    <GearIcon size={15} className="animate-spin" />
+                    {runningTools.length > 0
+                      ? `Running ${runningTools.join(", ")}`
+                      : "Waking the durable operation"}
+                  </div>
+                </Surface>
+              </div>
+            ) : null}
+
+            {error ? (
+              <div
+                role="alert"
+                className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
+              >
+                {error}
+              </div>
+            ) : null}
+
+            <div ref={endRef} />
           </div>
-        </form>
-        <div className="flex items-center justify-center gap-2 px-5 py-3">
-          <span className="hidden text-[10px] text-kumo-inactive sm:inline">
-            Enter to send · Shift+Enter for a new line
-          </span>
-          <span className="hidden text-kumo-line sm:inline">·</span>
-          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
+        </main>
+
+        <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              submit();
+            }}
+            className="mx-auto max-w-3xl px-5 pt-4"
+          >
+            <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
+              <InputArea
+                value={prompt}
+                onValueChange={setPrompt}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    submit();
+                  }
+                }}
+                placeholder="Ask Pi to use a tool"
+                aria-label="Message Pi"
+                disabled={!connected || running}
+                rows={2}
+                className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
+              />
+              {running ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  shape="square"
+                  aria-label="Stop"
+                  onClick={abort}
+                  icon={<StopIcon size={18} weight="fill" />}
+                  className="mb-0.5"
+                />
+              ) : (
+                <Button
+                  type="submit"
+                  variant="primary"
+                  shape="square"
+                  aria-label="Send message"
+                  disabled={!connected || prompt.trim() === ""}
+                  icon={<PaperPlaneRightIcon size={18} />}
+                  className="mb-0.5"
+                />
+              )}
+            </div>
+          </form>
+          <div className="flex items-center justify-center gap-2 px-5 py-3">
+            <span className="hidden text-[10px] text-kumo-inactive sm:inline">
+              Enter to send · Shift+Enter for a new line
+            </span>
+            <span className="hidden text-kumo-line sm:inline">·</span>
+            <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
+          </div>
         </div>
-      </div>
+      </section>
+
+      {toolsOpen ? (
+        <Sidebar
+          tools={tools}
+          activeTools={runningTools}
+          onClose={() => setToolsOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

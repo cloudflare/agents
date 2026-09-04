@@ -6,7 +6,8 @@ import type {
   ServerMessage,
   TranscriptEvent,
   TranscriptMessage,
-  TranscriptPart
+  TranscriptPart,
+  ToolInfo
 } from "./protocol";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
@@ -18,6 +19,7 @@ type State = {
   readonly live: TranscriptMessage | null;
   readonly running: boolean;
   readonly runningTools: readonly string[];
+  readonly tools: readonly ToolInfo[];
   readonly error: string | undefined;
 };
 
@@ -27,6 +29,7 @@ const INITIAL_STATE: State = {
   live: null,
   running: false,
   runningTools: [],
+  tools: [],
   error: undefined
 };
 
@@ -156,7 +159,8 @@ export function usePiSession(session: string, lane = "main") {
               message.snapshot.operation?.runningTools.map(
                 (tool) => tool.toolName
               ) ?? [],
-            live: message.snapshot.operation?.streaming ?? null
+            live: message.snapshot.operation?.streaming ?? null,
+            tools: message.snapshot.tools
           }));
           if (message.snapshot.stream && message.snapshot.stream.cursor > 0) {
             const resume: ClientMessage = {

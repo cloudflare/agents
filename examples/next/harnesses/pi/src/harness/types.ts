@@ -492,6 +492,13 @@ export type PiOperationStream = {
   readonly cursor: number;
 };
 
+/** One tool offered to the model, for display. */
+export type PiToolInfo = {
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+};
+
 /** Point-in-time view of one lane. */
 export type PiLaneSnapshot = {
   readonly lane: string;
@@ -503,6 +510,8 @@ export type PiLaneSnapshot = {
   readonly model: PiModelIdentity;
   readonly thinkingLevel: PiThinkingLevel;
   readonly activeTools: readonly string[];
+  /** Every registered tool, including skill tools. */
+  readonly tools: readonly PiToolInfo[];
   readonly usage: PiUsage;
 };
 

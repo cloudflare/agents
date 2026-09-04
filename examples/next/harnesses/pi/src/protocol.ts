@@ -5,5 +5,6 @@ export type {
   PiMessage as TranscriptMessage,
   PiMessageDelta as MessageDelta,
   PiMessagePart as TranscriptPart,
-  PiServerMessage as ServerMessage
+  PiServerMessage as ServerMessage,
+  PiToolInfo as ToolInfo
 } from "./harness/types";
