@@ -152,16 +152,51 @@ request's signal aborts the tail when the client disconnects.
 `examples/next/streams` is the end-to-end demo. For other transports,
 `read()`/`readBatches()` remain the raw async iterables to pipe yourself.
 
+## Storage: blocks, and the cutover to a message
+
+Chunks are stored as **rollover blocks**: one row per stream holds chunks
+until it reaches 256 KB, then the next append opens a new row. An append
+is one billed row either way (an UPDATE that grows the block, or the INSERT
+of the next one), the same as a row-per-chunk log, but a stream of
+thousands of chunks is a handful of rows, so deleting it is a handful of
+writes instead of thousands. Replay parses one block at a time.
+
+A stream is temporary: once its content has become something else (a
+session message, a report), its rows are dead weight. The **cutover** ends
+the stream, runs your own synchronous writes, and deletes its rows in one
+SQLite transaction:
+
+```ts
+stream.close({
+  commit: () => sessionSync.upsert(message), // synchronous writes only
+  discard: true // delete the stream's rows in the same transaction
+});
+```
+
+Either the message exists and the stream is gone, or `commit` threw, the
+settle rolled back and the stream is still live. Nothing is left for a
+retention sweep. `error(reason, { commit, discard })` is the same for a
+failed producer. `commit` must not await; a Session handle's
+`__DO_NOT_USE_WILL_BREAK__sync().upsert()` is the matching synchronous
+message write, and returns a `notify()` to dispatch the change feed after
+the transaction commits.
+
+Measured on a real Durable Object (400-chunk chat turn, 10 chunks per
+write): the old log paid 42 rows to write and another 42 to sweep; blocks
+pay 42 to write and 3 to cut over.
+
 ## Chat runs on this
 
 `AIChatAgent` and `Think` store their in-flight turn output here:
 `ResumableStream` (from `agents/chat`) is a thin adapter over Streams that
-packs ~10 wire chunks into one stored segment for write economy, maps
-completion/error onto stream settlement, and decides retention in two
-phases: a coarse cutoff on the stream row's own timestamp, verified
-against the newest chunk so an actively appending stream is never swept.
-Existing `cf_ai_chat_stream_*` tables migrate onto the
-capability automatically. The packing pattern is worth copying for any
+packs ~10 wire chunks into one stored segment for write economy, and ends
+every turn with the cutover: the assistant message, the stream's
+settlement and the deletion of its rows commit in one transaction. Nothing
+is swept on an alarm any more. A stream a crash left behind is either
+still `streaming` (recovery rebuilds the message from it) or reclaimed by
+the next stream start, together with in-flight rows abandoned for over an
+hour. Existing `cf_ai_chat_stream_*` tables migrate onto the capability
+automatically. The packing pattern is worth copying for any
 high-frequency producer: buffer what you already hold synchronously, append
 one packed chunk, and unpack on read — durability is unchanged (nothing is
 held across an await at settlement) and rows written drop by ~an order of
@@ -171,8 +206,8 @@ magnitude versus per-token appends.
 
 Live fanout is in-isolate (sufficient: a Durable Object executes in one
 isolate at a time; reconnecting readers replay from their cursor). Retention
-is explicit `delete()` (chat sweeps its own rows on an alarm); age-based
-sweeping in the capability itself, producer-generation fencing on `open()`,
+is explicit: `delete()`, or the cutover's `discard`; age-based sweeping in
+the capability itself, producer-generation fencing on `open()`,
 and transport helpers extracted from chat's resume protocol are future work.
 The design record is
 [`design/rfc-streams.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-streams.md).

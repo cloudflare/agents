@@ -33,7 +33,6 @@ import {
   ResumableStream,
   createChatStreams,
   bumpChatRecoveryProgress,
-  cleanupStreamBuffers,
   createChatFiberSnapshot,
   readChatRecoveryProgress,
   recordChatTerminal,
@@ -696,7 +695,7 @@ export class PiAgent extends Agent<Env> {
 
   /** Stream-buffer cleanup alarm target (scheduled by ResumableStream cleanup). */
   async _cleanupStreamBuffers(): Promise<void> {
-    await cleanupStreamBuffers(this._resumableStream, async () => {});
+    this._resumableStream.reclaim();
   }
 
   // ── Inspection surface (server stub RPC → e2e assertions) ───────────────────
