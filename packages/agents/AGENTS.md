@@ -6,32 +6,34 @@ The core Agents SDK, published to npm as `agents`. This is the most complex pack
 
 Each export maps to a public entry point that users `import` from. These are the boundaries of the public API — changes here need a changeset.
 
-| Import path                  | Source file(s)               | Purpose                                                                      |
-| ---------------------------- | ---------------------------- | ---------------------------------------------------------------------------- |
-| `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
-| `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
-| `agents/lifecycle`           | `src/lifecycle/index.ts`     | Composable Durable Object lifecycle and hibernating connections              |
-| `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
-| `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
-| `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                |
-| `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
-| `agents/mcp/server`          | `src/mcp/server/index.ts`    | Isolated Agents wrapper for SDK v2 stateless servers                         |
-| `agents/mcp/client`          | `src/mcp/client/index.ts`    | MCP client manager (connect to remote MCP servers from an Agent)             |
-| `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
-| `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
-| `agents/schedule`            | `src/schedule.ts`            | Deprecated scheduling-parser compatibility entry point                       |
-| `agents/schedules`           | `src/schedules/index.ts`     | Dependency-light Lifecycle Scheduler primitive and runtime types             |
-| `agents/schedules/parser`    | `src/schedules/parser.ts`    | Zod-based natural-language scheduling prompt and schema helpers              |
-| `agents/observability`       | `src/observability/index.ts` | Observability event types and emitters                                       |
-| `agents/ai-chat-agent`       | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
-| `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
-| `agents/tsconfig`            | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo                        |
-| `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and the `agents:skills` import transform  |
-| `agents/skills`              | `src/skills/index.ts`        | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner    |
-| `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`      |
-| `agents/browser`             | `src/browser/index.ts`       | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
-| `agents/browser/ai`          | `src/browser/ai.ts`          | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
-| `agents/browser/tanstack-ai` | `src/browser/tanstack-ai.ts` | TanStack AI browser tool (`browser_execute`)                                 |
+| Import path                  | Source file(s)               | Purpose                                                                       |
+| ---------------------------- | ---------------------------- | ----------------------------------------------------------------------------- |
+| `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL           |
+| `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                 |
+| `agents/lifecycle`           | `src/lifecycle/index.ts`     | Composable Durable Object lifecycle and hibernating connections               |
+| `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                        |
+| `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think`  |
+| `agents/chat/transport`      | `src/chat/transport.ts`      | Framework-neutral WebSocket chat transport for AI SDK clients                 |
+| `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs           |
+| `agents/mcp/server`          | `src/mcp/server/index.ts`    | Isolated Agents wrapper for SDK v2 stateless servers                          |
+| `agents/mcp/client`          | `src/mcp/client/index.ts`    | MCP client manager (connect to remote MCP servers from an Agent)              |
+| `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                      |
+| `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                            |
+| `agents/schedule`            | `src/schedule.ts`            | Deprecated scheduling-parser compatibility entry point                        |
+| `agents/schedules`           | `src/schedules/index.ts`     | Dependency-light Lifecycle Scheduler primitive and runtime types              |
+| `agents/schedules/parser`    | `src/schedules/parser.ts`    | Zod-based natural-language scheduling prompt and schema helpers               |
+| `agents/observability`       | `src/observability/index.ts` | Observability event types and emitters                                        |
+| `agents/models/ai-sdk`       | `src/models/ai-sdk/index.ts` | Experimental `createAI` for the AI SDK — Workers AI ids, vendor models routed |
+| `agents/models/pi-ai`        | `src/models/pi-ai/index.ts`  | Experimental `createAI` for pi-ai — same rule, pi `Model` objects and wires   |
+| `agents/ai-chat-agent`       | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                           |
+| `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                          |
+| `agents/tsconfig`            | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo                         |
+| `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and the `agents:skills` import transform   |
+| `agents/skills`              | `src/skills/index.ts`        | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner     |
+| `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`       |
+| `agents/browser`             | `src/browser/index.ts`       | Browser Run helpers — CDP sessions, connector, Quick Action primitives        |
+| `agents/browser/ai`          | `src/browser/ai.ts`          | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools`  |
+| `agents/browser/tanstack-ai` | `src/browser/tanstack-ai.ts` | TanStack AI browser tool (`browser_execute`)                                  |
 
 The `agents:skills` virtual-module types ship from `skills-module.d.ts` (referenced from the built `dist/index.d.ts`); `@cloudflare/think` consumes `agents/skills` and `@cloudflare/ai-chat` can too.
 
@@ -106,6 +108,32 @@ src/
 
   codemode/             # Experimental code generation
     ai.ts
+
+  models/               # Experimental model providers (one createAI() per framework, same skeleton)
+    core/               # Framework-neutral: binding transport, gateway options, Workers AI ids, SSE, errors
+      transport.ts      #   env.AI.run + env.AI.gateway(id).run (universal), envelope unwrap, errors
+      settings.ts       #   AISettings (binding only), GatewayOptions/ModelOptions, option merging
+      catalog.ts        #   WorkersAIModelId + per-modality id types (Workers AI only)
+      gateway-providers.ts # AI Gateway provider table: vendor host -> slug, endpoint, auth headers to strip
+      chat-completions/ # Workers AI <-> strict OpenAI chat-completions compat (quirk table, request/response/stream)
+      sse.ts            #   SSE decoder TransformStream
+      errors.ts         #   CloudflareAIError + status classification
+    ai-sdk/             # agents/models/ai-sdk — AI SDK v4 models over core
+      index.ts          #   createAI + public types (the only public entry)
+      settings.ts       #   ModelOptions, fallback legs, providerOptions.cloudflare parsing
+      errors.ts         #   APICallError lift over core errors
+      transport.ts      #   core transport with errors lifted
+      models/           #   language.ts (Workers AI), gateway.ts (vendor models routed), embedding/image/
+                        #   transcription/speech/reranking/modality.ts, fallback.ts
+      wires/            #   chat-completions.ts, shared.ts (Workers AI only — vendors bring their own wire)
+    pi-ai/              # agents/models/pi-ai — pi-ai models over core, same layout
+      index.ts          #   createAI + public types
+      settings.ts       #   pi call options -> resolved request
+      catalog.ts        #   Workers AI models + pi's Cloudflare AI Gateway registry lookup
+      routing.ts        #   pi model -> gateway provider slug + endpoint
+      errors.ts         #   pi error events + diagnostics
+      models/           #   language.ts, fallback.ts, image.ts
+      wires/            #   chat-completions.ts, responses.ts, anthropic.ts, shared.ts (pi's own converters)
 
   skills/               # Framework-agnostic Agent Skills engine
     index.ts            # Barrel — sources, registry, runner, types

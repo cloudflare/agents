@@ -33,9 +33,14 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.0",
+    "@ai-sdk/provider": "^4.0.0",
     "@ai-sdk/react": "^4.0.0",
     "@ai-sdk/valibot": "3.0.6",
     "@cloudflare/codemode": "workspace:*",
+    "@earendil-works/pi-agent-core": "^0.80.2",
+    "@earendil-works/pi-ai": "^0.80.2",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.10",
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -54,8 +59,10 @@
     "zod": "^4.5.4"
   },
   "peerDependencies": {
+    "@ai-sdk/provider": "^4.0.0",
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@cloudflare/codemode": ">=0.5.0",
+    "@earendil-works/pi-ai": ">=0.80.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
@@ -70,10 +77,16 @@
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@ai-sdk/provider": {
+      "optional": true
+    },
     "@ai-sdk/react": {
       "optional": true
     },
     "@cloudflare/codemode": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -167,6 +180,16 @@
       "types": "./dist/mcp/client/do-oauth-client-provider.d.ts",
       "import": "./dist/mcp/client/do-oauth-client-provider.js",
       "require": "./dist/mcp/client/do-oauth-client-provider.js"
+    },
+    "./models/ai-sdk": {
+      "types": "./dist/models/ai-sdk/index.d.ts",
+      "import": "./dist/models/ai-sdk/index.js",
+      "require": "./dist/models/ai-sdk/index.js"
+    },
+    "./models/pi-ai": {
+      "types": "./dist/models/pi-ai/index.d.ts",
+      "import": "./dist/models/pi-ai/index.js",
+      "require": "./dist/models/pi-ai/index.js"
     },
     "./observability": {
       "types": "./dist/observability/index.d.ts",
