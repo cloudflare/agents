@@ -7,7 +7,11 @@ export type KernelJson =
   | KernelJson[]
   | { [key: string]: KernelJson };
 
-/** Serialized state required to advance a Codex turn. */
+/**
+ * Serialized state required to advance a Codex turn. The transcript is not
+ * here: it lives in the host's Sessions store, so a checkpoint stays a few
+ * hundred bytes however long the conversation is.
+ */
 export type KernelCheckpoint = {
   version: number;
   thread_id: string;
@@ -16,7 +20,6 @@ export type KernelCheckpoint = {
   phase: "waiting_for_model" | "waiting_for_tool" | "completed" | "failed";
   model_round: number;
   next_event_seq: number;
-  input: KernelJson[];
   pending_calls: KernelJson[];
   final_output: string;
   response_id: string | null;
@@ -34,7 +37,6 @@ export type KernelCommand =
       type: "start_turn";
       thread_id: string;
       turn_id: string;
-      prompt: string;
       model: string;
     }
   | {

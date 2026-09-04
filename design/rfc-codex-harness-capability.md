@@ -1335,29 +1335,37 @@ Lifecycle capability is in
 ## Stress results
 
 A synthetic `LanguageModelV4` drives the example under `wrangler dev`
-(`pnpm run stress`). Kernel time is negligible: 11 transitions over a 770 KB
-checkpoint cost about 10 ms of Wasm time, and 200 short turns on one object
-cost 72 ms of kernel time in total. The binding limits are elsewhere:
+(`pnpm run stress`). The first round of runs broke the original design in
+four ways, all traceable to one decision: the kernel checkpoint carried the
+whole transcript, so every transition wrote it as one SQLite value, the model
+action repeated it, effects were journaled by value, and events were stored
+twice. Turns failed at about 1 MB of transcript, a 1 MB tool argument could
+not be journaled, and the transition cap of 16 failed any turn with more
+than six tool calls.
 
-- One SQLite value holds the whole checkpoint. Turns failed with
-  `SQLITE_TOOBIG` once the checkpoint passed about 1 MB locally, and the
-  stored model action used to repeat the checkpoint's input, halving the
-  usable transcript. The action is now stored without its input and
-  rehydrated from the checkpoint.
-- A journaled Tasks step result must stay under 1 MB, so a model round that
-  returns a 1 MB tool argument cannot be journaled. The codec replaces tool
-  arguments over 256 KB with an error the model sees, and the tools refuse
-  prompts, writes, and reads over 256 KB.
-- The transition cap of 16 failed any turn with more than six tool calls. The
-  cap is now 24 model rounds and 256 transitions.
-- Session listings carried every checkpoint; a 200-turn session would send
-  megabytes on connect. Listings omit kernel state and the UI reads one
-  checkpoint on demand.
-- Wasm linear memory never shrinks: an object that processed 512 KB tool
-  payloads retained about 13 MB of kernel memory until eviction. The payload
-  caps keep that peak small. Each turn also stores its events twice, in the
-  journal table and the Streams chunk; 200 turns of 10 KB checkpoints left a
-  16 MB database.
+The design now keeps the kernel a cursor and puts everything with size in the
+SDK's primitives:
+
+- the transcript lives in Sessions, which chunks large messages across rows;
+- each model round hydrates a byte-budgeted window of recent history and
+  Sessions compacts the branch past a token threshold;
+- tool calls reach the kernel as a pointer to the stored assistant message,
+  and tool outputs are stored as tool messages, so effects journal by id;
+- events append to the operation's Streams log in the same transaction as
+  the checkpoint, with no journal table;
+- `workspace_read` takes `offset` and `max_bytes`, so files have no size
+  limit and the model pages through them; the Workspace spills files past
+  1.5 MB to R2, which SQLite rows cannot hold.
+
+After the change every scenario completes: 8 MB prompts, 8 MB tool payloads,
+60-round turns, 200 tool calls in one round, 200 turns on one object, and 32
+objects concurrently. The checkpoint is 0.5 KB in every case and the kernel's
+Wasm memory stays at 1.1 MB. The one bound left is the model's context
+window, handled in the prompt rather than in storage: a byte-budgeted history
+window, a marker in place of any tool input or output over 64 KB with a
+ranged read to page it back, and compaction past a token threshold. The
+stress run also showed why the marker matters: with an 8 MB budget, one 8 MB
+tool argument had pushed the rest of the turn out of the window.
 
 ## Acceptance criteria
 

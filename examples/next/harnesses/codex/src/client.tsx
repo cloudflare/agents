@@ -27,7 +27,11 @@ import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { code } from "@streamdown/code";
 import { Streamdown } from "streamdown";
-import type { CodexOperationSnapshot, CodexWorkspaceFile } from "./protocol";
+import type {
+  CodexOperationSnapshot,
+  CodexWorkspaceFile,
+  SessionMessage
+} from "./protocol";
 import { useCodexSession, type KernelEvent } from "./use-codex-session";
 
 type OperationStatus = CodexOperationSnapshot["status"];
@@ -35,9 +39,13 @@ type OperationStatus = CodexOperationSnapshot["status"];
 type ToolActivity = {
   callId: string;
   name: string;
-  arguments: unknown;
+  /** Id of the assistant message holding the call's arguments. */
+  callMessageId?: string;
+  /** Id of the tool message holding the full output. */
+  outputMessageId?: string;
   status: "running" | "completed" | "failed";
-  output?: unknown;
+  preview?: string;
+  bytes?: number;
 };
 
 const SESSION_KEY = "codex-session";
@@ -105,7 +113,7 @@ function collectToolActivity(events: readonly KernelEvent[]): ToolActivity[] {
       tools.set(callId, {
         callId,
         name: String(event.name ?? "Tool"),
-        arguments: event.arguments ?? {},
+        callMessageId: stringField(event.arguments, "$message"),
         status: "running"
       });
       continue;
@@ -113,12 +121,18 @@ function collectToolActivity(events: readonly KernelEvent[]): ToolActivity[] {
     if (event.type !== "tool_completed") continue;
     const callId = String(event.call_id ?? event.effect_id ?? event.seq);
     const previous = tools.get(callId);
+    const output = event.output;
     tools.set(callId, {
       callId,
       name: String(event.name ?? previous?.name ?? "Tool"),
-      arguments: previous?.arguments ?? {},
+      callMessageId: previous?.callMessageId,
+      outputMessageId: stringField(output, "messageId"),
       status: event.success === false ? "failed" : "completed",
-      output: event.output
+      preview: stringField(output, "preview"),
+      bytes:
+        isRecord(output) && typeof output.bytes === "number"
+          ? output.bytes
+          : undefined
     });
   }
   return [...tools.values()];
@@ -136,7 +150,12 @@ function reasoningText(events: readonly KernelEvent[]): string {
 }
 
 function toolSummary(tool: ToolActivity): string {
-  const path = stringField(tool.arguments, "path");
+  let path: string | undefined;
+  try {
+    path = stringField(JSON.parse(tool.preview ?? ""), "path");
+  } catch {
+    path = undefined;
+  }
   const verb =
     tool.name === "workspace_write"
       ? tool.status === "running"
@@ -160,7 +179,25 @@ function JsonBlock({ value }: { value: unknown }) {
   );
 }
 
-function ToolCard({ tool }: { tool: ToolActivity }) {
+function toolPart(message: SessionMessage | null | undefined, callId: string) {
+  return message?.parts.find((part) => part.toolCallId === callId);
+}
+
+function ToolCard({
+  tool,
+  messages,
+  onExpand
+}: {
+  tool: ToolActivity;
+  messages: Readonly<Record<string, SessionMessage | null>>;
+  onExpand: (messageId: string) => void;
+}) {
+  const call = tool.callMessageId
+    ? toolPart(messages[tool.callMessageId], tool.callId)
+    : undefined;
+  const result = tool.outputMessageId
+    ? toolPart(messages[tool.outputMessageId], tool.callId)
+    : undefined;
   const icon =
     tool.status === "running" ? (
       <GearIcon size={14} className="animate-spin text-kumo-inactive" />
@@ -171,7 +208,15 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
     );
 
   return (
-    <details className="rounded-xl border border-kumo-line bg-kumo-base">
+    <details
+      className="rounded-xl border border-kumo-line bg-kumo-base"
+      onToggle={(event) => {
+        if (!event.currentTarget.open) return;
+        for (const id of [tool.callMessageId, tool.outputMessageId]) {
+          if (id && messages[id] === undefined) onExpand(id);
+        }
+      }}
+    >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
         {icon}
         <span className="min-w-0 flex-1">
@@ -180,6 +225,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
           </span>
           <span className="block truncate text-xs text-kumo-subtle">
             {toolSummary(tool)}
+            {tool.bytes !== undefined ? ` · ${tool.bytes} bytes` : ""}
           </span>
         </span>
         <Badge variant={tool.status === "failed" ? "destructive" : "secondary"}>
@@ -195,14 +241,14 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
           <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
             Arguments
           </p>
-          <JsonBlock value={tool.arguments} />
+          <JsonBlock value={call?.input ?? "Loading from the transcript"} />
         </div>
-        {tool.output !== undefined && (
+        {tool.status !== "running" && (
           <div>
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
               Result
             </p>
-            <JsonBlock value={tool.output} />
+            <JsonBlock value={result?.output ?? tool.preview ?? ""} />
           </div>
         )}
       </div>
@@ -325,10 +371,14 @@ function RunDetails({
 function AssistantMessage({
   operation,
   events,
+  messages,
+  onExpandTool,
   children
 }: {
   operation: CodexOperationSnapshot;
   events: readonly KernelEvent[];
+  messages: Readonly<Record<string, SessionMessage | null>>;
+  onExpandTool: (messageId: string) => void;
   children?: ReactNode;
 }) {
   const tools = useMemo(() => collectToolActivity(events), [events]);
@@ -386,7 +436,12 @@ function AssistantMessage({
         {tools.length > 0 && (
           <div className="max-w-xl space-y-2">
             {tools.map((tool) => (
-              <ToolCard key={tool.callId} tool={tool} />
+              <ToolCard
+                key={tool.callId}
+                tool={tool}
+                messages={messages}
+                onExpand={onExpandTool}
+              />
             ))}
           </div>
         )}
@@ -436,11 +491,13 @@ function App() {
     operations,
     events,
     file,
+    messages,
     error,
     recovered,
     active,
     submit,
     inspect,
+    inspectMessage,
     restart
   } = useCodexSession(session);
 
@@ -533,6 +590,8 @@ function App() {
               <AssistantMessage
                 operation={operation}
                 events={events[operation.operationId] ?? []}
+                messages={messages}
+                onExpandTool={inspectMessage}
               >
                 {operation.operationId === latest?.operationId && (
                   <RunDetails

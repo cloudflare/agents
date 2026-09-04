@@ -3,9 +3,11 @@
  * imported by both the client and the Durable Object, so it must stay free of
  * runtime imports.
  */
+import type { SessionMessage } from "agents/sessions";
 import type { CodexOperationSnapshot } from "./codex-harness";
 import type { KernelJson } from "./kernel-types";
 
+export type { SessionMessage } from "agents/sessions";
 export type { CodexOperationSnapshot } from "./codex-harness";
 export type { KernelJson } from "./kernel-types";
 
@@ -44,6 +46,12 @@ export type CodexClientMessage =
       readonly operationId: string;
     }
   | {
+      /** Read one transcript message, such as a tool call's input or output. */
+      readonly type: "message";
+      readonly id: string;
+      readonly messageId: string;
+    }
+  | {
       /** Abort the Durable Object so the client can watch it recover. */
       readonly type: "restart";
       readonly id: string;
@@ -66,6 +74,11 @@ export type CodexServerMessage =
       readonly events: readonly KernelJson[];
     }
   | { readonly type: "stream_end"; readonly operationId: string }
+  | {
+      readonly type: "message";
+      readonly id: string;
+      readonly message: SessionMessage | null;
+    }
   | {
       readonly type: "result";
       readonly id: string;

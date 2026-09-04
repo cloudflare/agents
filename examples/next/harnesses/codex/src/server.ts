@@ -2,6 +2,7 @@ import { Workspace } from "@cloudflare/shell";
 import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
+import { Sessions } from "agents/sessions";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
 import { WebSockets } from "agents/websockets";
@@ -14,13 +15,19 @@ const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 export class Coder extends DurableObject<Env> {
   readonly tasks = new Tasks();
   readonly streams = new Streams();
+  readonly sessions = new Sessions();
   readonly workspace = new Workspace({
     sql: this.ctx.storage.sql,
-    namespace: "codex"
+    namespace: "codex",
+    // Files past the inline threshold spill to R2; SQLite rows cannot hold
+    // them.
+    r2: this.env.WORKSPACE,
+    r2Prefix: this.ctx.id.toString()
   });
   readonly codex = new CodexHarness({
     tasks: this.tasks,
     streams: this.streams,
+    sessions: this.sessions,
     workspace: this.workspace,
     model: createWorkersAI({
       binding: this.env.AI,
@@ -38,6 +45,7 @@ export class Coder extends DurableObject<Env> {
   readonly lifecycle = Lifecycle.install(this)
     .use(this.tasks)
     .use(this.streams)
+    .use(this.sessions)
     .use(this.webSockets)
     .use(this.codex);
 }

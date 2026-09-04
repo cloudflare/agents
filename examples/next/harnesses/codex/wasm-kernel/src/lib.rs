@@ -1,7 +1,10 @@
 //! A small Codex-derived transition kernel for Cloudflare Workers.
 //!
-//! This crate deliberately keeps only the pure part of a Codex turn. The host
-//! owns networking, storage, filesystem access, process execution, and time.
+//! This crate deliberately keeps only the pure part of a Codex turn: which
+//! effect comes next and which tool calls are still pending. The host owns
+//! networking, storage, the transcript, filesystem access, and time. Transcript
+//! items live in the host's session store, so the checkpoint stays a few
+//! hundred bytes no matter how long the conversation is.
 //! The Responses request, stream-event, response-item, and tool shapes follow
 //! openai/codex at commit 5e26f7621c1c470fe62350d61c9eb4d6c772a0da.
 //!
@@ -22,7 +25,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::slice;
 
-const CHECKPOINT_VERSION: u32 = 2;
+const CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -30,7 +33,6 @@ enum KernelCommand {
     StartTurn {
         thread_id: String,
         turn_id: String,
-        prompt: String,
         model: String,
     },
     ResolveEffect {
@@ -49,7 +51,6 @@ struct Checkpoint {
     phase: Phase,
     model_round: u32,
     next_event_seq: u32,
-    input: Vec<Value>,
     pending_calls: Vec<PendingToolCall>,
     final_output: String,
     response_id: Option<String>,
@@ -185,7 +186,7 @@ struct ResponsesStreamEvent {
     delta: Option<String>,
 }
 
-fn start_turn(thread_id: String, turn_id: String, prompt: String, model: String) -> Transition {
+fn start_turn(thread_id: String, turn_id: String, model: String) -> Transition {
     let mut checkpoint = Checkpoint {
         version: CHECKPOINT_VERSION,
         thread_id,
@@ -194,11 +195,6 @@ fn start_turn(thread_id: String, turn_id: String, prompt: String, model: String)
         phase: Phase::WaitingForModel,
         model_round: 0,
         next_event_seq: 0,
-        input: vec![json!({
-            "type": "message",
-            "role": "user",
-            "content": [{ "type": "input_text", "text": prompt }]
-        })],
         pending_calls: Vec::new(),
         final_output: String::new(),
         response_id: None,
@@ -258,26 +254,9 @@ fn resolve_effect(
                     format!("tool effect {effect_id} does not match expected {expected}"),
                 );
             }
+            // The host already appended the tool's output to the transcript;
+            // the kernel only records that the call settled.
             checkpoint.pending_calls.remove(0);
-
-            let model_output = match &output {
-                Value::String(value) => value.clone(),
-                value => value.to_string(),
-            };
-            let response_item = match call.payload_kind {
-                ToolPayloadKind::Function => json!({
-                    "type": "function_call_output",
-                    "call_id": call.call_id,
-                    "output": model_output
-                }),
-                ToolPayloadKind::Custom => json!({
-                    "type": "custom_tool_call_output",
-                    "call_id": call.call_id,
-                    "name": call.name,
-                    "output": model_output
-                }),
-            };
-            checkpoint.input.push(response_item);
             let mut events = Vec::new();
             emit(
                 &mut checkpoint,
@@ -403,6 +382,8 @@ fn resolve_model(mut checkpoint: Checkpoint, frames: Vec<Value>) -> Transition {
     )
 }
 
+/// Register the tool calls a model response asked for. Message and reasoning
+/// items are the host's to store; only calls change the kernel's state.
 fn handle_output_item(checkpoint: &mut Checkpoint, item: Value) {
     let item_type = item.get("type").and_then(Value::as_str);
     match item_type {
@@ -414,7 +395,6 @@ fn handle_output_item(checkpoint: &mut Checkpoint, item: Value) {
                 .and_then(Value::as_str)
                 .and_then(|raw| serde_json::from_str(raw).ok())
                 .unwrap_or(Value::Null);
-            checkpoint.input.push(item);
             checkpoint.pending_calls.push(PendingToolCall {
                 call_id,
                 name,
@@ -430,16 +410,12 @@ fn handle_output_item(checkpoint: &mut Checkpoint, item: Value) {
                 .and_then(Value::as_str)
                 .map(|input| Value::String(input.to_string()))
                 .unwrap_or(Value::Null);
-            checkpoint.input.push(item);
             checkpoint.pending_calls.push(PendingToolCall {
                 call_id,
                 name,
                 arguments,
                 payload_kind: ToolPayloadKind::Custom,
             });
-        }
-        Some("message") | Some("reasoning") | Some("agent_message") => {
-            checkpoint.input.push(item);
         }
         _ => {}
     }
@@ -469,11 +445,13 @@ fn tool_action(checkpoint: &mut Checkpoint, events: &mut Vec<KernelEvent>) -> Op
 
 fn model_action(checkpoint: &mut Checkpoint, events: &mut Vec<KernelEvent>) -> Action {
     let effect_id = model_effect_id(checkpoint.model_round);
+    // `input` is the transcript, which the host assembles from its session
+    // store under its own context budget when it performs the effect.
     let request = json!({
         "type": "response.create",
         "model": checkpoint.model,
         "instructions": "You are Codex. Inspect and modify the workspace using the supplied tools. Finish with a concise account of the result.",
-        "input": checkpoint.input,
+        "input": null,
         "tools": workspace_tools(),
         "tool_choice": "auto",
         "parallel_tool_calls": true,
@@ -510,8 +488,12 @@ fn workspace_tools() -> Vec<Value> {
         ),
         function_tool(
             "workspace_read",
-            "Read UTF-8 text from a durable workspace path.",
-            BTreeMap::from([("path", json!({ "type": "string" }))]),
+            "Read UTF-8 text from a durable workspace path. Large files are read in ranges: pass byte offset and max_bytes to page through them.",
+            BTreeMap::from([
+                ("path", json!({ "type": "string" })),
+                ("offset", json!({ "type": "integer", "minimum": 0 })),
+                ("max_bytes", json!({ "type": "integer", "minimum": 1 })),
+            ]),
             vec!["path"],
         ),
     ]
@@ -592,9 +574,8 @@ fn transition_json(input: &[u8]) -> Vec<u8> {
             KernelCommand::StartTurn {
                 thread_id,
                 turn_id,
-                prompt,
                 model,
-            } => start_turn(thread_id, turn_id, prompt, model),
+            } => start_turn(thread_id, turn_id, model),
             KernelCommand::ResolveEffect {
                 checkpoint,
                 effect_id,
@@ -664,9 +645,8 @@ mod tests {
             KernelCommand::StartTurn {
                 thread_id,
                 turn_id,
-                prompt,
                 model,
-            } => start_turn(thread_id, turn_id, prompt, model),
+            } => start_turn(thread_id, turn_id, model),
             KernelCommand::ResolveEffect {
                 checkpoint,
                 effect_id,
@@ -681,7 +661,6 @@ mod tests {
             "type": "start_turn",
             "thread_id": "thread-1",
             "turn_id": "turn-1",
-            "prompt": "write a file",
             "model": "codex"
         }));
         assert!(matches!(started.action, Action::Model { .. }));
@@ -716,14 +695,8 @@ mod tests {
             "result": { "type": "tool", "output": { "written": true }, "success": true }
         }));
         assert!(matches!(resumed.action, Action::Model { .. }));
-        assert_eq!(
-            resumed.checkpoint.input.last().expect("tool output")["type"],
-            "function_call_output"
-        );
-        assert_eq!(
-            resumed.checkpoint.input.last().expect("tool output")["call_id"],
-            "call-1"
-        );
+        assert!(resumed.checkpoint.pending_calls.is_empty());
+        assert_eq!(resumed.checkpoint.model_round, 1);
     }
 
     #[test]
@@ -732,7 +705,6 @@ mod tests {
             "type": "start_turn",
             "thread_id": "thread-batch",
             "turn_id": "turn-batch",
-            "prompt": "write four files",
             "model": "codex"
         }));
         let frames = (1..=4)
@@ -783,14 +755,5 @@ mod tests {
         assert!(matches!(transition.action, Action::Model { .. }));
         assert!(transition.checkpoint.pending_calls.is_empty());
         assert_eq!(transition.checkpoint.model_round, 1);
-        let outputs = transition
-            .checkpoint
-            .input
-            .iter()
-            .filter(|item| item["type"] == "function_call_output")
-            .collect::<Vec<_>>();
-        assert_eq!(outputs.len(), 4);
-        assert_eq!(outputs[0]["call_id"], "call-1");
-        assert_eq!(outputs[3]["call_id"], "call-4");
     }
 }

@@ -7,7 +7,8 @@ import type {
   CodexOperationSnapshot,
   CodexServerMessage,
   CodexSessionSnapshot,
-  CodexWorkspaceFile
+  CodexWorkspaceFile,
+  SessionMessage
 } from "./protocol";
 
 /** The harness surface the transport drives. */
@@ -19,6 +20,7 @@ export interface CodexTransportHost {
     readonly operationId?: string;
   }): Promise<KernelJson>;
   operation(operationId: string): Promise<CodexOperationSnapshot | null>;
+  message(id: string): Promise<SessionMessage | null>;
   readFile(path: string): Promise<CodexWorkspaceFile>;
   restart(): void;
 }
@@ -142,6 +144,13 @@ export class CodexTransport {
           send(connection, { type: "operation", id: message.id, operation });
           return;
         }
+        case "message":
+          send(connection, {
+            type: "message",
+            id: message.id,
+            message: await this.#host.message(message.messageId)
+          });
+          return;
         case "restart":
           send(connection, { type: "result", id: message.id, result: true });
           this.#host.restart();

@@ -1,12 +1,19 @@
 import type { LanguageModelV4 } from "@ai-sdk/provider";
 import { Workspace } from "@cloudflare/shell";
+import { generateText } from "ai";
 import { LifecycleCapability } from "agents/lifecycle";
-import { Streams } from "agents/streams";
+import {
+  createCompactFunction,
+  type Session,
+  type SessionMessage,
+  type Sessions
+} from "agents/sessions";
+import { Streams, type StreamWriter } from "agents/streams";
 import { Tasks, type TaskStep } from "agents/tasks";
-import codexKernelModule from "../wasm-kernel/target/wasm32-unknown-unknown/release/codex_worker_kernel.wasm";
 import type { WebSocketsOptions } from "agents/websockets";
+import codexKernelModule from "../wasm-kernel/target/wasm32-unknown-unknown/release/codex_worker_kernel.wasm";
 import { DirectKernelRuntime } from "./kernel-runtime";
-import { completeCodexModel } from "./language-model-v4";
+import { completeCodexModel, type ModelTranscript } from "./language-model-v4";
 import { CodexTransport } from "./transport";
 import type { CodexSessionSnapshot, CodexWorkspaceFile } from "./protocol";
 import type {
@@ -20,17 +27,18 @@ import type {
 } from "./kernel-types";
 
 const DRIVER_DEFINITION = "__cf_codex_drive_v1";
-/** Model rounds one turn may take before the harness fails it. */
-const MAX_MODEL_ROUNDS = 24;
-/** Kernel transitions per turn: a start, each round, and each tool call. */
-const MAX_TRANSITIONS = 256;
-/**
- * Largest prompt, tool argument, or tool output the harness accepts. Every
- * transition writes the whole checkpoint back to SQLite in one row, so the
- * transcript must stay well inside the 2 MB row limit, and a journaled
- * effect result must fit the 1 MB Tasks step limit.
- */
-const MAX_PAYLOAD_BYTES = 256 * 1024;
+/** Bytes of recent transcript hydrated for one model round. */
+const DEFAULT_PROMPT_BYTES = 8 * 1024 * 1024;
+/** Estimated tokens on the branch before Sessions compacts it. */
+const DEFAULT_COMPACT_AFTER_TOKENS = 120_000;
+/** Tokens kept verbatim at the tail after a compaction. */
+const DEFAULT_KEEP_RECENT_TOKENS = 40_000;
+/** Bytes of a tool output shown in its event; the message holds it all. */
+const PREVIEW_BYTES = 512;
+/** Default page returned by workspace_read when the model gives no range. */
+const DEFAULT_READ_BYTES = 256 * 1024;
+/** Bytes of the prompt kept on the operation row; Sessions holds it all. */
+const PROMPT_PREVIEW_BYTES = 4 * 1024;
 
 /** Input accepted by one durable harness operation. */
 export type CodexPromptInput = {
@@ -50,7 +58,9 @@ export type CodexOperationSnapshot = {
   readonly operationId: string;
   readonly streamId: string;
   readonly status: "queued" | "running" | "completed" | "failed";
+  /** The prompt, or its first kilobytes; `promptMessageId` holds it all. */
   readonly prompt: string;
+  readonly promptMessageId: string;
   readonly checkpoint: KernelCheckpoint | null;
   readonly action: KernelAction | null;
   readonly transitions: number;
@@ -76,7 +86,6 @@ type OperationRow = {
   error: string | null;
 };
 
-type EventRow = { seq: number; event: string };
 type DriverInput = { operationId: string };
 
 /** Dependencies the host composes around a Codex harness. */
@@ -85,20 +94,30 @@ export type CodexHarnessOptions = {
   readonly tasks: Tasks;
   /** Durable operation event stream capability. */
   readonly streams: Streams;
+  /** Durable transcript: every prompt, assistant message, and tool output. */
+  readonly sessions: Sessions;
   /** Durable filesystem the Codex tools operate on. */
   readonly workspace: Workspace;
-  /** AI SDK LanguageModelV4 used for every Codex round. */
+  /** AI SDK LanguageModelV4 used for every Codex round and for compaction. */
   readonly model: LanguageModelV4;
+  /** Model rounds one turn may take before it is failed. @default 128 */
+  readonly maxRounds?: number;
+  /** Bytes of recent transcript sent to the model. @default 8 MiB */
+  readonly promptBytes?: number;
+  /** Compaction policy; `false` disables it. */
+  readonly compaction?:
+    | false
+    | { readonly afterTokens?: number; readonly keepRecentTokens?: number };
 };
 
 /**
  * Worker-only Codex-derived harness hosted as a Lifecycle capability.
  *
- * The capability owns durable operation state. The Rust/Wasm kernel is pure
- * and asks the capability to perform model or Workspace effects, each run as
- * a journaled Tasks step so a replayed attempt reuses settled results. Tasks
- * supplies wake delivery, Streams supplies replayable output, and Workspace
- * remains a filesystem with no harness or session responsibilities.
+ * The Rust/Wasm kernel is a pure cursor over one turn: which effect comes
+ * next and which tool calls are pending. Everything with size lives in the
+ * SDK's durable primitives: the transcript in Sessions, each operation's
+ * events in Streams, model and tool effects journaled by reference through
+ * Tasks steps, and files in the Workspace. Nothing here truncates.
  */
 export class CodexHarness extends LifecycleCapability {
   private readonly tasks: Tasks;
@@ -106,6 +125,10 @@ export class CodexHarness extends LifecycleCapability {
   private readonly workspace: Workspace;
   private readonly kernel: KernelRuntime;
   private readonly model: LanguageModelV4;
+  private readonly session: Session;
+  private readonly maxRounds: number;
+  private readonly promptBytes: number;
+  private readonly writers = new Map<string, StreamWriter>();
   private transport: CodexTransport | undefined;
   /** Demo file the UI shows; tools may write anywhere in the Workspace. */
   static readonly DEMO_FILE = "/codex/result.txt";
@@ -117,12 +140,28 @@ export class CodexHarness extends LifecycleCapability {
     this.workspace = options.workspace;
     this.kernel = new DirectKernelRuntime(codexKernelModule);
     this.model = options.model;
+    this.maxRounds = options.maxRounds ?? 128;
+    this.promptBytes = options.promptBytes ?? DEFAULT_PROMPT_BYTES;
+    this.session = options.sessions.session();
+    if (options.compaction !== false) {
+      const policy = options.compaction ?? {};
+      this.session
+        .onCompaction(
+          createCompactFunction({
+            summarize: async (prompt) =>
+              (await generateText({ model: this.model, prompt })).text,
+            keepRecentTokens:
+              policy.keepRecentTokens ?? DEFAULT_KEEP_RECENT_TOKENS
+          })
+        )
+        .compactAfter(policy.afterTokens ?? DEFAULT_COMPACT_AFTER_TOKENS);
+    }
     options.tasks.register(DRIVER_DEFINITION, (input, step) =>
       this.#drive(parseDriverInput(input), step)
     );
   }
 
-  /** Create tables owned by this capability. */
+  /** Create the operation table owned by this capability. */
   override onStart(): void {
     this.lifecycle.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS cf_codex_operations (
@@ -139,12 +178,6 @@ export class CodexHarness extends LifecycleCapability {
         output TEXT,
         error TEXT
       );
-      CREATE TABLE IF NOT EXISTS cf_codex_events (
-        operation_id TEXT NOT NULL,
-        seq INTEGER NOT NULL,
-        event TEXT NOT NULL,
-        PRIMARY KEY (operation_id, seq)
-      ) WITHOUT ROWID;
     `);
   }
 
@@ -153,16 +186,11 @@ export class CodexHarness extends LifecycleCapability {
     await this.lifecycle.ready();
     const prompt = input.prompt.trim();
     if (prompt.length === 0) throw new Error("Codex prompt must not be empty");
-    if (byteLength(prompt) > MAX_PAYLOAD_BYTES) {
-      throw new Error(
-        `Codex prompt exceeds ${MAX_PAYLOAD_BYTES} bytes; send a shorter prompt`
-      );
-    }
     const operationId = input.operationId ?? crypto.randomUUID();
     const streamId = `codex:${operationId}`;
     const existing = this.#operation(operationId);
     if (existing) {
-      if (existing.prompt !== prompt) {
+      if (existing.prompt !== promptPreview(prompt)) {
         throw new Error(
           `Codex operation ${operationId} already exists with different input`
         );
@@ -173,6 +201,14 @@ export class CodexHarness extends LifecycleCapability {
       return { operationId, streamId: existing.stream_id, accepted: false };
     }
 
+    // The prompt joins the transcript first: Sessions chunks a large message
+    // across rows, so there is no size to enforce here.
+    await this.session.appendMessage({
+      id: userMessageId(operationId),
+      role: "user",
+      parts: [{ type: "text", text: prompt }],
+      metadata: { operationId }
+    });
     await this.streams.open(streamId, { tag: operationId });
     this.lifecycle.storage.sql.exec(
       `INSERT INTO cf_codex_operations
@@ -180,7 +216,7 @@ export class CodexHarness extends LifecycleCapability {
        VALUES (?, ?, 'queued', ?, ?)`,
       operationId,
       streamId,
-      prompt,
+      promptPreview(prompt),
       Date.now()
     );
     await this.#enqueueDriver(operationId);
@@ -189,16 +225,21 @@ export class CodexHarness extends LifecycleCapability {
     return { operationId, streamId, accepted: true };
   }
 
+  #enqueueDriver(operationId: string): Promise<unknown> {
+    // Tasks dedupes on runId, so re-enqueueing an accepted operation is safe.
+    return this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      DRIVER_DEFINITION,
+      { operationId },
+      { runId: `codex:${operationId}`, metadata: { operationId } }
+    );
+  }
+
   /** Bytes of Wasm linear memory the kernel currently holds. */
   kernelMemoryBytes(): Promise<number> {
     return this.kernel.memoryBytes();
   }
 
-  /**
-   * Every operation in this session, oldest first, without kernel state.
-   * Checkpoints hold the whole transcript, so a session listing must not
-   * load or send them; `snapshot(operationId)` reads one on demand.
-   */
+  /** Every operation in this session, oldest first, without kernel state. */
   async list(): Promise<CodexOperationSnapshot[]> {
     await this.lifecycle.ready();
     return [
@@ -217,6 +258,12 @@ export class CodexHarness extends LifecycleCapability {
     return content === null
       ? { path, found: false }
       : { path, found: true, content };
+  }
+
+  /** Read one transcript message, such as a tool call's arguments or output. */
+  async message(id: string): Promise<SessionMessage | null> {
+    await this.lifecycle.ready();
+    return this.session.getMessage(id);
   }
 
   /** Everything a connecting client needs. */
@@ -238,21 +285,13 @@ export class CodexHarness extends LifecycleCapability {
         snapshot: () => this.sessionSnapshot(),
         submit: (input) => this.submit(input),
         operation: (operationId) => this.snapshot(operationId),
+        message: (id) => this.message(id),
         readFile: (path) => this.readFile(path),
         restart: options.restart
       },
       () => this.lifecycle.sockets
     );
     return this.transport.webSocketOptions();
-  }
-
-  #enqueueDriver(operationId: string): Promise<unknown> {
-    // Tasks dedupes on runId, so re-enqueueing an accepted operation is safe.
-    return this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      DRIVER_DEFINITION,
-      { operationId },
-      { runId: `codex:${operationId}`, metadata: { operationId } }
-    );
   }
 
   /** Inspect one operation and its serialized kernel state. */
@@ -262,26 +301,24 @@ export class CodexHarness extends LifecycleCapability {
     return row ? projectSnapshot(row) : null;
   }
 
-  /** Read the durable event journal currently available without tailing. */
+  /** Read one operation's durable events from its stream. */
   async events(operationId: string, from = 0): Promise<KernelJson[]> {
     await this.lifecycle.ready();
-    if (!this.#operation(operationId)) return [];
-    return [
-      ...this.lifecycle.storage.sql.exec<EventRow>(
-        `SELECT seq, event FROM cf_codex_events
-         WHERE operation_id = ? AND seq >= ? ORDER BY seq`,
-        operationId,
-        from
-      )
-    ].map((row) => parseKernelJson(row.event));
+    const row = this.#operation(operationId);
+    if (!row) return [];
+    const events: KernelJson[] = [];
+    for await (const chunk of this.streams.read(row.stream_id, { from })) {
+      events.push(chunk.chunk as KernelJson);
+    }
+    return events;
   }
 
   async #drive(input: DriverInput, step: TaskStep): Promise<KernelJson> {
     await step.status("Running Codex kernel");
     let operation = this.#requiredOperation(input.operationId);
+    const writer = await this.#writer(operation);
     if (operation.status === "completed" || operation.status === "failed") {
-      // Replayed after settling: make sure the stream is closed and finish.
-      await this.#flushEvents(operation, true);
+      this.#settleStream(writer, operation);
       return projectTaskResult(operation);
     }
 
@@ -298,12 +335,11 @@ export class CodexHarness extends LifecycleCapability {
           type: "start_turn",
           thread_id: `thread:${operation.operation_id}`,
           turn_id: `turn:${operation.operation_id}`,
-          prompt: operation.prompt,
           model: this.model.modelId
         };
       } else {
         const checkpoint = parseCheckpoint(operation.checkpoint);
-        const action = parseAction(operation.action, checkpoint);
+        const action = parseAction(operation.action);
         if (action.type === "completed" || action.type === "failed") {
           // The previous incarnation recorded the terminal transition but was
           // interrupted before settling the row. Settle it now.
@@ -313,37 +349,32 @@ export class CodexHarness extends LifecycleCapability {
             this.#settleFailed(operation.operation_id, action.message);
           }
           operation = this.#requiredOperation(input.operationId);
-          await this.#flushEvents(operation, true);
+          this.#settleStream(writer, operation);
           return projectTaskResult(operation);
         }
-        const effectResult = await this.#performEffect(action, step);
         command = {
           type: "resolve_effect",
           checkpoint,
           effect_id: action.effect_id,
-          result: effectResult
+          result: await this.#performEffect(operation, checkpoint, action, step)
         };
       }
 
       for (;;) {
         operation = this.#requiredOperation(input.operationId);
-        if (operation.transitions >= MAX_TRANSITIONS) {
-          throw new Error(`Codex turn exceeded ${MAX_TRANSITIONS} transitions`);
-        }
         if (
           command.type === "resolve_effect" &&
-          command.checkpoint.model_round >= MAX_MODEL_ROUNDS
+          command.checkpoint.model_round >= this.maxRounds
         ) {
           throw new Error(
-            `Codex turn exceeded ${MAX_MODEL_ROUNDS} model rounds without finishing`
+            `Codex turn exceeded ${this.maxRounds} model rounds without finishing`
           );
         }
         const started = performance.now();
         const transition = await this.kernel.transition(command);
         const elapsed = performance.now() - started;
-        this.#recordTransition(operation, transition, elapsed);
+        this.#recordTransition(operation, transition, elapsed, writer);
         operation = this.#requiredOperation(input.operationId);
-        await this.#flushEvents(operation);
 
         if (transition.action.type === "completed") {
           this.#settleCompleted(
@@ -351,17 +382,22 @@ export class CodexHarness extends LifecycleCapability {
             transition.action.output
           );
           operation = this.#requiredOperation(input.operationId);
-          await this.#flushEvents(operation, true);
+          this.#settleStream(writer, operation);
           return projectTaskResult(operation);
         }
         if (transition.action.type === "failed") {
           this.#settleFailed(operation.operation_id, transition.action.message);
           operation = this.#requiredOperation(input.operationId);
-          await this.#flushEvents(operation, true);
+          this.#settleStream(writer, operation);
           return projectTaskResult(operation);
         }
 
-        const result = await this.#performEffect(transition.action, step);
+        const result = await this.#performEffect(
+          operation,
+          transition.checkpoint,
+          transition.action,
+          step
+        );
         command = {
           type: "resolve_effect",
           checkpoint: transition.checkpoint,
@@ -375,48 +411,149 @@ export class CodexHarness extends LifecycleCapability {
         );
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.#settleFailed(input.operationId, message);
+      // Tasks signals a step retry, a suspension, or a superseded attempt by
+      // throwing a control value; those must reach Tasks, not settle the turn.
+      if (
+        !(error instanceof Error) ||
+        error.name === "AttemptSupersededError"
+      ) {
+        throw error;
+      }
+      this.#settleFailed(input.operationId, errorMessage(error));
       operation = this.#requiredOperation(input.operationId);
-      await this.#flushEvents(operation, true);
+      this.#settleStream(writer, operation);
       return projectTaskResult(operation);
     }
   }
 
   /**
-   * Run one kernel-requested effect as a journaled Tasks step. A settled
-   * effect replays its stored result instead of running again, and the
-   * attempt's signal cancels in-flight model calls when the run is cancelled.
-   *
-   * An effect interrupted mid-flight is re-run on the next attempt. Workspace
-   * tools are idempotent, and a model round that finished after its isolate
-   * died is accepted as a rare duplicate call rather than failing the turn.
+   * Run one kernel-requested effect as a journaled Tasks step. The step
+   * stores its payload in Sessions and returns only what the kernel needs,
+   * so a journaled result stays small however large the payload was. A
+   * settled effect replays its stored result instead of running again; an
+   * effect interrupted mid-flight re-runs, and its Sessions writes are
+   * idempotent on message id.
    */
   #performEffect(
+    operation: OperationRow,
+    checkpoint: KernelCheckpoint,
     action: Extract<KernelAction, { type: "model" | "tool" }>,
     step: TaskStep
   ): Promise<KernelEffectResult> {
-    return step.do(`effect:${action.effect_id}`, ({ signal }) =>
-      action.type === "model"
-        ? completeCodexModel(this.model, action, signal)
-        : performWorkspaceTool(this.workspace, action)
-    );
+    return step.do(`effect:${action.effect_id}`, async ({ signal }) => {
+      try {
+        return await this.#runEffect(operation, checkpoint, action, signal);
+      } catch (error) {
+        console.error(`Codex effect ${action.effect_id} failed`, error);
+        throw error;
+      }
+    });
   }
 
+  async #runEffect(
+    operation: OperationRow,
+    checkpoint: KernelCheckpoint,
+    action: Extract<KernelAction, { type: "model" | "tool" }>,
+    signal: AbortSignal
+  ): Promise<KernelEffectResult> {
+    {
+      if (action.type === "model") {
+        const round = await completeCodexModel(
+          this.model,
+          action,
+          assistantMessageId(operation.operation_id, checkpoint.model_round),
+          this.#transcript(),
+          signal
+        );
+        return round.result;
+      }
+      return this.#performTool(operation, action);
+    }
+  }
+
+  #transcript(): ModelTranscript {
+    return {
+      history: async () =>
+        (await this.session.getRecentHistory(this.promptBytes)).messages,
+      record: async (message) => {
+        await this.session.appendMessage(message);
+      }
+    };
+  }
+
+  /** Run one Workspace tool and store its output as a transcript message. */
+  async #performTool(
+    operation: OperationRow,
+    action: Extract<KernelAction, { type: "tool" }>
+  ): Promise<KernelEffectResult> {
+    const input = await this.#toolInput(action);
+    const outcome = await performWorkspaceTool(this.workspace, action, input);
+    const messageId = toolMessageId(operation.operation_id, action.call_id);
+    await this.session.appendMessage({
+      id: messageId,
+      role: "tool",
+      parts: [
+        {
+          type: `tool-${action.name}`,
+          toolCallId: action.call_id,
+          toolName: action.name,
+          output: outcome.output,
+          state: outcome.success ? "output-available" : "output-error"
+        }
+      ],
+      metadata: { operationId: operation.operation_id }
+    });
+    return {
+      type: "tool",
+      success: outcome.success,
+      output: {
+        messageId,
+        bytes: byteLength(JSON.stringify(outcome.output)),
+        preview: preview(outcome.output)
+      }
+    };
+  }
+
+  /** Resolve a tool call's arguments from the assistant message that made it. */
+  async #toolInput(
+    action: Extract<KernelAction, { type: "tool" }>
+  ): Promise<unknown> {
+    const pointer = action.arguments;
+    if (!isRecord(pointer) || typeof pointer.$message !== "string") {
+      return pointer;
+    }
+    const message = await this.session.getMessage(pointer.$message);
+    const part = message?.parts.find(
+      (candidate) => candidate.toolCallId === action.call_id
+    );
+    if (!part) {
+      throw new Error(
+        `Tool call ${action.call_id} has no stored arguments in ${pointer.$message}`
+      );
+    }
+    return part.input;
+  }
+
+  /**
+   * Record one transition and append its events to the operation's Streams
+   * log in the same transaction. Events already past the writer's cursor
+   * were appended by an earlier attempt and are skipped.
+   */
   #recordTransition(
     operation: OperationRow,
     transition: KernelTransition,
-    elapsedMs: number
+    elapsedMs: number,
+    writer: StreamWriter
   ): void {
     this.lifecycle.storage.transactionSync(() => {
       for (const event of transition.events) {
-        this.lifecycle.storage.sql.exec(
-          `INSERT OR IGNORE INTO cf_codex_events (operation_id, seq, event)
-           VALUES (?, ?, ?)`,
-          operation.operation_id,
-          event.seq,
-          JSON.stringify(event)
-        );
+        if (event.seq < writer.cursor) continue;
+        if (event.seq !== writer.cursor) {
+          throw new Error(
+            `Codex event gap for ${operation.operation_id}: expected ${writer.cursor}, got ${event.seq}`
+          );
+        }
+        writer.append(event);
       }
       this.lifecycle.storage.sql.exec(
         `UPDATE cf_codex_operations
@@ -424,36 +561,27 @@ export class CodexHarness extends LifecycleCapability {
              kernel_ms = kernel_ms + ?
          WHERE operation_id = ?`,
         JSON.stringify(transition.checkpoint),
-        JSON.stringify(storedAction(transition.action)),
+        JSON.stringify(transition.action),
         elapsedMs,
         operation.operation_id
       );
     });
   }
 
-  async #flushEvents(operation: OperationRow, settle = false): Promise<void> {
-    const writer = await this.streams.open(operation.stream_id);
-    const rows = [
-      ...this.lifecycle.storage.sql.exec<EventRow>(
-        `SELECT seq, event FROM cf_codex_events
-         WHERE operation_id = ? AND seq >= ? ORDER BY seq`,
-        operation.operation_id,
-        writer.cursor
-      )
-    ];
-    for (const row of rows) {
-      if (row.seq !== writer.cursor) {
-        throw new Error(
-          `Codex event gap for ${operation.operation_id}: expected ${writer.cursor}, got ${row.seq}`
-        );
-      }
-      writer.append(parseKernelJson(row.event));
+  async #writer(operation: OperationRow): Promise<StreamWriter> {
+    let writer = this.writers.get(operation.operation_id);
+    if (!writer) {
+      writer = await this.streams.open(operation.stream_id);
+      this.writers.set(operation.operation_id, writer);
     }
-    if (settle) {
-      if (operation.status === "failed")
-        writer.error(operation.error ?? undefined);
-      else writer.close();
-    }
+    return writer;
+  }
+
+  #settleStream(writer: StreamWriter, operation: OperationRow): void {
+    if (operation.status === "failed")
+      writer.error(operation.error ?? undefined);
+    else writer.close();
+    this.writers.delete(operation.operation_id);
   }
 
   #settleCompleted(operationId: string, output: string): void {
@@ -501,6 +629,18 @@ export class CodexHarness extends LifecycleCapability {
   }
 }
 
+function userMessageId(operationId: string): string {
+  return `${operationId}:user`;
+}
+
+function assistantMessageId(operationId: string, round: number): string {
+  return `${operationId}:assistant:${round}`;
+}
+
+function toolMessageId(operationId: string, callId: string): string {
+  return `${operationId}:tool:${callId}`;
+}
+
 function parseDriverInput(value: unknown): DriverInput {
   if (!isRecord(value) || typeof value.operationId !== "string") {
     throw new Error("Invalid Codex driver input");
@@ -518,38 +658,15 @@ function parseCheckpoint(value: string): KernelCheckpoint {
   return parsed as KernelCheckpoint;
 }
 
-/**
- * A model action's request repeats the checkpoint's whole input. Storing it
- * twice per transition doubled the row and halved the transcript a turn could
- * carry, so the stored copy drops `request.input` and it is rehydrated from
- * the checkpoint on read.
- */
-function storedAction(action: KernelAction): KernelJson {
-  if (action.type !== "model" || !isRecord(action.request)) return action;
-  return { ...action, request: { ...action.request, input: null } };
-}
-
-function parseAction(
-  value: string | null,
-  checkpoint: KernelCheckpoint
-): KernelAction {
+function parseAction(value: string | null): KernelAction {
   if (value === null) throw new Error("Stored Codex operation has no action");
   const parsed = JSON.parse(value) as unknown;
   if (!isRecord(parsed) || typeof parsed.type !== "string") {
     throw new Error("Stored Codex action is malformed");
   }
-  if (parsed.type === "model" && isRecord(parsed.request)) {
-    parsed.request = { ...parsed.request, input: checkpoint.input };
-  }
   // SAFETY: The Rust kernel is the only action writer and its discriminator
   // was checked before narrowing to the shared action union.
   return parsed as KernelAction;
-}
-
-function parseKernelJson(value: string): KernelJson {
-  // SAFETY: Rust serialized this value from KernelEvent, which contains only
-  // JSON-compatible fields.
-  return JSON.parse(value) as KernelJson;
 }
 
 function projectSnapshot(row: OperationRow): CodexOperationSnapshot {
@@ -558,12 +675,10 @@ function projectSnapshot(row: OperationRow): CodexOperationSnapshot {
     streamId: row.stream_id,
     status: row.status,
     prompt: row.prompt,
+    promptMessageId: userMessageId(row.operation_id),
     checkpoint:
       row.checkpoint === null ? null : parseCheckpoint(row.checkpoint),
-    action:
-      row.action === null || row.checkpoint === null
-        ? null
-        : parseAction(row.action, parseCheckpoint(row.checkpoint)),
+    action: row.action === null ? null : parseAction(row.action),
     transitions: row.transitions,
     kernelMs: row.kernel_ms,
     startedAt: row.started_at,
@@ -581,70 +696,91 @@ function projectTaskResult(row: OperationRow): KernelJson {
   };
 }
 
+type ToolOutcome = { readonly success: boolean; readonly output: KernelJson };
+
 async function performWorkspaceTool(
   workspace: Workspace,
-  action: Extract<KernelAction, { type: "tool" }>
-): Promise<KernelEffectResult> {
-  if (!isRecord(action.arguments)) {
+  action: Extract<KernelAction, { type: "tool" }>,
+  input: unknown
+): Promise<ToolOutcome> {
+  if (!isRecord(input)) {
     return {
-      type: "error",
-      message: `${action.name} arguments must be an object`
-    };
-  }
-  if (typeof action.arguments.error === "string") {
-    // The codec replaced oversized arguments; hand the reason to the model.
-    return {
-      type: "tool",
       success: false,
-      output: { error: action.arguments.error }
+      output: { error: `${action.name} arguments must be an object` }
     };
   }
-  const path = action.arguments.path;
+  const path = input.path;
   if (typeof path !== "string") {
-    return { type: "error", message: `${action.name} requires a path` };
+    return {
+      success: false,
+      output: { error: `${action.name} requires a path` }
+    };
   }
   if (action.name === "workspace_write") {
-    const content = action.arguments.content;
+    const content = input.content;
     if (typeof content !== "string") {
-      return { type: "error", message: "workspace_write requires content" };
-    }
-    if (byteLength(content) > MAX_PAYLOAD_BYTES) {
       return {
-        type: "tool",
         success: false,
-        output: {
-          path,
-          error: `content exceeds ${MAX_PAYLOAD_BYTES} bytes; write it in smaller files`
-        }
+        output: { path, error: "workspace_write requires content" }
       };
     }
     await workspace.writeFile(path, content);
-    return {
-      type: "tool",
-      success: true,
-      output: { path, bytes: new TextEncoder().encode(content).byteLength }
-    };
+    return { success: true, output: { path, bytes: byteLength(content) } };
   }
   if (action.name === "workspace_read") {
     const content = await workspace.readFile(path);
-    if (content !== null && byteLength(content) > MAX_PAYLOAD_BYTES) {
-      return {
-        type: "tool",
-        success: false,
-        output: {
-          path,
-          bytes: byteLength(content),
-          error: `file exceeds ${MAX_PAYLOAD_BYTES} bytes; it cannot be read into the transcript`
-        }
-      };
-    }
+    if (content === null)
+      return { success: false, output: { path, found: false } };
+    // Files have no size limit; the model pages through big ones by range.
+    const bytes = new TextEncoder().encode(content);
+    const offset = clampInteger(input.offset, 0, bytes.byteLength);
+    const maxBytes = clampInteger(input.max_bytes, 1, DEFAULT_READ_BYTES);
+    const end = Math.min(bytes.byteLength, offset + maxBytes);
     return {
-      type: "tool",
-      success: content !== null,
-      output: content === null ? { path, found: false } : { path, content }
+      success: true,
+      output: {
+        path,
+        content: new TextDecoder().decode(bytes.subarray(offset, end)),
+        offset,
+        end,
+        total_bytes: bytes.byteLength,
+        ...(end < bytes.byteLength ? { next_offset: end } : {})
+      }
     };
   }
-  return { type: "error", message: `Unknown Codex tool ${action.name}` };
+  return {
+    success: false,
+    output: { error: `Unknown Codex tool ${action.name}` }
+  };
+}
+
+function clampInteger(value: unknown, min: number, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(min, Math.floor(value))
+    : fallback;
+}
+
+function promptPreview(prompt: string): string {
+  return prompt.length > PROMPT_PREVIEW_BYTES
+    ? `${prompt.slice(0, PROMPT_PREVIEW_BYTES)}…`
+    : prompt;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function preview(value: KernelJson): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > PREVIEW_BYTES
+    ? `${text.slice(0, PREVIEW_BYTES)}…`
+    : text;
 }
 
 function byteLength(value: string): number {

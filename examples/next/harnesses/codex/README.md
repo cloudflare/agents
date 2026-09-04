@@ -7,15 +7,20 @@ The example composes:
 
 - `CodexHarness extends LifecycleCapability` for the durable agent loop;
 - `Tasks` for wake delivery and replay;
+- `Sessions` for the transcript: every prompt, assistant message, and tool
+  output, with compaction;
 - `Streams` for ordered operation events;
 - `WebSockets` to serve those events to the browser;
 - `@cloudflare/shell` Workspace for durable files;
 - AI SDK `LanguageModelV4` for model calls;
 - `workers-ai-provider` for Kimi K2.7 Code through Workers AI and AI Gateway.
 
-The Wasm kernel owns pure Codex turn transitions. TypeScript owns model I/O,
-Workspace authority, durable effects, and the UI. Model-authored code does not
-run inside the kernel.
+The Wasm kernel is a cursor over one turn: which effect comes next and which
+tool calls are pending. Everything with size lives in the SDK's durable
+primitives, so nothing here truncates. The transcript is in Sessions, which
+chunks large messages across rows; each operation's events go straight to
+Streams; model and tool effects are journaled by reference through Tasks
+steps; files stay in the Workspace and are read in ranges.
 
 ## Model composition
 
@@ -68,20 +73,30 @@ layers the harness protocol on that socket: a session snapshot on connect,
 `restart` to drive it. `harness.webSockets()` returns the options for the
 `WebSockets` capability that serves it.
 
-## Limits
+## Storage
 
-The kernel keeps a turn's whole transcript in one checkpoint, and every
-transition writes that checkpoint back to SQLite as a single value. The
-harness therefore bounds what enters it:
+| Data                                      | Where                                 | Bound                                               |
+| ----------------------------------------- | ------------------------------------- | --------------------------------------------------- |
+| Prompts, assistant messages, tool outputs | Sessions                              | Durable Object storage; large messages are chunked  |
+| Operation events                          | Streams                               | one stream per operation                            |
+| Kernel checkpoint                         | one small row per operation           | a few hundred bytes, independent of transcript size |
+| Model and tool effects                    | Tasks step journal                    | message ids only                                    |
+| Files                                     | Workspace, spilling to R2 past 1.5 MB | read in ranges with `offset` and `max_bytes`        |
 
-| Limit                              | Value       |
-| ---------------------------------- | ----------- |
-| Prompt, tool argument, tool output | 256 KB each |
-| Model rounds per turn              | 24          |
-| Kernel transitions per turn        | 256         |
+The model's context window is the one real limit, and it is handled in the
+prompt rather than in storage. Each round hydrates a byte-budgeted window of
+recent history, a tool input or output over 64 KB is replaced in the prompt
+by a marker the model can page back with a ranged read, and Sessions
+compacts the branch once its estimated tokens pass a threshold, using the
+same model to summarise. The budget and the compaction policy are
+`CodexHarness` options.
 
-Oversized tool arguments are replaced with an error the model sees, so it can
-split the work. Session listings omit checkpoints; the UI loads one on demand.
+The example binds an R2 bucket named `codex-harness-workspace` for the
+Workspace. Create it before deploying:
+
+```sh
+wrangler r2 bucket create codex-harness-workspace
+```
 
 ## Stress test
 

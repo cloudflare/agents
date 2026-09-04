@@ -5,7 +5,8 @@ import type {
   CodexOperationSnapshot,
   CodexServerMessage,
   CodexWorkspaceFile,
-  KernelJson
+  KernelJson,
+  SessionMessage
 } from "./protocol";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
@@ -23,6 +24,8 @@ type State = {
   readonly operations: readonly CodexOperationSnapshot[];
   readonly events: Readonly<Record<string, readonly KernelEvent[]>>;
   readonly file: CodexWorkspaceFile | null;
+  /** Transcript messages loaded on demand, by id. */
+  readonly messages: Readonly<Record<string, SessionMessage | null>>;
   readonly error: string | undefined;
   /** True after a restart completes and the snapshot was reloaded. */
   readonly recovered: boolean;
@@ -33,6 +36,7 @@ const INITIAL_STATE: State = {
   operations: [],
   events: {},
   file: null,
+  messages: {},
   error: undefined,
   recovered: false
 };
@@ -159,6 +163,15 @@ export function useCodexSession(session: string) {
           }
           return;
         }
+        case "message":
+          setState((current) => ({
+            ...current,
+            messages: {
+              ...current.messages,
+              [message.id]: message.message
+            }
+          }));
+          return;
         case "error":
           setState((current) => ({ ...current, error: message.message }));
           return;
@@ -202,6 +215,12 @@ export function useCodexSession(session: string) {
     [send]
   );
 
+  /** Load one transcript message by id; the reply is keyed by that id. */
+  const inspectMessage = useCallback(
+    (messageId: string) => send({ type: "message", id: messageId, messageId }),
+    [send]
+  );
+
   /** Load one operation with its kernel checkpoint, which listings omit. */
   const inspect = useCallback(
     (operationId: string) =>
@@ -217,5 +236,5 @@ export function useCodexSession(session: string) {
 
   const active = state.operations.find(isActive) ?? null;
 
-  return { ...state, active, submit, inspect, restart };
+  return { ...state, active, submit, inspect, inspectMessage, restart };
 }

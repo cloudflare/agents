@@ -5,6 +5,9 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"] }],
+  "r2_buckets": [
+    { "binding": "WORKSPACE", "bucket_name": "codex-harness-workspace" }
+  ],
   "durable_objects": {
     "bindings": [{ "name": "STRESS", "class_name": "StressCoder" }]
   },

@@ -34,11 +34,6 @@ function filler(bytes: number, seed: string): string {
   return unit.repeat(Math.ceil(bytes / unit.length)).slice(0, bytes);
 }
 
-/** Count completed model rounds so far from the prompt the kernel built. */
-function roundOf(options: LanguageModelV4CallOptions): number {
-  return options.prompt.filter((message) => message.role === "tool").length;
-}
-
 /**
  * A deterministic LanguageModelV4 that drives the Codex kernel through a
  * configurable number of tool rounds without any network. It streams like a
@@ -57,14 +52,21 @@ export class StressModel implements LanguageModelV4 {
     reasoningBytes: 64
   };
   calls = 0;
+  /** Model rounds taken in the current turn; reset by the host per run. */
+  round = 0;
+
+  /** Start a new turn: the next call is round 0 again. */
+  reset(): void {
+    this.round = 0;
+  }
 
   doGenerate(): never {
     throw new Error("StressModel only streams");
   }
 
-  async doStream(options: LanguageModelV4CallOptions) {
+  async doStream(_options: LanguageModelV4CallOptions) {
     this.calls += 1;
-    const round = roundOf(options);
+    const round = this.round++;
     const scenario = this.scenario;
     const parts: LanguageModelV4StreamPart[] = [
       { type: "stream-start", warnings: [] },
@@ -87,7 +89,7 @@ export class StressModel implements LanguageModelV4 {
         const path = `/stress/file-${round}-${Math.floor(index / 2)}.txt`;
         parts.push({
           type: "tool-call",
-          toolCallId: `call-${round}-${index}`,
+          toolCallId: `call-${this.calls}-${round}-${index}`,
           toolName: write ? "workspace_write" : "workspace_read",
           input: JSON.stringify(
             write

@@ -57,7 +57,7 @@ function describe(label, result) {
 
 function describeStats(label, s) {
   console.log(
-    `  ${label.padEnd(28)} ops ${s.operations}  checkpoints ${kb(s.checkpointBytesTotal)} (max ${kb(s.checkpointBytesMax)})  events ${s.events} / ${kb(s.eventBytesTotal)}  chunks ${s.streamChunks}  db ${kb(s.databaseBytes)}  wasm memory ${kb(s.kernelMemoryBytes)}`
+    `  ${label.padEnd(28)} ops ${s.operations}  checkpoints ${kb(s.checkpointBytesTotal)} (max ${kb(s.checkpointBytesMax)})  stream chunks ${s.streamChunks} / ${kb(s.streamBytes)}  session msgs ${s.sessionMessages} (+${s.sessionContinuationRows} continuation rows) / ${kb(s.sessionBytes)}  db ${kb(s.databaseBytes)}  wasm memory ${kb(s.kernelMemoryBytes)}`
   );
 }
 
@@ -83,8 +83,12 @@ const scenarios = {
       await run(`deep-${stamp}`, { ...base, rounds: 12 })
     );
     describe(
-      "30 rounds (over round cap)",
-      await run(`deep-${stamp}`, { ...base, rounds: 30 })
+      "60 rounds x 2 calls",
+      await run(`deep-${stamp}`, { ...base, rounds: 60 })
+    );
+    describe(
+      "200 rounds (over round cap)",
+      await run(`deep-${stamp}`, { ...base, rounds: 200 })
     );
   },
   async wide() {
@@ -93,12 +97,17 @@ const scenarios = {
       await run(`wide-${stamp}`, { ...base, callsPerRound: 14 })
     );
     describe(
-      "1 round x 60 calls",
-      await run(`wide-${stamp}`, { ...base, callsPerRound: 60 })
+      "1 round x 200 calls",
+      await run(`wide-${stamp}`, { ...base, callsPerRound: 200 })
     );
   },
   async "big-tools"() {
-    for (const toolBytes of [16 * 1024, 128 * 1024, 512 * 1024, 1024 * 1024]) {
+    for (const toolBytes of [
+      128 * 1024,
+      1024 * 1024,
+      4 * 1024 * 1024,
+      8 * 1024 * 1024
+    ]) {
       describe(
         `3 rounds, ${kb(toolBytes)} tools`,
         await run(`big-${stamp}`, { ...base, rounds: 3, toolBytes })
@@ -107,12 +116,7 @@ const scenarios = {
     describeStats("after big tools", await stats(`big-${stamp}`));
   },
   async "huge-prompt"() {
-    for (const promptBytes of [
-      64 * 1024,
-      512 * 1024,
-      1024 * 1024,
-      1900 * 1024
-    ]) {
+    for (const promptBytes of [512 * 1024, 2 * 1024 * 1024, 8 * 1024 * 1024]) {
       describe(
         `${kb(promptBytes)} prompt`,
         await run(`prompt-${stamp}`, base, promptBytes)

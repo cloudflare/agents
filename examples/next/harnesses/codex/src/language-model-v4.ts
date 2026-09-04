@@ -2,174 +2,198 @@ import type {
   LanguageModelV4,
   LanguageModelV4FunctionTool,
   LanguageModelV4Message,
-  LanguageModelV4StreamPart,
-  LanguageModelV4ToolCallPart,
-  LanguageModelV4ToolResultPart
+  LanguageModelV4StreamPart
 } from "@ai-sdk/provider";
+import type { SessionMessage, SessionMessagePart } from "agents/sessions";
 import type {
   KernelAction,
   KernelEffectResult,
   KernelJson
 } from "./kernel-types";
 
-/**
- * Largest tool-call argument string the codec passes into the kernel. The
- * kernel keeps every call in its checkpoint, and the checkpoint is one SQLite
- * value, so an oversized call is replaced by a small error the tool returns to
- * the model instead of poisoning the transcript.
- */
-export const MAX_TOOL_ARGUMENT_BYTES = 256 * 1024;
+/** Transcript access the model effect needs. */
+export interface ModelTranscript {
+  /** The conversation to send, oldest first, with compaction applied. */
+  history(): Promise<SessionMessage[]>;
+  /** Durably store the assistant message this round produced. */
+  record(message: SessionMessage): Promise<void>;
+}
 
-/** Run one Codex model action through an AI SDK LanguageModelV4. */
+/** Outcome of one model round: what the kernel gets and what was stored. */
+export type ModelRound = {
+  readonly result: KernelEffectResult;
+  readonly messageId: string;
+};
+
+/**
+ * Largest tool input or output sent to the model verbatim. Storage keeps
+ * every byte; the prompt shows a marker for anything bigger so one large
+ * file write cannot crowd the rest of the conversation out of the context
+ * window. The model can page the content back with a ranged read.
+ */
+export const MAX_PROMPT_PART_BYTES = 64 * 1024;
+
+/** Tool-call arguments as the kernel sees them: a pointer into Sessions. */
+export type ToolArgumentPointer = { readonly $message: string };
+
+/**
+ * Run one Codex model action through an AI SDK LanguageModelV4.
+ *
+ * The prompt is built from the session transcript, not from the kernel, and
+ * the assistant message is stored before the kernel sees the result. Tool
+ * calls reach the kernel with a pointer to that message instead of their
+ * arguments, so a call's payload never rides in a checkpoint, an event, or a
+ * journaled step result.
+ */
 export async function completeCodexModel(
   model: LanguageModelV4,
   action: Extract<KernelAction, { type: "model" }>,
+  messageId: string,
+  transcript: ModelTranscript,
   abortSignal?: AbortSignal
-): Promise<KernelEffectResult> {
+): Promise<ModelRound> {
   const request = parseResponsesRequest(action.request);
   const result = await model.doStream({
     abortSignal,
-    prompt: responsesInputToPrompt(request.instructions, request.input),
+    prompt: sessionMessagesToPrompt(
+      request.instructions,
+      await transcript.history()
+    ),
     tools: responsesToolsToLanguageModelTools(request.tools),
     toolChoice: { type: "auto" },
-    maxOutputTokens: 4096,
     temperature: 0
   });
-
-  return consumeModelStream(result.stream, action.effect_id);
+  const round = await consumeModelStream(result.stream, action.effect_id);
+  const message: SessionMessage = {
+    id: messageId,
+    role: "assistant",
+    parts: round.parts,
+    metadata: { responseId: round.responseId }
+  };
+  if (round.parts.length > 0) await transcript.record(message);
+  return { result: round.result(messageId), messageId };
 }
 
 function parseResponsesRequest(value: KernelJson): {
   readonly instructions: string;
-  readonly input: KernelJson[];
   readonly tools: KernelJson[];
 } {
   if (!isRecord(value)) {
     throw new Error("Codex model action request must be an object");
   }
   const instructions = value.instructions;
-  const input = value.input;
   const tools = value.tools;
-  if (
-    typeof instructions !== "string" ||
-    !Array.isArray(input) ||
-    !Array.isArray(tools)
-  ) {
+  if (typeof instructions !== "string" || !Array.isArray(tools)) {
     throw new Error(
       "Codex model action request has an invalid Responses shape"
     );
   }
-  return { instructions, input, tools };
+  return { instructions, tools };
 }
 
-function responsesInputToPrompt(
+// ── Sessions → LanguageModelV4 prompt ──────────────────────────────────────
+
+type AssistantPart = Extract<
+  LanguageModelV4Message,
+  { role: "assistant" }
+>["content"][number];
+type ToolResultPart = Extract<
+  LanguageModelV4Message,
+  { role: "tool" }
+>["content"][number];
+
+function toolName(part: SessionMessagePart): string {
+  return part.toolName ?? part.type.replace(/^tool-/, "");
+}
+
+/**
+ * Map stored session messages to the V4 prompt. User and assistant messages
+ * map directly; a `tool` message becomes a tool-result message; anything
+ * else, including compaction summaries, is folded into a system message.
+ */
+export function sessionMessagesToPrompt(
   instructions: string,
-  input: KernelJson[]
+  messages: readonly SessionMessage[]
 ): LanguageModelV4Message[] {
   const prompt: LanguageModelV4Message[] = [
     { role: "system", content: instructions }
   ];
-
-  for (let index = 0; index < input.length; ) {
-    const item = input[index];
-    if (!isRecord(item) || typeof item.type !== "string") {
-      index += 1;
-      continue;
-    }
-
-    if (item.type === "function_call") {
-      const calls: LanguageModelV4ToolCallPart[] = [];
-      while (index < input.length) {
-        const candidate = input[index];
-        if (!isRecord(candidate) || candidate.type !== "function_call") break;
-        const call = functionCallPart(candidate);
-        if (call) calls.push(call);
-        index += 1;
-      }
-      if (calls.length > 0) {
-        prompt.push({ role: "assistant", content: calls });
-      }
-      continue;
-    }
-
-    if (item.type === "function_call_output") {
-      const results: LanguageModelV4ToolResultPart[] = [];
-      while (index < input.length) {
-        const candidate = input[index];
-        if (!isRecord(candidate) || candidate.type !== "function_call_output") {
-          break;
-        }
-        const result = functionResultPart(candidate, input);
-        if (result) results.push(result);
-        index += 1;
-      }
-      if (results.length > 0) prompt.push({ role: "tool", content: results });
-      continue;
-    }
-
-    if (item.type === "message") {
-      const role = item.role;
-      const text = contentText(item.content);
-      if (role === "user") {
+  for (const message of messages) {
+    switch (message.role) {
+      case "user": {
+        const text = message.parts
+          .map((part) => (part.type === "text" ? (part.text ?? "") : ""))
+          .join("");
         prompt.push({ role: "user", content: [{ type: "text", text }] });
-      } else if (role === "assistant") {
-        prompt.push({
-          role: "assistant",
-          content: [{ type: "text", text }]
-        });
+        break;
+      }
+      case "assistant": {
+        const content: AssistantPart[] = [];
+        for (const part of message.parts) {
+          if (part.type === "text" && part.text) {
+            content.push({ type: "text", text: part.text });
+          } else if (part.type === "reasoning" && part.text) {
+            content.push({ type: "reasoning", text: part.text });
+          } else if (part.type.startsWith("tool-") && part.toolCallId) {
+            content.push({
+              type: "tool-call",
+              toolCallId: part.toolCallId,
+              toolName: toolName(part),
+              input: boundedForPrompt(part.input, "input")
+            });
+          }
+        }
+        if (content.length > 0) prompt.push({ role: "assistant", content });
+        break;
+      }
+      case "tool": {
+        const content: ToolResultPart[] = [];
+        for (const part of message.parts) {
+          if (!part.type.startsWith("tool-") || !part.toolCallId) continue;
+          content.push({
+            type: "tool-result",
+            toolCallId: part.toolCallId,
+            toolName: toolName(part),
+            output: {
+              type: "text",
+              value: outputText(boundedForPrompt(part.output, "output"))
+            }
+          });
+        }
+        if (content.length > 0) prompt.push({ role: "tool", content });
+        break;
+      }
+      default: {
+        const text = message.parts
+          .map((part) => part.text ?? "")
+          .filter((text) => text.length > 0)
+          .join("\n");
+        if (text) prompt.push({ role: "system", content: text });
       }
     }
-    index += 1;
   }
-
   return prompt;
 }
 
-function functionCallPart(
-  item: Record<string, unknown>
-): LanguageModelV4ToolCallPart | undefined {
-  const toolCallId = item.call_id;
-  const toolName = item.name;
-  const input = item.arguments;
-  if (
-    typeof toolCallId !== "string" ||
-    typeof toolName !== "string" ||
-    typeof input !== "string"
-  ) {
-    return undefined;
-  }
-  return { type: "tool-call", toolCallId, toolName, input: parseJson(input) };
-}
-
-function functionResultPart(
-  item: Record<string, unknown>,
-  input: KernelJson[]
-): LanguageModelV4ToolResultPart | undefined {
-  const toolCallId = item.call_id;
-  if (typeof toolCallId !== "string") return undefined;
-  const toolName = findToolName(input, toolCallId);
-  if (!toolName) return undefined;
+function boundedForPrompt(value: unknown, label: string): unknown {
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  const bytes = new TextEncoder().encode(serialized ?? "").byteLength;
+  if (bytes <= MAX_PROMPT_PART_BYTES) return value;
+  const path =
+    isRecord(value) && typeof value.path === "string" ? value.path : undefined;
   return {
-    type: "tool-result",
-    toolCallId,
-    toolName,
-    output: { type: "text", value: modelText(item.output) }
+    elided: `${label} of ${bytes} bytes omitted from the context window`,
+    ...(path === undefined
+      ? {}
+      : {
+          path,
+          hint: "use workspace_read with offset and max_bytes to page through it"
+        })
   };
 }
 
-function findToolName(input: KernelJson[], toolCallId: string): string | null {
-  for (let index = input.length - 1; index >= 0; index--) {
-    const item = input[index];
-    if (
-      isRecord(item) &&
-      item.type === "function_call" &&
-      item.call_id === toolCallId &&
-      typeof item.name === "string"
-    ) {
-      return item.name;
-    }
-  }
-  return null;
+function outputText(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value ?? null);
 }
 
 function responsesToolsToLanguageModelTools(
@@ -200,6 +224,8 @@ function responsesToolsToLanguageModelTools(
   return converted;
 }
 
+// ── LanguageModelV4 stream → stored message + kernel frames ────────────────
+
 type StreamBlock =
   | { readonly type: "text"; readonly id: string; value: string }
   | { readonly type: "reasoning"; readonly id: string; value: string }
@@ -211,16 +237,23 @@ type StreamBlock =
       complete: boolean;
     };
 
+type ConsumedStream = {
+  readonly parts: SessionMessagePart[];
+  readonly responseId: string;
+  result(messageId: string): KernelEffectResult;
+};
+
 async function consumeModelStream(
   stream: ReadableStream<LanguageModelV4StreamPart>,
   fallbackResponseId: string
-): Promise<KernelEffectResult> {
+): Promise<ConsumedStream> {
   const blocks: StreamBlock[] = [];
   const blockIndexes = new Map<string, number>();
   let responseId = fallbackResponseId;
   let finish:
     | Extract<LanguageModelV4StreamPart, { type: "finish" }>
     | undefined;
+  let streamError: string | undefined;
 
   for await (const part of stream) {
     switch (part.type) {
@@ -268,7 +301,8 @@ async function consumeModelStream(
         finish = part;
         break;
       case "error":
-        return modelFailure(blocks, responseId, errorMessage(part.error));
+        streamError = errorMessage(part.error);
+        break;
       case "custom":
       case "file":
       case "reasoning-file":
@@ -286,44 +320,56 @@ async function consumeModelStream(
       case "tool-input-end":
         break;
     }
+    if (streamError !== undefined) break;
   }
 
+  const parts = blocksToParts(blocks);
+  const failure = (message: string) => (messageId: string) =>
+    modelFailure(blocks, messageId, responseId, message);
+
+  if (streamError !== undefined) {
+    return { parts, responseId, result: failure(streamError) };
+  }
   if (!finish) {
-    return modelFailure(
-      blocks,
+    return {
+      parts,
       responseId,
-      "LanguageModelV4 stream ended without finish"
-    );
+      result: failure("LanguageModelV4 stream ended without finish")
+    };
   }
   if (finish.finishReason.unified === "error") {
-    return modelFailure(
-      blocks,
+    return {
+      parts,
       responseId,
-      `LanguageModelV4 failed with ${finish.finishReason.raw ?? "unknown reason"}`
-    );
+      result: failure(
+        `LanguageModelV4 failed with ${finish.finishReason.raw ?? "unknown reason"}`
+      )
+    };
   }
   if (
     finish.finishReason.unified === "length" ||
     finish.finishReason.unified === "content-filter"
   ) {
+    const reason = finish.finishReason.unified;
     return {
-      type: "model",
-      frames: [
-        ...blocksToFrames(blocks),
-        {
-          type: "response.incomplete",
-          response: {
-            id: responseId,
-            error: {
-              message: `LanguageModelV4 stopped with ${finish.finishReason.unified}`
+      parts,
+      responseId,
+      result: (messageId) => ({
+        type: "model",
+        frames: [
+          ...blocksToFrames(blocks, messageId),
+          {
+            type: "response.incomplete",
+            response: {
+              id: responseId,
+              error: { message: `LanguageModelV4 stopped with ${reason}` }
             }
           }
-        }
-      ]
+        ]
+      })
     };
   }
 
-  const frames = blocksToFrames(blocks);
   const toolCallCount = blocks.filter(
     (block) => block.type === "tool-call" && block.complete
   ).length;
@@ -331,18 +377,26 @@ async function consumeModelStream(
     (block) => block.type === "text" && block.value.trim().length > 0
   );
   if (toolCallCount === 0 && !hasText) {
-    return modelFailure(
-      blocks,
+    return {
+      parts,
       responseId,
-      "LanguageModelV4 returned neither text nor a tool call"
-    );
+      result: failure("LanguageModelV4 returned neither text nor a tool call")
+    };
   }
-
-  frames.push({
-    type: "response.completed",
-    response: { id: responseId, end_turn: toolCallCount === 0 }
-  });
-  return { type: "model", frames };
+  return {
+    parts,
+    responseId,
+    result: (messageId) => ({
+      type: "model",
+      frames: [
+        ...blocksToFrames(blocks, messageId),
+        {
+          type: "response.completed",
+          response: { id: responseId, end_turn: toolCallCount === 0 }
+        }
+      ]
+    })
+  };
 }
 
 function startTextBlock(
@@ -405,10 +459,40 @@ function startToolBlock(
   return block;
 }
 
-function blocksToFrames(blocks: StreamBlock[]): KernelJson[] {
+/** The stored assistant message: full text, reasoning, and tool inputs. */
+function blocksToParts(blocks: StreamBlock[]): SessionMessagePart[] {
+  const parts: SessionMessagePart[] = [];
+  for (const block of blocks) {
+    if (block.type === "reasoning") {
+      if (block.value.length > 0) {
+        parts.push({ type: "reasoning", text: block.value });
+      }
+    } else if (block.type === "text") {
+      if (block.value.length > 0)
+        parts.push({ type: "text", text: block.value });
+    } else if (block.complete) {
+      parts.push({
+        type: `tool-${block.name}`,
+        toolCallId: block.id,
+        toolName: block.name,
+        input: parseJson(block.input),
+        state: "input-available"
+      });
+    }
+  }
+  return parts;
+}
+
+/**
+ * The kernel's view of the same round. Text and reasoning ride as deltas so
+ * the kernel can journal them as events; each tool call carries only a
+ * pointer to the stored message, never its arguments.
+ */
+function blocksToFrames(
+  blocks: StreamBlock[],
+  messageId: string
+): KernelJson[] {
   const frames: KernelJson[] = [];
-  // Text blocks are joined before trimming so whitespace at block boundaries
-  // ("Hello " + "world") is preserved as one assistant message.
   const text = blocks
     .filter((block) => block.type === "text")
     .map((block) => block.value)
@@ -424,15 +508,15 @@ function blocksToFrames(blocks: StreamBlock[]): KernelJson[] {
       }
       continue;
     }
-    if (block.type === "text") continue;
-    if (!block.complete) continue;
+    if (block.type === "text" || !block.complete) continue;
+    const pointer: ToolArgumentPointer = { $message: messageId };
     frames.push({
       type: "response.output_item.done",
       item: {
         type: "function_call",
         call_id: block.id,
         name: block.name,
-        arguments: boundedArguments(block.input)
+        arguments: JSON.stringify(pointer)
       }
     });
   }
@@ -454,13 +538,14 @@ function blocksToFrames(blocks: StreamBlock[]): KernelJson[] {
 
 function modelFailure(
   blocks: StreamBlock[],
+  messageId: string,
   responseId: string,
   message: string
 ): KernelEffectResult {
   return {
     type: "model",
     frames: [
-      ...blocksToFrames(blocks),
+      ...blocksToFrames(blocks, messageId),
       {
         type: "response.failed",
         response: { id: responseId, error: { message } }
@@ -469,34 +554,12 @@ function modelFailure(
   };
 }
 
-function boundedArguments(input: string): string {
-  if (new TextEncoder().encode(input).byteLength <= MAX_TOOL_ARGUMENT_BYTES) {
-    return input;
-  }
-  return JSON.stringify({
-    error: `tool arguments exceed ${MAX_TOOL_ARGUMENT_BYTES} bytes; split the work into smaller calls`
-  });
-}
-
-function contentText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return "";
-  return value
-    .filter(isRecord)
-    .map((part) => (typeof part.text === "string" ? part.text : ""))
-    .join("\n");
-}
-
 function parseJson(value: string): unknown {
   try {
     return JSON.parse(value) as unknown;
   } catch {
     return value;
   }
-}
-
-function modelText(value: unknown): string {
-  return typeof value === "string" ? value : JSON.stringify(value ?? null);
 }
 
 function errorMessage(value: unknown): string {
