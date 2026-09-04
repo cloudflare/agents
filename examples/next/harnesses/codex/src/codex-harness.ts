@@ -20,7 +20,17 @@ import type {
 } from "./kernel-types";
 
 const DRIVER_DEFINITION = "__cf_codex_drive_v1";
-const MAX_TRANSITIONS = 16;
+/** Model rounds one turn may take before the harness fails it. */
+const MAX_MODEL_ROUNDS = 24;
+/** Kernel transitions per turn: a start, each round, and each tool call. */
+const MAX_TRANSITIONS = 256;
+/**
+ * Largest prompt, tool argument, or tool output the harness accepts. Every
+ * transition writes the whole checkpoint back to SQLite in one row, so the
+ * transcript must stay well inside the 2 MB row limit, and a journaled
+ * effect result must fit the 1 MB Tasks step limit.
+ */
+const MAX_PAYLOAD_BYTES = 256 * 1024;
 
 /** Input accepted by one durable harness operation. */
 export type CodexPromptInput = {
@@ -143,6 +153,11 @@ export class CodexHarness extends LifecycleCapability {
     await this.lifecycle.ready();
     const prompt = input.prompt.trim();
     if (prompt.length === 0) throw new Error("Codex prompt must not be empty");
+    if (byteLength(prompt) > MAX_PAYLOAD_BYTES) {
+      throw new Error(
+        `Codex prompt exceeds ${MAX_PAYLOAD_BYTES} bytes; send a shorter prompt`
+      );
+    }
     const operationId = input.operationId ?? crypto.randomUUID();
     const streamId = `codex:${operationId}`;
     const existing = this.#operation(operationId);
@@ -174,12 +189,24 @@ export class CodexHarness extends LifecycleCapability {
     return { operationId, streamId, accepted: true };
   }
 
-  /** Every operation in this session, oldest first. */
+  /** Bytes of Wasm linear memory the kernel currently holds. */
+  kernelMemoryBytes(): Promise<number> {
+    return this.kernel.memoryBytes();
+  }
+
+  /**
+   * Every operation in this session, oldest first, without kernel state.
+   * Checkpoints hold the whole transcript, so a session listing must not
+   * load or send them; `snapshot(operationId)` reads one on demand.
+   */
   async list(): Promise<CodexOperationSnapshot[]> {
     await this.lifecycle.ready();
     return [
       ...this.lifecycle.storage.sql.exec<OperationRow>(
-        "SELECT * FROM cf_codex_operations ORDER BY started_at, operation_id"
+        `SELECT operation_id, stream_id, status, prompt, NULL AS checkpoint,
+                NULL AS action, transitions, kernel_ms, started_at,
+                completed_at, output, error
+         FROM cf_codex_operations ORDER BY started_at, operation_id`
       )
     ].map(projectSnapshot);
   }
@@ -275,7 +302,8 @@ export class CodexHarness extends LifecycleCapability {
           model: this.model.modelId
         };
       } else {
-        const action = parseAction(operation.action);
+        const checkpoint = parseCheckpoint(operation.checkpoint);
+        const action = parseAction(operation.action, checkpoint);
         if (action.type === "completed" || action.type === "failed") {
           // The previous incarnation recorded the terminal transition but was
           // interrupted before settling the row. Settle it now.
@@ -291,7 +319,7 @@ export class CodexHarness extends LifecycleCapability {
         const effectResult = await this.#performEffect(action, step);
         command = {
           type: "resolve_effect",
-          checkpoint: parseCheckpoint(operation.checkpoint),
+          checkpoint,
           effect_id: action.effect_id,
           result: effectResult
         };
@@ -301,6 +329,14 @@ export class CodexHarness extends LifecycleCapability {
         operation = this.#requiredOperation(input.operationId);
         if (operation.transitions >= MAX_TRANSITIONS) {
           throw new Error(`Codex turn exceeded ${MAX_TRANSITIONS} transitions`);
+        }
+        if (
+          command.type === "resolve_effect" &&
+          command.checkpoint.model_round >= MAX_MODEL_ROUNDS
+        ) {
+          throw new Error(
+            `Codex turn exceeded ${MAX_MODEL_ROUNDS} model rounds without finishing`
+          );
         }
         const started = performance.now();
         const transition = await this.kernel.transition(command);
@@ -388,7 +424,7 @@ export class CodexHarness extends LifecycleCapability {
              kernel_ms = kernel_ms + ?
          WHERE operation_id = ?`,
         JSON.stringify(transition.checkpoint),
-        JSON.stringify(transition.action),
+        JSON.stringify(storedAction(transition.action)),
         elapsedMs,
         operation.operation_id
       );
@@ -482,11 +518,28 @@ function parseCheckpoint(value: string): KernelCheckpoint {
   return parsed as KernelCheckpoint;
 }
 
-function parseAction(value: string | null): KernelAction {
+/**
+ * A model action's request repeats the checkpoint's whole input. Storing it
+ * twice per transition doubled the row and halved the transcript a turn could
+ * carry, so the stored copy drops `request.input` and it is rehydrated from
+ * the checkpoint on read.
+ */
+function storedAction(action: KernelAction): KernelJson {
+  if (action.type !== "model" || !isRecord(action.request)) return action;
+  return { ...action, request: { ...action.request, input: null } };
+}
+
+function parseAction(
+  value: string | null,
+  checkpoint: KernelCheckpoint
+): KernelAction {
   if (value === null) throw new Error("Stored Codex operation has no action");
   const parsed = JSON.parse(value) as unknown;
   if (!isRecord(parsed) || typeof parsed.type !== "string") {
     throw new Error("Stored Codex action is malformed");
+  }
+  if (parsed.type === "model" && isRecord(parsed.request)) {
+    parsed.request = { ...parsed.request, input: checkpoint.input };
   }
   // SAFETY: The Rust kernel is the only action writer and its discriminator
   // was checked before narrowing to the shared action union.
@@ -507,7 +560,10 @@ function projectSnapshot(row: OperationRow): CodexOperationSnapshot {
     prompt: row.prompt,
     checkpoint:
       row.checkpoint === null ? null : parseCheckpoint(row.checkpoint),
-    action: row.action === null ? null : parseAction(row.action),
+    action:
+      row.action === null || row.checkpoint === null
+        ? null
+        : parseAction(row.action, parseCheckpoint(row.checkpoint)),
     transitions: row.transitions,
     kernelMs: row.kernel_ms,
     startedAt: row.started_at,
@@ -535,6 +591,14 @@ async function performWorkspaceTool(
       message: `${action.name} arguments must be an object`
     };
   }
+  if (typeof action.arguments.error === "string") {
+    // The codec replaced oversized arguments; hand the reason to the model.
+    return {
+      type: "tool",
+      success: false,
+      output: { error: action.arguments.error }
+    };
+  }
   const path = action.arguments.path;
   if (typeof path !== "string") {
     return { type: "error", message: `${action.name} requires a path` };
@@ -543,6 +607,16 @@ async function performWorkspaceTool(
     const content = action.arguments.content;
     if (typeof content !== "string") {
       return { type: "error", message: "workspace_write requires content" };
+    }
+    if (byteLength(content) > MAX_PAYLOAD_BYTES) {
+      return {
+        type: "tool",
+        success: false,
+        output: {
+          path,
+          error: `content exceeds ${MAX_PAYLOAD_BYTES} bytes; write it in smaller files`
+        }
+      };
     }
     await workspace.writeFile(path, content);
     return {
@@ -553,6 +627,17 @@ async function performWorkspaceTool(
   }
   if (action.name === "workspace_read") {
     const content = await workspace.readFile(path);
+    if (content !== null && byteLength(content) > MAX_PAYLOAD_BYTES) {
+      return {
+        type: "tool",
+        success: false,
+        output: {
+          path,
+          bytes: byteLength(content),
+          error: `file exceeds ${MAX_PAYLOAD_BYTES} bytes; it cannot be read into the transcript`
+        }
+      };
+    }
     return {
       type: "tool",
       success: content !== null,
@@ -560,6 +645,10 @@ async function performWorkspaceTool(
     };
   }
   return { type: "error", message: `Unknown Codex tool ${action.name}` };
+}
+
+function byteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

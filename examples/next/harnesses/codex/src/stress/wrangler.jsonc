@@ -1,0 +1,12 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "codex-harness-stress",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"] }],
+  "durable_objects": {
+    "bindings": [{ "name": "STRESS", "class_name": "StressCoder" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StressCoder"] }]
+}

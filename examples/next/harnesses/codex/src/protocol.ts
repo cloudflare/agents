@@ -38,6 +38,12 @@ export type CodexClientMessage =
       readonly from?: number;
     }
   | {
+      /** Read one operation with its kernel checkpoint. */
+      readonly type: "operation";
+      readonly id: string;
+      readonly operationId: string;
+    }
+  | {
       /** Abort the Durable Object so the client can watch it recover. */
       readonly type: "restart";
       readonly id: string;
@@ -47,8 +53,9 @@ export type CodexClientMessage =
 export type CodexServerMessage =
   | { readonly type: "snapshot"; readonly snapshot: CodexSessionSnapshot }
   | {
-      /** An operation was accepted or settled. */
+      /** An operation was accepted, settled, or read on demand. */
       readonly type: "operation";
+      readonly id?: string;
       readonly operation: CodexOperationSnapshot;
     }
   | {

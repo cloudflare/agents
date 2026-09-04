@@ -226,7 +226,8 @@ function RunDetails({
   events,
   recovered,
   restarting,
-  onRestart
+  onRestart,
+  onInspect
 }: {
   operation: CodexOperationSnapshot;
   file: CodexWorkspaceFile | null;
@@ -234,6 +235,7 @@ function RunDetails({
   recovered: boolean;
   restarting: boolean;
   onRestart: () => void;
+  onInspect: () => void;
 }) {
   const duration =
     operation.completedAt === undefined
@@ -291,12 +293,12 @@ function RunDetails({
           </div>
         </div>
 
-        <details>
+        <details onToggle={(event) => event.currentTarget.open && onInspect()}>
           <summary className="cursor-pointer text-xs font-semibold text-kumo-subtle">
             Kernel checkpoint
           </summary>
           <div className="mt-2">
-            <JsonBlock value={operation.checkpoint ?? "No checkpoint yet"} />
+            <JsonBlock value={operation.checkpoint ?? "Loading checkpoint"} />
           </div>
         </details>
 
@@ -438,6 +440,7 @@ function App() {
     recovered,
     active,
     submit,
+    inspect,
     restart
   } = useCodexSession(session);
 
@@ -542,6 +545,7 @@ function App() {
                       setRestarting(true);
                       restart();
                     }}
+                    onInspect={() => inspect(operation.operationId)}
                   />
                 )}
               </AssistantMessage>

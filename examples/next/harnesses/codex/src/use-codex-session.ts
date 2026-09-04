@@ -56,7 +56,11 @@ function upsert(
   );
   if (index === -1) return [...operations, next];
   const copy = [...operations];
-  copy[index] = next;
+  const previous = copy[index];
+  copy[index] =
+    next.checkpoint === null && previous?.checkpoint
+      ? { ...next, checkpoint: previous.checkpoint, action: previous.action }
+      : next;
   return copy;
 }
 
@@ -198,6 +202,13 @@ export function useCodexSession(session: string) {
     [send]
   );
 
+  /** Load one operation with its kernel checkpoint, which listings omit. */
+  const inspect = useCallback(
+    (operationId: string) =>
+      send({ type: "operation", id: crypto.randomUUID(), operationId }),
+    [send]
+  );
+
   const restart = useCallback(() => {
     restartingRef.current = true;
     setState((current) => ({ ...current, recovered: false }));
@@ -206,5 +217,5 @@ export function useCodexSession(session: string) {
 
   const active = state.operations.find(isActive) ?? null;
 
-  return { ...state, active, submit, restart };
+  return { ...state, active, submit, inspect, restart };
 }

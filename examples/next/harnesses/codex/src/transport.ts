@@ -134,6 +134,14 @@ export class CodexTransport {
           void this.#tail(connection, operation, message.from ?? 0);
           return;
         }
+        case "operation": {
+          const operation = await this.#host.operation(message.operationId);
+          if (!operation) {
+            throw new Error(`Unknown operation ${message.operationId}`);
+          }
+          send(connection, { type: "operation", id: message.id, operation });
+          return;
+        }
         case "restart":
           send(connection, { type: "result", id: message.id, result: true });
           this.#host.restart();

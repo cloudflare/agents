@@ -75,4 +75,6 @@ export type KernelTransition = {
 export interface KernelRuntime {
   /** Advance the kernel by one pure transition. */
   transition(command: KernelCommand): Promise<KernelTransition>;
+  /** Current size of the kernel's linear memory; Wasm memory never shrinks. */
+  memoryBytes(): Promise<number>;
 }

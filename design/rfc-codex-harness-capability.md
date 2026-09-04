@@ -1332,6 +1332,33 @@ The Worker host is in
 Lifecycle capability is in
 [`src/codex-harness.ts`](../examples/next/harnesses/codex/src/codex-harness.ts).
 
+## Stress results
+
+A synthetic `LanguageModelV4` drives the example under `wrangler dev`
+(`pnpm run stress`). Kernel time is negligible: 11 transitions over a 770 KB
+checkpoint cost about 10 ms of Wasm time, and 200 short turns on one object
+cost 72 ms of kernel time in total. The binding limits are elsewhere:
+
+- One SQLite value holds the whole checkpoint. Turns failed with
+  `SQLITE_TOOBIG` once the checkpoint passed about 1 MB locally, and the
+  stored model action used to repeat the checkpoint's input, halving the
+  usable transcript. The action is now stored without its input and
+  rehydrated from the checkpoint.
+- A journaled Tasks step result must stay under 1 MB, so a model round that
+  returns a 1 MB tool argument cannot be journaled. The codec replaces tool
+  arguments over 256 KB with an error the model sees, and the tools refuse
+  prompts, writes, and reads over 256 KB.
+- The transition cap of 16 failed any turn with more than six tool calls. The
+  cap is now 24 model rounds and 256 transitions.
+- Session listings carried every checkpoint; a 200-turn session would send
+  megabytes on connect. Listings omit kernel state and the UI reads one
+  checkpoint on demand.
+- Wasm linear memory never shrinks: an object that processed 512 KB tool
+  payloads retained about 13 MB of kernel memory until eviction. The payload
+  caps keep that peak small. Each turn also stores its events twice, in the
+  journal table and the Streams chunk; 200 turns of 10 KB checkpoints left a
+  16 MB database.
+
 ## Acceptance criteria
 
 The direct Codex capability is ready for an experimental package when:

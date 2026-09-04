@@ -90,4 +90,8 @@ export class DirectKernelRuntime implements KernelRuntime {
   async transition(command: KernelCommand): Promise<KernelTransition> {
     return runTransition(await this.#instance, command);
   }
+
+  async memoryBytes(): Promise<number> {
+    return exportsOf(await this.#instance).memory.buffer.byteLength;
+  }
 }

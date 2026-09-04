@@ -68,6 +68,32 @@ layers the harness protocol on that socket: a session snapshot on connect,
 `restart` to drive it. `harness.webSockets()` returns the options for the
 `WebSockets` capability that serves it.
 
+## Limits
+
+The kernel keeps a turn's whole transcript in one checkpoint, and every
+transition writes that checkpoint back to SQLite as a single value. The
+harness therefore bounds what enters it:
+
+| Limit                              | Value       |
+| ---------------------------------- | ----------- |
+| Prompt, tool argument, tool output | 256 KB each |
+| Model rounds per turn              | 24          |
+| Kernel transitions per turn        | 256         |
+
+Oversized tool arguments are replaced with an error the model sees, so it can
+split the work. Session listings omit checkpoints; the UI loads one on demand.
+
+## Stress test
+
+`src/stress` hosts the same composition with a synthetic model, so the kernel,
+Tasks, Streams, and SQLite paths run without Workers AI.
+
+```sh
+pnpm run stress:dev            # wrangler dev on :8790, inspector on :9250
+pnpm run stress                # or: pnpm run stress deep big-tools concurrent
+pnpm run heap snapshot         # V8 heap usage and top holders over CDP
+```
+
 ## Deploy
 
 ```sh

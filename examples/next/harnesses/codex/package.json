@@ -9,7 +9,10 @@
     "start": "pnpm run build:kernel && vite dev",
     "deploy": "pnpm run build:kernel && vite build && wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "types": "wrangler types env.d.ts --include-runtime false"
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "stress:dev": "wrangler dev --config src/stress/wrangler.jsonc --port 8790 --inspector-port 9250",
+    "stress": "node scripts/stress.mjs",
+    "heap": "node scripts/heap.mjs"
   },
   "dependencies": {
     "@ai-sdk/provider": "^4.0.0",
@@ -34,6 +37,7 @@
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "wrangler": "^4.115.0"
+    "wrangler": "^4.115.0",
+    "ws": "^8.21.3"
   }
 }

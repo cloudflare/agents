@@ -12,6 +12,14 @@ import type {
   KernelJson
 } from "./kernel-types";
 
+/**
+ * Largest tool-call argument string the codec passes into the kernel. The
+ * kernel keeps every call in its checkpoint, and the checkpoint is one SQLite
+ * value, so an oversized call is replaced by a small error the tool returns to
+ * the model instead of poisoning the transcript.
+ */
+export const MAX_TOOL_ARGUMENT_BYTES = 256 * 1024;
+
 /** Run one Codex model action through an AI SDK LanguageModelV4. */
 export async function completeCodexModel(
   model: LanguageModelV4,
@@ -424,7 +432,7 @@ function blocksToFrames(blocks: StreamBlock[]): KernelJson[] {
         type: "function_call",
         call_id: block.id,
         name: block.name,
-        arguments: block.input
+        arguments: boundedArguments(block.input)
       }
     });
   }
@@ -459,6 +467,15 @@ function modelFailure(
       }
     ]
   };
+}
+
+function boundedArguments(input: string): string {
+  if (new TextEncoder().encode(input).byteLength <= MAX_TOOL_ARGUMENT_BYTES) {
+    return input;
+  }
+  return JSON.stringify({
+    error: `tool arguments exceed ${MAX_TOOL_ARGUMENT_BYTES} bytes; split the work into smaller calls`
+  });
 }
 
 function contentText(value: unknown): string {
