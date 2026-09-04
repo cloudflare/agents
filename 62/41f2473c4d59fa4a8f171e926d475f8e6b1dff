@@ -1,0 +1,181 @@
+.changeset/unified-model-provider.md
+  s_e0361eb69e0f6d::t_0d78efc38209b2 1-60
+docs/agents/index.md
+  s_e0361eb69e0f6d::t_9aa9e1684de9a3 81-82
+docs/agents/models-pi-ai.md
+  s_e0361eb69e0f6d::t_62c6153b364e3b 1-319
+docs/agents/models.md
+  s_e0361eb69e0f6d::t_7621ca20b63aec 1-500
+examples/next/README.md
+  s_e0361eb69e0f6d::t_62fd3720a62013 17
+examples/next/models/README.md
+  s_e0361eb69e0f6d::t_0fa0a52d16bd4c 1-146
+examples/next/models/env.d.ts
+  s_e0361eb69e0f6d::t_6826ad5be54a54 1-12
+examples/next/models/package.json
+  s_e0361eb69e0f6d::t_ffefc7d6e20f0d 1-28
+examples/next/models/src/index.ts
+  s_e0361eb69e0f6d::t_a8a11134b88bd0 1-316
+examples/next/models/src/pi.ts
+  s_e0361eb69e0f6d::t_199b0ba11d60aa 1-231
+examples/next/models/tsconfig.json
+  s_e0361eb69e0f6d::t_dc4577f6154ca4 1-4
+examples/next/models/wrangler.jsonc
+  s_e0361eb69e0f6d::t_ed7b4f6e339c57 1-13
+packages/agents/AGENTS.md
+  s_e0361eb69e0f6d::t_bc311d5b57b894 9-36,112-137
+packages/agents/package.json
+  s_e0361eb69e0f6d::t_5df13d6eaf7377 36-38,42-43,62,65,80-82,89-91,184-193
+packages/agents/scripts/build.ts
+  s_e0361eb69e0f6d::t_6c1285b8c27be4 25-26
+packages/agents/src/models/ai-sdk/index.ts
+  s_e0361eb69e0f6d::t_afc6324818f001 1-336
+packages/agents/src/models/ai-sdk/models/embedding.ts
+  s_e0361eb69e0f6d::t_9941401f11b75e 1-133
+packages/agents/src/models/ai-sdk/models/fallback.ts
+  s_e0361eb69e0f6d::t_4b90e83d6555a1 1-114
+packages/agents/src/models/ai-sdk/models/gateway.ts
+  s_e0361eb69e0f6d::t_1c4afa4042b2df 1-625
+packages/agents/src/models/ai-sdk/models/image.ts
+  s_e0361eb69e0f6d::t_d63518b9003925 1-267
+packages/agents/src/models/ai-sdk/models/language.ts
+  s_e0361eb69e0f6d::t_b0b3cd181e86ed 1-471
+packages/agents/src/models/ai-sdk/models/modality.ts
+  s_e0361eb69e0f6d::t_f3db338508235e 1-243
+packages/agents/src/models/ai-sdk/models/reranking.ts
+  s_e0361eb69e0f6d::t_ea601395ba7e8b 1-100
+packages/agents/src/models/ai-sdk/models/speech.ts
+  s_e0361eb69e0f6d::t_64298f3f73b8d6 1-171
+packages/agents/src/models/ai-sdk/models/transcription.ts
+  s_e0361eb69e0f6d::t_546b980799bec5 1-201
+packages/agents/src/models/ai-sdk/settings.ts
+  s_e0361eb69e0f6d::t_e74ddba97fd414 1-163
+packages/agents/src/models/ai-sdk/transport.ts
+  s_e0361eb69e0f6d::t_b40b35b768d713 1-85
+packages/agents/src/models/ai-sdk/wires/chat-completions.ts
+  s_e0361eb69e0f6d::t_c1cebba67b0754 1-851
+packages/agents/src/models/ai-sdk/wires/shared.ts
+  s_e0361eb69e0f6d::t_c6b303952af7e8 1-90
+packages/agents/src/models/core/chat-completions/index.ts
+  s_e0361eb69e0f6d::t_b9df93a5d7bfd8 1-21
+packages/agents/src/models/core/chat-completions/quirks.ts
+  s_e0361eb69e0f6d::t_428d2400c62ee7 1-152
+packages/agents/src/models/core/chat-completions/request.ts
+  s_e0361eb69e0f6d::t_d7d99efa4d1a66 1-319
+packages/agents/src/models/core/chat-completions/response.ts
+  s_e0361eb69e0f6d::t_5eadaf5817e2ba 1-144
+packages/agents/src/models/core/chat-completions/stream.ts
+  s_e0361eb69e0f6d::t_ceeedbb94731fa 1-278
+packages/agents/src/models/core/errors.ts
+  s_e0361eb69e0f6d::t_5af3f8170174c2 1-220
+packages/agents/src/models/core/gateway-providers.ts
+  s_e0361eb69e0f6d::t_01176455de1771 1-368
+packages/agents/src/models/core/images.ts
+  s_e0361eb69e0f6d::t_98c7665333d4bd 1-132
+packages/agents/src/models/core/settings.ts
+  s_e0361eb69e0f6d::t_7ca64cbfbe4c9f 1-451
+packages/agents/src/models/core/sse.ts
+  s_e0361eb69e0f6d::t_9e0b01d25539a0 1-78
+packages/agents/src/models/core/transport.ts
+  s_e0361eb69e0f6d::t_40f7bff629cf88 1-415
+packages/agents/src/models/pi-ai/catalog.ts
+  s_e0361eb69e0f6d::t_4ba83cf353f28f 1-318
+packages/agents/src/models/pi-ai/errors.ts
+  s_e0361eb69e0f6d::t_b4b581f9727325 1-85
+packages/agents/src/models/pi-ai/index.ts
+  s_e0361eb69e0f6d::t_3c7eaeadd4f2fc 1-296
+packages/agents/src/models/pi-ai/models/fallback.ts
+  s_e0361eb69e0f6d::t_8b9104c683507b 1-111
+packages/agents/src/models/pi-ai/models/image.ts
+  s_e0361eb69e0f6d::t_7d2dc91427dfc8 1-274
+packages/agents/src/models/pi-ai/models/language.ts
+  s_e0361eb69e0f6d::t_dfbc272a3e80c8 1-174
+packages/agents/src/models/pi-ai/routing.ts
+  s_e0361eb69e0f6d::t_34d03958a084c9 1-98
+packages/agents/src/models/pi-ai/settings.ts
+  s_e0361eb69e0f6d::t_cee7788dee7e16 1-234
+packages/agents/src/models/pi-ai/wires/anthropic.ts
+  s_e0361eb69e0f6d::t_a731468a15f540 1-209
+packages/agents/src/models/pi-ai/wires/chat-completions.ts
+  s_e0361eb69e0f6d::t_7f2f19e395b723 1-649
+packages/agents/src/models/pi-ai/wires/responses.ts
+  s_e0361eb69e0f6d::t_cc4d25591652ed 1-208
+packages/agents/src/models/pi-ai/wires/shared.ts
+  s_e0361eb69e0f6d::t_39b87adb4d9ca0 1-459
+packages/agents/src/tests/models/ai-sdk/chat-completions-wire.test.ts
+  s_e0361eb69e0f6d::t_ef9f310d0ec6a1 1-971
+packages/agents/src/tests/models/ai-sdk/embedding.test.ts
+  s_e0361eb69e0f6d::t_c98bab0305ae22 1-212
+packages/agents/src/tests/models/ai-sdk/fallback-and-errors.test.ts
+  s_e0361eb69e0f6d::t_8968618e327605 1-398
+packages/agents/src/tests/models/ai-sdk/gateway.test.ts
+  s_e0361eb69e0f6d::t_1774d6d5201302 1-930
+packages/agents/src/tests/models/ai-sdk/helpers.ts
+  s_e0361eb69e0f6d::t_8cd57097da0f7b 1-216
+packages/agents/src/tests/models/ai-sdk/modalities.test.ts
+  s_e0361eb69e0f6d::t_ba40b1d68c645c 1-707
+packages/agents/src/tests/models/ai-sdk/options-and-metadata.test.ts
+  s_e0361eb69e0f6d::t_82c6940b3c3d45 1-289
+packages/agents/src/tests/models/ai-sdk/transport.test.ts
+  s_e0361eb69e0f6d::t_fc87ad28b7b807 1-388
+packages/agents/src/tests/models/ai-sdk/workers-ai.test.ts
+  s_e0361eb69e0f6d::t_ef42ba25cbc021 1-711
+packages/agents/src/tests/models/core/catalog.test.ts
+  s_e0361eb69e0f6d::t_75ae4a4a196399 1-69
+packages/agents/src/tests/models/core/chat-completions.test.ts
+  s_e0361eb69e0f6d::t_0a4e3e0bbf8b5f 1-737
+packages/agents/src/tests/models/core/gateway-providers.test.ts
+  s_e0361eb69e0f6d::t_f87d7c1d0e07d1 1-208
+packages/agents/src/tests/models/core/settings.test.ts
+  s_e0361eb69e0f6d::t_282318bd7352ff 1-151
+packages/agents/src/tests/models/core/transport.test.ts
+  s_e0361eb69e0f6d::t_1d59418e93522a 1-220
+packages/agents/src/tests/models/pi-ai/agent.test.ts
+  s_e0361eb69e0f6d::t_329f3fccd8c76b 1-80
+packages/agents/src/tests/models/pi-ai/anthropic.test.ts
+  s_e0361eb69e0f6d::t_079f6ace037c09 1-286
+packages/agents/src/tests/models/pi-ai/completions.test.ts
+  s_e0361eb69e0f6d::t_29f65e758e2ed5 1-612
+packages/agents/src/tests/models/pi-ai/fallback-and-provider.test.ts
+  s_e0361eb69e0f6d::t_4c3409f09d4676 1-274
+packages/agents/src/tests/models/pi-ai/gateway.test.ts
+  s_e0361eb69e0f6d::t_1254ef98ef3c32 1-278
+packages/agents/src/tests/models/pi-ai/helpers.ts
+  s_e0361eb69e0f6d::t_1c49618868a86c 1-730
+packages/agents/src/tests/models/pi-ai/images.test.ts
+  s_e0361eb69e0f6d::t_a82107de983482 1-108
+packages/agents/src/tests/models/pi-ai/responses.test.ts
+  s_e0361eb69e0f6d::t_3547f754e4bd3a 1-242
+pnpm-lock.yaml
+  s_e0361eb69e0f6d::t_f2c3eb03a3ca05 2285-2321,2520,3907,4231,4252,4257-4265,4275-4280,4295,5945-5950,5957-5962,5973-5977,5983-5987,5994-5999,6006-6011,6018-6023,6030-6035,6042-6047,6054-6059,6066-6071,6078-6083,6091-6097,6105-6111,6119-6125,6133-6139,6147-6153,6161-6167,6175-6181,6189-6195,6201-6204,6216-6221,6228-6233,6240-6245,12707,12715,12724,12732,12738-12742,12842-12844,12849-12851,12856-12861,12884-12888,13846,14061,14107-14111,14117-14121,14123-14124,14130-14132,14136-14138,14142-14144,14148-14150,14154-14156,14160-14162,14166-14168,14172-14174,14178-14180,14184-14186,14192-14196,14202-14206,14212-14216,14222-14226,14232-14236,14242-14246,14252-14256,14262-14266,14272-14276,14278-14279,14285-14287,14291-14293,14297-14299,14487,15118,15125,15382-15383,15602-15611,17680,17975,19627,19679,20179-20180,20182-20199,20201-20203,21135,21139
+scripts/use-ai-sdk-major.mjs
+  s_e0361eb69e0f6d::t_64d534b11a2c03 35,44
+packages/agents/src/models/ai-sdk/errors.ts
+  s_145c1930aba215::t_76c367c4f7d392 1-151
+packages/agents/src/models/core/catalog.ts
+  s_145c1930aba215::t_b078cf08d1f112 1-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6241f2473c4d59fa4a8f171e926d475f8e6b1dff",
+  "prompts": {},
+  "sessions": {
+    "s_145c1930aba215": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-abada8364faf7a81e",
+        "model": "unknown"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_e0361eb69e0f6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f16fa8-0eff-4dbe-8038-24f4b9a06afd",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
