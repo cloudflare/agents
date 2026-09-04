@@ -15,6 +15,8 @@ import {
   MoonIcon,
   PaperPlaneRightIcon,
   PlusIcon,
+  WrenchIcon,
+  XIcon,
   SunIcon,
   TerminalIcon,
   XCircleIcon
@@ -24,10 +26,13 @@ import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { code } from "@streamdown/code";
 import { Streamdown } from "streamdown";
-import type { CodexOperationSnapshot, SessionMessage } from "./protocol";
+import type {
+  CodexOperationSnapshot,
+  CodexToolInfo,
+  CodexWorkspaceFile,
+  SessionMessage
+} from "./protocol";
 import { useCodexSession, type KernelEvent } from "./use-codex-session";
-
-type OperationStatus = CodexOperationSnapshot["status"];
 
 type ToolActivity = {
   callId: string;
@@ -365,14 +370,82 @@ function AssistantMessage({
   );
 }
 
+function Sidebar({
+  tools,
+  file,
+  onClose
+}: {
+  tools: readonly CodexToolInfo[];
+  file: CodexWorkspaceFile | null;
+  onClose: () => void;
+}) {
+  return (
+    <aside
+      className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
+      aria-label="Tools"
+    >
+      <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
+        <Text size="sm" bold>
+          Tools
+        </Text>
+        <Button
+          variant="ghost"
+          shape="square"
+          aria-label="Close tools"
+          onClick={onClose}
+          icon={<XIcon size={16} />}
+        />
+      </div>
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+        {tools.map((tool) => (
+          <Surface
+            key={tool.name}
+            className="rounded-lg p-3 ring ring-kumo-line"
+          >
+            <div className="flex items-center gap-2">
+              <WrenchIcon size={14} className="text-kumo-inactive" />
+              <code className="text-xs font-semibold">{tool.name}</code>
+            </div>
+            <p className="mt-1 text-xs text-kumo-subtle">{tool.description}</p>
+          </Surface>
+        ))}
+        <div className="pt-2">
+          <Text size="xs" variant="secondary" bold>
+            Workspace
+          </Text>
+          <Surface className="mt-2 rounded-lg p-3 ring ring-kumo-line">
+            <code className="text-[11px] text-kumo-subtle">
+              {file?.path ?? "/codex/result.txt"}
+            </code>
+            {file?.found ? (
+              <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap">
+                {file.content}
+              </pre>
+            ) : (
+              <p className="mt-1 text-xs text-kumo-subtle">
+                Nothing written yet.
+              </p>
+            )}
+          </Surface>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 function App() {
   const [session, setSession] = useState(getSession);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [toolsOpen, setToolsOpen] = useState(
+    () => window.matchMedia("(min-width: 1100px)").matches
+  );
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const {
     status,
     operations,
     events,
+    file,
+    tools,
     messages,
     error,
     active,
@@ -406,127 +479,151 @@ function App() {
   };
 
   return (
-    <div className="flex h-dvh flex-col bg-kumo-elevated text-kumo-default">
-      <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
-        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-5 py-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
-              <CodeIcon size={20} weight="bold" />
+    <div
+      className={`grid h-dvh overflow-hidden bg-kumo-elevated text-kumo-default ${
+        toolsOpen
+          ? "lg:grid-cols-[minmax(520px,1fr)_minmax(300px,26vw)]"
+          : "grid-cols-1"
+      }`}
+    >
+      <section className="flex min-h-0 min-w-0 flex-col" aria-label="Chat">
+        <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
+          <div className="mx-auto flex h-[68px] max-w-3xl items-center justify-between gap-3 px-5">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
+                <CodeIcon size={20} weight="bold" />
+              </div>
+              <div className="min-w-0">
+                <h1 className="truncate text-base font-semibold">
+                  Codex harness
+                </h1>
+                <p className="truncate text-xs text-kumo-subtle">
+                  Session <code>{session}</code>
+                </p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold">
-                Codex harness
-              </h1>
-              <p className="truncate text-xs text-kumo-subtle">
-                Session <code>{session}</code>
-              </p>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <Badge variant="secondary" className="hidden sm:inline-flex">
+                Kimi K2.7
+              </Badge>
+              <Badge variant={connected ? "success" : "secondary"}>
+                {connected
+                  ? "Live"
+                  : status === "connecting"
+                    ? "Connecting"
+                    : "Reconnecting"}
+              </Badge>
+              <Button
+                variant="ghost"
+                shape="square"
+                aria-label="Tools"
+                aria-expanded={toolsOpen}
+                onClick={() => setToolsOpen((open) => !open)}
+                icon={<WrenchIcon size={16} />}
+              />
+              <Button
+                variant="ghost"
+                shape="square"
+                aria-label="New session"
+                onClick={newSession}
+                disabled={busy}
+                icon={<PlusIcon size={16} />}
+              />
+              <ModeToggle />
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <Badge variant="secondary" className="hidden sm:inline-flex">
-              Kimi K2.7
-            </Badge>
-            <Badge variant={connected ? "success" : "secondary"}>
-              {connected
-                ? "Live"
-                : status === "connecting"
-                  ? "Connecting"
-                  : "Reconnecting"}
-            </Badge>
-            <Button
-              variant="ghost"
-              shape="square"
-              aria-label="New session"
-              onClick={newSession}
-              disabled={busy}
-              icon={<PlusIcon size={16} />}
-            />
-            <ModeToggle />
-          </div>
-        </div>
-      </header>
+        </header>
 
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-5 py-6">
-          {operations.length === 0 && (
-            <div className="py-10 sm:py-16">
-              <Empty
-                icon={<TerminalIcon size={32} />}
-                title="What should Codex change?"
-                description="Describe a file task."
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto max-w-3xl space-y-6 px-5 py-6">
+            {operations.length === 0 && (
+              <div className="py-10 sm:py-16">
+                <Empty
+                  icon={<TerminalIcon size={32} />}
+                  title="What should Codex change?"
+                  description="Describe a file task."
+                />
+              </div>
+            )}
+
+            {operations.map((operation) => (
+              <div key={operation.operationId} className="space-y-5">
+                <UserMessage text={operation.prompt} />
+                <AssistantMessage
+                  operation={operation}
+                  events={events[operation.operationId] ?? []}
+                  messages={messages}
+                  onExpandTool={inspectMessage}
+                ></AssistantMessage>
+              </div>
+            ))}
+
+            {error && (
+              <div
+                role="alert"
+                className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
+              >
+                {error}
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
+          </div>
+        </main>
+
+        <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              send();
+            }}
+            className="mx-auto max-w-3xl px-5 pt-4"
+          >
+            <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
+              <InputArea
+                value={prompt}
+                onValueChange={setPrompt}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    send();
+                  }
+                }}
+                rows={2}
+                disabled={busy || !connected}
+                aria-label="Message Codex"
+                placeholder="Describe a coding task"
+                className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
+              />
+              <Button
+                type="submit"
+                variant="primary"
+                shape="square"
+                aria-label="Run turn"
+                loading={busy}
+                disabled={busy || !connected || prompt.trim().length === 0}
+                icon={<PaperPlaneRightIcon size={18} />}
+                className="mb-0.5"
               />
             </div>
-          )}
-
-          {operations.map((operation) => (
-            <div key={operation.operationId} className="space-y-5">
-              <UserMessage text={operation.prompt} />
-              <AssistantMessage
-                operation={operation}
-                events={events[operation.operationId] ?? []}
-                messages={messages}
-                onExpandTool={inspectMessage}
-              ></AssistantMessage>
-            </div>
-          ))}
-
-          {error && (
-            <div
-              role="alert"
-              className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-            >
-              {error}
-            </div>
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-      </main>
-
-      <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            send();
-          }}
-          className="mx-auto max-w-3xl px-5 pt-4"
-        >
-          <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
-            <InputArea
-              value={prompt}
-              onValueChange={setPrompt}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  send();
-                }
-              }}
-              rows={2}
-              disabled={busy || !connected}
-              aria-label="Message Codex"
-              placeholder="Describe a coding task"
-              className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
-            />
-            <Button
-              type="submit"
-              variant="primary"
-              shape="square"
-              aria-label="Run turn"
-              loading={busy}
-              disabled={busy || !connected || prompt.trim().length === 0}
-              icon={<PaperPlaneRightIcon size={18} />}
-              className="mb-0.5"
-            />
+          </form>
+          <div className="flex items-center justify-center gap-2 px-5 py-3">
+            <span className="hidden text-[10px] text-kumo-inactive sm:inline">
+              Enter to send · Shift+Enter for a new line
+            </span>
+            <span className="hidden text-kumo-line sm:inline">·</span>
+            <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
           </div>
-        </form>
-        <div className="flex items-center justify-center gap-2 px-5 py-3">
-          <span className="hidden text-[10px] text-kumo-inactive sm:inline">
-            Enter to send · Shift+Enter for a new line
-          </span>
-          <span className="hidden text-kumo-line sm:inline">·</span>
-          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
-      </div>
+      </section>
+
+      {toolsOpen ? (
+        <Sidebar
+          tools={tools}
+          file={file}
+          onClose={() => setToolsOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

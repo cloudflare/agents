@@ -18,10 +18,17 @@ export type CodexWorkspaceFile = {
   readonly content?: string;
 };
 
+/** One tool the kernel offers the model. */
+export type CodexToolInfo = {
+  readonly name: string;
+  readonly description: string;
+};
+
 /** Everything the client needs to render a session on connect. */
 export type CodexSessionSnapshot = {
   readonly operations: readonly CodexOperationSnapshot[];
   readonly file: CodexWorkspaceFile;
+  readonly tools: readonly CodexToolInfo[];
 };
 
 /** Messages a browser sends over the WebSockets capability. */

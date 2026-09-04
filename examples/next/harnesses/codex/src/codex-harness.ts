@@ -15,7 +15,11 @@ import codexKernelModule from "../wasm-kernel/target/wasm32-unknown-unknown/rele
 import { DirectKernelRuntime } from "./kernel-runtime";
 import { completeCodexModel, type ModelTranscript } from "./language-model-v4";
 import { CodexTransport } from "./transport";
-import type { CodexSessionSnapshot, CodexWorkspaceFile } from "./protocol";
+import type {
+  CodexSessionSnapshot,
+  CodexToolInfo,
+  CodexWorkspaceFile
+} from "./protocol";
 import type {
   KernelAction,
   KernelCheckpoint,
@@ -143,6 +147,18 @@ export class CodexHarness extends LifecycleCapability {
   private transport: CodexTransport | undefined;
   /** Demo file the UI shows; tools may write anywhere in the Workspace. */
   static readonly DEMO_FILE = "/codex/result.txt";
+  /** The tools the kernel offers the model; mirrors `workspace_tools()`. */
+  static readonly TOOLS: readonly CodexToolInfo[] = [
+    {
+      name: "workspace_write",
+      description: "Write UTF-8 text to a durable workspace path."
+    },
+    {
+      name: "workspace_read",
+      description:
+        "Read UTF-8 text from a durable workspace path, in ranges with offset and max_bytes."
+    }
+  ];
 
   constructor(options: CodexHarnessOptions) {
     super("codex-harness");
@@ -281,7 +297,8 @@ export class CodexHarness extends LifecycleCapability {
   async sessionSnapshot(): Promise<CodexSessionSnapshot> {
     return {
       operations: await this.list(),
-      file: await this.readFile(CodexHarness.DEMO_FILE)
+      file: await this.readFile(CodexHarness.DEMO_FILE),
+      tools: CodexHarness.TOOLS
     };
   }
 

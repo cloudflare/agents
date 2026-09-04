@@ -4,6 +4,7 @@ import type {
   CodexClientMessage,
   CodexOperationSnapshot,
   CodexServerMessage,
+  CodexToolInfo,
   CodexWorkspaceFile,
   KernelJson,
   SessionMessage
@@ -24,6 +25,7 @@ type State = {
   readonly operations: readonly CodexOperationSnapshot[];
   readonly events: Readonly<Record<string, readonly KernelEvent[]>>;
   readonly file: CodexWorkspaceFile | null;
+  readonly tools: readonly CodexToolInfo[];
   /** Transcript messages loaded on demand, by id. */
   readonly messages: Readonly<Record<string, SessionMessage | null>>;
   readonly error: string | undefined;
@@ -36,6 +38,7 @@ const INITIAL_STATE: State = {
   operations: [],
   events: {},
   file: null,
+  tools: [],
   messages: {},
   error: undefined,
   recovered: false
@@ -101,13 +104,14 @@ export function useCodexSession(session: string) {
       }
       switch (message.type) {
         case "snapshot": {
-          const { operations, file } = message.snapshot;
+          const { operations, file, tools } = message.snapshot;
           const recovered = restartingRef.current;
           restartingRef.current = false;
           setState((current) => ({
             ...current,
             operations,
             file,
+            tools,
             recovered,
             error: undefined
           }));
