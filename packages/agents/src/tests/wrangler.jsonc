@@ -49,6 +49,10 @@
         "name": "StreamHarnessObject"
       },
       {
+        "class_name": "SqliteStrategiesBench",
+        "name": "SqliteStrategiesBench"
+      },
+      {
         "class_name": "TaskStreamComposeObject",
         "name": "TaskStreamComposeObject"
       },
@@ -404,6 +408,7 @@
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
+        "SqliteStrategiesBench",
         "TaskStreamComposeObject",
         "StreamBenchObject",
         "SessionHarnessObject",
