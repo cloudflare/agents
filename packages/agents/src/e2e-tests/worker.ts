@@ -8,6 +8,7 @@
 import { Agent, callable, routeAgentRequest } from "agents";
 import type { TaskHandlers, TaskStep } from "agents/tasks";
 import { Streams } from "agents/streams";
+import { Sessions } from "agents/sessions";
 import type {
   FiberInspection,
   FiberRecoveryContext as RunFiberRecoveryContext,
@@ -21,6 +22,7 @@ type Env = {
   RunFiberTestAgent: DurableObjectNamespace<RunFiberTestAgent>;
   TaskKillTestAgent: DurableObjectNamespace<TaskKillTestAgent>;
   StreamKillTestAgent: DurableObjectNamespace<StreamKillTestAgent>;
+  CutoverKillAgent: DurableObjectNamespace<CutoverKillAgent>;
   SubAgentFiberParent: DurableObjectNamespace<SubAgentFiberParent>;
   SubAgentFiberChild: DurableObjectNamespace<SubAgentFiberChild>;
   PoisonRowAgent: DurableObjectNamespace<PoisonRowAgent>;
@@ -1020,3 +1022,147 @@ export default {
     );
   }
 };
+
+// ── CutoverKillAgent (block log + cutover crash matrix) ────────────────────
+
+/**
+ * The crash points that matter for the block log and the stream → message
+ * cutover. Each `crash*` method writes, then aborts the object (`ctx.abort`)
+ * at a precise point; `inspect` runs on the fresh instance and reports what
+ * storage alone holds. A restart must find either the exact committed
+ * prefix or the finished message — never neither, never both.
+ */
+export class CutoverKillAgent extends Agent<Record<string, unknown>> {
+  readonly streams = new Streams();
+  readonly sessions = new Sessions();
+
+  constructor(ctx: DurableObjectState, env: Record<string, unknown>) {
+    super(ctx, env);
+    this.lifecycle.use(this.streams).use(this.sessions);
+  }
+
+  #chunk(i: number, bytes: number) {
+    return { i, pad: "x".repeat(bytes) };
+  }
+
+  /** Append up to `n` chunks with a macrotask yield between each, so each commits. */
+  async #seed(streamId: string, n: number, bytes: number) {
+    const writer = await this.streams.open(streamId, { tag: "kill" });
+    for (let i = writer.cursor; i < n; i++) {
+      writer.append(this.#chunk(i, bytes));
+      await fiberSleep(0);
+    }
+    return writer;
+  }
+
+  /** 1. The append and the abort share one commit unit: the append is lost. */
+  @callable()
+  async crashBeforeAppendCommits(streamId: string): Promise<void> {
+    const writer = await this.#seed(streamId, 10, 50);
+    writer.append(this.#chunk(10, 50));
+    this.ctx.abort("crash before commit");
+  }
+
+  /** 2. One yield later the append is durable. */
+  @callable()
+  async crashAfterAppendCommits(streamId: string): Promise<void> {
+    const writer = await this.#seed(streamId, 10, 50);
+    writer.append(this.#chunk(10, 50));
+    await fiberSleep(0);
+    this.ctx.abort("crash after commit");
+  }
+
+  /** 3. Rollover: 250 KB chunks, so chunk 1 opens block 1. */
+  @callable()
+  async crashDuringRollover(
+    streamId: string,
+    afterCommit: boolean
+  ): Promise<void> {
+    const writer = await this.#seed(streamId, 1, 250 * 1024);
+    writer.append(this.#chunk(1, 250 * 1024));
+    if (afterCommit) await fiberSleep(0);
+    this.ctx.abort("crash during rollover");
+  }
+
+  /** 4a. Non-atomic path: settle, persist the message (with I/O between), then crash before discard. */
+  @callable()
+  async crashAfterPersistBeforeDiscard(streamId: string): Promise<void> {
+    const writer = await this.#seed(streamId, 10, 50);
+    writer.close();
+    await fiberSleep(0);
+    await this.sessions.session().upsertMessage({
+      id: `m-${streamId}`,
+      role: "assistant",
+      parts: [{ type: "text", text: "done" }]
+    });
+    await fiberSleep(0);
+    this.ctx.abort("crash after persist, before discard");
+  }
+
+  /** 4b. Atomic cutover: crash inside `commit` (nothing lands) or right after (all lands). */
+  @callable()
+  async crashAroundCutover(
+    streamId: string,
+    where: "inside" | "after"
+  ): Promise<void> {
+    const writer = await this.#seed(streamId, 10, 50);
+    const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
+    writer.close({
+      commit: () => {
+        sync.upsert({
+          id: `m-${streamId}`,
+          role: "assistant",
+          parts: [{ type: "text", text: "done" }]
+        });
+        if (where === "inside") this.ctx.abort("crash inside cutover");
+      },
+      discard: true
+    });
+    await fiberSleep(0);
+    this.ctx.abort("crash after cutover");
+  }
+
+  /** What a fresh isolate finds in storage. */
+  @callable()
+  async inspect(streamId: string): Promise<{
+    state: string | null;
+    cursor: number | null;
+    chunks: number[];
+    blocks: Array<{ block: number; seq_from: number; seq_to: number }>;
+    messageRows: number;
+  }> {
+    const status = await this.streams.status(streamId);
+    const chunks: number[] = [];
+    if (status) {
+      const abort = new AbortController();
+      try {
+        for await (const batch of this.streams.readBatches(streamId, {
+          signal: abort.signal,
+          onUpToDate: () => abort.abort(new Error("tail"))
+        })) {
+          for (const c of batch) chunks.push((c.chunk as { i: number }).i);
+        }
+      } catch (error) {
+        if (!(error instanceof Error && error.message === "tail")) throw error;
+      }
+    }
+    const blocks = this.sql<{
+      block: number;
+      seq_from: number;
+      seq_to: number;
+    }>`
+      SELECT block, seq_from, seq_to FROM cf_agents_stream_blocks
+      WHERE stream_id = ${streamId} ORDER BY block
+    `;
+    const messageRows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agents_session_messages WHERE id = ${`m-${streamId}`}
+    `[0].n;
+    return {
+      state: status?.state ?? null,
+      cursor: status?.cursor ?? null,
+      chunks,
+      blocks,
+      messageRows
+    };
+  }
+}
