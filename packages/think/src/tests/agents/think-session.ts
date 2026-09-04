@@ -4975,10 +4975,13 @@ export class ThinkToolsTestAgent extends Think {
       VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
-    for (const chunk of chunks) {
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${now}, ${now})
       `;
     }
   }
@@ -6910,7 +6913,7 @@ export class ThinkRecoveryTestAgent extends Think {
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_agents_stream_chunks
+        SELECT COALESCE(MAX(seq_to), 0) as count FROM cf_agents_stream_blocks
         WHERE stream_id = ${streamId}
       `;
       return rows[0]?.count ?? 0;
@@ -7775,10 +7778,13 @@ export class ThinkRecoveryTestAgent extends Think {
       VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
-    for (const chunk of chunks) {
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${now}, ${now})
       `;
     }
   }

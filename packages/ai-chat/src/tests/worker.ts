@@ -834,10 +834,15 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._resumableStream.getStreamChunks(streamId);
   }
 
-  /** Raw count of stored rows for a stream (packed segments count as 1 each). */
+  /**
+   * Number of stored segments for a stream (packed segments count as 1
+   * each): the appended-segment cursor, read from the block log's tail.
+   * Blocks pack many segments into one row, so a row count no longer
+   * reflects how the adapter batched its writes.
+   */
   getStreamChunkRowCount(streamId: string): number {
-    const result = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_agents_stream_chunks
+    const result = this.sql<{ cnt: number | null }>`
+      select max(seq_to) as cnt from cf_agents_stream_blocks
       where stream_id = ${streamId}
     `;
     return result?.[0]?.cnt ?? 0;
@@ -859,18 +864,48 @@ export class TestChatAgent extends AIChatAgent<Env> {
       values (${streamId}, 'completed', ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${bodies.length}, ${now}, ${now}, ${now})
     `;
-    bodies.forEach((body, index) => {
+    if (bodies.length > 0) {
       this.sql`
-        insert into cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        values (${streamId}, ${index}, ${JSON.stringify(body)}, ${now})
+        insert into cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        values (${streamId}, 0, 0, ${bodies.length},
+                ${bodies.map((b) => JSON.stringify(b)).join(",")}, ${now}, ${now})
       `;
-    });
+    }
   }
 
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
     return this._resumableStream.getStreamMetadata(streamId);
+  }
+
+  /**
+   * Stream metadata captured at stream start, keyed by request id. The rows
+   * themselves are discarded as soon as the turn's message persists, so a
+   * test that wants to see what the live path recorded reads it here.
+   */
+  private _startedStreams = new Map<
+    string,
+    { id: string; message_id: string | null }
+  >();
+
+  protected override _startStream(
+    requestId: string,
+    options: { messageId?: string; continuation?: boolean } = {}
+  ): string {
+    const streamId = super._startStream(requestId, options);
+    this._startedStreams.set(requestId, {
+      id: streamId,
+      message_id: this._resumableStream.getStreamMessageId(streamId)
+    });
+    return streamId;
+  }
+
+  getStartedStreamMetadata(
+    requestId: string
+  ): { id: string; message_id: string | null } | null {
+    return this._startedStreams.get(requestId) ?? null;
   }
 
   getAllStreamMetadata(): Array<{
@@ -3075,10 +3110,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       values (${streamId}, 'streaming', ${requestId}, ${JSON.stringify(streamMetadata)},
               ${chunks.length}, ${createdAt}, ${createdAt})
     `;
-    for (const chunk of chunks) {
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        insert into cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        values (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${createdAt})
+        insert into cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        values (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${createdAt}, ${createdAt})
       `;
     }
     this._resumableStream.restore();

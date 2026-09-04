@@ -7177,6 +7177,13 @@ export class AIChatAgent<
                 excludeBroadcastIds
               );
             }
+            // The message is durable: the stream's block rows are now
+            // redundant, so drop them instead of leaving them for a sweep.
+            // Agent-tool child turns are the exception: the parent tails the
+            // stored chunks after completion, so those stay for the sweep.
+            if (!this._agentToolRunsByRequestId.get(id)) {
+              this._resumableStream.discardCompleted(streamId);
+            }
           }
 
           this._pendingChatResponseResults.push({

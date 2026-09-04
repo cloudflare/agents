@@ -12742,6 +12742,9 @@ export class Think<
       if (accumulator.parts.length > 0) {
         await this._persistAssistantMessage(assistantMsg);
         this._broadcastMessages();
+        // The message is durable: drop the stream's block rows now rather
+        // than leaving them for the retention sweep.
+        this._resumableStream.discardCompleted(streamId);
       }
 
       if (streamError) {
@@ -13339,6 +13342,9 @@ export class Think<
         if (accumulator.parts.length > 0) {
           await this._persistAssistantMessage(assistantMsg, parentId);
           this._broadcastMessages();
+          // The message is durable: drop the stream's block rows now rather
+          // than leaving them for the retention sweep.
+          this._resumableStream.discardCompleted(streamId);
         }
 
         await this._fireResponseHook({

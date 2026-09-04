@@ -74,10 +74,31 @@ export interface StreamWriter {
   append(chunk: StreamJson): number;
 
   /** Settle the stream as completed. No-op if already terminal. */
-  close(): void;
+  close(options?: StreamSettleOptions): void;
 
   /** Settle the stream as errored. No-op if already terminal. */
-  error(reason?: string): void;
+  error(reason?: string, options?: StreamSettleOptions): void;
+}
+
+/**
+ * The cutover: settle a stream, run the caller's own synchronous writes
+ * (typically persisting the finished message), and discard the stream's
+ * rows, all in ONE SQLite transaction. A crash leaves either the live
+ * stream or the finished message, never neither. `commit` must not await
+ * and must not throw for a reason it wants ignored: a throw rolls the
+ * settle back and leaves the stream live.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export interface StreamSettleOptions {
+  /** Synchronous writes to commit with the settlement. */
+  readonly commit?: () => void;
+  /**
+   * Delete the stream's rows in the same transaction. The stream ceases
+   * to exist (`status()` returns null); readers tailing it end. Use when
+   * the chunks have been handed off, so nothing is left to sweep later.
+   */
+  readonly discard?: boolean;
 }
 
 /** Options accepted by `Streams.open()`. */
@@ -144,7 +165,7 @@ export type StreamRow = {
   closed_at: number | null;
 };
 
-/** @internal Raw `cf_agents_stream_chunks` SQLite row. */
+/** @internal One chunk as read back from a `cf_agents_stream_blocks` row. */
 export type StreamChunkRow = {
   stream_id: string;
   seq: number;

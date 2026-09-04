@@ -2,7 +2,7 @@
  * ResumableStream: chat's producer-side coalescing and wire-protocol replay
  * adapter over the `agents/streams` capability. Chat's in-flight output
  * lives in the shared durable chunk log (`cf_agents_streams` /
- * `cf_agents_stream_chunks`), one stream per turn, tagged with the turn's
+ * `cf_agents_stream_blocks`), one stream per turn, tagged with the turn's
  * request id so replay-by-request rides the capability's indexed lookup.
  *
  * Handles:
@@ -346,6 +346,12 @@ export class ResumableStream {
   ): string {
     // Flush any pending chunks from previous streams to prevent mixing
     this.flushBuffer();
+    // Reclaim completed streams a previous turn left behind (a crash
+    // between persist and discard): their messages are persisted, so the
+    // rows are dead weight. One row-table scan, no alarm.
+    for (const row of this._chatRows()) {
+      if (row.state === "completed") this.ops.deleteUnchecked(row.stream_id);
+    }
 
     const streamId = nanoid();
     this._activeStreamId = streamId;
@@ -375,12 +381,25 @@ export class ResumableStream {
 
   /**
    * Mark a stream as completed and flush any pending chunks.
+   *
+   * With `persist`, this is the cutover: the settle, the caller's message
+   * write and the discard of the stream's rows commit in one SQLite
+   * transaction, so a crash leaves either the live stream or the finished
+   * message, never neither, and nothing is left for a sweep. `persist`
+   * must be synchronous.
    * @param streamId - The stream to mark as completed
    */
-  complete(streamId: string) {
+  complete(streamId: string, options: { persist?: () => void } = {}) {
     this.flushBuffer();
 
-    this.ops.settle(streamId, "completed", null);
+    if (options.persist) {
+      this.ops.settle(streamId, "completed", null, {
+        commit: options.persist,
+        discard: true
+      });
+    } else {
+      this.ops.settle(streamId, "completed", null);
+    }
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._isLive = false;
@@ -388,6 +407,22 @@ export class ResumableStream {
 
     // Periodically clean up old streams
     this._maybeCleanupOldStreams();
+  }
+
+  /**
+   * Drop a completed stream's rows once its message is persisted. The rows
+   * are redundant with the message from that moment, so deleting them here
+   * (a handful of block rows) is what keeps the retention sweep from ever
+   * finding completed streams. Live and errored streams are left alone:
+   * a live one may still be resumed, an errored one still owes a resumed
+   * client its terminal frame (#1645).
+   * @returns Whether rows were deleted.
+   */
+  discardCompleted(streamId: string): boolean {
+    const row = this.ops.getStream(streamId);
+    if (!row || row.state !== "completed") return false;
+    this.ops.deleteUnchecked(streamId);
+    return true;
   }
 
   /**

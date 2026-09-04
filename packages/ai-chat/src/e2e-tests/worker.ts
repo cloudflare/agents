@@ -374,7 +374,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 /**
  * #1706 stream-buffer cleanup agent. Streams a SHORT turn that completes
  * quickly so a resumable-stream buffer (a chat-owned `cf_agents_streams` row
- * plus its packed `cf_agents_stream_chunks` rows) and a `_cleanupStreamBuffers`
+ * plus its `cf_agents_stream_blocks` rows) and a `_cleanupStreamBuffers`
  * cleanup alarm both exist after a single turn. Exposes @callable inspectors so
  * the test can drive a DETERMINISTIC sweep with an injected far-future "now"
  * instead of waiting out the real 10-minute/1-hour retention windows.
@@ -415,7 +415,7 @@ export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
   @callable()
   chunkRowCount(): number {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_stream_chunks
+      SELECT COUNT(*) as count FROM cf_agents_stream_blocks
       WHERE stream_id IN (
         SELECT stream_id FROM cf_agents_streams
         WHERE json_extract(metadata, '$.cfChat') = 1

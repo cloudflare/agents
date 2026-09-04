@@ -152,6 +152,39 @@ request's signal aborts the tail when the client disconnects.
 `examples/next/streams` is the end-to-end demo. For other transports,
 `read()`/`readBatches()` remain the raw async iterables to pipe yourself.
 
+## Storage: blocks, and the cutover to a message
+
+Chunks are stored as **rollover blocks**: one row per stream holds chunks
+until it reaches 256 KB, then the next append opens a new row. An append
+is one billed row either way (an UPDATE that grows the block, or the INSERT
+of the next one), the same as a row-per-chunk log, but a stream of
+thousands of chunks is a handful of rows, so deleting it is a handful of
+writes instead of thousands. Replay parses one block at a time.
+
+A stream is temporary: once its content has become something else (a
+session message, a report), its rows are dead weight. The **cutover** ends
+the stream, runs your own synchronous writes, and deletes its rows in one
+SQLite transaction:
+
+```ts
+stream.close({
+  commit: () => sessionSync.upsert(message), // synchronous writes only
+  discard: true // delete the stream's rows in the same transaction
+});
+```
+
+Either the message exists and the stream is gone, or `commit` threw, the
+settle rolled back and the stream is still live. Nothing is left for a
+retention sweep. `error(reason, { commit, discard })` is the same for a
+failed producer. `commit` must not await; a Session handle's
+`__DO_NOT_USE_WILL_BREAK__sync().upsert()` is the matching synchronous
+message write, and returns a `notify()` to dispatch the change feed after
+the transaction commits.
+
+Measured on a real Durable Object (400-chunk chat turn, 10 chunks per
+write): the old log paid 42 rows to write and another 42 to sweep; blocks
+pay 42 to write and 3 to cut over.
+
 ## Chat runs on this
 
 `AIChatAgent` and `Think` store their in-flight turn output here:

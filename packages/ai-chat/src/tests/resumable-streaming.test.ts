@@ -79,6 +79,7 @@ describe("Resumable Streaming", () => {
       // reconstructed chunks with the right message. Without this wiring the
       // column would be null and recovery would fall back to the (buggy)
       // last-assistant heuristic.
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
       const done = new Promise<void>((resolve) => {
         ws.addEventListener("message", (e: MessageEvent) => {
           const data = JSON.parse(e.data as string);
@@ -112,8 +113,6 @@ describe("Resumable Streaming", () => {
 
       await done;
 
-      const agentStub = await getAgentByName(env.TestChatAgent, room);
-
       // Persistence runs after the `done` broadcast, so wait for the assistant
       // message to land before asserting.
       await waitFor(async () =>
@@ -129,9 +128,14 @@ describe("Resumable Streaming", () => {
       const assistant = persisted.find((m) => m.role === "assistant");
       expect(assistant).toBeDefined();
 
-      const metadata = await agentStub.getAllStreamMetadata();
-      const row = metadata.find((m) => m.request_id === "req-wiring");
+      // The stream's rows are discarded as soon as its message persists, so
+      // the metadata the live path recorded is read from the test agent's
+      // capture at stream start.
+      const row = await agentStub.getStartedStreamMetadata("req-wiring");
       expect(row).toBeDefined();
+      // And once persisted, the stream is gone: nothing left to sweep.
+      const after = await agentStub.getAllStreamMetadata();
+      expect(after.find((m) => m.request_id === "req-wiring")).toBeUndefined();
       // The wiring: the metadata records the SAME id the assistant message was
       // persisted under (the allocated id, since no provider id was emitted).
       expect(row?.message_id).toBeTruthy();

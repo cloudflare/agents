@@ -49,6 +49,10 @@
         "name": "StreamHarnessObject"
       },
       {
+        "class_name": "CutoverHarnessObject",
+        "name": "CutoverHarnessObject"
+      },
+      {
         "class_name": "SqliteStrategiesBench",
         "name": "SqliteStrategiesBench"
       },
@@ -408,6 +412,7 @@
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
+        "CutoverHarnessObject",
         "SqliteStrategiesBench",
         "TaskStreamComposeObject",
         "StreamBenchObject",
