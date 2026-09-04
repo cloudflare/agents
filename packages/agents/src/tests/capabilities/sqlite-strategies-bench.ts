@@ -65,7 +65,9 @@ export class SqliteStrategiesBench extends DurableObject<Cloudflare.Env> {
   #poolSize = 0;
   readonly #ownedSlots = new Map<string, number[]>();
 
-  #exec<T = Record<string, unknown>>(query: string, ...params: unknown[]) {
+  #exec<
+    T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>
+  >(query: string, ...params: unknown[]) {
     const cursor = this.ctx.storage.sql.exec<T>(query, ...params);
     const rows = cursor.toArray();
     this.#counters.written += cursor.rowsWritten;

@@ -19,6 +19,11 @@ async function collect(
   return chunks;
 }
 
+/** The harness's storage; `ctx` is protected on DurableObject. */
+function sqlOf(instance: CutoverHarnessObject): SqlStorage {
+  return (instance as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+}
+
 describe("stream → session cutover", () => {
   it("commits the message, settles and discards the stream together", async () => {
     const stub = env.CutoverHarnessObject.getByName(crypto.randomUUID());
@@ -33,7 +38,7 @@ describe("stream → session cutover", () => {
       }
       // One block row holds all 300 chunks (well under the block ceiling).
       const blocks = [
-        ...instance.ctx.storage.sql.exec(
+        ...sqlOf(instance).exec(
           "SELECT COUNT(*) AS n FROM cf_agents_stream_blocks WHERE stream_id = 'turn-1'"
         )
       ][0].n;
@@ -49,7 +54,7 @@ describe("stream → session cutover", () => {
         commit: () => {
           notify = session
             .__DO_NOT_USE_WILL_BREAK__sync()
-            .upsert(message).notify;
+            .upsert(message).after;
         },
         discard: true
       });
@@ -58,7 +63,7 @@ describe("stream → session cutover", () => {
       expect(await instance.streams.status("turn-1")).toBeNull();
       expect(await instance.streams.list({ tag: "req-1" })).toEqual([]);
       const rows = [
-        ...instance.ctx.storage.sql.exec(
+        ...sqlOf(instance).exec(
           "SELECT COUNT(*) AS n FROM cf_agents_stream_blocks"
         )
       ][0].n;
@@ -109,7 +114,7 @@ describe("stream → session cutover", () => {
       for (let i = 0; i < 12; i++) stream.append(`${i}:${chunk}`);
       stream.close();
       const blocks = [
-        ...instance.ctx.storage.sql.exec(
+        ...sqlOf(instance).exec(
           "SELECT block, seq_from, seq_to FROM cf_agents_stream_blocks WHERE stream_id = 'big' ORDER BY block"
         )
       ] as { block: number; seq_from: number; seq_to: number }[];
@@ -125,7 +130,7 @@ describe("stream → session cutover", () => {
       expect(await instance.streams.delete("big")).toBe(true);
       expect(
         [
-          ...instance.ctx.storage.sql.exec(
+          ...sqlOf(instance).exec(
             "SELECT COUNT(*) AS n FROM cf_agents_stream_blocks WHERE stream_id = 'big'"
           )
         ][0].n
