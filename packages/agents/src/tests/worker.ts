@@ -32,6 +32,7 @@ export {
   TaskSchedulerCoexistObject
 } from "./capabilities/tasks.ts";
 export {
+  R2StreamHarnessObject,
   StreamHarnessObject,
   TaskStreamComposeObject
 } from "./capabilities/streams.ts";
@@ -42,6 +43,7 @@ export {
   SessionSearchHarnessObject
 } from "./capabilities/sessions.ts";
 import type {
+  R2StreamHarnessObject,
   StreamHarnessObject,
   TaskStreamComposeObject
 } from "./capabilities/streams.ts";
@@ -213,6 +215,8 @@ export type Env = {
   TaskHarnessObject: DurableObjectNamespace<TaskHarnessObject>;
   TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
   StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;
+  R2StreamHarnessObject: DurableObjectNamespace<R2StreamHarnessObject>;
+  STREAMS_R2: R2Bucket;
   TaskStreamComposeObject: DurableObjectNamespace<TaskStreamComposeObject>;
   StreamBenchObject: DurableObjectNamespace<StreamBenchObject>;
   SessionHarnessObject: DurableObjectNamespace<SessionHarnessObject>;

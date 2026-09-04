@@ -10,6 +10,7 @@
     "enable_nodejs_v8_module",
     "enable_nodejs_process_v2"
   ],
+  "r2_buckets": [{ "binding": "STREAMS_R2", "bucket_name": "streams-test" }],
   "durable_objects": {
     "bindings": [
       {
@@ -47,6 +48,10 @@
       {
         "class_name": "StreamHarnessObject",
         "name": "StreamHarnessObject"
+      },
+      {
+        "class_name": "R2StreamHarnessObject",
+        "name": "R2StreamHarnessObject"
       },
       {
         "class_name": "TaskStreamComposeObject",
@@ -404,6 +409,7 @@
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
+        "R2StreamHarnessObject",
         "TaskStreamComposeObject",
         "StreamBenchObject",
         "SessionHarnessObject",

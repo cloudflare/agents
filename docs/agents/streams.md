@@ -152,6 +152,65 @@ request's signal aborts the tail when the client disconnects.
 `examples/next/streams` is the end-to-end demo. For other transports,
 `read()`/`readBatches()` remain the raw async iterables to pipe yourself.
 
+## Storing chunks in R2
+
+Hand `Streams` an R2 binding and the chunk log leaves the Durable Object:
+
+```ts
+readonly streams = new Streams({
+  r2: this.env.BUCKET,
+  r2Prefix: `streams/${this.ctx.id}/`, // default "streams/"; include the id when objects share a bucket
+  r2Checkpoint: { everyChunks: 25, everyMs: 1000 } // the defaults
+});
+```
+
+Nothing else changes: `open`, `append`, `read`, `status`, `list`, `delete`
+behave as above, and `append()` is still synchronous. Stream rows (state,
+tag index, metadata, cursor) stay in SQLite, where a point read or tag
+lookup costs nothing; chunks go to the bucket.
+
+**Why this exists: cost.** SQLite bills one row per stored chunk and again
+to delete it; R2 bills one Class A op per checkpoint, deletes are free, and
+storage is about 13 times cheaper with no 10 GB ceiling. One R2 put costs
+the same as 4.5 SQLite row writes, so the R2 log is cheaper whenever a
+checkpoint covers more than about 4.5 stored rows. For a 400-chunk chat
+turn: about $0.0008 per turn on SQLite unpacked, $0.00008 packed ten to a
+row, $0.00009 on R2 at the default cadence, $0.00002 at a 5-second one.
+Against packed SQLite, R2 only wins once you widen the loss window.
+
+**How it works, and what a Durable Object dying means.** R2 has no append,
+rejects bodies of unknown length, and stores nothing from a put that has
+not completed. So the log is a write-ahead log of segment objects:
+
+- Appends go into an in-memory line log that live readers tail, exactly
+  like the SQLite log's wakeups.
+- Every `everyChunks` appends or `everyMs` after the first unflushed one,
+  the new lines are put as one immutable segment under `<id>/seg/`. Each
+  landed segment is the durability. When the isolate dies, everything up
+  to the last landed segment is in R2, and the loss window is the cadence.
+- The row's cursor is stamped only after a segment's put resolves, so
+  `status()` never reports more than R2 holds.
+- `open()` on a stream whose isolate died rebuilds the log from the
+  contiguous segment chain, deletes keys the chain does not cover, and
+  continues in a new epoch. A resumed producer starts at the durable
+  cursor, so the Tasks resume contract holds and no discarded generation
+  can be spliced back in.
+- `close()` and `error()` settle the row synchronously, then in the
+  background put the whole body as one exact-size object at `<id>/body`
+  so replay is a single get, and drop the segments. Segments stay readable
+  until the body lands, so a death mid-settle loses nothing. `await
+  streams.flush(id)` waits for the body when you need the object to exist.
+- Replay of a settled stream reads the body once and caches it, bounded
+  at 8 MiB per isolate.
+
+**What SQLite still pays.** Appends read and write nothing; each landed
+segment writes one row to stamp the cursor; `status()` reads one row, a
+tag lookup two, settlement reads two and writes two. Rows read bill at a
+thousandth of the write price.
+
+Chat's `ResumableStream` uses the synchronous SQLite aperture and is not
+affected by this option; it throws if asked for an R2-backed `Streams`.
+
 ## Chat runs on this
 
 `AIChatAgent` and `Think` store their in-flight turn output here:

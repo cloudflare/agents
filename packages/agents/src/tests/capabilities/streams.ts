@@ -16,6 +16,19 @@ export class StreamHarnessObject extends DurableObject<Cloudflare.Env> {
 }
 
 /**
+ * The same minimal host with the chunk log in R2: `new Streams({ r2 })`.
+ * Stream rows stay in this object's SQLite; chunks go to the bucket.
+ */
+export class R2StreamHarnessObject extends DurableObject<Cloudflare.Env> {
+  readonly streams = new Streams({
+    maxChunkBytes: 1024,
+    r2: this.env.STREAMS_R2,
+    r2Prefix: `t/${this.ctx.id.toString().slice(0, 12)}/`
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.streams);
+}
+
+/**
  * Streams and Tasks composed on one Lifecycle, exercising the contract the
  * RFC names: a task step appends to a stream it does not own, and a replay
  * after unclean interruption resumes from the stream's own durable cursor —

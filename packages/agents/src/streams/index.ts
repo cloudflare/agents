@@ -9,6 +9,7 @@ export {
   Streams,
   type StreamsOptions
 } from "./streams";
+export type { R2CheckpointOptions } from "./r2-log";
 export {
   StreamClosedError,
   StreamNotFoundError,

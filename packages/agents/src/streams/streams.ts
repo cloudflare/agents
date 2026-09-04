@@ -15,6 +15,7 @@
 
 import { LifecycleCapability } from "../lifecycle/capability";
 import { SqlError } from "../sql-error";
+import { R2ChunkLog, type R2CheckpointOptions } from "./r2-log";
 import {
   StreamClosedError,
   StreamNotFoundError,
@@ -54,6 +55,28 @@ const utf8 = new TextEncoder();
 export interface StreamsOptions {
   /** Ceiling for one serialized chunk. Default: 1 MiB. */
   readonly maxChunkBytes?: number;
+  /**
+   * Store chunk logs in this R2 bucket instead of DO SQLite. Stream rows
+   * (state, tag index, metadata, cursor) stay in SQLite; each stream's
+   * chunks become one NDJSON object under `r2Prefix`, streamed while the
+   * producer appends and checkpointed to a write-ahead log so a producer
+   * that dies mid-stream still leaves its chunks in R2. See
+   * `docs/agents/streams.md`.
+   */
+  readonly r2?: R2Bucket;
+  /**
+   * Key prefix for objects written to `r2`. Default: `streams/`. Include
+   * the Durable Object's id when several objects share one bucket, or
+   * their stream ids collide.
+   */
+  readonly r2Prefix?: string;
+  /**
+   * How often the R2 log checkpoints a segment: the loss window when the
+   * isolate dies. Default: every 25 chunks or 1 s, whichever first. Each
+   * checkpoint is one R2 Class A op, so widen it to trade durability for
+   * cost.
+   */
+  readonly r2Checkpoint?: R2CheckpointOptions;
 }
 
 /**
@@ -145,12 +168,32 @@ export interface StreamsSyncInternal {
  */
 export class Streams extends LifecycleCapability {
   readonly #maxChunkBytes: number;
+  /** The R2 chunk log when configured; chunks live in SQLite otherwise. */
+  readonly #r2: R2ChunkLog | null;
   /** Wakeup callbacks for readers tailing a live stream, per stream. */
   readonly #wakeups = new Map<string, Set<() => void>>();
 
   constructor(options: StreamsOptions = {}) {
     super("streams");
     this.#maxChunkBytes = options.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES;
+    this.#r2 = options.r2
+      ? new R2ChunkLog({
+          bucket: options.r2,
+          prefix: options.r2Prefix,
+          checkpoint: options.r2Checkpoint,
+          // The durable cursor: stamped once per landed segment (never per
+          // append) and once more when the settled body lands. Puts can
+          // resolve out of order, so the stamp is monotone.
+          onDurable: (streamId, cursor) => {
+            this.#sqlWrite(
+              `UPDATE cf_agents_streams
+               SET chunk_count = MAX(chunk_count, ?)
+               WHERE stream_id = ?`,
+              [cursor, streamId]
+            );
+          }
+        })
+      : null;
   }
 
   // ── Lifecycle capability hooks ───────────────────────────────────────────
@@ -200,6 +243,12 @@ export class Streams extends LifecycleCapability {
           `Stream "${streamId}" is already open with tag ${JSON.stringify(existing.tag)}; refusing reopen with tag ${JSON.stringify(options.tag)}`
         );
       }
+      // A live row with no log in this isolate is a producer that died
+      // elsewhere: rebuild the log from the R2 write-ahead log so the
+      // returned writer's cursor is exactly what was made durable.
+      if (this.#r2 && !this.#r2.has(streamId)) {
+        await this.#r2.resume(streamId);
+      }
       return this.#writer(streamId);
     }
 
@@ -214,8 +263,20 @@ export class Streams extends LifecycleCapability {
       VALUES
         (${streamId}, 'streaming', ${options.tag ?? null}, ${metadataJson}, 0, ${now}, ${now})
     `;
+    this.#r2?.open(streamId);
     this.#emit("stream:opened", { streamId });
     return this.#writer(streamId);
+  }
+
+  /**
+   * Wait for settlement to become durable. With the R2 chunk log a
+   * `close()`/`error()` finishes the stream's file and drops its
+   * write-ahead log in the background; this resolves when that is done.
+   * Resolves immediately on the SQLite log, where settlement is the
+   * synchronous UPDATE itself.
+   */
+  flush(streamId?: string): Promise<void> {
+    return this.#r2?.flush(streamId) ?? Promise.resolve();
   }
 
   // ── Consumer surface ─────────────────────────────────────────────────────
@@ -270,7 +331,9 @@ export class Streams extends LifecycleCapability {
     for (;;) {
       if (signal?.aborted) throw signal.reason ?? new Error("Read aborted");
 
-      const rows = this.#sql<StreamChunkRow>`
+      const rows = this.#r2
+        ? await this.#r2.readPage(streamId, next, batchSize)
+        : this.#sql<StreamChunkRow>`
         SELECT stream_id, seq, chunk, created_at FROM cf_agents_stream_chunks
         WHERE stream_id = ${streamId} AND seq >= ${next}
         ORDER BY seq ASC
@@ -299,7 +362,7 @@ export class Streams extends LifecycleCapability {
         continue;
       }
 
-      const state = this.#state(streamId);
+      const state = this.#liveState(streamId);
       if (state === undefined) return; // deleted mid-read: nothing further
       if (state !== "streaming") {
         // Terminal. Appends happen-before settlement (the append fence
@@ -369,9 +432,13 @@ export class Streams extends LifecycleCapability {
         `Cannot delete live stream "${streamId}"; close() or error() it first`
       );
     }
-    this.#sql`
-      DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}
-    `;
+    if (this.#r2) {
+      await this.#r2.delete(streamId);
+    } else {
+      this.#sql`
+        DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}
+      `;
+    }
     this.#sql`DELETE FROM cf_agents_streams WHERE stream_id = ${streamId}`;
     this.#emit("stream:deleted", { streamId });
     return true;
@@ -390,6 +457,11 @@ export class Streams extends LifecycleCapability {
    * break without notice; never use from application code.
    */
   __DO_NOT_USE_WILL_BREAK__sync(): StreamsSyncInternal {
+    if (this.#r2) {
+      throw new Error(
+        "Streams: the synchronous storage aperture is SQLite-only; it is not available with the R2 chunk log"
+      );
+    }
     return {
       ensureTables: () => this.#ensureTables(),
       getStream: (streamId) => this.#getStream(streamId),
@@ -517,18 +589,23 @@ export class Streams extends LifecycleCapability {
     // here and the INSERT may await or call user code — either would
     // reintroduce the lost-update races the old guarded-UPDATE fence
     // prevented, at the cost of one stream-row write per append.
-    const state = this.#state(streamId);
+    const state = this.#liveState(streamId);
     if (state !== "streaming") {
       throw new StreamClosedError(
         streamId,
         state !== undefined ? `already settled as ${state}` : "it was deleted"
       );
     }
-    const seq = this.#tail(streamId).nextSeq;
-    this.#sql`
-      INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-      VALUES (${streamId}, ${seq}, ${chunkJson}, ${Date.now()})
-    `;
+    let seq: number;
+    if (this.#r2) {
+      seq = this.#r2.append(streamId, chunkJson);
+    } else {
+      seq = this.#tail(streamId).nextSeq;
+      this.#sql`
+        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
+        VALUES (${streamId}, ${seq}, ${chunkJson}, ${Date.now()})
+      `;
+    }
     this.#wake(streamId);
     return seq;
   }
@@ -543,7 +620,11 @@ export class Streams extends LifecycleCapability {
     // from the chunk log's tail in the same synchronous block. While the
     // stream was live, appends wrote only the chunk log — the row's
     // chunk_count and updated_at were not maintained per append.
-    const finalCursor = this.#tail(streamId).nextSeq;
+    // With the R2 log the row must not claim more than R2 holds: settle
+    // stamps the durable cursor, and the log stamps the final one when the
+    // settled body lands (`flush()` awaits it).
+    const finalCursor =
+      this.#r2?.durableCursor(streamId) ?? this.#tail(streamId).nextSeq;
     const settled = this.#sqlWrite(
       `UPDATE cf_agents_streams
        SET state = ?, error_message = ?, closed_at = ?, updated_at = ?,
@@ -552,6 +633,9 @@ export class Streams extends LifecycleCapability {
       [state, reason, Date.now(), Date.now(), finalCursor, streamId]
     );
     if (settled > 0) {
+      // The row is terminal now; the R2 file and WAL cleanup finish in the
+      // background (`flush()` awaits them) while memory keeps serving reads.
+      void this.#r2?.settle(streamId);
       this.#emit(state === "completed" ? "stream:closed" : "stream:errored", {
         streamId,
         ...(reason !== null ? { reason } : {})
@@ -671,6 +755,17 @@ export class Streams extends LifecycleCapability {
    * reader loop's liveness checks, which need neither the metadata column
    * nor the (live-stale) counters of the full row.
    */
+  /**
+   * `#state` for the hot paths (append fence, live-tail loop), answered
+   * from memory when the R2 log holds the stream live: rows read are
+   * billed, and a per-append row read is the one SQLite touch the R2
+   * backend would otherwise keep on every chunk.
+   */
+  #liveState(streamId: string): StreamState | undefined {
+    if (this.#r2?.isLive(streamId)) return "streaming";
+    return this.#state(streamId);
+  }
+
   #state(streamId: string): StreamState | undefined {
     const rows = this.#sql<{ state: StreamState }>`
       SELECT state FROM cf_agents_streams WHERE stream_id = ${streamId}
@@ -686,6 +781,22 @@ export class Streams extends LifecycleCapability {
    * the stream row's `chunk_count`/`updated_at` are not maintained.
    */
   #tail(streamId: string): { nextSeq: number; lastChunkAt: number | null } {
+    if (this.#r2) {
+      // Live in this isolate: the memory log. Otherwise the row's
+      // chunk_count, stamped at every WAL checkpoint and at settle — the
+      // durable cursor, which is what a resumed producer must start from.
+      const cursor = this.#r2.cursor(streamId);
+      if (cursor !== undefined) {
+        return {
+          nextSeq: cursor,
+          lastChunkAt: this.#r2.lastAppendAt(streamId)
+        };
+      }
+      const rows = this.#sql<{ chunk_count: number }>`
+        SELECT chunk_count FROM cf_agents_streams WHERE stream_id = ${streamId}
+      `;
+      return { nextSeq: rows[0]?.chunk_count ?? 0, lastChunkAt: null };
+    }
     const rows = this.#sql<{ seq: number; created_at: number }>`
       SELECT seq, created_at FROM cf_agents_stream_chunks
       WHERE stream_id = ${streamId}
