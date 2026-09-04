@@ -1,0 +1,29 @@
+docs/agents/models.md
+  s_e0361eb69e0f6d::t_f69964ea92dee8 370-375
+packages/agents/src/models/ai-sdk/models/fallback.ts
+  s_e0361eb69e0f6d::t_f0f7df523f1fba 7-11,50-164
+packages/agents/src/models/ai-sdk/models/gateway.ts
+  s_e0361eb69e0f6d::t_47883db961c679 47-51,124-139,215,232-235,489-490,540-541,545-558
+packages/agents/src/models/ai-sdk/models/language.ts
+  s_e0361eb69e0f6d::t_d02e24929d44ed 40-44,384-385,457-458,461-479
+packages/agents/src/tests/models/ai-sdk/fallback-and-errors.test.ts
+  s_e0361eb69e0f6d::t_e109c7e3bf3671 399-469
+packages/agents/src/tests/models/ai-sdk/gateway.test.ts
+  s_e0361eb69e0f6d::t_4d45fa97c1b0d4 931-987
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9e0af71f53413faa3a572bf407fa087881fd28de",
+  "prompts": {},
+  "sessions": {
+    "s_e0361eb69e0f6d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f16fa8-0eff-4dbe-8038-24f4b9a06afd",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
