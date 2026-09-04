@@ -9,11 +9,8 @@ import {
   Text
 } from "@cloudflare/kumo";
 import {
-  ArrowCounterClockwiseIcon,
   CheckCircleIcon,
   CodeIcon,
-  DatabaseIcon,
-  FileTextIcon,
   GearIcon,
   MoonIcon,
   PaperPlaneRightIcon,
@@ -27,11 +24,7 @@ import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { code } from "@streamdown/code";
 import { Streamdown } from "streamdown";
-import type {
-  CodexOperationSnapshot,
-  CodexWorkspaceFile,
-  SessionMessage
-} from "./protocol";
+import type { CodexOperationSnapshot, SessionMessage } from "./protocol";
 import { useCodexSession, type KernelEvent } from "./use-codex-session";
 
 type OperationStatus = CodexOperationSnapshot["status"];
@@ -96,13 +89,6 @@ function ModeToggle() {
       icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
     />
   );
-}
-
-function StatusBadge({ status }: { status: OperationStatus }) {
-  if (status === "completed") return <Badge variant="success">Completed</Badge>;
-  if (status === "failed") return <Badge variant="destructive">Failed</Badge>;
-  if (status === "running") return <Badge variant="primary">Running</Badge>;
-  return <Badge variant="secondary">Queued</Badge>;
 }
 
 function collectToolActivity(events: readonly KernelEvent[]): ToolActivity[] {
@@ -266,108 +252,6 @@ function UserMessage({ text }: { text: string }) {
   );
 }
 
-function RunDetails({
-  operation,
-  file,
-  events,
-  recovered,
-  restarting,
-  onRestart,
-  onInspect
-}: {
-  operation: CodexOperationSnapshot;
-  file: CodexWorkspaceFile | null;
-  events: readonly KernelEvent[];
-  recovered: boolean;
-  restarting: boolean;
-  onRestart: () => void;
-  onInspect: () => void;
-}) {
-  const duration =
-    operation.completedAt === undefined
-      ? null
-      : operation.completedAt - operation.startedAt;
-
-  return (
-    <details className="max-w-xl overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
-        <DatabaseIcon size={14} className="text-kumo-inactive" />
-        <span className="flex-1 text-xs font-semibold">Run details</span>
-        {recovered && <Badge variant="success">Recovered</Badge>}
-        <StatusBadge status={operation.status} />
-      </summary>
-      <div className="space-y-4 border-t border-kumo-line p-3">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {[
-            ["Model", "Kimi K2.7"],
-            ["Transitions", String(operation.transitions)],
-            ["Kernel", `${operation.kernelMs.toFixed(3)} ms`],
-            ["Duration", duration === null ? "Running" : `${duration} ms`]
-          ].map(([label, value]) => (
-            <div key={label} className="rounded-lg bg-kumo-elevated p-2.5">
-              <p className="text-[10px] uppercase tracking-wide text-kumo-inactive">
-                {label}
-              </p>
-              <p className="mt-1 truncate text-xs font-medium">{value}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="rounded-lg border border-kumo-line">
-          <div className="flex items-center justify-between gap-2 border-b border-kumo-line px-3 py-2">
-            <div className="flex items-center gap-2">
-              <FileTextIcon size={14} className="text-kumo-inactive" />
-              <span className="text-xs font-semibold">Workspace file</span>
-            </div>
-            {file?.found && <Badge variant="success">Persisted</Badge>}
-          </div>
-          <div className="p-3">
-            {file?.found ? (
-              <>
-                <code className="text-[11px] text-kumo-subtle">
-                  {file.path}
-                </code>
-                <pre className="mt-2 max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap">
-                  {file.content}
-                </pre>
-              </>
-            ) : (
-              <Text size="xs" variant="secondary">
-                No persisted file yet.
-              </Text>
-            )}
-          </div>
-        </div>
-
-        <details onToggle={(event) => event.currentTarget.open && onInspect()}>
-          <summary className="cursor-pointer text-xs font-semibold text-kumo-subtle">
-            Kernel checkpoint
-          </summary>
-          <div className="mt-2">
-            <JsonBlock value={operation.checkpoint ?? "Loading checkpoint"} />
-          </div>
-        </details>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-kumo-line pt-3">
-          <span className="text-[11px] text-kumo-inactive">
-            {events.length} durable events
-          </span>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onRestart}
-            loading={restarting}
-            disabled={operation.status !== "completed" || restarting}
-            icon={<ArrowCounterClockwiseIcon size={14} />}
-          >
-            Restart and verify
-          </Button>
-        </div>
-      </div>
-    </details>
-  );
-}
-
 function AssistantMessage({
   operation,
   events,
@@ -484,26 +368,20 @@ function AssistantMessage({
 function App() {
   const [session, setSession] = useState(getSession);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [restarting, setRestarting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const {
     status,
     operations,
     events,
-    file,
     messages,
     error,
-    recovered,
     active,
     submit,
-    inspect,
-    inspectMessage,
-    restart
+    inspectMessage
   } = useCodexSession(session);
 
   const connected = status === "open";
   const busy = active !== null;
-  const latest = operations.at(-1) ?? null;
 
   const eventCount = Object.values(events).reduce(
     (sum, list) => sum + list.length,
@@ -512,10 +390,6 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [operations.length, eventCount, active?.status]);
-
-  useEffect(() => {
-    if (recovered) setRestarting(false);
-  }, [recovered]);
 
   const send = () => {
     const trimmed = prompt.trim();
@@ -592,22 +466,7 @@ function App() {
                 events={events[operation.operationId] ?? []}
                 messages={messages}
                 onExpandTool={inspectMessage}
-              >
-                {operation.operationId === latest?.operationId && (
-                  <RunDetails
-                    operation={operation}
-                    file={file}
-                    events={events[operation.operationId] ?? []}
-                    recovered={recovered}
-                    restarting={restarting}
-                    onRestart={() => {
-                      setRestarting(true);
-                      restart();
-                    }}
-                    onInspect={() => inspect(operation.operationId)}
-                  />
-                )}
-              </AssistantMessage>
+              ></AssistantMessage>
             </div>
           ))}
 
