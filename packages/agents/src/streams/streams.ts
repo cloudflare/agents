@@ -456,6 +456,11 @@ export class Streams extends LifecycleCapability {
    * diagnostics observe aperture writes exactly like capability writes. Will
    * break without notice; never use from application code.
    */
+  /** @internal The R2 chunk log when configured (tests). */
+  __DO_NOT_USE_WILL_BREAK__r2(): R2ChunkLog | null {
+    return this.#r2;
+  }
+
   __DO_NOT_USE_WILL_BREAK__sync(): StreamsSyncInternal {
     if (this.#r2) {
       throw new Error(

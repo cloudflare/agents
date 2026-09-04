@@ -183,28 +183,38 @@ rejects bodies of unknown length, and stores nothing from a put that has
 not completed. So the log is a write-ahead log of segment objects:
 
 - Appends go into an in-memory line log that live readers tail, exactly
-  like the SQLite log's wakeups.
+  like the SQLite log's wakeups. Memory holds only the unflushed tail plus
+  a 256 KB hot window of landed lines: once a segment's put resolves its
+  lines are evicted, and a reader further behind reads that segment from
+  R2. A stream's length never grows the isolate's memory.
 - Every `everyChunks` appends or `everyMs` after the first unflushed one,
   the new lines are put as one immutable segment under `<id>/seg/`. Each
   landed segment is the durability. When the isolate dies, everything up
   to the last landed segment is in R2, and the loss window is the cadence.
-- The row's cursor is stamped only after a segment's put resolves, so
-  `status()` never reports more than R2 holds.
-- `open()` on a stream whose isolate died rebuilds the log from the
-  contiguous segment chain, deletes keys the chain does not cover, and
-  continues in a new epoch. A resumed producer starts at the durable
-  cursor, so the Tasks resume contract holds and no discarded generation
-  can be spliced back in.
+- The row's cursor is stamped from landed segments, throttled to one row
+  write per 5 s, so `status()` never reports more than R2 holds and the
+  stamp costs a fraction of the puts. While a stream is live the row can
+  lag the chain by a few seconds; `open()` after a death re-stamps it
+  exactly. A segment put that fails after retries folds its range into
+  the next checkpoint, so nothing is skipped.
+- `open()` on a stream whose isolate died lists the segments once, keeps
+  the contiguous chain, deletes keys it does not cover, and continues in a
+  new epoch from the chain's end without loading it into memory. A resumed
+  producer starts at the durable cursor, so the Tasks resume contract
+  holds and no discarded generation can be spliced back in.
 - `close()` and `error()` settle the row synchronously, then in the
-  background put the whole body as one exact-size object at `<id>/body`
-  so replay is a single get, and drop the segments. Segments stay readable
-  until the body lands, so a death mid-settle loses nothing. `await
-  streams.flush(id)` waits for the body when you need the object to exist.
-- Replay of a settled stream reads the body once and caches it, bounded
-  at 8 MiB per isolate.
+  background stream the segments back through one exact-size put at
+  `<id>/body` so replay is a single object, and drop the segments (no
+  list: the keys are known). Segments stay readable until the body lands,
+  so a death mid-settle loses nothing. `await streams.flush(id)` waits for
+  the body when you need the object to exist.
+- Replay of a settled stream caches bodies up to 1 MiB whole; larger
+  bodies get a line-offset index and ranged gets per page, so replay
+  memory is bounded by the index, not the body. The read cache is 8 MiB
+  per isolate.
 
-**What SQLite still pays.** Appends read and write nothing; each landed
-segment writes one row to stamp the cursor; `status()` reads one row, a
+**What SQLite still pays.** Appends read and write nothing; the cursor
+stamp is one row write per 5 s of streaming; `status()` reads one row, a
 tag lookup two, settlement reads two and writes two. Rows read bill at a
 thousandth of the write price.
 

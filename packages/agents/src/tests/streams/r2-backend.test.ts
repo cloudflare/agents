@@ -196,9 +196,14 @@ describe("Streams on R2", () => {
       const lifecycle = Lifecycle.install(instance).use(restarted);
       await lifecycle.start();
 
-      expect((await restarted.status("dead"))?.cursor).toBe(50);
+      // The row's cursor is stamped at most every few seconds while live,
+      // so before resume it is a lower bound on what R2 holds.
+      const before = (await restarted.status("dead"))?.cursor ?? -1;
+      expect(before).toBeGreaterThanOrEqual(25);
+      expect(before).toBeLessThanOrEqual(50);
       const resumed = await restarted.open("dead");
       expect(resumed.cursor).toBe(50);
+      expect((await restarted.status("dead"))?.cursor).toBe(50);
       for (let i = 50; i < 55; i++) expect(resumed.append({ i })).toBe(i);
       resumed.close();
       await restarted.flush("dead");
@@ -243,6 +248,44 @@ describe("Streams on R2", () => {
       expect(all[59].chunk).toEqual({ i: 59 });
       // Two epochs wrote segments; the settled body replaced them all.
       expect(await objects(`${prefix}early/seg/`)).toEqual([]);
+    });
+  });
+
+  it("holds only a hot window in memory; readers behind it read segments", async () => {
+    const stub = env.R2StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: R2StreamHarnessObject) => {
+      const log = instance.streams.__DO_NOT_USE_WILL_BREAK__r2();
+      const stream = await instance.streams.open("big");
+      const total = 2000; // ~1 MB of 500 B chunks, 80 segments
+      const tail = collect(instance.streams.read("big"));
+      for (let i = 0; i < total; i++) {
+        stream.append({ i, pad: "x".repeat(480) });
+        // Let segment puts land and evict as the producer goes.
+        if (i % 100 === 99) await new Promise((r) => setTimeout(r, 20));
+      }
+      await new Promise((r) => setTimeout(r, 100));
+      const inMemory = log?.memoryLines("big") ?? total;
+      expect(inMemory).toBeLessThan(total / 2);
+      // A reader far behind the window is served from landed segments.
+      const behind = await replayToTail(instance.streams, "big");
+      expect(behind.length).toBe(total);
+      expect(behind[0].chunk).toMatchObject({ i: 0 });
+      stream.close();
+      expect((await tail).length).toBe(total);
+      await instance.streams.flush("big");
+      // The body was streamed back from segments (nothing in memory held
+      // it) and replays whole; it is over the small-body limit, so pages
+      // come from the line-offset index with ranged gets.
+      const status = await instance.streams.status("big");
+      expect(status?.cursor).toBe(total);
+      const fromMid = await collect(
+        instance.streams.read("big", { from: 1234 })
+      );
+      expect(fromMid.length).toBe(total - 1234);
+      expect(fromMid[0]).toMatchObject({ seq: 1234, chunk: { i: 1234 } });
+      expect(fromMid[fromMid.length - 1].chunk).toMatchObject({
+        i: total - 1
+      });
     });
   });
 
