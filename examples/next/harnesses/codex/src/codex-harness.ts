@@ -27,8 +27,13 @@ import type {
 } from "./kernel-types";
 
 const DRIVER_DEFINITION = "__cf_codex_drive_v1";
-/** Bytes of recent transcript hydrated for one model round. */
-const DEFAULT_PROMPT_BYTES = 8 * 1024 * 1024;
+/**
+ * Bytes of recent transcript hydrated for one model round. This bounds the
+ * Durable Object's memory, not the model's context: parts over
+ * MAX_PROMPT_PART_BYTES reach the model as markers and compaction bounds the
+ * token count. 32 MiB matches Think's hydration budget.
+ */
+const DEFAULT_PROMPT_BYTES = 32 * 1024 * 1024;
 /** Estimated tokens on the branch before Sessions compacts it. */
 const DEFAULT_COMPACT_AFTER_TOKENS = 120_000;
 /** Tokens kept verbatim at the tail after a compaction. */
@@ -108,7 +113,7 @@ export type CodexHarnessOptions = {
   readonly model: LanguageModelV4;
   /** Model rounds one turn may take before it is failed. @default 128 */
   readonly maxRounds?: number;
-  /** Bytes of recent transcript sent to the model. @default 8 MiB */
+  /** Bytes of recent transcript hydrated per round. @default 32 MiB */
   readonly promptBytes?: number;
   /** Compaction policy; `false` disables it. */
   readonly compaction?:
