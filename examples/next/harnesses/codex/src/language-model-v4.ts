@@ -19,6 +19,11 @@ export interface ModelTranscript {
   record(message: SessionMessage): Promise<void>;
 }
 
+/** A model round that produced no usable response; the Tasks step retries. */
+export class ModelRoundError extends Error {
+  override readonly name = "ModelRoundError";
+}
+
 /** Outcome of one model round: what the kernel gets and what was stored. */
 export type ModelRound = {
   readonly result: KernelEffectResult;
@@ -64,6 +69,10 @@ export async function completeCodexModel(
     temperature: 0
   });
   const round = await consumeModelStream(result.stream, action.effect_id);
+  if (round.failure !== undefined) {
+    // Nothing is stored for a failed round, so a retry starts clean.
+    throw new ModelRoundError(round.failure);
+  }
   const message: SessionMessage = {
     id: messageId,
     role: "assistant",
@@ -240,6 +249,8 @@ type StreamBlock =
 type ConsumedStream = {
   readonly parts: SessionMessagePart[];
   readonly responseId: string;
+  /** Set when the provider returned no usable response. */
+  readonly failure?: string;
   result(messageId: string): KernelEffectResult;
 };
 
@@ -328,23 +339,20 @@ async function consumeModelStream(
     modelFailure(blocks, messageId, responseId, message);
 
   if (streamError !== undefined) {
-    return { parts, responseId, result: failure(streamError) };
+    return {
+      parts,
+      responseId,
+      failure: streamError,
+      result: failure(streamError)
+    };
   }
   if (!finish) {
-    return {
-      parts,
-      responseId,
-      result: failure("LanguageModelV4 stream ended without finish")
-    };
+    const message = "LanguageModelV4 stream ended without finish";
+    return { parts, responseId, failure: message, result: failure(message) };
   }
   if (finish.finishReason.unified === "error") {
-    return {
-      parts,
-      responseId,
-      result: failure(
-        `LanguageModelV4 failed with ${finish.finishReason.raw ?? "unknown reason"}`
-      )
-    };
+    const message = `LanguageModelV4 failed with ${finish.finishReason.raw ?? "unknown reason"}`;
+    return { parts, responseId, failure: message, result: failure(message) };
   }
   if (
     finish.finishReason.unified === "length" ||
@@ -377,11 +385,8 @@ async function consumeModelStream(
     (block) => block.type === "text" && block.value.trim().length > 0
   );
   if (toolCallCount === 0 && !hasText) {
-    return {
-      parts,
-      responseId,
-      result: failure("LanguageModelV4 returned neither text nor a tool call")
-    };
+    const message = "LanguageModelV4 returned neither text nor a tool call";
+    return { parts, responseId, failure: message, result: failure(message) };
   }
   return {
     parts,

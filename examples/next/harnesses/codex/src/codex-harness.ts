@@ -37,6 +37,12 @@ const DEFAULT_KEEP_RECENT_TOKENS = 40_000;
 const PREVIEW_BYTES = 512;
 /** Default page returned by workspace_read when the model gives no range. */
 const DEFAULT_READ_BYTES = 256 * 1024;
+/** Retry policy for one effect step; model providers fail transiently. */
+const MODEL_ROUND_RETRIES = {
+  limit: 4,
+  delay: "2 seconds",
+  backoff: "exponential"
+} as const;
 /** Bytes of the prompt kept on the operation row; Sessions holds it all. */
 const PROMPT_PREVIEW_BYTES = 4 * 1024;
 
@@ -440,14 +446,13 @@ export class CodexHarness extends LifecycleCapability {
     action: Extract<KernelAction, { type: "model" | "tool" }>,
     step: TaskStep
   ): Promise<KernelEffectResult> {
-    return step.do(`effect:${action.effect_id}`, async ({ signal }) => {
-      try {
-        return await this.#runEffect(operation, checkpoint, action, signal);
-      } catch (error) {
-        console.error(`Codex effect ${action.effect_id} failed`, error);
-        throw error;
-      }
-    });
+    // A provider hiccup (capacity, a dropped stream) must not fail the turn:
+    // the step retries with backoff, and the turn fails only after that.
+    return step.do(
+      `effect:${action.effect_id}`,
+      { retries: MODEL_ROUND_RETRIES, timeout: "10 minutes" },
+      ({ signal }) => this.#runEffect(operation, checkpoint, action, signal)
+    );
   }
 
   async #runEffect(
