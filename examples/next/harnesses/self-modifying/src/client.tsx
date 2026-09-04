@@ -296,7 +296,7 @@ function Inspector({
       className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
       aria-label="Harness inspector"
     >
-      <div className="flex items-center justify-between gap-2 border-b border-kumo-line px-4 py-3">
+      <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
         <div className="min-w-0">
           <Text size="sm" bold>
             Active revision {snapshot?.active.revisionId ?? "…"}
@@ -479,7 +479,7 @@ function App() {
     >
       <section className="flex min-h-0 min-w-0 flex-col" aria-label="Chat">
         <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
-          <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-5 py-4">
+          <div className="mx-auto flex h-[68px] max-w-3xl items-center justify-between gap-3 px-5">
             <div className="flex min-w-0 items-center gap-3">
               <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
                 <CodeIcon size={20} weight="bold" />
