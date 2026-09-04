@@ -7,6 +7,7 @@ Think owns the `streamText` call and provides hooks at each stage of the chat tu
 | Hook                             | When it fires                                               | Return                            | Async |
 | -------------------------------- | ----------------------------------------------------------- | --------------------------------- | ----- |
 | `configureSession(session)`      | Once during `onStart`                                       | `Session`                         | yes   |
+| `configureContext()`             | Once during `onStart`                                       | `ContextConfig[]`                 | yes   |
 | `beforeTurn(ctx)`                | Before `streamText`                                         | `TurnConfig` or void              | yes   |
 | `beforeStep(ctx)`                | Before each model step                                      | `StepConfig` or void              | yes   |
 | `beforeToolCall(ctx)`            | When model calls a tool                                     | `ToolCallDecision` or void        | yes   |
@@ -23,6 +24,7 @@ For a turn with two tool calls:
 
 ```
 configureSession()          ← once at startup, not per-turn
+configureContext()          ← once at startup, not per-turn
       │
 beforeTurn()                ← inspect assembled context, override model/tools/prompt
       │
@@ -53,7 +55,7 @@ onChatResponse()            ← message persisted, turn lock released
 
 ## configureSession
 
-Called once during Durable Object initialization (`onStart`). Configure the Session with context blocks, compaction, search, and skills.
+Called once during Durable Object initialization (`onStart`). Configures the default session handle: compaction and search. Prompt context is declared by [`configureContext`](#configurecontext) instead.
 
 ```typescript
 configureSession(session: Session): Session | Promise<Session>
@@ -61,7 +63,7 @@ configureSession(session: Session): Session | Promise<Session>
 
 ```typescript
 import { Think, Session } from "@cloudflare/think";
-import { createCompactFunction } from "agents/experimental/memory/utils/compaction-helpers";
+import { createCompactFunction } from "agents/sessions";
 import { generateText } from "ai";
 
 export class MyAgent extends Think<Env> {
@@ -71,28 +73,62 @@ export class MyAgent extends Think<Env> {
 
   configureSession(session: Session) {
     return session
-      .withContext("soul", {
-        provider: { get: async () => "You are a helpful coding assistant." }
-      })
-      .withContext("memory", {
-        description: "Learned facts about the user.",
-        maxTokens: 1100
-      })
       .onCompaction(
         createCompactFunction({
           summarize: (prompt) =>
             generateText({ model: this.resolveModel(), prompt }).then(
               (r) => r.text
-            )
+            ),
+          keepRecentTokens: 20_000
         })
       )
-      .compactAfter(100_000)
-      .withCachedPrompt();
+      .compactAfter(100_000);
   }
 }
 ```
 
-When `configureSession` adds context blocks, Think builds the system prompt from those blocks instead of using `getSystemPrompt()`. See the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for the full API.
+The handle also accepts the 0.17 `withContext()` / `withCachedPrompt()` chain and the positional `appendMessage(message, parentId)` form, so an existing override keeps working; see [Upgrading from 0.17](./index.md#upgrading-from-017).
+
+`createCompactFunction` takes exactly two options: `summarize`, which calls the model with a prompt and returns its text, and `keepRecentTokens`, the token budget for the recent tail kept verbatim (default `20_000`). `compactAfter(threshold)` gates on the O(1) token estimate Sessions stamps on each row. See the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for the full API.
+
+---
+
+## configureContext
+
+Called once during Durable Object initialization (`onStart`). Declares the prompt context blocks for this agent.
+
+```typescript
+configureContext(): ContextConfig[] | Promise<ContextConfig[]>
+```
+
+```typescript
+import { Think } from "@cloudflare/think";
+import type { ContextConfig } from "agents/context";
+
+export class MyAgent extends Think<Env> {
+  getModel() {
+    /* ... */
+  }
+
+  configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "soul",
+        provider: { get: async () => "You are a helpful coding assistant." }
+      },
+      {
+        label: "memory",
+        description: "Learned facts about the user.",
+        maxTokens: 1100
+      }
+    ];
+  }
+}
+```
+
+A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. When context blocks are configured, Think builds the system prompt from those blocks instead of using `getSystemPrompt()`. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
+
+The assembled blocks are available as `this.context` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior.
 
 ---
 
@@ -110,7 +146,7 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 | -------------- | ------------------------- | ------------------------------------------------------------------------ |
 | `system`       | `string`                  | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
 | `messages`     | `ModelMessage[]`          | Assembled model messages (truncated)                                     |
-| `tools`        | `ToolSet`                 | Merged tool set (workspace + getTools + session + MCP + client + caller) |
+| `tools`        | `ToolSet`                 | Merged tool set (workspace + getTools + context + MCP + client + caller) |
 | `model`        | `LanguageModel`           | The resolved model (a string from `getModel()` is already resolved here) |
 | `continuation` | `boolean`                 | Whether this is a continuation turn (auto-continue after tool result)    |
 | `body`         | `Record<string, unknown>` | Custom body fields from the client request                               |
@@ -783,7 +819,7 @@ onChatError(error: unknown, ctx?: ChatErrorContext) {
 
 ## classifyChatError
 
-Called when an error occurs during a turn, **before** `onChatError`. Maps a raw provider error into a provider-agnostic category so Think can react without baking provider-specific strings into the framework — the same split as the `tokenCounter` you pass to `compactAfter()`. The app owns the mapping because it knows which provider and model it talks to.
+Called when an error occurs during a turn, **before** `onChatError`. Maps a raw provider error into a provider-agnostic category so Think can react without baking provider-specific strings into the framework. The app owns the mapping because it knows which provider and model it talks to.
 
 ```typescript
 classifyChatError(error: unknown, ctx?: ChatErrorContext): ChatErrorClassification | void

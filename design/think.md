@@ -246,18 +246,11 @@ Think uses `ResumableStream` from `agents/chat` for stream resumability:
 
 ### Message storage
 
-Think uses a flat `assistant_messages` table — no tree structure, no branching, no sessions:
+Think installs the `agents/sessions` Lifecycle capability. Settled messages form a tree in `cf_agents_session_messages`; linear turns attach to the active leaf and regeneration can append another child under an older user message. `cf_agents_session_compactions` stores non-destructive summary overlays.
 
-```sql
-CREATE TABLE assistant_messages (
-  id TEXT PRIMARY KEY,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,         -- JSON-serialized UIMessage
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-```
+Oversized payloads become content-addressed attachment pointers owned by Sessions, not by Workspace. Sessions keeps payloads in its own chunked SQLite tables and uses an optional R2 tier for larger ones. Offload is lossless and covers file parts, text and reasoning parts, and strings nested in tool outputs; the default read reconstructs the original part byte for byte, so Think's model and client paths are unchanged.
 
-Messages are ordered by `created_at` on load. User messages use `INSERT OR IGNORE` (idempotent). Assistant messages use `INSERT ON CONFLICT DO UPDATE` (streaming builds incrementally).
+Media eviction (`mediaEviction`) is Think's own concern and sits above that storage layer. Once media has aged past the recent window, Think replaces it in the conversation with an `[evicted <mediaType>, <bytes> bytes; preserved at <path>]` marker and writes the raw bytes to the Workspace under `/attachments/evicted/`, with their real mime type so the workspace `read` tool hands the model a real image on the way back. The Sessions attachment reference is dropped in the same write, so the blob is reaped and the bytes exist only in the Workspace. Workspace remains operational storage for tools, projected skills, and evicted media, and holds no message durability.
 
 A separate table stores request context across hibernation:
 
@@ -446,39 +439,27 @@ recording API.
 
 ## SQLite tables
 
-| Table                   | Owner             | Purpose                                                    |
-| ----------------------- | ----------------- | ---------------------------------------------------------- |
-| `assistant_messages`    | Session           | Tree-structured conversation history                       |
-| `assistant_compactions` | Session           | Compaction overlays and summaries                          |
-| `assistant_fts`         | Session           | Full-text search index for messages                        |
-| `assistant_config`      | Session           | Shared session-scoped metadata reserved by Session         |
-| `think_config`          | Think             | Think-private config (`_think_config`, client tools, body) |
-| `cf_agents_runs`        | Agent (inherited) | Durable fiber state and checkpoints                        |
-| `cf_agents_schedules`   | Agent (inherited) | Scheduled tasks and intervals                              |
+| Table                                            | Owner             | Purpose                                                      |
+| ------------------------------------------------ | ----------------- | ------------------------------------------------------------ |
+| `cf_agents_session_messages`                     | Sessions          | Tree-structured conversation history and row estimates       |
+| `cf_agents_session_compactions`                  | Sessions          | Compaction overlays and summaries                            |
+| `cf_agents_session_attachments`                  | Sessions          | Message references to Sessions-owned content-addressed blobs |
+| `cf_agents_session_fts`                          | Sessions          | Full-text search index for messages                          |
+| `cf_agents_session_attachment_blobs` / `_chunks` | Sessions          | Attachment payload metadata and 1.5 MiB SQLite windows       |
+| `cf_agents_context_blocks`                       | Context           | Prompt context blocks and the frozen system prompt           |
+| `think_config`                                   | Think             | Think-private config (`_think_config`, client tools, body)   |
+| `cf_agents_runs`                                 | Agent (inherited) | Durable fiber state and checkpoints                          |
+| `cf_agents_schedules`                            | Agent (inherited) | Scheduled tasks and intervals                                |
 
-## Known gaps (vs AIChatAgent)
+## Current distinctions from AIChatAgent
 
-Features present in `@cloudflare/ai-chat` but not yet in Think:
+Think and AIChatAgent now share Sessions, Streams, reconciliation, concurrency strategies, recovery, programmatic turns, and client protocol primitives. Their remaining differences are intentional:
 
-| Feature                              | AIChatAgent                                      | Think                                              |
-| ------------------------------------ | ------------------------------------------------ | -------------------------------------------------- |
-| Multi-session / branching            | No                                               | No (flat table, no session ID)                     |
-| `saveMessages()`                     | Programmatic message injection + turn trigger    | Not implemented                                    |
-| `continueLastTurn()`                 | Continue from last assistant message             | Not implemented                                    |
-| `chatRecovery` / `onChatRecovery`    | Fiber-wrapped turns, recovery after eviction     | Not implemented (has fibers but not wired to chat) |
-| `onChatResponse` hook                | Post-turn lifecycle callback                     | Not implemented                                    |
-| `onSanitizeMessage` hook             | Custom message transformation before persistence | Not implemented                                    |
-| `waitUntilStable()`                  | Await conversation quiescence                    | Not implemented                                    |
-| `hasPendingInteraction()`            | Track pending client tool state                  | Not implemented                                    |
-| Message reconciliation               | ID remapping, dedup, merge on client sync        | `INSERT OR IGNORE` only                            |
-| Regeneration                         | `regenerate-message` trigger                     | Not implemented                                    |
-| `messageConcurrency` strategies      | queue, latest, merge, drop, debounce             | Queue only (via TurnQueue)                         |
-| Custom body persistence              | `_lastBody` persisted to SQLite                  | Not parsed or persisted                            |
-| `CF_AGENT_CHAT_MESSAGES` from client | Full array sync from client                      | Not handled                                        |
-| `onFinish` callback                  | Provider-level finish metadata                   | Not exposed                                        |
-| v4 → v5 message migration            | `autoTransformMessages()`                        | Not implemented (v5 only)                          |
-| Compaction                           | No (only in experimental Session)                | Not implemented                                    |
-| Context blocks                       | No (only in experimental Session)                | Not implemented                                    |
+- Think owns model selection, context assembly, tools, compaction, and branching.
+- AIChatAgent exposes the lower-level `onChatMessage() → Response` protocol adapter.
+- Think treats regeneration as a new branch. AIChatAgent keeps destructive regeneration.
+- AIChatAgent converts stored v4 messages during its Sessions migration. Think expects current UI messages.
+- Think has extensions, channels, submissions, and sub-agent RPC helpers.
 
 ## Key decisions
 
@@ -490,15 +471,13 @@ Think is more than a behavior addition — it's an opinion about how chat agents
 
 AIChatAgent uses `applyChunkToParts()` with manual state tracking. Think uses `StreamAccumulator` (from `agents/chat`) which encapsulates the same logic behind a cleaner interface — `applyChunk()` returns a `ChunkResult` with optional actions (cross-message tool updates, errors). This avoids duplicating the chunk-to-parts logic.
 
-### Why INSERT OR IGNORE for user messages, INSERT ON CONFLICT UPDATE for assistant messages?
+### Why idempotent message IDs?
 
-User messages arrive from the client with stable IDs. The same message may arrive multiple times (reconnect, retry). `INSERT OR IGNORE` makes this idempotent.
+Sessions treats an append of an existing ID as a no-op and exposes an explicit update operation. Retries and reconnects can therefore repeat an append safely, while assistant continuation updates remain deliberate.
 
-Assistant messages are built incrementally during streaming. The first persist inserts; subsequent persists need to update the content. `INSERT ON CONFLICT DO UPDATE` handles both cases.
+### Why a live message projection?
 
-### Why a persistence cache?
-
-The `_persistedMessageCache` maps message IDs to their last-persisted JSON. Before writing to SQLite, Think compares the current serialization to the cached version. If identical, the write is skipped. Without the cache, every broadcast would trigger unnecessary SQL writes.
+Think retains an in-isolate message array for its existing model and client protocol. The Sessions change feed patches this projection after durable writes. Durable SQLite remains authoritative across eviction.
 
 ### Why sanitize messages before persistence?
 
@@ -516,11 +495,11 @@ Extension Workers loaded via `WorkerLoader` can only receive `Fetcher`/`ServiceS
 
 **Think is opinionated.** It assumes UIMessage format, the AI SDK's `streamText` interface, and a specific WebSocket protocol. Agents that need a fundamentally different message format or streaming protocol should use the base `Agent` class directly.
 
-**All messages in memory.** `this.messages` holds the full conversation. For very long conversations, this could be expensive. `maxPersistedMessages` is a partial mitigation. Compaction is not yet implemented.
+**Some host paths still materialize arrays.** Startup hydration is byte-budgeted and compaction limits model history, but reconciliation and current full-snapshot client messages still use arrays. [sessions.md](./sessions.md) records which paths can move to streamed scans later.
 
-**Single conversation per instance.** Think currently stores all messages in a single flat table with no session ID. There is no multi-session support. The `SessionManager` from `agents/experimental/memory/session` is designed to fill this gap but has not been integrated.
+**Single conversation per instance.** Think installs `agents/sessions` and uses its default handle. User-facing multi-chat applications use a parent directory Durable Object with one Think Durable Object per conversation; the directory is not part of the Sessions capability.
 
-**No message reconciliation.** Think uses `INSERT OR IGNORE` for incoming messages — it does not handle the client sending edited or truncated message lists. Regeneration (re-running from an earlier point) is not supported.
+**Reconciliation remains host-owned.** Think uses the shared `agents/chat` reconciler before writing to Sessions. This is separate from storage because client-generated IDs and tool states are wire-protocol concerns.
 
 **Extension sandbox is all-or-nothing on network.** The `permissions.network` field declares allowed hosts, but actual enforcement is binary: either no network or full network. Per-host filtering is not yet implemented at the runtime level.
 

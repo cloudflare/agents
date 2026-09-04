@@ -11,8 +11,9 @@ lands.
 | [`schedules`](./schedules)             | Available | `Scheduler` installed as a reusable lifecycle capability                                                             |
 | [`tasks`](./tasks)                     | This PR   | Durable replayable `Tasks` installed as a reusable lifecycle capability                                              |
 | [`streams`](./streams)                 | This PR   | Durable `Streams` composed with `Tasks`, served over SSE                                                             |
+| [`sessions`](./sessions)               | This PR   | Durable message trees, streamed reads, and Sessions-owned attachments                                                |
 | [`mcp-client`](./mcp-client)           | Available | `MCPClientManager` installed as a reusable lifecycle capability                                                      |
-| [`chats`](./chats)                     | This PR   | One DO per chat + a per-user push-based index — the recommended many-chats pattern                                   |
+| [`chats`](./chats)                     | This PR   | One DO per chat plus a per-user push-based index, the recommended many-chats pattern                                 |
 | [`dynamic-agents`](./dynamic-agents)   | This PR   | A supervisor runs user-submitted code as facets: isolated storage, supervised abort, code upgrades over stable state |
 | [`harnesses/codex`](./harnesses/codex) | This PR   | A static Codex Rust/Wasm loop composed as a Lifecycle capability, using LanguageModelV4 and Shell Workspace          |
 

@@ -8,7 +8,7 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
-import { Session } from "agents/experimental/memory/session";
+import type { Session } from "../../think";
 import type { ObservabilityEvent } from "agents/observability";
 import { Think } from "../../think";
 import type {

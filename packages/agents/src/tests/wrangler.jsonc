@@ -57,6 +57,18 @@
         "name": "StreamBenchObject"
       },
       {
+        "class_name": "SessionHarnessObject",
+        "name": "SessionHarnessObject"
+      },
+      {
+        "class_name": "SessionSearchHarnessObject",
+        "name": "SessionSearchHarnessObject"
+      },
+      {
+        "class_name": "SessionBenchObject",
+        "name": "SessionBenchObject"
+      },
+      {
         "class_name": "PlainMcpClientObject",
         "name": "PlainMcpClientObject"
       },
@@ -221,18 +233,6 @@
       {
         "class_name": "TestSessionAgent",
         "name": "TestSessionAgent"
-      },
-      {
-        "class_name": "TestSessionAgentWithContext",
-        "name": "TestSessionAgentWithContext"
-      },
-      {
-        "class_name": "TestSearchAgent",
-        "name": "TestSearchAgent"
-      },
-      {
-        "class_name": "TestMultiSessionAgent",
-        "name": "TestMultiSessionAgent"
       },
       {
         "class_name": "TestWaitConnectionsAgent",
@@ -406,6 +406,9 @@
         "StreamHarnessObject",
         "TaskStreamComposeObject",
         "StreamBenchObject",
+        "SessionHarnessObject",
+        "SessionSearchHarnessObject",
+        "SessionBenchObject",
         "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
@@ -445,9 +448,6 @@
         "TestRunFiberAgent",
         "TestKeepAliveAgent",
         "TestSessionAgent",
-        "TestSessionAgentWithContext",
-        "TestSearchAgent",
-        "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
         "RoutingOwnerAgent",
         "RoutedChatAgent",

@@ -10,7 +10,15 @@ import type {
   SkillSource
 } from "./types";
 import { validateSkillResourcePath } from "./types";
+import { parseSkillMarkdown } from "./frontmatter";
 import { validateSkillScriptPath } from "./runner";
+import {
+  createSkillWorkspaceFiles,
+  type SkillProjectionWorkspace,
+  type SkillWorkspaceFiles,
+  type SkillWorkspaceSeedOptions,
+  type SkillWorkspaceSeedResult
+} from "./workspace";
 
 const SKILL_CONTEXT_LABEL = "think_skills";
 
@@ -18,6 +26,26 @@ function stableSourceFingerprint(sources: SkillSource[]): string {
   return sources
     .map((source) => `${source.id}:${source.fingerprint}`)
     .join("|");
+}
+
+function renderSkillMarkdown(skill: SkillContent): string {
+  const lines = [
+    "---",
+    `name: ${JSON.stringify(skill.name)}`,
+    `description: ${JSON.stringify(skill.description)}`
+  ];
+  if (skill.compatibility) {
+    lines.push(`compatibility: ${JSON.stringify(skill.compatibility)}`);
+  }
+  if (skill.license) lines.push(`license: ${JSON.stringify(skill.license)}`);
+  if (skill.allowedTools) {
+    lines.push(`allowed-tools: ${JSON.stringify(skill.allowedTools)}`);
+  }
+  if (skill.metadata) {
+    lines.push(`metadata: ${JSON.stringify(skill.metadata)}`);
+  }
+  lines.push("---", "", skill.body);
+  return lines.join("\n");
 }
 
 function wrapSkillContent(skill: SkillContent): string {
@@ -79,6 +107,12 @@ export class SkillRegistry {
   private descriptors = new Map<string, SkillDescriptor>();
   private sourceBySkill = new Map<string, SkillSource>();
   private loaded = false;
+  private workspaceFiles: SkillWorkspaceFiles | null = null;
+  private workspaceSkillNames = new Set<string>();
+  private workspaceResources = new Map<
+    string,
+    Map<string, SkillResourceDescriptor>
+  >();
 
   constructor(
     sources: SkillSource[],
@@ -152,6 +186,109 @@ export class SkillRegistry {
     this.warnings.push(...refreshErrors);
   }
 
+  /**
+   * Seed resolved Agent Skills into Computer or legacy Shell storage.
+   * Existing files are preserved by default, and become authoritative for
+   * activation, resource reads, and script execution.
+   */
+  async seedWorkspace(
+    workspace: SkillProjectionWorkspace,
+    options: SkillWorkspaceSeedOptions = {}
+  ): Promise<SkillWorkspaceSeedResult> {
+    await this.load();
+    const files = createSkillWorkspaceFiles(workspace, options.root);
+    const result = {
+      written: 0,
+      preserved: 0,
+      skipped: 0,
+      warnings: [] as string[],
+      root: files.root
+    };
+    const seeded = new Set<string>();
+    const resources = new Map<string, Map<string, SkillResourceDescriptor>>();
+
+    for (const descriptor of this.descriptors.values()) {
+      const source = this.sourceBySkill.get(descriptor.name);
+      let skill: SkillContent | null = null;
+      try {
+        skill = (await source?.load(descriptor.name)) ?? null;
+      } catch (error) {
+        result.skipped++;
+        result.warnings.push(
+          `Could not load skill "${descriptor.name}" for Workspace seeding: ${error instanceof Error ? error.message : String(error)}`
+        );
+        continue;
+      }
+      if (!skill) {
+        result.skipped++;
+        result.warnings.push(
+          `Could not load skill "${descriptor.name}" for Workspace seeding.`
+        );
+        continue;
+      }
+
+      resources.set(
+        descriptor.name,
+        new Map(
+          (skill.resources ?? []).map((resource) => [resource.path, resource])
+        )
+      );
+      const skillPath = files.path(descriptor.name, "SKILL.md");
+      if (
+        await this.writeSeedFile(
+          files,
+          skillPath,
+          skill.rawContent ?? renderSkillMarkdown(skill),
+          options,
+          result
+        )
+      ) {
+        seeded.add(descriptor.name);
+      }
+    }
+
+    this.workspaceFiles = files;
+    this.workspaceSkillNames = seeded;
+    this.workspaceResources = resources;
+    return result;
+  }
+
+  /**
+   * Route skill reads through an already-seeded Workspace without probing or
+   * rewriting its files. Hosts use this when the durable source fingerprint
+   * matches the recorded projection fingerprint.
+   */
+  async useWorkspace(
+    workspace: SkillProjectionWorkspace,
+    options: SkillWorkspaceSeedOptions = {}
+  ): Promise<void> {
+    await this.load();
+    this.workspaceFiles = createSkillWorkspaceFiles(workspace, options.root);
+    this.workspaceSkillNames = new Set(this.descriptors.keys());
+    this.workspaceResources.clear();
+  }
+
+  private async writeSeedFile(
+    files: SkillWorkspaceFiles,
+    path: string,
+    content: string,
+    options: SkillWorkspaceSeedOptions,
+    result: { written: number; preserved: number; skipped: number }
+  ): Promise<boolean> {
+    try {
+      if (options.onConflict !== "replace" && (await files.exists(path))) {
+        result.preserved++;
+        return true;
+      }
+      await files.writeText(path, content);
+      result.written++;
+      return true;
+    } catch {
+      result.skipped++;
+      return false;
+    }
+  }
+
   async snapshot(): Promise<SkillRegistrySnapshot> {
     await this.load();
 
@@ -166,6 +303,11 @@ export class SkillRegistry {
       catalogPrompt: catalog.length
         ? [
             "Available skills. When a task matches a skill, use activate_skill with its name before proceeding.",
+            ...(this.workspaceFiles
+              ? [
+                  `Skill files are available at ${this.workspaceFiles.root}. Workspace edits affect later activations and resource reads.`
+                ]
+              : []),
             "",
             ...catalog
           ].join("\n")
@@ -181,7 +323,30 @@ export class SkillRegistry {
   async loadSkill(name: string): Promise<SkillContent | null> {
     await this.load();
     const source = this.sourceBySkill.get(name);
-    return source ? source.load(name) : null;
+    if (!source) return null;
+    const original = await source.load(name);
+    if (!original) return null;
+    this.workspaceResources.set(
+      name,
+      new Map(
+        (original.resources ?? []).map((resource) => [resource.path, resource])
+      )
+    );
+    if (!this.workspaceSkillNames.has(name)) return original;
+    const rawContent = await this.workspaceFiles?.readText(
+      this.workspaceFiles.path(name, "SKILL.md")
+    );
+    if (rawContent === null || rawContent === undefined) return null;
+    const parsed = parseSkillMarkdown(rawContent);
+    if (!parsed) return null;
+    return {
+      ...original,
+      ...parsed,
+      rawContent,
+      sourceId: original.sourceId,
+      version: original.version,
+      resources: original.resources
+    };
   }
 
   private resolveResourceTarget(
@@ -224,6 +389,31 @@ export class SkillRegistry {
     path: string
   ): Promise<SkillResource | string> {
     const source = this.sourceBySkill.get(name);
+    if (this.workspaceSkillNames.has(name) && this.workspaceFiles) {
+      let descriptor = this.workspaceResources.get(name)?.get(path);
+      if (!descriptor) {
+        const skill = await source?.load(name);
+        const resources = new Map(
+          (skill?.resources ?? []).map((resource) => [resource.path, resource])
+        );
+        this.workspaceResources.set(name, resources);
+        descriptor = resources.get(path);
+      }
+      if (!descriptor) return `Resource not found: ${name}/${path}`;
+      const workspacePath = this.workspaceFiles.path(name, path);
+      const existing = await this.workspaceFiles.readResource(
+        workspacePath,
+        descriptor
+      );
+      if (existing) return existing;
+      if (!source?.readResource) {
+        return `Skill "${name}" has no readable resources.`;
+      }
+      const resource = await source.readResource(name, path);
+      if (!resource) return `Resource not found: ${name}/${path}`;
+      await this.workspaceFiles.writeResource(workspacePath, resource);
+      return resource;
+    }
     if (!source?.readResource) {
       return `Skill "${name}" has no readable resources.`;
     }
@@ -331,13 +521,8 @@ export class SkillRegistry {
             return `Resource is not a script: ${name}/${path}`;
           }
 
-          const source = this.sourceBySkill.get(name);
-          if (!source?.readResource) {
-            return `Skill "${name}" has no readable resources.`;
-          }
-
-          const resource = await source.readResource(name, path);
-          if (!resource) return `Script not found: ${name}/${path}`;
+          const resource = await this.readResource(name, path);
+          if (typeof resource === "string") return resource;
           if ((resource.encoding ?? "text") !== "text") {
             return `Script resource must be text, got ${resource.encoding}: ${name}/${path}`;
           }

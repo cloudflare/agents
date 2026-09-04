@@ -43,6 +43,33 @@ type TestToolCallPart = Extract<
   { type: `tool-${string}` }
 >;
 
+/** The STORED rows, reassembled from their continuation rows. */
+async function persistedMessages(agent: AIChatAgent): Promise<ChatMessage[]> {
+  const history = await agent.sessions.session().getHistory();
+  return history as ChatMessage[];
+}
+
+const sessionChangeCounters = new WeakMap<AIChatAgent, { count: number }>();
+
+/**
+ * Count of Sessions change-feed events seen by this instance. Arming is lazy
+ * and idempotent: the first read subscribes and returns 0.
+ */
+function sessionChangeEventCount(agent: AIChatAgent): number {
+  const existing = sessionChangeCounters.get(agent);
+  if (existing) return existing.count;
+  const counter = { count: 0 };
+  sessionChangeCounters.set(agent, counter);
+  agent.sessions.subscribe(() => {
+    counter.count++;
+  });
+  return counter.count;
+}
+
+async function persistedMessageCount(agent: AIChatAgent): Promise<number> {
+  return (await agent.sessions.session().getHistory()).length;
+}
+
 function makeSSEChunkResponse(chunks: ReadonlyArray<Record<string, unknown>>) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -513,18 +540,74 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
-    return rawMessages;
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 
-  getMessagesForTest(): ChatMessage[] {
+  async getMessagesForTest(): Promise<ChatMessage[]> {
+    // `this.messages` hydrates in `onStart`; native RPC bypasses fetch, so a
+    // freshly woken object has to start the lifecycle before reading it.
+    await this.__unsafe_ensureInitialized();
     return this.messages as ChatMessage[];
+  }
+
+  /**
+   * Count of Sessions change-feed events. An unchanged row writes nothing and
+   * dispatches no event, so this is the observable no-op signal.
+   */
+  sessionChangeEventCountForTest(): number {
+    return sessionChangeEventCount(this);
+  }
+
+  /** Continuation rows the store currently holds for this object. */
+  continuationRowCountForTest(): number {
+    return Number(
+      this.ctx.storage.sql
+        .exec("SELECT COUNT(*) AS count FROM cf_agents_session_message_chunks")
+        .one().count
+    );
+  }
+
+  async clearSessionForTest(): Promise<void> {
+    await this.sessions.session().clearMessages();
+    this.messages = [];
+  }
+
+  seedLegacyMessagesForTest(): void {
+    this.sql`
+      CREATE TABLE cf_ai_chat_agent_messages (
+        id TEXT PRIMARY KEY,
+        message TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_messages (id, message, created_at)
+      VALUES (
+        'legacy-v4',
+        ${JSON.stringify({ id: "legacy-v4", role: "user", content: "old format" })},
+        '2026-01-01 00:00:00'
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_messages (id, message, created_at)
+      VALUES (
+        'legacy-v5',
+        ${JSON.stringify({ id: "legacy-v5", role: "assistant", parts: [{ type: "text", text: "new format" }] })},
+        '2026-01-01 00:00:01'
+      )
+    `;
+  }
+
+  legacyMessageTableNamesForTest(): string[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name LIKE 'cf_ai_chat_agent_messages%'
+         ORDER BY name`
+      )
+      .toArray()
+      .map((row) => String(row.name));
   }
 
   /**
@@ -901,10 +984,19 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * Insert a raw JSON string as a message directly into SQLite.
    * Used to test validation of malformed/corrupt messages.
    */
-  insertRawMessage(rowId: string, rawJson: string): void {
+  async insertRawMessage(rowId: string, rawJson: string): Promise<void> {
+    const parentId =
+      (await this.sessions.session().getLatestLeaf())?.id ?? null;
     this.sql`
-      insert into cf_ai_chat_agent_messages (id, message)
-      values (${rowId}, ${rawJson})
+      INSERT INTO cf_agents_session_messages
+        (id, session_id, seq, parent_id, role, content, token_estimate,
+         created_at)
+      VALUES (
+        ${rowId}, '',
+        (SELECT COALESCE(MAX(seq), 0) + 1
+         FROM cf_agents_session_messages WHERE session_id = ''),
+        ${parentId}, 'user', ${rawJson}, 0, ${Date.now()}
+      )
     `;
   }
 
@@ -912,11 +1004,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this.maxPersistedMessages = max ?? undefined;
   }
 
-  getMessageCount(): number {
-    const result = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_ai_chat_agent_messages
-    `;
-    return result?.[0]?.cnt ?? 0;
+  getMessageCount(): Promise<number> {
+    return persistedMessageCount(this);
   }
 
   /**
@@ -965,14 +1054,8 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
     };
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
-    return rawMessages;
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 }
 
@@ -1108,14 +1191,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return [...this._startedRequestIds];
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
-    return rawMessages;
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 
   getRequestStartTime(requestId: string): number | null {
@@ -1311,8 +1388,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     ]);
   }
 
-  getPersistedUserTexts(): string[] {
-    return this.getPersistedMessages()
+  async getPersistedUserTexts(): Promise<string[]> {
+    return (await this.getPersistedMessages())
       .filter((message) => message.role === "user")
       .flatMap((message) =>
         message.parts.flatMap((part) =>
@@ -1381,11 +1458,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     ]);
   }
 
-  getMessageCount(): number {
-    const result = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_ai_chat_agent_messages
-    `;
-    return result?.[0]?.cnt ?? 0;
+  getMessageCount(): Promise<number> {
+    return persistedMessageCount(this);
   }
 }
 
@@ -1496,11 +1570,8 @@ export class ResponseAgent extends AIChatAgent<Env> {
     await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 }
 
@@ -1528,11 +1599,8 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
     return [...this._responseResults];
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 }
 
@@ -1575,11 +1643,8 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
     return this._streamCompleted;
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 }
 
@@ -1628,11 +1693,8 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
     await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 }
 
@@ -2722,11 +2784,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.messages = this.messages.filter((m) => m.role !== "assistant");
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 
   getPartialText(streamId?: string) {
@@ -3133,11 +3192,8 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this.recoveryContexts;
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 
   getOnChatMessageCallCount(): number {
@@ -3195,11 +3251,8 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
     return this.onChatMessageCallCount;
   }
 
-  getPersistedMessages(): ChatMessage[] {
-    return (
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      []
-    ).map((row) => JSON.parse(row.message as string));
+  getPersistedMessages(): Promise<ChatMessage[]> {
+    return persistedMessages(this);
   }
 
   getActiveFibers(): Array<{ id: string; name: string }> {

@@ -156,6 +156,14 @@
         "name": "ThinkMediaEvictionAutoAgent"
       },
       {
+        "class_name": "ThinkPointerHydrationAgent",
+        "name": "ThinkPointerHydrationAgent"
+      },
+      {
+        "class_name": "ThinkLegacySessionApiAgent",
+        "name": "ThinkLegacySessionApiAgent"
+      },
+      {
         "class_name": "BrowserToolsHost",
         "name": "BrowserToolsHost"
       },
@@ -209,6 +217,8 @@
         "ThinkWindowedHydrationAgent",
         "ThinkMediaEvictionAgent",
         "ThinkMediaEvictionAutoAgent",
+        "ThinkPointerHydrationAgent",
+        "ThinkLegacySessionApiAgent",
         "BrowserToolsHost"
       ],
       "tag": "v1"
