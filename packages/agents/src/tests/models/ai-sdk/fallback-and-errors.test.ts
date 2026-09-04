@@ -396,3 +396,74 @@ describe("fallback chains that end on a vendor leg", () => {
     expect(binding.universal).toHaveLength(2);
   });
 });
+
+describe("stream-aware fallback", () => {
+  const errorChunk = JSON.stringify({
+    error: { code: 500, message: "upstream exploded" }
+  });
+  const textChunk = (content: string, finish: string | null) =>
+    JSON.stringify({
+      choices: [{ delta: { content }, finish_reason: finish, index: 0 }]
+    });
+
+  it("hands over to the next leg when a stream fails before any output", async () => {
+    const binding = fakeBinding((call) =>
+      call.model === SECOND
+        ? sseResponse([errorChunk, "[DONE]"])
+        : sseResponse([textChunk("second", "stop"), "[DONE]"])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { stream } = await ai(SECOND, { fallback: [MODEL] }).doStream(
+      callOptions()
+    );
+    const parts = await collect(stream);
+
+    expect(binding.calls.map((call) => call.model)).toEqual([SECOND, MODEL]);
+    expect(parts.some((part) => part.type === "error")).toBe(false);
+    expect(
+      parts
+        .filter((part) => part.type === "text-delta")
+        .map((part) => part.delta)
+        .join("")
+    ).toBe("second");
+    // The answering leg's own preamble is what the caller sees, once.
+    expect(parts.filter((part) => part.type === "stream-start")).toHaveLength(
+      1
+    );
+  });
+
+  it("keeps a stream that has already produced output, failure and all", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse([textChunk("part", null), errorChunk, "[DONE]"])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { stream } = await ai(SECOND, { fallback: [MODEL] }).doStream(
+      callOptions()
+    );
+    const parts = await collect(stream);
+
+    expect(binding.calls.map((call) => call.model)).toEqual([SECOND]);
+    expect(
+      parts
+        .filter((part) => part.type === "text-delta")
+        .map((part) => part.delta)
+        .join("")
+    ).toBe("part");
+    expect(parts.some((part) => part.type === "error")).toBe(true);
+  });
+
+  it("reports every leg when each stream fails before output", async () => {
+    const binding = fakeBinding(() => sseResponse([errorChunk, "[DONE]"]));
+    const ai = createAI({ binding: asAi(binding) });
+    const error = await failure(() =>
+      ai(SECOND, { fallback: [MODEL] }).doStream(callOptions())
+    );
+
+    expect(error).toBeInstanceOf(CloudflareAIError);
+    expect(error.attempts?.map((attempt) => attempt.model)).toEqual([
+      SECOND,
+      MODEL
+    ]);
+    expect(binding.calls).toHaveLength(2);
+  });
+});

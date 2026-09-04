@@ -928,3 +928,60 @@ describe("re-wrapping a configured model", () => {
     expect(field(binding.calls[0]?.options, "gateway.id")).toBe("new");
   });
 });
+
+describe("fetch call forms", () => {
+  /** A provider that calls `fetch(new Request(...))` rather than `fetch(url, init)`. */
+  class RequestFormModel implements LanguageModelV4 {
+    readonly specificationVersion = "v4" as const;
+    readonly provider = "acme.messages";
+    readonly modelId = "acme-1";
+    readonly supportedUrls = {};
+    config = { fetch: globalThis.fetch };
+
+    async doGenerate(): Promise<
+      Awaited<ReturnType<LanguageModelV4["doGenerate"]>>
+    > {
+      const response = await this.config.fetch(
+        new Request("https://api.anthropic.com/v1/messages", {
+          body: JSON.stringify({ max_tokens: 8, model: "acme-1" }),
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": "placeholder"
+          },
+          method: "POST"
+        })
+      );
+      const answer = (await response.json()) as { text: string };
+      return {
+        content: [{ text: answer.text, type: "text" }],
+        finishReason: { raw: "stop", unified: "stop" },
+        usage: {
+          inputTokens: { total: 1 },
+          outputTokens: { total: 1 },
+          totalTokens: 2
+        } as never,
+        warnings: []
+      };
+    }
+
+    doStream(): never {
+      throw new Error("not used");
+    }
+  }
+
+  it("reads the body and headers from a Request when the provider passes one", async () => {
+    const binding = fakeGatewayBinding({
+      universal: () => jsonResponse({ text: "routed" })
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai(new RequestFormModel()).doGenerate(callOptions());
+
+    expect(result.content).toEqual([{ text: "routed", type: "text" }]);
+    const call = binding.universal[0];
+    expect(call?.provider).toBe("anthropic");
+    expect(call?.endpoint).toBe("v1/messages");
+    expect(call?.query).toEqual({ max_tokens: 8, model: "acme-1" });
+    expect(call?.headers).not.toHaveProperty("x-api-key");
+    expect(call?.headers).toHaveProperty("content-type", "application/json");
+  });
+});

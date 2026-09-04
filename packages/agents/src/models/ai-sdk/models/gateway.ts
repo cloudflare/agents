@@ -44,7 +44,11 @@ import {
   headersToObject,
   isGatewayErrorEnvelope
 } from "../transport";
-import { withFallbackLegs } from "./fallback";
+import {
+  withFallbackLegs,
+  type FallbackAttempt,
+  withStreamFallbackLegs
+} from "./fallback";
 import {
   cloudflareMetadata,
   CloudflareLanguageModel,
@@ -115,6 +119,22 @@ function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.href;
   return input.url;
+}
+
+/**
+ * The body of either `fetch` call form: the `RequestInit`'s when one was
+ * given, else the `Request`'s own, read from a clone so the caller's object
+ * is neither consumed nor mutated.
+ */
+async function requestBody(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined
+): Promise<BodyInit | null | undefined> {
+  if (init?.body !== undefined) return init.body;
+  if (input instanceof Request && input.body !== null) {
+    return await input.clone().text();
+  }
+  return undefined;
 }
 
 /**
@@ -192,7 +212,7 @@ function routedFetch(context: {
   ): Promise<Response> => {
     const url = requestUrl(input);
     const route = requireGatewayProvider(url);
-    const query = universalQuery(init?.body);
+    const query = universalQuery(await requestBody(input, init));
     const { resolved } = context;
     const extraHeaders = {
       ...resolved.headers,
@@ -209,7 +229,10 @@ function routedFetch(context: {
       query,
       // The vendor puts the call's abort signal on the request it builds; the
       // call's own is the fallback for a provider that forgets to.
-      signal: init?.signal ?? context.signal
+      signal:
+        init?.signal ??
+        (input instanceof Request ? input.signal : undefined) ??
+        context.signal
     });
     context.capture.provider = route.provider;
     context.capture.response = response;
@@ -463,7 +486,8 @@ export class GatewayLanguageModel implements LanguageModelV4 {
             )
           )
         };
-      }
+      },
+      "stream"
     );
   }
 
@@ -513,20 +537,25 @@ export class GatewayLanguageModel implements LanguageModelV4 {
   #withFallback<T>(
     call: ModelOptions | undefined,
     runLeg: (model: LanguageModelV4) => PromiseLike<T>,
-    run: () => Promise<T>
+    run: () => Promise<T>,
+    mode: "generate" | "stream" = "generate"
   ): Promise<T> {
     const legs: FallbackLeg[] = fallbackLegs(this.#options, call);
     if (legs.length === 0) return run();
-    return withFallbackLegs(
-      [
-        { model: this.modelId, run },
-        ...legs.map((leg) => {
-          const model = typeof leg === "string" ? this.#workersAI(leg) : leg;
-          return { model: model.modelId, run: () => runLeg(model) };
-        })
-      ],
-      this.#config.transport.url
-    );
+    const chain = (attempts: FallbackAttempt<T>[]): Promise<T> =>
+      mode === "stream"
+        ? (withStreamFallbackLegs(
+            attempts as FallbackAttempt<LanguageModelV4StreamResult>[],
+            this.#config.transport.url
+          ) as Promise<T>)
+        : withFallbackLegs(attempts, this.#config.transport.url);
+    return chain([
+      { model: this.modelId, run },
+      ...legs.map((leg) => {
+        const model = typeof leg === "string" ? this.#workersAI(leg) : leg;
+        return { model: model.modelId, run: () => runLeg(model) };
+      })
+    ]);
   }
 
   /** A Workers AI leg, carrying this model's gateway options but no chain. */

@@ -367,8 +367,12 @@ await generateText({
 ## Fallback
 
 `fallback` tries each leg in order when the primary fails _before_ producing
-any output. Mid-stream failures are not retried — by then the caller already
-has part of an answer. Legs may be Workers AI ids or model objects, in any mix:
+any output. That covers a rejected request and also a stream that opens and
+then fails before its first output part — an `error` part, an error finish, or
+a broken body — in which case the failed leg's preamble is dropped and the
+answering leg's stream is delivered in its place. Once a leg has produced
+output it is the answer, failures and all: by then the caller already has part
+of it. Legs may be Workers AI ids or model objects, in any mix:
 
 ```ts
 const model = ai(anthropic("claude-opus-4-8"), {

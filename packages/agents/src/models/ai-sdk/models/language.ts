@@ -37,7 +37,11 @@ import {
   parseOpenAIGeneration
 } from "../wires/chat-completions";
 import { newId, type WireGeneration } from "../wires/shared";
-import { withFallbackLegs } from "./fallback";
+import {
+  withFallbackLegs,
+  type FallbackAttempt,
+  withStreamFallbackLegs
+} from "./fallback";
 
 /**
  * Typed observability attached to every result under
@@ -377,7 +381,8 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
           response: { headers: headersToObject(response.headers) },
           stream: parts.pipeThrough(decorate)
         };
-      }
+      },
+      "stream"
     );
   }
 
@@ -449,23 +454,28 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
   #withFallback<T>(
     call: ModelOptions | undefined,
     runLeg: (model: LanguageModelV4) => PromiseLike<T>,
-    runSelf: (modelId: string) => Promise<T>
+    runSelf: (modelId: string) => Promise<T>,
+    mode: "generate" | "stream" = "generate"
   ): Promise<T> {
     const legs: FallbackLeg[] = fallbackLegs(this.#options, call);
-    return withFallbackLegs(
-      [
-        { model: this.modelId, run: () => runSelf(this.modelId) },
-        ...legs.map((leg) =>
-          typeof leg === "string"
-            ? // Belt and braces: `ai()` and the per-call bag both gate their
-              // legs, and a vendor id must never reach `env.AI.run`. Checked
-              // as the chain is built, so the throw is not swallowed as one
-              // more failed leg.
-              { model: requireWorkersAIId(leg), run: () => runSelf(leg) }
-            : { model: leg.modelId, run: () => runLeg(leg) }
-        )
-      ],
-      this.#config.transport.url
-    );
+    const chain = (attempts: FallbackAttempt<T>[]): Promise<T> =>
+      mode === "stream"
+        ? (withStreamFallbackLegs(
+            attempts as FallbackAttempt<LanguageModelV4StreamResult>[],
+            this.#config.transport.url
+          ) as Promise<T>)
+        : withFallbackLegs(attempts, this.#config.transport.url);
+    return chain([
+      { model: this.modelId, run: () => runSelf(this.modelId) },
+      ...legs.map((leg) =>
+        typeof leg === "string"
+          ? // Belt and braces: `ai()` and the per-call bag both gate their
+            // legs, and a vendor id must never reach `env.AI.run`. Checked
+            // as the chain is built, so the throw is not swallowed as one
+            // more failed leg.
+            { model: requireWorkersAIId(leg), run: () => runSelf(leg) }
+          : { model: leg.modelId, run: () => runLeg(leg) }
+      )
+    ]);
   }
 }
