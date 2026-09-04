@@ -187,9 +187,7 @@ import {
   CHAT_MESSAGE_TYPES,
   TurnQueue,
   ResumableStream,
-  cleanupStreamBuffers,
   createChatStreams,
-  STREAM_CLEANUP_DELAY_SECONDS,
   ContinuationState,
   PreStreamTurns,
   AutoContinuationController,
@@ -1127,7 +1125,7 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // (The recovering-flag key/TTL and the stream-cleanup delay/re-arm loop now live
 // in agents/chat — the durable recovery UX is driven via the shared
 // `setChatRecovering` / `buildChatRecoveringFrame` helpers, and buffer cleanup via
-// `STREAM_CLEANUP_DELAY_SECONDS` / `cleanupStreamBuffers`. The N9 throttle lives
+// The N9 throttle lives
 // there too as `AgentToolStreamProgressThrottle`.)
 
 // Ephemeral user message appended when a model request would otherwise end in
@@ -12727,7 +12725,7 @@ export class Think<
       if (streamError) {
         this._errorResumableStream(streamId);
       } else {
-        this._completeResumableStream(streamId);
+        this._finishResumableStream(streamId);
       }
       streamFinalized = true;
       this._broadcastChat({
@@ -12740,12 +12738,11 @@ export class Think<
 
       assistantMsg = accumulator.toMessage();
       if (accumulator.parts.length > 0) {
-        await this._persistAssistantMessage(assistantMsg);
+        await this._persistAssistantMessageWithCutover(streamId, assistantMsg);
         this._broadcastMessages();
-        // The message is durable: drop the stream's block rows now rather
-        // than leaving them for the retention sweep.
-        this._resumableStream.discardCompleted(streamId);
       }
+      // Nothing to persist (or the persist threw): settle the finished stream.
+      this._resumableStream.finalizePending();
 
       if (streamError) {
         await this._fireResponseHook({
@@ -13215,7 +13212,7 @@ export class Think<
       if (streamError) {
         this._errorResumableStream(streamId);
       } else {
-        this._completeResumableStream(streamId);
+        this._finishResumableStream(streamId);
       }
       this._pendingResumeConnections.clear();
       this._broadcastChat({
@@ -13340,12 +13337,16 @@ export class Think<
         const assistantMsg = accumulator.toMessage();
 
         if (accumulator.parts.length > 0) {
-          await this._persistAssistantMessage(assistantMsg, parentId);
+          await this._persistAssistantMessageWithCutover(
+            streamId,
+            assistantMsg,
+            parentId
+          );
           this._broadcastMessages();
-          // The message is durable: drop the stream's block rows now rather
-          // than leaving them for the retention sweep.
-          this._resumableStream.discardCompleted(streamId);
         }
+        // Nothing to persist (or the persist threw): settle the finished
+        // stream so it is not mistaken for an interrupted turn.
+        this._resumableStream.finalizePending();
 
         await this._fireResponseHook({
           message: assistantMsg,
@@ -13362,6 +13363,7 @@ export class Think<
         console.error("Failed to persist assistant message:", e);
       }
     }
+    this._resumableStream.finalizePending();
 
     // The message is now persisted (or the turn was cleared), so subsequent
     // tool results resolve against storage; stop exposing the accumulator and
@@ -13404,6 +13406,36 @@ export class Think<
     const toPersist = this._strippedForPersist(msg);
     if (toPersist === null) return;
     await this._upsertMessageInHistory(toPersist, parentId);
+  }
+
+  /**
+   * The cutover: persist the finished turn's assistant message, settle its
+   * resumable stream and delete the stream's rows in ONE SQLite transaction,
+   * so a crash leaves either the live stream (recovery rebuilds the message
+   * from it) or the message — never neither, never both. The session
+   * change feed and auto-compaction run once the transaction has committed.
+   */
+  private async _persistAssistantMessageWithCutover(
+    streamId: string,
+    msg: UIMessage,
+    parentId?: string
+  ): Promise<void> {
+    const toPersist = this._strippedForPersist(msg);
+    if (toPersist === null) return;
+    if (this._resumableStream.pendingCutoverId !== streamId) {
+      // The stream was settled by another path (a stall, an error): plain persist.
+      await this._upsertMessageInHistory(toPersist, parentId);
+      return;
+    }
+    const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
+    let after: (() => Promise<void>) | undefined;
+    this._resumableStream.cutover(streamId, () => {
+      after = sync.upsert(toPersist as SessionMessage, {
+        parentId,
+        source: "server"
+      }).after;
+    });
+    await after?.();
   }
 
   /**
@@ -16223,58 +16255,35 @@ export class Think<
     // reconnected before the first chunk. (Continuation-turn parks live in
     // `_continuation` and are flushed by the caller.)
     this._preStream.flushOnStreamStart((c) => this._notifyStreamResuming(c));
-    void this._ensureStreamCleanupScheduled();
     return streamId;
   }
 
-  /**
-   * Mark a resumable stream completed and arm buffer cleanup. Wrapper around
-   * `ResumableStream.complete` so every stream-finish path also schedules the
-   * cleanup alarm (#1706).
-   */
+  /** Mark a resumable stream completed (settled now, rows kept until reclaim). */
   protected _completeResumableStream(streamId: string): void {
     this._resumableStream.complete(streamId);
-    void this._ensureStreamCleanupScheduled();
   }
 
   /**
-   * Mark a resumable stream errored and arm buffer cleanup. Wrapper around
-   * `ResumableStream.markError` — see {@link _completeResumableStream}.
+   * The producer finished; leave the row for the cutover that persists the
+   * assistant message (`_persistAssistantMessageWithCutover`). Every path
+   * that calls this must end in that cutover or `finalizePending()`.
    */
+  protected _finishResumableStream(streamId: string): void {
+    this._resumableStream.finish(streamId);
+  }
+
+  /** Mark a resumable stream errored. */
   protected _errorResumableStream(streamId: string): void {
     this._resumableStream.markError(streamId);
-    void this._ensureStreamCleanupScheduled();
   }
 
   /**
-   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
-   * buffers. Armed whenever a stream finishes so that idle/one-off chat DOs
-   * still reclaim their buffers — the lazy sweep in {@link ResumableStream}
-   * only fires when a *subsequent* stream completes, which never happens for a
-   * chat that receives a single turn (#1706).
-   *
-   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
-   * collapse onto one pending alarm rather than stacking.
-   */
-  protected async _ensureStreamCleanupScheduled({
-    idempotent = true
-  }: { idempotent?: boolean } = {}): Promise<void> {
-    await this.schedule(
-      STREAM_CLEANUP_DELAY_SECONDS,
-      "_cleanupStreamBuffers",
-      undefined,
-      { idempotent }
-    );
-  }
-
-  /**
-   * Alarm callback: sweep aged stream buffers, re-arming while rows remain (see
-   * the shared {@link cleanupStreamBuffers}).
+   * @deprecated Streams are reclaimed at cutover and on the next stream
+   * start; no alarm is armed any more. Kept so a cleanup alarm persisted by
+   * an earlier version still resolves to a callback when it fires.
    */
   async _cleanupStreamBuffers(): Promise<void> {
-    await cleanupStreamBuffers(this._resumableStream, () =>
-      this._ensureStreamCleanupScheduled({ idempotent: false })
-    );
+    this._resumableStream.reclaim();
   }
 
   private async _persistOrphanedStream(streamId: string): Promise<void> {

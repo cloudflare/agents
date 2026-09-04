@@ -46,48 +46,23 @@ const SEGMENT_MAX_BYTES = 512_000;
  * replay memory to one page of segment bodies rather than the whole turn.
  */
 const REPLAY_PAGE_SEGMENTS = 10;
-/** Default cleanup interval for old streams (ms) - every 10 minutes */
-const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
-/**
- * Retention for completed/errored stream buffers, measured from completion.
- *
- * The assistant message is persisted separately (`cf_ai_chat_agent_messages`),
- * so once a stream completes its buffer is no longer the source of truth — it
- * is only a brief reconnect-and-replay grace window: long enough to cover a
- * client that dropped at the completion boundary and reconnects to replay the
- * just-finished stream, and to deliver a pending terminal error frame on a
- * resumed stream (#1645). It is deliberately short (not the chat's lifetime)
- * so idle/one-off chat DOs don't accumulate stale buffers (#1706).
- */
-const COMPLETED_RETENTION_MS = 10 * 60 * 1000;
 /**
  * Retention for abandoned `streaming` rows, measured from LAST chunk activity.
  *
- * Generous relative to {@link COMPLETED_RETENTION_MS}: an interrupted turn must
- * have ample time to be resumed by a reconnecting client or healed by task
- * replay before its buffer is reaped. Only a stream that has produced no
- * chunk for this long is treated as truly dead. Last activity is decided in
- * two phases — a coarse cutoff on the stream row's `updated_at` (stamped at
- * open, not per append), then one indexed read of the newest chunk's
- * timestamp for rows past it — so a long but still-active stream is never
- * swept mid-flight.
+ * An interrupted turn must have ample time to be resumed by a reconnecting
+ * client or healed by task replay before its buffer is reaped. Only a stream
+ * that has produced no chunk for this long is treated as truly dead. Last
+ * activity is decided in two phases — a coarse cutoff on the stream row's
+ * `updated_at` (stamped at open, not per append), then one indexed read of
+ * the newest chunk's timestamp for rows past it — so a long but still-active
+ * stream is never reclaimed mid-flight. Terminal rows carry no such window:
+ * a stream that finished is redundant with its persisted message, and the
+ * cutover deletes it in the same transaction; anything a crash left behind
+ * is reclaimed by the next {@link ResumableStream.start}.
  */
 const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
 const textEncoder = new TextEncoder();
-
-/**
- * How far ahead (seconds) to schedule the resumable-stream buffer cleanup
- * alarm. Set to the short completion-grace window ({@link COMPLETED_RETENTION_MS},
- * 10m) so a finished buffer is reclaimed promptly. The re-arm-while-reclaimable
- * loop (see {@link cleanupStreamBuffers}) revisits any longer-lived rows — e.g.
- * an abandoned in-flight buffer on its 1h window — by waking again each interval
- * until they age out, then stops. Driving cleanup from an alarm (rather than
- * only piggybacking on the next stream completion) ensures idle/one-off chat
- * DOs still reclaim their buffers without waking forever (#1706). Shared by
- * `AIChatAgent` and `Think`.
- */
-export const STREAM_CLEANUP_DELAY_SECONDS = 10 * 60;
 
 /**
  * Ceiling for one stored chat segment after JSON serialization, and the
@@ -194,7 +169,12 @@ export class ResumableStream {
   private _chunkBuffer: Array<{ streamId: string; body: string }> = [];
   private _chunkBufferBytes = 0;
   private _isFlushingChunks = false;
-  private _lastCleanupTime = 0;
+  /**
+   * A stream whose producer finished but whose row is deliberately still
+   * `streaming`: the host will {@link cutover} it together with the message
+   * write, or {@link finalizePending} it when there is nothing to persist.
+   */
+  private _pendingCutover: string | null = null;
 
   private readonly ops: StreamsSyncInternal;
 
@@ -346,12 +326,10 @@ export class ResumableStream {
   ): string {
     // Flush any pending chunks from previous streams to prevent mixing
     this.flushBuffer();
-    // Reclaim completed streams a previous turn left behind (a crash
-    // between persist and discard): their messages are persisted, so the
-    // rows are dead weight. One row-table scan, no alarm.
-    for (const row of this._chatRows()) {
-      if (row.state === "completed") this.ops.deleteUnchecked(row.stream_id);
-    }
+    // Reclaim whatever a previous turn left behind: finished streams (their
+    // messages are persisted, so the rows are dead weight) and in-flight
+    // rows abandoned past the stale window. One row-table scan, no alarm.
+    this.reclaim();
 
     const streamId = nanoid();
     this._activeStreamId = streamId;
@@ -381,32 +359,71 @@ export class ResumableStream {
 
   /**
    * Mark a stream as completed and flush any pending chunks.
-   *
-   * With `persist`, this is the cutover: the settle, the caller's message
-   * write and the discard of the stream's rows commit in one SQLite
-   * transaction, so a crash leaves either the live stream or the finished
-   * message, never neither, and nothing is left for a sweep. `persist`
-   * must be synchronous.
    * @param streamId - The stream to mark as completed
    */
-  complete(streamId: string, options: { persist?: () => void } = {}) {
+  complete(streamId: string) {
     this.flushBuffer();
+    this.ops.settle(streamId, "completed", null);
+    if (this._pendingCutover === streamId) this._pendingCutover = null;
+    this._clearActive();
+  }
 
-    if (options.persist) {
-      this.ops.settle(streamId, "completed", null, {
-        commit: options.persist,
-        discard: true
-      });
-    } else {
-      this.ops.settle(streamId, "completed", null);
-    }
+  /**
+   * The producer finished, but leave the row `streaming` for the cutover:
+   * the host persists the message and settles the stream in one
+   * transaction with {@link cutover}. Until then a crash leaves the stream
+   * live — exactly the evidence recovery rebuilds the message from. The
+   * host MUST follow with {@link cutover} or {@link finalizePending}.
+   */
+  finish(streamId: string) {
+    this.flushBuffer();
+    this._pendingCutover = streamId;
+    this._clearActive();
+  }
+
+  /** The stream {@link finish}ed and awaiting its cutover, if any. */
+  get pendingCutoverId(): string | null {
+    return this._pendingCutover;
+  }
+
+  /**
+   * The cutover: settle the stream, run `persist` (synchronous writes — the
+   * message), and delete the stream's rows in one SQLite transaction. A
+   * crash leaves either the live stream or the finished message, never
+   * neither; nothing is left to sweep. `discard: false` keeps the settled
+   * rows (an agent-tool child whose parent still tails them); they are
+   * reclaimed by the next {@link start}.
+   */
+  cutover(
+    streamId: string,
+    persist: () => void,
+    options: { discard?: boolean } = {}
+  ) {
+    this.flushBuffer();
+    this.ops.settle(streamId, "completed", null, {
+      commit: persist,
+      discard: options.discard ?? true
+    });
+    if (this._pendingCutover === streamId) this._pendingCutover = null;
+    this._clearActive();
+  }
+
+  /**
+   * Settle a {@link finish}ed stream that had nothing to persist (no parts,
+   * a persist that threw). Idempotent; a no-op when nothing is pending.
+   */
+  finalizePending() {
+    const streamId = this._pendingCutover;
+    if (streamId === null) return;
+    this._pendingCutover = null;
+    this.ops.settle(streamId, "completed", null);
+  }
+
+  private _clearActive() {
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._isLive = false;
     this._activeIsContinuation = false;
-
-    // Periodically clean up old streams
-    this._maybeCleanupOldStreams();
   }
 
   /**
@@ -431,12 +448,9 @@ export class ResumableStream {
    */
   markError(streamId: string) {
     this.flushBuffer();
-
     this.ops.settle(streamId, "errored", null);
-    this._activeStreamId = null;
-    this._activeRequestId = null;
-    this._isLive = false;
-    this._activeIsContinuation = false;
+    if (this._pendingCutover === streamId) this._pendingCutover = null;
+    this._clearActive();
   }
 
   // ── Chunk storage ──────────────────────────────────────────────────
@@ -765,67 +779,33 @@ export class ResumableStream {
   }
 
   /**
-   * Force a sweep of aged stream buffers now, bypassing the lazy interval
-   * gate used by {@link _maybeCleanupOldStreams}. Intended to be driven by an
-   * alarm so idle/hibernated chat DOs still reclaim buffers even when no
-   * further stream ever completes to trigger the lazy path.
-   *
-   * @returns How many chat stream rows survive the sweep — the re-arm
-   * signal, so the alarm body needs no second scan of the table.
+   * Delete every chat stream row this Durable Object no longer needs:
+   * finished streams (their messages are persisted; the cutover normally
+   * deletes them in the same transaction, so these are crash leftovers) and
+   * in-flight rows abandoned past {@link ABANDONED_STREAM_RETENTION_MS} by
+   * last chunk activity. Runs on every {@link start}, so nothing needs an
+   * alarm to be reclaimed; a Durable Object that never starts another turn
+   * keeps at most one turn's rows. Streams other producers opened on the
+   * same object are untouched.
+   * @returns How many rows were reclaimed.
    */
-  cleanup(now: number = Date.now()): number {
-    this._lastCleanupTime = now;
-    return this._sweepOldStreams(now);
-  }
-
-  /**
-   * True if any chat stream rows remain at all. Used by alarm-driven cleanup
-   * to decide whether to re-arm: once no rows remain there is nothing left to
-   * sweep, so the DO can stop waking itself.
-   */
-  hasReclaimableStreams(): boolean {
-    return this._chatRows().length > 0;
-  }
-
-  // ── Internal ───────────────────────────────────────────────────────
-
-  private _maybeCleanupOldStreams() {
-    const now = Date.now();
-    if (now - this._lastCleanupTime < CLEANUP_INTERVAL_MS) {
-      return;
-    }
-    this._lastCleanupTime = now;
-    this._sweepOldStreams(now);
-  }
-
-  /** Delete completed/errored buffers past the completion grace window, plus
-   *  abandoned "streaming" rows past the stale-in-flight window. The two use
-   *  different retentions: a completed buffer is redundant with the persisted
-   *  message and needs only a brief replay grace, whereas an in-flight buffer
-   *  must outlive resume/replay before it is presumed dead. Abandonment is
-   *  decided in two phases: the stream row's `updated_at` (stamped at open,
-   *  not per append — appends write only the chunk log) is the coarse
-   *  cutoff, and only rows past it pay one indexed read of the newest
-   *  chunk's timestamp to confirm the producer really stopped. An actively
-   *  appending stream is never swept, and a quiet sweep still reads no
-   *  chunk rows at all.
-   *  @returns How many chat stream rows survive the sweep. */
-  private _sweepOldStreams(now: number): number {
-    const completedCutoff = now - COMPLETED_RETENTION_MS;
+  reclaim(now: number = Date.now()): number {
     const abandonedCutoff = now - ABANDONED_STREAM_RETENTION_MS;
-    const rows = this._chatRows();
-    const reclaimable = rows
+    const reclaimable = this._chatRows()
       .filter((row) =>
         row.state === "streaming"
-          ? row.updated_at < abandonedCutoff &&
+          ? row.stream_id !== this._activeStreamId &&
+            row.updated_at < abandonedCutoff &&
             (this.ops.lastChunkAt(row.stream_id) ?? row.updated_at) <
               abandonedCutoff
-          : (row.closed_at ?? row.updated_at) < completedCutoff
+          : true
       )
       .map((row) => row.stream_id);
     this.ops.deleteMany(reclaimable);
-    return rows.length - reclaimable.length;
+    return reclaimable.length;
   }
+
+  // ── Internal ───────────────────────────────────────────────────────
 
   // ── Test helpers (matching old AIChatAgent test API) ────────────────
 
@@ -890,33 +870,12 @@ export class ResumableStream {
 
   /**
    * Append a chunk to a stream dated `ageMs` in the past. Used to exercise
-   * the sweep's phase-2 verification: a long-running streaming row with a
+   * reclaim's phase-2 verification: a long-running streaming row with a
    * *recent* chunk must survive even when its row `updated_at` (stamped at
    * open, not per append) is older than the coarse cutoff.
    * @internal For testing only
    */
   insertChunkAt(streamId: string, body: string, ageMs: number): void {
     this.ops.importChunk(streamId, body, Date.now() - ageMs);
-  }
-}
-
-/**
- * The buffer-cleanup alarm body: sweep aged stream buffers, then re-arm only
- * while rows remain so a fully-swept DO stops waking itself. `rearm` schedules
- * the next sweep — it MUST schedule a non-idempotent alarm, because this runs
- * INSIDE the currently-executing one-shot schedule row, which `alarm()` deletes
- * only after it returns; an idempotent reschedule would dedup onto that row and
- * be deleted with it, so the re-arm would silently never fire and buffers that
- * survived this sweep (e.g. a younger turn) would go uncollected. A fresh
- * delayed row survives the deletion. Shared by `AIChatAgent` and `Think`.
- *
- * `@internal`
- */
-export async function cleanupStreamBuffers(
-  stream: Pick<ResumableStream, "cleanup">,
-  rearm: () => Promise<void>
-): Promise<void> {
-  if (stream.cleanup() > 0) {
-    await rearm();
   }
 }

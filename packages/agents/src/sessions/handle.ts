@@ -245,16 +245,17 @@ export class Session {
    * machinery that must commit a message inside a caller-owned SQLite
    * transaction — the stream cutover, where the finished message and the
    * discard of its stream rows land together. Bypasses readiness (the
-   * caller owns startup ordering) and defers the change-feed dispatch: call
-   * the returned `notify()` after the transaction commits, or subscribers
-   * (the host's message mirror) never hear about the write. Will break
-   * without notice; never use from application code.
+   * caller owns startup ordering) and defers everything that follows a
+   * write — the change-feed dispatch and auto-compaction: call the returned
+   * `after()` once the transaction commits, or subscribers (the host's
+   * message mirror) never hear about the write. Will break without notice;
+   * never use from application code.
    */
   __DO_NOT_USE_WILL_BREAK__sync(): {
     upsert(
       message: SessionMessage,
       options?: AppendOptions
-    ): { result: AppendResult; notify: () => Promise<void> };
+    ): { result: AppendResult; after: () => Promise<void> };
   } {
     return {
       upsert: (message, options = {}) => {
@@ -268,14 +269,16 @@ export class Session {
           );
           return {
             result,
-            notify: () =>
-              this.#core.notify({
+            after: async () => {
+              await this.#core.notify({
                 type: "append",
                 sessionId: this.sessionId,
                 message: result.message,
                 parentId: options.parentId,
                 inserted: result.inserted
-              })
+              });
+              if (result.inserted) await this.#maybeAutoCompact();
+            }
           };
         }
         const outcome = this.#core.update(
@@ -285,7 +288,7 @@ export class Session {
         );
         return {
           result: { inserted: false, message: prepared.message },
-          notify: () =>
+          after: () =>
             outcome === "updated"
               ? this.#core.notify({
                   type: "update",

@@ -48,9 +48,7 @@ export {
 
 export {
   ResumableStream,
-  cleanupStreamBuffers,
   createChatStreams,
-  STREAM_CLEANUP_DELAY_SECONDS,
   type SqlTaggedTemplate
 } from "./resumable-stream";
 export {

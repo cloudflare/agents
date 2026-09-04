@@ -7841,11 +7841,9 @@ export class ThinkRecoveryTestAgent extends Think {
     )._startResumableStream(requestId);
   }
 
-  /** Invoke the alarm-driven cleanup callback directly. */
-  async runStreamCleanupForTest(): Promise<void> {
-    await (
-      this as unknown as { _cleanupStreamBuffers(): Promise<void> }
-    )._cleanupStreamBuffers();
+  /** Reclaim leftover streams now, as the next stream start does. */
+  async runStreamCleanupForTest(nowMs?: number): Promise<number> {
+    return this._resumableStream.reclaim(nowMs);
   }
 
   /** Finish a stream via the cleanup-arming wrapper (mirrors a real turn end). */
@@ -7853,43 +7851,6 @@ export class ThinkRecoveryTestAgent extends Think {
     (
       this as unknown as { _completeResumableStream(id: string): void }
     )._completeResumableStream(streamId);
-  }
-
-  /** Arm the cleanup alarm without finishing a stream (leaves no new buffer). */
-  async armStreamCleanupForTest(): Promise<void> {
-    await (
-      this as unknown as { _ensureStreamCleanupScheduled(): Promise<void> }
-    )._ensureStreamCleanupScheduled();
-  }
-
-  /**
-   * The delay (seconds) of the pending cleanup schedule, or null if none.
-   * Locks the arming interval (STREAM_CLEANUP_DELAY_SECONDS) so a regression
-   * that lengthens it back toward the old 24h leak window is caught.
-   */
-  async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
-    const rows = this.sql<{ delayInSeconds: number | null }>`
-      SELECT json_extract(payload, '$.delayInSeconds') AS delayInSeconds
-      FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
-      LIMIT 1
-    `;
-    return rows[0]?.delayInSeconds ?? null;
-  }
-
-  /**
-   * Backdate any pending cleanup schedule so it is due, then run the REAL
-   * `alarm()` handler. This exercises the production path where `alarm()`
-   * deletes the fired one-shot row after the callback returns — so a re-arm
-   * must create a fresh row to survive (the idempotent-reschedule footgun).
-   */
-  async fireDueCleanupAlarmForTest(): Promise<void> {
-    this.sql`
-      UPDATE cf_agents_jobs
-      SET time = ${Date.now() - 1_000}
-      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
-    `;
-    await this.alarm();
   }
 
   async insertInterruptedFiber(
