@@ -300,3 +300,7 @@ export type {
   SaveMessagesOptions,
   SaveMessagesResult
 } from "./lifecycle";
+export {
+  truncateOlderMessages,
+  type TruncateOptions
+} from "./truncate-older-messages";

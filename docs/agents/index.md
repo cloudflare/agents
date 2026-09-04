@@ -81,7 +81,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Models (Experimental)](./models.md) - `createAI` — one AI SDK provider for Workers AI and third-party catalog models, same string space
 - [Models for pi-ai (Experimental)](./models-pi-ai.md) - the same `createAI` for pi-ai, pi-agent-core and Flue
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
-- [Sessions (Experimental)](./sessions.md) - Persistent conversation storage with tree-structured messages, context blocks, compaction, and search
+- [Sessions (Experimental)](./sessions.md) - Durable message trees, streamed history, compaction, search, and lossless attachment offload
+- [Context (Experimental)](./context.md) - System-prompt blocks, frozen prompts, writable/searchable/loadable providers, and their tools
 - [Workspace (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) - Durable virtual filesystem backed by SQLite + R2
 - [Codemode (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/agents/codemode.md) - LLM-generated executable code for tool orchestration
 - [Client Tools Continuation](./client-tools-continuation.md) - Handling tool calls across client/server
