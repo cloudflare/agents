@@ -1,0 +1,28 @@
+{
+  "name": "@cloudflare/agents-next-models-example",
+  "description": "Next: one createAI per framework (AI SDK and pi-ai) over Workers AI and third-party catalog models, gateway as an option",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.0",
+    "@ai-sdk/provider": "^4.0.0",
+    "@earendil-works/pi-agent-core": "^0.80.2",
+    "@earendil-works/pi-ai": "^0.80.2",
+    "agents": "*",
+    "ai": "^7.0.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.115.0"
+  }
+}

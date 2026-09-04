@@ -78,7 +78,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Chat & Fiber Recovery](./chat-agents.md#stream-recovery) - Recover LLM turns after Durable Object eviction
 - [Agent Tools](./agent-tools.md) - Run chat-capable sub-agents as tools with streaming child timelines
 - [Server-Driven Messages](./server-driven-messages.md) - Autonomous agent workflows: scheduled follow-ups, queue processing, webhooks, chained reasoning
-- TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
+- [Models (Experimental)](./models.md) - `createAI` — one AI SDK provider for Workers AI and third-party catalog models, same string space
+- [Models for pi-ai (Experimental)](./models-pi-ai.md) - the same `createAI` for pi-ai, pi-agent-core and Flue
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
 - [Sessions (Experimental)](./sessions.md) - Durable message trees, streamed history, compaction, search, and lossless attachment offload
 - [Context (Experimental)](./context.md) - System-prompt blocks, frozen prompts, writable/searchable/loadable providers, and their tools

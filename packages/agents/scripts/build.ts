@@ -22,6 +22,8 @@ const entries = [
   "src/mcp/client/x402.ts",
   "src/observability/index.ts",
   "src/observability/ai/index.ts",
+  "src/models/ai-sdk/index.ts",
+  "src/models/pi-ai/index.ts",
   "src/schedules/index.ts",
   "src/schedules/parser.ts",
   "src/tasks/index.ts",

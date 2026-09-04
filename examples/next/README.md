@@ -15,6 +15,7 @@ lands.
 | [`mcp-client`](./mcp-client)         | Available | `MCPClientManager` installed as a reusable lifecycle capability                                                      |
 | [`chats`](./chats)                   | This PR   | One DO per chat plus a per-user push-based index, the recommended many-chats pattern                                 |
 | [`dynamic-agents`](./dynamic-agents) | This PR   | A supervisor runs user-submitted code as facets: isolated storage, supervised abort, code upgrades over stable state |
+| [`models`](./models)                 | This PR   | One `createAI` per framework (AI SDK and pi-ai): `@cf/` ids for Workers AI, vendor models routed through AI Gateway  |
 
 Each example is an independent workspace package and should stay focused on one
 capability. Once the APIs are stable, move the examples into the main examples
