@@ -73,10 +73,13 @@ export interface StreamWriter {
   /** Durably append one chunk and wake live readers. Returns its `seq`. */
   append(chunk: StreamJson): number;
 
-  /** Settle the stream as completed. No-op if already terminal. */
+  /**
+   * Settle the stream as completed. No-op if already terminal or deleted:
+   * `options.commit` runs only when this call ends the stream.
+   */
   close(options?: StreamSettleOptions): void;
 
-  /** Settle the stream as errored. No-op if already terminal. */
+  /** Settle the stream as errored. Same no-op contract as {@link close}. */
   error(reason?: string, options?: StreamSettleOptions): void;
 }
 
@@ -87,6 +90,10 @@ export interface StreamWriter {
  * stream or the finished message, never neither. `commit` must not await
  * and must not throw for a reason it wants ignored: a throw rolls the
  * settle back and leaves the stream live.
+ *
+ * Settlement stays idempotent: on a stream already terminal or deleted,
+ * `commit` does not run and nothing is discarded. Events and reader wakeups
+ * fire after the transaction commits, never for a rolled-back cutover.
  *
  * @experimental The API surface may change before stabilizing.
  */

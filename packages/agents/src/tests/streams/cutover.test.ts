@@ -3,6 +3,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { CutoverHarnessObject } from "../capabilities/streams";
 import type { StreamChunk } from "../../streams";
+import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 
 /**
  * The cutover: temporary stream blocks → session message → delete the
@@ -136,5 +137,58 @@ describe("stream → session cutover", () => {
         ][0].n
       ).toBe(0);
     });
+  });
+
+  it("a repeated cutover is a no-op: commit does not run again", async () => {
+    const stub = env.CutoverHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {
+      await instance.lifecycle.start();
+      const stream = await instance.streams.open("turn-3");
+      stream.append("a");
+      let commits = 0;
+      const commit = () => {
+        commits++;
+      };
+      stream.close({ commit });
+      stream.close({ commit, discard: true });
+      stream.error("late", { commit, discard: true });
+      expect(commits).toBe(1);
+      // The repeat's discard did not run either: the settled rows remain.
+      expect((await instance.streams.status("turn-3"))?.state).toBe(
+        "completed"
+      );
+      await instance.streams.delete("turn-3");
+      stream.close({ commit, discard: true });
+      expect(commits).toBe(1);
+    });
+  });
+
+  it("a rolled-back cutover emits no terminal event", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.CutoverHarnessObject.getByName(name);
+    const capture = captureDiagnosticsEvents("agents:stream", name);
+    try {
+      await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {
+        await instance.lifecycle.start();
+        const stream = await instance.streams.open("turn-4");
+        stream.append("a");
+        expect(() =>
+          stream.close({
+            commit: () => {
+              throw new Error("persist failed");
+            },
+            discard: true
+          })
+        ).toThrow("persist failed");
+        stream.close({ commit: () => {}, discard: true });
+      });
+      expect(capture.events.map((event) => event.type)).toEqual([
+        "stream:opened",
+        "stream:closed",
+        "stream:deleted"
+      ]);
+    } finally {
+      capture.stop();
+    }
   });
 });

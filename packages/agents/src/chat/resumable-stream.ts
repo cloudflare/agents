@@ -400,10 +400,14 @@ export class ResumableStream {
     options: { discard?: boolean } = {}
   ) {
     this.flushBuffer();
-    this.ops.settle(streamId, "completed", null, {
+    const settled = this.ops.settle(streamId, "completed", null, {
       commit: persist,
       discard: options.discard ?? true
     });
+    // The stream was settled (or deleted) by another path first, so the
+    // settle was a no-op and `persist` did not run: the message must still
+    // land, just not atomically with a settlement that already happened.
+    if (!settled) persist();
     if (this._pendingCutover === streamId) this._pendingCutover = null;
     this._clearActive();
   }

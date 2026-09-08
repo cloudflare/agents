@@ -45,6 +45,8 @@ const CURRENT_STREAM_SCHEMA_VERSION = 2;
  * that a replay page parses one block at a time.
  */
 const BLOCK_MAX_CHARS = 256 * 1024;
+/** Rows read per page while folding one stream's v1 chunk rows into blocks. */
+const LEGACY_FOLD_PAGE_ROWS = 500;
 
 /** Default ceiling for one serialized chunk (1 MiB). */
 export const DEFAULT_MAX_CHUNK_BYTES = 1_048_576;
@@ -92,14 +94,16 @@ export interface StreamsSyncInternal {
   /**
    * Idempotent settlement with events and reader wakeup. With `options`,
    * the settle, the caller's `commit` writes and the log discard run in
-   * one SQLite transaction (see {@link StreamSettleOptions}).
+   * one SQLite transaction (see {@link StreamSettleOptions}). Returns
+   * whether the stream transitioned; on a repeat or a deleted stream the
+   * `commit` callback does not run.
    */
   settle(
     streamId: string,
     state: "completed" | "errored",
     reason: string | null,
     options?: StreamSettleOptions
-  ): void;
+  ): boolean;
   /** Delete a stream and its chunks regardless of state. */
   deleteUnchecked(streamId: string): void;
   /** Delete many streams and their chunks regardless of state, silently. */
@@ -161,6 +165,12 @@ export class Streams extends LifecycleCapability {
   readonly #maxChunkBytes: number;
   /** Wakeup callbacks for readers tailing a live stream, per stream. */
   readonly #wakeups = new Map<string, Set<() => void>>();
+  /**
+   * Whether the schema v1 `cf_agents_stream_chunks` table still exists.
+   * Its rows are folded into blocks one stream at a time, on first touch
+   * (see {@link #foldLegacyChunks}); the table is dropped once empty.
+   */
+  #legacyChunkTable = false;
 
   constructor(options: StreamsOptions = {}) {
     super("streams");
@@ -175,12 +185,12 @@ export class Streams extends LifecycleCapability {
     const version = (await storage.get<number>(STREAM_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_STREAM_SCHEMA_VERSION) {
       this.#ensureTables();
-      if (version >= 1) this.#migrateChunkRowsToBlocks();
       await storage.put(
         STREAM_SCHEMA_VERSION_KEY,
         CURRENT_STREAM_SCHEMA_VERSION
       );
     }
+    if (version >= 1) this.#legacyChunkTable = this.#hasLegacyChunkTable();
   }
 
   // ── Producer surface ─────────────────────────────────────────────────────
@@ -558,6 +568,7 @@ export class Streams extends LifecycleCapability {
     fromSeq: number,
     limit: number
   ): StreamChunkRow[] {
+    this.#foldLegacyChunks(streamId);
     const rows: StreamChunkRow[] = [];
     let block = -1;
     while (rows.length < limit) {
@@ -595,46 +606,68 @@ export class Streams extends LifecycleCapability {
 
   /** Delete a stream's blocks and row. Returns rows removed from the row table. */
   #deleteRows(streamId: string): number {
+    if (this.#legacyChunkTable) {
+      // Unfolded v1 rows die with the stream; no point folding them first.
+      this.#sql`DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}`;
+      this.#dropLegacyChunkTableIfEmpty();
+    }
     this.#sql`DELETE FROM cf_agents_stream_blocks WHERE stream_id = ${streamId}`;
     return this.#sqlWrite("DELETE FROM cf_agents_streams WHERE stream_id = ?", [
       streamId
     ]);
   }
 
+  /**
+   * @returns Whether this call transitioned the stream (a repeat, or a
+   * deleted stream, is a no-op and returns false: the caller's `commit`
+   * does not run and nothing is discarded).
+   */
   #settle(
     streamId: string,
     state: Extract<StreamState, "completed" | "errored">,
     reason: string | null,
     options?: StreamSettleOptions
-  ): void {
+  ): boolean {
     if (!options?.commit && !options?.discard) {
-      this.#settleRow(streamId, state, reason);
-      return;
+      const settled = this.#settleRow(streamId, state, reason);
+      if (settled) this.#emitSettled(streamId, state, reason);
+      // Idempotent for recovery callers; readers re-poll and observe the
+      // terminal state either way.
+      this.#wake(streamId);
+      return settled;
     }
     // The cutover: settle, the caller's writes (a session message), and
     // the discard of this stream's rows commit together or not at all. A
     // throwing `commit` rolls everything back and leaves the stream live.
+    // Events and wakeups are side effects outside SQLite, so they fire only
+    // once the transaction has returned.
+    let settled = false;
+    let deleted = false;
     this.lifecycle.storage.transactionSync(() => {
-      this.#settleRow(streamId, state, reason);
+      settled = this.#settleRow(streamId, state, reason);
+      if (!settled) return;
       options.commit?.();
-      if (options.discard) {
-        const removed = this.#deleteRows(streamId);
-        if (removed > 0) this.#emit("stream:deleted", { streamId });
-      }
+      if (options.discard) deleted = this.#deleteRows(streamId) > 0;
     });
+    if (settled) this.#emitSettled(streamId, state, reason);
+    if (deleted) this.#emit("stream:deleted", { streamId });
     this.#wake(streamId);
+    return settled;
   }
 
+  /**
+   * The one guarded UPDATE that ends a stream. Settlement is the moment
+   * the stream row becomes exact at rest: the same write stamps the final
+   * cursor, read from the chunk log's tail in the same synchronous block.
+   * While the stream was live, appends wrote only the chunk log — the
+   * row's chunk_count and updated_at were not maintained per append.
+   * @returns Whether the row transitioned from `streaming`.
+   */
   #settleRow(
     streamId: string,
     state: Extract<StreamState, "completed" | "errored">,
     reason: string | null
-  ): void {
-    // Settlement is the moment the stream row becomes exact at rest: the
-    // one UPDATE that ends the stream also stamps the final cursor, read
-    // from the chunk log's tail in the same synchronous block. While the
-    // stream was live, appends wrote only the chunk log — the row's
-    // chunk_count and updated_at were not maintained per append.
+  ): boolean {
     const finalCursor = this.#tail(streamId).nextSeq;
     const settled = this.#sqlWrite(
       `UPDATE cf_agents_streams
@@ -643,15 +676,18 @@ export class Streams extends LifecycleCapability {
        WHERE stream_id = ? AND state = 'streaming'`,
       [state, reason, Date.now(), Date.now(), finalCursor, streamId]
     );
-    if (settled > 0) {
-      this.#emit(state === "completed" ? "stream:closed" : "stream:errored", {
-        streamId,
-        ...(reason !== null ? { reason } : {})
-      });
-    }
-    // Idempotent for recovery callers; readers re-poll and observe the
-    // terminal state either way.
-    this.#wake(streamId);
+    return settled > 0;
+  }
+
+  #emitSettled(
+    streamId: string,
+    state: Extract<StreamState, "completed" | "errored">,
+    reason: string | null
+  ): void {
+    this.#emit(state === "completed" ? "stream:closed" : "stream:errored", {
+      streamId,
+      ...(reason !== null ? { reason } : {})
+    });
   }
 
   // ── Live fanout ──────────────────────────────────────────────────────────
@@ -786,6 +822,7 @@ export class Streams extends LifecycleCapability {
 
   /** The open block: one PK-served read (`ORDER BY block DESC LIMIT 1`). */
   #blockTail(streamId: string) {
+    this.#foldLegacyChunks(streamId);
     return this.#sql<{
       block: number;
       seq_to: number;
@@ -801,31 +838,92 @@ export class Streams extends LifecycleCapability {
   }
 
   /**
-   * Schema v1 → v2: fold the per-chunk `cf_agents_stream_chunks` rows into
-   * blocks, then drop the table. Chat retains stream rows for minutes, so
-   * this touches a handful of streams at most.
+   * Schema v1 → v2 is lazy: the per-chunk `cf_agents_stream_chunks` rows of
+   * ONE stream are folded into blocks the first time that stream is
+   * touched (a tail read before an append or settle, a replay, a delete).
+   * Startup never pays for the whole legacy log, so an object that let a
+   * large log accumulate still boots within its memory budget; each fold
+   * pages through its stream's rows and writes whole blocks, not one row
+   * per chunk. The table is dropped once the last stream's rows are gone.
    */
-  #migrateChunkRowsToBlocks(): void {
-    const legacy = this.#sql<{ name: string }>`
-      SELECT name FROM sqlite_master
-      WHERE type = 'table' AND name = 'cf_agents_stream_chunks'
-    `;
-    if (legacy.length === 0) return;
+  #foldLegacyChunks(streamId: string): void {
+    if (!this.#legacyChunkTable) return;
     this.lifecycle.storage.transactionSync(() => {
-      const rows = this.#sql<{
-        stream_id: string;
-        seq: number;
-        chunk: string;
-        created_at: number;
-      }>`
-        SELECT stream_id, seq, chunk, created_at FROM cf_agents_stream_chunks
-        ORDER BY stream_id, seq ASC
-      `;
-      for (const row of rows) {
-        this.#writeChunk(row.stream_id, row.chunk, row.created_at);
+      const tail = this.#sql<{ block: number; seq_to: number }>`
+        SELECT block, seq_to FROM cf_agents_stream_blocks
+        WHERE stream_id = ${streamId}
+        ORDER BY block DESC
+        LIMIT 1
+      `[0];
+      let block = (tail?.block ?? -1) + 1;
+      let seq = tail?.seq_to ?? 0;
+      let body = "";
+      let seqFrom = seq;
+      let createdAt = 0;
+      let updatedAt = 0;
+      const flush = () => {
+        if (body === "") return;
+        this.#sql`
+          INSERT INTO cf_agents_stream_blocks
+            (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+          VALUES
+            (${streamId}, ${block}, ${seqFrom}, ${seq}, ${body}, ${createdAt}, ${updatedAt})
+        `;
+        block += 1;
+        body = "";
+        seqFrom = seq;
+      };
+      let after = -1;
+      for (;;) {
+        const rows = this.#sql<{
+          seq: number;
+          chunk: string;
+          created_at: number;
+        }>`
+          SELECT seq, chunk, created_at FROM cf_agents_stream_chunks
+          WHERE stream_id = ${streamId} AND seq > ${after}
+          ORDER BY seq ASC
+          LIMIT ${LEGACY_FOLD_PAGE_ROWS}
+        `;
+        for (const row of rows) {
+          if (
+            body !== "" &&
+            body.length + row.chunk.length + 1 > BLOCK_MAX_CHARS
+          ) {
+            flush();
+          }
+          if (body === "") createdAt = row.created_at;
+          body = body === "" ? row.chunk : `${body},${row.chunk}`;
+          updatedAt = row.created_at;
+          seq += 1;
+          after = row.seq;
+        }
+        if (rows.length < LEGACY_FOLD_PAGE_ROWS) break;
       }
-      this.#sqlWrite("DROP TABLE cf_agents_stream_chunks", []);
+      flush();
+      if (after >= 0) {
+        this.#sql`DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}`;
+      }
+      this.#dropLegacyChunkTableIfEmpty();
     });
+  }
+
+  #hasLegacyChunkTable(): boolean {
+    return (
+      this.#sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_agents_stream_chunks'
+      `.length > 0
+    );
+  }
+
+  #dropLegacyChunkTableIfEmpty(): void {
+    const remaining = this.#sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM (SELECT 1 FROM cf_agents_stream_chunks LIMIT 1)
+    `[0].n;
+    if (remaining > 0) return;
+    this.#sqlWrite("DROP TABLE cf_agents_stream_chunks", []);
+    this.#legacyChunkTable = false;
   }
 
   #rowToStatus(row: StreamRow): StreamStatus {
