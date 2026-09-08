@@ -321,6 +321,83 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("streams history newest first and stops hydrating when the consumer stops", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      for (let i = 0; i < 6; i++) {
+        await session.appendMessage(text(`n${i}`, `body ${i}`));
+      }
+      // Compaction overlays collapse the same span in either direction.
+      await session.addCompaction("summary of n1..n2", "n1", "n2");
+
+      const forward: string[] = [];
+      for await (const message of session.history()) forward.push(message.id);
+      const backward: string[] = [];
+      for await (const message of session.history({ newestFirst: true })) {
+        backward.push(message.id);
+      }
+      expect(backward).toEqual([...forward].reverse());
+      expect(backward.slice(0, 3)).toEqual(["n5", "n4", "n3"]);
+      expect(backward.at(-1)).toBe("n0");
+      expect(backward.find((id) => id.startsWith("compaction_"))).toBeDefined();
+
+      // Breaking out after the first message returns the leaf alone.
+      let first: SessionMessage | undefined;
+      for await (const message of session.history({ newestFirst: true })) {
+        first = message;
+        break;
+      }
+      expect(first?.id).toBe("n5");
+
+      // A branch leaf reads that branch, newest first.
+      await session.appendMessage(text("branch", "alt"), { parentId: "n2" });
+      const branch: string[] = [];
+      for await (const message of session.history({
+        leafId: "branch",
+        newestFirst: true
+      })) {
+        branch.push(message.id);
+      }
+      expect(branch[0]).toBe("branch");
+      expect(branch.at(-1)).toBe("n0");
+    });
+  });
+
+  it("reports imports and direct compactions on the change feed", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      const events: SessionChangeEvent[] = [];
+      instance.sessions.subscribe((event) => {
+        events.push(event);
+      });
+      await session.appendMessage(text("e0", "first"));
+      await session.appendMessage(text("e1", "second"));
+      await session.importMessage(text("imported", "moved in"), {
+        parentId: "e1",
+        createdAt: 1
+      });
+      await session.addCompaction("first two", "e0", "e1");
+
+      expect(events.map((event) => event.type)).toEqual([
+        "append",
+        "append",
+        "import",
+        "compaction"
+      ]);
+      const imported = events[2];
+      expect(imported.type === "import" && imported.message.id).toBe(
+        "imported"
+      );
+      expect(imported.type === "import" && imported.parentId).toBe("e1");
+      const compaction = events[3];
+      expect(
+        compaction.type === "compaction" && compaction.compaction.summary
+      ).toBe("first two");
+    });
+  });
+
   it("budgets recent history with a floor and honest truncation", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
@@ -772,7 +849,7 @@ describe("Sessions capability", () => {
       });
     });
 
-    it("is idempotent on message ids and dispatches no change event", async () => {
+    it("is idempotent on message ids and reports only the row it wrote", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
         const events: SessionChangeEvent[] = [];
@@ -791,8 +868,10 @@ describe("Sessions capability", () => {
 
         expect((await session.getMessage("i1"))?.parts[0].text).toBe("first");
         expect((await session.getHistory()).map((m) => m.id)).toEqual(["i1"]);
-        // An import is a migration, not a turn: nothing mirrors it.
-        expect(events).toEqual([]);
+        // An import is a migration, not a turn: a host cache marks itself
+        // stale on the `import` event rather than mirroring the row, and the
+        // ignored duplicate reports nothing at all.
+        expect(events.map((event) => event.type)).toEqual(["import"]);
       });
     });
 

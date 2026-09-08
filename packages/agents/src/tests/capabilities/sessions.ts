@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { setLifecycleEventSink } from "../../lifecycle/durable-object-lifecycle";
 import { Sessions } from "../../sessions";
+import type { SessionMessage, SessionMessagePart } from "../../sessions";
 
 /** One capability telemetry event recorded by a harness object. */
 export type RecordedEvent = { type: string; payload: Record<string, unknown> };
@@ -16,7 +17,7 @@ export type RecordedEvent = { type: string; payload: Record<string, unknown> };
  * taken at the end of the window, after every caller has drained its cursor.
  */
 class BilledRows {
-  #cursors: { readonly rowsWritten: number }[] = [];
+  #cursors: { readonly rowsWritten: number; readonly rowsRead: number }[] = [];
   #active = false;
 
   constructor(sql: SqlStorage) {
@@ -38,11 +39,20 @@ class BilledRows {
   }
 
   stop(): number {
+    return this.stopAll().rowsWritten;
+  }
+
+  /** Both billed counters over the window; reads are the unit a lookup pays. */
+  stopAll(): { rowsWritten: number; rowsRead: number } {
     this.#active = false;
-    let total = 0;
-    for (const cursor of this.#cursors) total += cursor.rowsWritten;
+    let rowsWritten = 0;
+    let rowsRead = 0;
+    for (const cursor of this.#cursors) {
+      rowsWritten += cursor.rowsWritten;
+      rowsRead += cursor.rowsRead;
+    }
     this.#cursors = [];
-    return total;
+    return { rowsWritten, rowsRead };
   }
 }
 
@@ -406,6 +416,71 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
     this.#billed.start();
     await session.deleteMessages(ids.slice(0, -1));
     return { rowsWritten: this.#billed.stop() };
+  }
+
+  /**
+   * Rows read to find the message that owns a tool call: a full `getHistory()`
+   * against a newest-first `history()` that breaks at the first match. The
+   * owner sits `ownerFromLeaf` messages before the leaf (default three, as an
+   * approved tool's result landing in a continuation does). With
+   * `compactedPrefix` the first that many rows sit under one overlay.
+   */
+  async benchOwnerLookup(
+    count: number,
+    options: { ownerFromLeaf?: number; compactedPrefix?: number } = {}
+  ): Promise<{
+    fullRead: number;
+    newestFirst: number;
+    found: string | null;
+  }> {
+    await this.lifecycle.start();
+    const session = this.sessions.session();
+    const ownerId = `bench-${count - (options.ownerFromLeaf ?? 3)}`;
+    for (let i = 0; i < count; i++) {
+      const id = `bench-${i}`;
+      await session.appendMessage({
+        id,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts:
+          id === ownerId
+            ? [
+                {
+                  type: "tool-lookup",
+                  toolCallId: "tc-owner",
+                  state: "input-available",
+                  input: {}
+                } as SessionMessagePart
+              ]
+            : [{ type: "text", text: `${i}:${"x".repeat(120)}` }]
+      });
+    }
+    if (options.compactedPrefix !== undefined) {
+      await session.addCompaction(
+        "compacted prefix",
+        "bench-0",
+        `bench-${options.compactedPrefix - 1}`
+      );
+    }
+    const owns = (message: SessionMessage) =>
+      message.parts.some(
+        (part) => (part as { toolCallId?: string }).toolCallId === "tc-owner"
+      );
+
+    this.#billed.start();
+    const all = await session.getHistory();
+    all.find(owns);
+    const fullRead = this.#billed.stopAll().rowsRead;
+
+    this.#billed.start();
+    let found: string | null = null;
+    for await (const message of session.history({ newestFirst: true })) {
+      if (owns(message)) {
+        found = message.id;
+        break;
+      }
+    }
+    const newestFirst = this.#billed.stopAll().rowsRead;
+    return { fullRead, newestFirst, found };
   }
 
   /** Billed rows for one append carrying a payload of `payloadBytes`. */

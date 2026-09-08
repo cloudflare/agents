@@ -252,6 +252,49 @@ async function walkAndEvict(
   return changed ? result : value;
 }
 
+/**
+ * Whether a pass over `message` could evict anything: a file part or a tool
+ * output holding a `data:` URL at least `minPartBytes` long. Decodes nothing —
+ * this is the in-memory gate that decides whether a pass is worth scheduling,
+ * so a decoded payload that turns out smaller than the threshold is merely a
+ * pass that changes nothing.
+ */
+export function hasEvictableMedia(
+  message: UIMessage,
+  minPartBytes: number
+): boolean {
+  const isCandidate = (value: unknown): boolean =>
+    typeof value === "string" &&
+    value.length >= minPartBytes &&
+    value.startsWith("data:");
+  const walk = (value: unknown, depth: number): boolean => {
+    if (isCandidate(value)) return true;
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      depth >= MAX_WALK_DEPTH
+    ) {
+      return false;
+    }
+    const entries = Array.isArray(value) ? value : Object.values(value);
+    return entries.some((entry) => walk(entry, depth + 1));
+  };
+  for (const part of message.parts) {
+    if (part.type === "file" && "url" in part) {
+      if (isCandidate((part as { url: unknown }).url)) return true;
+      continue;
+    }
+    if (
+      (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
+      "output" in part &&
+      walk((part as { output?: unknown }).output, 0)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Decode a `data:` URL into raw bytes. Returns null when it is malformed. */
 export function decodeDataUrl(
   url: string

@@ -8483,6 +8483,57 @@ export class ThinkWindowedHydrationAgent extends Think {
     return (await this.syncMessagesFromStorage()).length;
   }
 
+  /**
+   * A tool result whose owner has fallen outside the hydration window. The
+   * live cache cannot name the row, so the apply must fall back to storage —
+   * and still land: the row is updated even though `this.messages` never
+   * held it.
+   */
+  async applyToolResultOutsideWindowForTest(): Promise<{
+    inCache: boolean;
+    cacheCoversPath: boolean;
+    storedState: string | undefined;
+  }> {
+    await this.session.appendMessage({
+      id: "old-owner",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-old",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "late" }
+        }
+      ]
+    } as unknown as UIMessage);
+    // Four 30KB messages push the owner past the 64KB window.
+    for (let i = 0; i < 4; i++) {
+      await this.session.appendMessage({
+        id: `after-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `after ${i} ${"y".repeat(30_000)}` }]
+      });
+    }
+    await this.syncMessagesFromStorage();
+    const inCache = this.messages.some((m) => m.id === "old-owner");
+    const internal = this as unknown as {
+      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _cacheCoversActivePath: boolean;
+    };
+    await internal._applyToolResult("tc-old", "late result");
+    const stored = await this.session.getMessage("old-owner");
+    const part = stored?.parts.find(
+      (candidate) =>
+        (candidate as { toolCallId?: string }).toolCallId === "tc-old"
+    ) as { state?: string } | undefined;
+    return {
+      inCache,
+      cacheCoversPath: internal._cacheCoversActivePath,
+      storedState: part?.state
+    };
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);

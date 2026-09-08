@@ -1,0 +1,5 @@
+---
+"@cloudflare/think": patch
+---
+
+perf(think): stop re-reading the transcript during a turn. A tool update (client result, approval, cross-message result, execution outcome) used to read the whole persisted history to find its one target message; it now resolves the owner from the in-flight accumulator and the live cache and reads that row alone, walking storage newest-first only when the cache does not cover the active path. A chat request no longer reads the path twice and upserts every echoed message: the cache is the server transcript, unchanged messages are skipped before Sessions sees them, and only what changed is written. The cache re-windows itself once appends carry it past `hydrationByteBudget`, and marks itself stale on Sessions `import` and `compaction` events. Media eviction is scheduled from an in-memory check on each linear append instead of a stored-path scan after every cache refresh, `think_config` rewrites of an unchanged request body or client-tool schemas are skipped, and the agent-tool child-run DDL runs once per isolate.

@@ -3,6 +3,7 @@ import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
 import type { MediaEvictionConfig } from "../think";
+import { hasEvictableMedia } from "../media-eviction";
 
 /**
  * Media eviction as a CONTEXT-WINDOW technique (#1710).
@@ -145,8 +146,10 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
 
   it("evicts a payload larger than one row, leaving the bytes in one place", async () => {
     const agent = await evictionAgent(uniqueName("evict-split"));
-    await agent.setMediaEvictionForTest(AGED_POLICY);
+    // Seed before enabling the policy: an append with the policy on would
+    // schedule the pass itself, and this test drives the pass by hand.
     await agent.seedMediaHistoryForTest("m", SPLIT_MEDIA_CHARS);
+    await agent.setMediaEvictionForTest(AGED_POLICY);
 
     // The message is split across continuation rows, and the part is still
     // the inline `data:` URL eviction decodes.
@@ -240,6 +243,27 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     ).toBeNull();
   });
 
+  it("a linear append schedules the pass without a cache refresh", async () => {
+    // The pass used to be armed only by a full cache refresh, which a chat
+    // turn no longer performs. An append is what ages older messages, so
+    // the in-memory gate runs there: once the sixth seeded message lands,
+    // `p0`/`p1` are aged and still carry payloads, and the pass follows on
+    // its own — no resync, no explicit run.
+    const agent = await evictionAgent(uniqueName("evict-on-append"));
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    await agent.seedMediaHistoryForTest("p");
+
+    await vi.waitFor(
+      async () => {
+        for (const id of ["p0", "p1"]) {
+          const message = await agent.getStoredMessageForTest(id);
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
   it("a windowed hydration read schedules the pass", async () => {
     const agent = (await getAgentByName(
       env.ThinkMediaEvictionAutoAgent,
@@ -259,5 +283,54 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
       },
       { timeout: 10_000, interval: 100 }
     );
+  });
+});
+
+describe("hasEvictableMedia — the in-memory gate for scheduling a pass", () => {
+  const png = (bytes: number) => `data:image/png;base64,${"A".repeat(bytes)}`;
+
+  it("sees an inline file payload at or above the threshold", () => {
+    const message = {
+      id: "m",
+      role: "user",
+      parts: [{ type: "file", mediaType: "image/png", url: png(2_000) }]
+    } as unknown as UIMessage;
+    expect(hasEvictableMedia(message, 1_000)).toBe(true);
+    expect(hasEvictableMedia(message, 10_000)).toBe(false);
+  });
+
+  it("sees a payload nested inside a tool output", () => {
+    const message = {
+      id: "m",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-screenshot",
+          toolCallId: "tc",
+          state: "output-available",
+          output: { frames: [{ image: png(5_000) }] }
+        }
+      ]
+    } as unknown as UIMessage;
+    expect(hasEvictableMedia(message, 1_000)).toBe(true);
+  });
+
+  it("ignores text, markers, remote urls and small payloads", () => {
+    const message = {
+      id: "m",
+      role: "assistant",
+      parts: [
+        { type: "text", text: "x".repeat(50_000) },
+        { type: "file", mediaType: "image/png", url: "https://x/y.png" },
+        { type: "file", mediaType: "image/png", url: png(10) },
+        {
+          type: "tool-fetch",
+          toolCallId: "tc",
+          state: "output-available",
+          output: { body: "z".repeat(50_000) }
+        }
+      ]
+    } as unknown as UIMessage;
+    expect(hasEvictableMedia(message, 1_000)).toBe(false);
   });
 });
