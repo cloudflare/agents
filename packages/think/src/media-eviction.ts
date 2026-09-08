@@ -1,64 +1,69 @@
 /**
- * Aged-media eviction (#1710).
+ * Aged-media eviction — a CONTEXT-WINDOW technique owned by Think.
  *
- * Long-lived sessions accumulate inline base64 media — screenshot/image
- * tool results, data-URL file attachments — in the persisted transcript.
- * Read-time truncation hides that content from the model, but it stays in
- * storage forever and is rehydrated on every wake, so the boot footprint
- * grows with the number of images a session ever produced until SQLite's
- * allocator fails with `SQLITE_NOMEM`.
+ * This is deliberately not how Sessions stores a message, and the two must
+ * not be confused:
  *
- * This module rewrites oversized part values in AGED messages (the recent
- * tail is never touched) with small markers, optionally preserving the
- * original bytes as workspace files. Targets:
+ *   - Row chunking is a STORAGE detail. A message too large for one SQLite
+ *     row is split across continuation rows and reassembled on read, byte
+ *     for byte. Invisible to the model and lossless.
+ *   - Media eviction is a CONTEXT decision. Once a screenshot has aged out
+ *     of the recent window, re-sending it on every turn is pure cost, so
+ *     Think removes it from the conversation and leaves a marker naming a
+ *     Workspace file. Visible to the model and lossy on purpose — the agent
+ *     reads the file back with the workspace `read` tool when it actually
+ *     needs the picture again.
  *
- *   - `file` parts whose `url` is a large `data:` URL — the part is
- *     replaced with a text marker;
- *   - large string values nested anywhere inside a tool part's `output` —
- *     the string is replaced in place, preserving the container shape so
- *     tool-specific `toModelOutput` handlers can still replay the result.
+ * The bytes are written to the Workspace RAW (not as a `data:` URL string)
+ * with their real mime type, so `read` recognises `image/*` and puts a real
+ * image back into the model's context.
  *
- * Plain `text` parts are intentionally NOT evicted: they are user-visible
- * prose, and the row-size limit already bounds them at write time.
+ * Evicted values are:
+ *   - `file` parts whose `url` is a large `data:` URL — the part becomes a
+ *     text marker;
+ *   - large `data:` strings nested anywhere inside a tool part's `output`
+ *     (screenshots commonly arrive that way) — the string is replaced in
+ *     place so tool-specific `toModelOutput` handlers still work.
+ *
+ * Plain text parts are never evicted: they are the conversation itself.
  */
 
 import type { UIMessage } from "ai";
 
+/** Nested tool-output walks stop here so hostile output cannot recurse forever. */
+const MAX_WALK_DEPTH = 8;
+
 export interface MediaEvictionConfig {
   /**
    * Messages at the tail of the active path that are never evicted.
-   * Think clamps this to at least the read-time truncation window
-   * (4 messages — the recent span the model replays at full fidelity),
-   * so a misconfigured low value can never strip content the model
-   * still sees.
+   * Think clamps this to at least the read-time window the model replays at
+   * full fidelity, so a misconfigured low value can never strip content the
+   * model still sees.
    * @default 8
    */
   keepRecentMessages?: number;
   /**
-   * Minimum serialized size (in characters; base64 is ASCII so this equals
-   * bytes for media) of a single part value to evict.
+   * Minimum decoded payload size, in bytes, for a value to be evicted.
    * @default 32 * 1024
    */
   minPartBytes?: number;
   /**
-   * Preserve evicted values as workspace files under
-   * `/attachments/evicted/` instead of dropping them. The marker records
-   * the file path.
-   * @default true
-   */
-  externalizeToWorkspace?: boolean;
-  /**
-   * Maximum oversized stored rows processed per pass. Bounds how long a
-   * single pass can take; remaining rows are picked up by later passes.
+   * Maximum stored rows processed per pass. Bounds how long a single pass
+   * can take; remaining rows are picked up by the next pass.
    * @default 64
    */
   maxRowsPerPass?: number;
+  /**
+   * @deprecated Ignored. Evicted bytes are always preserved in the Workspace
+   * under `/attachments/evicted/`; there is no drop-the-bytes mode. Accepted
+   * so existing configurations keep compiling.
+   */
+  externalizeToWorkspace?: boolean;
 }
 
 export interface ResolvedMediaEvictionConfig {
   keepRecentMessages: number;
   minPartBytes: number;
-  externalizeToWorkspace: boolean;
   maxRowsPerPass: number;
 }
 
@@ -70,77 +75,84 @@ export function resolveMediaEvictionConfig(
   return {
     keepRecentMessages: base.keepRecentMessages ?? 8,
     minPartBytes: base.minPartBytes ?? 32 * 1024,
-    externalizeToWorkspace: base.externalizeToWorkspace ?? true,
     maxRowsPerPass: base.maxRowsPerPass ?? 64
   };
 }
 
-/** An oversized value extracted from a message, to be written to the workspace. */
-export interface EvictedBlob {
-  path: string;
-  data: string;
-  mediaType?: string;
-}
-
-export interface EvictMessageResult {
-  message: UIMessage;
-  changed: boolean;
-  /** Individual oversized values evicted. */
-  parts: number;
-  /** Total characters removed from the serialized message. */
-  bytes: number;
-  /** Values to persist before the rewritten row is stored (may be empty). */
-  blobs: EvictedBlob[];
+/**
+ * The exact marker Think has always written. Old and new markers are
+ * byte-identical, so a transcript evicted before and after the Sessions
+ * replatform reads the same and old markers keep resolving.
+ */
+export function evictionMarker(
+  bytes: number,
+  path: string,
+  mediaType?: string
+): string {
+  const media = mediaType ? `${mediaType}, ` : "";
+  return `[evicted ${media}${bytes} bytes; preserved at ${path}]`;
 }
 
 export interface EvictMessageOptions {
+  /** Minimum decoded payload size to evict. */
   minPartBytes: number;
-  /** When false, evicted values are dropped and markers record size only. */
-  externalize: boolean;
-  /** Workspace path for the n-th evicted value of this message. */
-  pathFor: (index: number, extension: string) => string;
+  /**
+   * Persist one payload and return the Workspace path it was written to.
+   * `index` is the 0-based ordinal of the evicted value within the message.
+   */
+  write(
+    index: number,
+    bytes: Uint8Array,
+    mediaType: string | undefined
+  ): Promise<string>;
 }
 
-const MAX_WALK_DEPTH = 8;
+export interface EvictMessageResult {
+  /** Rewritten message, or the original reference when nothing was evicted. */
+  message: UIMessage;
+  changed: boolean;
+  /** Individual values replaced by markers. */
+  parts: number;
+  /** Decoded payload bytes removed from the conversation. */
+  bytes: number;
+}
+
+interface WalkState {
+  options: EvictMessageOptions;
+  index: number;
+  parts: number;
+  bytes: number;
+}
 
 /**
- * Replace oversized media values in a message with markers.
- * Returns a new message — the input is not mutated.
+ * Replace aged oversized media in one message with markers, writing the
+ * bytes to the Workspace first. Returns a new message — the input is never
+ * mutated, and nothing is written when nothing qualifies.
  */
-export function evictLargeMediaFromMessage(
+export async function evictMediaFromMessage(
   message: UIMessage,
   options: EvictMessageOptions
-): EvictMessageResult {
-  const state = {
-    options,
-    parts: 0,
-    bytes: 0,
-    blobs: [] as EvictedBlob[]
-  };
-
+): Promise<EvictMessageResult> {
+  const state: WalkState = { options, index: 0, parts: 0, bytes: 0 };
   let changed = false;
-  const parts = message.parts.map((part) => {
-    // Large data-URL file attachments → text marker.
+  const parts: UIMessage["parts"] = [];
+
+  for (const part of message.parts) {
     if (part.type === "file" && "url" in part) {
-      const url = (part as { url: string }).url;
-      if (
-        typeof url === "string" &&
-        url.startsWith("data:") &&
-        url.length >= options.minPartBytes
-      ) {
+      const marker = await evictUrl(
+        state,
+        (part as { url: string }).url,
+        (part as { mediaType?: string }).mediaType
+      );
+      if (marker !== null) {
         changed = true;
-        const mediaType =
-          (part as { mediaType?: string }).mediaType ?? dataUrlMediaType(url);
-        const path = extractBlob(state, url, mediaType);
-        return {
-          type: "text" as const,
-          text: evictionMarker(url.length, path, mediaType)
-        };
+        parts.push({ type: "text", text: marker });
+        continue;
       }
-      return part;
+      parts.push(part);
+      continue;
     }
 
-    // Large strings nested in tool outputs → marker strings in place.
     if (
       (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
       "output" in part
@@ -148,45 +160,71 @@ export function evictLargeMediaFromMessage(
       const output = (part as { output?: unknown }).output;
       if (output !== undefined) {
         const before = state.parts;
-        const evicted = walkAndEvict(state, output, 0);
+        const rewritten = await walkAndEvict(state, output, 0);
         if (state.parts > before) {
           changed = true;
-          return { ...part, output: evicted };
+          parts.push({ ...part, output: rewritten } as UIMessage["parts"][0]);
+          continue;
         }
       }
     }
 
-    return part;
-  }) as UIMessage["parts"];
+    parts.push(part);
+  }
 
   return {
     message: changed ? { ...message, parts } : message,
     changed,
     parts: state.parts,
-    bytes: state.bytes,
-    blobs: state.blobs
+    bytes: state.bytes
   };
 }
 
-type WalkState = {
-  options: EvictMessageOptions;
-  parts: number;
-  bytes: number;
-  blobs: EvictedBlob[];
-};
+/**
+ * Evict one stored payload locator. Returns its marker, or `null` when the
+ * value is not an evictable payload or is below the size threshold.
+ */
+async function evictUrl(
+  state: WalkState,
+  url: unknown,
+  fallbackMediaType?: string
+): Promise<string | null> {
+  if (typeof url !== "string") return null;
+  const payload = resolvePayload(state, url);
+  if (!payload) return null;
+  const mediaType = payload.mediaType ?? fallbackMediaType;
+  const path = await state.options.write(state.index, payload.bytes, mediaType);
+  state.index++;
+  state.parts++;
+  state.bytes += payload.bytes.byteLength;
+  return evictionMarker(payload.bytes.byteLength, path, mediaType);
+}
 
-function walkAndEvict(
+/**
+ * A stored payload is always an inline `data:` URL now, so eviction decodes
+ * it directly.
+ */
+function resolvePayload(
+  state: WalkState,
+  url: string
+): { bytes: Uint8Array; mediaType?: string } | null {
+  const { minPartBytes } = state.options;
+  if (!url.startsWith("data:")) return null;
+  // A `data:` URL is always larger than its payload, so the cheap string
+  // length rules out small values before any decoding happens.
+  if (url.length < minPartBytes) return null;
+  const decoded = decodeDataUrl(url);
+  if (!decoded || decoded.bytes.byteLength < minPartBytes) return null;
+  return decoded;
+}
+
+async function walkAndEvict(
   state: WalkState,
   value: unknown,
   depth: number
-): unknown {
+): Promise<unknown> {
   if (typeof value === "string") {
-    if (value.length < state.options.minPartBytes) return value;
-    const mediaType = value.startsWith("data:")
-      ? dataUrlMediaType(value)
-      : undefined;
-    const path = extractBlob(state, value, mediaType);
-    return evictionMarker(value.length, path, mediaType);
+    return (await evictUrl(state, value)) ?? value;
   }
 
   if (value === null || typeof value !== "object" || depth >= MAX_WALK_DEPTH) {
@@ -195,59 +233,65 @@ function walkAndEvict(
 
   if (Array.isArray(value)) {
     let changed = false;
-    const result = value.map((item) => {
-      const next = walkAndEvict(state, item, depth + 1);
+    const result: unknown[] = [];
+    for (const item of value) {
+      const next = await walkAndEvict(state, item, depth + 1);
       if (next !== item) changed = true;
-      return next;
-    });
+      result.push(next);
+    }
     return changed ? result : value;
   }
 
   let changed = false;
   const result: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    const next = walkAndEvict(state, entry, depth + 1);
+    const next = await walkAndEvict(state, entry, depth + 1);
     if (next !== entry) changed = true;
     result[key] = next;
   }
   return changed ? result : value;
 }
 
-/** Record an evicted value; returns its workspace path or null when dropped. */
-function extractBlob(
-  state: WalkState,
-  data: string,
-  mediaType: string | undefined
-): string | null {
-  state.parts++;
-  state.bytes += data.length;
-  if (!state.options.externalize) return null;
-  const path = state.options.pathFor(
-    state.blobs.length,
-    extensionFor(mediaType)
-  );
-  state.blobs.push({ path, data, mediaType });
-  return path;
+/** Decode a `data:` URL into raw bytes. Returns null when it is malformed. */
+export function decodeDataUrl(
+  url: string
+): { bytes: Uint8Array; mediaType?: string } | null {
+  const comma = url.indexOf(",");
+  if (comma === -1) return null;
+  const header = url.slice("data:".length, comma);
+  const base64 = /;base64$/i.test(header);
+  const mediaType =
+    header
+      .replace(/;base64$/i, "")
+      .split(";")[0]
+      ?.trim() || undefined;
+  const payload = url.slice(comma + 1);
+  try {
+    if (base64) {
+      const binary = atob(payload);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return mediaType === undefined ? { bytes } : { bytes, mediaType };
+    }
+    const bytes = new TextEncoder().encode(decodeURIComponent(payload));
+    return mediaType === undefined ? { bytes } : { bytes, mediaType };
+  } catch {
+    return null;
+  }
 }
 
-function evictionMarker(
-  bytes: number,
-  path: string | null,
-  mediaType?: string
-): string {
-  const media = mediaType ? `${mediaType}, ` : "";
-  return path
-    ? `[evicted ${media}${bytes} bytes; preserved at ${path}]`
-    : `[evicted ${media}${bytes} bytes]`;
-}
-
-function dataUrlMediaType(url: string): string | undefined {
-  const match = /^data:([^;,]+)/.exec(url);
-  return match?.[1] || undefined;
-}
-
-function extensionFor(mediaType: string | undefined): string {
+/** File extension for an evicted payload, derived from its media type. */
+export function extensionFor(mediaType: string | undefined): string {
   if (!mediaType) return "txt";
   const subtype = mediaType.split("/")[1]?.replace(/[^a-zA-Z0-9]/g, "");
   return subtype || "bin";
+}
+
+/** Workspace path for the n-th value evicted from a message. */
+export function evictedFilePath(
+  messageId: string,
+  index: number,
+  mediaType: string | undefined
+): string {
+  return `/attachments/evicted/${messageId}-${index}.${extensionFor(mediaType)}`;
 }

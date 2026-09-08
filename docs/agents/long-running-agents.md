@@ -623,7 +623,7 @@ The [Session API](./sessions.md) addresses this directly:
 
 - **Compaction** — automatically summarizes older messages when the estimated token count exceeds a threshold. The summary replaces the middle of the conversation as a non-destructive overlay. Original messages remain in SQLite for audit.
 - **Context blocks** — persistent structured sections injected into the system prompt (identity, memory, learned facts). The agent or the LLM can write to these blocks, and they survive hibernation and eviction.
-- **Multi-session management** — `SessionManager` provides a registry of named sessions within a single agent, with forking, cross-session search, and `compactAndSplit` for splitting long conversations into linked continuations.
+- **Conversation isolation** — use one Durable Object per user-facing conversation and keep the conversation directory in a parent Durable Object. Sessions can still fork paths or use named handles for local drafts and namespaces.
 
 For simpler cases: keep only the last N messages in the active context (sliding window), or selectively retain messages that contain decisions and approvals while pruning routine exchanges.
 

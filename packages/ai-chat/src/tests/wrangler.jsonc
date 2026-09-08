@@ -189,6 +189,9 @@
     {
       "new_sqlite_classes": ["AIChatAgentToolParent"],
       "tag": "v13"
+    },
+    {
+      "tag": "v14"
     }
   ]
 }
