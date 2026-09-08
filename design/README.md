@@ -6,16 +6,18 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 
 ## Contents
 
-| File                                                                             | Scope                                                                         |
-| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| [think.md](./think.md)                                                           | Think — chat agent base class, sessions, streaming, tools, execution ladder   |
-| [think-durable-submissions.md](./think-durable-submissions.md)                   | Think durable submissions — async programmatic turns, recovery, idempotency   |
-| [visuals.md](./visuals.md)                                                       | UI component library choice, Kumo usage, custom patterns                      |
-| [readonly-connections.md](./readonly-connections.md)                             | Readonly connection enforcement, storage, tradeoffs, and caveats              |
-| [workspace.md](./shell/index.md)                                                 | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks                       |
-| [agent-tools.md](./agent-tools.md)                                               | Agent tools — chat sub-agent orchestration, parent registry, replay           |
-| [sub-agent-routing.md](./sub-agent-routing.md)                                   | Sub-agent routing as shipped — facets, nested URLs, registry, parent lookup   |
-| [rfc-sub-agents.md](./rfc-sub-agents.md)                                         | RFC: Sub-agents — child DOs via facets, typed stubs, mixin API                |
-| [rfc-helper-sub-agent-orchestration.md](./rfc-helper-sub-agent-orchestration.md) | RFC: Agent tool orchestration — `runAgentTool`, `agentTool`, event forwarding |
-| [loopback.md](./loopback.md)                                                     | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates     |
-| [test-coverage-matrix.md](./test-coverage-matrix.md)                             | Feature × test-layer coverage rollup, CI mapping, skipped-test debt, hygiene  |
+| File                                                                               | Scope                                                                         |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [think.md](./think.md)                                                             | Think — chat agent base class, sessions, streaming, tools, execution ladder   |
+| [think-durable-submissions.md](./think-durable-submissions.md)                     | Think durable submissions — async programmatic turns, recovery, idempotency   |
+| [visuals.md](./visuals.md)                                                         | UI component library choice, Kumo usage, custom patterns                      |
+| [readonly-connections.md](./readonly-connections.md)                               | Readonly connection enforcement, storage, tradeoffs, and caveats              |
+| [workspace.md](./shell/index.md)                                                   | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks                       |
+| [agent-tools.md](./agent-tools.md)                                                 | Agent tools — chat sub-agent orchestration, parent registry, replay           |
+| [sub-agent-routing.md](./sub-agent-routing.md)                                     | Sub-agent routing as shipped — facets, nested URLs, registry, parent lookup   |
+| [rfc-sub-agents.md](./rfc-sub-agents.md)                                           | RFC: Sub-agents — child DOs via facets, typed stubs, mixin API                |
+| [rfc-helper-sub-agent-orchestration.md](./rfc-helper-sub-agent-orchestration.md)   | RFC: Agent tool orchestration — `runAgentTool`, `agentTool`, event forwarding |
+| [loopback.md](./loopback.md)                                                       | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates     |
+| [rfc-codex-harness-capability.md](./rfc-codex-harness-capability.md)               | RFC: static Codex Rust/Wasm engine composed as a Lifecycle capability         |
+| [rfc-harness-model-provider-boundary.md](./rfc-harness-model-provider-boundary.md) | RFC: LanguageModelV4 for Codex and pi-ai providers for Pi in v1               |
+| [test-coverage-matrix.md](./test-coverage-matrix.md)                               | Feature × test-layer coverage rollup, CI mapping, skipped-test debt, hygiene  |
