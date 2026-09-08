@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ClientMessage,
   MessageDelta,
@@ -135,6 +135,8 @@ function reduce(state: State, event: TranscriptEvent): State {
  */
 export function usePiSession(session: string, lane = "main") {
   const [state, setState] = useState<State>(INITIAL_STATE);
+  /** Last chunk sequence seen per stream, so a resubscribe resumes exactly. */
+  const lastSeq = useRef(new Map<string, number>());
 
   const agent = useAgent({
     agent: "pi-agent",
@@ -171,7 +173,19 @@ export function usePiSession(session: string, lane = "main") {
             agent.send(JSON.stringify(resume));
           }
           return;
+        case "stream_start":
+          // A stream opened (or reopened after the server woke) on this lane:
+          // subscribe from wherever this client last saw it.
+          agent.send(
+            JSON.stringify({
+              type: "subscribe",
+              streamId: message.streamId,
+              from: lastSeq.current.get(message.streamId) ?? 0
+            } satisfies ClientMessage)
+          );
+          return;
         case "events":
+          lastSeq.current.set(message.streamId, message.lastSeq + 1);
           setState((current) =>
             message.events.reduce((next, event) => reduce(next, event), current)
           );
@@ -200,6 +214,7 @@ export function usePiSession(session: string, lane = "main") {
 
   useEffect(() => {
     setState(INITIAL_STATE);
+    lastSeq.current.clear();
   }, [session]);
 
   const send = useCallback(
