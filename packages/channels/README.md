@@ -291,7 +291,9 @@ Returning `null` declines the request so another Channel can claim it.
 ## Durability contract
 
 Channels holds no state: no outbox, no retries, no deduplication, no scheduler.
-Durability is a property of how your application uses it.
+Durability is a property of how your application uses it. A caller-supplied
+`deliveryId` is correlation metadata, not an idempotency guarantee; an adapter
+may map it to a provider primitive when one exists.
 
 | Channels guarantees                                                     | Your application must                                                       |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |

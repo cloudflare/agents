@@ -220,6 +220,14 @@ describe("Slack signed ingress", () => {
       id: "slack:TWORK:channel:D123",
       isDirectMessage: true
     });
+    expect(unthreaded.events[0]?.event.replySurface).toMatchObject({
+      address: {
+        teamId: "TWORK",
+        channelId: "D123",
+        recipientUserId: "UHUMAN",
+        recipientTeamId: "TWORK"
+      }
+    });
     expect(threaded.events[0]?.event.thread).toEqual({
       id: "slack:TWORK:channel:D123:thread:1710000100.000100",
       isDirectMessage: true

@@ -526,10 +526,23 @@ function newDraftId(): number {
 
 function splitText(text: string, limit: number): string[] {
   const pieces: string[] = [];
-  for (let index = 0; index < text.length; index += limit) {
-    pieces.push(text.slice(index, index + limit));
+  let piece = "";
+  let length = 0;
+  for (const character of text) {
+    if (length === limit) {
+      pieces.push(piece);
+      piece = "";
+      length = 0;
+    }
+    piece += character;
+    length += 1;
   }
+  if (piece.length > 0) pieces.push(piece);
   return pieces;
+}
+
+function textLength(text: string): number {
+  return [...text].length;
 }
 
 /** Create a configured Telegram Bot API Channel. */
@@ -586,7 +599,7 @@ export function telegram(
         }
       };
     }
-    if (text.length > maxLength) {
+    if (textLength(text) > maxLength) {
       return {
         status: "failed",
         retryable: false,
@@ -685,11 +698,14 @@ export function telegram(
     text: string
   ): Promise<DeliveryResult> {
     const [head, ...tail] = splitText(text, maxLength);
-    const first = await send(destination, head!, options.parseMode);
+    // Raw HTML and Markdown cannot be partitioned safely without parsing it.
+    // Preserve all content literally rather than send malformed fragments.
+    const parseMode = tail.length === 0 ? options.parseMode : undefined;
+    const first = await send(destination, head!, parseMode);
     if (first.status !== "delivered") return first;
 
     for (const piece of tail) {
-      const result = await send(destination, piece, options.parseMode);
+      const result = await send(destination, piece, parseMode);
       // A later piece failing still leaves earlier ones in the chat.
       if (result.status !== "delivered") {
         return uncertain(
@@ -738,11 +754,8 @@ export function telegram(
         if (chunk.type !== "text" || chunk.text.length === 0) return;
         answer += chunk.text;
         if (draftsStopped || !shouldPreview()) return;
-        const shown = await sendDraft(
-          destination,
-          draftId!,
-          `${prefix}${answer}`.slice(0, maxLength)
-        );
+        const preview = splitText(`${prefix}${answer}`, maxLength)[0] ?? "";
+        const shown = await sendDraft(destination, draftId!, preview);
         if (!shown) draftsStopped = true;
       },
       async onFinish(outcome) {

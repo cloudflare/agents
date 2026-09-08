@@ -27,9 +27,10 @@ import type {
   ChannelIngressEvent,
   ChannelIngressEventInput
 } from "../ingress";
-import type {
-  ChannelMessageSurface,
-  ChannelMessageSurfaceInput
+import {
+  isChannelMessageSurface,
+  type ChannelMessageSurface,
+  type ChannelMessageSurfaceInput
 } from "../surface";
 
 export type ChannelMessageEvent = {
@@ -174,6 +175,11 @@ export class ChannelHost {
     chunks: ChannelChunkSource,
     options: ChannelStreamOptions = {}
   ): Promise<DeliveryResult> {
+    if (!isChannelMessageSurface(surface)) {
+      await chunks.cancel().catch(() => {});
+      return invalidSurface();
+    }
+
     const channel = this.#configuredChannel(surface.channelKey);
     if (!channel.stream && !channel.deliver) {
       await chunks.cancel().catch(() => {});
@@ -219,6 +225,7 @@ export class ChannelHost {
 
   /** Resolve whether a surface can currently be selected without delivery. */
   async isAvailable(surface: ChannelMessageSurface): Promise<boolean> {
+    if (!isChannelMessageSurface(surface)) return false;
     const channel = this.#configuredChannel(surface.channelKey);
     return channel.isAvailable?.(surface) ?? true;
   }
@@ -227,6 +234,7 @@ export class ChannelHost {
     surface: ChannelMessageSurface,
     operation: OutboundOperation
   ): Promise<DeliveryResult> {
+    if (!isChannelMessageSurface(surface)) return invalidSurface();
     const channel = this.#configuredChannel(surface.channelKey);
     return operation(channel, surface);
   }
@@ -331,6 +339,13 @@ export class ChannelHost {
  * losing the partial answer helps nobody, but the result is downgraded to
  * `uncertain` since the reader received an incomplete answer.
  */
+function invalidSurface(): DeliveryResult {
+  return unsupported(
+    "CHANNEL_SURFACE_INVALID",
+    "Cannot resolve an invalid Channel message surface"
+  );
+}
+
 async function collectAndDeliver(
   channel: Channel,
   surface: ChannelMessageSurface,

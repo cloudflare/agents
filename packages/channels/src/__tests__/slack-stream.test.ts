@@ -175,12 +175,13 @@ describe("Slack streaming", () => {
       { type: "reasoning", text: "dropped" },
       {
         type: "tool",
+        id: "call-1",
         name: "search",
         status: "started",
         title: "Searching",
         detail: "query"
       },
-      { type: "tool", name: "search", status: "completed" },
+      { type: "tool", id: "call-1", name: "search", status: "completed" },
       { type: "source", url: "https://example.com", title: "Example" },
       { type: "text", text: "Answer" }
     ];
@@ -193,14 +194,14 @@ describe("Slack streaming", () => {
     expect(appended).toEqual([
       {
         type: "task_update",
-        id: "search",
+        id: "call-1",
         title: "Searching",
         status: "in_progress",
         details: "query"
       },
       {
         type: "task_update",
-        id: "search",
+        id: "call-1",
         title: "search",
         status: "complete"
       },
@@ -219,6 +220,25 @@ describe("Slack streaming", () => {
     ]);
   });
 
+  it("keeps repeated tool calls distinct by invocation id", async () => {
+    const { fetch, calls } = recorder();
+    const channel = slack({ botToken: BOT_TOKEN, fetch, streamIntervalMs: 0 });
+    const parts: ChannelChunk[] = [
+      { type: "tool", id: "call-1", name: "search", status: "started" },
+      { type: "tool", id: "call-2", name: "search", status: "started" },
+      { type: "tool", id: "call-2", name: "search", status: "completed" },
+      { type: "tool", id: "call-1", name: "search", status: "completed" }
+    ];
+
+    await channel.stream!(CHANNEL_SURFACE, streamOf(parts), {});
+
+    const taskIds = calls
+      .filter((call) => call.method === "chat.appendStream")
+      .flatMap((call) => call.body.chunks as { id: string }[])
+      .map((chunk) => chunk.id);
+    expect(taskIds).toEqual(["call-1", "call-2", "call-2", "call-1"]);
+  });
+
   it("splits text past Slack's append limit", async () => {
     const { fetch, calls } = recorder();
     const channel = slack({ botToken: BOT_TOKEN, fetch, streamIntervalMs: 0 });
@@ -233,6 +253,50 @@ describe("Slack streaming", () => {
         (chunk) => chunk.text.length
       )
     ).toEqual([12_000, 1]);
+  });
+
+  it("splits a long title into valid opening chunks without breaking emoji", async () => {
+    const { fetch, calls } = recorder();
+    const channel = slack({ botToken: BOT_TOKEN, fetch, streamIntervalMs: 0 });
+    const title = `${"x".repeat(11_999)}😀tail`;
+
+    await channel.stream!(CHANNEL_SURFACE, chunks("Body"), { title });
+
+    const opening = calls[0]?.body.chunks as { text: string }[];
+    expect(opening.every((chunk) => [...chunk.text].length <= 12_000)).toBe(
+      true
+    );
+    expect(opening.map((chunk) => chunk.text).join("")).toBe(`${title}\n\n`);
+  });
+
+  it("escapes source link delimiters", async () => {
+    const { fetch, calls } = recorder();
+    const channel = slack({ botToken: BOT_TOKEN, fetch, streamIntervalMs: 0 });
+
+    await channel.stream!(
+      CHANNEL_SURFACE,
+      streamOf<ChannelChunk>([
+        {
+          type: "source",
+          url: "https://example.com/a|b?x=1&y=<two>",
+          title: "A | B <unsafe> & more"
+        },
+        { type: "text", text: "Answer" }
+      ]),
+      {}
+    );
+
+    expect(calls.at(-1)?.body.blocks).toEqual([
+      {
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: "<https://example.com/a%7Cb?x=1&amp;y=&lt;two&gt;|A &#124; B &lt;unsafe&gt; &amp; more>"
+          }
+        ]
+      }
+    ]);
   });
 
   it("stops the stream and reports uncertain when the generation fails", async () => {
@@ -357,6 +421,36 @@ describe("Slack streaming", () => {
       body: {
         channel: "DADA",
         recipient_user_id: "UADA",
+        recipient_team_id: "TWORK"
+      }
+    });
+  });
+
+  it("streams an inbound-style unthreaded direct-message surface", async () => {
+    const { fetch, calls } = recorder();
+    const channel = slack({ botToken: BOT_TOKEN, fetch, streamIntervalMs: 0 });
+
+    await channel.stream!(
+      {
+        channelKey: "slack",
+        version: 1,
+        address: {
+          teamId: "TWORK",
+          channelId: "D123",
+          recipientUserId: "UHUMAN",
+          recipientTeamId: "TWORK"
+        },
+        label: "Slack · D123"
+      },
+      chunks("Hi"),
+      {}
+    );
+
+    expect(calls[0]).toEqual({
+      method: "chat.startStream",
+      body: {
+        channel: "D123",
+        recipient_user_id: "UHUMAN",
         recipient_team_id: "TWORK"
       }
     });

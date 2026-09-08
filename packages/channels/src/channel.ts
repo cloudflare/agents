@@ -65,6 +65,8 @@ export type ChannelChunk =
   | { type: "reasoning"; text: string }
   | {
       type: "tool";
+      /** Stable identity for one invocation when the producer provides it. */
+      id?: string;
       name: string;
       status: "started" | "completed" | "failed";
       title?: string;
@@ -77,7 +79,7 @@ export type ChannelChunkSource = ReadableStream<ChannelChunk>;
 
 /** Caller options for one finished delivery. */
 export type ChannelDeliveryOptions = {
-  /** Caller-owned identity for provider idempotency and observability. */
+  /** Caller-owned correlation an Adapter may use where the provider supports it. */
   delivery?: ChannelDeliveryContext;
 };
 
@@ -89,11 +91,16 @@ export type ChannelStreamOptions = {
    * provider call.
    */
   title?: string;
-  /** Caller-owned identity for provider idempotency and observability. */
+  /** Caller-owned correlation an Adapter may use where the provider supports it. */
   delivery?: ChannelDeliveryContext;
 };
 
-/** A caller-owned identity supplied to one provider delivery attempt. */
+/**
+ * Caller-owned correlation supplied to one provider delivery attempt.
+ *
+ * This is not an idempotency guarantee. An Adapter may map it to a provider
+ * idempotency primitive when one exists, or otherwise use it for observability.
+ */
 export type ChannelDeliveryContext = {
   deliveryId: string;
 };
@@ -114,7 +121,7 @@ export type ChannelApprovalRequest = {
 export type ChannelApprovalRequestOptions = {
   interactionId: string;
   request: ChannelApprovalRequest;
-  /** Caller-owned identity for provider idempotency and observability. */
+  /** Caller-owned correlation an Adapter may use where the provider supports it. */
   delivery?: ChannelDeliveryContext;
   /** Lazily obtains approval links supplied and settled by the caller. */
   getApprovalLinks?: () => Promise<ChannelApprovalLinks>;

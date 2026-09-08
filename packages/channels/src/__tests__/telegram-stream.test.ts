@@ -224,6 +224,45 @@ describe("Telegram streaming", () => {
     expect(of(calls, "sendMessageDraft")[0]?.body.text).toBe("0123456789");
   });
 
+  it("does not split an emoji across messages", async () => {
+    const { fetch, calls } = recorder();
+    const channel = telegram({
+      botToken: BOT_TOKEN,
+      fetch,
+      maxLength: 1,
+      streamIntervalMs: 0
+    });
+
+    await expect(
+      channel.stream!(PRIVATE_SURFACE, chunks("😀a"), {})
+    ).resolves.toEqual({ status: "delivered", reference: "501" });
+    expect(of(calls, "sendMessage").map((call) => call.body.text)).toEqual([
+      "😀",
+      "a"
+    ]);
+    expect(of(calls, "sendMessageDraft")[0]?.body.text).toBe("😀");
+  });
+
+  it("sends split formatted answers as literal text rather than invalid markup", async () => {
+    const { fetch, calls } = recorder();
+    const channel = telegram({
+      botToken: BOT_TOKEN,
+      fetch,
+      maxLength: 6,
+      parseMode: "HTML",
+      streamIntervalMs: 0
+    });
+
+    await channel.stream!(PRIVATE_SURFACE, chunks("<b>hello</b>"), {});
+
+    const sends = of(calls, "sendMessage");
+    expect(sends).toHaveLength(2);
+    expect(sends.map((call) => call.body.text).join("")).toBe("<b>hello</b>");
+    expect(sends.every((call) => call.body.parse_mode === undefined)).toBe(
+      true
+    );
+  });
+
   it("reports a partly accepted split answer as uncertain", async () => {
     let sends = 0;
     const { fetch } = recorder({

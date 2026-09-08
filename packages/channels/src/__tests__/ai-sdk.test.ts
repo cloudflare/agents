@@ -136,9 +136,9 @@ describe("AI SDK stream adapter", () => {
     ).resolves.toEqual([
       { type: "text", text: "Hello" },
       { type: "reasoning", text: "thinking" },
-      { type: "tool", name: "search", status: "started" },
-      { type: "tool", name: "search", status: "completed" },
-      { type: "tool", name: "fetch", status: "failed" },
+      { type: "tool", id: "t1", name: "search", status: "started" },
+      { type: "tool", id: "t1", name: "search", status: "completed" },
+      { type: "tool", id: "t2", name: "fetch", status: "failed" },
       { type: "source", url: "https://example.com", title: "Example" }
     ]);
   });
@@ -157,4 +157,32 @@ describe("AI SDK stream adapter", () => {
       collect([{ type: "abort", reason: "stopped by the reader" }])
     ).rejects.toThrow("stopped by the reader");
   });
+
+  it.each([
+    {
+      part: { type: "error", error: new Error("model failed") },
+      message: "model failed"
+    },
+    {
+      part: { type: "abort", reason: "reader stopped" },
+      message: "reader stopped"
+    }
+  ])(
+    "closes the source iterator after a $part.type part",
+    async ({ part, message }) => {
+      let finalized = false;
+      const source = (async function* () {
+        try {
+          yield part as never;
+          yield { type: "text-delta", id: "1", text: "never" } as never;
+        } finally {
+          finalized = true;
+        }
+      })();
+
+      const reader = toChannelChunks(source).getReader();
+      await expect(reader.read()).rejects.toThrow(message);
+      expect(finalized).toBe(true);
+    }
+  );
 });

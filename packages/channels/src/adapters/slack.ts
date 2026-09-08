@@ -325,12 +325,10 @@ function normalizedEvent(
         ...((threadTimestamp || !isDirectMessage) && {
           threadTs: threadTimestamp ?? timestamp
         }),
-        // Slack renders a channel stream for one reader, and requires both
-        // ids to do it. A direct message already has a single reader.
-        ...(!isDirectMessage && {
-          recipientUserId: actorId,
-          recipientTeamId: teamId
-        })
+        // Preserve the reader even for a known DM conversation so outbound
+        // routing can distinguish it from a top-level public channel.
+        recipientUserId: actorId,
+        recipientTeamId: teamId
       },
       label: replySurfaceLabel(
         channelId,
@@ -767,17 +765,43 @@ const SLACK_TASK_STATUS = {
   failed: "error"
 } as const;
 
-function clamp(value: string, limit: number): string {
-  return value.length <= limit ? value : `${value.slice(0, limit - 1)}\u2026`;
+function splitText(text: string, limit: number): string[] {
+  const pieces: string[] = [];
+  let piece = "";
+  let length = 0;
+  for (const character of text) {
+    if (length === limit) {
+      pieces.push(piece);
+      piece = "";
+      length = 0;
+    }
+    piece += character;
+    length += 1;
+  }
+  if (piece.length > 0) pieces.push(piece);
+  return pieces;
 }
 
-function splitText(text: string, limit: number): string[] {
-  if (text.length <= limit) return text.length > 0 ? [text] : [];
-  const pieces: string[] = [];
-  for (let index = 0; index < text.length; index += limit) {
-    pieces.push(text.slice(index, index + limit));
-  }
-  return pieces;
+function clamp(value: string, limit: number): string {
+  const characters = [...value];
+  return characters.length <= limit
+    ? value
+    : `${characters.slice(0, limit - 1).join("")}\u2026`;
+}
+
+function escapeMrkdwn(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function escapeLinkUrl(value: string): string {
+  return escapeMrkdwn(value.replaceAll("|", "%7C"));
+}
+
+function escapeLinkLabel(value: string): string {
+  return escapeMrkdwn(value).replaceAll("|", "&#124;");
 }
 
 /**
@@ -801,7 +825,7 @@ function toStreamChunks(
       return [
         {
           type: "task_update",
-          id: chunk.name,
+          id: clamp(chunk.id ?? chunk.name, SLACK_TASK_FIELD_LIMIT),
           title: clamp(chunk.title ?? chunk.name, SLACK_TASK_FIELD_LIMIT),
           status: SLACK_TASK_STATUS[chunk.status],
           ...(chunk.detail !== undefined && {
@@ -821,7 +845,10 @@ function sourcesBlock(
   sources: readonly { url: string; title?: string }[]
 ): Record<string, unknown> {
   const text = sources
-    .map((source) => `<${source.url}|${source.title ?? source.url}>`)
+    .map(
+      (source) =>
+        `<${escapeLinkUrl(source.url)}|${escapeLinkLabel(source.title ?? source.url)}>`
+    )
     .join(" \u00b7 ");
   return {
     type: "context",
@@ -1005,7 +1032,11 @@ export function slack(
     // Slack only permits native channel streaming in a thread. Preserve the
     // simpler top-level application API by collecting and posting one ordinary
     // message; direct-message targets still use native streaming.
-    if (!("userId" in unresolvedTarget) && !unresolvedTarget.threadTs) {
+    if (
+      !("userId" in unresolvedTarget) &&
+      !unresolvedTarget.threadTs &&
+      !unresolvedTarget.recipientUserId
+    ) {
       const collected = await collectText(chunks);
       if (collected.interrupted && collected.text.length === 0) {
         return failed(
@@ -1049,7 +1080,9 @@ export function slack(
       // with `markdown_text` makes Slack reject each later append with
       // `streaming_mode_mismatch`, losing the whole answer.
       ...(streamOptions.title && {
-        chunks: [{ type: "markdown_text", text: `${streamOptions.title}\n\n` }]
+        chunks: splitText(`${streamOptions.title}\n\n`, SLACK_APPEND_LIMIT).map(
+          (text) => ({ type: "markdown_text", text })
+        )
       })
     });
     if ("status" in started) {

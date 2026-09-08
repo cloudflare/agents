@@ -74,11 +74,26 @@ function toChannelChunk(
           }
         : undefined;
     case "tool-call":
-      return { type: "tool", name: part.toolName, status: "started" };
+      return {
+        type: "tool",
+        id: part.toolCallId,
+        name: part.toolName,
+        status: "started"
+      };
     case "tool-result":
-      return { type: "tool", name: part.toolName, status: "completed" };
+      return {
+        type: "tool",
+        id: part.toolCallId,
+        name: part.toolName,
+        status: "completed"
+      };
     case "tool-error":
-      return { type: "tool", name: part.toolName, status: "failed" };
+      return {
+        type: "tool",
+        id: part.toolCallId,
+        name: part.toolName,
+        status: "failed"
+      };
     default:
       return undefined;
   }
@@ -96,36 +111,51 @@ export function toChannelChunks(
   fullStream: AsyncIterable<TextStreamPart<ToolSet>>
 ): ReadableStream<ChannelChunk> {
   const parts = fullStream[Symbol.asyncIterator]();
+  let sourceClosed = false;
+
+  async function closeSource(reason?: unknown): Promise<void> {
+    if (sourceClosed) return;
+    sourceClosed = true;
+    await parts.return?.(reason);
+  }
+
   return new ReadableStream<ChannelChunk>({
     async pull(controller) {
-      while (true) {
-        const { done, value } = await parts.next();
-        if (done) {
-          controller.close();
+      try {
+        while (true) {
+          const { done, value } = await parts.next();
+          if (done) {
+            sourceClosed = true;
+            controller.close();
+            return;
+          }
+          if (value.type === "error") {
+            const error =
+              value.error instanceof Error
+                ? value.error
+                : new Error(String(value.error));
+            await closeSource().catch(() => {});
+            controller.error(error);
+            return;
+          }
+          if (value.type === "abort") {
+            const error = new Error(
+              value.reason ?? "The generation was aborted"
+            );
+            await closeSource().catch(() => {});
+            controller.error(error);
+            return;
+          }
+          const chunk = toChannelChunk(value);
+          if (!chunk) continue;
+          controller.enqueue(chunk);
           return;
         }
-        if (value.type === "error") {
-          controller.error(
-            value.error instanceof Error
-              ? value.error
-              : new Error(String(value.error))
-          );
-          return;
-        }
-        if (value.type === "abort") {
-          controller.error(
-            new Error(value.reason ?? "The generation was aborted")
-          );
-          return;
-        }
-        const chunk = toChannelChunk(value);
-        if (!chunk) continue;
-        controller.enqueue(chunk);
-        return;
+      } catch (error) {
+        await closeSource().catch(() => {});
+        controller.error(error);
       }
     },
-    async cancel(reason) {
-      await parts.return?.(reason);
-    }
+    cancel: closeSource
   });
 }
