@@ -475,20 +475,23 @@ export class SelfModifyingHarness extends LifecycleCapability {
       revisionId: input.revisionId
     });
 
-    let outcome: JsonValue;
-    try {
-      outcome = await step.do(
-        "run-editable-harness",
-        { timeout: "5 minutes", retries: { limit: 2, delay: "5 seconds" } },
-        async () =>
-          taskOutcome({
+    // Harness failures settle inside the step so they journal as the turn's
+    // durable outcome. Only Tasks control signals (retry suspension, cancel,
+    // a superseded attempt) leave `step.do`, and they must keep propagating.
+    const outcome = await step.do(
+      "run-editable-harness",
+      { timeout: "5 minutes", retries: { limit: 2, delay: "5 seconds" } },
+      async () => {
+        try {
+          return taskOutcome({
             ok: true,
             result: await this.#runPinnedTurn(input, writer)
-          })
-      );
-    } catch (error) {
-      outcome = taskOutcome({ ok: false, error: errorMessage(error) });
-    }
+          });
+        } catch (error) {
+          return taskOutcome({ ok: false, error: errorMessage(error) });
+        }
+      }
+    );
 
     const parsed = this.#parseOutcome(outcome);
     if (parsed.ok) {

@@ -30,6 +30,9 @@ readonly lifecycle = Lifecycle.install(this)
   .use(this.harness);
 ```
 
+Every connected client can edit source, activate, and restore revisions. The
+example has no authentication; put it behind your own before exposing it.
+
 `SelfModifyingHarnessOptions.model` is exactly AI SDK 7's `LanguageModelV4`.
 The Workers AI model from `workers-ai-provider@4` is passed directly.
 
