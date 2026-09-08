@@ -37,6 +37,7 @@ readonly codex = new CodexHarness({
   model,
   tasks: this.tasks,
   streams: this.streams,
+  sessions: this.sessions,
   workspace: this.workspace
 });
 ```

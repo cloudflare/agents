@@ -7,7 +7,6 @@ import type {
   CodexOperationSnapshot,
   CodexServerMessage,
   CodexSessionSnapshot,
-  CodexWorkspaceFile,
   SessionMessage
 } from "./protocol";
 
@@ -21,7 +20,6 @@ export interface CodexTransportHost {
   }): Promise<KernelJson>;
   operation(operationId: string): Promise<CodexOperationSnapshot | null>;
   message(id: string): Promise<SessionMessage | null>;
-  readFile(path: string): Promise<CodexWorkspaceFile>;
   restart(): void;
 }
 

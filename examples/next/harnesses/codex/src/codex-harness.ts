@@ -279,7 +279,7 @@ export class CodexHarness extends LifecycleCapability {
     ].map(projectSnapshot);
   }
 
-  /** Read one Workspace file for the UI. */
+  /** Read one Workspace file for the UI; the snapshot reads `DEMO_FILE`. */
   async readFile(path: string): Promise<CodexWorkspaceFile> {
     const content = await this.workspace.readFile(path);
     return content === null
@@ -314,7 +314,6 @@ export class CodexHarness extends LifecycleCapability {
         submit: (input) => this.submit(input),
         operation: (operationId) => this.snapshot(operationId),
         message: (id) => this.message(id),
-        readFile: (path) => this.readFile(path),
         restart: options.restart
       },
       () => this.lifecycle.sockets
@@ -483,19 +482,17 @@ export class CodexHarness extends LifecycleCapability {
     action: Extract<KernelAction, { type: "model" | "tool" }>,
     signal: AbortSignal
   ): Promise<KernelEffectResult> {
-    {
-      if (action.type === "model") {
-        const round = await completeCodexModel(
-          this.model,
-          action,
-          assistantMessageId(operation.operation_id, checkpoint.model_round),
-          this.#transcript(),
-          signal
-        );
-        return round.result;
-      }
-      return this.#performTool(operation, action);
+    if (action.type === "model") {
+      const round = await completeCodexModel(
+        this.model,
+        action,
+        assistantMessageId(operation.operation_id, checkpoint.model_round),
+        this.#transcript(),
+        signal
+      );
+      return round.result;
     }
+    return this.#performTool(operation, action);
   }
 
   #transcript(): ModelTranscript {
@@ -760,7 +757,7 @@ async function performWorkspaceTool(
       return { success: false, output: { path, found: false } };
     // Files have no size limit; the model pages through big ones by range.
     const bytes = new TextEncoder().encode(content);
-    const offset = clampInteger(input.offset, 0, bytes.byteLength);
+    const offset = Math.min(bytes.byteLength, clampInteger(input.offset, 0, 0));
     const maxBytes = clampInteger(input.max_bytes, 1, DEFAULT_READ_BYTES);
     const end = Math.min(bytes.byteLength, offset + maxBytes);
     return {
