@@ -57,12 +57,7 @@ import {
   type SubmitConcurrencyDecision,
   type ChatFiberSnapshot
 } from "agents/chat";
-import {
-  ResumableStream,
-  cleanupStreamBuffers,
-  createChatStreams,
-  STREAM_CLEANUP_DELAY_SECONDS
-} from "agents/chat";
+import { ResumableStream, createChatStreams } from "agents/chat";
 import type { Streams } from "agents/streams";
 import { Sessions, type Session, type SessionMessage } from "agents/sessions";
 import {
@@ -242,8 +237,7 @@ type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 // sweep via the shared `sweepStaleChatRecoveryIncidents` helper.)
 // (N9 throttle now lives in the shared engine as `AgentToolStreamProgressThrottle`
 // / `AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS`; the stream-cleanup delay and
-// re-arm loop now live in agents/chat as `STREAM_CLEANUP_DELAY_SECONDS` /
-// `cleanupStreamBuffers`. The `sendIfOpen` / `isWebSocketClosedSendError` WS send
+// The `sendIfOpen` / `isWebSocketClosedSendError` WS send
 // guard is shared via agents/chat.)
 
 type StreamResultStatus = {
@@ -1818,7 +1812,6 @@ export class AIChatAgent<
     // wake if fiber recovery cannot finalize a stream. The last-activity sweep
     // threshold keeps an actively streaming run from being reclaimed before it
     // goes quiet (#1706).
-    void this._ensureStreamCleanupScheduled();
     return streamId;
   }
 
@@ -1826,46 +1819,36 @@ export class AIChatAgent<
   protected _completeStream(streamId: string) {
     const completedRequestId = this._resumableStream.activeRequestId;
     this._resumableStream.complete(streamId);
+    this._afterStreamFinished(completedRequestId);
+  }
+
+  /**
+   * @internal The producer finished; leave the row for the cutover that
+   * persists the message (`persistMessages` via `#pendingCutover`). `_reply`'s
+   * finally settles it if no persist follows.
+   */
+  protected _finishStream(streamId: string) {
+    const finishedRequestId = this._resumableStream.activeRequestId;
+    this._resumableStream.finish(streamId);
+    this._afterStreamFinished(finishedRequestId);
+  }
+
+  private _afterStreamFinished(requestId: string | null) {
     this._pendingResumeConnections.clear();
-    if (completedRequestId === this._continuation.activeRequestId) {
+    if (requestId === this._continuation.activeRequestId) {
       this._continuation.activeRequestId = null;
       this._continuation.activeConnectionId = null;
     }
-    void this._ensureStreamCleanupScheduled();
   }
 
   /**
-   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
-   * buffers. Armed whenever a stream finishes (completes or errors) so that
-   * idle/one-off chat DOs still reclaim their buffers — the lazy sweep in
-   * {@link ResumableStream} only fires when a *subsequent* stream completes,
-   * which never happens for a chat that receives a single turn (#1706).
-   *
-   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
-   * collapse onto one pending alarm rather than stacking.
-   * @internal
-   */
-  protected async _ensureStreamCleanupScheduled({
-    idempotent = true
-  }: { idempotent?: boolean } = {}): Promise<void> {
-    await this.schedule(
-      STREAM_CLEANUP_DELAY_SECONDS,
-      "_cleanupStreamBuffers",
-      undefined,
-      { idempotent }
-    );
-  }
-
-  /**
-   * Alarm callback: sweep aged stream buffers, re-arming while rows remain (see
-   * the shared {@link cleanupStreamBuffers}). Public so it is reachable as a
-   * schedule callback.
+   * @deprecated Streams are reclaimed at cutover and on the next stream
+   * start; no alarm is armed any more. Kept so a cleanup alarm persisted
+   * by an earlier version still resolves to a callback when it fires.
    * @internal
    */
   async _cleanupStreamBuffers(): Promise<void> {
-    await cleanupStreamBuffers(this._resumableStream, () =>
-      this._ensureStreamCleanupScheduled({ idempotent: false })
-    );
+    this._resumableStream.reclaim();
   }
 
   /** @internal Delegate to _resumableStream. Also advances the recovery
@@ -1930,7 +1913,6 @@ export class AIChatAgent<
       this._continuation.activeRequestId = null;
       this._continuation.activeConnectionId = null;
     }
-    void this._ensureStreamCleanupScheduled();
   }
 
   /**
@@ -5021,7 +5003,6 @@ export class AIChatAgent<
         this._persistOrphanedStream(streamId),
       completeRecoveredStream: (streamId) => {
         this._resumableStream.complete(streamId);
-        void this._ensureStreamCleanupScheduled();
       },
       dispatchRecoveredTurn: (input) => this._dispatchRecoveredChatTurn(input)
     } satisfies ChatFiberWakeHooks<AIChatRecoveryClassification>);
@@ -5751,6 +5732,20 @@ export class AIChatAgent<
     );
   }
 
+  /**
+   * The turn whose finished stream is waiting for its message write: the
+   * cutover rides on the instance, not on an argument, so a subclass that
+   * overrides {@link persistMessages} and calls `super` with only the
+   * messages still lands the message, the stream's settlement and the
+   * deletion of its rows in one transaction. Consumed by the first persist
+   * that carries the turn's message; cleared when the turn ends.
+   */
+  #pendingCutover: {
+    streamId: string;
+    messageId: string;
+    discard: boolean;
+  } | null = null;
+
   async persistMessages(
     messages: UIMessage[],
     excludeBroadcastIds: string[] = [],
@@ -5765,6 +5760,7 @@ export class AIChatAgent<
       this._sanitizeMessageForPersistence(msg)
     );
 
+    const toWrite: UIMessage[] = [];
     for (const message of mergedMessages) {
       const resolved = resolveToolMergeId(
         this._sanitizeMessageForPersistence(message),
@@ -5776,7 +5772,33 @@ export class AIChatAgent<
       // decode and hash of every payload on every turn.
       const prior = priorById.get(resolved.id);
       if (prior && JSON.stringify(prior) === JSON.stringify(resolved)) continue;
-      await this.#session.upsertMessage(resolved);
+      toWrite.push(resolved);
+    }
+    // The cutover: a persist that carries the finished turn's message
+    // lands every changed message in the same transaction that settles the
+    // stream and drops its rows. A persist of other messages (an override
+    // writing its own first) takes the plain path and leaves the cutover
+    // pending. The change feed (and auto-compaction) run once the
+    // transaction has committed.
+    const cutover = this.#pendingCutover;
+    if (
+      cutover &&
+      mergedMessages.some((message) => message.id === cutover.messageId)
+    ) {
+      this.#pendingCutover = null;
+      const sync = this.#session.__DO_NOT_USE_WILL_BREAK__sync();
+      const afters: Array<() => Promise<void>> = [];
+      this._resumableStream.cutover(
+        cutover.streamId,
+        () => {
+          for (const message of toWrite)
+            afters.push(sync.upsert(message).after);
+        },
+        { discard: cutover.discard }
+      );
+      for (const after of afters) await after();
+    } else {
+      for (const message of toWrite) await this.#session.upsertMessage(message);
     }
 
     // Regeneration can submit a strict subset of the server transcript. Keep
@@ -6409,7 +6431,7 @@ export class AIChatAgent<
       if (done) {
         // reader.cancel() resolves read() with { done: true } — check abort
         if (abortSignal?.aborted) break;
-        this._completeStream(streamId);
+        this._finishStream(streamId);
         streamCompleted.value = true;
         this._broadcastChatMessage({
           body: "",
@@ -6765,7 +6787,7 @@ export class AIChatAgent<
 
     // If we exited due to abort, send a done signal so clients know the stream ended
     if (!streamCompleted.value) {
-      this._completeStream(streamId);
+      this._finishStream(streamId);
       streamCompleted.value = true;
       this._broadcastChatMessage({
         body: "",
@@ -6858,7 +6880,7 @@ export class AIChatAgent<
         );
 
         // Mark the stream as completed
-        this._completeStream(streamId);
+        this._finishStream(streamId);
         streamCompleted.value = true;
         // Send final completion signal
         this._broadcastChatMessage({
@@ -6892,7 +6914,7 @@ export class AIChatAgent<
         { type: "text-end", id },
         continuation
       );
-      this._completeStream(streamId);
+      this._finishStream(streamId);
       streamCompleted.value = true;
       this._broadcastChatMessage({
         body: "",
@@ -7133,6 +7155,19 @@ export class AIChatAgent<
             }
           }
 
+          // The cutover: when this turn's stream is awaiting settlement, the
+          // persist that carries this turn's message settles it and drops
+          // its rows in one transaction (see `#pendingCutover`). Agent-tool
+          // child turns keep their rows (the parent tails the stored chunks
+          // after completion); the next start() reclaims them.
+          this.#pendingCutover =
+            this._resumableStream.pendingCutoverId === streamId
+              ? {
+                  streamId,
+                  messageId: earlyPersistedId ?? message.id,
+                  discard: !this._agentToolRunsByRequestId.get(id)
+                }
+              : null;
           if (message.parts.length > 0) {
             if (earlyPersistedId) {
               // Message already exists in this.messages from the early persist.
@@ -7178,6 +7213,11 @@ export class AIChatAgent<
               );
             }
           }
+          // Nothing to persist (or the persist threw, or an override never
+          // reached the session write): settle the stream so it is not
+          // mistaken for an interrupted turn.
+          this.#pendingCutover = null;
+          this._resumableStream.finalizePending();
 
           this._pendingChatResponseResults.push({
             message,
@@ -7190,6 +7230,8 @@ export class AIChatAgent<
           });
           return streamResult;
         } finally {
+          this.#pendingCutover = null;
+          this._resumableStream.finalizePending();
           // The streamed assistant message (with all tool parts) is now
           // persisted: clear the stream-active gate and re-run the
           // auto-continuation barrier for a continuation it held (#1650). This
