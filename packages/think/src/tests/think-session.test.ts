@@ -2438,17 +2438,20 @@ describe("Think — chatRecovery", () => {
     expect(fibers).toHaveLength(0);
   });
 
-  it("chat() records stream chunks for recovery lookup", async () => {
+  it("chat() discards the stream once its message is persisted", async () => {
     const agent = await freshRecoveryAgent("chat-stream-metadata");
 
     const result = await agent.testChat("Record the stream");
     expect(result.done).toBe(true);
 
+    // The stream's rows were the recovery evidence while the turn was in
+    // flight; once the assistant message is durable they are redundant and
+    // are dropped in place, leaving nothing for the retention sweep.
+    // Interrupted turns keep their rows (covered by the recovery tests).
     const snapshot = await agent.getLatestStreamSnapshot();
-    expect(snapshot).not.toBeNull();
-    expect(snapshot!.status).toBe("completed");
-    expect(snapshot!.chunkCount).toBeGreaterThan(0);
-    expect(snapshot!.text).toBe("Continued response.");
+    expect(snapshot).toBeNull();
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.at(-1)?.role).toBe("assistant");
   });
 
   it("saveMessages with recovery wraps in fiber and cleans up", async () => {

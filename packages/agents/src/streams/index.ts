@@ -22,6 +22,7 @@ export type {
   StreamOpenOptions,
   StreamReadBatchesOptions,
   StreamReadOptions,
+  StreamSettleOptions,
   StreamState,
   StreamStatus,
   StreamWriter

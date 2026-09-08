@@ -201,10 +201,21 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
         now,
         now
       ),
-      realChunkAppend: w(
-        `INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-         VALUES ('probe-s', 0, '"x"', ?)`,
+      realBlockOpen: w(
+        `INSERT INTO cf_agents_stream_blocks
+           (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+         VALUES ('probe-s', 0, 0, 1, '"x"', ?, ?)`,
+        now,
         now
+      ),
+      realBlockAppend: w(
+        `UPDATE cf_agents_stream_blocks
+         SET body = body || ',' || '"y"', seq_to = 2, updated_at = ?
+         WHERE stream_id = 'probe-s' AND block = 0`,
+        now
+      ),
+      realBlockDelete: w(
+        `DELETE FROM cf_agents_stream_blocks WHERE stream_id = 'probe-s'`
       ),
       realStreamSettle: w(
         `UPDATE cf_agents_streams
@@ -259,8 +270,8 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
         continue;
       }
       const tail = sql.exec(
-        `SELECT seq, created_at FROM cf_agents_stream_chunks
-         WHERE stream_id = ? ORDER BY seq DESC LIMIT 1`,
+        `SELECT seq_to, updated_at FROM cf_agents_stream_blocks
+         WHERE stream_id = ? ORDER BY block DESC LIMIT 1`,
         row.stream_id
       );
       [...tail];

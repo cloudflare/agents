@@ -21,3 +21,4 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 | [rfc-codex-harness-capability.md](./rfc-codex-harness-capability.md)               | RFC: static Codex Rust/Wasm engine composed as a Lifecycle capability         |
 | [rfc-harness-model-provider-boundary.md](./rfc-harness-model-provider-boundary.md) | RFC: LanguageModelV4 for Codex and pi-ai providers for Pi in v1               |
 | [test-coverage-matrix.md](./test-coverage-matrix.md)                               | Feature × test-layer coverage rollup, CI mapping, skipped-test debt, hygiene  |
+| [rfc-pi-harness-example.md](./rfc-pi-harness-example.md)                           | RFC: pi `AgentHarness` as an example-local Lifecycle capability               |
