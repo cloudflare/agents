@@ -16,6 +16,7 @@ lands.
 | [`chats`](./chats)                     | This PR   | One DO per chat plus a per-user push-based index, the recommended many-chats pattern                                 |
 | [`dynamic-agents`](./dynamic-agents)   | This PR   | A supervisor runs user-submitted code as facets: isolated storage, supervised abort, code upgrades over stable state |
 | [`harnesses/codex`](./harnesses/codex) | This PR   | A static Codex Rust/Wasm loop composed as a Lifecycle capability, using LanguageModelV4 and Shell Workspace          |
+| [`harnesses/pi`](./harnesses/pi)       | This PR   | Experimental: pi `AgentHarness` on a pinned pi dev build, composed as an example-local Lifecycle capability          |
 
 Each example is an independent workspace package and should stay focused on one
 capability. Once the APIs are stable, move the examples into the main examples
