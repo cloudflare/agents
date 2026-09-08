@@ -121,6 +121,7 @@ function makeHangingSSEResponse() {
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
+  OverridingPersistAgent: DurableObjectNamespace<OverridingPersistAgent>;
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
   SlowStreamAgent: DurableObjectNamespace<SlowStreamAgent>;
@@ -1021,6 +1022,28 @@ export class TestChatAgent extends AIChatAgent<Env> {
  * Test agent that overrides sanitizeMessageForPersistence to strip custom data.
  * Used to verify the user-overridable hook runs after built-in sanitization.
  */
+/**
+ * A subclass that overrides `persistMessages` the way application code
+ * does: extra side effects, then `super` with only the messages. The
+ * cutover must still reach the session write — the finished turn leaves no
+ * stream row behind — even though the override forwards no third argument.
+ */
+export class OverridingPersistAgent extends TestChatAgent {
+  private _persistOverrideCalls = 0;
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = []
+  ) {
+    this._persistOverrideCalls++;
+    await super.persistMessages(messages, excludeBroadcastIds);
+  }
+
+  getPersistOverrideCalls(): number {
+    return this._persistOverrideCalls;
+  }
+}
+
 export class CustomSanitizeAgent extends AIChatAgent<Env> {
   async onChatMessage() {
     return new Response("ok");

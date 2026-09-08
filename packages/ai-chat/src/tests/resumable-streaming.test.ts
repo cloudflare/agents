@@ -1882,6 +1882,57 @@ describe("Resumable Streaming", () => {
       ws.close(1000);
     });
 
+    it("cuts over through a persistMessages override that forwards only the messages", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(
+        `/agents/overriding-persist-agent/${room}`
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      const agentStub = await getAgentByName(env.OverridingPersistAgent, room);
+
+      const done = new Promise<void>((resolve) => {
+        ws.addEventListener("message", (e: MessageEvent) => {
+          const data = JSON.parse(e.data as string);
+          if (
+            data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+            data.done
+          ) {
+            resolve();
+          }
+        });
+      });
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-override",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "u-1",
+                  role: "user",
+                  parts: [{ type: "text", text: "hi" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      await done;
+      await waitFor(async () =>
+        (
+          (await agentStub.getPersistedMessages()) as Array<{ role: string }>
+        ).some((m) => m.role === "assistant")
+      );
+      expect(await agentStub.getPersistOverrideCalls()).toBeGreaterThan(0);
+      // The override dropped the internal options, yet the message write
+      // still ran inside the cutover: a plain persist would have left the
+      // finished stream's row (settled, not discarded) until the next turn.
+      expect(await agentStub.getAllStreamMetadata()).toEqual([]);
+      ws.close(1000);
+    });
+
     it("reclaims finished streams of any age and abandoned in-flight rows past the stale window", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

@@ -1824,7 +1824,7 @@ export class AIChatAgent<
 
   /**
    * @internal The producer finished; leave the row for the cutover that
-   * persists the message (`persistMessages` with `_cutover`). `_reply`'s
+   * persists the message (`persistMessages` via `#pendingCutover`). `_reply`'s
    * finally settles it if no persist follows.
    */
   protected _finishStream(streamId: string) {
@@ -5732,19 +5732,25 @@ export class AIChatAgent<
     );
   }
 
+  /**
+   * The turn whose finished stream is waiting for its message write: the
+   * cutover rides on the instance, not on an argument, so a subclass that
+   * overrides {@link persistMessages} and calls `super` with only the
+   * messages still lands the message, the stream's settlement and the
+   * deletion of its rows in one transaction. Consumed by the first persist
+   * that carries the turn's message; cleared when the turn ends.
+   */
+  #pendingCutover: {
+    streamId: string;
+    messageId: string;
+    discard: boolean;
+  } | null = null;
+
   async persistMessages(
     messages: UIMessage[],
     excludeBroadcastIds: string[] = [],
     /** @internal */
-    options?: {
-      _deleteStaleRows?: boolean;
-      /**
-       * Persist inside the stream's cutover: the message writes, the
-       * stream's settlement and the deletion of its temporary rows commit
-       * in one transaction.
-       */
-      _cutover?: { streamId: string; discard: boolean };
-    }
+    options?: { _deleteStaleRows?: boolean }
   ) {
     // Snapshot the pre-write transcript: `this.messages` is mirrored from the
     // change feed and therefore mutates as the loop below writes.
@@ -5768,19 +5774,27 @@ export class AIChatAgent<
       if (prior && JSON.stringify(prior) === JSON.stringify(resolved)) continue;
       toWrite.push(resolved);
     }
-    if (options?._cutover) {
-      // The cutover: every changed message lands in the same transaction
-      // that settles the stream and drops its rows. The change feed (and
-      // auto-compaction) run once the transaction has committed.
+    // The cutover: a persist that carries the finished turn's message
+    // lands every changed message in the same transaction that settles the
+    // stream and drops its rows. A persist of other messages (an override
+    // writing its own first) takes the plain path and leaves the cutover
+    // pending. The change feed (and auto-compaction) run once the
+    // transaction has committed.
+    const cutover = this.#pendingCutover;
+    if (
+      cutover &&
+      mergedMessages.some((message) => message.id === cutover.messageId)
+    ) {
+      this.#pendingCutover = null;
       const sync = this.#session.__DO_NOT_USE_WILL_BREAK__sync();
       const afters: Array<() => Promise<void>> = [];
       this._resumableStream.cutover(
-        options._cutover.streamId,
+        cutover.streamId,
         () => {
           for (const message of toWrite)
             afters.push(sync.upsert(message).after);
         },
-        { discard: options._cutover.discard }
+        { discard: cutover.discard }
       );
       for (const after of afters) await after();
     } else {
@@ -7142,16 +7156,18 @@ export class AIChatAgent<
           }
 
           // The cutover: when this turn's stream is awaiting settlement, the
-          // message write settles it and drops its rows in one transaction.
-          // Agent-tool child turns keep their rows (the parent tails the
-          // stored chunks after completion); the next start() reclaims them.
-          const cutover =
+          // persist that carries this turn's message settles it and drops
+          // its rows in one transaction (see `#pendingCutover`). Agent-tool
+          // child turns keep their rows (the parent tails the stored chunks
+          // after completion); the next start() reclaims them.
+          this.#pendingCutover =
             this._resumableStream.pendingCutoverId === streamId
               ? {
                   streamId,
+                  messageId: earlyPersistedId ?? message.id,
                   discard: !this._agentToolRunsByRequestId.get(id)
                 }
-              : undefined;
+              : null;
           if (message.parts.length > 0) {
             if (earlyPersistedId) {
               // Message already exists in this.messages from the early persist.
@@ -7171,9 +7187,7 @@ export class AIChatAgent<
                 updatedMessages.push(persistedMessage);
               }
 
-              await this.persistMessages(updatedMessages, excludeBroadcastIds, {
-                _cutover: cutover
-              });
+              await this.persistMessages(updatedMessages, excludeBroadcastIds);
             } else if (continuation) {
               const existingIdx = this.messages.findIndex(
                 (msg) => msg.id === message.id
@@ -7183,27 +7197,26 @@ export class AIChatAgent<
                 updatedMessages[existingIdx] = message;
                 await this.persistMessages(
                   updatedMessages,
-                  excludeBroadcastIds,
-                  { _cutover: cutover }
+                  excludeBroadcastIds
                 );
               } else {
                 // No assistant message to append to, create new one
                 await this.persistMessages(
                   [...this.messages, message],
-                  excludeBroadcastIds,
-                  { _cutover: cutover }
+                  excludeBroadcastIds
                 );
               }
             } else {
               await this.persistMessages(
                 [...this.messages, message],
-                excludeBroadcastIds,
-                { _cutover: cutover }
+                excludeBroadcastIds
               );
             }
           }
-          // Nothing to persist (or the persist threw): settle the stream so
-          // it is not mistaken for an interrupted turn.
+          // Nothing to persist (or the persist threw, or an override never
+          // reached the session write): settle the stream so it is not
+          // mistaken for an interrupted turn.
+          this.#pendingCutover = null;
           this._resumableStream.finalizePending();
 
           this._pendingChatResponseResults.push({
@@ -7217,6 +7230,7 @@ export class AIChatAgent<
           });
           return streamResult;
         } finally {
+          this.#pendingCutover = null;
           this._resumableStream.finalizePending();
           // The streamed assistant message (with all tool parts) is now
           // persisted: clear the stream-active gate and re-run the
