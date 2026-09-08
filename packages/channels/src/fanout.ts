@@ -121,9 +121,18 @@ export function fanoutChannel(resolve: OutboundResolver): Channel {
       const branches = teeAll(chunks, destinations.length);
       return combine(
         await Promise.all(
-          destinations.map((destination, index) =>
-            resolve.stream(destination, branches[index]!, options)
-          )
+          destinations.map(async (destination, index) => {
+            const branch = branches[index]!;
+            try {
+              return await resolve.stream(destination, branch, options);
+            } finally {
+              // A destination may return after an opening failure without
+              // reading. Cancel immediately so tee does not retain every chunk
+              // consumed by the remaining destinations. Do not await: one tee
+              // branch's cancellation settles only after its siblings finish.
+              void branch.cancel().catch(() => {});
+            }
+          })
         )
       );
     },

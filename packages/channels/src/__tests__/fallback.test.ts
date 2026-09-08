@@ -240,8 +240,13 @@ describe("fallback surfaces", () => {
 });
 
 describe("fallback streaming", () => {
-  it("replays what a failed destination consumed to the next one", async () => {
-    const first = streamingChannel(rejected);
+  it("advances when a destination fails before reading", async () => {
+    const first: Channel = {
+      async stream(_surface, chunks) {
+        await chunks.cancel();
+        return rejected;
+      }
+    };
     const second = streamingChannel({ status: "delivered", reference: "s-1" });
     const channelHost = host({ first, second });
 
@@ -255,25 +260,73 @@ describe("fallback streaming", () => {
       { type: "text", text: "Hello " },
       { type: "text", text: "world" }
     ]);
-    expect(second.seen).toEqual(first.seen);
   });
 
-  it("replays the consumed prefix and streams the untouched remainder", async () => {
+  it("stops fallback once a destination starts reading", async () => {
     const first = streamingChannel(rejected, { readAtMost: 1 });
+    const second = streamingChannel({ status: "delivered" });
+    const cancel = vi.fn();
+    let produced = 0;
+    const source = new ReadableStream<ChannelChunk>({
+      pull(controller) {
+        produced += 1;
+        if (produced <= 3) {
+          controller.enqueue({ type: "text", text: String(produced) });
+        } else {
+          controller.close();
+        }
+      },
+      cancel
+    });
+    const channelHost = host({ first, second });
+
+    await expect(
+      channelHost.stream(
+        fallback([surface("first"), surface("second")]),
+        source
+      )
+    ).resolves.toEqual(rejected);
+
+    expect(first.seen).toEqual([{ type: "text", text: "1" }]);
+    expect(second.calls).toBe(0);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("does not advance while an earlier attempt has a pending pull", async () => {
+    let releaseSource: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    let sent = false;
+    const source = new ReadableStream<ChannelChunk>({
+      async pull(controller) {
+        if (sent) {
+          controller.close();
+          return;
+        }
+        await blocked;
+        sent = true;
+        controller.enqueue({ type: "text", text: "late" });
+      }
+    });
+    const first: Channel = {
+      async stream(_surface, chunks) {
+        const reader = chunks.getReader();
+        void reader.read().finally(() => reader.releaseLock());
+        return rejected;
+      }
+    };
     const second = streamingChannel({ status: "delivered" });
     const channelHost = host({ first, second });
 
-    await channelHost.stream(
+    const delivery = channelHost.stream(
       fallback([surface("first"), surface("second")]),
-      streamOf(text("one", "two", "three"))
+      source
     );
+    setTimeout(() => releaseSource?.(), 0);
 
-    expect(first.seen).toEqual([{ type: "text", text: "one" }]);
-    expect(second.seen).toEqual([
-      { type: "text", text: "one" },
-      { type: "text", text: "two" },
-      { type: "text", text: "three" }
-    ]);
+    await expect(delivery).resolves.toEqual(rejected);
+    expect(second.calls).toBe(0);
   });
 
   it("skips an unavailable destination without consuming the stream", async () => {
@@ -318,8 +371,8 @@ describe("fallback streaming", () => {
     expect(second.calls).toBe(0);
   });
 
-  it("attempts the final destination even after every earlier one failed", async () => {
-    const first = streamingChannel(rejected);
+  it("attempts the final destination after earlier failures before reading", async () => {
+    const first: Channel = { stream: async () => rejected };
     const second = streamingChannel(rejected);
     const channelHost = host({ first, second });
 
@@ -332,9 +385,9 @@ describe("fallback streaming", () => {
     expect(second.seen).toEqual([{ type: "text", text: "Hello" }]);
   });
 
-  it("replays into a destination that cannot stream", async () => {
+  it("falls back to a non-streaming destination before the first read", async () => {
     const deliver = vi.fn(async () => ({ status: "delivered" as const }));
-    const first = streamingChannel(rejected);
+    const first: Channel = { stream: async () => rejected };
     const channelHost = host({ first, second: { deliver } });
 
     await expect(

@@ -18,8 +18,10 @@ was a stream, because the Host collects the answer and calls `deliver` once.
   collecting into an ordinary message for top-level channels where Slack does
   not support native streaming. Telegram previews with `sendMessageDraft`
   before persisting the answer with `sendMessage`.
-- `fanout` tees the stream per destination; `fallback` buffers consumed chunks
-  and replays them to the next destination after a failure.
+- `fanout` tees the stream per destination and cancels branches whose
+  destinations return without consuming them. `fallback` advances after a
+  failure only before that destination starts reading, avoiding an unbounded
+  replay buffer.
 - `toChannelChunks` maps an AI SDK `fullStream` onto `ChannelChunk`.
 - `DeliveryResult`'s `uncertain` arm gains an optional `reference`, and the
   three statuses are now defined by what the reader received rather than by

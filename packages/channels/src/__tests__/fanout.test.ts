@@ -251,6 +251,39 @@ describe("fanout streaming", () => {
     ]);
   });
 
+  it("cancels a branch when its destination returns without reading", async () => {
+    const source = streamOf(text("one", "two", "three"));
+    const [unreadBranch, drainingBranch] = source.tee();
+    const cancel = vi.spyOn(unreadBranch, "cancel");
+    const branchedSource = {
+      tee: () => [unreadBranch, drainingBranch]
+    } as ReadableStream<ChannelChunk>;
+    const seen: ChannelChunk[] = [];
+    const channelHost = host({
+      unread: {
+        stream: async () => ({
+          status: "failed",
+          retryable: false,
+          error: { code: "NOPE", message: "Rejected" }
+        })
+      },
+      draining: {
+        async stream(_surface, chunks) {
+          for await (const chunk of chunks) seen.push(chunk);
+          return { status: "delivered" };
+        }
+      }
+    });
+
+    await channelHost.stream(
+      fanout([surface("unread"), surface("draining")]),
+      branchedSource
+    );
+
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(seen).toEqual(text("one", "two", "three"));
+  });
+
   it("lets a fast destination finish while a slow one is still reading", async () => {
     let release: (() => void) | undefined;
     const blocked = new Promise<void>((resolve) => {

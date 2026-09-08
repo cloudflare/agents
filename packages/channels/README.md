@@ -90,8 +90,11 @@ await host.deliver(fanout([slackSurface, emailSurface]), message);
 ```
 
 `fallback()` tries destinations in order, advancing only after a _confirmed_
-failure, so it can never duplicate a delivery. `fanout()` sends to all of them;
-a partial or uncertain result is reported as `uncertain` for the same reason.
+failure, so it can never duplicate a delivery. For a stream, it advances only
+when that failure happens before the destination starts reading; replaying an
+arbitrarily large consumed prefix would require an unbounded buffer. `fanout()`
+sends to all destinations; a partial or uncertain result is reported as
+`uncertain` for the same reason.
 The Host installs both policies as ordinary Channels under reserved keys. You
 can register another composite policy as an ordinary Channel under your own key
 and pair it with a surface constructor that writes that key; inject only the

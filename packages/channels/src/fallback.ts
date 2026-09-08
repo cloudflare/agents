@@ -42,48 +42,49 @@ export function fallback(surfaces: FallbackSurfaceOptions): FallbackSurface {
 }
 
 /**
- * Advance past a failed destination, replaying what the failed one consumed.
+ * Advance only when a failed destination has not started reading the answer.
  *
- * Buffering the answer keeps `failed` meaning that nothing reached the reader,
- * so streaming failover behaves exactly like one-shot failover. No Channel has
- * to obey an invisible rule about calling its provider before its first read.
+ * Replaying an arbitrarily large consumed prefix requires an arbitrarily large
+ * buffer. Instead, each attempt gets a cancellation-shielded view of the same
+ * source. Once an attempt asks for its first chunk, its result is terminal and
+ * the source is never handed to another destination.
  */
-async function streamWithReplay(
+async function streamWithFallbackBeforeRead(
   resolve: OutboundResolver,
   destinations: readonly ChannelMessageSurface[],
   chunks: ReadableStream<ChannelChunk>,
   options: ChannelStreamOptions
 ): Promise<DeliveryResult> {
   const reader = chunks.getReader();
-  const buffered: ChannelChunk[] = [];
   let drained = false;
 
-  function attempt(): ReadableStream<ChannelChunk> {
-    let index = 0;
-    return new ReadableStream<ChannelChunk>({
-      async pull(controller) {
-        if (index < buffered.length) {
-          controller.enqueue(buffered[index]!);
-          index += 1;
-          return;
-        }
-        if (drained) {
-          controller.close();
-          return;
-        }
-        const result = await reader.read();
-        if (result.done) {
-          drained = true;
-          controller.close();
-          return;
-        }
-        buffered.push(result.value);
-        index = buffered.length;
-        controller.enqueue(result.value);
-      }
-      // A cancelling destination must not cancel the shared source, which the
-      // next destination may still need.
-    });
+  function attempt(): {
+    chunks: ReadableStream<ChannelChunk>;
+    startedReading: () => boolean;
+  } {
+    let startedReading = false;
+    return {
+      chunks: new ReadableStream<ChannelChunk>(
+        {
+          async pull(controller) {
+            startedReading = true;
+            const result = await reader.read();
+            if (result.done) {
+              drained = true;
+              controller.close();
+              return;
+            }
+            controller.enqueue(result.value);
+          },
+          // A destination may cancel after an opening failure. Shield the
+          // untouched source so the next destination can still try it.
+          cancel() {}
+        },
+        // Do not prefetch: creating an attempt must not consume the source.
+        { highWaterMark: 0 }
+      ),
+      startedReading: () => startedReading
+    };
   }
 
   try {
@@ -91,12 +92,14 @@ async function streamWithReplay(
       const destination = destinations[index]!;
       if (!(await resolve.isAvailable(destination))) continue;
 
-      const result = await resolve.stream(destination, attempt(), options);
-      if (result.status !== "failed") return result;
+      const current = attempt();
+      const result = await resolve.stream(destination, current.chunks, options);
+      if (result.status !== "failed" || current.startedReading()) return result;
     }
+    const final = attempt();
     // `return await` so the shared reader is released only after the final
     // destination has finished consuming it.
-    return await resolve.stream(destinations.at(-1)!, attempt(), options);
+    return await resolve.stream(destinations.at(-1)!, final.chunks, options);
   } finally {
     if (!drained) await reader.cancel().catch(() => {});
     reader.releaseLock();
@@ -152,7 +155,12 @@ export function fallbackChannel(resolve: OutboundResolver): Channel {
           "Fallback surface must contain at least one valid destination"
         );
       }
-      return streamWithReplay(resolve, destinations, chunks, options);
+      return streamWithFallbackBeforeRead(
+        resolve,
+        destinations,
+        chunks,
+        options
+      );
     },
 
     requestApproval(
