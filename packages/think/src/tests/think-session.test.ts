@@ -16,6 +16,7 @@ import type {
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent,
+  ThinkLegacySessionApiAgent,
   TestChatResult
 } from "./agents/think-session";
 import type { ChatResponseResult, SaveMessagesResult } from "../think";
@@ -945,6 +946,60 @@ describe("Think — Session integration", () => {
   });
 });
 
+// ── Pre-Sessions Think API ───────────────────────────────────────
+
+async function freshLegacyAgent(name: string) {
+  return getAgentByName(
+    env.ThinkLegacySessionApiAgent as unknown as DurableObjectNamespace<ThinkLegacySessionApiAgent>,
+    name
+  );
+}
+
+describe("Think — pre-Sessions session API keeps working", () => {
+  it("folds withContext() blocks into the prompt and serves the context forwards", async () => {
+    const agent = await freshLegacyAgent("legacy-context");
+
+    expect(await agent.legacyBlockLabels()).toEqual(["soul", "memory"]);
+    await agent.legacyReplaceBlock("memory", "User prefers TypeScript.");
+    expect(await agent.legacyBlockContent("memory")).toBe(
+      "User prefers TypeScript."
+    );
+
+    const prompt = await agent.legacyFreezeSystemPrompt();
+    expect(prompt).toContain("You are a legacy-configured agent.");
+    expect(prompt).toContain("User prefers TypeScript.");
+
+    expect(await agent.legacyToolNames()).toContain("set_context");
+    expect(await agent.legacyAddAndRemoveContext("scratch")).toBe(true);
+    expect(await agent.legacyBlockLabels()).toEqual(["soul", "memory"]);
+
+    await agent.testChat("Hello!");
+    expect(await agent.legacyBlockContent("memory")).toBe(
+      "User prefers TypeScript."
+    );
+  });
+
+  it("accepts the positional appendMessage / getHistory / getRecentHistory forms", async () => {
+    const agent = await freshLegacyAgent("legacy-positional");
+
+    expect(await agent.legacyPositionalWrites()).toEqual({
+      rootLength: 2,
+      branchLength: 2
+    });
+    expect(await agent.legacyRecentHistoryLength()).toBe(2);
+  });
+
+  it("routes a failing compaction function through onCompactionError()", async () => {
+    const agent = await freshLegacyAgent("legacy-compaction-error");
+    await agent.legacyPositionalWrites();
+
+    expect(await agent.legacyCompact()).toEqual({
+      result: null,
+      errors: ["summarizer down"]
+    });
+  });
+});
+
 // ── Context blocks ───────────────────────────────────────────────
 
 describe("Think — context blocks", () => {
@@ -1007,7 +1062,9 @@ describe("Think — context blocks", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const agent = await getAgentByName(
       env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
-      "skills-system-prompt-warning"
+      // Unique per run: the warning fires once per instance, so a retry
+      // against a warm object would see no call.
+      `skills-system-prompt-warning-${crypto.randomUUID()}`
     );
 
     try {
@@ -1016,7 +1073,7 @@ describe("Think — context blocks", () => {
       });
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining(
-          "getSystemPrompt() is only used as a fallback when no Session context blocks are configured"
+          "getSystemPrompt() is only used as a fallback when no context blocks are configured"
         )
       );
     } finally {
