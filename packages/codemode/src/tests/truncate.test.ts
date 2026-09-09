@@ -173,6 +173,21 @@ describe("truncateResult", () => {
     expect(JSON.stringify(out).length).toBeLessThanOrEqual(100);
   });
 
+  it("bounds the omitted-key note and stays linear on wide objects", () => {
+    const wide: Record<string, string> = {};
+    for (let i = 0; i < 20_000; i++)
+      wide[`property_number_${i}`] = "v".repeat(40);
+    const started = performance.now();
+    const out = truncateResult(wide, { maxChars: 300 }) as Record<
+      string,
+      unknown
+    >;
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(typeof out).toBe("object");
+    expect(JSON.stringify(out).length).toBeLessThanOrEqual(300);
+    expect(out["--- TRUNCATED ---"]).toContain("keys omitted");
+  });
+
   it("honours the budget for any structured input", () => {
     let seed = 42;
     const rnd = () =>

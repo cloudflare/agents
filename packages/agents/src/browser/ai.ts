@@ -281,10 +281,16 @@ function browserExecuteModelOutput(
   }
 
   // `calls` is the durable audit log; like the codemode tool's own projection,
-  // it stays on the persisted part and never enters the model's context.
+  // it stays on the persisted part and never enters the model's context, and
+  // the sandbox `logs` are bounded like a result.
   const modelFacing =
     typeof output === "object" && output !== null && !Array.isArray(output)
-      ? (({ calls: _calls, ...rest }: { calls?: unknown }) => rest)(output)
+      ? (({ calls: _calls, ...rest }: { calls?: unknown; logs?: unknown }) => ({
+          ...rest,
+          ...(Array.isArray(rest.logs)
+            ? { logs: truncateResult(rest.logs) }
+            : {})
+        }))(output)
       : output;
   const redacted = redactBase64Payloads(modelFacing);
   try {

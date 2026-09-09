@@ -223,58 +223,60 @@ function shrinkObject(
   // The marker entry must not shadow a real key.
   let markerKey = TRUNCATION_MARKER;
   while (markerKey in value) markerKey += " ";
-  const marker = (omitted: string[]): [string, string] => [
-    markerKey,
-    `${omitted.length.toLocaleString()} keys omitted: ${omitted.join(", ")}`
-  ];
-  const entryCost = ([key, v]: [string, Json]) =>
-    size(key) + 1 + floorSize(v, maxChars);
-  const skeleton = (count: number) => 2 + Math.max(0, count - 1);
+  const keyCost = (key: string) => size(key) + 1;
+  const floors = entries.map(([k, v]) => keyCost(k) + floorSize(v, maxChars));
+  const floorOf = (chars: number) =>
+    Math.min(chars, MIN_SLOT, Math.max(2, Math.floor(maxChars / 2)));
 
-  // Drop the largest values first, only until the remaining floors fit.
+  // Drop the largest values first, only until the remaining floors fit. Costs
+  // are tracked incrementally so a wide object stays linear in its key count;
+  // the marker note's cost is derived arithmetically from the omitted names.
   const byValueSize = entries
     .map((_, i) => i)
     .sort((a, b) => size(entries[b][1]) - size(entries[a][1]));
   const dropped = new Set<number>();
-  const fits = () => {
-    const kept = entries.filter((_, i) => !dropped.has(i));
-    const omitted = [...dropped]
-      .sort((a, b) => a - b)
-      .map((i) => entries[i][0]);
-    const extra = omitted.length > 0 ? [marker(omitted)] : [];
-    const cost =
-      kept.reduce((n, e) => n + entryCost(e), 0) +
-      extra.reduce((n, e) => n + entryCost(e), 0) +
-      skeleton(kept.length + extra.length);
-    return cost <= maxChars;
+  let present = entries.length;
+  let floorsSum = floors.reduce((n, f) => n + f, 0);
+  let namesLength = 0;
+  const noteLength = () =>
+    `${dropped.size.toLocaleString()} keys omitted: `.length +
+    namesLength +
+    2 * (dropped.size - 1);
+  const cost = () => {
+    const marker =
+      dropped.size > 0 ? keyCost(markerKey) + floorOf(noteLength() + 2) : 0;
+    const count = present + (dropped.size > 0 ? 1 : 0);
+    return 2 + Math.max(0, count - 1) + floorsSum + marker;
   };
   for (const i of byValueSize) {
-    if (fits()) break;
+    if (cost() <= maxChars) break;
     dropped.add(i);
+    present--;
+    floorsSum -= floors[i];
+    namesLength += size(entries[i][0]) - 2;
   }
 
   const kept = entries.filter((_, i) => !dropped.has(i));
   const omitted = [...dropped].sort((a, b) => a - b).map((i) => entries[i][0]);
-  const out: { [key: string]: Json } = {};
-  if (kept.length === 0) {
-    // Nothing survives: the marker alone, clipped to whatever room there is.
-    const [key, note] = marker(omitted);
-    const room = maxChars - skeleton(1) - size(key) - 1;
-    if (room >= 2) out[key] = shrink(note, room);
-    return out;
+  const note = `${omitted.length.toLocaleString()} keys omitted: ${omitted.join(", ")}`;
+  if (cost() > maxChars) {
+    // Not even the marker fits at its floor: keep as much of it as there is
+    // room for, or nothing.
+    const room = maxChars - 2 - keyCost(markerKey);
+    return room >= 2 ? { [markerKey]: shrink(note, room) } : {};
   }
-  const extra = omitted.length > 0 ? [marker(omitted)] : [];
+  const all: [string, Json][] = [...kept];
+  if (omitted.length > 0) all.push([markerKey, note]);
   const fixed =
-    [...kept, ...extra].reduce((n, [k]) => n + size(k) + 1, 0) +
-    extra.reduce((n, [, note]) => n + size(note), 0) +
-    skeleton(kept.length + extra.length);
+    2 + Math.max(0, all.length - 1) + all.reduce((n, [k]) => n + keyCost(k), 0);
+  // The note is shrunk like any other value, so it can never overshoot.
   const allocation = allocate(
-    kept.map(([, v]) => v),
+    all.map(([, v]) => v),
     maxChars - fixed
   );
-  kept.forEach(([k, v], i) => {
+  const out: { [key: string]: Json } = {};
+  all.forEach(([k, v], i) => {
     out[k] = shrink(v, allocation[i]);
   });
-  for (const [k, note] of extra) out[k] = note;
   return out;
 }

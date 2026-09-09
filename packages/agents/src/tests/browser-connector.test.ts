@@ -270,6 +270,15 @@ describe("browser_execute model output", () => {
     expect(serialized).not.toContain(image);
     // The durable call log is audit data for the UI, not model context.
     expect(serialized).not.toContain("calls");
+
+    const noisy = (await tool.toModelOutput({
+      output: {
+        status: "completed",
+        result: "ok",
+        logs: Array.from({ length: 5_000 }, (_, i) => `line ${i}`)
+      }
+    })) as { value: { logs: unknown[] } };
+    expect(JSON.stringify(noisy.value.logs).length).toBeLessThanOrEqual(24_000);
     expect(output.result.captures[0]).toHaveProperty("data", "AAAA");
     expect(output.calls[0].result.data).toBe(image);
   });
