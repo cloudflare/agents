@@ -5403,10 +5403,12 @@ export class Think<
         }
       });
 
-      const previous = this._configGet("skillsFingerprint");
+      const previous = (this._skillsFingerprint ??=
+        this._configGet("skillsFingerprint") ?? null);
       if (previous !== registry.fingerprint) {
         await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", registry.fingerprint);
+        this._skillsFingerprint = registry.fingerprint;
       }
     } catch (error) {
       console.warn(
@@ -5477,6 +5479,12 @@ export class Think<
     return null;
   }
 
+  /**
+   * The persisted skills fingerprint, read from `think_config` once per
+   * object lifetime; `null` once read and absent. Saves the per-turn probe.
+   */
+  private _skillsFingerprint: string | null | undefined;
+
   private async _refreshSkillsIfChanged(): Promise<void> {
     if (!this._skillRegistry) return;
 
@@ -5486,10 +5494,12 @@ export class Think<
       await this._skillRegistry.refresh();
       this._logSkillWarnings(this._skillRegistry);
       await this._configureSkillWorkspace(this._skillRegistry);
-      const previous = this._configGet("skillsFingerprint");
+      const previous = (this._skillsFingerprint ??=
+        this._configGet("skillsFingerprint") ?? null);
       if (previous !== this._skillRegistry.fingerprint) {
         await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
+        this._skillsFingerprint = this._skillRegistry.fingerprint;
       }
     } catch (error) {
       console.warn(
@@ -13620,16 +13630,23 @@ export class Think<
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
     let after: (() => Promise<void>) | undefined;
-    this._resumableStream.cutover(
-      streamId,
-      () => {
-        after = sync.upsert(toPersist as SessionMessage, {
-          parentId,
-          source: "server"
-        }).after;
-      },
-      { discard: options.discard ?? true }
-    );
+    try {
+      this._resumableStream.cutover(
+        streamId,
+        () => {
+          after = sync.upsert(toPersist as SessionMessage, {
+            parentId,
+            source: "server"
+          }).after;
+        },
+        { discard: options.discard ?? true }
+      );
+    } catch (error) {
+      // The settle transaction rolled back: the row never landed, but the
+      // session's in-memory caches already counted it.
+      sync.abandon();
+      throw error;
+    }
     await after?.();
   }
 
@@ -13795,16 +13812,38 @@ export class Think<
     await this._upsertMessageInHistory(resolved, undefined, "client");
   }
 
-  private _persistClientTools(): void {
-    if (this._lastClientTools) {
-      this._configSet("lastClientTools", JSON.stringify(this._lastClientTools));
+  /**
+   * The serialized form last written to (or read from) `think_config` for a
+   * request-context key. Every chat request re-sends its client tools and
+   * body; comparing here turns the per-request write into a no-op when
+   * nothing changed. `undefined` means "not persisted" (row absent).
+   */
+  private _persistedRequestContext: {
+    lastClientTools?: string;
+    lastBody?: string;
+  } = {};
+
+  private _persistRequestContextKey(
+    key: "lastClientTools" | "lastBody",
+    value: unknown
+  ): void {
+    const json = value ? JSON.stringify(value) : undefined;
+    if (this._persistedRequestContext[key] === json) return;
+    if (json === undefined) {
+      this._configDelete(key);
     } else {
-      this._configDelete("lastClientTools");
+      this._configSet(key, json);
     }
+    this._persistedRequestContext[key] = json;
+  }
+
+  private _persistClientTools(): void {
+    this._persistRequestContextKey("lastClientTools", this._lastClientTools);
   }
 
   private _restoreClientTools(): void {
     const raw = this._configGet("lastClientTools");
+    this._persistedRequestContext.lastClientTools = raw;
     if (raw) {
       try {
         this._lastClientTools = JSON.parse(raw);
@@ -13815,15 +13854,12 @@ export class Think<
   }
 
   private _persistBody(): void {
-    if (this._lastBody) {
-      this._configSet("lastBody", JSON.stringify(this._lastBody));
-    } else {
-      this._configDelete("lastBody");
-    }
+    this._persistRequestContextKey("lastBody", this._lastBody);
   }
 
   private _restoreBody(): void {
     const raw = this._configGet("lastBody");
+    this._persistedRequestContext.lastBody = raw;
     if (raw) {
       try {
         this._lastBody = JSON.parse(raw);

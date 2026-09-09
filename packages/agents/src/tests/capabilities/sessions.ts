@@ -79,6 +79,23 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     });
   }
 
+  /**
+   * Append through the synchronous aperture inside a transaction that then
+   * throws, the way a stream cutover fails after its message write. The
+   * row rolls back; the aperture's `abandon()` drops the caches that moved.
+   */
+  appendThenRollback(message: SessionMessage): void {
+    const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
+    try {
+      this.ctx.storage.transactionSync(() => {
+        sync.upsert(message);
+        throw new Error("cutover failed after the message write");
+      });
+    } catch {
+      sync.abandon();
+    }
+  }
+
   /** Telemetry events of one type, in dispatch order. */
   eventsOfType(type: string): RecordedEvent[] {
     return this.events.filter((event) => event.type === type);
@@ -364,6 +381,33 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
       });
     }
     return { rowsWritten: this.#billed.stop() };
+  }
+
+  /**
+   * Rows read by tail appends on a session with an auto-compaction threshold
+   * the transcript never reaches. The threshold check runs after every
+   * insert; its cost must not grow with the transcript.
+   */
+  async benchThresholdAppends(
+    count: number,
+    textBytes: number
+  ): Promise<{ rowsRead: number }> {
+    await this.lifecycle.start();
+    const session = this.sessions.session();
+    session
+      .onCompaction(async () => null)
+      .compactAfter(Number.MAX_SAFE_INTEGER);
+    await session.getLatestLeaf();
+    const filler = "x".repeat(textBytes);
+    this.#billed.start();
+    for (let i = 0; i < count; i++) {
+      await session.appendMessage({
+        id: `bench-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `${i}:${filler}` }]
+      });
+    }
+    return { rowsRead: this.#billed.stopAll().rowsRead };
   }
 
   /** An update whose serialized row is byte-identical writes nothing. */
