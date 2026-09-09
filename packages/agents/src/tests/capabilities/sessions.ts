@@ -79,6 +79,23 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     });
   }
 
+  /**
+   * Append through the synchronous aperture inside a transaction that then
+   * throws, the way a stream cutover fails after its message write. The
+   * row rolls back; the aperture's `abandon()` drops the caches that moved.
+   */
+  appendThenRollback(message: SessionMessage): void {
+    const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
+    try {
+      this.ctx.storage.transactionSync(() => {
+        sync.upsert(message);
+        throw new Error("cutover failed after the message write");
+      });
+    } catch {
+      sync.abandon();
+    }
+  }
+
   /** Telemetry events of one type, in dispatch order. */
   eventsOfType(type: string): RecordedEvent[] {
     return this.events.filter((event) => event.type === type);

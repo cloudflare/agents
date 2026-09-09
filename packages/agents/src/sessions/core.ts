@@ -75,6 +75,8 @@ type PathTokens = {
   leafId: string | null;
   counted: Set<string>;
   total: number;
+  /** Rows the walk returned: the memo is only extended while under the path cap. */
+  depth: number;
 };
 
 export type UpdateOutcome = "missing" | "unchanged" | "updated";
@@ -399,6 +401,17 @@ export class SessionsCore {
       : { leafId: null, nextSeq: 1 };
     this.#tails.set(sessionId, tail);
     return tail;
+  }
+
+  /**
+   * Drop the in-memory tail and token-total caches for a session. For a
+   * caller whose enclosing transaction rolled back after an append or update
+   * ran inside it: the rows are gone but the caches already moved. The next
+   * read re-derives both from storage.
+   */
+  forgetCaches(sessionId: string): void {
+    this.#tails.delete(sessionId);
+    this.#pathTokens.delete(sessionId);
   }
 
   latestLeafId(sessionId: string): string | null {
@@ -822,7 +835,12 @@ export class SessionsCore {
       }
       tokens += estimateStringTokens(span.compaction.summary);
     }
-    this.#pathTokens.set(sessionId, { leafId, counted, total: tokens });
+    this.#pathTokens.set(sessionId, {
+      leafId,
+      counted,
+      total: tokens,
+      depth: stats.length
+    });
     return Math.max(0, Math.ceil(tokens));
   }
 
@@ -959,12 +977,15 @@ export class SessionsCore {
     this.#tails.set(sessionId, { leafId: message.id, nextSeq: seq + 1 });
     const memo = this.#pathTokens.get(sessionId);
     if (memo) {
-      if (memo.leafId === parent) {
+      if (memo.leafId === parent && memo.depth <= MAX_PATH_DEPTH) {
         // The row extends the memoised path: count it, no re-walk.
         memo.leafId = message.id;
         memo.counted.add(message.id);
         memo.total += tokenEstimate;
+        memo.depth += 1;
       } else {
+        // A branch, or a path at the cap: the walk would drop its oldest
+        // row, which the memo cannot see. Re-derive on the next read.
         this.#pathTokens.delete(sessionId);
       }
     }

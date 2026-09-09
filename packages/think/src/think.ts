@@ -13630,16 +13630,23 @@ export class Think<
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
     let after: (() => Promise<void>) | undefined;
-    this._resumableStream.cutover(
-      streamId,
-      () => {
-        after = sync.upsert(toPersist as SessionMessage, {
-          parentId,
-          source: "server"
-        }).after;
-      },
-      { discard: options.discard ?? true }
-    );
+    try {
+      this._resumableStream.cutover(
+        streamId,
+        () => {
+          after = sync.upsert(toPersist as SessionMessage, {
+            parentId,
+            source: "server"
+          }).after;
+        },
+        { discard: options.discard ?? true }
+      );
+    } catch (error) {
+      // The settle transaction rolled back: the row never landed, but the
+      // session's in-memory caches already counted it.
+      sync.abandon();
+      throw error;
+    }
     await after?.();
   }
 

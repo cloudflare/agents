@@ -332,6 +332,74 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("forgets a rolled-back append's share of the estimate and the tail", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      let compactions = 0;
+      session
+        .onCompaction(async (messages) => {
+          compactions++;
+          if (messages.length < 2) return null;
+          return {
+            fromMessageId: messages[0].id,
+            toMessageId: messages[messages.length - 2].id,
+            summary: "auto summary"
+          };
+        })
+        .compactAfter(100);
+
+      await session.appendMessage(text("r1", "short"));
+      expect(compactions).toBe(0);
+
+      // A large row is written inside a transaction that then rolls back.
+      // Its estimate and its place as the leaf must go with it.
+      instance.appendThenRollback(text("r2", "y".repeat(600), "assistant"));
+      expect(await session.getMessage("r2")).toBeNull();
+
+      await session.appendMessage(text("r3", "short", "assistant"));
+      expect(compactions).toBe(0);
+      expect((await session.getHistory()).map((m) => m.id)).toEqual([
+        "r1",
+        "r3"
+      ]);
+    });
+  });
+
+  it("re-derives the estimate once the path reaches the walk cap", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      let parentId: string | null = null;
+      for (let i = 0; i < 10_000; i++) {
+        await session.importMessage(text(`cap-${i}`, "x"), {
+          parentId,
+          createdAt: i
+        });
+        parentId = `cap-${i}`;
+      }
+      // Every row estimates the same; the walk returns at most 10,001 rows,
+      // so once the path is that long the estimate stops growing.
+      const perRow = (await session.getHistoryRowStats())[0].tokenEstimate;
+      let compactions = 0;
+      session
+        .onCompaction(async () => {
+          compactions++;
+          return null;
+        })
+        .compactAfter(perRow * 10_001);
+
+      // Row 10,001 fills the window exactly: at the threshold, not over.
+      await session.appendMessage(text("cap-10000", "x"));
+      expect(compactions).toBe(0);
+      // Rows past the cap slide the window. A memo that kept adding would
+      // cross the threshold here; the re-derived estimate does not.
+      await session.appendMessage(text("cap-10001", "x"));
+      await session.appendMessage(text("cap-10002", "x"));
+      expect(compactions).toBe(0);
+    });
+  }, 120_000);
+
   it("streams history in bounded batches", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
