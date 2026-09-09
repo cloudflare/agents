@@ -614,22 +614,6 @@ export class ResumableStream {
   }
 
   /**
-   * Drop a completed stream's rows once its message is persisted. The rows
-   * are redundant with the message from that moment, so deleting them here
-   * (a handful of block rows) is what keeps the retention sweep from ever
-   * finding completed streams. Live and errored streams are left alone:
-   * a live one may still be resumed, an errored one still owes a resumed
-   * client its terminal frame (#1645).
-   * @returns Whether rows were deleted.
-   */
-  discardCompleted(streamId: string): boolean {
-    const row = this.ops.getStream(streamId);
-    if (!row || row.state !== "completed") return false;
-    this._deleteRetiring([row]);
-    return true;
-  }
-
-  /**
    * Mark a stream as errored and clean up state.
    * @param streamId - The stream to mark as errored
    */
