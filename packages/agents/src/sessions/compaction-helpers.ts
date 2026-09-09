@@ -204,7 +204,7 @@ export function buildSummaryPrompt(
           if (tp.input)
             parts.push(`Input: ${JSON.stringify(tp.input).slice(0, 500)}`);
           if (tp.output)
-            parts.push(`Output: ${String(tp.output).slice(0, 500)}`);
+            parts.push(`Output: ${JSON.stringify(tp.output).slice(0, 500)}`);
           return parts.join("\n");
         })
         .join("\n");

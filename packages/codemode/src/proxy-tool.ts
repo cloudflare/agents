@@ -752,7 +752,46 @@ export type CodemodeTool = {
     input: ProxyToolInput,
     options: unknown
   ) => Promise<ProxyToolOutput>;
+  /**
+   * The AI SDK model-facing projection of the output: everything but `calls`.
+   * The full output (with the durable call log) stays on the persisted tool
+   * part for UIs; the model sees the transformed `result`, `logs`, `pending`
+   * or `error`. Without this the raw call log — every connector call's args
+   * and result — would ride along uncapped and defeat `transformResult`.
+   */
+  toModelOutput: (options: { output: unknown }) => {
+    type: "json";
+    value: JSONValue;
+  };
 };
+
+/** Structural twin of the AI SDK's `JSONValue`; the root entry must not import `ai`. */
+type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JSONValue[]
+  | { [key: string]: JSONValue };
+
+/** Drop the audit-only `calls` log from a tool output bound for the model. */
+function toModelOutput(output: unknown): {
+  type: "json";
+  value: JSONValue;
+} {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) {
+    return { type: "json", value: toJSONValue(output) };
+  }
+  const { calls: _calls, ...rest } = output as { calls?: unknown };
+  return { type: "json", value: toJSONValue(rest) };
+}
+
+function toJSONValue(value: unknown): JSONValue {
+  const serialized = JSON.stringify(value);
+  return serialized === undefined
+    ? null
+    : (JSON.parse(serialized) as JSONValue);
+}
 
 export function createProxyTool(options: CreateProxyToolOptions): CodemodeTool {
   const connectors = options.connectors;
@@ -801,7 +840,8 @@ export function createProxyTool(options: CreateProxyToolOptions): CodemodeTool {
         options.executor,
         options.transformResult
       );
-    }
+    },
+    toModelOutput: ({ output }) => toModelOutput(output)
   };
 }
 

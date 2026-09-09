@@ -841,6 +841,39 @@ describe("openApiMcpServer", () => {
     await client.close();
   });
 
+  it("search keeps oversized structured results as valid JSON", async () => {
+    const executor = {
+      execute: async () => ({
+        result: {
+          schema: "fixture_v1",
+          rows: [{ detail: "x".repeat(70_000) }]
+        }
+      })
+    };
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: { code: "async () => 'ignored'" }
+    });
+
+    const text = callText(result);
+    const parsed = JSON.parse(text) as {
+      schema: string;
+      rows: { detail: string }[];
+    };
+    expect(parsed.schema).toBe("fixture_v1");
+    expect(parsed.rows[0].detail).toContain("--- TRUNCATED --- 70,000 chars");
+    expect(text.length).toBeLessThan(70_000);
+
+    await client.close();
+  });
+
   it("search should truncate oversized string results from custom executors on the host", async () => {
     const executor = {
       execute: async () => ({ result: "x".repeat(25000) })

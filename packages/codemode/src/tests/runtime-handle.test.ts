@@ -103,6 +103,34 @@ describe("createCodemodeRuntime", () => {
     });
   });
 
+  it("projects the model-facing output without the durable call log", async () => {
+    const runtime = createCodemodeRuntime({
+      ctx: createMockCtx({}),
+      executor: createMockExecutor(),
+      connectors: []
+    });
+    const codemode = runtime.tool();
+
+    const output = {
+      status: "completed",
+      executionId: "exec_1",
+      result: { ok: true },
+      logs: ["hi"],
+      calls: [{ seq: 0, args: { big: "x".repeat(10_000) }, result: {} }]
+    };
+    expect(codemode.toModelOutput({ output })).toEqual({
+      type: "json",
+      value: {
+        status: "completed",
+        executionId: "exec_1",
+        result: { ok: true },
+        logs: ["hi"]
+      }
+    });
+    // The persisted output is untouched — UIs keep the audit trail.
+    expect(output.calls).toHaveLength(1);
+  });
+
   it("executes directly without an AI SDK adapter", async () => {
     const runtimeStub = {
       begin: vi.fn(async () => "exec_direct"),
