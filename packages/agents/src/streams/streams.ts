@@ -97,6 +97,16 @@ export interface StreamsSyncInternal {
    */
   cursor(streamId: string): number;
   /**
+   * Observe every deletion of a stream's rows — the public `delete()`, the
+   * aperture's own deletes, and a cutover's discard — with the row and its
+   * cursor as they were just before removal, in the same synchronous block
+   * (and, for a cutover, the same transaction). Hooks must be synchronous
+   * and must not await: the cutover runs them inside `transactionSync`.
+   * The chat adapter uses this to keep its recovery progress marker exact
+   * however a chat row leaves the table.
+   */
+  onDelete(hook: (row: StreamRow, cursor: number) => void): void;
+  /**
    * Idempotent settlement with events and reader wakeup. With `options`,
    * the settle, the caller's `commit` writes and the log discard run in
    * one SQLite transaction (see {@link StreamSettleOptions}). Returns
@@ -433,6 +443,9 @@ export class Streams extends LifecycleCapability {
       append: (streamId, chunk) => this.#append(streamId, chunk),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
       cursor: (streamId) => this.#tail(streamId).nextSeq,
+      onDelete: (hook) => {
+        this.#deleteHooks.push(hook);
+      },
       settle: (streamId, state, reason, options) =>
         this.#settle(streamId, state, reason, options),
       deleteUnchecked: (streamId) => {
@@ -611,7 +624,21 @@ export class Streams extends LifecycleCapability {
   }
 
   /** Delete a stream's blocks and row. Returns rows removed from the row table. */
+  readonly #deleteHooks: Array<(row: StreamRow, cursor: number) => void> = [];
+
+  /**
+   * Remove a stream's row and log. Deletion hooks see the row and its
+   * cursor first, so an owner can account for the segments before they are
+   * gone; this is the single point every delete path passes through.
+   */
   #deleteRows(streamId: string): number {
+    if (this.#deleteHooks.length > 0) {
+      const row = this.#getStream(streamId);
+      if (row) {
+        const cursor = this.#tail(streamId).nextSeq;
+        for (const hook of this.#deleteHooks) hook(row, cursor);
+      }
+    }
     if (this.#legacyChunkTable) {
       // Unfolded v1 rows die with the stream; no point folding them first.
       this.#sql`DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}`;

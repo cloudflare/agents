@@ -148,6 +148,19 @@ export type SqlTaggedTemplate = {
   ): T[];
 };
 
+/** Host hooks for the chat stream adapter. */
+export type ResumableStreamOptions = {
+  /**
+   * Called with the durable part of the recovery progress marker (retired
+   * segments plus credits plus the seeded legacy counter) after it advances,
+   * outside any transaction. Hosts mirror it to the pre-derivation KV key so
+   * a build rolled back to the KV counter never reads a marker lower than
+   * an incident recorded under this one. Fires per stream retired and per
+   * credit, never per chunk.
+   */
+  onProgress?: (durableSegments: number) => void;
+};
+
 export class ResumableStream {
   private _activeStreamId: string | null = null;
   private _activeRequestId: string | null = null;
@@ -178,11 +191,23 @@ export class ResumableStream {
 
   private readonly ops: StreamsSyncInternal;
 
-  constructor(streams: Streams, sql: SqlTaggedTemplate) {
+  constructor(
+    streams: Streams,
+    sql: SqlTaggedTemplate,
+    options: ResumableStreamOptions = {}
+  ) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
     this._sql = sql;
+    this._onProgress = options.onProgress;
     this._ensureProgressTable();
+    // Every path that removes a chat row's log — this adapter's cutover,
+    // reclaim and clear, and the capability's public `delete()` — folds the
+    // row's segments into the retired total first. Registered before the
+    // legacy migration, which is itself a delete path.
+    this.ops.onDelete((row, cursor) => {
+      if (parseChatMetadata(row)) this._retire(cursor);
+    });
     this._migrateLegacyTables(sql);
     // Restore any active stream from a previous session
     this.restore();
@@ -202,6 +227,17 @@ export class ResumableStream {
   // written per stream retired.
 
   private readonly _sql: SqlTaggedTemplate;
+  private readonly _onProgress: ResumableStreamOptions["onProgress"];
+
+  /**
+   * Tell the host the durable part of the marker moved. Called after the
+   * write that moved it has left any transaction, never inside one: the
+   * host's mirror is an async KV put, which a synchronous transaction
+   * would reject.
+   */
+  private _notifyProgress(): void {
+    this._onProgress?.(this._retiredSegments());
+  }
 
   /**
    * One row: `retired` accumulates the segments of deleted streams and
@@ -257,10 +293,10 @@ export class ResumableStream {
    * log-tail row per live stream: called at incident evaluation, not on the
    * hot path.
    *
-   * Chat streams are deleted only through this adapter, which retires their
-   * segments first. A chat stream removed some other way (the capability's
-   * own `delete()`, say) lowers the sum by its segments; the incident keeps
-   * its own high-water mark, so that reads as "no progress", never as work.
+   * A chat row leaving the table by any path — this adapter's cutover,
+   * reclaim and clear, or the capability's own `delete()` — passes through
+   * the deletion hook, so its segments are retired before they are gone
+   * and the marker never moves on a deletion.
    */
   progressMarker(): number {
     let live = 0;
@@ -276,6 +312,7 @@ export class ResumableStream {
    */
   creditProgress(): void {
     this._retire(1);
+    this._notifyProgress();
   }
 
   /**
@@ -304,17 +341,14 @@ export class ResumableStream {
   }
 
   /**
-   * Fold the rows' segments into the retired total, then delete them. Both
-   * writes sit in one synchronous block, which the runtime commits as one
-   * unit at the next I/O boundary; the retire comes first so a partial
-   * commit could only ever count a stream twice, never lose it.
+   * Delete chat rows. The deletion hook folds each row's segments into the
+   * retired total in the same synchronous block, retire before delete, so
+   * a partial commit could only ever count a stream twice, never lose it.
    */
-  private _retireAndDelete(rows: readonly StreamRow[]): void {
+  private _deleteRetiring(rows: readonly StreamRow[]): void {
     if (rows.length === 0) return;
-    let segments = 0;
-    for (const row of rows) segments += this._segmentsOf(row);
-    this._retire(segments);
     this.ops.deleteMany(rows.map((row) => row.stream_id));
+    this._notifyProgress();
   }
 
   /**
@@ -532,17 +566,14 @@ export class ResumableStream {
   ) {
     this.flushBuffer();
     const discard = options.discard ?? true;
+    // The discard deletes the rows inside the settle transaction, and the
+    // deletion hook retires their segments there, so the marker moves with
+    // the commit or not at all.
     const settled = this.ops.settle(streamId, "completed", null, {
-      // The rows go in this same transaction, so their segments move to
-      // the retired total here or not at all.
-      commit: discard
-        ? () => {
-            persist();
-            this._retire(this.ops.cursor(streamId));
-          }
-        : persist,
+      commit: persist,
       discard
     });
+    if (settled && discard) this._notifyProgress();
     // The stream was settled (or deleted) by another path first, so the
     // settle was a no-op and `persist` did not run: the message must still
     // land, just not atomically with a settlement that already happened.
@@ -581,7 +612,7 @@ export class ResumableStream {
   discardCompleted(streamId: string): boolean {
     const row = this.ops.getStream(streamId);
     if (!row || row.state !== "completed") return false;
-    this._retireAndDelete([row]);
+    this._deleteRetiring([row]);
     return true;
   }
 
@@ -902,7 +933,7 @@ export class ResumableStream {
   clearAll() {
     this._chunkBuffer = [];
     this._chunkBufferBytes = 0;
-    this._retireAndDelete(this._chatRows());
+    this._deleteRetiring(this._chatRows());
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._activeIsContinuation = false;
@@ -942,7 +973,7 @@ export class ResumableStream {
             abandonedCutoff
         : true
     );
-    this._retireAndDelete(reclaimable);
+    this._deleteRetiring(reclaimable);
     return reclaimable.length;
   }
 

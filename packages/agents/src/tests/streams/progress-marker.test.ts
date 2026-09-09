@@ -52,6 +52,25 @@ describe("ResumableStream.progressMarker", () => {
     });
   });
 
+  it("keeps the marker when a chat row is deleted through the public capability", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      const { before, after } = await instance.probePublicDelete();
+      expect(before).toBe(1);
+      expect(after).toBe(1);
+    });
+  });
+
+  it("reports the durable marker to the host per retire and per credit, never per chunk", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      await instance.probeProgressMarker();
+      // Cutover, reclaim, credit, clear: four reports for 36 stored chunks,
+      // each carrying the durable total as it stood, never decreasing.
+      expect(instance.progressReports).toEqual([3, 4, 5, 6]);
+    });
+  });
+
   it("seeds the legacy counter beside segments retired before it, idempotently", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {

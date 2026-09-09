@@ -90,6 +90,7 @@ import {
   listActiveChatRecoveryIncidents,
   classifyAgentToolChildRecovery,
   readChatRecoveryProgress,
+  CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
@@ -1005,7 +1006,17 @@ export class AIChatAgent<
           () => {
             this._resumableStream = new ResumableStream(
               this.streams,
-              this.sql.bind(this)
+              this.sql.bind(this),
+              {
+                // Rollback insurance: a build still on the KV counter reads
+                // a marker no lower than one recorded under the derived
+                // marker. One put per stream retired, none per chunk.
+                onProgress: (durable) => {
+                  void this.ctx.storage
+                    .put(CHAT_RECOVERY_PROGRESS_KEY, durable)
+                    .catch(() => {});
+                }
+              }
             );
           }
         );
@@ -4682,9 +4693,15 @@ export class AIChatAgent<
   private async _chatRecoveryProgressMarker(): Promise<number> {
     // Memoized as the promise, not a flag: two concurrent readers both wait
     // for the seed to land, so neither can hand the engine an unseeded
-    // marker as an incident's work baseline.
+    // marker as an incident's work baseline. A failed read is not cached:
+    // the next evaluation retries it instead of failing for the isolate's
+    // life on a transient storage error.
     this._progressSeed ??= readChatRecoveryProgress(this.ctx.storage).then(
-      (legacy) => this._resumableStream.seedProgress(legacy)
+      (legacy) => this._resumableStream.seedProgress(legacy),
+      (error: unknown) => {
+        this._progressSeed = null;
+        throw error;
+      }
     );
     await this._progressSeed;
     return this._resumableStream.progressMarker();

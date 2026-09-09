@@ -25,6 +25,9 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return JSON.stringify({ type: "text-delta", delta: `${index}:${filler}` });
   }
 
+  /** Durable-marker values the adapter reported through `onProgress`. */
+  readonly progressReports: number[] = [];
+
   #adapter(): ResumableStream {
     return new ResumableStream(
       this.streams,
@@ -40,8 +43,24 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
             ),
             ...values
           )
-        ] as T[]
+        ] as T[],
+      { onProgress: (durable) => this.progressReports.push(durable) }
     );
+  }
+
+  /**
+   * A completed chat stream deleted through the capability's public
+   * `delete()`, which bypasses the adapter: the marker must not move.
+   */
+  async probePublicDelete(): Promise<{ before: number; after: number }> {
+    await this.lifecycle.start();
+    const adapter = this.#adapter();
+    const id = adapter.start("public-delete-req");
+    for (let i = 0; i < 10; i++) adapter.storeChunk(id, this.#body(i, 60));
+    adapter.complete(id);
+    const before = adapter.progressMarker();
+    await this.streams.delete(id);
+    return { before, after: adapter.progressMarker() };
   }
 
   /**
