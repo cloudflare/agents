@@ -8826,6 +8826,70 @@ export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
     }
     return ["media-0", "media-1"];
   }
+
+  /**
+   * Appends that land while a FRUITLESS pass is running on the windowed
+   * cache. The pass records what it saw when it ends; the appends that
+   * arrived meanwhile must count toward re-arming it, or the request they
+   * left pending is suppressed until as many appends again. The pass is
+   * held open by slowing its row-stats read.
+   */
+  async appendDuringFruitlessPassForTest(): Promise<{
+    ids: string[];
+    runningAtAppend: boolean;
+    firstPassMessages: number;
+  }> {
+    const media = `data:image/png;base64,${"D".repeat(16_000)}`;
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `fpre-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `filler ${i}` }]
+      } as UIMessage);
+    }
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `fmedia-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [
+          { type: "text", text: `shot ${i}` },
+          { type: "file", mediaType: "image/png", url: media }
+        ]
+      } as UIMessage);
+    }
+    await this.syncMessagesFromStorage();
+    // The refresh's own pass runs and records nothing aged.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Hold the next pass open AFTER its row-stats read, so it finishes
+    // fruitless on stats that predate the appends below.
+    const session = this.session as unknown as {
+      getHistoryRowStats: (...args: unknown[]) => Promise<unknown>;
+    };
+    const stats = session.getHistoryRowStats.bind(session);
+    session.getHistoryRowStats = async (...args: unknown[]) => {
+      const rows = await stats(...args);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return rows;
+    };
+    const internal = this as unknown as { _mediaEvictionRunning: boolean };
+    const pass = this._evictAgedMediaBestEffort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const runningAtAppend = internal._mediaEvictionRunning;
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `fpost-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `later ${i}` }]
+      } as UIMessage);
+    }
+    const result = await pass;
+    return {
+      ids: ["fmedia-0", "fmedia-1"],
+      runningAtAppend,
+      firstPassMessages: result?.messages ?? 0
+    };
+  }
 }
 
 // ── Pointer-inflation hydration (#1710) ─────────────────────────

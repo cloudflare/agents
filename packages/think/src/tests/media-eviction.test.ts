@@ -313,6 +313,37 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     );
   });
 
+  it("counts appends that land during a fruitless pass toward re-arming it", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkMediaEvictionAutoAgent,
+      uniqueName("evict-rearm-mid-pass")
+    )) as unknown as MediaEvictionStub & {
+      appendDuringFruitlessPassForTest(): Promise<{
+        ids: string[];
+        runningAtAppend: boolean;
+        firstPassMessages: number;
+      }>;
+    };
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+
+    // Four appends land while a fruitless pass is running. The pass used to
+    // record zero appends since when it ended, so the request those appends
+    // left pending was suppressed until four more arrived.
+    const { ids, runningAtAppend, firstPassMessages } =
+      await agent.appendDuringFruitlessPassForTest();
+    expect(runningAtAppend).toBe(true);
+    expect(firstPassMessages).toBe(0);
+    await vi.waitFor(
+      async () => {
+        for (const id of ids) {
+          const message = await agent.getStoredMessageForTest(id);
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
   it("a windowed hydration read schedules the pass", async () => {
     const agent = (await getAgentByName(
       env.ThinkMediaEvictionAutoAgent,

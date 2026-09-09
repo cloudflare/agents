@@ -3130,6 +3130,9 @@ export class Think<
                     if (this._mediaEvictionFruitless) {
                       this._mediaEvictionFruitless.appendsSince++;
                     }
+                    if (this._mediaEvictionRunning) {
+                      this._mediaEvictionAppendsDuringPass++;
+                    }
                     this._scheduleMediaEvictionPass();
                   }
                   break;
@@ -3511,6 +3514,12 @@ export class Think<
    * and re-evaluated once the pass ends rather than dropped.
    */
   private _mediaEvictionPending = false;
+  /**
+   * Linear appends that landed while a pass was running. The pass read its
+   * candidates before them, so a fruitless result records them as appends
+   * since — not zero — and the request they left pending can pass the gate.
+   */
+  private _mediaEvictionAppendsDuringPass = 0;
   private _warnedEvictionUnsupported = false;
   /**
    * The last pass that found nothing to evict while aged rows were hidden
@@ -3628,6 +3637,7 @@ export class Think<
     const config = resolveMediaEvictionConfig(this.mediaEviction);
     if (!config) return null;
     this._mediaEvictionRunning = true;
+    this._mediaEvictionAppendsDuringPass = 0;
     const totals = {
       messages: 0,
       parts: 0,
@@ -3709,7 +3719,7 @@ export class Think<
       } else if (this._agedRowsHiddenFromCache() && this._lastHydration) {
         this._mediaEvictionFruitless = {
           storedBytes: this._lastHydration.totalContentBytes,
-          appendsSince: 0
+          appendsSince: this._mediaEvictionAppendsDuringPass
         };
       }
       return totals;
