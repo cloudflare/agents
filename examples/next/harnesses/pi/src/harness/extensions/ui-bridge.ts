@@ -8,6 +8,27 @@ import type { Theme } from "../../../vendor/pi-coding-agent-src/modes/interactiv
 import { theme } from "../../../vendor/pi-coding-agent-src/modes/interactive/theme/theme.ts";
 import type { PiExtensionUiRequest, PiExtensionUiResponse } from "../types";
 
+/**
+ * Raised when a blocking dialog has nobody to answer it.
+ *
+ * The alternative is to invent an answer — and the default answer to
+ * `confirm` is false, which an extension reads as "the user declined" when
+ * no user was ever asked. A permission gate that silently denies is as
+ * dishonest as one that silently allows, so the dialog throws instead: a
+ * tool call gated on it is blocked with this message as its reason, which
+ * says what actually happened.
+ */
+export class NoExtensionUiError extends Error {
+  /** The dialog method that had no audience. */
+  readonly method: string;
+
+  constructor(method: string) {
+    super(`No client is connected to answer the ${method} request`);
+    this.name = "NoExtensionUiError";
+    this.method = method;
+  }
+}
+
 /** What the bridge needs from its host to reach a lane's clients. */
 export type PiUiBridgeDeps = {
   /** The lane these dialogs belong to; carried on every broadcast frame. */
@@ -16,6 +37,12 @@ export type PiUiBridgeDeps = {
   readonly broadcast: (request: PiExtensionUiRequest) => number;
   /** Default dialog timeout when the extension does not name one. */
   readonly timeoutMs: number;
+  /**
+   * A dialog stopped waiting — answered, timed out, aborted, or never
+   * delivered. Clients showing it have to be told, or the modal outlives the
+   * request that raised it.
+   */
+  readonly onSettled?: (requestId: string) => void;
 };
 
 /** A UI context plus the handles the transport needs to answer it. */
@@ -48,10 +75,13 @@ type PendingDialog = {
  * Two deliberate differences from upstream, both so an extension can never
  * wedge a hook gate open inside a Durable Object:
  *
- * - a dialog broadcast to zero subscribers settles with its default
- *   immediately, rather than waiting for a client that may never connect;
+ * - a dialog broadcast to zero subscribers rejects with
+ *   {@link NoExtensionUiError} immediately, rather than waiting for a client
+ *   that may never connect. It rejects rather than settling with its default
+ *   because the default is an answer, and nobody gave one;
  * - every dialog carries a timeout (`opts.timeout`, else `deps.timeoutMs`),
- *   including `editor`, which upstream leaves open indefinitely.
+ *   including `editor`, which upstream leaves open indefinitely. A dialog
+ *   that timed out did reach a client, so that one settles with its default.
  *
  * `opts.timeout` is milliseconds, per `ExtensionUIDialogOptions`.
  */
@@ -68,8 +98,9 @@ export function createWebSocketUIContext(deps: PiUiBridgeDeps): PiUiBridge {
     }
   };
 
-  /** Upstream `createDialogPromise`, minus the reject path. */
+  /** Upstream `createDialogPromise`, with one rejection path of its own. */
   function dialog<T>(
+    method: string,
     opts: ExtensionUIDialogOptions | undefined,
     defaultValue: T,
     build: (requestId: string, timeoutMs: number) => PiExtensionUiRequest,
@@ -79,13 +110,13 @@ export function createWebSocketUIContext(deps: PiUiBridgeDeps): PiUiBridge {
 
     const requestId = crypto.randomUUID();
     const timeoutMs = opts?.timeout ?? deps.timeoutMs;
-    return new Promise<T>((resolve) => {
+    return new Promise<T>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
 
       const cleanup = () => {
         if (timer !== undefined) clearTimeout(timer);
         opts?.signal?.removeEventListener("abort", onAbort);
-        pending.delete(requestId);
+        if (pending.delete(requestId)) deps.onSettled?.(requestId);
       };
 
       const settleDefault = () => {
@@ -107,7 +138,8 @@ export function createWebSocketUIContext(deps: PiUiBridgeDeps): PiUiBridge {
       });
 
       if (emit(build(requestId, timeoutMs)) === 0) {
-        settleDefault();
+        cleanup();
+        reject(new NoExtensionUiError(method));
         return;
       }
       timer = setTimeout(settleDefault, timeoutMs);
@@ -124,6 +156,7 @@ export function createWebSocketUIContext(deps: PiUiBridgeDeps): PiUiBridge {
   const ui: ExtensionUIContext = {
     select: (title, options, opts) =>
       dialog(
+        "select",
         opts,
         undefined,
         (requestId, timeoutMs) => ({
@@ -143,6 +176,7 @@ export function createWebSocketUIContext(deps: PiUiBridgeDeps): PiUiBridge {
 
     confirm: (title, message, opts) =>
       dialog(
+        "confirm",
         opts,
         false,
         (requestId, timeoutMs) => ({
@@ -162,6 +196,7 @@ export function createWebSocketUIContext(deps: PiUiBridgeDeps): PiUiBridge {
 
     input: (title, placeholder, opts) =>
       dialog(
+        "input",
         opts,
         undefined,
         (requestId, timeoutMs) => ({
@@ -181,6 +216,7 @@ export function createWebSocketUIContext(deps: PiUiBridgeDeps): PiUiBridge {
 
     editor: (title, prefill) =>
       dialog(
+        "editor",
         undefined,
         undefined,
         (requestId, timeoutMs) => ({
@@ -370,6 +406,8 @@ export type PiLaneUiBridgeDeps = {
   /** Broadcast one request to a lane and report how many clients received it. */
   readonly broadcast: (lane: string, request: PiExtensionUiRequest) => number;
   readonly timeoutMs: number;
+  /** A dialog on `lane` stopped waiting; see {@link PiUiBridgeDeps.onSettled}. */
+  readonly onSettled?: (lane: string, requestId: string) => void;
 };
 
 /**
@@ -391,7 +429,8 @@ export function createLaneUiBridges(deps: PiLaneUiBridgeDeps): PiLaneUiBridges {
       existing = createWebSocketUIContext({
         lane,
         broadcast: (request) => deps.broadcast(lane, request),
-        timeoutMs: deps.timeoutMs
+        timeoutMs: deps.timeoutMs,
+        onSettled: (requestId) => deps.onSettled?.(lane, requestId)
       });
       bridges.set(lane, existing);
     }

@@ -753,6 +753,16 @@ export type PiEventListener = (event: PiEvent, context: PiEventContext) => void;
 /** Pi prompt outcome with the updated display-ready transcript. */
 export type PiPromptResponse = PiOperationResult & {
   readonly messages: readonly PiMessage[];
+  /**
+   * True when an extension's `input` handler consumed the prompt. No
+   * operation ran, so the result is a synthetic settled one.
+   */
+  readonly handled?: boolean;
+  /**
+   * The extension slash command the prompt ran instead of a model turn.
+   * As with `handled`, no operation ran.
+   */
+  readonly command?: string;
 };
 
 /** Options for reading one lane's durable transcript. */
@@ -918,7 +928,11 @@ export type PiClientMessage =
       readonly message: PiMessageInput;
     }
   | {
-      /** Answer one extension UI dialog. */
+      /**
+       * Answer one extension UI dialog. Send an `id` to learn whether the
+       * answer landed: a dialog the harness already settled is answered with
+       * a `stale:` error frame carrying that id.
+       */
       readonly type: "extension_ui_response";
       readonly id?: string;
       readonly requestId: string;
@@ -927,6 +941,11 @@ export type PiClientMessage =
   | {
       /** Ask for the lane's slash commands; answered with a `commands` frame. */
       readonly type: "get_commands";
+      readonly id: string;
+    }
+  | {
+      /** Ask for the current extension flags; answered with a `flags` frame. */
+      readonly type: "get_flags";
       readonly id: string;
     }
   | {
@@ -993,6 +1012,17 @@ export type PiServerMessage =
       readonly lane: string;
       readonly requestId: string;
       readonly request: PiExtensionUiRequest;
+    }
+  | {
+      /**
+       * A dialog the harness settled on its own — its timeout elapsed, the
+       * run was aborted, or another subscriber answered first. The request id
+       * is dead: a client showing it should take it down, and an answer sent
+       * after this frame is refused.
+       */
+      readonly type: "extension_ui_settled";
+      readonly lane: string;
+      readonly requestId: string;
     }
   | {
       readonly type: "commands";

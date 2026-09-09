@@ -233,6 +233,16 @@ function reduce(state: State, event: TranscriptEvent): State {
       if (index >= 0) next.splice(index, 1);
       return { ...state, runningTools: next };
     }
+    case "handler_error":
+      // A hook, event listener or extension threw mid-turn. The run carries
+      // on, so this is a notice rather than a session error — but it has to
+      // be visible, or an extension fails in silence.
+      return withNotice(state, {
+        id: crypto.randomUUID(),
+        level: "error",
+        message: event.message,
+        source: `${event.kind}: ${event.source}`
+      });
     case "fault":
       return { ...state, error: event.message };
     default:
@@ -269,6 +279,14 @@ export function usePiSession(
       agent.send(
         JSON.stringify({
           type: "get_commands",
+          id: crypto.randomUUID()
+        } satisfies ClientMessage)
+      );
+      // Flags are only ever pushed when they change, so a client that
+      // connects after an extension registered them has to ask.
+      agent.send(
+        JSON.stringify({
+          type: "get_flags",
           id: crypto.randomUUID()
         } satisfies ClientMessage)
       );
@@ -333,6 +351,22 @@ export function usePiSession(
             );
           }
           return;
+        case "event":
+          // A lane event outside any operation stream — the same events the
+          // `events` frames carry, so the same reducer applies.
+          setState((current) => reduce(current, message.event));
+          return;
+        case "extension_ui_settled":
+          // The harness stopped waiting on this dialog: take it off screen
+          // rather than leave a modal that can no longer be answered.
+          owed.current.delete(message.requestId);
+          setState((current) => ({
+            ...current,
+            dialogs: current.dialogs.filter(
+              (dialog) => dialog.requestId !== message.requestId
+            )
+          }));
+          return;
         case "extension_ui_request": {
           const request = message.request;
           if (!isDialog(request)) {
@@ -355,6 +389,7 @@ export function usePiSession(
               agent.send(
                 JSON.stringify({
                   type: "extension_ui_response",
+                  id: crypto.randomUUID(),
                   requestId: request.requestId,
                   response
                 } satisfies ClientMessage)
@@ -379,9 +414,15 @@ export function usePiSession(
           );
           return;
         case "error":
-          // A host without the extension surface answers `unsupported: …`;
-          // that is a missing feature, not a session error.
-          if (message.message.startsWith("unsupported:")) return;
+          // A host without the extension surface answers `unsupported: …`,
+          // and an answer that lost the race to a timeout answers `stale: …`.
+          // Neither is a session error.
+          if (
+            message.message.startsWith("unsupported:") ||
+            message.message.startsWith("stale:")
+          ) {
+            return;
+          }
           setState((current) => ({ ...current, error: message.message }));
           return;
         default:
@@ -429,7 +470,12 @@ export function usePiSession(
           (dialog) => dialog.requestId !== requestId
         )
       }));
-      send({ type: "extension_ui_response", requestId, response });
+      send({
+        type: "extension_ui_response",
+        id: crypto.randomUUID(),
+        requestId,
+        response
+      });
     },
     [send]
   );
@@ -467,8 +513,10 @@ export function usePiSession(
     setState((current) => ({ ...current, editorText: undefined }));
   }, []);
 
-  // An extension is waiting on a dialog this client owns. Leaving without an
-  // answer would hold a hook gate open until the harness's timeout, so cancel.
+  // Best effort only: `useAgent` closes the socket in its own cleanup, which
+  // may run before this one, so the sends below are often no-ops. The
+  // guarantee lives on the server, which cancels a lane's open dialogs once
+  // its last subscriber has gone.
   useEffect(() => {
     const pending = owed.current;
     return () => {

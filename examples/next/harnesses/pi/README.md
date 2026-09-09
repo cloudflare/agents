@@ -111,8 +111,12 @@ it later without touching pi or the extensions.
 
 Three sources answer `/`: extension commands (run out of band, no model turn),
 prompt templates from `promptTemplates` (`$1`, `$2`, … substituted from the
-arguments), and skills. The client fetches the merged list over the socket for
-its autocomplete and can toggle boolean flags from the tools panel.
+arguments), and skills. On connect the client asks for both lists over the
+socket — `get_commands` for its autocomplete, `get_flags` for the current flag
+values — and the harness pushes a fresh `commands` or `flags` frame whenever
+either changes. Boolean flags are toggled from the tools panel, which sends
+`set_flag`; `notes`'s `confirm_destructive` is the one to try, since turning it
+on makes the next `rm` raise a `confirm` dialog.
 
 ## Run locally
 
@@ -204,7 +208,10 @@ The extension surface rides the same socket: `extension_ui_request` /
 `extension_ui_response` for blocking dialogs, `commands` and `flags` frames for
 the slash-command list and flag values, and `handler_error` when an extension
 handler throws. Unanswered dialogs resolve to their default after
-`uiRequestTimeoutMs` (30 s) rather than holding a hook open.
+`uiRequestTimeoutMs` (30 s) rather than holding a hook open, and the harness
+announces every dialog it settles that way with `extension_ui_settled` so a
+client never leaves a dead modal on screen. A lane whose last subscriber
+disconnects has its open dialogs cancelled on the spot, for the same reason.
 
 ## Vendored pi sources
 

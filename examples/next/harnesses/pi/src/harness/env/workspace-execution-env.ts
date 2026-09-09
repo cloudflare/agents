@@ -51,10 +51,29 @@ const READDIR_PAGE_SIZE = 1_000;
 const TEMP_ROOT = "/tmp";
 
 /**
- * Synthetic paths the bash sandbox materializes for itself. New entries here
- * are never persisted; pre-existing workspace files under them still sync.
+ * Roots the bash sandbox materializes for itself, plus {@link TEMP_ROOT}.
+ *
+ * One rule governs them, in both directions:
+ *
+ * - entries the *script* creates under them are never persisted — a sandbox
+ *   `/bin/ls` is not workspace content;
+ * - entries the *workspace* already holds under them are ordinary content:
+ *   they are snapshotted into the shell, written back when the script changes
+ *   them, and removed when the script removes them.
+ *
+ * The second half is why the sync passes must never delete a sandbox root or
+ * anything under it wholesale. `/tmp` in particular holds the files
+ * `createTempDir`/`createTempFile` just wrote, and the shell always
+ * materializes these roots whether or not the workspace has content there.
  */
-const EXCLUDED_SYNC_ROOTS = ["/bin", "/usr", "/dev", "/proc", "/sys"];
+const SANDBOX_ROOTS = [TEMP_ROOT, "/bin", "/usr", "/dev", "/proc", "/sys"];
+
+/** True when `path` is a sandbox root or lives under one. */
+function inSandboxRoot(path: string): boolean {
+  return SANDBOX_ROOTS.some(
+    (root) => path === root || path.startsWith(`${root}/`)
+  );
+}
 
 // ── Path helpers ──────────────────────────────────────────────────────────
 
@@ -597,6 +616,11 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       // would on a real filesystem.
       await this.#sync(bash, snapshot);
 
+      // Output a killed script produced before it was killed is still output:
+      // pi builds a tool's visible result from these callbacks alone, so it
+      // has to be streamed on the failure paths too, before they return.
+      const callbackError = notify(options, stdout, stderr, context);
+
       if (timedOut) {
         return err(
           failure?.code === "timeout"
@@ -606,8 +630,6 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       }
       if (signal?.aborted) return err(new ExecutionError("aborted", "aborted"));
       if (failure) return err(failure);
-
-      const callbackError = notify(options, stdout, stderr, context);
       if (callbackError) return err(callbackError);
       return ok({ stdout, stderr, exitCode });
     } catch (error) {
@@ -652,7 +674,15 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     return entries;
   }
 
-  /** Copy the whole workspace into the shell's virtual filesystem. */
+  /**
+   * Copy the whole workspace into the shell's virtual filesystem.
+   *
+   * This snapshot/sync pair is a fork of Think's bash tool
+   * (`packages/think/src/tools/workspace.ts`, the `#snapshot`/`#sync` engine
+   * around its `BASH_EXCLUDED_SYNC_ROOTS`): same problem, same shape, one
+   * layer apart. Fix a bug in either engine in both — the divergence here is
+   * only the sandbox-root rule documented at {@link SANDBOX_ROOTS}.
+   */
   async #snapshot(): Promise<Snapshot> {
     const files: InitialFiles = {};
     const initialFiles = new Map<string, Uint8Array>();
@@ -741,6 +771,11 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       b.localeCompare(a)
     )) {
       if (path === "/" || finalDirectories.has(path)) continue;
+      // A sandbox root is never absent from the shell's view because the
+      // shell owns it, so its absence from `finalDirectories` says nothing
+      // about the script's intent — and a recursive delete here would take
+      // the workspace's own `/tmp` content with it.
+      if (inSandboxRoot(path)) continue;
       if (hasProtectedDescendant(path, snapshot.protectedPaths)) continue;
       await this.#workspace
         .rm(path, { recursive: true, force: true })
@@ -841,12 +876,11 @@ interface Snapshot {
 
 function shouldSync(path: string, snapshot: Snapshot): boolean {
   if (path === "/") return false;
+  // Anything the snapshot carried in is workspace content, wherever it lives.
   if (snapshot.initialFiles.has(path)) return true;
+  if (snapshot.initialDirectories.has(path)) return true;
   if (snapshot.protectedPaths.has(path)) return true;
-  if (path === TEMP_ROOT || path.startsWith(`${TEMP_ROOT}/`)) return false;
-  return !EXCLUDED_SYNC_ROOTS.some(
-    (root) => path === root || path.startsWith(`${root}/`)
-  );
+  return !inSandboxRoot(path);
 }
 
 function hasProtectedDescendant(

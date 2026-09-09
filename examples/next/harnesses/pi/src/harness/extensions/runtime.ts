@@ -91,13 +91,18 @@ export type PiExtensionRuntimeDeps = {
   /** Report a handler failure onto the lane's event stream. */
   readonly report: PiExtensionErrorReporter;
   /**
-   * PHASE 6 INJECTION POINT — the blocking UI surface `ctx.ui` exposes.
-   * Left undefined here, so the runner keeps pi's no-op UI context and
-   * `ctx.hasUI` is false. The UI bridge passes its own context, and the
-   * runtime switches the runner into `"rpc"` mode.
+   * The blocking UI surface `ctx.ui` exposes, when the host has one. With a
+   * context the runner runs in `"rpc"` mode and `ctx.hasUI` is true, which
+   * says a UI *bridge* exists — not that a client is subscribed to it. The
+   * bridge answers that question for itself: a dialog with no subscriber
+   * throws rather than inventing an answer nobody gave.
    */
   readonly uiContext?: ExtensionUIContext;
 };
+
+function quoted(name: string): string {
+  return JSON.stringify(name);
+}
 
 function extensionName(extension: PiExtension, index: number): string {
   return typeof extension === "function"
@@ -147,6 +152,7 @@ export class PiExtensionRuntime {
         // narrow public projection of the same object.
         deps.models.getModel(provider, modelId) as Model<Api> | undefined,
       report: deps.report,
+      refresh: (lane) => this.#refresh(lane),
       // Discovered paths cannot be read here; the loader records each one as
       // a warning rather than dropping it silently.
       resources: (discovered) => {
@@ -225,8 +231,26 @@ export class PiExtensionRuntime {
       createSessionView(states, { cwd: deps.cwd, sessionId: deps.sessionId }),
       createExtensionModelRegistry(deps.models)
     );
-    // Configured values win over the defaults registered above.
+    // Configured values win over the defaults registered above, so long as
+    // an extension registered the flag with that type. One bad entry is
+    // reported and skipped rather than failing the whole attachment.
+    const registered = runner.getFlags();
     for (const [name, value] of Object.entries(deps.flags ?? {})) {
+      const flag = registered.get(name);
+      const problem = !flag
+        ? `no extension registered a flag named ${quoted(name)}`
+        : typeof value !== flag.type
+          ? `flag ${quoted(name)} is a ${flag.type} flag, but the configured value is a ${typeof value}`
+          : undefined;
+      if (problem !== undefined) {
+        deps.report({
+          lane: deps.defaultLane,
+          kind: "extension",
+          source: `flag:${name}`,
+          message: problem
+        });
+        continue;
+      }
       runner.setFlagValue(name, value);
     }
     // Built on first read, not here: skills and templates are resolved by the
@@ -292,10 +316,11 @@ export class PiExtensionRuntime {
     if (this.#stopped) return false;
     const command = this.#runner.getCommand(name);
     if (!command) return false;
-    this.enter(lane);
     try {
-      await this.#refresh(lane);
-      await command.handler(args, this.#runner.createCommandContext());
+      await this.#states.withLane(lane, async () => {
+        await this.#refresh(lane);
+        await command.handler(args, this.#runner.createCommandContext());
+      });
     } catch (error) {
       this.#deps.report({
         lane,
@@ -321,8 +346,25 @@ export class PiExtensionRuntime {
     return Object.fromEntries(this.flags());
   }
 
-  /** Set one flag value. */
+  /**
+   * Set one flag value.
+   *
+   * Only a flag an extension registered can be set, and only to its own
+   * type: the flag map is process-local state the client can write to, so an
+   * unchecked name would grow it without bound and an unchecked value would
+   * hand `pi.getFlag` a type its extension never registered. Both are
+   * refused with an error the caller sees.
+   */
   setFlag(name: string, value: boolean | string): void {
+    const flag = this.#runner.getFlags().get(name);
+    if (!flag) {
+      throw new Error(`No extension registered a flag named ${quoted(name)}`);
+    }
+    if (typeof value !== flag.type) {
+      throw new Error(
+        `Flag ${quoted(name)} is a ${flag.type} flag, but the value is a ${typeof value}`
+      );
+    }
     this.#runner.setFlagValue(name, value);
   }
 
@@ -359,8 +401,8 @@ export class PiExtensionRuntime {
         ...(error.stack === undefined ? {} : { stack: error.stack })
       });
     });
-    // PHASE 6 INJECTION POINT: with a UI context the runner runs in "rpc"
-    // mode and `ctx.hasUI` is true; without one it keeps pi's no-op UI.
+    // With a UI context the runner runs in "rpc" mode and `ctx.hasUI` is
+    // true; without one it keeps pi's no-op UI.
     if (deps.uiContext) this.#runner.setUIContext(deps.uiContext, "rpc");
     const contextDeps: ExtensionContextActionDeps = {
       states: this.#states,

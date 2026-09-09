@@ -1,6 +1,10 @@
+import type { HarnessEvent } from "@earendil-works/pi-agent-core";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { ExtensionRunner } from "../../vendor/pi-coding-agent-src/core/extensions/runner.ts";
+import { ExtensionEventAdapter } from "../harness/extensions/events-adapter";
+import { ExtensionLaneStates } from "../harness/extensions/state";
 import type { PiExtensionsTestObject } from "./worker";
 
 function fresh(): DurableObjectStub<PiExtensionsTestObject> {
@@ -88,6 +92,26 @@ describe("pi extension surface", () => {
     expect(events.some((event) => event.type === "tool_start")).toBe(false);
   });
 
+  it("blocks a tool call when the tool_call handler throws", async () => {
+    const stub = fresh();
+    // A gate that threw did not approve the call: pi's own beforeTool fails
+    // closed, and so must the bridge, or a throwing permission check would
+    // read as permission granted.
+    const blocked = await stub.runMultiply(7);
+    expect(blocked.toolError).toBe(true);
+    expect(blocked.output).toContain("tool_call handler exploded");
+
+    const events = await stub.events(blocked.operationId);
+    expect(events.some((event) => event.type === "tool_start")).toBe(false);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "handler_error" &&
+          event.message === "tool_call handler exploded"
+      )
+    ).toBe(true);
+  });
+
   it("transforms the provider context without touching the transcript", async () => {
     const stub = fresh();
     await stub.runEcho("note");
@@ -144,6 +168,54 @@ describe("pi extension surface", () => {
     expect(await stub.contextSeen()).toEqual([]);
   });
 
+  it("resolves a prompt that ran a command instead of an operation", async () => {
+    const stub = fresh();
+    // No operation was queued, so there is no result to wait for; waiting
+    // for one anyway would never return.
+    const response = await stub.promptText("/note quick");
+    expect(response).toEqual({
+      status: "completed",
+      command: "note",
+      handled: false
+    });
+    expect(await stub.customEntries()).toEqual([
+      { customType: "test:note", text: "quick" }
+    ]);
+  });
+
+  it("resolves a prompt an input handler consumed", async () => {
+    const stub = fresh();
+    const response = await stub.promptText("swallow this");
+    expect(response).toEqual({
+      status: "completed",
+      command: null,
+      handled: true
+    });
+    expect(await stub.messages()).toEqual([]);
+  });
+
+  it("runs input handlers once for a retried operation id", async () => {
+    const stub = fresh();
+    // The retry has to be refused before anything observable happens: an
+    // `input` handler is a side effect, not a read.
+    const outcome = await stub.submitTwice("say hello");
+    expect(outcome).toEqual({ first: true, second: false, inputCalls: 1 });
+  });
+
+  it("queues one message when an action asks for a turn", async () => {
+    const stub = fresh();
+    await stub.promptText("/announce announce-token");
+
+    // The custom message is queued for the next run; appending it as well
+    // would leave two copies of it in the transcript.
+    const queued = await stub.queued();
+    expect(queued).toEqual([{ kind: "nextRun", role: null, text: null }]);
+
+    await stub.runEcho("go");
+    const seen = await stub.contextSeen();
+    expect(seen.filter((text) => text.includes("announce-token"))).toEqual([]);
+  });
+
   it("expands a prompt template into a durable operation", async () => {
     const stub = fresh();
     const receipt = await stub.submitText("/greet world");
@@ -179,11 +251,15 @@ describe("pi extension surface", () => {
     client.close();
   });
 
-  it("answers a dialog with its default when nobody is listening", async () => {
+  it("refuses a dialog nobody is subscribed to answer", async () => {
     const stub = fresh();
+    // Answering for an absent user is the dishonest option: `confirm` would
+    // report a decline nobody made. The dialog throws instead, and the
+    // failure says so.
     const run = await stub.runEcho("pick one");
     expect(run.status).toBe("completed");
-    expect(run.output).toBe("echo:pick one:undefined");
+    expect(run.toolError).toBe(true);
+    expect(run.output).toContain("No client is connected");
   });
 
   it("sets an extension flag over the harness API", async () => {
@@ -195,6 +271,20 @@ describe("pi extension surface", () => {
     await stub.runEcho("after");
     const seen = await stub.contextSeen();
     expect(seen.at(-1)).toBe("changed: extension note");
+  });
+
+  it("refuses a flag no extension registered, and a mistyped value", async () => {
+    const stub = fresh();
+    // The flag map is process-local state a client can write to, so an
+    // unknown name must not grow it and a wrong type must not reach
+    // `pi.getFlag`.
+    expect(await stub.setFlagError("not-a-flag", "x")).toMatch(
+      /No extension registered a flag named/
+    );
+    expect(await stub.setFlagError("note-prefix", true)).toMatch(
+      /is a string flag/
+    );
+    expect(await stub.flags()).not.toHaveProperty("not-a-flag");
   });
 
   it("lists extension, template and skill commands", async () => {
@@ -209,5 +299,53 @@ describe("pi extension surface", () => {
     );
     // Pi's terminal built-ins are not offered by a Durable Object.
     expect(commands.some((command) => command.name === "model")).toBe(false);
+  });
+});
+
+describe("extension notification lanes", () => {
+  /**
+   * Pi's `ExtensionContext` names no lane, so a notification handler's
+   * `pi.*` calls land on whichever lane is current when it runs. Every
+   * dispatched event therefore has to make its own lane current for the
+   * length of its handlers, and hand the previous one back afterwards.
+   */
+  it("runs each notification on its own lane and restores the previous one", async () => {
+    const states = new ExtensionLaneStates("main");
+    const laneWhileEmitting: string[] = [];
+    const refreshed: string[] = [];
+    const runner = {
+      emit: async () => {
+        laneWhileEmitting.push(states.current.lane);
+      },
+      emitResourcesDiscover: async () => ({
+        skillPaths: [],
+        promptPaths: [],
+        themePaths: []
+      })
+    } as unknown as ExtensionRunner;
+
+    const adapter = new ExtensionEventAdapter(runner, {
+      states,
+      cwd: "/",
+      resolveModel: () => undefined,
+      report: () => {},
+      refresh: async (lane) => {
+        refreshed.push(lane);
+      }
+    });
+
+    states.enter("main");
+    adapter.dispatch({
+      type: "run_start",
+      lane: "side",
+      runId: "run-1"
+    } as unknown as HarnessEvent);
+    await adapter.drain();
+
+    expect(laneWhileEmitting).toEqual(["side"]);
+    // The read model a handler reads is the one for the lane it fired on.
+    expect(refreshed).toEqual(["side"]);
+    // And the lane that was current before the notification still is.
+    expect(states.current.lane).toBe("main");
   });
 });

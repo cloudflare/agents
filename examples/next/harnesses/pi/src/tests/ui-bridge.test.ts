@@ -1,19 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { createWebSocketUIContext } from "../harness/extensions/ui-bridge";
+import {
+  createWebSocketUIContext,
+  NoExtensionUiError
+} from "../harness/extensions/ui-bridge";
 import type { PiExtensionUiRequest } from "../harness/types";
 
 /** A bridge over a fake lane that records every broadcast request. */
 function bridgeWith(subscribers: number, timeoutMs = 10_000) {
   const sent: PiExtensionUiRequest[] = [];
+  const settled: string[] = [];
   const bridge = createWebSocketUIContext({
     lane: "main",
     broadcast: (request) => {
       sent.push(request);
       return subscribers;
     },
+    onSettled: (requestId) => settled.push(requestId),
     timeoutMs
   });
-  return { ...bridge, sent };
+  return { ...bridge, sent, settled };
 }
 
 describe("ui bridge", () => {
@@ -30,10 +35,14 @@ describe("ui bridge", () => {
     expect(bridge.pending()).toBe(0);
   });
 
-  it("answers with the default when no client is subscribed", async () => {
+  it("refuses a dialog when no client is subscribed", async () => {
     const bridge = bridgeWith(0);
-    await expect(bridge.ui.select("Pick", ["a"])).resolves.toBeUndefined();
-    await expect(bridge.ui.confirm("Sure?", "really")).resolves.toBe(false);
+    await expect(bridge.ui.select("Pick", ["a"])).rejects.toBeInstanceOf(
+      NoExtensionUiError
+    );
+    await expect(bridge.ui.confirm("Sure?", "really")).rejects.toBeInstanceOf(
+      NoExtensionUiError
+    );
     expect(bridge.sent).toHaveLength(2);
     expect(bridge.pending()).toBe(0);
   });
@@ -99,6 +108,54 @@ describe("ui bridge", () => {
     expect(bridge.pending()).toBe(0);
   });
 
+  it("announces a dialog the client answered", async () => {
+    const bridge = bridgeWith(1);
+    const answer = bridge.ui.select("Pick", ["a", "b"]);
+    const requestId = bridge.sent[0]!.requestId;
+    bridge.resolve(requestId, { value: "b" });
+
+    await expect(answer).resolves.toBe("b");
+    expect(bridge.settled).toEqual([requestId]);
+  });
+
+  it("announces a dialog it settled on its own timeout", async () => {
+    const bridge = bridgeWith(1, 5);
+    const answer = bridge.ui.input("Name", "who?");
+    const requestId = bridge.sent[0]!.requestId;
+
+    await expect(answer).resolves.toBeUndefined();
+    // Without this the client's modal outlives the request behind it.
+    expect(bridge.settled).toEqual([requestId]);
+  });
+
+  it("announces every dialog abortAll settles", async () => {
+    const bridge = bridgeWith(1);
+    const selected = bridge.ui.select("Pick", ["a"]);
+    const confirmed = bridge.ui.confirm("Sure?", "really");
+    const ids = bridge.sent.map((request) => request.requestId);
+
+    bridge.abortAll("harness shutting down");
+
+    await expect(selected).resolves.toBeUndefined();
+    await expect(confirmed).resolves.toBe(false);
+    expect(bridge.settled).toEqual(ids);
+  });
+
+  it("announces a dialog no client received", async () => {
+    const bridge = bridgeWith(0);
+    await expect(bridge.ui.confirm("Sure?", "really")).rejects.toBeInstanceOf(
+      NoExtensionUiError
+    );
+    expect(bridge.settled).toEqual([bridge.sent[0]!.requestId]);
+  });
+
+  it("never announces a fire-and-forget view update", () => {
+    const bridge = bridgeWith(1);
+    bridge.ui.notify("saved");
+    bridge.ui.setTitle("pi");
+    expect(bridge.settled).toEqual([]);
+  });
+
   it("ignores an answer to an unknown request", () => {
     const bridge = bridgeWith(1);
     expect(bridge.resolve("nope", { value: "x" })).toBe(false);
@@ -150,7 +207,7 @@ describe("ui bridge", () => {
     expect(bridge.sent).toHaveLength(0);
   });
 
-  it("falls back to the default when a broadcast throws", async () => {
+  it("refuses a dialog whose broadcast throws", async () => {
     const bridge = createWebSocketUIContext({
       lane: "main",
       broadcast: () => {
@@ -158,7 +215,9 @@ describe("ui bridge", () => {
       },
       timeoutMs: 10_000
     });
-    await expect(bridge.ui.confirm("Sure?", "really")).resolves.toBe(false);
+    await expect(bridge.ui.confirm("Sure?", "really")).rejects.toBeInstanceOf(
+      NoExtensionUiError
+    );
     expect(bridge.pending()).toBe(0);
   });
 });

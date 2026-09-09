@@ -293,6 +293,27 @@ function projectResult(record: OperationResultRecord): PiOperationResult {
   };
 }
 
+/**
+ * The settled result of a submission that never became an operation.
+ *
+ * An `input` handler or an extension slash command consumes the submission
+ * where it stands, so pi records no operation and there is nothing to wait
+ * for. Callers still get a terminal result — the work is over — flagged by
+ * `handled` or `command` so they can tell it apart from a model run.
+ */
+function outOfBandResult(operationId: string): PiOperationResult {
+  const now = Date.now();
+  return {
+    operationId,
+    kind: "run",
+    status: "completed",
+    fromTipId: null,
+    tipId: null,
+    startedAt: now,
+    endedAt: now
+  };
+}
+
 function operationStatus(
   operation: NonNullable<LaneSnapshot["operation"]>
 ): PiOperationStatus {
@@ -468,6 +489,18 @@ export class PiHarness<
     const operationId = options.operationId ?? request.operationId ?? uuidv7();
     const context = asUpstreamContext(options.context);
     const upstream = await this.#upstreamLane(lane, context);
+    const submissions = this.#requireSubmissions();
+    // Idempotency is settled before anything observable happens. A retried
+    // submission carries the operation id of the first one, and an `input`
+    // handler or a slash command is a side effect that must not run twice
+    // for it — so this check comes ahead of both, not after them.
+    if (
+      submissions.has(operationId) ||
+      (await upstream.getResult(operationId, context)) !== undefined ||
+      (await upstream.inspectExecution(context)).current?.id === operationId
+    ) {
+      return { operationId, lane, accepted: false };
+    }
     const admitted = await this.#interceptInput(lane, request);
     if (admitted === undefined) {
       return { operationId, lane, accepted: false, handled: true };
@@ -484,14 +517,6 @@ export class PiHarness<
       return { operationId, lane, accepted: false, command: resolved.name };
     }
     const queued = resolved.request;
-    const submissions = this.#requireSubmissions();
-    if (
-      submissions.has(operationId) ||
-      (await upstream.getResult(operationId, context)) !== undefined ||
-      (await upstream.inspectExecution(context)).current?.id === operationId
-    ) {
-      return { operationId, lane, accepted: false };
-    }
     submissions.insert(lane, operationId, queued);
     await this.#ensureLaneDriver(lane);
     return { operationId, lane, accepted: true };
@@ -511,9 +536,20 @@ export class PiHarness<
       },
       options
     );
+    const messages = () => this.getMessages(options);
+    // An `input` handler or a slash command consumes the submission without
+    // queueing an operation, so there is no result to wait for and waiting
+    // would never end. The transcript is still read: both can write to it.
+    if (receipt.handled === true || receipt.command !== undefined) {
+      return {
+        ...outOfBandResult(receipt.operationId),
+        ...(receipt.handled === true ? { handled: true } : {}),
+        ...(receipt.command === undefined ? {} : { command: receipt.command }),
+        messages: await messages()
+      };
+    }
     const result = await this.waitForResult(receipt.operationId, options);
-    const messages = await this.getMessages(options);
-    return { ...result, messages };
+    return { ...result, messages: await messages() };
   }
 
   /** Wait for one operation's terminal result. */
@@ -742,7 +778,11 @@ export class PiHarness<
     return this.submit({ kind: "prompt", prompt: text }, options);
   }
 
-  /** Set one extension flag and return every flag's current value. */
+  /**
+   * Set one extension flag and return every flag's current value. Throws
+   * when no extension registered that flag, or when the value is not of the
+   * type it was registered with.
+   */
   async setFlag(
     name: string,
     value: boolean | string
@@ -1039,6 +1079,8 @@ export class PiHarness<
       lane: () => this.#extensions?.currentLane ?? this.#defaultLane,
       broadcast: (lane, request) =>
         this.#transport?.extensionUiRequest(lane, request) ?? 0,
+      onSettled: (lane, requestId) =>
+        this.#transport?.extensionUiSettled(lane, requestId),
       timeoutMs:
         this.#config.uiRequestTimeoutMs ?? DEFAULT_UI_REQUEST_TIMEOUT_MS
     });
@@ -1619,6 +1661,7 @@ export class PiHarness<
       resolveUi: (requestId, response) =>
         this.resolveExtensionUi(requestId, response),
       commands: () => this.getCommands(),
+      flags: () => this.getFlags(),
       setFlag: (name, value) => this.setFlag(name, value),
       runCommand: (name, args, options) => this.runCommand(name, args, options)
     };

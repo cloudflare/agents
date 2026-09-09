@@ -91,14 +91,15 @@ export function createExtensionActions(
             await lane.nextRun(custom, undefined, context);
             return;
           default:
-            await lane.appendMessage(custom, context);
+            // `triggerTurn` asks for the same message to start a run, not
+            // for a second one: `nextRun` appends it and drives it, so
+            // appending it here as well would leave the transcript holding
+            // the message twice.
             if (options?.triggerTurn) {
-              await lane.nextRun(
-                userMessage(message.content),
-                undefined,
-                context
-              );
+              await lane.nextRun(custom, undefined, context);
+              return;
             }
+            await lane.appendMessage(custom, context);
         }
       });
     },

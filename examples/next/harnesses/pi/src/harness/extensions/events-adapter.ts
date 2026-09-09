@@ -14,6 +14,8 @@ export type ExtensionEventDeps = {
     modelId: string
   ) => Model<Api> | undefined;
   readonly report: PiExtensionErrorReporter;
+  /** Re-read one lane into its cached read model before handlers run. */
+  readonly refresh: (lane: string) => Promise<void>;
   /** Receive the resource paths extensions asked pi to load at startup. */
   readonly resources?: (discovered: {
     readonly skillPaths: ReadonlyArray<{ path: string; extensionPath: string }>;
@@ -250,7 +252,13 @@ export class ExtensionEventAdapter {
   #run(lane: string, source: string, work: () => Promise<void>): void {
     this.#chain = this.#chain.then(async () => {
       try {
-        await work();
+        // Notification handlers call the synchronous `pi.*` actions, which
+        // resolve against the current lane and read the cached read model,
+        // so this step owns both for as long as it runs.
+        await this.#deps.states.withLane(lane, async () => {
+          await this.#refresh(lane, source);
+          await work();
+        });
       } catch (error) {
         this.#deps.report({
           lane,
@@ -263,5 +271,22 @@ export class ExtensionEventAdapter {
         });
       }
     });
+  }
+
+  /**
+   * Refresh one lane's read model, tolerating a lane that cannot be read
+   * yet. A stale read model is a worse handler experience than a fresh one,
+   * but a failure here is not the handler's failure, so it is not reported
+   * as one; the handler still runs.
+   */
+  async #refresh(lane: string, source: string): Promise<void> {
+    try {
+      await this.#deps.refresh(lane);
+    } catch (error) {
+      console.warn(
+        `pi extensions: could not refresh lane ${lane} before ${source}`,
+        error
+      );
+    }
   }
 }

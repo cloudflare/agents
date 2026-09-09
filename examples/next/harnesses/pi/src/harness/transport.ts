@@ -49,6 +49,8 @@ export interface PiTransportHost {
     options: { lane: string }
   ): boolean;
   commands?(options: { lane: string }): Promise<readonly PiSlashCommand[]>;
+  /** Current extension flag values, for a client that has just connected. */
+  flags?(): Promise<Readonly<Record<string, boolean | string>>>;
   setFlag?(
     name: string,
     value: boolean | string
@@ -59,6 +61,14 @@ export interface PiTransportHost {
     options: { lane: string }
   ): Promise<PiSubmissionReceipt>;
 }
+
+/** The UI request methods that wait for an answer; the rest are view updates. */
+const DIALOG_METHODS: ReadonlySet<string> = new Set([
+  "select",
+  "confirm",
+  "input",
+  "editor"
+]);
 
 const LANE_TAG_PREFIX = "pi:";
 const LANE_QUERY = "lane";
@@ -118,6 +128,12 @@ export class PiTransport {
   readonly #host: PiTransportHost;
   readonly #sockets: () => LifecycleSockets;
   readonly #tails = new WeakMap<WebSocket, Map<string, AbortController>>();
+  /**
+   * Dialogs broadcast to a lane and not yet settled. The transport is the only
+   * place that knows both which lane a request went to and whether anyone is
+   * still listening, so it owns the "last subscriber left" cancellation.
+   */
+  readonly #openDialogs = new Map<string, Set<string>>();
 
   constructor(host: PiTransportHost, sockets: () => LifecycleSockets) {
     this.#host = host;
@@ -134,8 +150,8 @@ export class PiTransport {
         onConnect: (connection, ctx) => this.#onConnect(connection, ctx),
         onMessage: (connection, message) =>
           this.#onMessage(connection, message),
-        onClose: (connection) => this.#stopTails(connection),
-        onError: (connection) => this.#stopTails(connection)
+        onClose: (connection) => this.#onClose(connection),
+        onError: (connection) => this.#onClose(connection)
       }
     };
   }
@@ -173,6 +189,14 @@ export class PiTransport {
    * rather than wait for a client that is not there.
    */
   extensionUiRequest(lane: string, request: PiExtensionUiRequest): number {
+    if (DIALOG_METHODS.has(request.method)) {
+      let open = this.#openDialogs.get(lane);
+      if (!open) {
+        open = new Set();
+        this.#openDialogs.set(lane, open);
+      }
+      open.add(request.requestId);
+    }
     let delivered = 0;
     for (const socket of this.#sockets().get(laneTag(lane))) {
       if (socket.readyState !== OPEN) continue;
@@ -185,6 +209,23 @@ export class PiTransport {
       delivered += 1;
     }
     return delivered;
+  }
+
+  /**
+   * Announce that a dialog is dead: its timeout elapsed, the run was aborted,
+   * or an answer already settled it. Clients take the modal down; without the
+   * frame a settled dialog sits on screen and its late answer is dropped in
+   * silence.
+   */
+  extensionUiSettled(lane: string, requestId: string): void {
+    const open = this.#openDialogs.get(lane);
+    if (open) {
+      open.delete(requestId);
+      if (open.size === 0) this.#openDialogs.delete(lane);
+    }
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      send(socket, { type: "extension_ui_settled", lane, requestId });
+    }
   }
 
   /** Broadcast a hook, event listener or extension failure to a lane. */
@@ -309,9 +350,23 @@ export class PiTransport {
       case "extension_ui_response": {
         const resolveUi = this.#host.resolveUi;
         if (!resolveUi) throw unsupported(message.type);
-        return resolveUi.call(this.#host, message.requestId, message.response, {
-          lane
-        });
+        const answered = resolveUi.call(
+          this.#host,
+          message.requestId,
+          message.response,
+          { lane }
+        );
+        if (!answered) {
+          // The dialog settled before this answer arrived. Say so rather than
+          // dropping it: the client is still showing a modal for it.
+          send(connection, {
+            type: "extension_ui_settled",
+            lane,
+            requestId: message.requestId
+          });
+          throw stale(message.type);
+        }
+        return answered;
       }
       case "get_commands": {
         const commands = this.#host.commands;
@@ -321,6 +376,16 @@ export class PiTransport {
           id: message.id,
           lane,
           commands: await commands.call(this.#host, { lane })
+        });
+        return SUBSCRIPTION;
+      }
+      case "get_flags": {
+        const flags = this.#host.flags;
+        if (!flags) throw unsupported(message.type);
+        send(connection, {
+          type: "flags",
+          id: message.id,
+          flags: await flags.call(this.#host)
         });
         return SUBSCRIPTION;
       }
@@ -383,11 +448,43 @@ export class PiTransport {
     }
   }
 
+  #onClose(connection: Connection): void {
+    this.#stopTails(connection);
+    this.#cancelOrphanedDialogs(
+      laneOf(connection, this.#host.defaultLane),
+      connection
+    );
+  }
+
   #stopTails(connection: Connection): void {
     const tails = this.#tails.get(connection);
     if (!tails) return;
     for (const controller of tails.values()) controller.abort();
     this.#tails.delete(connection);
+  }
+
+  /**
+   * The last subscriber to a lane has gone. Every dialog it was owed is now
+   * unanswerable, and an extension waiting on one holds a hook gate open until
+   * the harness's timeout, so settle them with their defaults now — exactly as
+   * the bridge does for a dialog broadcast to nobody in the first place.
+   */
+  #cancelOrphanedDialogs(lane: string, closing: Connection): void {
+    const open = this.#openDialogs.get(lane);
+    if (!open || open.size === 0) return;
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      // The closing connection may still be listed, and may still report OPEN
+      // when the close came from this side.
+      if (socket !== closing && socket.readyState === OPEN) return;
+    }
+    const resolveUi = this.#host.resolveUi;
+    if (!resolveUi) return;
+    // The bridge answers back through `extensionUiSettled`, which mutates
+    // `open`, so cancel over a copy.
+    for (const requestId of [...open]) {
+      resolveUi.call(this.#host, requestId, { cancelled: true }, { lane });
+    }
+    this.#openDialogs.delete(lane);
   }
 }
 
@@ -397,6 +494,11 @@ const SUBSCRIPTION = Symbol("pi-subscription");
 /** A frame this harness understands but this host does not implement. */
 function unsupported(type: string): Error {
   return new Error(`unsupported: ${type}`);
+}
+
+/** A frame that arrived too late to change anything. */
+function stale(type: string): Error {
+  return new Error(`stale: ${type}`);
 }
 
 function operationIdOf(

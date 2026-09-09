@@ -14,7 +14,10 @@ const NOTE_ENTRY_TYPE = "note";
  * - `confirm_destructive` is a boolean flag the client can toggle over the
  *   socket; while it is on, any `bash` command containing `rm ` waits for a
  *   `ctx.ui.confirm` answer from the browser before it runs, and a declined
- *   dialog blocks the tool call.
+ *   dialog blocks the tool call. With no client connected the dialog throws
+ *   rather than answering for the absent user, and the throw blocks the
+ *   call too — the reason then says nobody was there to ask, not that
+ *   somebody declined.
  */
 export function notes(pi: PiExtensionApi): void {
   pi.registerFlag(CONFIRM_DESTRUCTIVE_FLAG, {

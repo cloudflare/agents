@@ -26,6 +26,7 @@ export {
 export {
   createLaneUiBridges,
   createWebSocketUIContext,
+  NoExtensionUiError,
   type PiLaneUiBridgeDeps,
   type PiLaneUiBridges,
   type PiUiBridge,

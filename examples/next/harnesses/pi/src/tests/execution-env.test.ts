@@ -1,3 +1,5 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/pi-agent-core";
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type {
@@ -7,6 +9,24 @@ import type {
 
 function fresh(): DurableObjectStub<PiExecutionEnvTestObject> {
   return env.PI_EXECUTION_ENV_TEST.getByName(crypto.randomUUID());
+}
+
+/**
+ * `runInDurableObject`, typed for this example's objects.
+ *
+ * The pool constrains its instance to `DurableObject<Cloudflare.Env, {}>`,
+ * which an object declared as `DurableObject<Env>` against Wrangler's
+ * generated `Env` does not structurally satisfy. The stub is the right object;
+ * only the constraint disagrees, so the cast stops at this helper.
+ */
+function inObject<R>(
+  stub: DurableObjectStub<PiExecutionEnvTestObject>,
+  callback: (instance: PiExecutionEnvTestObject) => Promise<R>
+): Promise<R> {
+  return runInDurableObject(
+    stub as unknown as Parameters<typeof runInDurableObject>[0],
+    (instance) => callback(instance as unknown as PiExecutionEnvTestObject)
+  );
 }
 
 describe("pi ExecutionEnv over a Workspace", () => {
@@ -40,6 +60,56 @@ describe("pi ExecutionEnv over a Workspace", () => {
     const result = await fresh().runShell("sleep 5 && echo done", 1);
     expect(result.ok).toBe(false);
     expect(result.errorCode).toBe("timeout");
+  });
+
+  it("streams the output a timed-out script produced before it died", async () => {
+    // pi builds a bash tool's visible result out of onStdout/onStderr alone,
+    // so a killed script's partial output has to reach them all the same.
+    const result = await fresh().runShell(
+      "for i in 1 2 3 4 5; do echo partial; sleep 5; done",
+      1
+    );
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("timeout");
+    expect(result.streamed.join("")).toContain("partial\n");
+  });
+
+  it("leaves temp files and sandbox-root content alone across a run", async () => {
+    // `/tmp` and `/usr` are roots the shell materializes for itself, so they
+    // never appear in the sync pass's final directory set. Deleting them for
+    // that reason would take the workspace's own content with them.
+    const result = await inObject(fresh(), async (instance) => {
+      const context = BACKGROUND_CONTEXT;
+      const temp = await instance.executionEnv.createTempFile(
+        { suffix: ".txt" },
+        context
+      );
+      if (!temp.ok) throw temp.error;
+      await instance.executionEnv.writeFile(temp.value, "keep me", context);
+      await instance.executionEnv.writeFile(
+        "/usr/notes.txt",
+        "pre-existing",
+        context
+      );
+
+      const exec = await instance.executionEnv.exec(
+        "echo hi",
+        undefined,
+        context
+      );
+
+      return {
+        ok: exec.ok,
+        temp: await instance.workspace.readFile(temp.value),
+        notes: await instance.workspace.readFile("/usr/notes.txt")
+      };
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      temp: "keep me",
+      notes: "pre-existing"
+    });
   });
 });
 

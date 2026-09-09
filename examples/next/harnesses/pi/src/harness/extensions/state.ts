@@ -147,6 +147,32 @@ export class ExtensionLaneStates {
     return state;
   }
 
+  /**
+   * Run one serialized chain step with `lane` as the current lane, and put
+   * the previous lane back afterwards.
+   *
+   * Pi's `ExtensionContext` names no lane, so a handler's synchronous
+   * `pi.*` calls resolve against whichever lane is current. Without the
+   * restore, a hook or notification on a second lane would leave that lane
+   * current for everything that followed it, and a handler on the quiet lane
+   * would write to the busy one. The callers are each other's only
+   * contenders and both serialize their work, so a save/restore around the
+   * awaited step is enough; nothing here makes concurrent chains safe.
+   */
+  async withLane<T>(
+    lane: string,
+    work: (state: ExtensionLaneState) => Promise<T>,
+    runId?: string
+  ): Promise<T> {
+    const previous = this.#current;
+    const state = this.enter(lane, runId);
+    try {
+      return await work(state);
+    } finally {
+      this.#current = previous;
+    }
+  }
+
   all(): readonly ExtensionLaneState[] {
     return [...this.#states.values()];
   }

@@ -19,7 +19,7 @@
     "lint": "oxlint .",
     "typecheck": "tsx scripts/typecheck.ts",
     "check:exports": "tsx scripts/check-exports.ts",
-    "check": "sherif && pnpm run check:exports && oxfmt --check . && oxlint . && pnpm run typecheck",
+    "check": "sherif && pnpm run check:exports && pnpm run vendor:pi:check && oxfmt --check . && oxlint . && pnpm run typecheck",
     "test": "nx run-many -t test",
     "ci": "oxfmt --write . && nx run-many -t build test && pnpm run check",
     "test:e2e": "nx run-many -t test:e2e --parallel=1",

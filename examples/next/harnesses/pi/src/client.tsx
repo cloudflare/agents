@@ -433,6 +433,22 @@ function ExtensionDialog({
     onAnswer(dialog.requestId, response);
   const cancel = () => answer({ cancelled: true });
 
+  // The harness settles this dialog with its default when `timeoutMs` runs
+  // out and says so with an `extension_ui_settled` frame. Counting down here
+  // too tells the user how long they have, and takes the modal down on its own
+  // if that frame never arrives — a dead socket, say.
+  const [remainingMs, setRemainingMs] = useState(dialog.timeoutMs);
+  useEffect(() => {
+    const deadline = Date.now() + dialog.timeoutMs;
+    setRemainingMs(dialog.timeoutMs);
+    const timer = setInterval(() => {
+      const left = deadline - Date.now();
+      setRemainingMs(left > 0 ? left : 0);
+      if (left <= 0) onAnswer(dialog.requestId, { cancelled: true });
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [dialog.requestId, dialog.timeoutMs, onAnswer]);
+
   return (
     <Dialog.Root
       open
@@ -449,6 +465,9 @@ function ExtensionDialog({
             Requested by an extension on this session.
           </Dialog.Description>
         )}
+        <p className="mt-1 text-neutral-500 text-xs">
+          Answers in {Math.ceil(remainingMs / 1_000)}s if left alone.
+        </p>
 
         {dialog.method === "select" ? (
           <div className="mt-4 flex flex-col gap-2">

@@ -18,7 +18,11 @@ import type {
   ToolResultEvent
 } from "../../../vendor/pi-coding-agent-src/core/extensions/types.ts";
 import { projectSessionEntry } from "./session-view";
-import type { ExtensionLaneStates, PiExtensionErrorReporter } from "./state";
+import type {
+  ExtensionLaneState,
+  ExtensionLaneStates,
+  PiExtensionErrorReporter
+} from "./state";
 
 /** Id every hook the extension runtime installs is registered under. */
 export const EXTENSION_HOOK_ID = "pi-extensions";
@@ -81,7 +85,10 @@ function customMessage(
  *
  * A handler that throws must not take the operation down, and only some of
  * the runner's emit methods catch for themselves, so every bridge here
- * catches, reports a `handler_error`, and returns the unmodified value.
+ * catches and reports a `handler_error`. All but one then return the
+ * unmodified value; `before_tool` blocks the call instead, because a
+ * permission check that failed to run is not a permission check that
+ * passed.
  */
 export function bindExtensionHooks(
   hooks: Hooks,
@@ -91,33 +98,53 @@ export function bindExtensionHooks(
   const { states, report } = deps;
   const disposers: Array<() => void> = [];
 
-  const enter = async (
-    lane: string,
-    runId: string
-  ): Promise<ReturnType<ExtensionLaneStates["enter"]>> => {
-    const state = states.enter(lane, runId);
-    await deps.refresh(lane);
-    return state;
+  const message = (error: unknown): string =>
+    error instanceof Error ? error.message : String(error);
+
+  const fail = (hook: HookName, lane: string, error: unknown): void => {
+    report({
+      lane,
+      kind: "hook",
+      source: hook,
+      message: message(error),
+      ...(error instanceof Error && error.stack !== undefined
+        ? { stack: error.stack }
+        : {})
+    });
   };
+
+  /**
+   * Run one hook body with its lane current and its read model fresh.
+   *
+   * The lane is restored afterwards: hooks on two lanes are each other's
+   * only contenders for the synchronous `pi.*` surface, and leaving the
+   * second lane current would send the first lane's later writes to it.
+   */
+  const onLane = <T>(
+    lane: string,
+    runId: string,
+    run: (state: ExtensionLaneState) => Promise<T>
+  ): Promise<T> =>
+    states.withLane(
+      lane,
+      async (state) => {
+        await deps.refresh(lane);
+        return run(state);
+      },
+      runId
+    );
 
   const guard = async <T>(
     hook: HookName,
     lane: string,
     fallback: T,
-    run: () => Promise<T>
+    runId: string,
+    run: (state: ExtensionLaneState) => Promise<T>
   ): Promise<T> => {
     try {
-      return await run();
+      return await onLane(lane, runId, run);
     } catch (error) {
-      report({
-        lane,
-        kind: "hook",
-        source: hook,
-        message: error instanceof Error ? error.message : String(error),
-        ...(error instanceof Error && error.stack !== undefined
-          ? { stack: error.stack }
-          : {})
-      });
+      fail(hook, lane, error);
       return fallback;
     }
   };
@@ -126,24 +153,29 @@ export function bindExtensionHooks(
     hooks.on(
       "before_run",
       (event) =>
-        guard("before_run", event.lane, undefined, async () => {
-          const state = await enter(event.lane, event.runId);
-          const result = await runner.emitBeforeAgentStart(
-            promptText(event.prompt),
-            promptImages(event.prompt),
-            state.systemPrompt,
-            { cwd: deps.cwd }
-          );
-          if (!result) return undefined;
-          // The system prompt is only known at transform_context, so an
-          // override is stashed here and applied there.
-          if (result.systemPrompt !== undefined) {
-            state.systemPromptOverride = result.systemPrompt;
+        guard(
+          "before_run",
+          event.lane,
+          undefined,
+          event.runId,
+          async (state) => {
+            const result = await runner.emitBeforeAgentStart(
+              promptText(event.prompt),
+              promptImages(event.prompt),
+              state.systemPrompt,
+              { cwd: deps.cwd }
+            );
+            if (!result) return undefined;
+            // The system prompt is only known at transform_context, so an
+            // override is stashed here and applied there.
+            if (result.systemPrompt !== undefined) {
+              state.systemPromptOverride = result.systemPrompt;
+            }
+            return result.messages
+              ? { messages: result.messages.map(customMessage) }
+              : undefined;
           }
-          return result.messages
-            ? { messages: result.messages.map(customMessage) }
-            : undefined;
-        }),
+        ),
       { id: EXTENSION_HOOK_ID }
     )
   );
@@ -152,16 +184,21 @@ export function bindExtensionHooks(
     hooks.on(
       "transform_context",
       (event) =>
-        guard("transform_context", event.lane, undefined, async () => {
-          const state = await enter(event.lane, event.runId);
-          state.systemPrompt = event.systemPrompt;
-          const messages = await runner.emitContext([...event.messages]);
-          const systemPrompt = state.systemPromptOverride;
-          return {
-            messages,
-            ...(systemPrompt === undefined ? {} : { systemPrompt })
-          };
-        }),
+        guard(
+          "transform_context",
+          event.lane,
+          undefined,
+          event.runId,
+          async (state) => {
+            state.systemPrompt = event.systemPrompt;
+            const messages = await runner.emitContext([...event.messages]);
+            const systemPrompt = state.systemPromptOverride;
+            return {
+              messages,
+              ...(systemPrompt === undefined ? {} : { systemPrompt })
+            };
+          }
+        ),
       { id: EXTENSION_HOOK_ID }
     )
   );
@@ -170,20 +207,25 @@ export function bindExtensionHooks(
     hooks.on(
       "before_request",
       (event) =>
-        guard("before_request", event.lane, undefined, async () => {
-          await enter(event.lane, event.runId);
-          const before = event.streamOptions.headers ?? {};
-          const headers: ProviderHeaders = { ...before };
-          await runner.emitBeforeProviderHeaders(headers);
-          // Handlers mutate in place; pi-ai deletes a header with null,
-          // the harness patch deletes it with undefined.
-          const patch: Record<string, string | undefined> = {};
-          for (const key of Object.keys(before)) patch[key] = undefined;
-          for (const [key, value] of Object.entries(headers)) {
-            patch[key] = value === null ? undefined : value;
+        guard(
+          "before_request",
+          event.lane,
+          undefined,
+          event.runId,
+          async () => {
+            const before = event.streamOptions.headers ?? {};
+            const headers: ProviderHeaders = { ...before };
+            await runner.emitBeforeProviderHeaders(headers);
+            // Handlers mutate in place; pi-ai deletes a header with null,
+            // the harness patch deletes it with undefined.
+            const patch: Record<string, string | undefined> = {};
+            for (const key of Object.keys(before)) patch[key] = undefined;
+            for (const [key, value] of Object.entries(headers)) {
+              patch[key] = value === null ? undefined : value;
+            }
+            return { streamOptions: { headers: patch } };
           }
-          return { streamOptions: { headers: patch } };
-        }),
+        ),
       { id: EXTENSION_HOOK_ID }
     )
   );
@@ -192,11 +234,18 @@ export function bindExtensionHooks(
     hooks.on(
       "before_payload",
       (event) =>
-        guard("before_payload", event.lane, undefined, async () => {
-          await enter(event.lane, event.runId);
-          const payload = await runner.emitBeforeProviderRequest(event.payload);
-          return { payload };
-        }),
+        guard(
+          "before_payload",
+          event.lane,
+          undefined,
+          event.runId,
+          async () => {
+            const payload = await runner.emitBeforeProviderRequest(
+              event.payload
+            );
+            return { payload };
+          }
+        ),
       { id: EXTENSION_HOOK_ID }
     )
   );
@@ -205,52 +254,68 @@ export function bindExtensionHooks(
     hooks.on(
       "after_response",
       (event) =>
-        guard("after_response", event.lane, undefined, async () => {
-          await enter(event.lane, event.runId);
-          await runner.emit({
-            type: "after_provider_response",
-            status: event.status ?? 0,
-            headers: event.headers ?? {}
-          });
-          const message = await runner.emitMessageEnd({
-            type: "message_end",
-            message: event.message
-          });
-          return message !== undefined && message.role === "assistant"
-            ? { message: message as SettledAssistantMessage }
-            : undefined;
-        }),
+        guard(
+          "after_response",
+          event.lane,
+          undefined,
+          event.runId,
+          async () => {
+            await runner.emit({
+              type: "after_provider_response",
+              status: event.status ?? 0,
+              headers: event.headers ?? {}
+            });
+            const message = await runner.emitMessageEnd({
+              type: "message_end",
+              message: event.message
+            });
+            return message !== undefined && message.role === "assistant"
+              ? { message: message as SettledAssistantMessage }
+              : undefined;
+          }
+        ),
       { id: EXTENSION_HOOK_ID }
     )
   );
 
+  // `before_tool` is the one gate that fails closed. Every other bridge
+  // returns the unmodified value when a handler throws, because the worst a
+  // lost handler can do there is leave the run as pi would have run it
+  // anyway. Here a lost handler is a permission check that never ran, so a
+  // throw blocks the call with the failure as its reason — as
+  // `hooks.beforeTool` does upstream — and is reported as well.
   disposers.push(
     hooks.on(
       "before_tool",
-      (event) =>
-        guard("before_tool", event.lane, undefined, async () => {
-          await enter(event.lane, event.runId);
-          const input = { ...event.args };
-          const call = {
-            type: "tool_call",
-            toolCallId: event.toolCallId,
-            toolName: event.toolName,
-            input
-          } as unknown as ToolCallEvent;
-          const result = await runner.emitToolCall(call);
-          if (result?.block) {
-            return {
-              block: {
-                reason: result.reason ?? "Blocked by an extension",
-                ...(result.terminate === undefined
-                  ? {}
-                  : { terminate: result.terminate })
-              }
-            };
-          }
-          // Handlers patch arguments by mutating `event.input` in place.
-          return { args: input };
-        }),
+      async (event) => {
+        try {
+          return await onLane(event.lane, event.runId, async () => {
+            const input = { ...event.args };
+            const call = {
+              type: "tool_call",
+              toolCallId: event.toolCallId,
+              toolName: event.toolName,
+              input
+            } as unknown as ToolCallEvent;
+            const result = await runner.emitToolCall(call);
+            if (result?.block) {
+              return {
+                block: {
+                  reason: result.reason ?? "Blocked by an extension",
+                  ...(result.terminate === undefined
+                    ? {}
+                    : { terminate: result.terminate })
+                }
+              };
+            }
+            // Handlers patch arguments by mutating `event.input` in place.
+            return { args: input };
+          });
+        } catch (error) {
+          fail("before_tool", event.lane, error);
+          return { block: { reason: message(error) } };
+        }
+      },
       { id: EXTENSION_HOOK_ID }
     )
   );
@@ -259,8 +324,7 @@ export function bindExtensionHooks(
     hooks.on(
       "after_tool",
       (event) =>
-        guard("after_tool", event.lane, undefined, async () => {
-          await enter(event.lane, event.runId);
+        guard("after_tool", event.lane, undefined, event.runId, async () => {
           const result = await runner.emitToolResult({
             type: "tool_result",
             toolCallId: event.toolCallId,
@@ -293,35 +357,40 @@ export function bindExtensionHooks(
     hooks.on(
       "before_compaction",
       (event) =>
-        guard("before_compaction", event.lane, undefined, async () => {
-          const state = await enter(event.lane, event.runId);
-          const result = (await runner.emit({
-            type: "session_before_compact",
-            preparation: event.preparation,
-            branchEntries: state.entries.map(projectSessionEntry),
-            ...(event.customInstructions === undefined
-              ? {}
-              : { customInstructions: event.customInstructions }),
-            reason: event.reason,
-            willRetry: false,
-            signal: new AbortController().signal
-          })) as SessionBeforeCompactResult | undefined;
-          if (result?.cancel) return { decline: true };
-          if (!result?.compaction) return undefined;
-          return {
-            compaction: {
-              summary: result.compaction.summary,
-              tokensBefore: result.compaction.tokensBefore,
-              retainedTail: event.preparation.retainedTail,
-              ...(result.compaction.usage === undefined
+        guard(
+          "before_compaction",
+          event.lane,
+          undefined,
+          event.runId,
+          async (state) => {
+            const result = (await runner.emit({
+              type: "session_before_compact",
+              preparation: event.preparation,
+              branchEntries: state.entries.map(projectSessionEntry),
+              ...(event.customInstructions === undefined
                 ? {}
-                : { usage: result.compaction.usage }),
-              ...(result.compaction.details === undefined
-                ? {}
-                : { details: result.compaction.details as never })
-            }
-          };
-        }),
+                : { customInstructions: event.customInstructions }),
+              reason: event.reason,
+              willRetry: false,
+              signal: new AbortController().signal
+            })) as SessionBeforeCompactResult | undefined;
+            if (result?.cancel) return { decline: true };
+            if (!result?.compaction) return undefined;
+            return {
+              compaction: {
+                summary: result.compaction.summary,
+                tokensBefore: result.compaction.tokensBefore,
+                retainedTail: event.preparation.retainedTail,
+                ...(result.compaction.usage === undefined
+                  ? {}
+                  : { usage: result.compaction.usage }),
+                ...(result.compaction.details === undefined
+                  ? {}
+                  : { details: result.compaction.details as never })
+              }
+            };
+          }
+        ),
       { id: EXTENSION_HOOK_ID }
     )
   );
@@ -330,36 +399,41 @@ export function bindExtensionHooks(
     hooks.on(
       "before_navigation",
       (event) =>
-        guard("before_navigation", event.lane, undefined, async () => {
-          const state = await enter(event.lane, event.runId);
-          const result = (await runner.emit({
-            type: "session_before_tree",
-            preparation: {
-              targetId: event.targetId,
-              oldLeafId: state.tipId,
-              // The harness prepares messages, not a branch walk.
-              commonAncestorId: null,
-              entriesToSummarize: [],
-              userWantsSummary: true,
-              ...(event.customInstructions === undefined
-                ? {}
-                : { customInstructions: event.customInstructions })
-            },
-            signal: new AbortController().signal
-          })) as SessionBeforeTreeResult | undefined;
-          if (result?.cancel) return { decline: true };
-          if (!result?.summary) return undefined;
-          return {
-            summary: {
-              summary: result.summary.summary,
-              ...(result.summary.usage === undefined
-                ? {}
-                : { usage: result.summary.usage }),
-              readFiles: [],
-              modifiedFiles: []
-            }
-          };
-        }),
+        guard(
+          "before_navigation",
+          event.lane,
+          undefined,
+          event.runId,
+          async (state) => {
+            const result = (await runner.emit({
+              type: "session_before_tree",
+              preparation: {
+                targetId: event.targetId,
+                oldLeafId: state.tipId,
+                // The harness prepares messages, not a branch walk.
+                commonAncestorId: null,
+                entriesToSummarize: [],
+                userWantsSummary: true,
+                ...(event.customInstructions === undefined
+                  ? {}
+                  : { customInstructions: event.customInstructions })
+              },
+              signal: new AbortController().signal
+            })) as SessionBeforeTreeResult | undefined;
+            if (result?.cancel) return { decline: true };
+            if (!result?.summary) return undefined;
+            return {
+              summary: {
+                summary: result.summary.summary,
+                ...(result.summary.usage === undefined
+                  ? {}
+                  : { usage: result.summary.usage }),
+                readFiles: [],
+                modifiedFiles: []
+              }
+            };
+          }
+        ),
       { id: EXTENSION_HOOK_ID }
     )
   );

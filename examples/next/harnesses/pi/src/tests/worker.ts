@@ -351,6 +351,7 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
   readonly #faux = fauxProvider();
   readonly #contextSeen: string[] = [];
   #throwOnMessageEnd = false;
+  #inputCalls = 0;
   readonly tasks = new Tasks();
   readonly streams = new Streams();
   readonly harness = new PiHarness({
@@ -455,6 +456,70 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     };
   }
 
+  /**
+   * Submit the same prompt twice under one operation id, the way a client
+   * retrying a dropped response does, and report how many times the
+   * extension's `input` handler saw it.
+   */
+  async submitTwice(text: string): Promise<{
+    readonly first: boolean;
+    readonly second: boolean;
+    readonly inputCalls: number;
+  }> {
+    this.#faux.setResponses([fauxAssistantMessage("done")]);
+    this.#inputCalls = 0;
+    const operationId = crypto.randomUUID();
+    const first = await this.harness.submit(
+      { kind: "prompt", prompt: text },
+      { operationId }
+    );
+    const second = await this.harness.submit(
+      { kind: "prompt", prompt: text },
+      { operationId }
+    );
+    await this.harness.waitForResult(operationId);
+    return {
+      first: first.accepted,
+      second: second.accepted,
+      inputCalls: this.#inputCalls
+    };
+  }
+
+  /**
+   * Submit one line of text through `prompt`, which waits for whatever it
+   * produced. A slash command produces no operation, so this is also the
+   * regression test for waiting on one.
+   */
+  async promptText(text: string): Promise<{
+    readonly status: string;
+    readonly command: string | null;
+    readonly handled: boolean;
+  }> {
+    this.#faux.setResponses([fauxAssistantMessage("done")]);
+    const response = await this.harness.prompt(text);
+    return {
+      status: response.status,
+      command: response.command ?? null,
+      handled: response.handled ?? false
+    };
+  }
+
+  /** Whatever is waiting in one lane's queue, as the snapshot projects it. */
+  async queued(): Promise<
+    readonly {
+      readonly kind: string;
+      readonly role: string | null;
+      readonly text: string | null;
+    }[]
+  > {
+    const snapshot = await this.harness.snapshot();
+    return snapshot.queue.map((item) => ({
+      kind: item.kind,
+      role: item.message?.role ?? null,
+      text: item.message === undefined ? null : messageText(item.message)
+    }));
+  }
+
   /** Make the extension's `message_end` handler throw on the next run. */
   async failMessageEnd(fail: boolean): Promise<void> {
     this.#throwOnMessageEnd = fail;
@@ -498,6 +563,28 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
   /** Slash commands this session offers, as a client's autocomplete sees them. */
   async commands(): Promise<readonly PiSlashCommand[]> {
     return this.harness.getCommands();
+  }
+
+  /**
+   * Try to set one flag and report the failure rather than rejecting, so a
+   * refusal crosses the RPC boundary as a value. `setFlag` itself throws,
+   * which is what the transport turns into an `error` frame.
+   */
+  async setFlagError(
+    name: string,
+    value: boolean | string
+  ): Promise<string | null> {
+    try {
+      await this.harness.setFlag(name, value);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** Every extension flag's current value. */
+  async flags(): Promise<Record<string, boolean | string>> {
+    return this.harness.getFlags();
   }
 
   /** Set one extension flag and report every flag afterwards. */
@@ -595,7 +682,18 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
       if (event.toolName === "multiply" && value === 13) {
         return { block: true, reason: "unlucky number" };
       }
+      // A gate that throws is a gate that did not decide; the harness has to
+      // treat that as a refusal rather than an approval.
+      if (event.toolName === "multiply" && value === 7) {
+        throw new Error("tool_call handler exploded");
+      }
       return undefined;
+    });
+    pi.on("input", (event) => {
+      this.#inputCalls += 1;
+      return event.text.startsWith("swallow")
+        ? { action: "handled" as const }
+        : { action: "continue" as const };
     });
     pi.on("context", (event) => ({
       messages: [
@@ -615,6 +713,19 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
       description: "Append a note to the transcript.",
       handler: async (args) => {
         pi.appendEntry("test:note", { text: args });
+      }
+    });
+    pi.registerCommand("announce", {
+      description: "Send a custom message that the next run picks up.",
+      handler: async (args) => {
+        pi.sendMessage(
+          {
+            customType: "test:announce",
+            content: args,
+            display: true
+          },
+          { triggerTurn: true }
+        );
       }
     });
   }
