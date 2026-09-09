@@ -5403,10 +5403,12 @@ export class Think<
         }
       });
 
-      const previous = this._configGet("skillsFingerprint");
+      const previous = (this._skillsFingerprint ??=
+        this._configGet("skillsFingerprint") ?? null);
       if (previous !== registry.fingerprint) {
         await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", registry.fingerprint);
+        this._skillsFingerprint = registry.fingerprint;
       }
     } catch (error) {
       console.warn(
@@ -5477,6 +5479,12 @@ export class Think<
     return null;
   }
 
+  /**
+   * The persisted skills fingerprint, read from `think_config` once per
+   * object lifetime; `null` once read and absent. Saves the per-turn probe.
+   */
+  private _skillsFingerprint: string | null | undefined;
+
   private async _refreshSkillsIfChanged(): Promise<void> {
     if (!this._skillRegistry) return;
 
@@ -5486,10 +5494,12 @@ export class Think<
       await this._skillRegistry.refresh();
       this._logSkillWarnings(this._skillRegistry);
       await this._configureSkillWorkspace(this._skillRegistry);
-      const previous = this._configGet("skillsFingerprint");
+      const previous = (this._skillsFingerprint ??=
+        this._configGet("skillsFingerprint") ?? null);
       if (previous !== this._skillRegistry.fingerprint) {
         await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
+        this._skillsFingerprint = this._skillRegistry.fingerprint;
       }
     } catch (error) {
       console.warn(
