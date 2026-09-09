@@ -148,6 +148,27 @@ export type SqlTaggedTemplate = {
   ): T[];
 };
 
+/** Host hooks for the chat stream adapter. */
+export type ResumableStreamOptions = {
+  /**
+   * Called with the durable part of the recovery progress marker (retired
+   * segments plus credits plus the seeded legacy counter) after it advances,
+   * outside any transaction. Hosts mirror it to the pre-derivation KV key so
+   * a build rolled back to the KV counter never reads a marker lower than
+   * an incident recorded under this one. Fires per stream retired and per
+   * credit, never per chunk.
+   */
+  onProgress?: (durableSegments: number) => void;
+};
+
+/**
+ * The deletion hook each adapter holds on its Streams capability. One
+ * adapter per capability: a host whose startup retried constructs the
+ * adapter again on the same capability, and the earlier hook must go, or a
+ * deleted stream's segments would be retired once per construction.
+ */
+const deletionHooks = new WeakMap<Streams, () => void>();
+
 export class ResumableStream {
   private _activeStreamId: string | null = null;
   private _activeRequestId: string | null = null;
@@ -178,12 +199,169 @@ export class ResumableStream {
 
   private readonly ops: StreamsSyncInternal;
 
-  constructor(streams: Streams, sql: SqlTaggedTemplate) {
+  constructor(
+    streams: Streams,
+    sql: SqlTaggedTemplate,
+    options: ResumableStreamOptions = {}
+  ) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
+    this._sql = sql;
+    this._onProgress = options.onProgress;
+    this._ensureProgressTable();
+    // Every path that removes a chat row's log — this adapter's cutover,
+    // reclaim and clear, and the capability's public `delete()` — folds the
+    // row's segments into the retired total first. Registered before the
+    // legacy migration, which is itself a delete path, and replacing the
+    // hook of any adapter constructed earlier on this capability.
+    deletionHooks.get(streams)?.();
+    deletionHooks.set(
+      streams,
+      this.ops.onDelete((row, cursor) => {
+        if (parseChatMetadata(row)) this._retire(cursor);
+      })
+    );
     this._migrateLegacyTables(sql);
     // Restore any active stream from a previous session
     this.restore();
+  }
+
+  // ── Recovery progress marker ───────────────────────────────────────
+  //
+  // Chat recovery's no-progress budget and work meter key off a monotonic
+  // count of durably produced content (#1628, #1637). That count used to be
+  // a Durable Object KV counter bumped on every credited chunk — a get and
+  // a put per tool call and per text segment, on the streaming hot path.
+  // The chunk log already IS the durable record of produced content, so the
+  // marker is derived from it instead: segments still in the table are
+  // counted from their logs, and a stream's segments are folded into a
+  // retired total in the same transaction that deletes its rows, so the sum
+  // never moves when rows go away. Nothing is written per chunk; one row is
+  // written per stream retired.
+
+  private readonly _sql: SqlTaggedTemplate;
+  private readonly _onProgress: ResumableStreamOptions["onProgress"];
+
+  /**
+   * Tell the host the durable part of the marker moved. Called after the
+   * write that moved it has left any transaction, never inside one: the
+   * host's mirror is an async KV put, which a synchronous transaction
+   * would reject.
+   */
+  private _notifyProgress(): void {
+    this._onProgress?.(this._retiredSegments());
+  }
+
+  /**
+   * One row: `retired` accumulates the segments of deleted streams and
+   * explicit credits; `legacy` holds the pre-derivation KV counter, folded
+   * in once. They are separate columns so a seed can never swallow
+   * segments retired before it landed, and a repeated seed is idempotent.
+   */
+  private _ensureProgressTable(): void {
+    this._sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_chat_progress (
+        key TEXT PRIMARY KEY,
+        retired INTEGER NOT NULL,
+        legacy INTEGER NOT NULL DEFAULT 0
+      ) WITHOUT ROWID
+    `;
+  }
+
+  private _retiredSegments(): number {
+    const rows = this._sql<{ retired: number; legacy: number }>`
+      SELECT retired, legacy FROM cf_agents_chat_progress WHERE key = 'chat'
+    `;
+    const row = rows[0];
+    return row ? row.retired + row.legacy : 0;
+  }
+
+  /** Add `segments` to the retired total. One row write; a no-op for zero. */
+  private _retire(segments: number): void {
+    if (segments <= 0) return;
+    this._sql`
+      INSERT INTO cf_agents_chat_progress (key, retired, legacy)
+      VALUES ('chat', ${segments}, 0)
+      ON CONFLICT(key) DO UPDATE SET retired = retired + excluded.retired
+    `;
+  }
+
+  /**
+   * Segments a row still accounts for: a live stream's log tail, a settled
+   * stream's final cursor (stamped exact at settlement).
+   */
+  private _segmentsOf(row: StreamRow): number {
+    return row.state === "streaming"
+      ? this.ops.cursor(row.stream_id)
+      : row.chunk_count;
+  }
+
+  /**
+   * Monotonic count of durably flushed chat segments on this Durable
+   * Object, plus explicit credits (see {@link creditProgress}): the recovery
+   * engine's forward-progress marker. Advances only when a segment lands in
+   * the log — never on a reconnect replay or a recovery re-persist, which
+   * read the log without appending — and is untouched by compaction, which
+   * rewrites the transcript, not the log. Reads the stream rows plus one
+   * log-tail row per live stream: called at incident evaluation, not on the
+   * hot path.
+   *
+   * A chat row leaving the table by any path — this adapter's cutover,
+   * reclaim and clear, or the capability's own `delete()` — passes through
+   * the deletion hook, so its segments are retired before they are gone
+   * and the marker never moves on a deletion.
+   */
+  progressMarker(): number {
+    let live = 0;
+    for (const row of this._chatRows()) live += this._segmentsOf(row);
+    return this._retiredSegments() + live;
+  }
+
+  /**
+   * Credit one unit of forward progress that the log cannot see: a parent
+   * forwarding a sub-agent's output (N9) produces no chunks of its own, yet
+   * that output is the parent turn advancing. One row write; callers
+   * throttle.
+   */
+  creditProgress(): void {
+    this._retire(1);
+    this._notifyProgress();
+  }
+
+  /**
+   * Carry the pre-derivation KV counter forward: the marker must not read
+   * lower after the upgrade than the high-water mark an in-flight incident
+   * already recorded, or a progressing turn would look stuck until the log
+   * caught up. The counter is never written again, so its value is a
+   * constant this folds into its own column by max — idempotent across
+   * isolates, and never touching segments retired before the seed landed.
+   * A no-op for zero, so a fresh object never writes.
+   *
+   * The counter already credited a stream that was in flight at the
+   * upgrade, and that stream's live segments count again here, so the
+   * first read after the upgrade can exceed the counter by those segments.
+   * That reads as progress once, and hands an in-flight incident one extra
+   * no-progress window; it cannot recur.
+   */
+  seedProgress(legacyTotal: number): void {
+    if (legacyTotal <= 0) return;
+    this._sql`
+      INSERT INTO cf_agents_chat_progress (key, retired, legacy)
+      VALUES ('chat', 0, ${legacyTotal})
+      ON CONFLICT(key) DO UPDATE
+        SET legacy = MAX(legacy, excluded.legacy)
+    `;
+  }
+
+  /**
+   * Delete chat rows. The deletion hook folds each row's segments into the
+   * retired total in the same synchronous block, retire before delete, so
+   * a partial commit could only ever count a stream twice, never lose it.
+   */
+  private _deleteRetiring(rows: readonly StreamRow[]): void {
+    if (rows.length === 0) return;
+    this.ops.deleteMany(rows.map((row) => row.stream_id));
+    this._notifyProgress();
   }
 
   /**
@@ -400,10 +578,15 @@ export class ResumableStream {
     options: { discard?: boolean } = {}
   ) {
     this.flushBuffer();
+    const discard = options.discard ?? true;
+    // The discard deletes the rows inside the settle transaction, and the
+    // deletion hook retires their segments there, so the marker moves with
+    // the commit or not at all.
     const settled = this.ops.settle(streamId, "completed", null, {
       commit: persist,
-      discard: options.discard ?? true
+      discard
     });
+    if (settled && discard) this._notifyProgress();
     // The stream was settled (or deleted) by another path first, so the
     // settle was a no-op and `persist` did not run: the message must still
     // land, just not atomically with a settlement that already happened.
@@ -428,22 +611,6 @@ export class ResumableStream {
     this._activeRequestId = null;
     this._isLive = false;
     this._activeIsContinuation = false;
-  }
-
-  /**
-   * Drop a completed stream's rows once its message is persisted. The rows
-   * are redundant with the message from that moment, so deleting them here
-   * (a handful of block rows) is what keeps the retention sweep from ever
-   * finding completed streams. Live and errored streams are left alone:
-   * a live one may still be resumed, an errored one still owes a resumed
-   * client its terminal frame (#1645).
-   * @returns Whether rows were deleted.
-   */
-  discardCompleted(streamId: string): boolean {
-    const row = this.ops.getStream(streamId);
-    if (!row || row.state !== "completed") return false;
-    this.ops.deleteUnchecked(streamId);
-    return true;
   }
 
   /**
@@ -763,7 +930,7 @@ export class ResumableStream {
   clearAll() {
     this._chunkBuffer = [];
     this._chunkBufferBytes = 0;
-    this.ops.deleteMany(this._chatRows().map((row) => row.stream_id));
+    this._deleteRetiring(this._chatRows());
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._activeIsContinuation = false;
@@ -795,17 +962,15 @@ export class ResumableStream {
    */
   reclaim(now: number = Date.now()): number {
     const abandonedCutoff = now - ABANDONED_STREAM_RETENTION_MS;
-    const reclaimable = this._chatRows()
-      .filter((row) =>
-        row.state === "streaming"
-          ? row.stream_id !== this._activeStreamId &&
-            row.updated_at < abandonedCutoff &&
-            (this.ops.lastChunkAt(row.stream_id) ?? row.updated_at) <
-              abandonedCutoff
-          : true
-      )
-      .map((row) => row.stream_id);
-    this.ops.deleteMany(reclaimable);
+    const reclaimable = this._chatRows().filter((row) =>
+      row.state === "streaming"
+        ? row.stream_id !== this._activeStreamId &&
+          row.updated_at < abandonedCutoff &&
+          (this.ops.lastChunkAt(row.stream_id) ?? row.updated_at) <
+            abandonedCutoff
+        : true
+    );
+    this._deleteRetiring(reclaimable);
     return reclaimable.length;
   }
 

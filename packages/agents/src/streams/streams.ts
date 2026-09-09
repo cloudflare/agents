@@ -92,6 +92,23 @@ export interface StreamsSyncInternal {
    */
   lastChunkAt(streamId: string): number | null;
   /**
+   * Segments durably appended so far: the chunk log's tail, read in the
+   * calling synchronous block. Zero for an unknown stream.
+   */
+  cursor(streamId: string): number;
+  /**
+   * Observe every deletion of a stream's rows — the public `delete()`, the
+   * aperture's own deletes, and a cutover's discard — with the row and its
+   * cursor as they were just before removal, in the same synchronous block
+   * (and, for a cutover, the same transaction). Hooks must be synchronous
+   * and must not await: the cutover runs them inside `transactionSync`.
+   * The chat adapter uses this to keep its recovery progress marker exact
+   * however a chat row leaves the table. Returns the unsubscribe: an owner
+   * constructed again (a host whose startup retried) must drop its earlier
+   * hook, or a deletion is observed once per construction.
+   */
+  onDelete(hook: (row: StreamRow, cursor: number) => void): () => void;
+  /**
    * Idempotent settlement with events and reader wakeup. With `options`,
    * the settle, the caller's `commit` writes and the log discard run in
    * one SQLite transaction (see {@link StreamSettleOptions}). Returns
@@ -427,6 +444,14 @@ export class Streams extends LifecycleCapability {
       },
       append: (streamId, chunk) => this.#append(streamId, chunk),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
+      cursor: (streamId) => this.#tail(streamId).nextSeq,
+      onDelete: (hook) => {
+        this.#deleteHooks.push(hook);
+        return () => {
+          const index = this.#deleteHooks.indexOf(hook);
+          if (index !== -1) this.#deleteHooks.splice(index, 1);
+        };
+      },
       settle: (streamId, state, reason, options) =>
         this.#settle(streamId, state, reason, options),
       deleteUnchecked: (streamId) => {
@@ -605,7 +630,21 @@ export class Streams extends LifecycleCapability {
   }
 
   /** Delete a stream's blocks and row. Returns rows removed from the row table. */
+  readonly #deleteHooks: Array<(row: StreamRow, cursor: number) => void> = [];
+
+  /**
+   * Remove a stream's row and log. Deletion hooks see the row and its
+   * cursor first, so an owner can account for the segments before they are
+   * gone; this is the single point every delete path passes through.
+   */
   #deleteRows(streamId: string): number {
+    if (this.#deleteHooks.length > 0) {
+      const row = this.#getStream(streamId);
+      if (row) {
+        const cursor = this.#tail(streamId).nextSeq;
+        for (const hook of this.#deleteHooks) hook(row, cursor);
+      }
+    }
     if (this.#legacyChunkTable) {
       // Unfolded v1 rows die with the stream; no point folding them first.
       this.#sql`DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}`;
@@ -643,12 +682,24 @@ export class Streams extends LifecycleCapability {
     // once the transaction has returned.
     let settled = false;
     let deleted = false;
-    this.lifecycle.storage.transactionSync(() => {
-      settled = this.#settleRow(streamId, state, reason);
-      if (!settled) return;
-      options.commit?.();
-      if (options.discard) deleted = this.#deleteRows(streamId) > 0;
-    });
+    const hadLegacy = this.#legacyChunkTable;
+    try {
+      this.lifecycle.storage.transactionSync(() => {
+        settled = this.#settleRow(streamId, state, reason);
+        if (!settled) return;
+        options.commit?.();
+        if (options.discard) deleted = this.#deleteRows(streamId) > 0;
+      });
+    } finally {
+      // The settle's tail read may have folded this stream's v1 rows and,
+      // if they were the last, dropped the legacy table and cleared the
+      // flag — inside the transaction. A rollback restores the table but
+      // not the flag, so re-derive it from the schema rather than trust a
+      // bit written by a transaction that may not have committed.
+      if (hadLegacy && !this.#legacyChunkTable) {
+        this.#legacyChunkTable = this.#hasLegacyChunkTable();
+      }
+    }
     if (settled) this.#emitSettled(streamId, state, reason);
     if (deleted) this.#emit("stream:deleted", { streamId });
     this.#wake(streamId);
