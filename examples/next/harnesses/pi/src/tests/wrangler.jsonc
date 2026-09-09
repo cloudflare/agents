@@ -16,6 +16,10 @@
       {
         "name": "PI_BUILTIN_TOOLS_TEST",
         "class_name": "PiBuiltinToolsTestObject"
+      },
+      {
+        "name": "PI_EXTENSIONS_TEST",
+        "class_name": "PiExtensionsTestObject"
       }
     ]
   },
@@ -31,6 +35,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["PiBuiltinToolsTestObject"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["PiExtensionsTestObject"]
     }
   ]
 }

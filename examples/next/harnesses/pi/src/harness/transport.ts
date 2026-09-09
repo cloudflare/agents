@@ -9,12 +9,15 @@ import type {
   PiAbortResult,
   PiClientMessage,
   PiEvent,
+  PiExtensionUiRequest,
+  PiExtensionUiResponse,
   PiJson,
   PiLaneSnapshot,
   PiMessageInput,
   PiOperationRequest,
   PiQueueReceipt,
   PiServerMessage,
+  PiSlashCommand,
   PiSubmissionReceipt
 } from "./types";
 
@@ -35,6 +38,26 @@ export interface PiTransportHost {
     message: PiMessageInput,
     options: { lane: string }
   ): Promise<PiQueueReceipt>;
+  /**
+   * The extension surface. Optional so a harness built without extensions
+   * still satisfies the host contract; the transport answers the matching
+   * client frames with an `unsupported` error when a method is absent.
+   */
+  resolveUi?(
+    requestId: string,
+    response: PiExtensionUiResponse,
+    options: { lane: string }
+  ): boolean;
+  commands?(options: { lane: string }): Promise<readonly PiSlashCommand[]>;
+  setFlag?(
+    name: string,
+    value: boolean | string
+  ): Promise<Readonly<Record<string, boolean | string>>>;
+  runCommand?(
+    name: string,
+    args: string | undefined,
+    options: { lane: string }
+  ): Promise<PiSubmissionReceipt>;
 }
 
 const LANE_TAG_PREFIX = "pi:";
@@ -144,6 +167,58 @@ export class PiTransport {
     }
   }
 
+  /**
+   * Broadcast one extension UI request to a lane's connections and report how
+   * many received it. Zero is the bridge's cue to answer with the default
+   * rather than wait for a client that is not there.
+   */
+  extensionUiRequest(lane: string, request: PiExtensionUiRequest): number {
+    let delivered = 0;
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      if (socket.readyState !== OPEN) continue;
+      send(socket, {
+        type: "extension_ui_request",
+        lane,
+        requestId: request.requestId,
+        request
+      });
+      delivered += 1;
+    }
+    return delivered;
+  }
+
+  /** Broadcast a hook, event listener or extension failure to a lane. */
+  handlerError(
+    lane: string,
+    payload: {
+      readonly kind: "hook" | "event" | "extension";
+      readonly source: string;
+      readonly message: string;
+      readonly stack?: string;
+    }
+  ): void {
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      send(socket, { type: "handler_error", lane, ...payload });
+    }
+  }
+
+  /** Broadcast a changed slash command set to a lane's connections. */
+  commandsChanged(lane: string, commands: readonly PiSlashCommand[]): void {
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      send(socket, { type: "commands", lane, commands });
+    }
+  }
+
+  /** Broadcast changed extension flags to a lane's connections. */
+  flagsChanged(
+    lane: string,
+    flags: Readonly<Record<string, boolean | string>>
+  ): void {
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      send(socket, { type: "flags", flags });
+    }
+  }
+
   async #onConnect(
     connection: Connection,
     ctx: ConnectionContext
@@ -231,6 +306,41 @@ export class PiTransport {
         });
       case "steer":
         return this.#host.steer(message.message, { lane });
+      case "extension_ui_response": {
+        const resolveUi = this.#host.resolveUi;
+        if (!resolveUi) throw unsupported(message.type);
+        return resolveUi.call(this.#host, message.requestId, message.response, {
+          lane
+        });
+      }
+      case "get_commands": {
+        const commands = this.#host.commands;
+        if (!commands) throw unsupported(message.type);
+        send(connection, {
+          type: "commands",
+          id: message.id,
+          lane,
+          commands: await commands.call(this.#host, { lane })
+        });
+        return SUBSCRIPTION;
+      }
+      case "set_flag": {
+        const setFlag = this.#host.setFlag;
+        if (!setFlag) throw unsupported(message.type);
+        send(connection, {
+          type: "flags",
+          id: message.id,
+          flags: await setFlag.call(this.#host, message.name, message.value)
+        });
+        return SUBSCRIPTION;
+      }
+      case "command": {
+        const runCommand = this.#host.runCommand;
+        if (!runCommand) throw unsupported(message.type);
+        return runCommand.call(this.#host, message.name, message.args, {
+          lane
+        });
+      }
       default:
         throw new Error(
           `Unknown pi message type ${JSON.stringify((message as { type: string }).type)}`
@@ -283,6 +393,11 @@ export class PiTransport {
 
 /** Sentinel for commands whose reply is the subscription itself. */
 const SUBSCRIPTION = Symbol("pi-subscription");
+
+/** A frame this harness understands but this host does not implement. */
+function unsupported(type: string): Error {
+  return new Error(`unsupported: ${type}`);
+}
 
 function operationIdOf(
   metadata: Record<string, unknown> | undefined

@@ -1,4 +1,9 @@
 import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
+import type {
+  ExtensionAPI,
+  ExtensionFactory,
+  ExtensionUIContext
+} from "../../vendor/pi-coding-agent-src/core/extensions/types.ts";
 import type { Static, TSchema } from "typebox";
 import type { SkillSource } from "agents/skills";
 import type { Streams } from "agents/streams";
@@ -235,6 +240,35 @@ export type PiResources = {
   readonly promptTemplates?: readonly PiPromptTemplate[];
 };
 
+// ── Extensions ────────────────────────────────────────────────────────────
+
+/**
+ * Pi's own extension API, as an extension factory receives it: event
+ * subscription, tool and command registration, flags, and the actions that
+ * reach back into the session.
+ */
+export type PiExtensionApi = ExtensionAPI;
+
+/** An extension's registration function. */
+export type PiExtensionFactory = ExtensionFactory;
+
+/**
+ * The blocking UI surface `ctx.ui` exposes to an extension. The harness runs
+ * with pi's no-op context unless a host supplies one.
+ */
+export type PiExtensionUiContext = ExtensionUIContext;
+
+/** One extension: a bare factory, or a factory with a display name. */
+export type PiExtension =
+  | PiExtensionFactory
+  | {
+      /** Name reported as the extension's path in diagnostics. */
+      readonly name: string;
+      readonly factory: PiExtensionFactory;
+      /** Hide this extension from user-visible listings. */
+      readonly hidden?: boolean;
+    };
+
 // ── Configuration ─────────────────────────────────────────────────────────
 
 /** Configuration for the Durable Object hosted pi harness. */
@@ -305,6 +339,31 @@ export type PiHarnessConfig<
    * Requires {@link PiHarnessConfig.executionEnv}; defaults to none.
    */
   readonly builtinTools?: readonly PiBuiltinToolName[];
+  /**
+   * Pi extensions loaded into this harness. They register tools, commands,
+   * flags, and event handlers, and are re-loaded on every isolate wake.
+   */
+  readonly extensions?:
+    | readonly PiExtension[]
+    | ((
+        context: PiContext
+      ) => readonly PiExtension[] | Promise<readonly PiExtension[]>);
+  /**
+   * Prompt templates offered as slash commands.
+   *
+   * @experimental Accepted now; command dispatch lands with the command
+   * surface.
+   */
+  readonly promptTemplates?: readonly PiPromptTemplate[];
+  /** Working directory extensions and their tools see. @default "/" */
+  readonly cwd?: string;
+  /** Initial values for extension-registered flags, by flag name. */
+  readonly flags?: Readonly<Record<string, boolean | string>>;
+  /**
+   * How long a blocking extension UI request waits for a client answer
+   * before resolving to its default. @default 30000
+   */
+  readonly uiRequestTimeoutMs?: number;
   /** Register process-local hooks after each isolate wake. */
   readonly configure?: (
     hooks: PiHookRegistry,
@@ -644,6 +703,18 @@ export type PiEvent =
       readonly type: "transcript_reset";
       readonly reason: "compaction" | "navigation";
     }
+  | {
+      /**
+       * A hook, event handler, or extension threw. The operation continues:
+       * pi isolates handler failures from the run.
+       */
+      readonly type: "handler_error";
+      readonly kind: "hook" | "event" | "extension";
+      /** Hook name, event type, or extension path the failure came from. */
+      readonly source: string;
+      readonly message: string;
+      readonly stack?: string;
+    }
   | { readonly type: "fault"; readonly code: string; readonly message: string };
 
 /** Envelope for events delivered to in-process listeners. */
@@ -684,6 +755,11 @@ export type PiSubmissionReceipt = {
   readonly lane: string;
   /** False when this operation id was already submitted or settled. */
   readonly accepted: boolean;
+  /**
+   * True when an extension's `input` handler consumed the submission. No
+   * operation was queued.
+   */
+  readonly handled?: boolean;
 };
 
 /** Receipt for a message queued into a lane's inbox. */
@@ -697,6 +773,89 @@ export type PiAbortResult = {
   /** False when the operation was already aborting. */
   readonly newlyRequested: boolean;
 } | null;
+
+/**
+ * One extension UI request, addressed by `requestId`.
+ *
+ * Shapes follow pi's RPC mode (`modes/rpc/rpc-types.ts`
+ * `RpcExtensionUIRequest`) with snake_case methods and a lane-scoped id. The
+ * first four methods are dialogs and expect a `PiExtensionUiResponse`; the
+ * rest are fire-and-forget view updates the client applies to its own state.
+ */
+export type PiExtensionUiRequest =
+  | {
+      readonly method: "select";
+      readonly requestId: string;
+      readonly title: string;
+      readonly options: readonly string[];
+      /** Milliseconds after which the harness answers with the default. */
+      readonly timeoutMs: number;
+    }
+  | {
+      readonly method: "confirm";
+      readonly requestId: string;
+      readonly title: string;
+      readonly message: string;
+      readonly timeoutMs: number;
+    }
+  | {
+      readonly method: "input";
+      readonly requestId: string;
+      readonly title: string;
+      readonly placeholder?: string;
+      readonly timeoutMs: number;
+    }
+  | {
+      readonly method: "editor";
+      readonly requestId: string;
+      readonly title: string;
+      readonly prefill?: string;
+      readonly timeoutMs: number;
+    }
+  | {
+      readonly method: "notify";
+      readonly requestId: string;
+      readonly message: string;
+      readonly level?: "info" | "warning" | "error";
+    }
+  | {
+      readonly method: "set_status";
+      readonly requestId: string;
+      readonly key: string;
+      /** Undefined clears the status slot. */
+      readonly text: string | undefined;
+    }
+  | {
+      readonly method: "set_widget";
+      readonly requestId: string;
+      readonly key: string;
+      /** Undefined clears the widget. Component factories are not sent. */
+      readonly lines: readonly string[] | undefined;
+      readonly placement?: "aboveEditor" | "belowEditor";
+    }
+  | {
+      readonly method: "set_title";
+      readonly requestId: string;
+      readonly title: string;
+    }
+  | {
+      readonly method: "set_editor_text";
+      readonly requestId: string;
+      readonly text: string;
+    };
+
+/** A client's answer to one extension UI dialog. */
+export type PiExtensionUiResponse =
+  | { readonly value: string }
+  | { readonly confirmed: boolean }
+  | { readonly cancelled: true };
+
+/** One slash command offered to the client's autocomplete. */
+export type PiSlashCommand = {
+  readonly name: string;
+  readonly description: string;
+  readonly source: "extension" | "template" | "skill";
+};
 
 /** Wire message sent by a browser client over the WebSockets transport. */
 export type PiClientMessage =
@@ -728,6 +887,32 @@ export type PiClientMessage =
       readonly type: "steer";
       readonly id: string;
       readonly message: PiMessageInput;
+    }
+  | {
+      /** Answer one extension UI dialog. */
+      readonly type: "extension_ui_response";
+      readonly id?: string;
+      readonly requestId: string;
+      readonly response: PiExtensionUiResponse;
+    }
+  | {
+      /** Ask for the lane's slash commands; answered with a `commands` frame. */
+      readonly type: "get_commands";
+      readonly id: string;
+    }
+  | {
+      /** Set one extension flag; answered with a `flags` frame. */
+      readonly type: "set_flag";
+      readonly id: string;
+      readonly name: string;
+      readonly value: boolean | string;
+    }
+  | {
+      /** Run one slash command out of band from durable operations. */
+      readonly type: "command";
+      readonly id: string;
+      readonly name: string;
+      readonly args?: string;
     };
 
 /** Wire message sent to a browser client over the WebSockets transport. */
@@ -769,4 +954,34 @@ export type PiServerMessage =
       readonly operationId: string;
     }
   | { readonly type: "result"; readonly id: string; readonly result: PiJson }
-  | { readonly type: "error"; readonly id?: string; readonly message: string };
+  | { readonly type: "error"; readonly id?: string; readonly message: string }
+  | {
+      /**
+       * An extension asked for UI. `requestId` is lifted out of `request` so a
+       * client can correlate an answer without narrowing the method union.
+       */
+      readonly type: "extension_ui_request";
+      readonly lane: string;
+      readonly requestId: string;
+      readonly request: PiExtensionUiRequest;
+    }
+  | {
+      readonly type: "commands";
+      readonly id?: string;
+      readonly lane: string;
+      readonly commands: readonly PiSlashCommand[];
+    }
+  | {
+      readonly type: "flags";
+      readonly id?: string;
+      readonly flags: Readonly<Record<string, boolean | string>>;
+    }
+  | {
+      /** A hook, event listener or extension threw; the run carries on. */
+      readonly type: "handler_error";
+      readonly lane: string;
+      readonly kind: "hook" | "event" | "extension";
+      readonly source: string;
+      readonly message: string;
+      readonly stack?: string;
+    };

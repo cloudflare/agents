@@ -34,6 +34,12 @@ import type { Streams } from "agents/streams";
 import type { Tasks, TaskStep } from "agents/tasks";
 import type { WebSocketsOptions } from "agents/websockets";
 import { DurableObjectPiDatabase, ensurePiSession } from "./do-sqlite";
+import { shellExecAdapter } from "./env";
+import {
+  describeTools,
+  PiExtensionRuntime,
+  type PiExtensionHandlerError
+} from "./extensions";
 import {
   OperationStreamWriter,
   projectHarnessEvent,
@@ -46,12 +52,13 @@ import {
   projectAgentMessage,
   projectToolResult
 } from "./messages";
-import { resolveModel } from "../providers/models";
+import { resolveModel, type PiModelRegistry } from "../providers/models";
 import { resolveSkillSources, type ResolvedSkills } from "./skills";
 import { PiTransport, type PiTransportHost } from "./transport";
 import type {
   PiAbortResult,
   PiBuiltinToolName,
+  PiExtension,
   PiContext,
   PiEvent,
   PiEventListener,
@@ -119,6 +126,8 @@ type DrivePassOutcome =
 type Attached = {
   readonly harness: UpstreamAgentHarness<object | undefined>;
   readonly open: readonly OpenOperation[];
+  /** Absent when the harness runs without extensions. */
+  readonly extensions: PiExtensionRuntime | undefined;
 };
 
 /** A submission pi refused to admit. */
@@ -326,6 +335,9 @@ export class PiHarness<
   readonly #defaultLane: string;
   #submissions: PiSubmissions | undefined;
   #attaching: Promise<Attached> | undefined;
+  #extensions: PiExtensionRuntime | undefined;
+  #toolInfos: ReturnType<typeof describeTools> = [];
+  #refreshingTools: Promise<void> | undefined;
   #skills: Promise<ResolvedSkills> | undefined;
   #transport: PiTransport | undefined;
   readonly #listeners = new Set<PiEventListener>();
@@ -409,8 +421,11 @@ export class PiHarness<
   /** Close process-local pi resources without changing durable state. */
   async dispose(): Promise<void> {
     const attaching = this.#attaching;
+    const extensions = this.#extensions;
     this.#attaching = undefined;
+    this.#extensions = undefined;
     for (const writer of this.#writers.values()) writer.flush();
+    await extensions?.stop().catch(() => {});
     if (attaching) {
       const attached = await attaching.catch(() => undefined);
       await attached?.harness.close(BACKGROUND_CONTEXT);
@@ -433,6 +448,10 @@ export class PiHarness<
     const operationId = options.operationId ?? request.operationId ?? uuidv7();
     const context = asUpstreamContext(options.context);
     const upstream = await this.#upstreamLane(lane, context);
+    const admitted = await this.#interceptInput(lane, request);
+    if (admitted === undefined) {
+      return { operationId, lane, accepted: false, handled: true };
+    }
     const submissions = this.#requireSubmissions();
     if (
       submissions.has(operationId) ||
@@ -441,7 +460,7 @@ export class PiHarness<
     ) {
       return { operationId, lane, accepted: false };
     }
-    submissions.insert(lane, operationId, request);
+    submissions.insert(lane, operationId, admitted);
     await this.#ensureLaneDriver(lane);
     return { operationId, lane, accepted: true };
   }
@@ -657,6 +676,11 @@ export class PiHarness<
     );
     const context = BACKGROUND_CONTEXT;
     const config = this.#config;
+    // Extensions load first: their tools have to be registered before the
+    // harness is created so the model is offered them on the first turn
+    // after every wake.
+    const extensions = await this.#createExtensionRuntime(context, metadata.id);
+    this.#extensions = extensions;
     const tools = await this.#resolveTools(context);
     const resources = await this.#resolveResources(context);
     const toolContextSource = this.#toolContextSource();
@@ -725,18 +749,171 @@ export class PiHarness<
       for (const type of SUBSCRIBED_EVENT_TYPES) {
         attached.events.on(type, (event) => this.#dispatchEvent(event));
       }
+      // Extension actions, hooks, and notifications need the live harness,
+      // so they bind here; the application's own hooks go on last.
+      extensions?.attach(attached.hooks);
       // SAFETY: PiHookRegistry is the public structural projection of pi's
       // hook registry.
       await config.configure?.(
         attached.hooks as PiHookRegistry,
         context as PiContext
       );
-      return { harness: attached, open: created.open };
+      return { harness: attached, open: created.open, extensions };
     } catch (error) {
+      this.#extensions = undefined;
+      await extensions?.stop().catch(() => {});
       if (attached) await attached.close(context).catch(() => {});
       else await session.close(context).catch(() => {});
       throw error;
     }
+  }
+
+  /**
+   * Build the process-local extension runtime for this attachment, or
+   * nothing when the configuration names no extensions.
+   */
+  async #createExtensionRuntime(
+    context: UpstreamContext,
+    sessionId: string
+  ): Promise<PiExtensionRuntime | undefined> {
+    const config = this.#config;
+    const source = config.extensions;
+    const extensions =
+      typeof source === "function"
+        ? await source(context as PiContext)
+        : source;
+    if (!extensions || extensions.length === 0) return undefined;
+    const env = config.executionEnv;
+    return PiExtensionRuntime.create({
+      extensions: extensions as readonly PiExtension[],
+      cwd: config.cwd ?? "/",
+      defaultLane: this.#defaultLane,
+      sessionId,
+      // SAFETY: PiModels is the opaque projection of the same registry
+      // `createModels` returns.
+      models: config.models as PiModelRegistry,
+      ...(config.flags === undefined ? {} : { flags: config.flags }),
+      ...(config.promptTemplates === undefined
+        ? {}
+        : { promptTemplates: config.promptTemplates }),
+      // `pi.exec` runs on the same shell pi's own bash tool uses.
+      ...(env === undefined ? {} : { shell: shellExecAdapter(env) }),
+      lane: (name) => this.#upstreamLane(name, BACKGROUND_CONTEXT),
+      setSessionName: async (name) => {
+        const { harness } = await this.#attached();
+        await harness.setName(name, BACKGROUND_CONTEXT);
+      },
+      setLabel: async (entryId, label) => {
+        const { harness } = await this.#attached();
+        await harness.setLabel(entryId, label, BACKGROUND_CONTEXT);
+      },
+      refreshTools: () => this.#scheduleToolRefresh(),
+      allTools: () => this.#toolInfos,
+      compact: async (lane, options) => {
+        await this.submit(
+          {
+            kind: "compaction",
+            ...(options?.customInstructions === undefined
+              ? {}
+              : { customInstructions: options.customInstructions })
+          },
+          { lane }
+        );
+      },
+      navigate: async (lane, targetId, options) => {
+        await this.submit(
+          {
+            kind: "navigation",
+            targetId,
+            ...(options?.summarize === undefined
+              ? {}
+              : { summarize: options.summarize }),
+            ...(options?.label === undefined ? {} : { label: options.label }),
+            ...(options?.customInstructions === undefined
+              ? {}
+              : { customInstructions: options.customInstructions })
+          },
+          { lane }
+        );
+      },
+      report: (error) => this.#reportHandlerError(error)
+    });
+  }
+
+  /**
+   * Run pi's `input` event over one submission. Returns the request to queue,
+   * or nothing when an extension consumed it.
+   */
+  async #interceptInput(
+    lane: string,
+    request: PiOperationRequest
+  ): Promise<PiOperationRequest | undefined> {
+    const { extensions } = await this.#attached();
+    if (!extensions || request.kind !== "prompt") return request;
+    extensions.enter(lane);
+    const outcome = await extensions.emitInput(
+      request.prompt,
+      request.images?.map(
+        (image): ImageContent => ({ type: "image", ...image })
+      ),
+      "rpc"
+    );
+    switch (outcome.action) {
+      case "handled":
+        return undefined;
+      case "transform":
+        return {
+          ...request,
+          prompt: outcome.text,
+          ...(outcome.images === undefined
+            ? {}
+            : {
+                images: outcome.images.map(({ type: _type, ...image }) => image)
+              })
+        };
+      default:
+        return request;
+    }
+  }
+
+  /** Re-resolve process-local tools after an extension registered one. */
+  #scheduleToolRefresh(): void {
+    if (this.#refreshingTools) return;
+    this.#refreshingTools = (async () => {
+      const { harness } = await this.#attached();
+      const lane = await harness.lane(this.#defaultLane, BACKGROUND_CONTEXT);
+      await this.#refreshProcessLocal(harness, lane, BACKGROUND_CONTEXT);
+    })()
+      .catch((error: unknown) => {
+        console.warn("PiHarness failed to refresh extension tools", error);
+      })
+      .finally(() => {
+        this.#refreshingTools = undefined;
+      });
+  }
+
+  /** Surface one hook, event, or extension failure on its lane. */
+  #reportHandlerError(error: PiExtensionHandlerError): void {
+    this.#emitLaneEvent(
+      error.lane,
+      {
+        type: "handler_error",
+        kind: error.kind,
+        source: error.source,
+        message: error.message,
+        ...(error.stack === undefined ? {} : { stack: error.stack })
+      },
+      undefined,
+      this.#laneWriters.get(error.lane)
+    );
+  }
+
+  /** Drop the current attachment and tear its extension runtime down. */
+  #discardAttachment(): void {
+    this.#attaching = undefined;
+    const extensions = this.#extensions;
+    this.#extensions = undefined;
+    if (extensions) void extensions.stop().catch(() => {});
   }
 
   async #upstreamLane(
@@ -777,13 +954,17 @@ export class PiHarness<
         ? await source(context as PiContext)
         : (source ?? []);
     const skillTools = (await this.#resolvedSkills())?.tools ?? [];
-    return [
+    const tools = [
       ...this.#builtinTools(),
       ...asUpstreamTools<object | undefined>([
         ...(own as readonly PiTool<object | undefined>[]),
         ...skillTools
-      ])
+      ]),
+      // Third source: whatever the loaded extensions registered.
+      ...(this.#extensions?.tools() ?? [])
     ];
+    this.#toolInfos = describeTools(tools);
+    return tools;
   }
 
   /**
@@ -1040,7 +1221,7 @@ export class PiHarness<
       const message = error instanceof Error ? error.message : String(error);
       this.lifecycle.events.emit("operation:error", { lane, message });
       // A faulted harness is sealed; the next pass attaches a fresh one.
-      this.#attaching = undefined;
+      this.#discardAttachment();
       return { kind: "error", message };
     }
   }
@@ -1151,9 +1332,10 @@ export class PiHarness<
   }
 
   #dispatchEvent(event: HarnessEvent): void {
+    this.#extensions?.dispatch(event);
     if (event.type === "fault") {
       // The harness sealed itself; the next pass attaches a fresh one.
-      this.#attaching = undefined;
+      this.#discardAttachment();
     }
     const projected = projectHarnessEvent(event);
     if (!projected) return;

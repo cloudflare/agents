@@ -14,6 +14,8 @@ import type { PiEvent, PiJson } from "./types";
 
 /** Harness event types the capability subscribes to. */
 export const SUBSCRIBED_EVENT_TYPES = [
+  "run_start",
+  "run_end",
   "run_resume",
   "run_suspend",
   "operation_abort",
@@ -33,6 +35,8 @@ export const SUBSCRIBED_EVENT_TYPES = [
   "compaction_end",
   "navigation_start",
   "navigation_end",
+  "value_update",
+  "handler_error",
   "fault"
 ] as const satisfies readonly HarnessEventType[];
 
@@ -49,7 +53,9 @@ function streamingMessageId(runId: string): string {
 /**
  * Project one pi harness event into the public wire shape. Operation start
  * and end are not projected here: the harness synthesizes them from
- * admission and the settled result, which cover every operation kind.
+ * admission and the settled result, which cover every operation kind, so
+ * `run_start`, `run_end` and `value_update` are subscribed for the extension
+ * runtime's benefit and have no projection of their own.
  */
 export function projectHarnessEvent(
   event: HarnessEvent
@@ -246,6 +252,16 @@ export function projectHarnessEvent(
           type: "navigation_end",
           operationId: event.runId,
           status: event.status
+        }
+      };
+    case "handler_error":
+      return {
+        event: {
+          type: "handler_error",
+          kind: event.kind,
+          source: event.kind === "hook" ? event.hook : event.event,
+          message: event.error,
+          ...(event.stack === undefined ? {} : { stack: event.stack })
         }
       };
     case "fault":

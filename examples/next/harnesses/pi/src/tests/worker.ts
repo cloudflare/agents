@@ -1,5 +1,8 @@
 import { Workspace } from "@cloudflare/shell";
-import { BACKGROUND_CONTEXT } from "@earendil-works/pi-agent-core";
+import {
+  BACKGROUND_CONTEXT,
+  type AgentMessage
+} from "@earendil-works/pi-agent-core";
 import {
   fauxAssistantMessage,
   fauxProvider,
@@ -12,7 +15,12 @@ import { Tasks } from "agents/tasks";
 import { Type } from "typebox";
 import { createWorkspaceExecutionEnv } from "../harness/env";
 import { PiHarness } from "../harness/pi-harness";
-import type { PiEvent, PiMessage, PiTool } from "../harness/types";
+import type {
+  PiEvent,
+  PiExtensionApi,
+  PiMessage,
+  PiTool
+} from "../harness/types";
 import { createModels } from "../providers/models";
 
 const multiplyParameters = Type.Object({ value: Type.Number() });
@@ -21,6 +29,24 @@ const TOOL_REVISION_KEY = "test:pi:revision";
 type ToolContext = {
   readonly revision: number;
 };
+
+/** The last tool result in a projected transcript, as text and error flag. */
+function toolResult(messages: readonly PiMessage[]): {
+  readonly output: string;
+  readonly error: boolean;
+} {
+  const part = messages
+    .flatMap((message) => message.parts)
+    .filter((part) => part.type === "tool-result")
+    .at(-1);
+  if (part?.type !== "tool-result") return { output: "", error: false };
+  return {
+    output: part.content
+      .map((content) => (content.type === "text" ? content.text : ""))
+      .join(""),
+    error: part.error
+  };
+}
 
 function messageText(message: PiMessage): string {
   return message.parts
@@ -310,6 +336,211 @@ export class PiBuiltinToolsTestObject extends DurableObject<Env> {
       readStatus: read.status,
       file,
       readOutput
+    };
+  }
+}
+
+const echoParameters = Type.Object({ text: Type.String() });
+
+/** Durable Object exercising the pi extension surface. */
+export class PiExtensionsTestObject extends DurableObject<Env> {
+  readonly #faux = fauxProvider();
+  readonly #contextSeen: string[] = [];
+  #throwOnMessageEnd = false;
+  readonly tasks = new Tasks();
+  readonly streams = new Streams();
+  readonly harness = new PiHarness({
+    models: createModels({ providers: [this.#faux.provider] }),
+    model: this.#faux.getModel(),
+    tasks: this.tasks,
+    streams: this.streams,
+    thinkingLevel: "off",
+    retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+    compaction: { enabled: false, reserveTokens: 0, keepRecentTokens: 0 },
+    tools: () => [this.#multiplyTool()],
+    extensions: [{ name: "test", factory: (pi) => this.#register(pi) }],
+    flags: { "note-prefix": "flagged" },
+    systemPrompt: "Use the supplied test tools.",
+    configure: (hooks) => {
+      // Registered after the extension runtime's own hooks, so this observes
+      // the messages an extension `context` handler produced.
+      hooks.on("transform_context", (event) => {
+        const { messages } = event as { messages: readonly AgentMessage[] };
+        for (const message of messages) {
+          if (message.role !== "user") continue;
+          this.#contextSeen.push(
+            typeof message.content === "string"
+              ? message.content
+              : message.content
+                  .map((part) => (part.type === "text" ? part.text : ""))
+                  .join("")
+          );
+        }
+        return undefined;
+      });
+    }
+  });
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.tasks)
+    .use(this.streams)
+    .use(this.harness);
+
+  /** Run one faux turn whose tool call goes to the extension's own tool. */
+  async runEcho(text: string): Promise<{
+    readonly operationId: string;
+    readonly status: string;
+    readonly output: string;
+    readonly toolError: boolean;
+  }> {
+    this.#faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("echo", { text }), {
+        stopReason: "toolUse"
+      }),
+      fauxAssistantMessage("echoed")
+    ]);
+    const response = await this.harness.prompt(`echo ${text}`);
+    const result = toolResult(response.messages);
+    return {
+      operationId: response.operationId,
+      status: response.status,
+      output: result.output,
+      toolError: result.error
+    };
+  }
+
+  /** Run one faux turn calling the harness tool the extension may block. */
+  async runMultiply(value: number): Promise<{
+    readonly operationId: string;
+    readonly status: string;
+    readonly output: string;
+    readonly toolError: boolean;
+  }> {
+    this.#faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("multiply", { value }), {
+        stopReason: "toolUse"
+      }),
+      fauxAssistantMessage("multiplied")
+    ]);
+    const response = await this.harness.prompt(`multiply ${value}`);
+    const result = toolResult(response.messages);
+    return {
+      operationId: response.operationId,
+      status: response.status,
+      output: result.output,
+      toolError: result.error
+    };
+  }
+
+  /** Make the extension's `message_end` handler throw on the next run. */
+  async failMessageEnd(fail: boolean): Promise<void> {
+    this.#throwOnMessageEnd = fail;
+  }
+
+  /** User-role text every provider request carried, across runs. */
+  async contextSeen(): Promise<readonly string[]> {
+    return [...this.#contextSeen];
+  }
+
+  /** The durable transcript, as text. */
+  async messages(): Promise<readonly string[]> {
+    return (await this.harness.getMessages()).map(messageText);
+  }
+
+  /** Names of every tool currently offered to the model. */
+  async toolNames(): Promise<readonly string[]> {
+    return (await this.harness.snapshot()).tools.map((tool) => tool.name);
+  }
+
+  /**
+   * One operation's durable events, flattened to the fields the tests read.
+   * The full union crosses the RPC boundary poorly.
+   */
+  async events(operationId: string): Promise<
+    readonly {
+      readonly type: string;
+      readonly error?: boolean;
+      readonly message?: string;
+    }[]
+  > {
+    const events: PiEvent[] = [];
+    for await (const chunk of this.streams.read(
+      this.harness.streamId(operationId)
+    )) {
+      events.push(...(chunk.chunk as unknown as PiEvent[]));
+    }
+    return events.map((event) => ({
+      type: event.type,
+      ...("error" in event && typeof event.error === "boolean"
+        ? { error: event.error }
+        : {}),
+      ...("message" in event && typeof event.message === "string"
+        ? { message: event.message }
+        : {})
+    }));
+  }
+
+  #register(pi: PiExtensionApi): void {
+    pi.registerFlag("note-prefix", {
+      type: "string",
+      default: "note",
+      description: "Prefix for appended notes."
+    });
+    pi.registerTool({
+      name: "echo",
+      label: "Echo",
+      description: "Echo the supplied text back.",
+      parameters: echoParameters,
+      async execute(_toolCallId, params) {
+        return {
+          content: [{ type: "text", text: `echo:${params.text}` }],
+          details: { text: params.text }
+        };
+      }
+    });
+    pi.on("tool_call", (event) => {
+      const value = (event.input as { value?: unknown }).value;
+      if (event.toolName === "multiply" && value === 13) {
+        return { block: true, reason: "unlucky number" };
+      }
+      return undefined;
+    });
+    pi.on("context", (event) => ({
+      messages: [
+        ...event.messages,
+        {
+          role: "user" as const,
+          content: `${String(pi.getFlag("note-prefix"))}: extension note`,
+          timestamp: Date.now()
+        }
+      ]
+    }));
+    pi.on("message_end", () => {
+      if (this.#throwOnMessageEnd)
+        throw new Error("message_end handler failed");
+    });
+    pi.registerCommand("note", {
+      description: "Append a note to the transcript.",
+      handler: async () => {}
+    });
+  }
+
+  #multiplyTool(): PiTool<
+    object | undefined,
+    typeof multiplyParameters,
+    { readonly result: number }
+  > {
+    return {
+      name: "multiply",
+      label: "Multiply",
+      description: "Multiply by two.",
+      parameters: multiplyParameters,
+      async execute(_id, input) {
+        const result = input.value * 2;
+        return {
+          content: [{ type: "text", text: String(result) }],
+          details: { result }
+        };
+      }
     };
   }
 }
