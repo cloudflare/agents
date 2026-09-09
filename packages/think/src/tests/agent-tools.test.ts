@@ -35,10 +35,7 @@ type ThinkAgentToolTestStub = {
     runId: string,
     reason?: unknown
   ): ReturnType<ThinkTestAgent["cancelAgentToolRun"]>;
-  getAgentToolCleanupMapSizesForTest(): Promise<{
-    lastErrors: number;
-    preTurnAssistantIds: number;
-  }>;
+  awaitAgentToolTurnForTest(): Promise<void>;
   reconcileStaleChildRunViaRecoveryForTest(
     path: "continue" | "retry",
     withAssistantTurn: boolean
@@ -324,19 +321,11 @@ describe("Think agent tools", () => {
       error: "stop"
     });
 
-    // Let the parked turn resume and run its finish path to the end (the
-    // cleanup maps empty only when it has), then re-assert: the finalizer's
-    // guarded UPDATE must NOT clobber the aborted seal.
+    // Let the parked turn resume and run its finish path to the end, then
+    // re-assert: the finalizer's guarded UPDATE must NOT clobber the aborted
+    // seal.
     await agent.releaseBeforeStepForTest();
-    await vi.waitFor(
-      async () => {
-        expect(await agent.getAgentToolCleanupMapSizesForTest()).toEqual({
-          lastErrors: 0,
-          preTurnAssistantIds: 0
-        });
-      },
-      { timeout: 8000, interval: 25 }
-    );
+    await agent.awaitAgentToolTurnForTest();
     await expect(agent.inspectAgentToolRun(runId)).resolves.toMatchObject({
       runId,
       status: "aborted",
@@ -344,19 +333,27 @@ describe("Think agent tools", () => {
     });
   });
 
-  it("cleans in-memory agent-tool bookkeeping after a run completes", async () => {
+  it("seals a run whose turn broadcast an error frame", async () => {
     const agent = await freshAgent();
     const runId = crypto.randomUUID();
 
-    await agent.seedAgentToolLastErrorForTest(runId, "seeded stream error");
+    // Park the turn so the error frame is observed while the run is still in
+    // flight, exactly as an in-band stream failure would be.
+    await agent.holdBeforeStepForTest();
     await agent.startAgentToolRun("cleanup probe", { runId });
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasEnteredBeforeStepForTest()).toBe(true);
+      },
+      { timeout: 8000, interval: 25 }
+    );
+    await agent.seedAgentToolLastErrorForTest(runId, "seeded stream error");
+    await agent.releaseBeforeStepForTest();
+
     const inspection = await waitForAgentToolRun(agent, runId);
 
     expect(inspection?.status).toBe("error");
-    expect(await agent.getAgentToolCleanupMapSizesForTest()).toEqual({
-      lastErrors: 0,
-      preTurnAssistantIds: 0
-    });
+    expect(inspection?.error).toBe("seeded stream error");
   });
 
   it("runs a Think child through the parent agent-tool API", async () => {

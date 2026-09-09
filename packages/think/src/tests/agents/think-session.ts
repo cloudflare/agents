@@ -4,6 +4,7 @@ import { action, skills, Think, type ThinkSession } from "../../think";
 import { Agent } from "agents";
 import type {
   Connection,
+  AgentToolChildAdapter,
   AgentToolEventMessage,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
@@ -689,8 +690,10 @@ export class ThinkTestAgent extends Think {
   ): Promise<{ requestId: string; streamId: string } | null> {
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline) {
-      const row = this["_readAgentToolChildRun"](runId);
-      const requestId = row?.request_id ?? undefined;
+      // The child capability owns the run row; a test reads its durable
+      // `request_id` rather than the capability's private attribution map.
+      const requestId =
+        (await this._waitForRunRequestIdForTest(runId)) ?? undefined;
       if (requestId) {
         const streamId =
           this["_resumableStream"]
@@ -703,39 +706,34 @@ export class ThinkTestAgent extends Think {
     return null;
   }
 
-  override async getAgentToolChunks(
+  override async tailAgentToolRun(
     runId: string,
-    options?: { afterSequence?: number }
-  ): Promise<AgentToolStoredChunk[]> {
-    const chunks = await super.getAgentToolChunks(runId, options);
+    options?: { afterSequence?: number; signal?: AbortSignal }
+  ): Promise<ReadableStream<AgentToolStoredChunk>> {
+    // The capability drains the stored backlog inside its own tail, so the
+    // injections land right after the tail is armed — the live window a
+    // proxied child's chunks arrive in.
+    const stream = await super.tailAgentToolRun(runId, options);
 
     const race = this._attachRaceInjection;
     if (race && race.runId === runId) {
       this._attachRaceInjection = null;
-      // Land a STORED + broadcast chunk in the drain↔register window. Runs
-      // INSIDE getAgentToolChunks — before tailAgentToolRun's post-drain
-      // forwarder registration in the buggy ordering — so it faithfully lands in
-      // the attach window. With the #1589 fix the forwarder is already attached,
-      // so the chunk is buffered and replayed in order instead of being dropped.
+      // Land a STORED + broadcast chunk on a live tail, after the stored
+      // backlog was drained: it is neither in the replayed snapshot nor stored
+      // before the forwarder attached, so it reaches the parent only if the tap
+      // forwards it live (#1589).
       const live = await this._waitForLiveTurnForTest(runId);
       if (live) {
         this["_resumableStream"].storeChunk(live.streamId, race.body);
         this["_resumableStream"].flushBuffer();
-        this.broadcast(
-          JSON.stringify({
-            type: "cf_agent_use_chat_response",
-            id: live.requestId,
-            body: race.body,
-            done: false
-          })
-        );
+        this._broadcastChatFrameForTest(live.requestId, race.body);
       }
     }
 
     const progress = this._progressInjection;
     if (progress && progress.runId === runId) {
       this._progressInjection = null;
-      // Land NON-stored progress + milestone frames in the same window. These
+      // Land NON-stored progress + milestone frames on the same live tail. These
       // are broadcast-only (exactly like `reportProgress`): no stored
       // chunk_index, so they depend on the in-memory live sequence to be
       // forwarded. Sourcing the forward sequence from the stored chunk count
@@ -743,26 +741,12 @@ export class ThinkTestAgent extends Think {
       // dedupe would silently drop them — the regression this guards against.
       const live = await this._waitForLiveTurnForTest(runId);
       if (live) {
-        this.broadcast(
-          JSON.stringify({
-            type: "cf_agent_use_chat_response",
-            id: live.requestId,
-            body: progress.progressBody,
-            done: false
-          })
-        );
-        this.broadcast(
-          JSON.stringify({
-            type: "cf_agent_use_chat_response",
-            id: live.requestId,
-            body: progress.milestoneBody,
-            done: false
-          })
-        );
+        this._broadcastChatFrameForTest(live.requestId, progress.progressBody);
+        this._broadcastChatFrameForTest(live.requestId, progress.milestoneBody);
       }
     }
 
-    return chunks;
+    return stream;
   }
 
   /**
@@ -771,15 +755,65 @@ export class ThinkTestAgent extends Think {
    * while a run is being tailed.
    */
   broadcastUnrelatedErrorForTest(requestId: string): void {
-    this.broadcast(
-      JSON.stringify({
-        type: "cf_agent_use_chat_response",
-        id: requestId,
-        error: true,
-        done: false,
-        body: "unrelated turn failure"
-      })
-    );
+    this._broadcastChatFrameForTest(requestId, "unrelated turn failure", {
+      error: true
+    });
+  }
+
+  /**
+   * Send a chat-response frame through Think's single frame sender, so it takes
+   * the same route (and agent-tool tap) as a frame a real turn broadcasts.
+   */
+  private _broadcastChatFrameForTest(
+    requestId: string,
+    body: string,
+    options?: { error?: true }
+  ): void {
+    (
+      this as unknown as {
+        _broadcastChat(message: Record<string, unknown>): void;
+      }
+    )._broadcastChat({
+      type: "cf_agent_use_chat_response",
+      id: requestId,
+      body,
+      done: false,
+      ...(options?.error ? { error: true } : {})
+    });
+  }
+
+  /** Bounded-poll until the run's turn has bound its request id. */
+  private async _waitForRunRequestIdForTest(
+    runId: string
+  ): Promise<string | null> {
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      const requestId =
+        this.sql<{ request_id: string | null }>`
+          SELECT request_id FROM cf_agent_tool_child_runs
+          WHERE run_id = ${runId}
+        `[0]?.request_id ?? null;
+      if (requestId) return requestId;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return null;
+  }
+
+  /**
+   * Await the keep-alive work of the most recently started agent-tool turn, so
+   * a test can assert AFTER the capability's finalizer has run (the in-memory
+   * bookkeeping it clears is the capability's own, not observable from here).
+   */
+  async awaitAgentToolTurnForTest(): Promise<void> {
+    await this._lastAgentToolKeepAlive;
+  }
+
+  private _lastAgentToolKeepAlive: Promise<unknown> = Promise.resolve();
+
+  override keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
+    const work = super.keepAliveWhile(fn);
+    this._lastAgentToolKeepAlive = work.catch(() => undefined);
+    return work;
   }
 
   /**
@@ -793,16 +827,15 @@ export class ThinkTestAgent extends Think {
     runId: string,
     requestId: string
   ): { running: string | null; unknown: string | null } {
-    this["_ensureAgentToolChildRunTable"]();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
       VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
     `;
-    // Cold in-memory map, as after a restart.
-    this["_agentToolRunsByRequestId"].clear();
+    // The in-memory attribution map is cold after a restart, so the capability
+    // resolves the frame from this durable row — the state this asserts.
     return {
-      running: this["_agentToolRunForRequest"](requestId),
-      unknown: this["_agentToolRunForRequest"]("no-such-request")
+      running: resolveAgentToolRunForRequest(this, requestId),
+      unknown: resolveAgentToolRunForRequest(this, "no-such-request")
     };
   }
 
@@ -2111,27 +2144,17 @@ export class ThinkTestAgent extends Think {
     return this._responseLog;
   }
 
+  /**
+   * Record a stream error for a run through the capability's public tap, using
+   * the request id its turn is bound to — the route a real error frame takes.
+   */
   async seedAgentToolLastErrorForTest(
     runId: string,
     error: string
   ): Promise<void> {
-    (
-      this as unknown as { _agentToolLastErrors: Map<string, string> }
-    )._agentToolLastErrors.set(runId, error);
-  }
-
-  async getAgentToolCleanupMapSizesForTest(): Promise<{
-    lastErrors: number;
-    preTurnAssistantIds: number;
-  }> {
-    const self = this as unknown as {
-      _agentToolLastErrors: Map<string, string>;
-      _agentToolPreTurnAssistantIds: Map<string, Set<string>>;
-    };
-    return {
-      lastErrors: self._agentToolLastErrors.size,
-      preTurnAssistantIds: self._agentToolPreTurnAssistantIds.size
-    };
+    const requestId = await this._waitForRunRequestIdForTest(runId);
+    if (!requestId) throw new Error(`no bound turn for run ${runId}`);
+    this.agentToolsChild.observeError(requestId, error);
   }
 
   // ── Static method proxies for unit testing ─────────────────────
@@ -2210,6 +2233,25 @@ export class ThinkTestAgent extends Think {
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
   }
+}
+
+/**
+ * The run a request id is bound to, read from the child capability's durable
+ * row — the capability keeps its own request→run lookup private, so a test
+ * asserts the durable binding that lookup resolves from. Deliberately NOT
+ * filtered on an active status: a recovery seals the row it just rebound, and
+ * the binding is what attribution turns on.
+ */
+function resolveAgentToolRunForRequest(
+  agent: { sql: Think["sql"] },
+  requestId: string
+): string | null {
+  const rows = agent.sql<{ run_id: string }>`
+    SELECT run_id FROM cf_agent_tool_child_runs
+    WHERE request_id = ${requestId}
+    LIMIT 1
+  `;
+  return rows[0]?.run_id ?? null;
 }
 
 type AgentToolFinishForTest = {
@@ -2491,11 +2533,11 @@ export class ThinkAgentToolParent extends Agent {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
-        input_redacted, status, display_metadata, display_order,
+        status, display_metadata, display_order,
         started_at, completed_at
       ) VALUES (
         ${runId}, 'seed-tool-call', 'ThinkTestAgent', ${JSON.stringify("seed")},
-        1, ${status}, ${JSON.stringify({ name: "seed" })}, 0, ${now}, ${completedAt}
+        ${status}, ${JSON.stringify({ name: "seed" })}, 0, ${now}, ${completedAt}
       )
     `;
   }
@@ -2657,11 +2699,11 @@ export class ThinkAgentToolParent extends Agent {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
-        input_redacted, status, display_metadata, display_order,
+        status, display_metadata, display_order,
         started_at, completed_at
       ) VALUES (
         ${runId}, 'think-tool-call', 'ThinkTestAgent',
-        ${JSON.stringify(input)}, 1, 'interrupted',
+        ${JSON.stringify(input)}, 'interrupted',
         ${JSON.stringify({ name: "think child" })}, 0,
         ${started.startedAt}, ${Date.now()}
       )
@@ -2691,10 +2733,10 @@ export class ThinkAgentToolParent extends Agent {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
-        input_redacted, status, display_metadata, display_order, started_at
+        status, display_metadata, display_order, started_at
       ) VALUES (
         ${runId}, 'think-tool-call', ${agentType},
-        ${JSON.stringify(inputPreview)}, 1, ${status},
+        ${JSON.stringify(inputPreview)}, ${status},
         ${JSON.stringify({ name: "think child" })}, 0, ${startedAt}
       )
     `;
@@ -2730,29 +2772,13 @@ export class ThinkAgentToolParent extends Agent {
     reattachMaxWindowMs?: number;
     totalRecoveryTimeoutMs?: number;
   }): Promise<Array<() => Promise<void>>> {
-    return (
-      this as unknown as {
-        _reconcileAgentToolRuns(options?: {
-          deferFinishHooks?: boolean;
-          childInspectionTimeoutMs?: number;
-          reattachTimeoutMs?: number;
-          reattachMaxWindowMs?: number;
-          totalRecoveryTimeoutMs?: number;
-        }): Promise<Array<() => Promise<void>>>;
-      }
-    )._reconcileAgentToolRuns(options);
+    return this.agentTools.reconcile(options);
   }
 
   private async scheduleAgentToolRunRecoveryForTest(options?: {
     childInspectionTimeoutMs?: number;
   }): Promise<void> {
-    await (
-      this as unknown as {
-        _scheduleAgentToolRunRecovery(options?: {
-          childInspectionTimeoutMs?: number;
-        }): Promise<void>;
-      }
-    )._scheduleAgentToolRunRecovery(options);
+    await this.agentTools.scheduleStartupRecovery(options);
   }
 
   async reconcileCompletedThinkChildForTest(
@@ -3053,20 +3079,11 @@ export class ThinkAgentToolParent extends Agent {
       getAgentToolChunks: async (): Promise<AgentToolStoredChunk[]> => []
       // Intentionally NO `tailAgentToolRun`.
     };
-    const reattach = await (
-      this as unknown as {
-        _reattachAgentToolRunToTerminal(
-          adapter: unknown,
-          row: {
-            run_id: string;
-            agent_type: string;
-            parent_tool_call_id: string | null;
-          },
-          sequence: number
-        ): Promise<{ reason?: string; result?: unknown }>;
-      }
-    )._reattachAgentToolRunToTerminal(
-      adapter,
+    const reattach = await this.agentTools.reattachToTerminal(
+      // SAFETY: the adapter is deliberately INCOMPLETE (no `tailAgentToolRun`)
+      // — that missing member is exactly what this exercises, and the parameter
+      // type cannot express it.
+      adapter as unknown as AgentToolChildAdapter,
       {
         run_id: crypto.randomUUID(),
         agent_type: "NotTailableAdapter",
@@ -3167,22 +3184,10 @@ export class ThinkAgentToolParent extends Agent {
       }
     };
 
-    const reattach = await (
-      this as unknown as {
-        _reattachAgentToolRunToTerminal(
-          adapter: unknown,
-          row: {
-            run_id: string;
-            agent_type: string;
-            parent_tool_call_id: string | null;
-          },
-          sequence: number,
-          noProgressTimeoutMs?: number,
-          maxWindowMs?: number
-        ): Promise<{ result?: { status?: string }; reason?: string }>;
-      }
-    )._reattachAgentToolRunToTerminal(
-      adapter,
+    const reattach = await this.agentTools.reattachToTerminal(
+      // SAFETY: a scripted stand-in for a real (RPC) child adapter; its methods
+      // match the adapter contract but the object literal is not one nominally.
+      adapter as unknown as AgentToolChildAdapter,
       {
         run_id: crypto.randomUUID(),
         agent_type: "ScriptedAdapter",
@@ -7015,16 +7020,6 @@ export class ThinkRecoveryTestAgent extends Think {
     start: number;
     after: number;
   }> {
-    const self = this as unknown as {
-      _forwardAgentToolStream(
-        stream: ReadableStream<{ body: string }>,
-        parentToolCallId: string | undefined,
-        runId: string,
-        sequence: number
-      ): Promise<number>;
-      _lastAgentToolStreamProgressAt: number;
-    };
-    self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
       this._resumableStream.progressMarker();
     const start = await read();
@@ -7037,7 +7032,14 @@ export class ThinkRecoveryTestAgent extends Think {
         controller.close();
       }
     });
-    await self._forwardAgentToolStream(stream, undefined, "n9-probe-run", 1);
+    await this.agentTools.forwardStream(
+      // SAFETY: the forward loop only reads each chunk's `body`; the synthetic
+      // stream carries exactly that.
+      stream as unknown as ReadableStream<AgentToolStoredChunk>,
+      undefined,
+      "n9-probe-run",
+      1
+    );
     const after = await read();
     return { start, after };
   }
@@ -7933,9 +7935,6 @@ export class ThinkRecoveryTestAgent extends Think {
     requestId: string,
     startedAt: number = Date.now()
   ): Promise<void> {
-    (
-      this as unknown as { _ensureAgentToolChildRunTable(): void }
-    )._ensureAgentToolChildRunTable();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
       VALUES (${runId}, ${requestId}, 'running', ${startedAt})
@@ -7950,9 +7949,6 @@ export class ThinkRecoveryTestAgent extends Think {
     runId: string,
     requestId: string
   ): Promise<void> {
-    (
-      this as unknown as { _ensureAgentToolChildRunTable(): void }
-    )._ensureAgentToolChildRunTable();
     const now = Date.now();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
@@ -7961,24 +7957,19 @@ export class ThinkRecoveryTestAgent extends Think {
     `;
   }
 
-  /** Directly invoke the rebind helper (bypassing the full recovery flow). */
+  /** Directly invoke the rebind (bypassing the full recovery flow). */
   async rebindAgentToolChildRunRequestIdForTest(
     requestId: string
   ): Promise<void> {
-    (
-      this as unknown as {
-        _rebindAgentToolChildRunRequestId(requestId: string): void;
-      }
-    )._rebindAgentToolChildRunRequestId(requestId);
+    this.agentToolsChild.rebindRequestId(requestId);
   }
 
-  /** Whether this facet has a `cf_agent_tool_child_runs` table at all. */
-  async hasAgentToolChildRunTableForTest(): Promise<boolean> {
+  /** How many child-run rows this facet holds (none unless it ran as one). */
+  async agentToolChildRunCountForTest(): Promise<number> {
     const rows = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM sqlite_master
-      WHERE type = 'table' AND name = 'cf_agent_tool_child_runs'
+      SELECT COUNT(*) AS n FROM cf_agent_tool_child_runs
     `;
-    return (rows[0]?.n ?? 0) > 0;
+    return rows[0]?.n ?? 0;
   }
 
   /** The `request_id` currently bound to an agent-tool child run row. */
@@ -7995,11 +7986,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async resolveAgentToolRunForRequestForTest(
     requestId: string
   ): Promise<string | null> {
-    return (
-      this as unknown as {
-        _agentToolRunForRequest(requestId: string): string | null;
-      }
-    )._agentToolRunForRequest(requestId);
+    return resolveAgentToolRunForRequest(this, requestId);
   }
 
   /**

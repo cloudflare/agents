@@ -3593,24 +3593,12 @@ export class AIChatAgent<
    * Whether this turn's stream rows can go with its cutover. An agent-tool
    * child turn keeps them: the parent tails the stored chunks after the child
    * completes (`getAgentToolChunks`), so the rows are reclaimed by the child's
-   * next `start()` instead.
-   *
-   * Reads the child capability's run table directly — the capability binds a
-   * run's row to its turn request id before the turn streams (and re-binds
-   * across recovery), which is exactly this predicate. The `try` covers a
-   * facet that never ran as a child and so has no table.
+   * next `start()` instead. The child capability binds a run to its turn
+   * request id before the turn streams and re-binds across recovery, so its
+   * live-run lookup is exactly this predicate.
    */
   #discardStreamAtCutover(requestId: string): boolean {
-    try {
-      const rows = this.sql<{ run_id: string }>`
-        select run_id from cf_agent_tool_child_runs
-        where request_id = ${requestId} and status in ('starting', 'running')
-        limit 1
-      `;
-      return rows[0] === undefined;
-    } catch {
-      return true;
-    }
+    return this.agentToolsChild.activeRunForRequest(requestId) === null;
   }
 
   /**

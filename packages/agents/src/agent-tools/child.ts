@@ -760,6 +760,15 @@ export class AgentToolsChild extends LifecycleCapability {
    * `request_id` is written when the run's turn is bound) so attribution
    * survives a DO restart mid-run; either outcome is cached.
    */
+  /**
+   * The in-flight run whose turn owns a request id, or null when the request
+   * is not an agent-tool turn. Hosts use it to decide whether a stream cut
+   * over at recovery still belongs to a live child run.
+   */
+  activeRunForRequest(requestId: string): string | null {
+    return this.#runForRequest(requestId);
+  }
+
   #runForRequest(requestId: string): string | null {
     const cached = this.#runsByRequestId.get(requestId);
     if (cached !== undefined) return cached;
