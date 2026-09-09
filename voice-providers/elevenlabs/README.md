@@ -5,7 +5,7 @@ ElevenLabs speech-to-text and text-to-speech providers for the [Cloudflare Agent
 ## Install
 
 ```bash
-npm install @cloudflare/voice-elevenlabs
+npm install agents @cloudflare/voice-elevenlabs
 ```
 
 ## Speech to text
@@ -14,11 +14,7 @@ Set `transcriber` on your voice agent:
 
 ```typescript
 import { Agent } from "agents";
-import {
-  withVoice,
-  WorkersAITTS,
-  type VoiceTurnContext
-} from "@cloudflare/voice";
+import { withVoice, WorkersAITTS, type VoiceTurnContext } from "agents/voice";
 import { ElevenLabsSTT } from "@cloudflare/voice-elevenlabs";
 
 const VoiceAgent = withVoice(Agent);
@@ -44,7 +40,7 @@ Override `synthesize()` on your voice agent:
 
 ```typescript
 import { Agent } from "agents";
-import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
+import { withVoice, type VoiceTurnContext } from "agents/voice";
 import { ElevenLabsTTS } from "@cloudflare/voice-elevenlabs";
 
 const VoiceAgent = withVoice(Agent);

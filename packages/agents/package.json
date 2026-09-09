@@ -30,6 +30,7 @@
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.16",
     "partysocket": "1.3.0",
+    "postal-mime": "^2.7.5",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
@@ -50,6 +51,7 @@
     "glob": "^13.0.6",
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
+    "teleproto": "^1.228.5",
     "valibot": "1.4.1",
     "zod": "^4.5.4"
   },
@@ -288,6 +290,81 @@
       "import": "./dist/browser/tanstack-ai.js",
       "require": "./dist/browser/tanstack-ai.js"
     },
+    "./voice": {
+      "types": "./dist/voice/index.d.ts",
+      "import": "./dist/voice/index.js",
+      "require": "./dist/voice/index.js"
+    },
+    "./voice/types": {
+      "types": "./dist/voice/types.d.ts",
+      "import": "./dist/voice/types.js",
+      "require": "./dist/voice/types.js"
+    },
+    "./voice/client": {
+      "types": "./dist/voice/client.d.ts",
+      "import": "./dist/voice/client.js",
+      "require": "./dist/voice/client.js"
+    },
+    "./voice/react": {
+      "types": "./dist/voice/react.d.ts",
+      "import": "./dist/voice/react.js",
+      "require": "./dist/voice/react.js"
+    },
+    "./voice/errors": {
+      "types": "./dist/voice/errors.d.ts",
+      "import": "./dist/voice/errors.js",
+      "require": "./dist/voice/errors.js"
+    },
+    "./voice/workers-ai": {
+      "types": "./dist/voice/workers-ai.d.ts",
+      "import": "./dist/voice/workers-ai.js",
+      "require": "./dist/voice/workers-ai.js"
+    },
+    "./voice/sfu": {
+      "types": "./dist/voice/sfu.d.ts",
+      "import": "./dist/voice/sfu.js",
+      "require": "./dist/voice/sfu.js"
+    },
+    "./voice/text": {
+      "types": "./dist/voice/text.d.ts",
+      "import": "./dist/voice/text.js",
+      "require": "./dist/voice/text.js"
+    },
+    "./channels": {
+      "types": "./dist/channels/index.d.ts",
+      "import": "./dist/channels/index.js",
+      "require": "./dist/channels/index.js"
+    },
+    "./channels/email": {
+      "types": "./dist/channels/email.d.ts",
+      "import": "./dist/channels/email.js",
+      "require": "./dist/channels/email.js"
+    },
+    "./channels/slack": {
+      "types": "./dist/channels/slack.d.ts",
+      "import": "./dist/channels/slack.js",
+      "require": "./dist/channels/slack.js"
+    },
+    "./channels/telegram": {
+      "types": "./dist/channels/telegram.d.ts",
+      "import": "./dist/channels/telegram.js",
+      "require": "./dist/channels/telegram.js"
+    },
+    "./channels/voice": {
+      "types": "./dist/channels/voice.d.ts",
+      "import": "./dist/channels/voice.js",
+      "require": "./dist/channels/voice.js"
+    },
+    "./channels/ai-sdk": {
+      "types": "./dist/channels/ai-sdk.d.ts",
+      "import": "./dist/channels/ai-sdk.js",
+      "require": "./dist/channels/ai-sdk.js"
+    },
+    "./channels/tanstack-ai": {
+      "types": "./dist/channels/tanstack-ai.d.ts",
+      "import": "./dist/channels/tanstack-ai.js",
+      "require": "./dist/channels/tanstack-ai.js"
+    },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
       "types": "./dist/vite.d.ts",
@@ -340,6 +417,10 @@
     "test": "vitest --run",
     "test:node": "vitest --project node",
     "test:react": "vitest --project react",
+    "test:voice:workers": "vitest --project voice-workers",
+    "test:voice:react": "vitest --project voice-react",
+    "test:channels": "vitest --project channels",
+    "test:channels:live": "vitest --run -c src/channels/vitest.live.config.ts",
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
