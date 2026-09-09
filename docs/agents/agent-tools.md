@@ -1,7 +1,8 @@
 # Agent Tools
 
 Agent tools let one chat agent dispatch another chat-capable sub-agent as part
-of its work. The child is a real sub-agent with its own Durable Object storage,
+of its work — per-run, parent-supervised delegation is the flagship use case
+for facet-backed dynamic agents. The child is a real sub-agent with its own Durable Object storage,
 messages, tools, resumable stream, and drill-in URL. The parent keeps a small
 run registry so clients can render the child timeline, replay it after refresh,
 and clean it up later.

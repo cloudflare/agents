@@ -115,8 +115,11 @@ export class TestRetryAgent extends Agent {
   ): Promise<string> {
     this.scheduleCallbackAttempts = 0;
     this.scheduleCallbackResult = null;
+    // Far-future delay: a due-now schedule arms an imminent alarm the test
+    // pool auto-fires, racing the test's manual runDurableObjectAlarm into a
+    // double dispatch. Tests backdate the job before firing deterministically.
     const schedule = await this.schedule(
-      0,
+      3600,
       "onScheduleCallback",
       { succeedOnAttempt },
       { retry: retryOpts }

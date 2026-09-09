@@ -1,8 +1,9 @@
 # Live delivery tests
 
-This local-only test calls the real `telegram()`, `slack()`, and `email()`
-adapters, then reads each destination through an independent provider API. It
-is not part of normal package tests, Nx affected tests, or CI.
+These local-only tests call the real `telegram()`, `slack()`, and `email()`
+adapters through `ChannelHost`, then read each destination through an independent
+provider API. They are not part of normal package tests, Nx affected tests, or
+CI.
 
 The configured destinations must be disposable. The test deletes their messages
 before and after delivery. Telegram's immutable chat/channel creation service
@@ -28,6 +29,16 @@ Telegram observation uses a non-bot Teleproto `StringSession`. Slack needs
 email sender needs Cloudflare Email Service access; Fastmail supplies independent
 JMAP observation and deletion.
 
+Slack live streaming posts a disposable anchor and streams its thread reply. It
+also needs the reader's user and team ids; the binding derives them from
+`auth.test` and the one channel member that is not this bot, so no extra
+configuration or scope is needed.
+
+Telegram only shows drafts in private chats. Point
+`CHANNELS_LIVE_TELEGRAM_CHAT_ID` at a private chat with the bot to exercise the
+draft path. A group still receives the terminal message, but cannot prove that
+streaming previews reached a reader.
+
 ## Run
 
 ```sh
@@ -39,7 +50,3 @@ Run one provider with Vitest's name filter:
 ```sh
 pnpm --filter @cloudflare/channels test:live -t telegram
 ```
-
-Each test sends `Cloudflare Channels live delivery smoke test.`, polls once per
-second for up to two minutes, waits five more seconds for duplicates, and
-snapshots the exact observed `[{ text }]` array.

@@ -1,217 +1,13 @@
 import { Agent } from "../../index";
-import { ResumableStream } from "../../chat";
-import {
-  Session,
-  AgentSessionProvider,
-  AgentContextProvider,
-  AgentSearchProvider,
-  type SessionMessage,
-  type StoredCompaction,
-  type ContextBlock
-} from "../../experimental/memory/session";
+import { ResumableStream, createChatStreams } from "../../chat";
 
-/**
- * Test Agent — full Session API
- */
+/** Test Agent retained for ResumableStream legacy migration coverage. */
 export class TestSessionAgent extends Agent {
-  /**
-   * Counts how many times the latest-leaf anti-join (`latestLeafRow`) hits
-   * the database. The active-leaf cache should keep this at zero across
-   * repeated reads and auto-parent appends within a wake.
-   */
-  antiJoinCount = 0;
+  readonly streams = createChatStreams();
 
-  session = new Session(
-    new AgentSessionProvider({
-      sql: <T = Record<string, string | number | boolean | null>>(
-        strings: TemplateStringsArray,
-        ...values: (string | number | boolean | null)[]
-      ): T[] => {
-        if (strings.some((s) => s.includes("LEFT JOIN assistant_messages c"))) {
-          this.antiJoinCount++;
-        }
-        return this.sql<T>(strings, ...values);
-      }
-    })
-  );
-
-  async getAntiJoinCountForTest(): Promise<number> {
-    return this.antiJoinCount;
-  }
-
-  async resetAntiJoinCountForTest(): Promise<void> {
-    this.antiJoinCount = 0;
-  }
-
-  // ── Messages ────────────────────────────────────────────────────
-
-  async appendMessage(
-    message: SessionMessage,
-    parentId?: string | null
-  ): Promise<void> {
-    await this.session.appendMessage(message, parentId);
-  }
-
-  async getMessage(id: string): Promise<SessionMessage | null> {
-    return this.session.getMessage(id);
-  }
-
-  async updateMessage(message: SessionMessage): Promise<void> {
-    await this.session.updateMessage(message);
-  }
-
-  async deleteMessages(ids: string[]): Promise<void> {
-    await this.session.deleteMessages(ids);
-  }
-
-  async clearMessages(): Promise<void> {
-    await this.session.clearMessages();
-  }
-
-  // ── History (tree) ──────────────────────────────────────────────
-
-  async getHistory(leafId?: string): Promise<SessionMessage[]> {
-    return this.session.getHistory(leafId);
-  }
-
-  async getLatestLeaf(): Promise<SessionMessage | null> {
-    return this.session.getLatestLeaf();
-  }
-
-  async getBranches(messageId: string): Promise<SessionMessage[]> {
-    return this.session.getBranches(messageId);
-  }
-
-  async getPathLength(): Promise<number> {
-    return this.session.getPathLength();
-  }
-
-  async getRecentHistory(maxContentBytes: number, minRecentMessages?: number) {
-    return this.session.getRecentHistory(maxContentBytes, minRecentMessages);
-  }
-
-  async getHistoryRowStats() {
-    return this.session.getHistoryRowStats();
-  }
-
-  // ── Compaction ──────────────────────────────────────────────────
-
-  async addCompaction(
-    summary: string,
-    fromId: string,
-    toId: string
-  ): Promise<StoredCompaction> {
-    return this.session.addCompaction(summary, fromId, toId);
-  }
-
-  async getCompactions(): Promise<StoredCompaction[]> {
-    return this.session.getCompactions();
-  }
-
-  /** Seed same-timestamp compactions in an index order opposite insertion. */
-  async seedSameTimestampCompactionsForTest(): Promise<void> {
-    const createdAt = "2026-08-15 12:00:00";
-    this.sql`
-      INSERT INTO assistant_compactions
-        (id, session_id, summary, from_message_id, to_message_id, created_at)
-      VALUES
-        (${"compaction-a-old"}, ${""}, ${"Old summary"}, ${"m0"}, ${"m1"}, ${createdAt})
-    `;
-    this.sql`
-      INSERT INTO assistant_compactions
-        (id, session_id, summary, from_message_id, to_message_id, created_at)
-      VALUES
-        (${"compaction-z-new"}, ${""}, ${"New summary"}, ${"m0"}, ${"m2"}, ${createdAt})
-    `;
-    this.sql`
-      CREATE INDEX assistant_compactions_tie_order_test
-      ON assistant_compactions(session_id, created_at ASC, id DESC)
-    `;
-  }
-
-  // ── Search ──────────────────────────────────────────────────────
-
-  async search(
-    query: string
-  ): Promise<Array<{ id: string; role: string; content: string }>> {
-    return this.session.search(query);
-  }
-
-  // ── Test helpers ────────────────────────────────────────────────
-
-  /**
-   * Append `count` alternating user/assistant text messages server-side,
-   * ids `${prefix}0..${prefix}${count - 1}`. Keeps long-chain tests to a
-   * single RPC round trip.
-   */
-  async appendLinearChainForTest(count: number, prefix = "m"): Promise<void> {
-    for (let i = 0; i < count; i++) {
-      await this.session.appendMessage({
-        id: `${prefix}${i}`,
-        role: i % 2 === 0 ? "user" : "assistant",
-        parts: [{ type: "text", text: `${prefix} message ${i}` }]
-      });
-    }
-  }
-
-  /**
-   * Insert a child row directly via SQL, bypassing the provider (and its leaf
-   * cache) — simulates another writer mutating the cached tip so tests can
-   * prove the validation path self-heals.
-   */
-  async rawInsertChildForTest(parentId: string, id: string): Promise<void> {
-    const content = JSON.stringify({
-      id,
-      role: "assistant",
-      parts: [{ type: "text", text: id }]
-    });
-    this.sql`
-      INSERT INTO assistant_messages (id, session_id, parent_id, role, content)
-      VALUES (${id}, ${""}, ${parentId}, ${"assistant"}, ${content})
-    `;
-  }
-
-  /** Delete a row directly via SQL, bypassing the provider and its cache. */
-  async rawDeleteForTest(id: string): Promise<void> {
-    this
-      .sql`DELETE FROM assistant_messages WHERE id = ${id} AND session_id = ${""}`;
-  }
-
-  /** Overwrite a stored message's content with invalid JSON. */
-  async corruptMessageForTest(id: string): Promise<void> {
-    const invalid = "{ this is not valid json";
-    this
-      .sql`UPDATE assistant_messages SET content = ${invalid} WHERE id = ${id}`;
-  }
-
-  /**
-   * Append `count` messages of ~`charsPerMessage` text each, server-side.
-   * Exercises the byte-bounded content-chunking path without pushing
-   * megabytes through the test RPC boundary.
-   */
-  async appendLargeChainForTest(
-    count: number,
-    charsPerMessage: number,
-    prefix = "big"
-  ): Promise<void> {
-    for (let i = 0; i < count; i++) {
-      await this.session.appendMessage({
-        id: `${prefix}${i}`,
-        role: i % 2 === 0 ? "user" : "assistant",
-        parts: [{ type: "text", text: `${i}:${"x".repeat(charsPerMessage)}` }]
-      });
-    }
-  }
-
-  /** Lengths only — keeps multi-MB payloads out of the RPC response. */
-  async getHistoryTextLengthsForTest(): Promise<
-    Array<{ id: string; textLength: number }>
-  > {
-    const history = await this.session.getHistory();
-    return history.map((m) => ({
-      id: m.id,
-      textLength: (m.parts[0] as { text: string }).text.length
-    }));
+  constructor(...args: ConstructorParameters<typeof Agent>) {
+    super(...args);
+    this.lifecycle.use(this.streams);
   }
 
   // ── ResumableStream legacy migration helpers ────────────────────
@@ -235,6 +31,68 @@ export class TestSessionAgent extends Agent {
     this
       .sql`insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
       values ('legacy-stream', 'legacy-req', 'streaming', ${Date.now()})`;
+    this.sql`create table cf_ai_chat_stream_chunks (
+      id text primary key,
+      stream_id text not null,
+      body text not null,
+      chunk_index integer not null,
+      created_at integer not null
+    )`;
+    // One plain body row and one packed segment row, so the migration must
+    // preserve both stored formats.
+    this
+      .sql`insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+      values ('c0', 'legacy-stream', ${'{"type":"text-delta","delta":"a"}'}, 0, ${Date.now()})`;
+    this
+      .sql`insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+      values ('c1', 'legacy-stream', ${JSON.stringify(['{"type":"text-delta","delta":"b"}', '{"type":"text-delta","delta":"c"}'])}, 1, ${Date.now()})`;
+    // A completed legacy stream too: a terminal row is never settle-stamped
+    // later, so the migration itself must carry its exact cursor.
+    this
+      .sql`insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
+      values ('legacy-done', 'legacy-done-req', 'completed', ${Date.now()}, ${Date.now()})`;
+    this
+      .sql`insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+      values ('d0', 'legacy-done', ${'{"type":"text-delta","delta":"z"}'}, 0, ${Date.now()})`;
+  }
+
+  /**
+   * Prove chat tag lookups ignore non-chat streams sharing a tag: seed one
+   * chat-owned completed stream for a request, then NEWER application
+   * streams with the same tag (one streaming, one completed), and report
+   * what the chat lookups observe.
+   */
+  async chatTagCollisionForTest(): Promise<{
+    latest: { id: string; status: string } | null;
+    activeId: string | null;
+  }> {
+    const requestId = "collide-req";
+    const chat = await this.streams.open("chat-owned", {
+      tag: requestId,
+      metadata: { cfChat: 1 }
+    });
+    chat.append(JSON.stringify({ type: "text-delta", delta: "hi" }));
+    chat.close();
+    // Newer unrelated application streams sharing the tag, in the states
+    // that could mask each chat lookup.
+    const appLive = await this.streams.open("app-live", { tag: requestId });
+    appLive.append({ x: 1 });
+    const appDone = await this.streams.open("app-done", { tag: requestId });
+    appDone.append({ x: 2 });
+    appDone.close();
+
+    const stream = new ResumableStream(
+      this.streams,
+      <T = Record<string, unknown>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] => this.sql<T>(strings, ...values)
+    );
+    const latest = stream.latestStreamInfoForRequest(requestId);
+    return {
+      latest: latest ? { id: latest.id, status: latest.status } : null,
+      activeId: stream.latestActiveStreamInfoForRequest(requestId)?.id ?? null
+    };
   }
 
   private streamMetadataColumnsForTest(): string[] {
@@ -244,30 +102,55 @@ export class TestSessionAgent extends Agent {
   }
 
   /**
-   * Drive a `ResumableStream` over a legacy metadata table and report what
-   * happened, so the test can assert the lazy migration recovered instead of
-   * throwing. Construction itself exercises `restore()` (a `SELECT *` that
-   * must tolerate the missing columns).
+   * Drive a `ResumableStream` over seeded legacy `cf_ai_chat_stream_*` tables
+   * and report what happened, so the test can assert construction migrated
+   * the rows into the Streams capability's tables (preserving both stored
+   * chunk formats and the in-flight active stream) and dropped the legacy
+   * tables.
    */
   async resumableLegacyMigrationForTest(): Promise<{
     columnsBefore: string[];
+    remainingLegacyTables: string[];
+    migratedStatus: { status: string; request_id: string } | null;
+    migratedChunkBodies: string[];
+    migratedLiveCursor: number | null;
+    migratedCompletedCursor: number | null;
     legacyMessageId: string | null;
+    restoredActiveStreamId: string | null;
     startThrew: boolean;
-    columnsAfter: string[];
     newStreamMessageId: string | null;
   }> {
+    const columnsBefore = this.streamMetadataColumnsForTest();
+
     const stream = new ResumableStream(
+      this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,
         ...values: (string | number | boolean | null)[]
       ): T[] => this.sql<T>(strings, ...values)
     );
 
-    const columnsBefore = this.streamMetadataColumnsForTest();
-    // SELECT of the new column on a legacy row: guarded → null, no throw.
-    const legacyMessageId = stream.getStreamMessageId("legacy-stream");
+    const remainingLegacyTables = this.sql<{ name: string }>`
+      select name from sqlite_master where type = 'table'
+      and name in ('cf_ai_chat_stream_metadata', 'cf_ai_chat_stream_chunks')
+    `.map((row) => row.name);
 
-    // INSERT naming the new columns on a legacy table: must migrate + retry.
+    const migratedStatus = stream.getStreamMetadata("legacy-stream");
+    const migratedChunkBodies = stream
+      .getStreamChunks("legacy-stream")
+      .map((chunk) => chunk.body);
+    // The migrated cursors: the live row's is derived from the imported
+    // chunk log; the completed row's is the count importStream stamped
+    // (nothing ever settle-stamps an imported terminal row).
+    const migratedLiveCursor =
+      (await this.streams.status("legacy-stream"))?.cursor ?? null;
+    const migratedCompletedCursor =
+      (await this.streams.status("legacy-done"))?.cursor ?? null;
+    // The legacy schema predates message-id tracking: guarded → null.
+    const legacyMessageId = stream.getStreamMessageId("legacy-stream");
+    // Construction ran restore(), which must adopt the migrated in-flight row.
+    const restoredActiveStreamId = stream.activeStreamId;
+
     let startThrew = false;
     let newStreamId = "";
     try {
@@ -279,222 +162,21 @@ export class TestSessionAgent extends Agent {
       startThrew = true;
     }
 
-    const columnsAfter = this.streamMetadataColumnsForTest();
     const newStreamMessageId = newStreamId
       ? stream.getStreamMessageId(newStreamId)
       : null;
 
     return {
       columnsBefore,
+      remainingLegacyTables,
+      migratedStatus,
+      migratedChunkBodies,
+      migratedLiveCursor,
+      migratedCompletedCursor,
       legacyMessageId,
+      restoredActiveStreamId,
       startThrew,
-      columnsAfter,
       newStreamMessageId
     };
-  }
-}
-
-/**
- * Test Agent — context blocks with frozen snapshot
- */
-export class TestSessionAgentWithContext extends Agent<Cloudflare.Env> {
-  session = new Session(new AgentSessionProvider(this), {
-    context: [
-      {
-        label: "memory",
-        description: "Persistent notes",
-        maxTokens: 500,
-        provider: new AgentContextProvider(this, "memory")
-      },
-      {
-        label: "soul",
-        description: "Identity",
-        provider: { get: async () => "You are helpful." }
-      }
-    ]
-  });
-
-  async freezeSystemPrompt(): Promise<string> {
-    return this.session.freezeSystemPrompt();
-  }
-
-  async refreshSystemPrompt(): Promise<string> {
-    return this.session.refreshSystemPrompt();
-  }
-
-  async setBlock(label: string, content: string): Promise<ContextBlock> {
-    return this.session.replaceContextBlock(label, content);
-  }
-
-  getBlock(label: string): ContextBlock | null {
-    return this.session.getContextBlock(label);
-  }
-
-  getBlocks(): ContextBlock[] {
-    return this.session.getContextBlocks();
-  }
-
-  async getTools(): Promise<Record<string, unknown>> {
-    return this.session.tools();
-  }
-}
-
-type TestResult = { success: boolean; error?: string };
-
-/**
- * Test Agent — searchable context block with FTS5
- */
-export class TestSearchAgent extends Agent<Cloudflare.Env> {
-  session = Session.create(this)
-    .withContext("knowledge", {
-      description: "Searchable knowledge base",
-      provider: new AgentSearchProvider(this)
-    })
-    .withCachedPrompt();
-
-  async testIndexAndSearch(): Promise<TestResult> {
-    try {
-      const tools = await this.session.tools();
-      if (!tools.set_context)
-        return { success: false, error: "no set_context" };
-      if (!tools.search_context)
-        return { success: false, error: "no search_context" };
-
-      // Index some content
-      type SetArgs = {
-        label: string;
-        content: string;
-        metadata?: { title?: string; description?: string };
-      };
-      const setTool = tools.set_context as unknown as {
-        execute: (args: SetArgs) => Promise<string>;
-      };
-      const searchTool = tools.search_context as unknown as {
-        execute: (args: Record<string, string>) => Promise<string>;
-      };
-
-      await setTool.execute({
-        label: "knowledge",
-        metadata: { title: "meeting-notes" },
-        content: "The deployment is scheduled for Friday with budget concerns"
-      });
-      await setTool.execute({
-        label: "knowledge",
-        metadata: { title: "design-doc" },
-        content: "The API uses REST endpoints with JSON responses"
-      });
-
-      // Single word search
-      const r1 = await searchTool.execute({
-        label: "knowledge",
-        query: "deployment"
-      });
-      if (!r1.includes("deployment"))
-        return { success: false, error: "single word search failed" };
-
-      // Multi-word search (non-adjacent terms)
-      const r2 = await searchTool.execute({
-        label: "knowledge",
-        query: "deployment budget"
-      });
-      if (!r2.includes("budget"))
-        return {
-          success: false,
-          error: "multi-word non-adjacent search failed"
-        };
-
-      // Search that should not match
-      const r3 = await searchTool.execute({
-        label: "knowledge",
-        query: "nonexistent"
-      });
-      if (!r3.includes("No results"))
-        return { success: false, error: "expected no results" };
-
-      // Cross-key search
-      const r4 = await searchTool.execute({
-        label: "knowledge",
-        query: "REST"
-      });
-      if (!r4.includes("REST"))
-        return { success: false, error: "cross-key search failed" };
-
-      return { success: true };
-    } catch (err) {
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err)
-      };
-    }
-  }
-
-  async testInitLifecycle(): Promise<TestResult> {
-    try {
-      // The provider should have received label "knowledge" via init()
-      const prompt = await this.session.freezeSystemPrompt();
-      if (!prompt.includes("KNOWLEDGE"))
-        return { success: false, error: "prompt missing KNOWLEDGE" };
-      if (!prompt.includes("[searchable]"))
-        return { success: false, error: "prompt missing [searchable] tag" };
-
-      return { success: true };
-    } catch (err) {
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err)
-      };
-    }
-  }
-
-  async testUpdateReplacesEntry(): Promise<TestResult> {
-    try {
-      const tools = await this.session.tools();
-      type SetArgs = {
-        label: string;
-        content: string;
-        metadata?: { title?: string; description?: string };
-      };
-      const setTool = tools.set_context as unknown as {
-        execute: (args: SetArgs) => Promise<string>;
-      };
-      const searchTool = tools.search_context as unknown as {
-        execute: (args: Record<string, string>) => Promise<string>;
-      };
-
-      // Index then replace — same title → same key → upsert
-      await setTool.execute({
-        label: "knowledge",
-        metadata: { title: "doc" },
-        content: "original content about cats"
-      });
-      await setTool.execute({
-        label: "knowledge",
-        metadata: { title: "doc" },
-        content: "replaced content about dogs"
-      });
-
-      // Should find new content
-      const r1 = await searchTool.execute({
-        label: "knowledge",
-        query: "dogs"
-      });
-      if (!r1.includes("replaced"))
-        return { success: false, error: "replacement not found" };
-
-      // Should not find old content
-      const r2 = await searchTool.execute({
-        label: "knowledge",
-        query: "cats"
-      });
-      if (!r2.includes("No results"))
-        return { success: false, error: "old content still searchable" };
-
-      return { success: true };
-    } catch (err) {
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err)
-      };
-    }
   }
 }

@@ -1296,6 +1296,42 @@ export class TestSubAgentParent extends Agent {
     return child.get(counterId);
   }
 
+  // ── this.dynamicAgents facade (the new public capability surface) ──
+
+  async dynamicAgentsIncrement(
+    subAgentName: string,
+    counterId: string
+  ): Promise<number> {
+    const child = await this.dynamicAgents.get(CounterSubAgent, subAgentName);
+    return child.increment(counterId);
+  }
+
+  dynamicAgentsHas(subAgentName: string): { facade: boolean; legacy: boolean } {
+    return {
+      facade: this.dynamicAgents.has(CounterSubAgent, subAgentName),
+      legacy: this.hasSubAgent(CounterSubAgent, subAgentName)
+    };
+  }
+
+  dynamicAgentsListNames(): { facade: string[]; legacy: string[] } {
+    return {
+      facade: this.dynamicAgents.list(CounterSubAgent).map((e) => e.name),
+      legacy: this.listSubAgents(CounterSubAgent).map((e) => e.name)
+    };
+  }
+
+  dynamicAgentsAbort(subAgentName: string): void {
+    this.dynamicAgents.abort(
+      CounterSubAgent,
+      subAgentName,
+      new Error("test abort")
+    );
+  }
+
+  async dynamicAgentsDelete(subAgentName: string): Promise<void> {
+    await this.dynamicAgents.delete(CounterSubAgent, subAgentName);
+  }
+
   async subAgentAbort(subAgentName: string): Promise<void> {
     this.abortSubAgent(CounterSubAgent, subAgentName, new Error("test abort"));
   }
@@ -1446,8 +1482,8 @@ export class TestSubAgentParent extends Agent {
   }
 
   async backdateSchedule(id: string): Promise<void> {
-    const past = Math.floor(Date.now() / 1000) - 1;
-    this.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${id}`;
+    const past = Date.now() - 1_000;
+    this.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${id}`;
   }
 
   async forgetCounterSubAgentRegistry(subAgentName: string): Promise<void> {
@@ -1475,8 +1511,14 @@ export class TestSubAgentParent extends Agent {
       type: string;
       running: number | null;
     }>`
-      SELECT id, callback, owner_path, owner_path_key, type, COALESCE(running, 0) AS running
-      FROM cf_agents_schedules
+      SELECT id,
+             fn AS callback,
+             json_extract(payload, '$.owner_path') AS owner_path,
+             json_extract(payload, '$.owner_path_key') AS owner_path_key,
+             json_extract(payload, '$.type') AS type,
+             COALESCE(running, 0) AS running
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler'
       ORDER BY id
     `.map((row) => ({
       id: row.id,

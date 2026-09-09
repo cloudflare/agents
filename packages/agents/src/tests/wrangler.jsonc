@@ -37,6 +37,46 @@
         "name": "SchedulerStartupWarnObject"
       },
       {
+        "class_name": "TaskHarnessObject",
+        "name": "TaskHarnessObject"
+      },
+      {
+        "class_name": "TaskSchedulerCoexistObject",
+        "name": "TaskSchedulerCoexistObject"
+      },
+      {
+        "class_name": "StreamHarnessObject",
+        "name": "StreamHarnessObject"
+      },
+      {
+        "class_name": "CutoverHarnessObject",
+        "name": "CutoverHarnessObject"
+      },
+      {
+        "class_name": "SqliteStrategiesBench",
+        "name": "SqliteStrategiesBench"
+      },
+      {
+        "class_name": "TaskStreamComposeObject",
+        "name": "TaskStreamComposeObject"
+      },
+      {
+        "class_name": "StreamBenchObject",
+        "name": "StreamBenchObject"
+      },
+      {
+        "class_name": "SessionHarnessObject",
+        "name": "SessionHarnessObject"
+      },
+      {
+        "class_name": "SessionSearchHarnessObject",
+        "name": "SessionSearchHarnessObject"
+      },
+      {
+        "class_name": "SessionBenchObject",
+        "name": "SessionBenchObject"
+      },
+      {
         "class_name": "PlainMcpClientObject",
         "name": "PlainMcpClientObject"
       },
@@ -92,6 +132,10 @@
       {
         "class_name": "TestScheduleAgent",
         "name": "TestScheduleAgent"
+      },
+      {
+        "class_name": "TestTaskAgent",
+        "name": "TestTaskAgent"
       },
       {
         "class_name": "TestOnStartScheduleWarnAgent",
@@ -199,20 +243,16 @@
         "name": "TestSessionAgent"
       },
       {
-        "class_name": "TestSessionAgentWithContext",
-        "name": "TestSessionAgentWithContext"
-      },
-      {
-        "class_name": "TestSearchAgent",
-        "name": "TestSearchAgent"
-      },
-      {
-        "class_name": "TestMultiSessionAgent",
-        "name": "TestMultiSessionAgent"
-      },
-      {
         "class_name": "TestWaitConnectionsAgent",
         "name": "TestWaitConnectionsAgent"
+      },
+      {
+        "class_name": "RoutingOwnerAgent",
+        "name": "RoutingOwnerAgent"
+      },
+      {
+        "class_name": "RoutedChatAgent",
+        "name": "RoutedChatAgent"
       },
       {
         "class_name": "TestSubAgentParent",
@@ -369,6 +409,16 @@
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
+        "TaskHarnessObject",
+        "TaskSchedulerCoexistObject",
+        "StreamHarnessObject",
+        "CutoverHarnessObject",
+        "SqliteStrategiesBench",
+        "TaskStreamComposeObject",
+        "StreamBenchObject",
+        "SessionHarnessObject",
+        "SessionSearchHarnessObject",
+        "SessionBenchObject",
         "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
@@ -384,6 +434,7 @@
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",
         "TestScheduleAgent",
+        "TestTaskAgent",
         "TestOnStartScheduleWarnAgent",
         "TestOnStartScheduleNoWarnAgent",
         "TestOnStartScheduleExplicitFalseAgent",
@@ -407,10 +458,9 @@
         "TestRunFiberAgent",
         "TestKeepAliveAgent",
         "TestSessionAgent",
-        "TestSessionAgentWithContext",
-        "TestSearchAgent",
-        "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
+        "RoutingOwnerAgent",
+        "RoutedChatAgent",
         "TestSubAgentParent",
         "CustomBoundSubAgentParent",
         "TestWorkflowSubAgent",

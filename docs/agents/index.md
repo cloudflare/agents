@@ -40,8 +40,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 ## Core Concepts
 
 - [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStateChanged()`
-- [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
-- [Sub-agents](./sub-agents.md) - Parent/child DO composition via facets, nested routing, and direct child connections
+- [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works, plus `RoutedAgents` for a hub that routes to many independent Agents
+- [Dynamic agents](./sub-agents.md) - Facet-backed child agents for code the parent supervises (dynamic/generated code, per-run tool agents, sandboxes) — not the recommended primitive for many independent peers like chats
 - [HTTP & WebSockets](./http-websockets.md) - Request handling and real-time connections
 - [Callable Methods](./callable-methods.md) - The `@callable` decorator and client-server method calls
 - [Readonly Connections](./readonly-connections.md) - Restricting which connections can modify state
@@ -80,7 +80,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Server-Driven Messages](./server-driven-messages.md) - Autonomous agent workflows: scheduled follow-ups, queue processing, webhooks, chained reasoning
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
-- [Sessions (Experimental)](./sessions.md) - Persistent conversation storage with tree-structured messages, context blocks, compaction, and search
+- [Sessions (Experimental)](./sessions.md) - Durable message trees, streamed history, compaction, search, and lossless attachment offload
+- [Context (Experimental)](./context.md) - System-prompt blocks, frozen prompts, writable/searchable/loadable providers, and their tools
 - [Workspace (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) - Durable virtual filesystem backed by SQLite + R2
 - [Codemode (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/agents/codemode.md) - LLM-generated executable code for tool orchestration
 - [Client Tools Continuation](./client-tools-continuation.md) - Handling tool calls across client/server
@@ -141,6 +142,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 ## Reference
 
 - [Durable Object Lifecycle](./lifecycle.md) - Compose reusable durable components outside the Agent base class
+- [Tasks](./tasks.md) - Durable, replayable background work with journaled steps and durable sleeps (experimental)
+- [Streams](./streams.md) - Durable incremental output: chunk log, cursor, replay-then-tail reads (experimental)
 - TODO: [API Reference](./api-reference.md) - Complete API documentation
 - TODO: [FAQ / How is this different from Durable Objects?](./faq.md)
 - TODO: [Resources & Further Reading](./resources.md)

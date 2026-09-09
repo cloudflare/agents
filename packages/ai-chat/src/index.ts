@@ -43,8 +43,6 @@ import {
   aiSdkRecoveryCodec,
   ResumeHandshake,
   isReplayChunk,
-  sanitizeMessage,
-  enforceRowSizeLimit,
   parseProtocolMessage,
   sendIfOpen,
   TurnQueue,
@@ -59,12 +57,18 @@ import {
   type SubmitConcurrencyDecision,
   type ChatFiberSnapshot
 } from "agents/chat";
+import { ResumableStream, createChatStreams } from "agents/chat";
+import type { Streams } from "agents/streams";
+import { Sessions, type Session, type SessionMessage } from "agents/sessions";
 import {
-  ResumableStream,
-  cleanupStreamBuffers,
-  STREAM_CLEANUP_DELAY_SECONDS
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
+  createChatRecoveryTaskDefinition,
+  createChatTurnTaskDefinition,
+  dispatchChatRecoveryToHandoff,
+  type ChatRecoveryTaskReason
 } from "agents/chat";
-import { MAX_BOUND_PARAMS, buildInClauseStrings } from "agents/chat";
+import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
 import {
   ContinuationState,
   PreStreamTurns,
@@ -78,7 +82,6 @@ import {
 } from "agents/chat";
 import {
   resolveChatRecoveryConfig,
-  chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
   ChatStreamStalledError,
@@ -87,15 +90,13 @@ import {
   listActiveChatRecoveryIncidents,
   classifyAgentToolChildRecovery,
   readChatRecoveryProgress,
-  bumpChatRecoveryProgress,
+  CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
-  StreamProgressCreditThrottle,
-  shouldCreditStreamProgress,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
@@ -206,12 +207,12 @@ type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 // persisted incident shape and key prefix are owned by the engine package so
 // both consumers round-trip the same record across the deploy that ships them.
 
-// The durable, monotonic forward-progress counter (`CHAT_RECOVERY_PROGRESS_KEY`)
-// and its read/bump helpers now live in the shared engine (agents/chat) —
-// `readChatRecoveryProgress` / `bumpChatRecoveryProgress`. Bumped at production
-// time when new content is streamed (`_storeStreamChunk`), so it reflects
-// genuinely new content and is immune to reconnects/re-persists; never recomputed
-// from the (compactable) transcript.
+// The monotonic forward-progress marker the recovery budget keys off is
+// derived from the stream log (`ResumableStream.progressMarker`): durably
+// flushed segments, folded into a retired total as their rows are deleted.
+// Nothing is written per chunk. The pre-derivation KV counter
+// (`CHAT_RECOVERY_PROGRESS_KEY`) is read once per isolate and seeded into the
+// marker, so it is never read lower than an in-flight incident recorded.
 // Recovery budget defaults (maxAttempts, maxRecoveryWork, stableTimeoutMs,
 // terminalMessage, noProgressTimeoutMs, alarm debounce) now live in the shared
 // incident engine (agents/chat) and are applied by `resolveChatRecoveryConfig`
@@ -234,8 +235,7 @@ type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 // sweep via the shared `sweepStaleChatRecoveryIncidents` helper.)
 // (N9 throttle now lives in the shared engine as `AgentToolStreamProgressThrottle`
 // / `AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS`; the stream-cleanup delay and
-// re-arm loop now live in agents/chat as `STREAM_CLEANUP_DELAY_SECONDS` /
-// `cleanupStreamBuffers`. The `sendIfOpen` / `isWebSocketClosedSendError` WS send
+// The `sendIfOpen` / `isWebSocketClosedSendError` WS send
 // guard is shared via agents/chat.)
 
 type StreamResultStatus = {
@@ -317,12 +317,6 @@ type AIChatAgentToolRunRow = {
   progress_json?: string | null;
   last_signal_at?: number | null;
 };
-type AIChatStreamMetadataRow = {
-  id: string;
-  status: string;
-  request_id: string;
-};
-
 /**
  * Options passed to the onChatMessage handler.
  */
@@ -383,6 +377,10 @@ const agentToolChunkEncoder = new TextEncoder();
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
+/** Bounds for one window of the legacy lift: rows and their summed bytes. */
+const LEGACY_LIFT_WINDOW_ROWS = 25;
+const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
+
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -395,6 +393,37 @@ export class AIChatAgent<
    * Used to propagate cancellation signals for any external calls made by the agent.
    */
   private _abortRegistry: AbortRegistry;
+
+  /** Durable chat history for this Agent. */
+  readonly sessions = new Sessions();
+
+  /**
+   * Byte budget for wake-time transcript hydration into {@link messages}.
+   *
+   * `onStart` hydrates through `session.getRecentHistory(budget, …)`. The
+   * budget counts each stored row plus the continuation rows it was split
+   * across, so it bounds isolate memory: an oversized transcript hydrates
+   * as a bounded recent window
+   * instead of exhausting the isolate. Durable storage is never truncated by
+   * this — `sessions.session().getHistory()` still reads the full path, and
+   * the streamed `get-messages` route still serves every message.
+   *
+   * Set to `Number.POSITIVE_INFINITY` (or any non-positive value) to disable
+   * windowing and always hydrate the whole transcript.
+   *
+   * @default 32 * 1024 * 1024
+   */
+  hydrationByteBudget: number = 32 * 1024 * 1024;
+
+  /** The default linear conversation handle. */
+  readonly #session: Session = this.sessions.session();
+
+  /**
+   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * output lives in the shared durable chunk log, readable by any
+   * `streams.read()` consumer on this Durable Object.
+   */
+  readonly streams: Streams = createChatStreams();
 
   /**
    * Resumable stream manager -- handles chunk buffering, persistence, and replay.
@@ -560,14 +589,6 @@ export class AIChatAgent<
   protected _lastBody: Record<string, unknown> | undefined;
 
   /**
-   * Cache of last-persisted JSON for each message ID.
-   * Used for incremental persistence: skip SQL writes for unchanged messages.
-   * Lost on hibernation, repopulated from SQLite on wake.
-   * @internal
-   */
-  private _persistedMessageCache: Map<string, string> = new Map();
-
-  /**
    * Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
    * and the double-fire guard. Parameterized by this agent's stream-active
    * signal, apply-drain, and continuation-turn pipeline (`_fireAutoContinuation`).
@@ -661,6 +682,112 @@ export class AIChatAgent<
    */
   waitForMcpConnections: boolean | { timeout: number } = { timeout: 10_000 };
 
+  /**
+   * Live chat-turn closures keyed by run nonce. A closure exists only in the
+   * isolate that accepted the turn; recovery after interruption never re-runs
+   * it — the definition's `recover` callback hands the interruption to the
+   * shared ChatRecoveryEngine instead.
+   */
+  private readonly _liveChatTurnClosures = new Map<
+    string,
+    {
+      initial: unknown;
+      wrap: (data: unknown) => unknown;
+      run: () => Promise<unknown>;
+      settle: {
+        resolve: (value: unknown) => void;
+        reject: (error: unknown) => void;
+      };
+    }
+  >();
+
+  /**
+   * Register the shared chat-turn Task definition (see
+   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
+   * host wires its protected internals through the hooks.
+   */
+  private _registerChatTurnTaskDefinition(): void {
+    const chatFiberName = (this.constructor as typeof AIChatAgent)
+      .CHAT_FIBER_NAME;
+    this.tasks.register(
+      chatFiberName,
+      createChatTurnTaskDefinition({
+        definitionName: chatFiberName,
+        storage: this.ctx.storage,
+        getRunCreatedAt: async (runId) =>
+          (await this.tasks.get(runId))?.createdAt ?? null,
+        getLiveClosure: (nonce) => this._liveChatTurnClosures.get(nonce),
+        keepAliveWhile: (fn) => this.keepAliveWhile(fn),
+        withStash: (context, fn) => this._withFiberStash(context, fn),
+        handleRecovery: (ctx) => this._handleInternalFiberRecovery(ctx)
+      })
+    );
+  }
+
+  /** Register the shared Tasks transport for recovery continuations. */
+  private _registerChatRecoveryTaskDefinition(): void {
+    // SAFETY: the recovery engine is the sole producer of each callback's
+    // payload and the Task persists it verbatim, so the callback name selects
+    // the matching host input type.
+    this.tasks.register(
+      CHAT_RECOVERY_TASK_NAME,
+      createChatRecoveryTaskDefinition({
+        _chatRecoveryContinue: (data) =>
+          this._chatRecoveryContinue(data as ChatRecoveryContinueData),
+        _chatRecoveryRetry: (data) =>
+          this._chatRecoveryRetry(data as ChatRecoveryRetryData)
+      })
+    );
+  }
+
+  /**
+   * Run a queue-driven recovery callback to its model handoff and return;
+   * the turn continues as tracked alarm work, and a detached platform
+   * failure enqueues one replacement attempt through the same transport.
+   */
+  private _dispatchChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown> | undefined,
+    detached: (onTurnStarted: () => void) => Promise<void>
+  ): Promise<void> {
+    return dispatchChatRecoveryToHandoff({
+      detached,
+      track: (turn) => this.lifecycle.trackAlarmWork(turn),
+      redefer: (dedupeKey) =>
+        this._enqueueChatRecovery(
+          callback,
+          data ?? {},
+          "redefer",
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          dedupeKey
+        ),
+      onDetachedError: (error) =>
+        console.error(`[AIChatAgent] ${callback} dispatch failed`, error)
+    });
+  }
+
+  /**
+   * Enqueue one recovery attempt on the shared Tasks transport. Tasks
+   * mirrors a routed dynamic agent's wake to the root's alarm; the run
+   * itself, and this continuation's replay, still execute here. `dedupeKey`
+   * keys a retried enqueue so it joins its own prior attempt instead of
+   * duplicating it — see {@link chatRecoveryTaskRunOptions}.
+   */
+  private async _enqueueChatRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown>,
+    reason: ChatRecoveryTaskReason,
+    delaySeconds: number,
+    dedupeKey?: string
+  ): Promise<void> {
+    const input = { callback, data, delaySeconds };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, reason, dedupeKey)
+    );
+  }
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -675,20 +802,51 @@ export class AIChatAgent<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
+    const wrap = (data: unknown) =>
+      wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
 
-    return this._runFiberWithStashWrapper(
-      `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-      async () => fn(),
-      {
-        initialSnapshot: wrapChatFiberSnapshot(
-          "__cfAIChatFiberSnapshot",
-          snapshot,
-          null
-        ),
-        wrapStash: (data) =>
-          wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data)
-      }
-    );
+    // Facet-hosted turns stay on the legacy fiber engine: the Tasks
+    // capability does not accept runs on routed sub-agents yet, and facet
+    // recovery routes through the root's facet-run index.
+    if (this.parentPath.length > 0) {
+      return this._runFiberWithStashWrapper(
+        `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+        async () => fn(),
+        { initialSnapshot: wrap(null), wrapStash: wrap }
+      );
+    }
+
+    const nonce = nanoid();
+    let resolveOutcome!: (value: unknown) => void;
+    let rejectOutcome!: (error: unknown) => void;
+    const outcome = new Promise<unknown>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    // Rejections can land while `runAttached` is still being awaited (before
+    // the outcome listener attaches); mark them handled so workerd does not
+    // report an unhandled rejection the wrapper is about to consume.
+    outcome.catch(() => {});
+    // The turn closure re-enters the caller's invocation context (live
+    // connection/request), exactly as legacy inline fiber execution did: the
+    // capability's host boundary intentionally carries no connection.
+    const ambient = agentContext.getStore();
+    this._liveChatTurnClosures.set(nonce, {
+      initial: wrap(null),
+      wrap,
+      run: ambient ? () => agentContext.run(ambient, fn) : fn,
+      settle: { resolve: resolveOutcome, reject: rejectOutcome }
+    });
+    try {
+      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+        (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
+        { requestId, continuation, nonce },
+        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+      );
+      return (await outcome) as T;
+    } finally {
+      this._liveChatTurnClosures.delete(nonce);
+    }
   }
 
   /**
@@ -799,6 +957,10 @@ export class AIChatAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
+    this.lifecycle.use(this.sessions);
+    this.lifecycle.use(this.streams);
+    this._registerChatTurnTaskDefinition();
+    this._registerChatRecoveryTaskDefinition();
     withAgentSpan(
       this,
       "chat_initialization",
@@ -811,11 +973,9 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this.sql`create table if not exists cf_ai_chat_agent_messages (
-              id text primary key,
-              message text not null,
-              created_at datetime default current_timestamp
-            )`;
+            // Session storage is Sessions' business and is initialized by its
+            // capability `onStart`; the constructor never reads or writes the
+            // transcript. Legacy lift and hydration happen in `onStart`.
 
             // Key-value table for request context that must survive hibernation
             // (e.g., custom body fields, client tools from the last chat request).
@@ -844,27 +1004,51 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this._resumableStream = new ResumableStream(this.sql.bind(this));
+            this._resumableStream = new ResumableStream(
+              this.streams,
+              this.sql.bind(this),
+              {
+                // Rollback insurance: a build still on the KV counter reads
+                // a marker no lower than one recorded under the derived
+                // marker. One put per stream retired, none per chunk.
+                onProgress: (durable) => {
+                  void this.ctx.storage
+                    .put(CHAT_RECOVERY_PROGRESS_KEY, durable)
+                    .catch(() => {});
+                }
+              }
+            );
           }
         );
 
-        const rawMessages = withAgentSpan(
-          this,
-          "load_chat_messages",
-          "initialization",
-          { "cloudflare.agents.component": "ai_chat" },
-          () => this._loadMessagesFromDb()
-        );
-
-        // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
-        this.messages = autoTransformMessages(rawMessages);
         update({
-          "cloudflare.agents.chat.messages.loaded": rawMessages.length,
           "cloudflare.agents.chat.active_stream.restored":
             this._resumableStream.hasActiveStream()
         });
       }
     );
+
+    // `this.messages` mirrors durable storage through the Sessions change
+    // feed rather than being hand-patched at each write site.
+    this.#subscribeToSessionChanges();
+
+    const _onStart = this.onStart.bind(this);
+    this.onStart = async (props?: Props) => {
+      await withAgentSpan(
+        this,
+        "load_chat_messages",
+        "startup",
+        { "cloudflare.agents.component": "ai_chat" },
+        async (update) => {
+          await this._migrateLegacyMessages();
+          await this._hydrateMessages();
+          update({
+            "cloudflare.agents.chat.messages.loaded": this.messages.length
+          });
+        }
+      );
+      return _onStart(props);
+    };
 
     this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
@@ -1276,7 +1460,7 @@ export class AIChatAgent<
         // Handle clear chat
         if (event.type === "clear") {
           this.resetTurnState();
-          this.sql`delete from cf_ai_chat_agent_messages`;
+          await this.#session.clearMessages();
           // Drop any pending terminal record (#1645) so a stale exhaustion
           // can't replay onto a freshly-cleared (empty) conversation when a
           // client reconnects and runs the resume probe.
@@ -1288,8 +1472,8 @@ export class AIChatAgent<
           this._lastClientTools = undefined;
           this._lastBody = undefined;
           this._persistRequestContext();
-          this._persistedMessageCache.clear();
-          this.messages = [];
+          // `clearMessages()` above emptied `this.messages` through the
+          // change feed.
           this._broadcastChatMessage(
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
             [connection.id]
@@ -1430,7 +1614,9 @@ export class AIChatAgent<
       return this._tryCatchChat(async () => {
         const url = new URL(request.url);
         if (url.pathname.split("/").pop() === "get-messages") {
-          return Response.json(this._loadMessagesFromDb());
+          return new Response(this.#streamMessagesAsJson(), {
+            headers: { "content-type": "application/json" }
+          });
         }
         return _onRequest(request);
       });
@@ -1634,7 +1820,6 @@ export class AIChatAgent<
     // wake if fiber recovery cannot finalize a stream. The last-activity sweep
     // threshold keeps an actively streaming run from being reclaimed before it
     // goes quiet (#1706).
-    void this._ensureStreamCleanupScheduled();
     return streamId;
   }
 
@@ -1642,88 +1827,65 @@ export class AIChatAgent<
   protected _completeStream(streamId: string) {
     const completedRequestId = this._resumableStream.activeRequestId;
     this._resumableStream.complete(streamId);
+    this._afterStreamFinished(completedRequestId);
+  }
+
+  /**
+   * @internal The producer finished; leave the row for the cutover that
+   * persists the message (`persistMessages` via `#pendingCutover`). `_reply`'s
+   * finally settles it if no persist follows.
+   */
+  protected _finishStream(streamId: string) {
+    const finishedRequestId = this._resumableStream.activeRequestId;
+    this._resumableStream.finish(streamId);
+    this._afterStreamFinished(finishedRequestId);
+  }
+
+  private _afterStreamFinished(requestId: string | null) {
     this._pendingResumeConnections.clear();
-    if (completedRequestId === this._continuation.activeRequestId) {
+    if (requestId === this._continuation.activeRequestId) {
       this._continuation.activeRequestId = null;
       this._continuation.activeConnectionId = null;
     }
-    void this._ensureStreamCleanupScheduled();
   }
 
   /**
-   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
-   * buffers. Armed whenever a stream finishes (completes or errors) so that
-   * idle/one-off chat DOs still reclaim their buffers — the lazy sweep in
-   * {@link ResumableStream} only fires when a *subsequent* stream completes,
-   * which never happens for a chat that receives a single turn (#1706).
-   *
-   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
-   * collapse onto one pending alarm rather than stacking.
-   * @internal
-   */
-  protected async _ensureStreamCleanupScheduled({
-    idempotent = true
-  }: { idempotent?: boolean } = {}): Promise<void> {
-    await this.schedule(
-      STREAM_CLEANUP_DELAY_SECONDS,
-      "_cleanupStreamBuffers",
-      undefined,
-      { idempotent }
-    );
-  }
-
-  /**
-   * Alarm callback: sweep aged stream buffers, re-arming while rows remain (see
-   * the shared {@link cleanupStreamBuffers}). Public so it is reachable as a
-   * schedule callback.
+   * @deprecated Streams are reclaimed at cutover and on the next stream
+   * start; no alarm is armed any more. Kept so a cleanup alarm persisted
+   * by an earlier version still resolves to a callback when it fires.
    * @internal
    */
   async _cleanupStreamBuffers(): Promise<void> {
-    await cleanupStreamBuffers(this._resumableStream, () =>
-      this._ensureStreamCleanupScheduled({ idempotent: false })
-    );
+    this._resumableStream.reclaim();
   }
 
-  /** @internal Delegate to _resumableStream. Also advances the recovery
-   *  progress counter at production time (see `_maybeBumpRecoveryProgress`). */
+  /**
+   * @internal Delegate to _resumableStream.
+   *
+   * A settled tool result (`tool-output-available` / `-error` / `-denied`)
+   * is flushed to SQLite immediately rather than waiting for the packed
+   * segment to fill: it captures a completed, often non-idempotent side
+   * effect (or a user's denial), and an isolate eviction before the next
+   * batch flush would lose it — recovery would re-anchor without it and
+   * re-run the tool. The flush is also what the recovery progress marker is
+   * derived from (`_chatRecoveryProgressMarker`), so a settled result counts
+   * as forward progress the moment it lands, as it did under the old
+   * per-chunk counter. Streaming deltas keep the buffer's own packing.
+   */
   protected async _storeStreamChunk(streamId: string, body: string) {
     this._resumableStream.storeChunk(streamId, body);
     let type: string | undefined;
     try {
       type = (JSON.parse(body) as { type?: string }).type;
     } catch {
-      // non-JSON chunk body — nothing to credit
+      // non-JSON chunk body — packed with the rest
     }
-    await this._maybeBumpRecoveryProgress(type);
-  }
-
-  /** Per-isolate throttle for crediting recovery progress from mid-segment
-   *  streaming-content deltas (the shared `agents/chat` rule); reset per isolate
-   *  so the first delta after a restart always credits. */
-  private _streamProgressCredit = new StreamProgressCreditThrottle();
-
-  /** Advance the recovery-progress counter when a chunk represents genuinely
-   *  new produced content. Uses the shared host-agnostic rule
-   *  ({@link shouldCreditStreamProgress}): a milestone (started segment / settled
-   *  tool) always credits, and a long single segment's streaming deltas credit
-   *  through a time throttle so the no-progress window doesn't false-fire while
-   *  content streams across crashes. Bumped at production time, so it reflects
-   *  real forward progress and is immune to client reconnects / recovery
-   *  re-persists (which replay or re-materialize stored chunks rather than flow
-   *  through here). This is what the recovery no-progress window keys off
-   *  (#1637), and stays compaction-proof (#1628). */
-  private async _maybeBumpRecoveryProgress(
-    type: string | undefined
-  ): Promise<void> {
     if (
-      shouldCreditStreamProgress({
-        codec: aiSdkRecoveryCodec,
-        type,
-        throttle: this._streamProgressCredit,
-        now: Date.now()
-      })
+      type === "tool-output-available" ||
+      type === "tool-output-error" ||
+      type === "tool-output-denied"
     ) {
-      await this._bumpChatRecoveryProgress();
+      this._resumableStream.flushBuffer();
     }
   }
 
@@ -1746,7 +1908,6 @@ export class AIChatAgent<
       this._continuation.activeRequestId = null;
       this._continuation.activeConnectionId = null;
     }
-    void this._ensureStreamCleanupScheduled();
   }
 
   /**
@@ -1761,9 +1922,8 @@ export class AIChatAgent<
    *     `Think` and the client reducer use), replacing a hand-rolled chunk
    *     switch; it owns the `start` / `finish` / `message-metadata` handling;
    *   - (b) {@link _resolveOrphanTargetId} — the id to persist under (#1691);
-   *   - (c)+(d) upsert-by-id over the flat array, the `SessionProvider`-subset
-   *     store-write shape (`getMessage` → `updateMessage` / `appendMessage`)
-   *     that `Think._upsertMessageInHistory` implements over a Session tree.
+   *   - (c)+(d) upsert-by-id through the shared `OrphanPersistStore` shape
+   *     (`getMessage` → `updateMessage` / `appendMessage`).
    *     When a row already owns the id, the shared `reconcileOrphanPartial`
    *     merge preserves an in-place tool result rather than letting a replayed
    *     chunk re-advance it (ai-chat has an early tool-approval persist; hosts
@@ -1842,9 +2002,9 @@ export class AIChatAgent<
   }
 
   /**
-   * The orphan-persist store adapter — orphan-persist steps **(c)/(d)** route
-   * their write through this shared `OrphanPersistStore` seam (the
-   * `SessionProvider` write-subset). Backed by ai-chat's flat `this.messages`
+   * The orphan-persist store adapter. Orphan-persist steps **(c)/(d)** route
+   * through the shared `OrphanPersistStore` seam, backed by ai-chat's
+   * `this.messages`
    * array + the existing `persistMessages` whole-array write path, so
    * reconcile/sanitize/row-size/broadcast all stay intact. Each mutating call
    * is exactly one `persistMessages` invocation; `parentId` is unused (a flat
@@ -2031,41 +2191,229 @@ export class AIChatAgent<
     });
   }
 
-  private _loadMessagesFromDb(): UIMessage[] {
-    const rows =
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      [];
+  /**
+   * Lift ai-chat's legacy flat table into the default Sessions chain.
+   *
+   * Runs in `onStart` (before hydration), not in the constructor: the lift is
+   * an async import through Sessions, and the constructor does no session
+   * storage work at all.
+   *
+   * Order is read first as ids alone, then message bodies are fetched in
+   * windows bounded by row count and bytes, so a large transcript never sits
+   * in the isolate at once. Once every readable row has a copy the legacy
+   * table is DROPPED rather than renamed: keeping it would leave the object
+   * holding its history twice.
+   */
+  private async _migrateLegacyMessages(): Promise<void> {
+    const present =
+      this.ctx.storage.sql
+        .exec(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table' AND name = 'cf_ai_chat_agent_messages'`
+        )
+        .toArray().length > 0;
+    if (!present) return;
 
-    // Populate the persistence cache from DB so incremental persistence
-    // can skip SQL writes for messages already stored.
-    this._persistedMessageCache.clear();
+    // Ids and sizes only: the ordering pass must not carry message bodies.
+    const order = this.sql<{
+      id: string;
+      bytes: number;
+      created_at: string | number | null;
+    }>`
+      SELECT id, LENGTH(CAST(message AS BLOB)) AS bytes, created_at
+      FROM cf_ai_chat_agent_messages
+      ORDER BY created_at ASC, rowid ASC
+    `;
 
-    return rows
-      .map((row) => {
+    let parentId: string | null = null;
+    let imported = 0;
+    let skipped = 0;
+    let index = 0;
+    while (index < order.length) {
+      const window: typeof order = [];
+      let bytes = 0;
+      while (
+        index < order.length &&
+        window.length < LEGACY_LIFT_WINDOW_ROWS &&
+        (window.length === 0 ||
+          bytes + order[index].bytes <= LEGACY_LIFT_WINDOW_BYTES)
+      ) {
+        bytes += order[index].bytes;
+        window.push(order[index]);
+        index++;
+      }
+      const ids = JSON.stringify(window.map((row) => row.id));
+      const bodies = new Map(
+        this.sql<{ id: string; message: string }>`
+          SELECT id, message FROM cf_ai_chat_agent_messages
+          WHERE id IN (SELECT value FROM json_each(${ids}))
+        `.map((row) => [row.id, row.message] as const)
+      );
+
+      for (const row of window) {
+        const body = bodies.get(row.id);
+        if (body === undefined) {
+          skipped++;
+          continue;
+        }
         try {
-          const messageStr = row.message as string;
-          const parsed = JSON.parse(messageStr) as UIMessage;
-
-          // Structural validation: ensure required fields exist and have
-          // the correct types. This catches corrupted rows, manual tampering,
-          // or schema drift from older versions without crashing the agent.
-          if (!isValidMessageStructure(parsed)) {
+          const parsed: unknown = JSON.parse(body);
+          const message = autoTransformMessages([parsed])[0];
+          if (!message || !isValidMessageStructure(message)) {
             console.warn(
-              `[AIChatAgent] Skipping invalid message ${row.id}: ` +
+              `[AIChatAgent] Skipping invalid legacy message ${row.id}: ` +
                 "missing or malformed id, role, or parts"
             );
-            return null;
+            skipped++;
+            continue;
           }
-
-          // Cache the raw JSON keyed by message ID
-          this._persistedMessageCache.set(parsed.id, messageStr);
-          return parsed;
+          const parsedTime =
+            typeof row.created_at === "number"
+              ? row.created_at
+              : Date.parse(String(row.created_at ?? ""));
+          await this.#session.importMessage(message, {
+            parentId,
+            createdAt: Number.isFinite(parsedTime) ? parsedTime : imported
+          });
+          parentId = message.id;
+          imported++;
         } catch (error) {
-          console.error(`Failed to parse message ${row.id}:`, error);
-          return null;
+          console.error(`Failed to migrate message ${row.id}:`, error);
+          skipped++;
         }
-      })
-      .filter((msg): msg is UIMessage => msg !== null);
+      }
+    }
+
+    // Drop the source ONLY when every row actually landed. A skipped row is
+    // one that could not be parsed or imported, and dropping the table then
+    // would delete it permanently — accounting for a row is not the same as
+    // migrating it. The lift is idempotent (`importMessage` ignores ids it
+    // already has), so leaving the table means a later start retries the rows
+    // that failed rather than losing them.
+    if (skipped === 0 && imported === order.length) {
+      this.ctx.storage.sql.exec("DROP TABLE cf_ai_chat_agent_messages");
+      return;
+    }
+    console.error(
+      `[AIChatAgent] Legacy lift imported ${imported} of ${order.length} rows ` +
+        `(${skipped} skipped); leaving cf_ai_chat_agent_messages in place so ` +
+        "they remain recoverable."
+    );
+  }
+
+  /**
+   * Hydrate `this.messages` once per wake, bounded by
+   * {@link hydrationByteBudget}. This is the only transcript read on the
+   * startup path; every later change arrives through the Sessions change
+   * feed.
+   */
+  private async _hydrateMessages(): Promise<void> {
+    const budget = this.hydrationByteBudget;
+    const stored =
+      Number.isFinite(budget) && budget > 0
+        ? (await this.#session.getRecentHistory(budget)).messages
+        : await this.#session.getHistory();
+
+    const messages: UIMessage[] = [];
+    for (const message of stored as unknown[]) {
+      if (!isValidMessageStructure(message)) {
+        console.warn(
+          `[AIChatAgent] Skipping invalid message ${(message as { id?: unknown } | null)?.id}: ` +
+            "missing or malformed id, role, or parts"
+        );
+        continue;
+      }
+      messages.push(message);
+    }
+    // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
+    this.messages = autoTransformMessages(messages);
+  }
+
+  /**
+   * Mirror `this.messages` from the Sessions change feed. Every durable write
+   * dispatches here synchronously, so write sites never hand-patch the
+   * cache.
+   */
+  #subscribeToSessionChanges(): void {
+    this.sessions.subscribe(async (event) => {
+      if (event.sessionId !== this.#session.sessionId) return;
+      switch (event.type) {
+        case "append": {
+          if (!event.inserted) return;
+          const message = this.#messageForCache(event.message);
+          const index = this.messages.findIndex((m) => m.id === message.id);
+          if (index === -1) this.messages.push(message);
+          else this.messages[index] = message;
+          return;
+        }
+        case "update": {
+          const index = this.messages.findIndex(
+            (m) => m.id === event.message.id
+          );
+          if (index === -1) return;
+          this.messages[index] = this.#messageForCache(event.message);
+          return;
+        }
+        case "delete": {
+          const removed = new Set(event.messageIds);
+          this.messages = this.messages.filter((m) => !removed.has(m.id));
+          return;
+        }
+        case "clear": {
+          this.messages = [];
+          return;
+        }
+        default:
+          return;
+      }
+    });
+  }
+
+  /**
+   * Turn a stored row into its in-memory form. A stored row is exactly what
+   * the write returned, so this never costs a re-read.
+   */
+  #messageForCache(message: SessionMessage): UIMessage {
+    const stored = message as UIMessage;
+    return autoTransformMessages([stored])[0] ?? stored;
+  }
+
+  /**
+   * Serialize the whole transcript as a JSON array of messages without ever
+   * holding it in one string: `historyBatches()` yields bounded batches and
+   * each batch is encoded straight into the response body.
+   */
+  #streamMessagesAsJson(): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    const batches = this.#session.historyBatches();
+    let opened = false;
+    let first = true;
+    return new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        if (!opened) {
+          opened = true;
+          controller.enqueue(encoder.encode("["));
+          return;
+        }
+        const next = await batches.next();
+        if (next.done) {
+          controller.enqueue(encoder.encode("]"));
+          controller.close();
+          return;
+        }
+        let chunk = "";
+        for (const message of autoTransformMessages(
+          next.value as UIMessage[]
+        )) {
+          chunk += `${first ? "" : ","}${JSON.stringify(message)}`;
+          first = false;
+        }
+        if (chunk.length > 0) controller.enqueue(encoder.encode(chunk));
+      },
+      cancel: async () => {
+        await batches.return?.(undefined);
+      }
+    });
   }
 
   private async _tryCatchChat<T>(fn: () => T | Promise<T>) {
@@ -4001,14 +4349,7 @@ export class AIChatAgent<
   }
 
   private _getAgentToolStreamId(requestId: string): string | undefined {
-    const rows = this.sql<AIChatStreamMetadataRow>`
-      select id, status, request_id
-      from cf_ai_chat_stream_metadata
-      where request_id = ${requestId}
-      order by rowid desc
-      limit 1
-    `;
-    return rows[0]?.id;
+    return this._resumableStream.latestStreamInfoForRequest(requestId)?.id;
   }
 
   private _getAgentToolStoredChunks(
@@ -4338,26 +4679,35 @@ export class AIChatAgent<
    * recomputed from the live, mutable transcript. Compaction collapses older
    * assistant messages into a summary, lowering the count — so a turn that had
    * genuinely advanced could read as "no progress" between attempts and exhaust
-   * its budget prematurely (#1628). Instead we read a durably-persisted counter
-   * that only ever increments — bumped at production time when new content is
-   * streamed (see `_storeStreamChunk` / `_maybeBumpRecoveryProgress`), which is
-   * genuine forward progress and is immune to client reconnects / recovery
-   * re-persists — so compaction can never lower it and a reconnect can't fake
-   * it (#1637).
+   * its budget prematurely (#1628). It then became a KV counter bumped per
+   * credited chunk. It is now derived from the stream log the chunks were
+   * already flushed to (`ResumableStream.progressMarker`): the log only grows
+   * when new content lands durably, a reconnect replay or a recovery
+   * re-persist reads it without appending (#1637), and compaction rewrites
+   * the transcript, not the log. Nothing is written per chunk.
+   *
+   * The pre-derivation KV counter is folded in once per isolate, so a marker
+   * an in-flight incident already recorded is never read lower after the
+   * upgrade.
    */
   private async _chatRecoveryProgressMarker(): Promise<number> {
-    // Storage read lives in the shared engine (agents/chat); this is the
-    // package binding, symmetric with `Think`.
-    return readChatRecoveryProgress(this.ctx.storage);
+    // Memoized as the promise, not a flag: two concurrent readers both wait
+    // for the seed to land, so neither can hand the engine an unseeded
+    // marker as an incident's work baseline. A failed read is not cached:
+    // the next evaluation retries it instead of failing for the isolate's
+    // life on a transient storage error.
+    this._progressSeed ??= readChatRecoveryProgress(this.ctx.storage).then(
+      (legacy) => this._resumableStream.seedProgress(legacy),
+      (error: unknown) => {
+        this._progressSeed = null;
+        throw error;
+      }
+    );
+    await this._progressSeed;
+    return this._resumableStream.progressMarker();
   }
 
-  /** Advance the durable recovery-progress counter. Called from
-   *  `_maybeBumpRecoveryProgress` when new content is streamed (real,
-   *  reconnect-immune forward progress). The increment lives in the shared
-   *  engine (agents/chat); this is the package binding. */
-  private async _bumpChatRecoveryProgress(): Promise<void> {
-    return bumpChatRecoveryProgress(this.ctx.storage);
-  }
+  private _progressSeed: Promise<void> | null = null;
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
    *  isolate so the first forwarded chunk after a restart always credits. */
@@ -4367,14 +4717,16 @@ export class AIChatAgent<
    * N9: forwarding a sub-agent's chunks IS forward progress for this parent
    * turn, so credit the parent's recovery progress marker — otherwise a parent
    * whose turn merely `await`s a child banks no progress of its own and its
-   * no-progress window exhausts while the child is healthily streaming. Only
+   * no-progress window exhausts while the child is healthily streaming. The
+   * child's output goes to clients, not to this object's stream log, so the
+   * derived marker cannot see it; this is the one explicit credit left. Only
    * invoked after a child actually produced output (see
    * `_forwardAgentToolStream`), so a silent child still lets the parent exhaust.
    * Throttled (and reset per isolate) so we never write storage per token.
    */
   protected override async _onAgentToolStreamProgress(): Promise<void> {
     if (this._agentToolStreamProgress.shouldCredit(Date.now())) {
-      await this._bumpChatRecoveryProgress();
+      this._resumableStream.creditProgress();
     }
   }
 
@@ -4410,14 +4762,8 @@ export class AIChatAgent<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
-      scheduleRecovery: async (callback, data, reason, delaySeconds) => {
-        await this.schedule(
-          delaySeconds,
-          callback,
-          data,
-          chatRecoverySchedulePolicy(reason)
-        );
-      },
+      scheduleRecovery: (callback, data, reason, delaySeconds) =>
+        this._enqueueChatRecovery(callback, data, reason, delaySeconds),
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
@@ -4663,7 +5009,6 @@ export class AIChatAgent<
         this._persistOrphanedStream(streamId),
       completeRecoveredStream: (streamId) => {
         this._resumableStream.complete(streamId);
-        void this._ensureStreamCleanupScheduled();
       },
       dispatchRecoveredTurn: (input) => this._dispatchRecoveredChatTurn(input)
     } satisfies ChatFiberWakeHooks<AIChatRecoveryClassification>);
@@ -4684,14 +5029,8 @@ export class AIChatAgent<
   ): ResolvedRecoveryStream {
     let streamId = "";
     if (requestId) {
-      const rows = this.sql<{ id: string }>`
-        SELECT id FROM cf_ai_chat_stream_metadata
-        WHERE request_id = ${requestId}
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (rows.length > 0) {
-        streamId = rows[0].id;
-      }
+      streamId =
+        this._resumableStream.latestStreamInfoForRequest(requestId)?.id ?? "";
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {
       streamId = this._resumableStream.activeStreamId ?? "";
@@ -4844,6 +5183,17 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
+    await this._dispatchChatRecovery(
+      "_chatRecoveryContinue",
+      data,
+      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+    );
+  }
+
+  protected async _chatRecoveryContinueDetached(
+    data?: ChatRecoveryContinueData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -4918,6 +5268,7 @@ export class AIChatAgent<
       // re-enters inference (`_repairInterruptedToolsBeforeTurn`), so the
       // recovered transcript is settled and the next `convertToModelMessages`
       // doesn't 400 with `AI_MissingToolResultsError`.
+      onTurnStarted?.();
       const result = await this.continueLastTurn();
       await this._updateChatRecoveryIncident(
         data?.incidentId,
@@ -4930,8 +5281,9 @@ export class AIChatAgent<
       );
     } catch (error) {
       // AIChatAgent otherwise has no continuation `catch` (a thrown error
-      // propagates to `Agent._executeScheduleCallback`). The ONLY case we
-      // intercept is an OOM thrown out of the turn (#1825): route it through the
+      // propagates to the driving Task attempt, or the routed one-shot
+      // schedule row). The ONLY case we intercept is an OOM thrown out of
+      // the turn (#1825): route it through the
       // tight OOM-retry budget, and rethrow everything else so the existing
       // behavior is byte-identical for non-OOM errors.
       if (await this._handleRecoveryOom("_chatRecoveryContinue", data, error)) {
@@ -5115,28 +5467,35 @@ export class AIChatAgent<
    * Two residual at-least-once edges, both deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
-   *    invocation — every production scheduler carries one): the synthesized
-   *    incident can't be persisted (no key), so the guard can't arm.
+   *    invocation — every production recovery enqueue carries one): the
+   *    synthesized incident can't be persisted (no key), so the guard can't
+   *    arm.
    *  • The record is swept AGAIN between two alarms (the guard re-persists on
    *    the first, so this needs a second independent sweep) — vanishingly
    *    unlikely.
    */
   /**
-   * Recovery continuation callbacks the alarm-boundary OOM circuit breaker may
-   * back off / purge (#1825). See `Agent._cf_handleAlarmMemoryLimitReset`.
+   * Host memory-limit policy hook (#1825), dispatched structurally by
+   * Lifecycle's circuit breaker — protected because it is framework
+   * machinery, not part of the public chat API. Tasks applies the breaker to
+   * root recovery runs; the routed dynamic-agent fallback applies it to
+   * `recoveryLoop` schedule rows (see `RecoveryLoopScheduleOptions`). At the
+   * strike budget this hook seals active incidents via
+   * {@link _cf_sealMemoryLimitedRecovery}.
    */
-  protected override _cf_recoveryAlarmCallbacks(): string[] {
-    return ["_chatRecoveryContinue", "_chatRecoveryRetry"];
+  protected async onAlarmMemoryLimit(context: { readonly sealed: boolean }) {
+    if (!context.sealed) return;
+    await this._cf_sealMemoryLimitedRecovery();
   }
 
   /**
-   * Seal any still-live recovery incident as an out-of-memory exhaustion when
-   * the alarm circuit breaker trips at its strike budget (#1825). Runs at the
-   * outermost alarm frame (post-unwind), so the terminal banner / `onExhausted`
-   * and the sealed-incident write can land where mid-turn writes OOMed. Reuses
-   * the shared give-up spine via the recovery engine.
+   * Seal any still-live recovery incident as an out-of-memory exhaustion
+   * when the alarm circuit breaker trips at its strike budget (#1825). Runs
+   * at the outermost alarm frame (post-unwind), so the terminal banner /
+   * `onExhausted` and the sealed-incident write can land where mid-turn
+   * writes OOMed. Reuses the shared give-up spine via the recovery engine.
    */
-  protected override async _cf_sealMemoryLimitedRecovery(): Promise<void> {
+  private async _cf_sealMemoryLimitedRecovery(): Promise<void> {
     const active = await listActiveChatRecoveryIncidents(this.ctx.storage);
     for (const { incident } of active) {
       const callback: ChatRecoveryScheduleCallback =
@@ -5252,6 +5611,17 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
+    await this._dispatchChatRecovery(
+      "_chatRecoveryRetry",
+      data,
+      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+    );
+  }
+
+  protected async _chatRecoveryRetryDetached(
+    data?: ChatRecoveryRetryData,
+    onTurnStarted?: () => void
+  ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -5322,6 +5692,7 @@ export class AIChatAgent<
       // (`_repairInterruptedToolsBeforeTurn`). The retry path normally re-runs
       // an unanswered user-message tail (no assistant orphan to repair), so that
       // is a defensive no-op here, but keeps both recovery entrypoints converged.
+      onTurnStarted?.();
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody
@@ -5367,71 +5738,105 @@ export class AIChatAgent<
     );
   }
 
+  /**
+   * The turn whose finished stream is waiting for its message write: the
+   * cutover rides on the instance, not on an argument, so a subclass that
+   * overrides {@link persistMessages} and calls `super` with only the
+   * messages still lands the message, the stream's settlement and the
+   * deletion of its rows in one transaction. Consumed by the first persist
+   * that carries the turn's message; cleared when the turn ends.
+   */
+  #pendingCutover: {
+    streamId: string;
+    messageId: string;
+    discard: boolean;
+  } | null = null;
+
   async persistMessages(
     messages: UIMessage[],
     excludeBroadcastIds: string[] = [],
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
   ) {
-    const mergedMessages = reconcileMessages(messages, this.messages, (msg) =>
+    // Snapshot the pre-write transcript: `this.messages` is mirrored from the
+    // change feed and therefore mutates as the loop below writes.
+    const priorMessages = [...this.messages];
+    const priorById = new Map(priorMessages.map((m) => [m.id, m]));
+    const mergedMessages = reconcileMessages(messages, priorMessages, (msg) =>
       this._sanitizeMessageForPersistence(msg)
     );
 
-    // Persist only new or changed messages (incremental persistence).
-    // Compares serialized JSON against a cache of last-persisted versions.
+    const toWrite: UIMessage[] = [];
     for (const message of mergedMessages) {
-      const sanitizedMessage = this._sanitizeMessageForPersistence(message);
-      const resolved = resolveToolMergeId(sanitizedMessage, this.messages);
-      const safe = this._enforceRowSizeLimit(resolved);
-      const json = JSON.stringify(safe);
-
-      // Skip SQL write if the message is identical to what's already persisted
-      if (this._persistedMessageCache.get(safe.id) === json) {
-        continue;
-      }
-
-      this.sql`
-        insert into cf_ai_chat_agent_messages (id, message)
-        values (${safe.id}, ${json})
-        on conflict(id) do update set message = excluded.message
-      `;
-      this._persistedMessageCache.set(safe.id, json);
+      const resolved = resolveToolMergeId(
+        this._sanitizeMessageForPersistence(message),
+        priorMessages
+      );
+      // The live array mirrors storage, so a message serializing to what it
+      // already holds is already stored. Comparing here is a string compare;
+      // letting Sessions discover it would cost a row read and, for media, a
+      // decode and hash of every payload on every turn.
+      const prior = priorById.get(resolved.id);
+      if (prior && JSON.stringify(prior) === JSON.stringify(resolved)) continue;
+      toWrite.push(resolved);
+    }
+    // The cutover: a persist that carries the finished turn's message
+    // lands every changed message in the same transaction that settles the
+    // stream and drops its rows. A persist of other messages (an override
+    // writing its own first) takes the plain path and leaves the cutover
+    // pending. The change feed (and auto-compaction) run once the
+    // transaction has committed.
+    const cutover = this.#pendingCutover;
+    if (
+      cutover &&
+      mergedMessages.some((message) => message.id === cutover.messageId)
+    ) {
+      this.#pendingCutover = null;
+      const sync = this.#session.__DO_NOT_USE_WILL_BREAK__sync();
+      const afters: Array<() => Promise<void>> = [];
+      this._resumableStream.cutover(
+        cutover.streamId,
+        () => {
+          for (const message of toWrite)
+            afters.push(sync.upsert(message).after);
+        },
+        { discard: cutover.discard }
+      );
+      for (const after of afters) await after();
+    } else {
+      for (const message of toWrite) await this.#session.upsertMessage(message);
     }
 
-    // Reconcile: delete DB rows not present in the incoming message set.
-    // Only safe when the incoming set is a subset of the server state
-    // (e.g. regenerate() trims the last assistant message). When the
-    // client appends new messages (IDs unknown to the server), it may
-    // not have the full history, so deleting "missing" rows would
-    // destroy server-generated assistant messages the client hasn't
-    // seen yet.
-    // This MUST use mergedMessages (post-merge IDs) because
-    // reconcileMessages can remap client IDs to server IDs.
+    // Regeneration can submit a strict subset of the server transcript. Keep
+    // the old subset guard, but delete through Sessions so descendants splice
+    // to their grandparent instead of breaking the active path.
     if (options?._deleteStaleRows) {
-      const serverIds = new Set(this.messages.map((m) => m.id));
-      const isSubsetOfServer = mergedMessages.every((m) => serverIds.has(m.id));
-
+      const serverIds = new Set(priorMessages.map((message) => message.id));
+      const isSubsetOfServer = mergedMessages.every((message) =>
+        serverIds.has(message.id)
+      );
       if (isSubsetOfServer) {
-        const keepIds = new Set(mergedMessages.map((m) => m.id));
-        const allDbRows =
-          this.sql<{ id: string }>`
-            select id from cf_ai_chat_agent_messages
-          ` || [];
-        const staleIds = allDbRows
-          .map((row) => row.id)
-          .filter((id) => !keepIds.has(id));
-        this._deleteMessagesByIds(staleIds);
+        const keepIds = new Set(mergedMessages.map((message) => message.id));
+        await this._deleteMessagesByIds(
+          this.messages
+            .map((message) => message.id)
+            .filter((id) => !keepIds.has(id))
+        );
       }
     }
 
-    // Enforce maxPersistedMessages: delete oldest messages if over the limit
+    // Retention counts STORED rows, not the hydrated window: a transcript
+    // larger than the hydration budget holds rows this.messages never saw.
     if (this.maxPersistedMessages != null) {
-      this._enforceMaxPersistedMessages();
+      const stored = await this.#session.getHistoryRowStats();
+      const excess = stored.length - this.maxPersistedMessages;
+      if (excess > 0) {
+        await this._deleteMessagesByIds(
+          stored.slice(0, excess).map((row) => row.id)
+        );
+      }
     }
 
-    // refresh in-memory messages
-    const persisted = this._loadMessagesFromDb();
-    this.messages = autoTransformMessages(persisted);
     this._broadcastChatMessage(
       {
         messages: mergedMessages,
@@ -5488,45 +5893,34 @@ export class AIChatAgent<
   }
 
   /**
-   * Sanitizes a message for persistence by removing ephemeral provider-specific
-   * data that should not be stored or sent back in subsequent requests.
+   * Applies the ai-chat-specific normalization Sessions does not do.
+   *
+   * Sessions already strips OpenAI ephemeral fields (itemId,
+   * reasoningEncryptedContent) and drops truly empty reasoning parts on every
+   * write, so those steps are not repeated here.
    *
    * Pipeline:
    *
-   * 1. **Strip OpenAI ephemeral fields**: The AI SDK's @ai-sdk/openai provider
-   *    (v2.0.x+) defaults to using OpenAI's Responses API which assigns unique
-   *    itemIds and reasoningEncryptedContent to message parts. When persisted
-   *    and sent back, OpenAI rejects duplicate itemIds.
-   *
-   * 2. **Truncate provider-executed tool payloads**: Server-side tool
+   * 1. **Truncate provider-executed tool payloads**: Server-side tool
    *    executions (e.g. Anthropic code_execution, text_editor) can produce
    *    200KB+ payloads in `input` and `output`. These are truncated since the
    *    model has already consumed the results.
    *
-   * 3. **Filter truly empty reasoning parts**: After stripping, reasoning parts
-   *    with no text and no remaining providerMetadata are removed. Parts that
-   *    still carry providerMetadata (e.g. Anthropic's redacted_thinking blocks
-   *    with providerMetadata.anthropic.redactedData) are preserved, as they
-   *    contain data required for round-tripping with the provider API.
-   *
-   * 4. **User hook**: Calls the overridable `sanitizeMessageForPersistence()`
+   * 2. **User hook**: Calls the overridable `sanitizeMessageForPersistence()`
    *    method, allowing subclasses to apply custom transformations.
    *
    * @param message - The message to sanitize
-   * @returns A new message with ephemeral provider data removed
+   * @returns A new message with ai-chat's normalization applied
    */
   private _sanitizeMessageForPersistence(message: UIMessage): UIMessage {
-    // Base sanitization: strip OpenAI ephemeral fields + filter empty reasoning parts
-    const baseSanitized = sanitizeMessage(message);
-
     // ai-chat-specific: truncate large payloads in provider-executed tool parts
-    const parts = baseSanitized.parts.map((part) =>
+    const parts = message.parts.map((part) =>
       AIChatAgent._truncateProviderExecutedToolPayloads(part)
     ) as UIMessage["parts"];
 
     // Run user-overridable hook last
     return this.sanitizeMessageForPersistence({
-      ...baseSanitized,
+      ...message,
       parts
     });
   }
@@ -5628,73 +6022,12 @@ export class AIChatAgent<
   }
 
   /**
-   * Delete the given message rows from SQLite in batched `IN (...)` queries
-   * and evict them from the persistence cache. Batches stay within the SQLite
-   * 100 bound-parameter limit. No-op for an empty list.
-   * @internal
+   * Delete message rows through Sessions. The change feed removes them from
+   * `this.messages`.
    */
-  private _deleteMessagesByIds(ids: string[]) {
-    for (let i = 0; i < ids.length; i += MAX_BOUND_PARAMS) {
-      const batch = ids.slice(i, i + MAX_BOUND_PARAMS);
-      const strings = buildInClauseStrings(
-        "delete from cf_ai_chat_agent_messages where id in ",
-        batch.length
-      );
-      this.sql(strings, ...batch);
-      for (const id of batch) {
-        this._persistedMessageCache.delete(id);
-      }
-    }
-  }
-
-  /**
-   * Deletes oldest messages from SQLite when the count exceeds maxPersistedMessages.
-   * Called after each persist to keep storage bounded.
-   */
-  private _enforceMaxPersistedMessages() {
-    if (this.maxPersistedMessages == null) return;
-
-    const countResult = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_ai_chat_agent_messages
-    `;
-    const count = countResult?.[0]?.cnt ?? 0;
-
-    if (count <= this.maxPersistedMessages) return;
-
-    const excess = count - this.maxPersistedMessages;
-
-    // Delete the oldest messages (by created_at)
-    // Also remove them from the persistence cache
-    const toDelete = this.sql<{ id: string }>`
-      select id from cf_ai_chat_agent_messages 
-      order by created_at asc 
-      limit ${excess}
-    `;
-
-    if (toDelete && toDelete.length > 0) {
-      this._deleteMessagesByIds(toDelete.map((row) => row.id));
-    }
-  }
-
-  /**
-   * Enforces SQLite row size limits by compacting tool outputs and text parts
-   * when a serialized message exceeds the safety threshold (1.8MB).
-   *
-   * Only fires in pathological cases (extremely large tool outputs or text).
-   * Returns the message unchanged if it fits within limits.
-   *
-   * Compaction strategy:
-   * 1. Compact tool outputs over 1KB (replace with LLM-friendly summary)
-   * 2. If still too big, truncate text parts from oldest to newest
-   * 3. Add metadata so clients can detect compaction
-   *
-   * @param message - The message to check
-   * @returns The message, compacted if necessary
-   */
-  private _enforceRowSizeLimit(message: UIMessage): UIMessage {
-    return enforceRowSizeLimit(message, {
-      warn: (m) => console.warn(`[AIChatAgent] ${m}`)
-    });
+  private async _deleteMessagesByIds(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await this.#session.deleteMessages(ids);
   }
 
   /**
@@ -5815,18 +6148,18 @@ export class AIChatAgent<
           ...message,
           parts: updatedParts
         });
-        const safe = this._enforceRowSizeLimit(updatedMessage);
-        const json = JSON.stringify(safe);
-
-        this.sql`
-          update cf_ai_chat_agent_messages 
-          set message = ${json}
-          where id = ${message.id}
-        `;
-        this._persistedMessageCache.set(message.id, json);
-
-        const persisted = this._loadMessagesFromDb();
-        this.messages = autoTransformMessages(persisted);
+        // The change feed patches `this.messages`. A `null` result means the
+        // row is not in storage (nothing to mirror), so patch the live view
+        // directly to keep the in-memory transcript consistent.
+        const stored = await this.#session.updateMessage(updatedMessage);
+        if (!stored) {
+          const index = this.messages.findIndex(
+            (candidate) => candidate.id === updatedMessage.id
+          );
+          if (index !== -1) {
+            this.messages[index] = autoTransformMessages([updatedMessage])[0];
+          }
+        }
       }
     }
 
@@ -6104,7 +6437,7 @@ export class AIChatAgent<
       if (done) {
         // reader.cancel() resolves read() with { done: true } — check abort
         if (abortSignal?.aborted) break;
-        this._completeStream(streamId);
+        this._finishStream(streamId);
         streamCompleted.value = true;
         this._broadcastChatMessage({
           body: "",
@@ -6240,15 +6573,10 @@ export class AIChatAgent<
                 parts: [...this._streamingMessage.parts]
               };
               const sanitized = this._sanitizeMessageForPersistence(snapshot);
-              const json = JSON.stringify(sanitized);
-              this.sql`
-                INSERT INTO cf_ai_chat_agent_messages (id, message)
-                VALUES (${sanitized.id}, ${json})
-                ON CONFLICT(id) DO UPDATE SET message = excluded.message
-              `;
+              const stored = await this.#session.upsertMessage(sanitized);
               // Track that we persisted early so stream completion can update
               // in place rather than appending a duplicate.
-              this._approvalPersistedMessageId = sanitized.id;
+              this._approvalPersistedMessageId = stored.message.id;
             }
 
             // Cross-message tool output fallback:
@@ -6465,7 +6793,7 @@ export class AIChatAgent<
 
     // If we exited due to abort, send a done signal so clients know the stream ended
     if (!streamCompleted.value) {
-      this._completeStream(streamId);
+      this._finishStream(streamId);
       streamCompleted.value = true;
       this._broadcastChatMessage({
         body: "",
@@ -6558,7 +6886,7 @@ export class AIChatAgent<
         );
 
         // Mark the stream as completed
-        this._completeStream(streamId);
+        this._finishStream(streamId);
         streamCompleted.value = true;
         // Send final completion signal
         this._broadcastChatMessage({
@@ -6592,7 +6920,7 @@ export class AIChatAgent<
         { type: "text-end", id },
         continuation
       );
-      this._completeStream(streamId);
+      this._finishStream(streamId);
       streamCompleted.value = true;
       this._broadcastChatMessage({
         body: "",
@@ -6833,6 +7161,19 @@ export class AIChatAgent<
             }
           }
 
+          // The cutover: when this turn's stream is awaiting settlement, the
+          // persist that carries this turn's message settles it and drops
+          // its rows in one transaction (see `#pendingCutover`). Agent-tool
+          // child turns keep their rows (the parent tails the stored chunks
+          // after completion); the next start() reclaims them.
+          this.#pendingCutover =
+            this._resumableStream.pendingCutoverId === streamId
+              ? {
+                  streamId,
+                  messageId: earlyPersistedId ?? message.id,
+                  discard: !this._agentToolRunsByRequestId.get(id)
+                }
+              : null;
           if (message.parts.length > 0) {
             if (earlyPersistedId) {
               // Message already exists in this.messages from the early persist.
@@ -6878,6 +7219,11 @@ export class AIChatAgent<
               );
             }
           }
+          // Nothing to persist (or the persist threw, or an override never
+          // reached the session write): settle the stream so it is not
+          // mistaken for an interrupted turn.
+          this.#pendingCutover = null;
+          this._resumableStream.finalizePending();
 
           this._pendingChatResponseResults.push({
             message,
@@ -6890,6 +7236,8 @@ export class AIChatAgent<
           });
           return streamResult;
         } finally {
+          this.#pendingCutover = null;
+          this._resumableStream.finalizePending();
           // The streamed assistant message (with all tool parts) is now
           // persisted: clear the stream-active gate and re-run the
           // auto-continuation barrier for a continuation it held (#1650). This

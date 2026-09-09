@@ -1,5 +1,13 @@
 # Multi AI Chat
 
+> **A note on the pattern.** This example works and demonstrates the
+> full sub-agent routing surface, but for many long-lived chats per
+> user we now recommend one top-level Durable Object per chat plus a
+> per-user push-based index instead of facets — see
+> [`examples/next/chats`](../next/chats) and
+> [When to use dynamic agents](../../docs/agents/sub-agents.md#when-to-use-dynamic-agents)
+> in the docs.
+
 Multi-session AI chat built on the sub-agent routing primitive. A
 single `Inbox` Durable Object owns the chat list + per-user shared
 memory; each chat is a **facet** of that inbox — its own

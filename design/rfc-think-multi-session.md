@@ -1,8 +1,17 @@
 # RFC: Think Multi-Session via Composition
 
-Status: proposed
+Status: rejected
 
-Supersedes the "Multi-Session Support" section of [`think-sessions.md`](./think-sessions.md) (the unimplemented `SessionManager`-inside-Think plan).
+Replaced by
+[`rfc-user-chat-durable-objects.md`](./rfc-user-chat-durable-objects.md), which
+uses one top-level Durable Object per user-visible chat. A deployed routing
+spike showed that the User Durable Object can return a Chat Durable Object's
+WebSocket upgrade without receiving subsequent Chat frames, so chats do not
+need facet-backed routing.
+
+This RFC superseded the "Multi-Session Support" section of
+[`think-sessions.md`](./think-sessions.md), the unimplemented
+`SessionManager`-inside-Think plan.
 
 ## Summary
 

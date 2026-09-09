@@ -140,7 +140,7 @@ packages/*/docs
 
 # cloudflare/wrangler
 .wrangler
-.wrangler-*-state
+.wrangler-*
 .dev.vars
 
 # e2e recovery harness miniflare/SQLite state
@@ -166,3 +166,4 @@ test-results/
 
 # npm artifacts (repo uses pnpm)
 package-lock.json
+!examples/next/harnesses/pi/vendor/pi-dev/*.tgz

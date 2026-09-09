@@ -51,7 +51,7 @@
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "valibot": "1.4.1",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
@@ -117,6 +117,31 @@
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js",
       "require": "./dist/client.js"
+    },
+    "./routing": {
+      "types": "./dist/routing/index.d.ts",
+      "import": "./dist/routing/index.js",
+      "require": "./dist/routing/index.js"
+    },
+    "./streams": {
+      "types": "./dist/streams/index.d.ts",
+      "import": "./dist/streams/index.js",
+      "require": "./dist/streams/index.js"
+    },
+    "./context": {
+      "types": "./dist/context/index.d.ts",
+      "import": "./dist/context/index.js",
+      "require": "./dist/context/index.js"
+    },
+    "./sessions": {
+      "types": "./dist/sessions/index.d.ts",
+      "import": "./dist/sessions/index.js",
+      "require": "./dist/sessions/index.js"
+    },
+    "./tasks": {
+      "types": "./dist/tasks/index.d.ts",
+      "import": "./dist/tasks/index.js",
+      "require": "./dist/tasks/index.js"
     },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
@@ -192,16 +217,6 @@
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js",
       "require": "./dist/workflows.js"
-    },
-    "./experimental/memory/session": {
-      "types": "./dist/experimental/memory/session/index.d.ts",
-      "import": "./dist/experimental/memory/session/index.js",
-      "require": "./dist/experimental/memory/session/index.js"
-    },
-    "./experimental/memory/utils": {
-      "types": "./dist/experimental/memory/utils/index.d.ts",
-      "import": "./dist/experimental/memory/utils/index.js",
-      "require": "./dist/experimental/memory/utils/index.js"
     },
     "./experimental/webmcp": {
       "types": "./dist/experimental/webmcp.d.ts",

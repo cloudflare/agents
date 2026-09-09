@@ -653,6 +653,50 @@ describe("stateless ChannelHost", () => {
     expect(requestApproval).toHaveBeenCalledWith(destination, approval);
   });
 
+  it("rejects malformed outbound surfaces before a custom Channel sees them", async () => {
+    const deliver = vi.fn(delivered);
+    const stream = vi.fn(delivered);
+    const requestApproval = vi.fn(delivered);
+    const isAvailable = vi.fn(async () => true);
+    const channelHost = host({
+      outbound: { deliver, stream, requestApproval, isAvailable }
+    });
+    const malformed = {
+      ...surface,
+      channelKey: "outbound",
+      label: " "
+    };
+    const cancel = vi.fn();
+    const chunks = new ReadableStream({ cancel });
+
+    await expect(
+      channelHost.deliver(malformed, { markdown: "Hello" })
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "CHANNEL_SURFACE_INVALID" }
+    });
+    await expect(
+      channelHost.requestApproval(malformed, {
+        interactionId: "approval-1",
+        request: { summary: "Proceed?", input: {} }
+      })
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "CHANNEL_SURFACE_INVALID" }
+    });
+    await expect(channelHost.isAvailable(malformed)).resolves.toBe(false);
+    await expect(channelHost.stream(malformed, chunks)).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "CHANNEL_SURFACE_INVALID" }
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(stream).not.toHaveBeenCalled();
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(isAvailable).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it("resolves a contact surface directly through the identity Channel key", () => {
     const first = vi.fn(() => {
       throw new Error("must not inspect a different configured Channel");

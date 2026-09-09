@@ -1,9 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DurableObject } from "cloudflare:workers";
 
-import type { AlarmContribution } from "./capability-runner";
+import type { MemoryLimitContext } from "./capability-runner";
 import type { Lifecycle } from "./durable-object-lifecycle";
 import type { Connection } from "./types";
+import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
 
 /**
  * A Durable Object that has installed the Agents SDK Lifecycle.
@@ -21,7 +22,21 @@ export interface LifecycleObject<
   onStart?(props?: Props): void | Promise<void>;
   onRequest?(request: Request): Response | Promise<Response>;
   onAlarm?(): void | Promise<void>;
-  getNextAlarm?(): AlarmContribution | Promise<AlarmContribution>;
+  onJob?(
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void>;
+  /**
+   * Host domain policy applied when the alarm memory-limit circuit breaker
+   * records a strike (#1825), after every capability's `onMemoryLimit` hook.
+   *
+   * Lifecycle dispatches host hooks structurally through its internal host
+   * cast, so TS visibility is the host's to choose: a framework host whose
+   * implementation is internal machinery declares the hook `protected` (the
+   * pattern — see `AIChatAgent`/`Think`) and keeps the real work in a
+   * `private _cf_`-prefixed method, without falling out of this contract at
+   * runtime.
+   */
+  onAlarmMemoryLimit?(context: MemoryLimitContext): void | Promise<void>;
 }
 
 /** Values associated with the currently executing Lifecycle host. */

@@ -42,6 +42,13 @@ interface ChatRecoveryTestStub {
     Array<Array<{ name: string; description?: string }> | undefined>
   >;
   getScheduleCountForCallback(callback: string): Promise<number>;
+  getRecoveryTransportCountsForTest(
+    callback: string
+  ): Promise<{ tasks: number; schedules: number }>;
+  testRecoveryDispatchHandoffForTest(options: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    phase: "before" | "after";
+  }): Promise<{ threw: boolean; tasks: number; schedules: number }>;
   getRunFiberCountForTest(): Promise<number>;
   runAlarmForTest(): Promise<void>;
   setSimulateSupersededIsolateForTest(value: boolean): Promise<void>;
@@ -768,6 +775,23 @@ describe("onChatRecovery", () => {
     expect(afterPersist).toBe(afterFlush);
   });
 
+  it("keeps pre-handoff failure on the current Task and replaces only post-handoff failure", async () => {
+    for (const callback of [
+      "_chatRecoveryContinue",
+      "_chatRecoveryRetry"
+    ] as const) {
+      const before = await (
+        await getTestAgent(`${callback}-before-${crypto.randomUUID()}`)
+      ).testRecoveryDispatchHandoffForTest({ callback, phase: "before" });
+      expect(before).toEqual({ threw: true, tasks: 1, schedules: 0 });
+
+      const after = await (
+        await getTestAgent(`${callback}-after-${crypto.randomUUID()}`)
+      ).testRecoveryDispatchHandoffForTest({ callback, phase: "after" });
+      expect(after).toEqual({ threw: false, tasks: 2, schedules: 0 });
+    }
+  });
+
   it("recovers when the continuation alarm fires on a superseded isolate", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
@@ -783,6 +807,11 @@ describe("onChatRecovery", () => {
     await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-stale");
     await agentStub.triggerFiberRecovery();
     expect(await agentStub.getRunFiberCountForTest()).toBe(0);
+    const transport = await agentStub.getRecoveryTransportCountsForTest(
+      "_chatRecoveryContinue"
+    );
+    expect(transport.schedules).toBe(0);
+    expect(transport.tasks).toBeGreaterThanOrEqual(1);
 
     // Fire the continuation alarm on the superseded isolate. The first storage
     // op throws for the whole invocation; `_executeScheduleCallback` would burn
@@ -830,15 +859,15 @@ describe("onChatRecovery", () => {
     expect(await agentStub.getRunFiberCountForTest()).toBe(0);
 
     await agentStub.runAlarmForTest();
-    // The in-process retries actually ran (this is not the immediate-defer
-    // supersede path) ...
+    // Unlike an immediately condemned code-update isolate, a connection loss
+    // enters the Task step's durable retry budget. One alarm performs one
+    // attempt and leaves the run waiting rather than burning retries inline.
     expect(await agentStub.getSupersededThrowsForTest()).toBeGreaterThanOrEqual(
-      2
+      1
     );
 
-    // ... and on exhaustion the platform transient must DEFER the row, not
-    // consume it: the turn stays resumable for the healthy window that
-    // follows the deploy.
+    // The durable retry must preserve the continuation: the turn stays
+    // resumable for the healthy window that follows the deploy.
     const pendingContinuations = await agentStub.getScheduleCountForCallback(
       "_chatRecoveryContinue"
     );

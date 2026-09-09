@@ -4,7 +4,7 @@ import {
   AGENT_TOOL_PROGRESS_PART,
   getAgentByName
 } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ThinkAgentToolParent, ThinkTestAgent } from "./agents";
 import type {
   AgentToolEventMessage,
@@ -23,7 +23,9 @@ type ThinkAgentToolTestStub = {
   setAgentToolOutputForTest(runId: string, output: unknown): Promise<void>;
   clearAgentToolOutputForTest(runId: string): Promise<void>;
   setStripTextResponseForTest(strip: boolean): Promise<void>;
-  setBeforeStepAsyncDelay(ms: number): Promise<void>;
+  holdBeforeStepForTest(): Promise<void>;
+  hasEnteredBeforeStepForTest(): Promise<boolean>;
+  releaseBeforeStepForTest(): Promise<void>;
   resetTurnStateForTest(): Promise<void>;
   startAgentToolRun(
     input: unknown,
@@ -86,6 +88,10 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     errorText: string,
     runId?: string
   ): Promise<NonNullable<AgentToolInspection>>;
+  readCompletedChildChunksForTest(
+    input: string,
+    runId?: string
+  ): Promise<{ status: string; chunks: number }>;
   reconcileCompletedThinkChildForTest(
     input: string,
     runId?: string
@@ -191,18 +197,18 @@ async function waitForAgentToolRun(
   agent: ThinkAgentToolTestStub,
   runId: string
 ): Promise<AgentToolInspection> {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const inspection = await agent.inspectAgentToolRun(runId);
-    if (
-      inspection?.status === "completed" ||
-      inspection?.status === "error" ||
-      inspection?.status === "aborted"
-    ) {
+  // The child turn runs detached (`startAgentToolRun` returns immediately),
+  // so terminal status is only observable by polling. Use a long deadline —
+  // it costs nothing when the run is fast, and fails with a clear timeout
+  // instead of handing callers a misleading non-terminal snapshot.
+  return vi.waitFor(
+    async () => {
+      const inspection = await agent.inspectAgentToolRun(runId);
+      expect(["completed", "error", "aborted"]).toContain(inspection?.status);
       return inspection;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  return agent.inspectAgentToolRun(runId);
+    },
+    { timeout: 8000, interval: 25 }
+  );
 }
 
 describe("Think agent tools", () => {
@@ -269,10 +275,21 @@ describe("Think agent tools", () => {
     const agent = await freshAgent();
     const runId = crypto.randomUUID();
 
-    await agent.setBeforeStepAsyncDelay(50);
+    // Park the child turn inside `beforeStep` on a promise gate so the reset
+    // deterministically lands while the turn is in flight (a wall-clock sleep
+    // here could lose the race and observe a completed turn instead).
+    await agent.holdBeforeStepForTest();
     await agent.startAgentToolRun("skipped probe", { runId });
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasEnteredBeforeStepForTest()).toBe(true);
+      },
+      { timeout: 8000, interval: 25 }
+    );
     await agent.resetTurnStateForTest();
+    // Release AFTER the reset so the resumed turn observes the generation
+    // bump and seals the child run promptly.
+    await agent.releaseBeforeStepForTest();
 
     const inspection = await waitForAgentToolRun(agent, runId);
 
@@ -287,9 +304,17 @@ describe("Think agent tools", () => {
     const agent = await freshAgent();
     const runId = crypto.randomUUID();
 
-    await agent.setBeforeStepAsyncDelay(50);
+    // Park the child turn inside `beforeStep` so the cancel deterministically
+    // lands while the run is still cancellable (a wall-clock sleep here could
+    // lose the race and observe a completed turn instead).
+    await agent.holdBeforeStepForTest();
     await agent.startAgentToolRun("cancelled probe", { runId });
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasEnteredBeforeStepForTest()).toBe(true);
+      },
+      { timeout: 8000, interval: 25 }
+    );
     await agent.cancelAgentToolRun(runId, "stop");
 
     const inspection = await waitForAgentToolRun(agent, runId);
@@ -299,7 +324,19 @@ describe("Think agent tools", () => {
       error: "stop"
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Let the parked turn resume and run its finish path to the end (the
+    // cleanup maps empty only when it has), then re-assert: the finalizer's
+    // guarded UPDATE must NOT clobber the aborted seal.
+    await agent.releaseBeforeStepForTest();
+    await vi.waitFor(
+      async () => {
+        expect(await agent.getAgentToolCleanupMapSizesForTest()).toEqual({
+          lastErrors: 0,
+          preTurnAssistantIds: 0
+        });
+      },
+      { timeout: 8000, interval: 25 }
+    );
     await expect(agent.inspectAgentToolRun(runId)).resolves.toMatchObject({
       runId,
       status: "aborted",
@@ -472,6 +509,21 @@ describe("Think agent tools", () => {
 
     expect(resolved.running).toBe(runId);
     expect(resolved.unknown).toBeNull();
+  });
+
+  it("keeps a completed Think child's stored chunks for a parent attaching afterwards", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+
+    // The child's cutover used to discard its stream rows with its message,
+    // so a parent re-attaching after completion (recovery, a late tail)
+    // replayed nothing. The rows now outlive the cutover, as in ai-chat.
+    const result = await parent.readCompletedChildChunksForTest(
+      "late attach",
+      runId
+    );
+    expect(result.status).toBe("completed");
+    expect(result.chunks).toBeGreaterThan(0);
   });
 
   it("recovers completed Think child runs into terminal parent rows", async () => {

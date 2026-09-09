@@ -2,12 +2,19 @@ import { DurableObject } from "cloudflare:workers";
 
 import { publishDiagnosticsEvent } from "../observability/diagnostics";
 import {
-  type AlarmContribution,
   CapabilityRunner,
   type DurableObjectCapability,
   type LifecycleEvent,
   type LifecycleEventSink
 } from "./capability-runner";
+import { abortWithoutAlarmRetry } from "./abort";
+import { JobDriver, type JobDispatch } from "./job-driver";
+import {
+  HOST_JOB_CAPABILITY,
+  JobQueue,
+  type LifecycleJobs,
+  type LifecycleJobPushOptions
+} from "./job-queue";
 import {
   bindLifecycleCapability,
   lifecycleCapabilityId,
@@ -25,40 +32,26 @@ import { isBenignTeardownError } from "./transport-errors";
 import type { WSMessage } from "./types";
 
 export {
-  type AlarmContribution,
   type CapabilityRequestContext,
   type CapabilityWebSocketUpgradeContext,
   type LifecycleEvent,
   type CapabilityStartContext,
-  type DurableObjectCapability
+  type DurableObjectCapability,
+  type MemoryLimitContext
 } from "./capability-runner";
+export {
+  type LifecycleJobContext,
+  type LifecycleJobs,
+  type LifecycleJob,
+  type LifecycleJobOutcome,
+  type LifecycleJobPushOptions
+} from "./job-queue";
 export * from "./types";
 
 const LEGACY_NAME_STORAGE_KEY = "__ps_name";
 
 function mutableRequest(request: Request): Request {
   return new Request(request);
-}
-
-function selectAlarm(
-  contributions: ReadonlyArray<AlarmContribution>
-): number | null {
-  let ordinary: number | null = null;
-  let exclusive: number | null = null;
-  for (const contribution of contributions) {
-    if (contribution === null) continue;
-    const time =
-      typeof contribution === "number" ? contribution : contribution.time;
-    if (!Number.isFinite(time) || time < 0) {
-      throw new Error(`Invalid alarm contribution: ${String(time)}`);
-    }
-    if (typeof contribution === "object" && contribution.exclusive) {
-      exclusive = exclusive === null ? time : Math.min(exclusive, time);
-    } else {
-      ordinary = ordinary === null ? time : Math.min(ordinary, time);
-    }
-  }
-  return exclusive ?? ordinary;
 }
 
 /**
@@ -147,6 +140,27 @@ export function setLifecycleEventSink<
   lifecycleEventSinks.set(lifecycle, sink);
 }
 
+/** Configuration accepted when constructing a {@link Lifecycle}. */
+export type LifecycleOptions = {
+  /**
+   * Consecutive alarm invocations that may end in a Durable Object
+   * memory-limit reset before the circuit breaker (#1825) seals recovery
+   * work instead of backing it off. Default: 3.
+   */
+  readonly maxAlarmMemoryLimitStrikes?: number;
+};
+
+/** Placement of a capability in the dispatch order. */
+export type LifecycleUseOptions = {
+  /**
+   * Dispatch after every non-fallback capability, whenever it was
+   * installed. For a host's catch-all, such as a WebSockets capability
+   * that claims every upgrade, so middleware installed later still runs
+   * first.
+   */
+  readonly fallback?: boolean;
+};
+
 /**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
@@ -167,6 +181,8 @@ export class Lifecycle<
   readonly #capabilityRunner = new CapabilityRunner<Props>(
     () => this.#capabilities
   );
+  readonly #jobQueue: JobQueue;
+  readonly #jobDriver: JobDriver;
 
   #status: "zero" | "starting" | "started" = "zero";
   #alarmRearmQueue: Promise<void> = Promise.resolve();
@@ -174,6 +190,7 @@ export class Lifecycle<
   #pendingEvents: LifecycleEvent[] = [];
   #alarmsDisabled = false;
   #capabilitiesLocked = false;
+  readonly #fallbacks = new Set<DurableObjectCapability<Props>>();
   #handlersInstalled = false;
 
   /**
@@ -185,8 +202,11 @@ export class Lifecycle<
   static install<
     Env extends object,
     Props extends Record<string, unknown> = Record<string, unknown>
-  >(host: DurableObject<Env>): Lifecycle<Env, Props> {
-    const lifecycle = new Lifecycle<Env, Props>(host);
+  >(
+    host: DurableObject<Env>,
+    options?: LifecycleOptions
+  ): Lifecycle<Env, Props> {
+    const lifecycle = new Lifecycle<Env, Props>(host, options);
     lifecycle.installHandlers();
     return lifecycle;
   }
@@ -195,14 +215,40 @@ export class Lifecycle<
    * Bind a lifecycle to a Durable Object instance without mutating its handlers.
    *
    * @param host - The Durable Object whose runtime lifecycle this object owns.
+   * @param options - Policy configuration for this lifecycle.
    */
-  constructor(host: DurableObject<Env>) {
+  constructor(host: DurableObject<Env>, options?: LifecycleOptions) {
     // SAFETY: DurableObject exposes ctx as protected to subclasses. The
     // lifecycle is constructed by that subclass with `this`, so this boundary
     // accesses the same runtime-owned context without exposing it publicly.
     this.#host = host as unknown as LifecycleHost<Env, Props>;
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
+    this.#jobQueue = new JobQueue(this.#ctx.storage);
+    this.#jobDriver = new JobDriver({
+      queue: this.#jobQueue,
+      storage: this.#ctx.storage,
+      disabled: () => this.#alarmsDisabled,
+      resolveDispatch: (owner) => this.#resolveJobDispatch(owner),
+      maxMemoryLimitStrikes: () => options?.maxAlarmMemoryLimitStrikes,
+      onMemoryLimit: async (context) => {
+        // Capabilities first (each best-effort inside the runner), then the
+        // host hook — a failed capability policy must not silence the host's.
+        await this.#capabilityRunner.memoryLimit(context);
+        await runInLifecycleHostContext({ host: this.#host }, () =>
+          this.#host.onAlarmMemoryLimit?.(context)
+        );
+      },
+      emit: (type, payload) =>
+        this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
+      rearm: () => this.rearmAlarm(),
+      // Deferred a tick so the current invocation settles (its RPC/alarm
+      // completes and its writes confirm) before the instance resets —
+      // `abort()` throws an uncatchable error, mirroring Agent.destroy().
+      reset: (reason) => {
+        setTimeout(() => abortWithoutAlarmRetry(this.#ctx, reason), 0);
+      }
+    });
   }
 
   /**
@@ -239,10 +285,17 @@ export class Lifecycle<
   /**
    * Add a reusable capability before this lifecycle starts.
    *
-   * @param capability - The capability to add in dispatch order.
+   * Capabilities dispatch in registration order, except that fallbacks
+   * always come after non-fallbacks.
+   *
+   * @param capability - The capability to add.
+   * @param options - Dispatch placement.
    * @returns This lifecycle.
    */
-  use(capability: DurableObjectCapability<Props>): this {
+  use(
+    capability: DurableObjectCapability<Props>,
+    options?: LifecycleUseOptions
+  ): this {
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
@@ -257,7 +310,19 @@ export class Lifecycle<
         `Lifecycle capability ${JSON.stringify(capabilityId)} is already installed`
       );
     }
-    this.#capabilities.push(capability);
+
+    const firstFallback = this.#capabilities.findIndex((candidate) =>
+      this.#fallbacks.has(candidate)
+    );
+    if (options?.fallback) this.#fallbacks.add(capability);
+    this.#capabilities.splice(
+      options?.fallback || firstFallback === -1
+        ? this.#capabilities.length
+        : firstFallback,
+      0,
+      capability
+    );
+
     if (capability instanceof LifecycleCapability) {
       bindLifecycleCapability(
         capability,
@@ -283,10 +348,9 @@ export class Lifecycle<
       }),
       ready: () => this.#readyForCapabilityOperation(),
       starting: () => this.#status === "starting",
-      alarms: Object.freeze({
-        rearm: () => this.rearmAlarm(),
-        disabled: () => this.#alarmsDisabled
-      }),
+      jobs: this.#jobsForOwner(capabilityId),
+      trackAlarmWork: (work: Promise<unknown>) =>
+        this.#jobDriver.trackAlarmWork(work),
       runInHostContext: async (
         fn: () => unknown,
         scope?: LifecycleHostContextScope
@@ -444,6 +508,9 @@ export class Lifecycle<
 
   /**
    * Handle an incoming request for the owning Durable Object.
+   *
+   * Non-upgrade requests run through the capability middleware chain first,
+   * then fall through to the host's `onRequest`.
    */
   async fetch(request: Request): Promise<Response> {
     try {
@@ -648,10 +715,39 @@ export class Lifecycle<
   #props?: Props;
 
   /**
-   * Recompute the physical Durable Object alarm from every capability.
+   * The host's scoped access to the Lifecycle work queue. Items pushed here
+   * are dispatched to the host's `onJob` inside the host invocation
+   * boundary.
+   */
+  get jobs(): LifecycleJobs {
+    return this.#jobsForOwner(HOST_JOB_CAPABILITY);
+  }
+
+  #jobsForOwner(owner: string): LifecycleJobs {
+    const rearmAfter = async <T>(mutate: () => T): Promise<T> => {
+      const result = mutate();
+      await this.rearmAlarm();
+      return result;
+    };
+    return Object.freeze({
+      push: (options: LifecycleJobPushOptions) =>
+        rearmAfter(() => this.#jobQueue.push(owner, options)),
+      cancel: (id: string) =>
+        rearmAfter(() => this.#jobQueue.cancel(owner, id)),
+      reschedule: (id: string, time: number) =>
+        rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
+      get: (id: string) => this.#jobQueue.get(owner, id),
+      list: () => this.#jobQueue.list(owner),
+      rearm: () => this.rearmAlarm()
+    });
+  }
+
+  /**
+   * Recompute the physical Durable Object alarm from job-queue state.
    *
    * Concurrent requests are serialized so a later durable-state change cannot
-   * be overwritten by an earlier alarm calculation.
+   * be overwritten by an earlier alarm calculation. Queue mutations call this
+   * automatically; it stays public for composition roots and tests.
    */
   async rearmAlarm(): Promise<void> {
     if (this.#alarmsDisabled) return;
@@ -659,24 +755,13 @@ export class Lifecycle<
       this.#rearmRequestedDuringStart = true;
       return;
     }
-    if (this.#status === "zero") await this.start();
 
     const prior = this.#alarmRearmQueue;
     const next = prior
       .catch(() => {})
       .then(async () => {
         if (this.#alarmsDisabled) return;
-        const contributions = await runWithoutCurrentAgent(() =>
-          this.#capabilityRunner.getAlarmContributions()
-        );
-        const hostContribution = await runInLifecycleHostContext(
-          { host: this.#host },
-          () => this.#host.getNextAlarm?.()
-        );
-        if (hostContribution !== undefined) {
-          contributions.push(hostContribution);
-        }
-        const alarm = selectAlarm(contributions);
+        const alarm = this.#jobQueue.nextAlarmTime(Date.now());
         if (alarm === null) {
           await this.#ctx.storage.deleteAlarm();
         } else {
@@ -685,6 +770,17 @@ export class Lifecycle<
       });
     this.#alarmRearmQueue = next;
     await next;
+  }
+
+  /**
+   * Keep work a job handed off at a bounded return inside the current
+   * alarm's memory-limit breaker domain (#1825). Hosts call this where a
+   * queue-driven callback detaches long work and returns.
+   *
+   * @returns True when called during an alarm invocation; false otherwise.
+   */
+  trackAlarmWork(work: Promise<unknown>): boolean {
+    return this.#jobDriver.trackAlarmWork(work);
   }
 
   /** Dispose installed capabilities in reverse registration order. */
@@ -699,13 +795,48 @@ export class Lifecycle<
     await this.#ctx.storage.deleteAlarm();
   }
 
-  /** Dispatch lifecycle and host alarm callbacks after startup. */
+  /**
+   * Run one alarm invocation. The job driver owns the event loop — deadman
+   * pre-arm, due-job dispatch with retry and deferral policy, the alarm
+   * memory-limit circuit breaker (#1825) — and re-arms the physical alarm
+   * from queue state. The host's `onAlarm()` runs after due jobs, inside
+   * the host invocation boundary.
+   */
   async alarm(): Promise<void> {
-    await this.#ensureInitialized();
-    await runWithoutCurrentAgent(() => this.#capabilityRunner.alarm());
-    await runInLifecycleHostContext({ host: this.#host }, () =>
-      this.#host.onAlarm?.()
+    await this.#jobDriver.runAlarm(
+      () => this.#ensureInitialized(),
+      () =>
+        runInLifecycleHostContext({ host: this.#host }, async () => {
+          await this.#host.onAlarm?.();
+        })
     );
-    await this.rearmAlarm();
+  }
+
+  /**
+   * Resolve a job owner to its dispatch hooks. Host jobs run inside the
+   * host invocation boundary; capability jobs run outside ambient host
+   * context, like every other capability hook.
+   */
+  async #resolveJobDispatch(owner: string): Promise<JobDispatch | undefined> {
+    if (owner === HOST_JOB_CAPABILITY) {
+      const host = this.#host;
+      if (!host.onJob) return undefined;
+      // No host onJobError: a host job's terminal application failure
+      // completes it, and the host re-derives its jobs from durable state.
+      return {
+        onJob: async (context) =>
+          runInLifecycleHostContext({ host }, () => host.onJob!(context))
+      };
+    }
+    const capability = await this.#capabilityRunner.findById(owner);
+    if (!capability?.onJob) return undefined;
+    return {
+      onJob: async (context) =>
+        runWithoutCurrentAgent(() => capability.onJob!(context)),
+      onJobError: capability.onJobError
+        ? async (context, error) =>
+            runWithoutCurrentAgent(() => capability.onJobError!(context, error))
+        : undefined
+    };
   }
 }

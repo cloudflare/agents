@@ -87,11 +87,12 @@ export interface ProgressCreditThrottle {
 }
 
 /**
- * The single, host-agnostic rule for crediting recovery forward progress from a
- * stored stream chunk — the convergence of what `AIChatAgent` and `Think`
- * previously each decided on their own (ai-chat keyed on chunk type only; Think
- * keyed on its flush cadence). Both hosts now call this at chunk-store time so
- * the bump TIMING is identical:
+ * The host-agnostic rule for crediting recovery forward progress from a stored
+ * stream chunk, from when the marker was a counter bumped per chunk. Neither
+ * host bumps a counter any more: the marker is derived from the stream log
+ * (`ResumableStream.progressMarker`), so a chunk counts once its segment is
+ * durably flushed. The rule stays exported for consumers that still keep a
+ * counter of their own:
  *
  *  - a **milestone** ({@link ChatRecoveryCodec.isProgressChunk}) always credits;
  *  - **streaming content** ({@link ChatRecoveryCodec.isStreamingContentChunk})
