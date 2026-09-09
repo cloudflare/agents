@@ -52,6 +52,10 @@
       {
         "name": "StreamKillTestAgent",
         "class_name": "StreamKillTestAgent"
+      },
+      {
+        "name": "CutoverKillAgent",
+        "class_name": "CutoverKillAgent"
       }
     ]
   },
@@ -79,6 +83,10 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["StreamKillTestAgent"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": ["CutoverKillAgent"]
     }
   ]
 }

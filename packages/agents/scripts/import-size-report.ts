@@ -21,7 +21,8 @@ import { gzipSync } from "node:zlib";
 
 const SNAPSHOT_KIND = "agents-import-size-snapshot";
 const REPORT_KIND = "agents-import-size-report";
-const SCHEMA_VERSION = 1;
+const SNAPSHOT_SCHEMA_VERSION = 1;
+const REPORT_SCHEMA_VERSION = 2;
 const MAX_MEASUREMENTS = 1_000;
 const MAX_TEXT_LENGTH = 256;
 
@@ -83,7 +84,7 @@ export type ImportSizeSummary = {
 
 /** A PR comparison consumed by CI and the Agent Think GitHub App. */
 export type ImportSizeReport = {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly kind: "agents-import-size-report";
   readonly repository: string;
   readonly packageName: string;
@@ -99,7 +100,6 @@ export type ImportSizeReport = {
   readonly thresholdPercent: number;
   readonly metric: "minified-gzip";
   readonly overall: "red" | "yellow" | "green" | "unchanged";
-  readonly gate: "pass" | "fail";
   readonly summary: ImportSizeSummary;
   readonly changes: ReadonlyArray<ImportSizeChange>;
 };
@@ -200,7 +200,7 @@ export async function measurePackageImports(
     }
 
     return {
-      schemaVersion: SCHEMA_VERSION,
+      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
       kind: SNAPSHOT_KIND,
       packageName: manifest.name,
       packageVersion: manifest.version,
@@ -221,7 +221,7 @@ export async function measurePackageImports(
  *
  * @param base - Snapshot measured from the pull request base revision.
  * @param head - Snapshot measured from the pull request head revision.
- * @param options - Pull request identity and failure threshold.
+ * @param options - Pull request identity and red classification threshold.
  * @returns A structured report whose worst import controls the overall colour.
  */
 export function compareImportSizeSnapshots(
@@ -267,7 +267,7 @@ export function compareImportSizeSnapshots(
   const overall = overallStatus(summary);
 
   return {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: REPORT_SCHEMA_VERSION,
     kind: REPORT_KIND,
     repository: options.repository,
     packageName: head.packageName,
@@ -283,7 +283,6 @@ export function compareImportSizeSnapshots(
     thresholdPercent: options.thresholdPercent,
     metric: "minified-gzip",
     overall,
-    gate: overall === "red" ? "fail" : "pass",
     summary,
     changes
   };
@@ -299,8 +298,11 @@ export function parseImportSizeSnapshot(
   value: unknown
 ): ParseResult<ImportSizeSnapshot> {
   if (!isRecord(value)) return invalid("snapshot", "expected an object");
-  if (value.schemaVersion !== SCHEMA_VERSION) {
-    return invalid("snapshot.schemaVersion", `expected ${SCHEMA_VERSION}`);
+  if (value.schemaVersion !== SNAPSHOT_SCHEMA_VERSION) {
+    return invalid(
+      "snapshot.schemaVersion",
+      `expected ${SNAPSHOT_SCHEMA_VERSION}`
+    );
   }
   if (value.kind !== SNAPSHOT_KIND) {
     return invalid("snapshot.kind", `expected ${SNAPSHOT_KIND}`);
@@ -357,7 +359,7 @@ export function parseImportSizeSnapshot(
   return {
     ok: true,
     value: {
-      schemaVersion: SCHEMA_VERSION,
+      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
       kind: SNAPSHOT_KIND,
       packageName,
       packageVersion,

@@ -48,6 +48,7 @@ packages/agents/src/chat/          ← shared foundation
   recovery.ts                      chat-fiber snapshot codec
   recovery-incident.ts             incident budget math + storage helpers
   recovery-engine.ts               ChatRecoveryEngine + adapter / wake-hook seams
+  recovery-task.ts                 reserved chained Task definition for continuations
   recovery-codec.ts                ChatRecoveryCodec (AISDKRecoveryCodec)
   resume-handshake.ts              ResumeHandshake stream-resume driver
   stall-watchdog.ts                iterateWithStallWatchdog
@@ -154,7 +155,7 @@ Pure functions for aligning client messages with server state during persistence
 
 ### recovery-engine.ts
 
-**`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a `runFiber` that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
+**`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a Task run for a root agent, or `runFiber` for a routed facet, that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
 
 Durable chat recovery is an invariant in both hosts: every chat entry path runs inside a recovery fiber. `ChatRecoveryConfig` accepts `true` or a tuning object, not `false`; previously compiled JavaScript that still supplies `false` is resolved to the default configuration. This guarantees that agent-tool child inspection can use durable recovery state after a restart instead of relying on instance-local abort controllers or stream managers.
 
@@ -172,9 +173,28 @@ Durable chat recovery is an invariant in both hosts: every chat entry path runs 
 | (a) chunks → parts       | shared           | rebuild via `StreamAccumulator` (idempotent by `toolCallId`) |
 | (b) target-id resolution | host hook        | which message id to write under                              |
 | (c) merge onto existing  | shared primitive | `reconcileOrphanPartial`                                     |
-| (d) upsert by id         | host store       | a `SessionProvider`-subset write                             |
+| (d) upsert by id         | host store       | an `OrphanPersistStore` write backed by Sessions             |
 
 (b) is the one legitimately per-package step: ai-chat reads the stored stream `message_id` (#1691) because a flat `UIMessage[]` can't express parent/child (`AIChatAgent._resolveOrphanTargetId`); Think resolves it structurally from its Session tree. (c) `reconcileOrphanPartial` keeps an existing in-place tool result that lives only in storage — ai-chat's early tool-approval persist — rather than letting a replayed chunk re-advance it; Think has no early persist, so its whole-message replace is already dedup-safe and it doesn't use the helper. (d) is recognizably the same shape on both: ai-chat does `findIndex` → map-replace / append over its flat array; `Think._upsertMessageInHistory` does `session.getMessage` → `updateMessage` / `appendMessage` over a Session tree.
+
+Root-agent continuation attempts run as chained `__cf_internal_chat_recovery`
+Task runs. Initial detection joins by incident identity; stable-state and OOM
+retries enqueue a separate run and express their delay with `step.sleep`. The
+Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
+entry point; both hosts run it through the shared
+`dispatchChatRecoveryToHandoff`, which returns at model handoff so a long turn
+never blocks the Lifecycle job loop and registers the turn as tracked alarm
+work (on the root; on a facet `trackAlarmWork` declines, and the detached turn
+stays outside the breaker until Tasks supports routed child wakes). A platform
+failure before handoff propagates through the
+current Task or compatibility schedule; after handoff that execution has
+settled, so the detached continuation enqueues exactly one replacement attempt.
+The incident record remains the recovery state machine.
+
+Facets do not yet have routed Task wakes. Dynamic-agent recovery therefore
+keeps the root-owned routed Scheduler transport as a compatibility path until
+Tasks can mirror a child run's wake to its alarm owner. Legacy recovery schedule
+rows use the same callback entry points and drain without migration.
 
 Full design + point-in-time decision record: [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 
@@ -329,6 +349,6 @@ The machine handles accumulator creation (including continuation context walking
 - ResumableStream moved from ai-chat to `agents/chat/resumable-stream.ts`. Resume protocol constants (`STREAM_RESUMING`, `STREAM_RESUME_ACK`, `STREAM_RESUME_REQUEST`, `STREAM_RESUME_NONE`) added to `CHAT_MESSAGE_TYPES`. Think wired with full resume support.
 - Client tool primitives (`ClientToolSchema`, `createToolsFromClientSchemas`) moved to `agents/chat/client-tools.ts`. Tool protocol constants (`TOOL_RESULT`, `TOOL_APPROVAL`, `MESSAGE_UPDATED`) added. Think implements client-side tools with debounce-based auto-continuation.
 - Think now has: MCP `waitForMcpConnections`, message push on connect, feature parity with AIChatAgent's core chat experience.
-- Durable chat-recovery orchestration unified in `agents/chat/recovery-engine.ts` (`ChatRecoveryEngine` over a `ChatRecoveryAdapter` + per-wake `ChatFiberWakeHooks`); `AIChatAgent`, `Think`, and the `experimental/pi-recovery` fixture all drive it. The orphan-persist path was factored into named seams — (a) shared `StreamAccumulator` reconstruction, (b) host `resolveOrphanTargetId`, (c) shared `reconcileOrphanPartial`, (d) `SessionProvider`-subset upsert. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
+- Durable chat-recovery orchestration unified in `agents/chat/recovery-engine.ts` (`ChatRecoveryEngine` over a `ChatRecoveryAdapter` + per-wake `ChatFiberWakeHooks`); `AIChatAgent`, `Think`, and the `experimental/pi-recovery` fixture all drive it. The orphan-persist path was factored into named seams: (a) shared `StreamAccumulator` reconstruction, (b) host `resolveOrphanTargetId`, (c) shared `reconcileOrphanPartial`, and (d) `OrphanPersistStore` upsert backed by Sessions. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 - Auto-continuation barrier (#1649 / #1650) extracted to `agents/chat/auto-continuation-controller.ts` (`AutoContinuationController`). The controller owns the coalesce timer, the `_barrierActive` double-fire guard, and the schedule/coalesce/fire lifecycle (`schedule` / `rearmForBatch` / `armTimer` / `fireWhenStable` / `activateDeferredAndReschedule` / `reset`), parameterized by an `AutoContinuationHost` (stream-active signal, pending-interaction signal, incomplete-batch test, apply-drain, `keepAliveWhile`, and the host `fire()` turn pipeline). Both hosts retain thin delegating wrappers over their original method names; `COALESCE_MS` (50ms) is now single-sourced on the controller. Exported `@internal` for sibling packages. Fast-follow: Think's `waitUntilStable()` now consults `controller.isArmed()` to wait out an armed continuation, converging its idle definition with ai-chat's `waitForIdle()`. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 - Adapter-spine helpers de-duplicated (Tier A + B, pure leaf lifts, no behavior change). Three byte-identical fragments shared by both hosts now live once in `agents/chat`: (1) `async-helpers.ts` — the `TIMED_OUT` sentinel, `awaitWithDeadline` (deadline-bounded race), and `drainInteractionApplies` (the substrate-free interaction-apply completeness drain, parameterized by `hasPending` / `getTail`); (2) `classifyAgentToolChildRecovery(storage)` in `recovery-incident.ts` — the parent's agent-tool reattach incident scan (in-progress > failed > none precedence); (3) `interceptAgentToolBroadcast(msg, hooks)` in `agent-tools.ts` — the #1575 outgoing-frame snoop that tails an agent-tool child's progress, parameterized by an `AgentToolBroadcastHooks` substrate (forwarders / liveSequences / lastErrors maps, the host response-type constant, and the host run-lookup). Both hosts delegate through their existing private method names and `broadcast()` overrides (which keep a cheap size-guard so the common no-child path stays allocation-free, then call `super.broadcast`), so all call sites are untouched. The recovery-engine adapter seam (`_chatRecoveryEngine` / `_runChatRecoveryFiber`) and the genuinely product-substrate `dispatch`/`classify`/`terminalize` methods were deliberately left in the hosts (RFC bucket 3) for the Turns effort. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).

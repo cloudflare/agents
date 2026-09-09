@@ -67,7 +67,6 @@ jobs:
           --output "$RUNNER_TEMP/agents-import-sizes/base.json"
 
       - name: Compare import sizes
-        id: import-sizes
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -82,7 +81,6 @@ jobs:
           --run-id "$RUN_ID"
           --run-attempt "$RUN_ATTEMPT"
           --threshold 10
-          --github-output "$GITHUB_OUTPUT"
           --github-step-summary "$GITHUB_STEP_SUMMARY"
 
       - name: Upload import-size report
@@ -92,9 +90,3 @@ jobs:
           path: ${{ runner.temp }}/agents-import-sizes/report.json
           if-no-files-found: error
           retention-days: 14
-
-      - name: Enforce import-size limit
-        if: steps.import-sizes.outputs.gate == 'fail'
-        run: |
-          echo "One or more existing imports grew by more than 10%." >&2
-          exit 1

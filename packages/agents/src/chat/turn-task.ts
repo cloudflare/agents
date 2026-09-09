@@ -58,7 +58,7 @@ function turnSnapshotKey(runId: string): string {
 
 /**
  * Build the chat-turn Task handler for one host. Registered under the
- * host's `CHAT_FIBER_NAME` via `_registerInternalTaskDefinition`.
+ * host's `CHAT_FIBER_NAME` via `Tasks#register`.
  */
 export function createChatTurnTaskDefinition(
   hooks: ChatTurnTaskHooks

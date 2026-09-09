@@ -1,6 +1,6 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { action, skills, Think } from "../../think";
+import { action, skills, Think, type ThinkSession } from "../../think";
 import { Agent } from "agents";
 import type {
   Connection,
@@ -47,13 +47,16 @@ import type {
 } from "../../think";
 import {
   CHAT_MESSAGE_TYPES,
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator
 } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
-import { Session } from "agents/experimental/memory/session";
+import type { Session } from "../../think";
+import type { ContextConfig } from "agents/context";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────
@@ -75,6 +78,99 @@ export type RpcJsonObject = Record<
   | null
   | ReadonlyArray<string | number | boolean | null>
 >;
+
+function recoveryTransportCountsForTest(
+  agent: Think,
+  callback: string
+): { tasks: number; schedules: number } {
+  const scheduled = agent.sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM cf_agents_jobs
+    WHERE capability = 'scheduler' AND fn = ${callback}
+  `;
+  const tasks = agent.sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND state IN ('pending', 'running', 'waiting')
+      AND json_extract(metadata, '$.callback') = ${callback}
+  `;
+  return {
+    tasks: tasks[0]?.count ?? 0,
+    schedules: scheduled[0]?.count ?? 0
+  };
+}
+
+function recoveryWorkCountForTest(agent: Think, callback: string): number {
+  const counts = recoveryTransportCountsForTest(agent, callback);
+  return counts.tasks + counts.schedules;
+}
+
+async function runQueuedRecoveryTaskForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<boolean> {
+  const rows = agent.sql<{ run_id: string }>`
+    SELECT run_id FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND state IN ('pending', 'running', 'waiting')
+      AND json_extract(metadata, '$.callback') = ${callback}
+    ORDER BY created_at ASC
+    LIMIT 1
+  `;
+  const runId = rows[0]?.run_id;
+  if (!runId) return false;
+  const past = Date.now() - 1_000;
+  agent.sql`
+    UPDATE cf_agents_task_runs
+    SET next_at = ${past}, input = json_set(input, '$.delaySeconds', 0)
+    WHERE run_id = ${runId}
+  `;
+  agent.sql`
+    UPDATE cf_agents_task_steps SET next_at = ${past}
+    WHERE run_id = ${runId} AND kind = 'sleep'
+  `;
+  agent.sql`
+    UPDATE cf_agents_jobs SET time = ${past}
+    WHERE id = ${`task:${runId}`}
+  `;
+  await agent.alarm();
+  return true;
+}
+
+async function waitForThinkIdleForTest(agent: Think): Promise<void> {
+  await (
+    agent as unknown as { _turnQueue: { waitForIdle(): Promise<void> } }
+  )._turnQueue.waitForIdle();
+}
+
+async function runRecoveryWorkForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<void> {
+  if (await runQueuedRecoveryTaskForTest(agent, callback)) {
+    await waitForThinkIdleForTest(agent);
+    return;
+  }
+  const rows = agent.sql<{ payload: string }>`
+    SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+    WHERE capability = 'scheduler' AND fn = ${callback}
+    ORDER BY time ASC
+    LIMIT 1
+  `;
+  const payload = rows[0]?.payload;
+  if (!payload) {
+    await waitForThinkIdleForTest(agent);
+    return;
+  }
+  const host = agent as unknown as {
+    _chatRecoveryContinueDetached(data: unknown): Promise<void>;
+    _chatRecoveryRetryDetached(data: unknown): Promise<void>;
+  };
+  if (callback === "_chatRecoveryContinue") {
+    await host._chatRecoveryContinueDetached(JSON.parse(payload));
+  } else {
+    await host._chatRecoveryRetryDetached(JSON.parse(payload));
+  }
+}
 
 // ── Mock LanguageModel (v3 format) ──────────────────────────────
 
@@ -1436,24 +1532,14 @@ export class ThinkTestAgent extends Think {
     this.chatStreamStallTimeoutMs = timeoutMs;
     try {
       const first = await this.testChat("trigger stall then recover");
-      const scheduled = this.sql<{ payload: string }>`
-        SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-        WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        ORDER BY time ASC LIMIT 1
-      `;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_jobs
-          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
-      // Drive the scheduled continuation — this inference streams normally (the
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      // Drive the queued continuation — this inference streams normally (the
       // stall budget is exhausted), so the turn completes.
-      if (scheduled[0]) {
-        await (
-          this as unknown as {
-            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
-          }
-        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
       }
 
       const messages = await this.getMessages();
@@ -1500,22 +1586,12 @@ export class ThinkTestAgent extends Think {
     this._stallAttemptsRemaining = 1;
     try {
       const first = await this.testChat("per-turn stall override");
-      const scheduled = this.sql<{ payload: string }>`
-        SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-        WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        ORDER BY time ASC LIMIT 1
-      `;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_jobs
-          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
-      if (scheduled[0]) {
-        await (
-          this as unknown as {
-            _chatRecoveryContinueDetached(d: unknown): Promise<void>;
-          }
-        )._chatRecoveryContinueDetached(JSON.parse(scheduled[0].payload));
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
       }
       const messages = await this.getMessages();
       const assistant = messages.filter((m) => m.role === "assistant");
@@ -1601,11 +1677,10 @@ export class ThinkTestAgent extends Think {
       const coalesceTimerArmedAfterStall =
         internal._autoContinuation._timer !== null;
       const streamingAssistantCleared = internal._streamingAssistant === null;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_jobs
-          WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
       return {
         firstError: first.error,
         scheduledContinues,
@@ -2115,6 +2190,25 @@ export class ThinkTestAgent extends Think {
   async getLastBeforeTurnSystem(): Promise<string | null> {
     const log = this._beforeTurnLog;
     return log.length > 0 ? log[log.length - 1].system : null;
+  }
+
+  /** Insert a fiber-ledger row so `_checkRunFibers` finds it interrupted. */
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${crypto.randomUUID()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  /** Drive this facet's own fiber-recovery scan, exactly as a real wake would. */
+  async triggerFiberRecovery(): Promise<void> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
   }
 }
 
@@ -2695,6 +2789,25 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   /**
+   * A parent that attaches only after the child completed must still find
+   * the child's stored chunks: the child's cutover keeps its rows for the
+   * parent, which the child's next `start()` reclaims.
+   */
+  async readCompletedChildChunksForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{ status: string; chunks: number }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.startAgentToolRun(input, { runId });
+    const inspection = await this.waitForTerminalInspectionForTest(
+      child,
+      runId
+    );
+    const chunks = await child.getAgentToolChunks(runId);
+    return { status: inspection.status, chunks: chunks.length };
+  }
+
+  /**
    * A still-running child that reaches terminal *during* the parent's bounded
    * re-attach window: reconciliation should tail it to terminal and finalize
    * the parent row `completed` instead of abandoning it `interrupted` (#1630).
@@ -3267,13 +3380,14 @@ export class ThinkPropsTestAgent extends Think<
 export class ThinkSessionTestAgent extends Think {
   private _response = "Hello from session agent!";
 
-  override configureSession(session: Session) {
-    return session
-      .withContext("memory", {
+  override configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "memory",
         description: "Important facts learned during conversation.",
         maxTokens: 2000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3300,50 +3414,50 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async getSystemPromptSnapshot(): Promise<string> {
-    return this.session.freezeSystemPrompt();
+    return this.context.freezeSystemPrompt();
   }
 
   async setContextBlock(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
 
   async addDynamicContext(label: string, description?: string): Promise<void> {
-    await this.session.addContext(label, { description });
+    await this.context.addBlock({ label, description });
   }
 
   async removeDynamicContext(label: string): Promise<boolean> {
-    return this.session.removeContext(label);
+    return this.context.removeBlock(label);
   }
 
   async refreshPrompt(): Promise<string> {
-    return this.session.refreshSystemPrompt();
+    return this.context.refreshSystemPrompt();
   }
 
   async getContextLabels(): Promise<string[]> {
-    return this.session.getContextBlocks().map((b) => b.label);
+    return this.context.getBlocks().map((b) => b.label);
   }
 
   async getSessionToolNames(): Promise<string[]> {
-    const tools = await this.session.tools();
+    const tools = await this.context.tools();
     return Object.keys(tools);
   }
 
   async getContextBlockDetails(
     label: string
-  ): Promise<{ writable: boolean; isSkill: boolean } | null> {
-    const block = this.session.getContextBlock(label);
+  ): Promise<{ writable: boolean; isSearchable: boolean } | null> {
+    const block = this.context.getBlock(label);
     if (!block) return null;
-    return { writable: block.writable, isSkill: block.isSkill };
+    return { writable: block.writable, isSearchable: block.isSearchable };
   }
 
   async hostSetContext(label: string, content: string): Promise<void> {
@@ -3400,14 +3514,15 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
 // Tests async configureSession — simulates reading config before setup.
 
 export class ThinkAsyncConfigSessionAgent extends Think {
-  override async configureSession(session: Session): Promise<Session> {
+  override async configureContext(): Promise<ContextConfig[]> {
     await new Promise((resolve) => setTimeout(resolve, 10));
-    return session
-      .withContext("memory", {
+    return [
+      {
+        label: "memory",
         description: "Async-configured memory block.",
         maxTokens: 1000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3430,16 +3545,16 @@ export class ThinkAsyncConfigSessionAgent extends Think {
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async setContextBlock(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
 }
@@ -3518,14 +3633,15 @@ type ConfigInSessionConfig = {
 };
 
 export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
-  override configureSession(session: Session) {
+  override configureContext(): ContextConfig[] {
     const persona =
       this.getConfig<ConfigInSessionConfig>()?.persona || "default persona";
-    return session
-      .withContext("memory", {
+    return [
+      {
+        label: "memory",
         description: `Agent persona: ${persona}`
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -4842,53 +4958,25 @@ export class ThinkToolsTestAgent extends Think {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
-    // Recovery arms ZERO-delay schedules whose alarms the workers test pool
-    // can fire as soon as this RPC releases the DO, consuming the job rows.
-    // Read the counts synchronously inside the same invocation so callers can
-    // assert on them without racing that alarm.
+    // Read recovery state synchronously inside the same invocation: an
+    // immediate alarm may consume it after this RPC releases the object.
     return {
-      scheduledContinueCount: this._countScheduledChatRecovery(
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
         "_chatRecoveryContinue"
       ),
-      scheduledRetryCount:
-        this._countScheduledChatRecovery("_chatRecoveryRetry")
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
     };
-  }
-
-  private _countScheduledChatRecovery(callback: string): number {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler' AND fn = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
   }
 
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    return this._countScheduledChatRecovery(callback);
+    return recoveryWorkCountForTest(this, callback);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await (
-      this as unknown as {
-        _chatRecoveryRetryDetached(d: {
-          targetUserId?: string;
-          lastBody?: Record<string, unknown>;
-        }): Promise<void>;
-      }
-    )._chatRecoveryRetryDetached(
-      JSON.parse(rows[0].payload) as {
-        targetUserId?: string;
-        lastBody?: Record<string, unknown>;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
   async insertInterruptedStream(
@@ -4906,37 +4994,19 @@ export class ThinkToolsTestAgent extends Think {
       VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
-    for (const chunk of chunks) {
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${now}, ${now})
       `;
     }
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await (
-      this as unknown as {
-        _chatRecoveryContinueDetached(d: {
-          targetAssistantId?: string;
-          lastBody?: Record<string, unknown> | null;
-          lastClientTools?: ClientToolSchema[] | null;
-        }): Promise<void>;
-      }
-    )._chatRecoveryContinueDetached(
-      JSON.parse(rows[0].payload) as {
-        targetAssistantId?: string;
-        lastBody?: Record<string, unknown> | null;
-        lastClientTools?: ClientToolSchema[] | null;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
@@ -6821,10 +6891,14 @@ export class ThinkRecoveryTestAgent extends Think {
    *  partial. The recovery budget keys off this counter (not the live message
    *  count), so this is how a test marks "the turn advanced". */
   async bumpRecoveryProgressForTest(): Promise<void> {
-    const self = this as unknown as {
-      _bumpChatRecoveryProgress(): Promise<void>;
-    };
-    await self._bumpChatRecoveryProgress();
+    // One explicit credit — the same unit a flushed segment or a forwarded
+    // child chunk adds to the derived marker.
+    this._resumableStream.creditProgress();
+  }
+
+  /** The recovery progress marker as the engine would read it now. */
+  async readProgressMarkerForTest(): Promise<number> {
+    return this._resumableStream.progressMarker();
   }
 
   /** Simulate compaction collapsing the transcript by dropping all assistant
@@ -6862,7 +6936,7 @@ export class ThinkRecoveryTestAgent extends Think {
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_agents_stream_chunks
+        SELECT COALESCE(MAX(seq_to), 0) as count FROM cf_agents_stream_blocks
         WHERE stream_id = ${streamId}
       `;
       return rows[0]?.count ?? 0;
@@ -6900,7 +6974,7 @@ export class ThinkRecoveryTestAgent extends Think {
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+      this._resumableStream.progressMarker();
 
     const start = await read();
     const streamId = self._resumableStream.start("req-progress-immunity");
@@ -6952,7 +7026,7 @@ export class ThinkRecoveryTestAgent extends Think {
     };
     self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
-      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+      this._resumableStream.progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -7665,36 +7739,11 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryRetry'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await this._chatRecoveryRetryDetached(
-      JSON.parse(rows[0].payload) as {
-        targetUserId?: string;
-        lastBody?: Record<string, unknown>;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await this._chatRecoveryContinueDetached(
-      JSON.parse(rows[0].payload) as {
-        targetAssistantId?: string;
-        lastBody?: Record<string, unknown> | null;
-        lastClientTools?: ClientToolSchema[] | null;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
   async setRequestContextForTest(
@@ -7752,10 +7801,13 @@ export class ThinkRecoveryTestAgent extends Think {
       VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
-    for (const chunk of chunks) {
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${now}, ${now})
       `;
     }
   }
@@ -7763,7 +7815,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    return this._countScheduledChatRecovery(callback);
+    return recoveryWorkCountForTest(this, callback);
   }
 
   /** Insert a stream-metadata row aged `ageMs` in the past (for cleanup tests). */
@@ -7812,11 +7864,9 @@ export class ThinkRecoveryTestAgent extends Think {
     )._startResumableStream(requestId);
   }
 
-  /** Invoke the alarm-driven cleanup callback directly. */
-  async runStreamCleanupForTest(): Promise<void> {
-    await (
-      this as unknown as { _cleanupStreamBuffers(): Promise<void> }
-    )._cleanupStreamBuffers();
+  /** Reclaim leftover streams now, as the next stream start does. */
+  async runStreamCleanupForTest(nowMs?: number): Promise<number> {
+    return this._resumableStream.reclaim(nowMs);
   }
 
   /** Finish a stream via the cleanup-arming wrapper (mirrors a real turn end). */
@@ -7824,43 +7874,6 @@ export class ThinkRecoveryTestAgent extends Think {
     (
       this as unknown as { _completeResumableStream(id: string): void }
     )._completeResumableStream(streamId);
-  }
-
-  /** Arm the cleanup alarm without finishing a stream (leaves no new buffer). */
-  async armStreamCleanupForTest(): Promise<void> {
-    await (
-      this as unknown as { _ensureStreamCleanupScheduled(): Promise<void> }
-    )._ensureStreamCleanupScheduled();
-  }
-
-  /**
-   * The delay (seconds) of the pending cleanup schedule, or null if none.
-   * Locks the arming interval (STREAM_CLEANUP_DELAY_SECONDS) so a regression
-   * that lengthens it back toward the old 24h leak window is caught.
-   */
-  async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
-    const rows = this.sql<{ delayInSeconds: number | null }>`
-      SELECT json_extract(payload, '$.delayInSeconds') AS delayInSeconds
-      FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
-      LIMIT 1
-    `;
-    return rows[0]?.delayInSeconds ?? null;
-  }
-
-  /**
-   * Backdate any pending cleanup schedule so it is due, then run the REAL
-   * `alarm()` handler. This exercises the production path where `alarm()`
-   * deletes the fired one-shot row after the callback returns — so a re-arm
-   * must create a fresh row to survive (the idempotent-reschedule footgun).
-   */
-  async fireDueCleanupAlarmForTest(): Promise<void> {
-    this.sql`
-      UPDATE cf_agents_jobs
-      SET time = ${Date.now() - 1_000}
-      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
-    `;
-    await this.alarm();
   }
 
   async insertInterruptedFiber(
@@ -7881,26 +7894,24 @@ export class ThinkRecoveryTestAgent extends Think {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
-    // Recovery arms ZERO-delay schedules whose alarms the workers test pool
-    // can fire as soon as this RPC releases the DO, consuming the job rows.
-    // Read the counts synchronously inside the same invocation so callers can
-    // assert on them without racing that alarm.
+    // Read recovery state synchronously inside the same invocation: an
+    // immediate alarm may consume it after this RPC releases the object.
     return {
-      scheduledContinueCount: this._countScheduledChatRecovery(
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
         "_chatRecoveryContinue"
       ),
-      scheduledRetryCount:
-        this._countScheduledChatRecovery("_chatRecoveryRetry")
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
     };
   }
 
-  private _countScheduledChatRecovery(callback: string): number {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count
-      FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+  async triggerFiberRecoveryWithTransportForTest(
+    callback: string
+  ): Promise<{ tasks: number; schedules: number }> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+    return recoveryTransportCountsForTest(this, callback);
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
@@ -8085,13 +8096,81 @@ export class ThinkRecoveryTestAgent extends Think {
     )._chatRecoveryRetry(data);
   }
 
+  /** Exercise platform failure ownership on either side of model handoff. */
+  async testRecoveryDispatchHandoffForTest(options: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    phase: "before" | "after";
+  }): Promise<{ threw: boolean; tasks: number; schedules: number }> {
+    const data = { incidentId: crypto.randomUUID() };
+    if (options.callback === "_chatRecoveryContinue") {
+      await this.preScheduleRecoveryContinueForTest(data);
+    } else {
+      await this.preScheduleRecoveryRetryForTest(data);
+    }
+
+    type ContinueData = Parameters<Think["_chatRecoveryContinue"]>[0];
+    type RetryData = Parameters<Think["_chatRecoveryRetry"]>[0];
+    const host = this as unknown as {
+      _chatRecoveryContinueDetached(
+        data?: ContinueData,
+        onTurnStarted?: () => void
+      ): Promise<void>;
+      _chatRecoveryRetryDetached(
+        data?: RetryData,
+        onTurnStarted?: () => void
+      ): Promise<void>;
+    };
+    const originalContinue = host._chatRecoveryContinueDetached.bind(this);
+    const originalRetry = host._chatRecoveryRetryDetached.bind(this);
+    const fail = async (onTurnStarted?: () => void): Promise<never> => {
+      if (options.phase === "after") {
+        onTurnStarted?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      throw new Error("Network connection lost.");
+    };
+    host._chatRecoveryContinueDetached = (_data, onTurnStarted) =>
+      fail(onTurnStarted);
+    host._chatRecoveryRetryDetached = (_data, onTurnStarted) =>
+      fail(onTurnStarted);
+
+    let threw = false;
+    try {
+      if (options.callback === "_chatRecoveryContinue") {
+        await this._chatRecoveryContinue(data);
+      } else {
+        await this._chatRecoveryRetry(data);
+      }
+    } catch (error) {
+      threw =
+        error instanceof Error &&
+        error.message.includes("Network connection lost");
+    } finally {
+      host._chatRecoveryContinueDetached = originalContinue;
+      host._chatRecoveryRetryDetached = originalRetry;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      threw,
+      ...recoveryTransportCountsForTest(this, options.callback)
+    };
+  }
+
   /** Retry-path twin of `preScheduleRecoveryContinueForTest`. */
   async preScheduleRecoveryRetryForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryRetry", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<{
@@ -8113,17 +8192,20 @@ export class ThinkRecoveryTestAgent extends Think {
       : null;
   }
 
-  /**
-   * Pre-insert a matching `_chatRecoveryContinue` schedule row to simulate the
-   * not-yet-deleted one-shot row that `alarm()` is executing — so a reschedule
-   * with `idempotent: true` would (incorrectly) dedup onto it.
-   */
+  /** Pre-insert a recovery Task representing the current dispatch. */
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryContinue", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryContinue" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getScheduledChatRecoveryPayloadForTest(
@@ -8134,14 +8216,24 @@ export class ThinkRecoveryTestAgent extends Think {
     // `payload` as `never`. The scheduled payload only needs its recovery-link
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
-    const rows = this.sql<{ payload: string }>`
+    const taskRows = this.sql<{ payload: string }>`
+      SELECT json_extract(input, '$.data') AS payload
+      FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+        AND json_extract(metadata, '$.callback') = ${callback}
+      ORDER BY created_at ASC
+      LIMIT 1
+    `;
+    const scheduledRows = this.sql<{ payload: string }>`
       SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
       WHERE capability = 'scheduler' AND fn = ${callback}
       ORDER BY time ASC
       LIMIT 1
     `;
-    return rows[0]
-      ? (JSON.parse(rows[0].payload) as {
+    const payload = taskRows[0]?.payload ?? scheduledRows[0]?.payload;
+    return payload
+      ? (JSON.parse(payload) as {
           recoveredRequestId?: string;
           requestId?: string;
         })
@@ -8261,17 +8353,17 @@ export class ThinkOnStartHydrationFailureAgent extends Think {
       throw new Error("SQL query failed: out of memory: SQLITE_NOMEM");
     };
     const originalHistory = session.getHistory.bind(session);
-    session.getHistory = async (leafId?: string | null) => {
+    session.getHistory = async (options) => {
       failFirstRead();
-      return originalHistory(leafId);
+      return originalHistory(options);
     };
     const originalRecent = session.getRecentHistory.bind(session);
     session.getRecentHistory = async (
       maxContentBytes: number,
-      minRecentMessages?: number
+      options?: Parameters<typeof originalRecent>[1]
     ) => {
       failFirstRead();
-      return originalRecent(maxContentBytes, minRecentMessages);
+      return originalRecent(maxContentBytes, options);
     };
     return session;
   }
@@ -8395,7 +8487,18 @@ export class ThinkWindowedHydrationAgent extends Think {
 
 // ── Media eviction agents (#1710, step 3) ───────────────────────
 
-const BIG_MEDIA_CHARS = 12_000;
+/**
+ * A payload the message row CAN hold, so it stays inline as a `data:` URL.
+ * Think's eviction has to decode it in place.
+ */
+const BIG_MEDIA_CHARS = 16_000;
+
+/**
+ * A payload the message row CANNOT hold, so Sessions splits the message
+ * across continuation rows. The part is still an inline `data:` URL, so
+ * eviction decodes it exactly as it does a small one.
+ */
+export const POINTER_MEDIA_CHARS = 1_600_000;
 
 /**
  * Eviction disabled by default so tests can seed deterministically, then
@@ -8403,7 +8506,6 @@ const BIG_MEDIA_CHARS = 12_000;
  */
 export class ThinkMediaEvictionAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
-
   override getModel(): LanguageModel {
     return createMockModel("media eviction agent response");
   }
@@ -8415,43 +8517,16 @@ export class ThinkMediaEvictionAgent extends Think {
   }
 
   /**
-   * Frames broadcast by Session status updates (`cf_agent_session`) — the
-   * side effect of a PUBLIC `updateMessage`. Eviction rewrites rows via the
-   * silent maintenance path (`internal_rewriteMessage`), which must NOT add
-   * to this count (each status emit also runs a full-history token
-   * estimate, reintroducing the memory pressure eviction removes).
-   */
-  private _sessionStatusBroadcasts = 0;
-
-  override broadcast(
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void {
-    if (typeof message === "string") {
-      try {
-        const parsed = JSON.parse(message) as { type?: string };
-        if (parsed.type === "cf_agent_session") {
-          this._sessionStatusBroadcasts++;
-        }
-      } catch {
-        // non-JSON frame — not a session status broadcast
-      }
-    }
-    super.broadcast(message, without);
-  }
-
-  async getSessionStatusBroadcastsForTest(): Promise<number> {
-    return this._sessionStatusBroadcasts;
-  }
-
-  /**
    * Seed: 2 aged messages with oversized media (a data-URL file part and a
-   * tool output with a nested big string) + 4 small filler messages. The
+   * tool output with a nested data-URL string) + 4 small filler messages. The
    * eviction cutoff clamps `keepRecentMessages` to the model's read-time
    * window (4), so with 6 seeded messages the 2 media messages are aged
    * and the 4 fillers are protected.
    */
-  async seedMediaHistoryForTest(prefix = "m"): Promise<void> {
+  async seedMediaHistoryForTest(
+    prefix = "m",
+    mediaChars = BIG_MEDIA_CHARS
+  ): Promise<void> {
     await this.appendMessageToHistory({
       id: `${prefix}0`,
       role: "user",
@@ -8460,7 +8535,7 @@ export class ThinkMediaEvictionAgent extends Think {
         {
           type: "file",
           mediaType: "image/png",
-          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+          url: `data:image/png;base64,${"A".repeat(mediaChars)}`
         }
       ]
     } as UIMessage);
@@ -8475,7 +8550,9 @@ export class ThinkMediaEvictionAgent extends Think {
           input: {},
           output: {
             mediaType: "image/png",
-            data: "B".repeat(BIG_MEDIA_CHARS),
+            // A screenshot is media wherever a tool put it: eviction finds
+            // a nested `data:` URL or pointer just as readily.
+            data: `data:image/png;base64,${"B".repeat(mediaChars)}`,
             note: "small structured field"
           }
         }
@@ -8495,28 +8572,259 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
+  /** One bounded Think-owned eviction pass. */
   async runEvictionForTest(): Promise<{
     messages: number;
     parts: number;
     bytes: number;
-    externalizedBytes: number;
+    backlogRemains: boolean;
   } | null> {
     return this._evictAgedMediaBestEffort();
+  }
+
+  /**
+   * This class does NOT override `hydrationByteBudget`, so this reads the
+   * framework default.
+   */
+  async getHydrationBudgetForTest(): Promise<number> {
+    return this.hydrationByteBudget;
+  }
+
+  /** Re-run the budgeted cache refresh (a windowed read schedules eviction). */
+  async resyncForTest(): Promise<number> {
+    return (await this.syncMessagesFromStorage()).length;
   }
 
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
     return (await this.session.getMessage(id)) as UIMessage | null;
   }
 
-  async readWorkspaceFileForTest(path: string): Promise<string | null> {
-    return this.workspace.readFile(path);
+  /** Continuation rows the object currently holds. */
+  async getContinuationRowCountForTest(): Promise<number> {
+    return (
+      this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_session_message_chunks
+    `[0]?.count ?? 0
+    );
+  }
+
+  /** The workspace file an eviction marker points at. */
+  async readEvictedFileForTest(path: string): Promise<{
+    byteLength: number;
+    mimeType: string | null;
+    firstBytes: number[];
+    allSame: boolean;
+  } | null> {
+    const bytes = await this.workspace.readFileBytes(path);
+    if (bytes === null) return null;
+    const stat = await this.workspace.stat(path);
+    const first = bytes[0] ?? 0;
+    return {
+      byteLength: bytes.byteLength,
+      mimeType: stat?.mimeType ?? null,
+      firstBytes: Array.from(bytes.slice(0, 4)),
+      allSame: bytes.every((b) => b === first)
+    };
+  }
+
+  /** What the model would see for a message: the reconstructed parts. */
+  async getModelVisibleTextForTest(id: string): Promise<string> {
+    return JSON.stringify(await this.session.getMessage(id));
   }
 }
 
-/** Eviction enabled with tiny thresholds — exercises the background pass. */
+/**
+ * A hydration budget small enough that any seeded transcript boots windowed.
+ * A truncated read is the trigger that schedules the background eviction
+ * pass, so this agent exercises that path end to end.
+ */
 export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
-  override mediaEviction: MediaEvictionConfig = {
-    keepRecentMessages: 2,
-    minPartBytes: 10_000
-  };
+  override hydrationByteBudget = 1024;
+}
+
+// ── Pointer-inflation hydration (#1710) ─────────────────────────
+
+/**
+ * Over the row budget, so every seeded row stores a pointer:
+ * 1_600_000 base64 chars decode to 1_200_000 bytes.
+ */
+export const PTR_MEDIA_CHARS = 1_600_000;
+
+/**
+ * Every seeded row overflows the row budget, so it is chunked out on the
+ * WRITE path: its stored bytes are ~a few hundred while the attachment it
+ * points at inflates back to 1.2 MB. A budget that counted only stored
+ * bytes would hydrate all ten rows (~2KB) and blow past its own ceiling on
+ * reconstruction; a budget that counts the reconstructed attachment bytes
+ * hydrates a window instead.
+ */
+export class ThinkPointerHydrationAgent extends Think {
+  override hydrationByteBudget = 64 * 1024;
+  // Storage-level offload only: this agent is about hydration accounting, so
+  // Think's context-window eviction stays off and the payloads stay stored.
+  override mediaEviction: MediaEvictionConfig | boolean = false;
+
+  override async configureSession(session: Session): Promise<Session> {
+    const existing = await session.getHistory();
+    if (existing.length === 0) {
+      for (let i = 0; i < 10; i++) {
+        await session.appendMessage({
+          id: `ptr-${i}`,
+          role: i % 2 === 0 ? "user" : "assistant",
+          parts: [
+            { type: "text", text: `ptr ${i}` },
+            {
+              type: "file",
+              mediaType: "image/png",
+              // Distinct per row: content-addressed storage must not
+              // dedupe ten rows down to one blob.
+              url: `data:image/png;base64,${String.fromCharCode(65 + i).repeat(
+                PTR_MEDIA_CHARS
+              )}`
+            }
+          ]
+        });
+      }
+    }
+    return session;
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("pointer hydration agent response");
+  }
+
+  async getHydrationInfoForTest(): Promise<{
+    truncated: boolean;
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null> {
+    return this._lastHydration;
+  }
+
+  async getCachedMessageIdsForTest(): Promise<string[]> {
+    return this.messages.map((m) => m.id);
+  }
+
+  async getFullHistoryIdsForTest(): Promise<string[]> {
+    return (await this.session.getHistory()).map((m) => m.id);
+  }
+
+  /** Stored bytes of the whole path — the on-disk footprint. */
+  async getStoredPathBytesForTest(): Promise<number> {
+    const stats = await this.session.getHistoryRowStats();
+    return stats.reduce((sum, row) => sum + row.bytes, 0);
+  }
+
+  /** The `data:` URLs the hydrated window reconstructed, in cache order. */
+  async getCachedFileUrlsForTest(): Promise<string[]> {
+    return this.messages.map(
+      (m) =>
+        (m.parts.find((p) => p.type === "file") as { url?: string } | undefined)
+          ?.url ?? ""
+    );
+  }
+}
+
+/**
+ * A subclass written against the pre-Sessions Think API: context declared
+ * through `configureSession(session).withContext(...)`, the context
+ * accessors read off `this.session`, and the positional `appendMessage` /
+ * `getHistory` forms. Every call here must keep compiling and behaving.
+ */
+export class ThinkLegacySessionApiAgent extends Think {
+  private _response = "Hello from legacy session agent!";
+  private _compactionErrors: string[] = [];
+
+  override configureSession(session: ThinkSession): ThinkSession {
+    return session
+      .withContext("soul", {
+        provider: { get: async () => "You are a legacy-configured agent." }
+      })
+      .withContext("memory", {
+        description: "Important facts learned during conversation.",
+        maxTokens: 2000
+      })
+      .withCachedPrompt()
+      .onCompaction(async () => {
+        throw new Error("summarizer down");
+      })
+      .onCompactionError((error) => {
+        this._compactionErrors.push(
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel(this._response);
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  async legacyBlockLabels(): Promise<string[]> {
+    return this.session.getContextBlocks().map((block) => block.label);
+  }
+
+  async legacyBlockContent(label: string): Promise<string | null> {
+    return this.session.getContextBlock(label)?.content ?? null;
+  }
+
+  async legacyReplaceBlock(label: string, content: string): Promise<void> {
+    await this.session.replaceContextBlock(label, content);
+  }
+
+  async legacyFreezeSystemPrompt(): Promise<string> {
+    return this.session.freezeSystemPrompt();
+  }
+
+  async legacyAddAndRemoveContext(label: string): Promise<boolean> {
+    await this.session.addContext(label, { description: "Dynamic block" });
+    await this.session.refreshSystemPrompt();
+    return this.session.removeContext(label);
+  }
+
+  async legacyToolNames(): Promise<string[]> {
+    return Object.keys(await this.session.tools());
+  }
+
+  /** Positional `appendMessage(message, parentId)` and `getHistory(leafId)`. */
+  async legacyPositionalWrites(): Promise<{
+    rootLength: number;
+    branchLength: number;
+  }> {
+    const text = (id: string, content: string): UIMessage => ({
+      id,
+      role: "user",
+      parts: [{ type: "text", text: content }]
+    });
+    await this.session.appendMessage(text("legacy-root", "root"), null);
+    await this.session.appendMessage(text("legacy-a", "a"), "legacy-root");
+    await this.session.appendMessage(text("legacy-b", "b"), "legacy-root");
+    const branch = await this.session.getHistory("legacy-a");
+    const root = await this.session.getHistory(null);
+    return { rootLength: root.length, branchLength: branch.length };
+  }
+
+  /** `getRecentHistory(budget, minRecentMessages)` still accepts two args. */
+  async legacyRecentHistoryLength(): Promise<number> {
+    const recent = await this.session.getRecentHistory(1024 * 1024, 4);
+    return recent.messages.length;
+  }
+
+  async legacyCompact(): Promise<{
+    result: unknown;
+    errors: string[];
+  }> {
+    const result = await this.session.compact();
+    return { result, errors: [...this._compactionErrors] };
+  }
 }

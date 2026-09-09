@@ -113,13 +113,20 @@ modules.
 ### Agent integration and the chat replatform
 
 `Agent` installs the capability as experimental `this.tasks`. Subclass
-definitions go on the overridable `taskDefinitions` field; framework
-definitions attach through a composition-root resolver
-(`setTaskDefinitionResolver`) so they never occupy the user's map, and
-reserved `__cf`-prefixed names cannot be started through the public
-`run()`. An internal aperture (`runAttached`) accepts a run durably and
-executes it inline while the isolate lives — the shape a request-driven
-chat turn needs.
+definitions go on the overridable `taskDefinitions` field, bridged by a
+composition-root resolver (`setTaskDefinitionResolver`) that stays lazy
+because a further-downstream subclass's field initializer only runs after
+every constructor up the chain returns. Framework definitions — chat
+turns, chat recovery, messenger replies — never touch that field at all:
+each host subclass (`AIChatAgent`, `Think`) registers them eagerly from
+its own constructor through `Tasks#register`, a capability-owned
+aperture that lives on `Tasks` itself rather than on `Agent`, so it
+composes correctly no matter how many subclass layers sit between the
+framework and the end user or what any of them do with their own
+`taskDefinitions` field. Reserved `__cf`-prefixed names cannot be started
+through the public `run()`. An internal aperture (`runAttached`) accepts
+a run durably and executes it inline while the isolate lives — the shape
+a request-driven chat turn needs.
 
 Think and AIChatAgent run their chat turns and messenger replies on this
 capability. The shared turn definition lives once in `agents/chat`

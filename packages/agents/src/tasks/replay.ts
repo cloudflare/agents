@@ -9,6 +9,11 @@
  * schema.
  */
 
+import {
+  isDurableObjectCodeUpdateReset,
+  isDurableObjectMemoryLimitReset,
+  isPlatformFailure
+} from "../retries";
 import { parseTaskDuration, type TaskDurationString } from "./duration";
 import {
   DuplicateTaskStepError,
@@ -418,6 +423,21 @@ export class ReplayStep implements TaskStep {
       if (error instanceof AttemptSupersededError) throw error;
       const cancellation = this.#engine.cancellationRequested();
       if (cancellation) throw new TaskCancellation(cancellation.reason);
+      // A condemned isolate cannot recover in-process. Leave the journal row
+      // running and let the whole Task reach the alarm boundary, where a code
+      // update defers to fresh code and a memory reset enters the breaker.
+      // Other platform transients (notably "Network connection lost") retain
+      // the ordinary short step retry budget before the run defers.
+      if (
+        isDurableObjectCodeUpdateReset(error) ||
+        isDurableObjectMemoryLimitReset(error)
+      ) {
+        throw error;
+      }
+      // Transient platform errors use the configured durable retry budget.
+      // Once that budget is spent they still are not application failures:
+      // keep the step claimed and defer the whole run to a later invocation.
+      if (isPlatformFailure(error) && attempt >= policy.retryLimit) throw error;
       if (
         isNonRetryableError(error) ||
         error instanceof TaskSerializationError ||

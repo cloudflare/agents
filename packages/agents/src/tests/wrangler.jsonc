@@ -49,12 +49,32 @@
         "name": "StreamHarnessObject"
       },
       {
+        "class_name": "CutoverHarnessObject",
+        "name": "CutoverHarnessObject"
+      },
+      {
+        "class_name": "SqliteStrategiesBench",
+        "name": "SqliteStrategiesBench"
+      },
+      {
         "class_name": "TaskStreamComposeObject",
         "name": "TaskStreamComposeObject"
       },
       {
         "class_name": "StreamBenchObject",
         "name": "StreamBenchObject"
+      },
+      {
+        "class_name": "SessionHarnessObject",
+        "name": "SessionHarnessObject"
+      },
+      {
+        "class_name": "SessionSearchHarnessObject",
+        "name": "SessionSearchHarnessObject"
+      },
+      {
+        "class_name": "SessionBenchObject",
+        "name": "SessionBenchObject"
       },
       {
         "class_name": "PlainMcpClientObject",
@@ -221,18 +241,6 @@
       {
         "class_name": "TestSessionAgent",
         "name": "TestSessionAgent"
-      },
-      {
-        "class_name": "TestSessionAgentWithContext",
-        "name": "TestSessionAgentWithContext"
-      },
-      {
-        "class_name": "TestSearchAgent",
-        "name": "TestSearchAgent"
-      },
-      {
-        "class_name": "TestMultiSessionAgent",
-        "name": "TestMultiSessionAgent"
       },
       {
         "class_name": "TestWaitConnectionsAgent",
@@ -404,8 +412,13 @@
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
+        "CutoverHarnessObject",
+        "SqliteStrategiesBench",
         "TaskStreamComposeObject",
         "StreamBenchObject",
+        "SessionHarnessObject",
+        "SessionSearchHarnessObject",
+        "SessionBenchObject",
         "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
@@ -445,9 +458,6 @@
         "TestRunFiberAgent",
         "TestKeepAliveAgent",
         "TestSessionAgent",
-        "TestSessionAgentWithContext",
-        "TestSearchAgent",
-        "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
         "RoutingOwnerAgent",
         "RoutedChatAgent",

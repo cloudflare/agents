@@ -27,13 +27,17 @@ it("billed writes: WITHOUT ROWID tables pay one row per insert, indexes bill per
     expect(probe.updateNotTouchingIndexed).toBe(1);
     expect(probe.updateTouchingIndexed).toBe(2);
 
-    // The real hot statements: a chunk append bills exactly one row. A
+    // The real hot statements: a block append bills exactly one row. A
     // stream open pays its row plus the hidden PK index plus the tag
     // index — the metadata table deliberately stays a rowid table so
     // rowid keeps "newest first" deterministic within one created_at
     // millisecond, a cost paid once per stream, never per chunk. Settle
     // touches no index and bills one.
-    expect(probe.realChunkAppend).toBe(1);
+    // A chunk append is one row whether it opens a block or grows one, and
+    // a stream's whole log is one row to delete per block at cutover.
+    expect(probe.realBlockOpen).toBe(1);
+    expect(probe.realBlockAppend).toBe(1);
+    expect(probe.realBlockDelete).toBe(1);
     expect(probe.realStreamOpen).toBe(3);
     expect(probe.realStreamSettle).toBe(1);
   });

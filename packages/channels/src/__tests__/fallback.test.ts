@@ -4,9 +4,64 @@ import {
   fallback,
   fallbackChannel,
   type Channel,
+  type ChannelChunk,
   type DeliveryResult,
   type OutboundResolver
 } from "..";
+
+function streamOf<T>(values: readonly T[], error?: unknown): ReadableStream<T> {
+  let index = 0;
+  return new ReadableStream<T>({
+    pull(controller) {
+      if (index < values.length) {
+        controller.enqueue(values[index]!);
+        index += 1;
+        return;
+      }
+      if (error !== undefined) controller.error(error);
+      else controller.close();
+    }
+  });
+}
+
+function text(...parts: string[]): ChannelChunk[] {
+  return parts.map((part) => ({ type: "text", text: part }));
+}
+
+/** A Channel that records what it read, then reports a fixed outcome. */
+function streamingChannel(
+  result: DeliveryResult,
+  options: { readAtMost?: number; available?: boolean } = {}
+): Channel & { seen: ChannelChunk[]; calls: number } {
+  const channel = {
+    seen: [] as ChannelChunk[],
+    calls: 0,
+    ...(options.available === undefined
+      ? {}
+      : { isAvailable: () => options.available! }),
+    async stream(_surface: unknown, chunks: ReadableStream<ChannelChunk>) {
+      channel.calls += 1;
+      const reader = chunks.getReader();
+      let read = 0;
+      for (;;) {
+        if (read === options.readAtMost) break;
+        const next = await reader.read();
+        if (next.done) break;
+        channel.seen.push(next.value);
+        read += 1;
+      }
+      reader.releaseLock();
+      return result;
+    }
+  };
+  return channel as Channel & { seen: ChannelChunk[]; calls: number };
+}
+
+const rejected: DeliveryResult = {
+  status: "failed",
+  retryable: false,
+  error: { code: "DELIVERY_FAILED", message: "Not delivered" }
+};
 
 function surface(channelKey: string) {
   return {
@@ -104,14 +159,14 @@ describe("fallback surfaces", () => {
     const first = channel({ status: "delivered" });
     const channelHost = host({ first });
     const message = { markdown: "Hello" };
-    const context = { deliveryId: "notice-1" };
+    const options = { delivery: { deliveryId: "notice-1" } };
 
-    await channelHost.deliver(fallback([surface("first")]), message, context);
+    await channelHost.deliver(fallback([surface("first")]), message, options);
 
     expect(first.deliver).toHaveBeenCalledWith(
       surface("first"),
       message,
-      context
+      options
     );
   });
 
@@ -181,5 +236,196 @@ describe("fallback surfaces", () => {
       address: { surfaces: [surface("Slack"), surface("email")] },
       label: "Slack, then email"
     });
+  });
+});
+
+describe("fallback streaming", () => {
+  it("advances when a destination fails before reading", async () => {
+    const first: Channel = {
+      async stream(_surface, chunks) {
+        await chunks.cancel();
+        return rejected;
+      }
+    };
+    const second = streamingChannel({ status: "delivered", reference: "s-1" });
+    const channelHost = host({ first, second });
+
+    await expect(
+      channelHost.stream(
+        fallback([surface("first"), surface("second")]),
+        streamOf(text("Hello ", "world"))
+      )
+    ).resolves.toEqual({ status: "delivered", reference: "s-1" });
+    expect(second.seen).toEqual([
+      { type: "text", text: "Hello " },
+      { type: "text", text: "world" }
+    ]);
+  });
+
+  it("stops fallback once a destination starts reading", async () => {
+    const first = streamingChannel(rejected, { readAtMost: 1 });
+    const second = streamingChannel({ status: "delivered" });
+    const cancel = vi.fn();
+    let produced = 0;
+    const source = new ReadableStream<ChannelChunk>({
+      pull(controller) {
+        produced += 1;
+        if (produced <= 3) {
+          controller.enqueue({ type: "text", text: String(produced) });
+        } else {
+          controller.close();
+        }
+      },
+      cancel
+    });
+    const channelHost = host({ first, second });
+
+    await expect(
+      channelHost.stream(
+        fallback([surface("first"), surface("second")]),
+        source
+      )
+    ).resolves.toEqual(rejected);
+
+    expect(first.seen).toEqual([{ type: "text", text: "1" }]);
+    expect(second.calls).toBe(0);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("does not advance while an earlier attempt has a pending pull", async () => {
+    let releaseSource: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    let sent = false;
+    const source = new ReadableStream<ChannelChunk>({
+      async pull(controller) {
+        if (sent) {
+          controller.close();
+          return;
+        }
+        await blocked;
+        sent = true;
+        controller.enqueue({ type: "text", text: "late" });
+      }
+    });
+    const first: Channel = {
+      async stream(_surface, chunks) {
+        const reader = chunks.getReader();
+        void reader.read().finally(() => reader.releaseLock());
+        return rejected;
+      }
+    };
+    const second = streamingChannel({ status: "delivered" });
+    const channelHost = host({ first, second });
+
+    const delivery = channelHost.stream(
+      fallback([surface("first"), surface("second")]),
+      source
+    );
+    setTimeout(() => releaseSource?.(), 0);
+
+    await expect(delivery).resolves.toEqual(rejected);
+    expect(second.calls).toBe(0);
+  });
+
+  it("skips an unavailable destination without consuming the stream", async () => {
+    const skipped = streamingChannel(
+      { status: "delivered" },
+      {
+        available: false
+      }
+    );
+    const final = streamingChannel({ status: "delivered", reference: "f-1" });
+    const channelHost = host({ skipped, final });
+
+    await expect(
+      channelHost.stream(
+        fallback([surface("skipped"), surface("final")]),
+        streamOf(text("Hello"))
+      )
+    ).resolves.toEqual({ status: "delivered", reference: "f-1" });
+    expect(skipped.calls).toBe(0);
+    expect(final.seen).toEqual([{ type: "text", text: "Hello" }]);
+  });
+
+  it("stops after an uncertain streaming outcome", async () => {
+    const first = streamingChannel({
+      status: "uncertain",
+      reference: "half-written",
+      error: { code: "STREAM_ERROR", message: "Partly sent" }
+    });
+    const second = streamingChannel({ status: "delivered" });
+    const channelHost = host({ first, second });
+
+    await expect(
+      channelHost.stream(
+        fallback([surface("first"), surface("second")]),
+        streamOf(text("Hello"))
+      )
+    ).resolves.toEqual({
+      status: "uncertain",
+      reference: "half-written",
+      error: { code: "STREAM_ERROR", message: "Partly sent" }
+    });
+    expect(second.calls).toBe(0);
+  });
+
+  it("attempts the final destination after earlier failures before reading", async () => {
+    const first: Channel = { stream: async () => rejected };
+    const second = streamingChannel(rejected);
+    const channelHost = host({ first, second });
+
+    await expect(
+      channelHost.stream(
+        fallback([surface("first"), surface("second")]),
+        streamOf(text("Hello"))
+      )
+    ).resolves.toEqual(rejected);
+    expect(second.seen).toEqual([{ type: "text", text: "Hello" }]);
+  });
+
+  it("falls back to a non-streaming destination before the first read", async () => {
+    const deliver = vi.fn(async () => ({ status: "delivered" as const }));
+    const first: Channel = { stream: async () => rejected };
+    const channelHost = host({ first, second: { deliver } });
+
+    await expect(
+      channelHost.stream(
+        fallback([surface("first"), surface("second")]),
+        streamOf(text("Hello ", "world")),
+        { title: "Update" }
+      )
+    ).resolves.toEqual({ status: "delivered" });
+    expect(deliver).toHaveBeenCalledWith(
+      surface("second"),
+      { title: "Update", markdown: "Hello world" },
+      undefined
+    );
+  });
+
+  it("passes an interrupted generation on to the destination", async () => {
+    const seen: ChannelChunk[] = [];
+    let interrupted = false;
+    const channelHost = host({
+      only: {
+        async stream(_surface, chunks) {
+          try {
+            for await (const chunk of chunks) seen.push(chunk);
+          } catch {
+            interrupted = true;
+          }
+          return { status: "uncertain", error: { code: "X", message: "y" } };
+        }
+      }
+    });
+
+    await channelHost.stream(
+      fallback([surface("only")]),
+      streamOf(text("Half an "), new Error("model failed"))
+    );
+
+    expect(seen).toEqual([{ type: "text", text: "Half an " }]);
+    expect(interrupted).toBe(true);
   });
 });

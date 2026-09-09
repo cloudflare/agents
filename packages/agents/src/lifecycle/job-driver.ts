@@ -10,6 +10,7 @@
  * entry point itself.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
@@ -86,10 +87,71 @@ export type JobDriverOptions = {
   readonly reset: (reason: string) => void;
 };
 
+/** The dispatch an async flow belongs to while an alarm drives it. */
+type AlarmScope = { readonly executing: JobStorageRow | undefined };
+
+/**
+ * Carries the row a platform failure escaped from out to `runAlarm`'s catch,
+ * across the rethrow from `#driveJob`. Attribution must not live in a shared
+ * instance field: overlapping `alarm()` invocations (a deadman or the
+ * platform's own re-fire racing a still-running invocation) dispatch jobs
+ * concurrently, and a field would let a later dispatch overwrite the row an
+ * earlier one is still unwinding for.
+ */
+class AttributedPlatformFailure {
+  constructor(
+    readonly row: JobStorageRow,
+    readonly cause: unknown
+  ) {}
+}
+
+/** One recorded memory-limit strike, shared by every flow that observed it. */
+type MemoryLimitStrike = {
+  readonly strikes: number;
+  readonly limit: number;
+  readonly sealed: boolean;
+  /** The backoff wake time armed for an unsealed strike. */
+  readonly nextTime: number | undefined;
+  /** Recovery-loop jobs purged by a sealing strike, snapshotted beforehand. */
+  readonly purgedRecoveryLoopJobs: LifecycleJob[] | undefined;
+};
+
 /** @internal Drives the job queue when the Durable Object alarm fires. */
 export class JobDriver {
   readonly #options: JobDriverOptions;
-  #executingRow: JobStorageRow | undefined;
+  /**
+   * Ambient dispatch identity for `trackAlarmWork`. Read through the async
+   * flow rather than an instance slot so attribution stays correct when
+   * alarm invocations overlap (tests drive `alarm()` by hand while the
+   * platform fires its own).
+   */
+  readonly #alarmScope = new AsyncLocalStorage<AlarmScope>();
+  #alarmsInFlight = 0;
+  /**
+   * Work handed off by alarm-driven jobs that has not settled yet. While it
+   * is non-empty the alarm domain is not quiescent, so a clean alarm must not
+   * clear the strike counter: a still-running handoff may yet report the
+   * memory reset that alarm started.
+   */
+  readonly #outstandingAlarmWork = new Set<Promise<unknown>>();
+  /**
+   * The strike being recorded for the current memory-limit event. One reset
+   * is often observed by several flows (an in-alarm job plus handed-off work,
+   * or several handoffs awaiting the same condemned storage); they share this
+   * record so the counter moves once per event. Cleared by a clean,
+   * quiescent classification.
+   */
+  #strike: Promise<MemoryLimitStrike> | undefined;
+  /**
+   * Once a strike has been fully recorded in this isolate, no later
+   * settlement may clear the durable counter — a slower, unrelated clean
+   * sibling finishing after the strike (but before the isolate reset it
+   * scheduled actually lands) must not erase what was just recorded. The
+   * isolate reset always follows a recorded strike, so the next genuinely
+   * clean cycle runs in a fresh isolate with a fresh `JobDriver` and this
+   * flag back at its default; there is no cross-isolate state to reset.
+   */
+  #strikeRecordedThisIsolate = false;
 
   constructor(options: JobDriverOptions) {
     this.#options = options;
@@ -111,17 +173,111 @@ export class JobDriver {
     initialize: () => Promise<void>,
     runHostAlarm: () => Promise<void>
   ): Promise<void> {
+    this.#alarmsInFlight++;
+    // Only a clean pass (no memory-limit reset seen by this invocation
+    // itself) is ever eligible to trigger the quiescence-clear check below —
+    // a pass that just recorded a strike must not immediately re-check
+    // quiescence and undo what it just set. Reaching quiescence again is a
+    // job for some LATER, genuinely clean invocation or handoff settlement.
+    let clean = false;
     try {
-      await initialize();
-      await this.#driveDueJobs();
-      await runHostAlarm();
-      await this.#clearMemoryLimitStrikes();
-    } catch (error) {
-      if (!isDurableObjectMemoryLimitReset(error)) throw error;
-      await this.#handleMemoryLimitReset(error);
-      return;
+      try {
+        await initialize();
+        await this.#driveDueJobs();
+        await this.#alarmScope.run({ executing: undefined }, runHostAlarm);
+        clean = true;
+      } catch (error) {
+        // A platform failure from #driveJob carries its row out of the
+        // rethrow; anything else (initialize/runHostAlarm) has no job to
+        // attribute. Unwrap either way before classifying the real error.
+        const attributed = error instanceof AttributedPlatformFailure;
+        const cause = attributed ? error.cause : error;
+        if (!isDurableObjectMemoryLimitReset(cause)) {
+          throw attributed ? cause : error;
+        }
+        await this.#handleMemoryLimitReset(
+          cause,
+          attributed ? error.row : undefined
+        );
+        return;
+      }
+    } finally {
+      // Re-check quiescence exactly when this alarm's own "in flight" status
+      // ends, using the freshest counters — one of the two points (the
+      // other is a handoff settling, see #settleAlarmWork) that must not be
+      // skipped: whichever transition happens last is what performs the
+      // clear, and each transition re-evaluates both conditions itself
+      // rather than trusting a stale snapshot taken before the other side's
+      // own transition landed.
+      this.#alarmsInFlight--;
+      if (clean) await this.#clearMemoryLimitStrikesWhenQuiescent();
     }
     await this.#options.rearm();
+  }
+
+  /**
+   * Keep work a job handed off at a bounded return inside this alarm's
+   * memory-limit breaker domain (#1825). The alarm itself returns promptly,
+   * so other jobs stay live; the handoff is classified when it settles. A
+   * memory-limit reset it reports records a strike against the job that
+   * handed it off, exactly as an in-alarm reset would. Strikes clear only
+   * once no handed-off work is outstanding and the last of it settled clean.
+   *
+   * @returns True when called from an alarm-driven dispatch or the host
+   * alarm hook; false otherwise, in which case nothing is tracked. Tracking
+   * the same promise again (a claim-backstop wake for an attempt already
+   * handed off) is a no-op.
+   */
+  trackAlarmWork(work: Promise<unknown>): boolean {
+    const scope = this.#alarmScope.getStore();
+    if (!scope) return false;
+    if (this.#outstandingAlarmWork.has(work)) return true;
+    this.#outstandingAlarmWork.add(work);
+    void work.then(
+      () => this.#settleAlarmWork(work, undefined, scope.executing),
+      (error) => this.#settleAlarmWork(work, error, scope.executing)
+    );
+    return true;
+  }
+
+  async #settleAlarmWork(
+    work: Promise<unknown>,
+    error: unknown,
+    executing: JobStorageRow | undefined
+  ): Promise<void> {
+    try {
+      if (this.#options.disabled()) return;
+      if (isDurableObjectMemoryLimitReset(error)) {
+        // Still outstanding while the strike is recorded, so an alarm
+        // finishing concurrently cannot clear it from underneath.
+        await this.#handleMemoryLimitReset(error, executing);
+        return;
+      }
+    } finally {
+      this.#outstandingAlarmWork.delete(work);
+    }
+    // This settle is itself a quiescence transition — re-check freshly
+    // rather than trusting whether an alarm looked in flight before this
+    // delete landed (see runAlarm's matching call for why neither side may
+    // skip its own check).
+    await this.#clearMemoryLimitStrikesWhenQuiescent();
+  }
+
+  /**
+   * Clear the strike counter once the alarm domain is fully quiescent: no
+   * alarm invocation in flight, no handed-off work outstanding, and no
+   * strike recorded in this isolate that a fresh isolate hasn't yet
+   * superseded. Called at every transition that could make either counter
+   * newly zero (an alarm ending, a handoff settling) — each call re-reads
+   * both fresh, so whichever transition happens last is the one that
+   * performs the clear. Idempotent: redundant calls no-op.
+   */
+  async #clearMemoryLimitStrikesWhenQuiescent(): Promise<void> {
+    if (this.#alarmsInFlight > 0) return;
+    if (this.#outstandingAlarmWork.size > 0) return;
+    if (this.#strikeRecordedThisIsolate) return;
+    this.#strike = undefined;
+    await this.#clearMemoryLimitStrikes();
   }
 
   /** Drive every due job once, in due-time order. */
@@ -213,19 +369,21 @@ export class JobDriver {
       }
     }, hungTimeoutMs(row));
 
-    this.#executingRow = row;
     let outcome: LifecycleJobOutcome | void;
     try {
-      outcome = await tryN(
-        maxAttempts,
-        (attempt) => dispatch.onJob({ job, attempt }),
-        {
+      outcome = await this.#alarmScope.run({ executing: row }, () =>
+        tryN(maxAttempts, (attempt) => dispatch.onJob({ job, attempt }), {
           baseDelayMs: job.retry?.baseDelayMs ?? DEFAULT_JOB_RETRY.baseDelayMs,
           maxDelayMs: job.retry?.maxDelayMs ?? DEFAULT_JOB_RETRY.maxDelayMs,
-          // In-process retries are futile on a superseded isolate: code
-          // never reloads mid-invocation. Defer to a fresh invocation.
-          shouldRetry: (error) => !isDurableObjectCodeUpdateReset(error)
-        }
+          // In-process retries are futile on a superseded isolate (code
+          // never reloads mid-invocation) and on a memory-limit reset (the
+          // isolate is condemned, and a retry can read half-claimed state
+          // as "nothing to do", converting the reset into a silent success
+          // that the breaker never sees). Defer both to the alarm boundary.
+          shouldRetry: (error) =>
+            !isDurableObjectCodeUpdateReset(error) &&
+            !isDurableObjectMemoryLimitReset(error)
+        })
       );
     } catch (error) {
       if (disabled()) return;
@@ -244,9 +402,11 @@ export class JobDriver {
           `Deferring job ${row.id} to a fresh invocation after a ` +
             `platform failure; the job is preserved.`
         );
-        // Leave #executingRow set: the memory-limit breaker at the alarm
-        // boundary targets the exact job that was executing.
-        throw error;
+        // Carry the row out with the error rather than through a shared
+        // field: an overlapping alarm's own #driveJob may already be
+        // dispatching a different row by the time this unwinds to
+        // runAlarm's catch.
+        throw new AttributedPlatformFailure(row, error);
       }
       // Application failure after retry exhaustion: the owner observes it
       // and decides advancement; default is completion.
@@ -264,7 +424,6 @@ export class JobDriver {
 
     if (disabled()) return;
     queue.applyOutcome(row.id, outcome ?? undefined);
-    this.#executingRow = undefined;
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {
@@ -314,14 +473,88 @@ export class JobDriver {
    * tolerates a few consecutive resets — backing off the executing job and
    * every pending recovery-loop job so the retry is not a hot loop — then
    * seals: those jobs are purged and the capability + host memory-limit
-   * policy hooks run. Each step is best-effort:
-   * even these small writes can OOM, but swallowing still halts the
-   * platform's auto-retry, and a later wake re-arms legitimate work.
+   * policy hooks run.
+   *
+   * One reset is one event even when several flows observe it. The strike
+   * is recorded once per event ({@link #recordMemoryLimitStrike}); every
+   * observer then applies the per-job policy for the job it belongs to, and
+   * the first observer finishes the event by re-arming, syncing, and
+   * resetting the isolate. Each step is best-effort: even these small writes
+   * can OOM, but swallowing still halts the platform's auto-retry, and a
+   * later wake re-arms legitimate work.
    */
-  async #handleMemoryLimitReset(error: unknown): Promise<void> {
+  async #handleMemoryLimitReset(
+    error: unknown,
+    executing: JobStorageRow | undefined
+  ): Promise<void> {
+    const { queue } = this.#options;
+    const first = this.#strike === undefined;
+    // Set before the first await below: closes the window as tightly as
+    // possible against a still-outstanding clean sibling reaching quiescence
+    // and clearing what this event is about to record.
+    this.#strikeRecordedThisIsolate = true;
+    this.#strike ??= this.#recordMemoryLimitStrike(error);
+    const strike = await this.#strike;
+
+    try {
+      if (executing) {
+        if (strike.sealed) {
+          queue.delete(executing.id);
+        } else if (strike.nextTime !== undefined) {
+          queue.retime(executing.id, strike.nextTime);
+        }
+      }
+    } catch {
+      // best-effort at a failure boundary
+    }
+
+    try {
+      await this.#options.onMemoryLimit({
+        sealed: strike.sealed,
+        nextTime: strike.nextTime,
+        executing: executing ? jobFromRow(executing) : undefined,
+        purgedRecoveryLoopJobs: first
+          ? strike.purgedRecoveryLoopJobs
+          : undefined
+      });
+    } catch {
+      // best-effort domain policy; the purge above already broke the loop
+    }
+
+    if (!first) return;
+
+    // Re-arm so unrelated work continues. Wrapped because it can itself OOM;
+    // if it does, the next external wake re-arms.
+    try {
+      await this.#options.rearm();
+    } catch {
+      // best-effort
+    }
+
+    // Finish on a fresh isolate: the strike is durable and the backoff alarm
+    // owns the next wake, so schedule a reset to reclaim the memory
+    // footprint instead of limping on in the pressured isolate. Sync first —
+    // a reset cancels unconfirmed writes, and the strike/backoff writes must
+    // land. If any of this fails, fall through to the swallow-and-return
+    // exit, which still halts the platform's alarm auto-retry.
+    try {
+      await this.#options.storage.sync();
+      this.#options.reset(
+        `Alarm memory-limit strike ${strike.strikes}/${strike.limit}${strike.sealed ? " (sealed)" : ""}; resetting isolate (#1825)`
+      );
+    } catch {
+      // best-effort
+    }
+  }
+
+  /**
+   * Record one strike durably and apply the queue-wide policy that belongs
+   * to the event rather than to any one job: recovery-loop rows back off (or
+   * purge) as a pack, a sealing strike resets the counter, and the event is
+   * emitted once.
+   */
+  async #recordMemoryLimitStrike(error: unknown): Promise<MemoryLimitStrike> {
     const { queue, storage } = this.#options;
-    const executing = this.#executingRow;
-    this.#executingRow = undefined;
 
     let strikes = 1;
     try {
@@ -357,13 +590,6 @@ export class JobDriver {
     }
 
     try {
-      if (executing) {
-        if (sealed) {
-          queue.delete(executing.id);
-        } else if (nextTime !== undefined) {
-          queue.retime(executing.id, nextTime);
-        }
-      }
       // Recovery-loop rows travel as a pack: a doomed loop's sibling rows
       // would re-trigger it on the next wake, so they back off (or purge)
       // together with the row that struck.
@@ -374,17 +600,6 @@ export class JobDriver {
       }
     } catch {
       // best-effort at a failure boundary
-    }
-
-    try {
-      await this.#options.onMemoryLimit({
-        sealed,
-        nextTime,
-        executing: executing ? jobFromRow(executing) : undefined,
-        purgedRecoveryLoopJobs
-      });
-    } catch {
-      // best-effort domain policy; the purge above already broke the loop
     }
 
     if (sealed) {
@@ -406,27 +621,6 @@ export class JobDriver {
       // event emission is non-critical
     }
 
-    // Re-arm so unrelated work continues. Wrapped because it can itself OOM;
-    // if it does, the next external wake re-arms.
-    try {
-      await this.#options.rearm();
-    } catch {
-      // best-effort
-    }
-
-    // Finish on a fresh isolate: the strike is durable and the backoff alarm
-    // owns the next wake, so schedule a reset to reclaim the memory
-    // footprint instead of limping on in the pressured isolate. Sync first —
-    // a reset cancels unconfirmed writes, and the strike/backoff writes must
-    // land. If any of this fails, fall through to the swallow-and-return
-    // exit, which still halts the platform's alarm auto-retry.
-    try {
-      await this.#options.storage.sync();
-      this.#options.reset(
-        `Alarm memory-limit strike ${strikes}/${limit}${sealed ? " (sealed)" : ""}; resetting isolate (#1825)`
-      );
-    } catch {
-      // best-effort
-    }
+    return { strikes, limit, sealed, nextTime, purgedRecoveryLoopJobs };
   }
 }

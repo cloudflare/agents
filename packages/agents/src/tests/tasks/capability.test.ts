@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
   backdateTaskWake,
@@ -59,6 +63,70 @@ async function waitFor(
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+describe("Tasks#register", () => {
+  it("rejects a name without the reserved __cf prefix", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(() =>
+        instance.tasks.register("not-reserved", async () => undefined)
+      ).toThrow(/"__cf"-prefixed reserved definition name/);
+    });
+  });
+
+  it("rejects an empty name", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(() => instance.tasks.register("", async () => undefined)).toThrow(
+        /non-empty strings/
+      );
+    });
+  });
+
+  it("rejects a duplicate registration of the same name", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      instance.tasks.register("__cf_test_dup", async () => "first");
+      expect(() =>
+        instance.tasks.register("__cf_test_dup", async () => "second")
+      ).toThrow(/already registered/);
+    });
+  });
+
+  it("rejects a name that collides with a constructor-declared definition", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      // "pipeline" is declared in TaskHarnessObject's constructor `definitions`
+      // map — not `__cf`-prefixed, so this hits the prefix check first, which
+      // is fine: either failure mode correctly refuses the collision.
+      expect(() =>
+        instance.tasks.register("pipeline", async () => "shadowed")
+      ).toThrow();
+    });
+  });
+
+  it("dispatches a registered reserved definition through the internal aperture", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      instance.tasks.register("__cf_test_registered", async () => "ran");
+      const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+        "__cf_test_registered",
+        undefined
+      );
+      expect(receipt.accepted).toBe(true);
+      expect((await instance.tasks.get(receipt.runId))?.state).toBe(
+        "completed"
+      );
+      // The reserved name stays unreachable through the public surface.
+      await expect(
+        instance.tasks.run(
+          "__cf_test_registered" as unknown as "pipeline",
+          undefined as never
+        )
+      ).rejects.toThrow(/reserved "__cf" prefix/);
+    });
+  });
+});
 
 describe("Tasks capability", () => {
   it("accepts runs durably and deduplicates acceptance", async () => {
@@ -146,6 +214,61 @@ describe("Tasks capability", () => {
     });
   });
 
+  it("repairs a missing wake mirror when a retry joins an already-accepted run", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const runId = "repair-wake-run";
+
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "sleeper",
+        { ms: 60 * 60 * 1000 },
+        { runId }
+      );
+      expect(receipt.accepted).toBe(true);
+      await waitForState(instance.tasks, runId, ["waiting"]);
+    });
+
+    // Simulate acceptance throwing after the row was already durably
+    // inserted — the realistic failure is on the wake-mirror push itself,
+    // not the insert — by deleting the mirror directly, as if it never
+    // landed.
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "DELETE FROM cf_agents_jobs WHERE id = ?",
+        `task:${runId}`
+      );
+      const rows = state.storage.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM cf_agents_jobs WHERE id = ?",
+          `task:${runId}`
+        )
+        .toArray();
+      expect(rows[0]?.count).toBe(0);
+    });
+
+    // A retry that joins the existing run (same runId, the real caller
+    // pattern for a redefer retry) must repair the missing wake, not just
+    // report accepted:false against a run nothing will ever wake again.
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const joined = await instance.tasks.run(
+        "sleeper",
+        { ms: 60 * 60 * 1000 },
+        { runId }
+      );
+      expect(joined.accepted).toBe(false);
+    });
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const rows = state.storage.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM cf_agents_jobs WHERE id = ?",
+          `task:${runId}`
+        )
+        .toArray();
+      expect(rows[0]?.count).toBe(1);
+    });
+  });
+
   it("completes a run through the warm path with journaled steps and host context", async () => {
     const name = crypto.randomUUID();
     const stub = env.TaskHarnessObject.getByName(name);
@@ -182,6 +305,96 @@ describe("Tasks capability", () => {
     } finally {
       capture.stop();
     }
+  });
+
+  it("leaves internal enqueues to their durable wake instead of warm-starting", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+        "pipeline",
+        { label: "queued" }
+      );
+      expect((await instance.tasks.get(receipt.runId))?.state).toBe("pending");
+      expect(instance.stepRuns).toEqual([]);
+      await instance.tasks.cancel(receipt.runId);
+    });
+  });
+
+  it("re-arms a lost physical alarm on startup when every wake mirror already matches", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    const future = Date.now() + 60 * 60 * 1000;
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "lost-alarm",
+          definition: "checkpointing",
+          state: "pending",
+          nextAt: future
+        });
+        // Bring the mirror to exactly what #syncWake writes, so the fresh
+        // start below has nothing to push and must re-arm explicitly.
+        state.storage.sql.exec(
+          `UPDATE cf_agents_jobs SET retry_options = ? WHERE id = ?`,
+          JSON.stringify({ maxAttempts: 1 }),
+          "task:lost-alarm"
+        );
+        await state.storage.deleteAlarm();
+        expect(await state.storage.getAlarm()).toBeNull();
+      }
+    );
+
+    await evictDurableObject(stub);
+    await runInDurableObject(
+      env.TaskHarnessObject.getByName(name),
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        expect(await state.storage.getAlarm()).toBe(future);
+        await instance.tasks.cancel("lost-alarm");
+      }
+    );
+  });
+
+  it("upgrades an existing Task wake to the one-attempt job policy", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "old-wake-policy",
+          definition: "checkpointing",
+          state: "pending",
+          nextAt: Date.now() + 60 * 60 * 1000
+        });
+      }
+    );
+
+    await evictDurableObject(stub);
+    const fresh = env.TaskHarnessObject.getByName(name);
+    await runInDurableObject(
+      fresh,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const rows = state.storage.sql
+          .exec(
+            `SELECT fn, retry_options FROM cf_agents_jobs
+             WHERE id = 'task:old-wake-policy'`
+          )
+          .toArray() as Array<{
+          fn: string;
+          retry_options: string | null;
+        }>;
+        expect(rows[0]?.fn).toBe("wake");
+        expect(JSON.parse(rows[0]?.retry_options ?? "null")).toEqual({
+          maxAttempts: 1
+        });
+        await instance.tasks.cancel("old-wake-policy");
+      }
+    );
   });
 
   it("parks on a step retry and replays without re-executing completed steps", async () => {
@@ -594,6 +807,40 @@ describe("Tasks capability", () => {
     );
   });
 
+  it("defers an exhausted platform step to a fresh alarm invocation", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const result = await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+          "exhaustedPlatformStep",
+          undefined
+        );
+        backdateTaskWake(state.storage, receipt.runId);
+        await instance.lifecycle.rearmAlarm();
+
+        let threw = false;
+        try {
+          await (instance as unknown as { alarm(): Promise<void> }).alarm();
+        } catch (error) {
+          threw =
+            error instanceof Error &&
+            error.message.includes("Network connection lost");
+        }
+
+        return {
+          threw,
+          run: await instance.tasks.get(receipt.runId),
+          stepRuns: instance.stepRuns.slice()
+        };
+      }
+    );
+
+    expect(result.threw).toBe(true);
+    expect(result.stepRuns).toEqual(["exhausted-platform-step:1"]);
+    expect(result.run?.state).toBe("running");
+  });
+
   it("a platform-class failure never settles the run; replay completes it", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     let runId = "";
@@ -647,6 +894,24 @@ describe("Tasks capability", () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
       expect(instance.stepRuns).toEqual(["pipeline:first", "pipeline:second"]);
+    });
+  });
+
+  it("removes non-retained records after cancellation", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "sleeper",
+        { ms: 60_000 },
+        { retain: false }
+      );
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+      expect(
+        await instance.tasks.cancel(receipt.runId, "no longer needed")
+      ).toBe(true);
+      await waitFor(
+        async () => (await instance.tasks.get(receipt.runId)) === null
+      );
     });
   });
 

@@ -104,7 +104,7 @@ const receipt = await this.tasks.run("build-report@v1", input, {
 completion. The same `idempotencyKey` (or a caller-selected `runId`) joins
 the existing run instead of creating a second one; `accepted: false` on the
 receipt marks that join. Pass `metadata` to retain JSON alongside the run and
-`retain: false` to remove the record after successful completion.
+`retain: false` to remove the record after terminal settlement.
 
 `run()` and `handle()` type the definition name and its input against the
 declared map. A handle is a typed lens scoped to one definition — its `run`,

@@ -281,3 +281,39 @@ time, the breaker stops the platform retry storm and the bill, but the agent is
 only usable again once the stored footprint shrinks (the #1710 windowed-hydration
 / media-eviction lever). The breaker bounds the blast radius; it does not shrink
 the working set.
+
+## The marker is derived from the stream log
+
+Both progress-keyed bounds — the no-progress window and the work meter — read
+one monotonic number. It began as a count of assistant messages, which
+compaction could lower (#1628), then became a KV counter bumped per credited
+chunk, which was a Durable Object KV get and put on the streaming hot path:
+two per tool call, one per text or reasoning segment start, one per five
+seconds of deltas, and one per five seconds of forwarded sub-agent output.
+
+The chunk log the hosts already flush to is the durable record of produced
+content, so the marker is now read from it (`ResumableStream.progressMarker`):
+
+- a live stream contributes its log tail, a settled stream its final cursor;
+- when a stream's rows are deleted — the cutover, the reclaim on the next
+  `start()`, `clearAll()` — its segments are folded into a retired total
+  first, in the same synchronous block, so the sum never moves when rows go
+  away;
+- a parent forwarding a sub-agent's output credits one unit explicitly
+  (`creditProgress()`), throttled as before, because that output goes to
+  clients and not to the parent's own log.
+
+The unit changed from "credited chunk" to "durable segment": one per ten
+packed streaming chunks, one per settled tool result, one per explicit
+credit. For delta-heavy turns that is finer than the old counter, which
+credited a long text segment once per five seconds, so the default
+`maxRecoveryWork` moved from 1 000 to 10 000 to stay as generous in the new
+unit while remaining finite. Nothing is written per chunk; one row is written
+per stream retired and per explicit credit.
+
+The old KV counter (`CHAT_RECOVERY_PROGRESS_KEY`) is read once per isolate and
+folded into its own column of the progress row by max, beside the retired
+total, so an incident whose recorded high-water mark predates the upgrade
+never sees the marker read lower, a seed can never swallow segments retired
+before it, and a repeated seed is idempotent. The key is not deleted: a
+rollback resumes from a value no lower than it left.
