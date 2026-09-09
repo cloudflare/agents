@@ -4379,6 +4379,9 @@ importers:
       '@cloudflare/voice':
         specifier: workspace:*
         version: link:../voice
+      agents:
+        specifier: workspace:*
+        version: link:../agents
       postal-mime:
         specifier: ^2.7.5
         version: 2.7.5
