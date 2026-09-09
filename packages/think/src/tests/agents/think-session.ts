@@ -8474,6 +8474,61 @@ export class ThinkWindowedHydrationAgent extends Think {
   }
 
   /**
+   * Growth the refresh never measured: a tool result that enlarges a cached
+   * message, and an append whose text is multibyte. Both must be charged in
+   * bytes against the 64 KB budget, so the cache stops claiming to cover the
+   * path even though nothing was re-read.
+   */
+  async growCachePastBudgetForTest(): Promise<{
+    coversAfterSync: boolean;
+    coversAfterUpdate: boolean;
+    coversAfterMultibyteAppend: boolean;
+  }> {
+    const internal = this as unknown as {
+      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _cacheCoversActivePath: boolean;
+    };
+    await this.session.appendMessage({
+      id: "grow-user",
+      role: "user",
+      parts: [{ type: "text", text: "run it" }]
+    });
+    await this.session.appendMessage({
+      id: "grow-assistant",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-grow",
+          toolName: "client_action",
+          state: "input-available",
+          input: {}
+        }
+      ]
+    } as unknown as UIMessage);
+    await this.syncMessagesFromStorage();
+    const coversAfterSync = internal._cacheCoversActivePath;
+
+    // A 70 KB result on a message the cache already holds: an update, not an
+    // append, and alone larger than the budget.
+    await internal._applyToolResult("tc-grow", "y".repeat(70_000));
+    const coversAfterUpdate = internal._cacheCoversActivePath;
+
+    // Reset by refreshing (the update re-windows), then grow by an append
+    // of 40 000 two-byte characters: 40 KB of string length, 80 KB stored.
+    await this.session.clearMessages();
+    await this.syncMessagesFromStorage();
+    await this.session.appendMessage({
+      id: "grow-multibyte",
+      role: "user",
+      parts: [{ type: "text", text: "é".repeat(40_000) }]
+    });
+    const coversAfterMultibyteAppend = internal._cacheCoversActivePath;
+
+    return { coversAfterSync, coversAfterUpdate, coversAfterMultibyteAppend };
+  }
+
+  /**
    * A tool result whose owner has fallen outside the hydration window. The
    * live cache cannot name the row, so the apply must fall back to storage —
    * and still land: the row is updated even though `this.messages` never
@@ -8691,6 +8746,46 @@ export class ThinkMediaEvictionAgent extends Think {
  */
 export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
   override hydrationByteBudget = 1024;
+
+  /**
+   * Media that a pass had to protect, then aged by appends alone. The first
+   * pass on the windowed cache finds nothing aged and records that; the
+   * appends that follow never refresh the hydration snapshot, so only the
+   * append count can re-arm the pass. Seeds two fillers and two media
+   * messages (the media newest, so protected), refreshes so the cache is
+   * windowed, then appends four fillers to age the media.
+   */
+  async ageProtectedMediaByAppendsForTest(): Promise<string[]> {
+    const media = `data:image/png;base64,${"A".repeat(16_000)}`;
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `pre-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `filler ${i}` }]
+      } as UIMessage);
+    }
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `media-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [
+          { type: "text", text: `shot ${i}` },
+          { type: "file", mediaType: "image/png", url: media }
+        ]
+      } as UIMessage);
+    }
+    await this.syncMessagesFromStorage();
+    // Let the refresh's pass run and record nothing aged.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `post-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `later ${i}` }]
+      } as UIMessage);
+    }
+    return ["media-0", "media-1"];
+  }
 }
 
 // ── Pointer-inflation hydration (#1710) ─────────────────────────

@@ -264,6 +264,31 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     );
   });
 
+  it("re-arms a fruitless pass on a windowed cache once appends age a protected row", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkMediaEvictionAutoAgent,
+      uniqueName("evict-rearm")
+    )) as unknown as MediaEvictionStub & {
+      ageProtectedMediaByAppendsForTest(): Promise<string[]>;
+    };
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+
+    // The first pass sees the media inside the protected tail and records a
+    // fruitless scan. Four appends later the media is aged; those appends
+    // never refreshed the hydration snapshot, so the append count alone
+    // must re-arm the pass.
+    const ids = await agent.ageProtectedMediaByAppendsForTest();
+    await vi.waitFor(
+      async () => {
+        for (const id of ids) {
+          const message = await agent.getStoredMessageForTest(id);
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
   it("a windowed hydration read schedules the pass", async () => {
     const agent = (await getAgentByName(
       env.ThinkMediaEvictionAutoAgent,

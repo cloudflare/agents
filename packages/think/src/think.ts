@@ -1958,6 +1958,16 @@ const THINK_WORKFLOW_NOTIFICATIONS_JOB_ID = "think:workflow-notifications";
  */
 const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
 
+const cachedMessageEncoder = new TextEncoder();
+
+/**
+ * A cached message's size in the unit the hydration budget is measured in:
+ * UTF-8 bytes of its serialized form, not UTF-16 code units.
+ */
+function cachedMessageBytes(message: UIMessage): number {
+  return cachedMessageEncoder.encode(JSON.stringify(message)).byteLength;
+}
+
 /**
  * The stored form of a client-sourced message's metadata: Sessions drops the
  * reserved keys on every client write, so a compare against a stored row has
@@ -3114,7 +3124,12 @@ export class Think<
                     // is where an eviction pass becomes worth scheduling;
                     // the gate decides from memory. It also grows the cache
                     // past what the last refresh measured.
-                    this._noteCachedGrowth(event.message as UIMessage);
+                    this._noteCachedGrowth(
+                      cachedMessageBytes(event.message as UIMessage)
+                    );
+                    if (this._mediaEvictionFruitless) {
+                      this._mediaEvictionFruitless.appendsSince++;
+                    }
                     this._scheduleMediaEvictionPass();
                   }
                   break;
@@ -3492,12 +3507,18 @@ export class Think<
   private _mediaEvictionScheduled = false;
   private _warnedEvictionUnsupported = false;
   /**
-   * Stored transcript size at the last pass that found nothing to evict
-   * while aged rows were hidden from the cache. Until the stored bytes
-   * change, another pass would scan the same rows to the same answer, so it
-   * is not scheduled.
+   * The last pass that found nothing to evict while aged rows were hidden
+   * from the cache: the stored size it saw, and how many linear appends have
+   * landed since. Until either changes enough, another pass would scan the
+   * same rows to the same answer. A refresh that measures a different size
+   * re-arms it, and so do `keepRecentMessages` appends: that is what it takes
+   * for a row the pass had to protect to age into a candidate. An update
+   * that grows a cached row clears it outright (`_patchCachedMessage`).
    */
-  private _mediaEvictionFruitlessAtBytes: number | null = null;
+  private _mediaEvictionFruitless: {
+    storedBytes: number;
+    appendsSince: number;
+  } | null = null;
 
   /**
    * Whether the cache can stand in for the stored path when deciding if an
@@ -3540,10 +3561,12 @@ export class Think<
     // it would scan the same rows to the same answer.
     const keepRecent = Math.max(config.keepRecentMessages, MODEL_RECENT_WINDOW);
     if (this._agedRowsHiddenFromCache()) {
+      const fruitless = this._mediaEvictionFruitless;
       if (
+        fruitless !== null &&
         this._lastHydration !== null &&
-        this._mediaEvictionFruitlessAtBytes ===
-          this._lastHydration.totalContentBytes
+        fruitless.storedBytes === this._lastHydration.totalContentBytes &&
+        fruitless.appendsSince < keepRecent
       ) {
         return;
       }
@@ -3666,7 +3689,7 @@ export class Think<
       }
 
       if (totals.messages > 0) {
-        this._mediaEvictionFruitlessAtBytes = null;
+        this._mediaEvictionFruitless = null;
         this._emit("chat:media:evicted", {
           messages: totals.messages,
           parts: totals.parts,
@@ -3674,8 +3697,10 @@ export class Think<
           externalizedBytes: totals.bytes
         });
       } else if (this._agedRowsHiddenFromCache() && this._lastHydration) {
-        this._mediaEvictionFruitlessAtBytes =
-          this._lastHydration.totalContentBytes;
+        this._mediaEvictionFruitless = {
+          storedBytes: this._lastHydration.totalContentBytes,
+          appendsSince: 0
+        };
       }
       return totals;
     } catch (error) {
@@ -3725,19 +3750,26 @@ export class Think<
   private _cacheCoversActivePath = false;
 
   /**
-   * Serialized bytes appended to the cache since the last refresh. The
-   * hydration budget was measured at that refresh; once the appends since
-   * would carry the cache past it, the cache stops claiming to cover the
-   * path, so the next boundary re-reads storage and re-windows (#1710).
+   * Serialized bytes the cache has grown by since the last refresh — new
+   * messages and updates that enlarged existing ones, measured as UTF-8 the
+   * way the budget is. The hydration budget was measured at that refresh;
+   * once the growth since would carry the cache past it, the cache stops
+   * claiming to cover the path, so the next boundary re-reads storage and
+   * re-windows (#1710).
    */
   private _cachedBytesSinceSync = 0;
 
-  private _noteCachedGrowth(message: UIMessage): void {
+  private _noteCachedGrowth(bytes: number): void {
     const budget = this.hydrationByteBudget;
-    if (!Number.isFinite(budget) || budget <= 0 || !this._lastHydration) {
+    if (
+      bytes <= 0 ||
+      !Number.isFinite(budget) ||
+      budget <= 0 ||
+      !this._lastHydration
+    ) {
       return;
     }
-    this._cachedBytesSinceSync += JSON.stringify(message).length;
+    this._cachedBytesSinceSync += bytes;
     if (
       this._lastHydration.totalContentBytes + this._cachedBytesSinceSync >
       budget
@@ -3836,11 +3868,23 @@ export class Think<
     }
   }
 
-  /** Patch a message that is already present in the live cache. */
+  /**
+   * Patch a message that is already present in the live cache. An update
+   * that enlarges the message (a tool result landing on it) grows the cache
+   * exactly as an append does, so it is charged against the hydration
+   * budget the same way; and it may have put an inline payload on an aged
+   * row, so a fruitless eviction pass no longer stands.
+   */
   private _patchCachedMessage(message: UIMessage): void {
     const index = this._cachedMessages.findIndex((m) => m.id === message.id);
-    if (index !== -1) {
-      this._cachedMessages[index] = message;
+    if (index === -1) return;
+    const grew =
+      cachedMessageBytes(message) -
+      cachedMessageBytes(this._cachedMessages[index]);
+    this._cachedMessages[index] = message;
+    if (grew > 0) {
+      this._noteCachedGrowth(grew);
+      this._mediaEvictionFruitless = null;
     }
   }
 
