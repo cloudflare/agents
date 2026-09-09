@@ -65,6 +65,42 @@ function seedV1(
 }
 
 describe("v1 chunk rows fold into blocks lazily", () => {
+  it("keeps the folded-away legacy table visible after a rolled-back cutover", async () => {
+    const stub = env.CutoverHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {
+      const ctx = (instance as unknown as { ctx: DurableObjectState }).ctx;
+      await ctx.storage.put("cf_agents:streams_schema_version", 1);
+      // The one live stream holds the last v1 rows, so its fold drops the
+      // legacy table — and a cutover is that stream's first touch.
+      seedV1(instance, {
+        live: { state: "streaming", chunks: ["a", "b", "c"] }
+      });
+      await instance.lifecycle.start();
+
+      const writer = await instance.streams.open("live");
+      expect(() =>
+        writer.close({
+          commit: () => {
+            throw new Error("persist failed");
+          },
+          discard: true
+        })
+      ).toThrow("persist failed");
+
+      // SQLite restored the legacy rows with the rollback; the capability
+      // must still see them: the cursor, the next append, and a replay.
+      expect(
+        count(instance, "SELECT COUNT(*) AS n FROM cf_agents_stream_chunks")
+      ).toBe(3);
+      expect((await instance.streams.status("live"))?.cursor).toBe(3);
+      expect(writer.append("d")).toBe(3);
+      expect((await instance.streams.status("live"))?.cursor).toBe(4);
+      writer.close();
+      const chunks = await collect(instance.streams.read("live"));
+      expect(chunks.map((c) => c.chunk)).toEqual(["a", "b", "c", "d"]);
+    });
+  });
+
   it("folds one stream on first touch and drops the table once empty", async () => {
     const stub = env.CutoverHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {

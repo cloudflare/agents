@@ -2789,6 +2789,25 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   /**
+   * A parent that attaches only after the child completed must still find
+   * the child's stored chunks: the child's cutover keeps its rows for the
+   * parent, which the child's next `start()` reclaims.
+   */
+  async readCompletedChildChunksForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{ status: string; chunks: number }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.startAgentToolRun(input, { runId });
+    const inspection = await this.waitForTerminalInspectionForTest(
+      child,
+      runId
+    );
+    const chunks = await child.getAgentToolChunks(runId);
+    return { status: inspection.status, chunks: chunks.length };
+  }
+
+  /**
    * A still-running child that reaches terminal *during* the parent's bounded
    * re-attach window: reconciliation should tail it to terminal and finalize
    * the parent row `completed` instead of abandoning it `interrupted` (#1630).

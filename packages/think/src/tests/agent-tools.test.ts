@@ -88,6 +88,10 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     errorText: string,
     runId?: string
   ): Promise<NonNullable<AgentToolInspection>>;
+  readCompletedChildChunksForTest(
+    input: string,
+    runId?: string
+  ): Promise<{ status: string; chunks: number }>;
   reconcileCompletedThinkChildForTest(
     input: string,
     runId?: string
@@ -505,6 +509,21 @@ describe("Think agent tools", () => {
 
     expect(resolved.running).toBe(runId);
     expect(resolved.unknown).toBeNull();
+  });
+
+  it("keeps a completed Think child's stored chunks for a parent attaching afterwards", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+
+    // The child's cutover used to discard its stream rows with its message,
+    // so a parent re-attaching after completion (recovery, a late tail)
+    // replayed nothing. The rows now outlive the cutover, as in ai-chat.
+    const result = await parent.readCompletedChildChunksForTest(
+      "late attach",
+      runId
+    );
+    expect(result.status).toBe("completed");
+    expect(result.chunks).toBeGreaterThan(0);
   });
 
   it("recovers completed Think child runs into terminal parent rows", async () => {

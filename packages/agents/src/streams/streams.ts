@@ -682,12 +682,24 @@ export class Streams extends LifecycleCapability {
     // once the transaction has returned.
     let settled = false;
     let deleted = false;
-    this.lifecycle.storage.transactionSync(() => {
-      settled = this.#settleRow(streamId, state, reason);
-      if (!settled) return;
-      options.commit?.();
-      if (options.discard) deleted = this.#deleteRows(streamId) > 0;
-    });
+    const hadLegacy = this.#legacyChunkTable;
+    try {
+      this.lifecycle.storage.transactionSync(() => {
+        settled = this.#settleRow(streamId, state, reason);
+        if (!settled) return;
+        options.commit?.();
+        if (options.discard) deleted = this.#deleteRows(streamId) > 0;
+      });
+    } finally {
+      // The settle's tail read may have folded this stream's v1 rows and,
+      // if they were the last, dropped the legacy table and cleared the
+      // flag — inside the transaction. A rollback restores the table but
+      // not the flag, so re-derive it from the schema rather than trust a
+      // bit written by a transaction that may not have committed.
+      if (hadLegacy && !this.#legacyChunkTable) {
+        this.#legacyChunkTable = this.#hasLegacyChunkTable();
+      }
+    }
     if (settled) this.#emitSettled(streamId, state, reason);
     if (deleted) this.#emit("stream:deleted", { streamId });
     this.#wake(streamId);

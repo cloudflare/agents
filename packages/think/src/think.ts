@@ -12746,7 +12746,12 @@ export class Think<
 
       assistantMsg = accumulator.toMessage();
       if (accumulator.parts.length > 0) {
-        await this._persistAssistantMessageWithCutover(streamId, assistantMsg);
+        await this._persistAssistantMessageWithCutover(
+          streamId,
+          assistantMsg,
+          undefined,
+          { discard: this._discardStreamAtCutover(requestId) }
+        );
         this._broadcastMessages();
       }
       // Nothing to persist (or the persist threw): settle the finished stream.
@@ -13328,7 +13333,8 @@ export class Think<
           await this._persistAssistantMessageWithCutover(
             streamId,
             assistantMsg,
-            parentId
+            parentId,
+            { discard: this._discardStreamAtCutover(requestId) }
           );
           this._broadcastMessages();
         }
@@ -13406,7 +13412,8 @@ export class Think<
   private async _persistAssistantMessageWithCutover(
     streamId: string,
     msg: UIMessage,
-    parentId?: string
+    parentId?: string,
+    options: { discard?: boolean } = {}
   ): Promise<void> {
     const toPersist = this._strippedForPersist(msg);
     if (toPersist === null) return;
@@ -13417,13 +13424,27 @@ export class Think<
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
     let after: (() => Promise<void>) | undefined;
-    this._resumableStream.cutover(streamId, () => {
-      after = sync.upsert(toPersist as SessionMessage, {
-        parentId,
-        source: "server"
-      }).after;
-    });
+    this._resumableStream.cutover(
+      streamId,
+      () => {
+        after = sync.upsert(toPersist as SessionMessage, {
+          parentId,
+          source: "server"
+        }).after;
+      },
+      { discard: options.discard ?? true }
+    );
     await after?.();
+  }
+
+  /**
+   * Whether this turn's stream rows can go with its cutover. An agent-tool
+   * child turn keeps them: the parent tails the stored chunks after the
+   * child completes (`getAgentToolChunks`), so the rows are reclaimed by
+   * the child's next `start()` instead, as `AIChatAgent` does.
+   */
+  private _discardStreamAtCutover(requestId: string): boolean {
+    return !this._agentToolRunsByRequestId.get(requestId);
   }
 
   /**
