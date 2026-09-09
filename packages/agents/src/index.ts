@@ -167,6 +167,12 @@ import {
 } from "./agent-tools/options";
 export {
   AgentTools,
+  AgentToolsChild,
+  type AgentToolsChildHost,
+  type ChildTurnOutcome,
+  defaultDetachedCompletionText,
+  defaultDetachedMilestoneText,
+  setAgentToolsChildHost,
   setAgentToolsHost,
   type AgentToolsHost,
   type AgentToolsOptions

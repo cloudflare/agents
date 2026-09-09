@@ -13,3 +13,13 @@ export {
   DEFAULT_DETACHED_MAX_BUDGET_MS,
   DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS
 } from "./options";
+export {
+  AgentToolsChild,
+  defaultDetachedCompletionText,
+  defaultDetachedMilestoneText
+} from "./child";
+export {
+  type AgentToolsChildHost,
+  type ChildTurnOutcome,
+  setAgentToolsChildHost
+} from "./child-host";
