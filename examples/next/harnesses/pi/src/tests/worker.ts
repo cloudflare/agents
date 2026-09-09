@@ -12,13 +12,17 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
+import { WebSockets } from "agents/websockets";
 import { Type } from "typebox";
 import { createWorkspaceExecutionEnv } from "../harness/env";
 import { PiHarness } from "../harness/pi-harness";
 import type {
+  PiCustomEntry,
   PiEvent,
   PiExtensionApi,
   PiMessage,
+  PiSlashCommand,
+  PiSubmissionReceipt,
   PiTool
 } from "../harness/types";
 import { createModels } from "../providers/models";
@@ -360,6 +364,24 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     tools: () => [this.#multiplyTool()],
     extensions: [{ name: "test", factory: (pi) => this.#register(pi) }],
     flags: { "note-prefix": "flagged" },
+    promptTemplates: [
+      {
+        name: "greet",
+        description: "Greet somebody by name.",
+        content: "Say hello to $1"
+      }
+    ],
+    resources: {
+      skills: [
+        {
+          name: "tidy",
+          description: "Tidy the workspace.",
+          content: "Tidy everything you can find.",
+          filePath: "/skills/tidy.md"
+        }
+      ]
+    },
+    uiRequestTimeoutMs: 5_000,
     systemPrompt: "Use the supplied test tools.",
     configure: (hooks) => {
       // Registered after the extension runtime's own hooks, so this observes
@@ -380,9 +402,11 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
       });
     }
   });
+  readonly webSockets = new WebSockets(this.harness.webSockets());
   readonly lifecycle = Lifecycle.install(this)
     .use(this.tasks)
     .use(this.streams)
+    .use(this.webSockets)
     .use(this.harness);
 
   /** Run one faux turn whose tool call goes to the extension's own tool. */
@@ -446,6 +470,66 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     return (await this.harness.getMessages()).map(messageText);
   }
 
+  /**
+   * Submit one line of text the way a client would, slash commands included,
+   * and wait for whatever it produced.
+   */
+  async submitText(text: string): Promise<{
+    readonly accepted: boolean;
+    readonly command: string | null;
+    readonly status: string | null;
+  }> {
+    this.#faux.setResponses([fauxAssistantMessage("done")]);
+    const receipt: PiSubmissionReceipt = await this.harness.submit({
+      kind: "prompt",
+      prompt: text
+    });
+    if (!receipt.accepted) {
+      return {
+        accepted: false,
+        command: receipt.command ?? null,
+        status: null
+      };
+    }
+    const result = await this.harness.waitForResult(receipt.operationId);
+    return { accepted: true, command: null, status: result.status };
+  }
+
+  /** Slash commands this session offers, as a client's autocomplete sees them. */
+  async commands(): Promise<readonly PiSlashCommand[]> {
+    return this.harness.getCommands();
+  }
+
+  /** Set one extension flag and report every flag afterwards. */
+  async setFlag(
+    name: string,
+    value: boolean | string
+  ): Promise<Record<string, boolean | string>> {
+    return this.harness.setFlag(name, value);
+  }
+
+  /**
+   * Custom entries extensions appended to the transcript, flattened: the
+   * recursive JSON payload type crosses the RPC boundary poorly.
+   */
+  async customEntries(): Promise<
+    readonly { readonly customType: string; readonly text: string | null }[]
+  > {
+    const entries: readonly PiCustomEntry[] =
+      await this.harness.getCustomEntries();
+    return entries.map((entry) => {
+      const data = entry.data;
+      const text =
+        typeof data === "object" &&
+        data !== null &&
+        !Array.isArray(data) &&
+        typeof data.text === "string"
+          ? data.text
+          : null;
+      return { customType: entry.customType, text };
+    });
+  }
+
   /** Names of every tool currently offered to the model. */
   async toolNames(): Promise<readonly string[]> {
     return (await this.harness.snapshot()).tools.map((tool) => tool.name);
@@ -490,9 +574,18 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
       label: "Echo",
       description: "Echo the supplied text back.",
       parameters: echoParameters,
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        // "pick ..." asks the client to choose, which is the blocking
+        // extension UI surface running inside a tool call.
+        if (!params.text.startsWith("pick")) {
+          return {
+            content: [{ type: "text", text: `echo:${params.text}` }],
+            details: { text: params.text }
+          };
+        }
+        const choice = await ctx.ui.select("Pick one", ["a", "b"]);
         return {
-          content: [{ type: "text", text: `echo:${params.text}` }],
+          content: [{ type: "text", text: `echo:${params.text}:${choice}` }],
           details: { text: params.text }
         };
       }
@@ -520,7 +613,9 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     });
     pi.registerCommand("note", {
       description: "Append a note to the transcript.",
-      handler: async () => {}
+      handler: async (args) => {
+        pi.appendEntry("test:note", { text: args });
+      }
     });
   }
 

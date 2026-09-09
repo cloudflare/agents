@@ -4,6 +4,7 @@ import type {
   ExtensionFactory,
   ExtensionUIContext
 } from "../../vendor/pi-coding-agent-src/core/extensions/types.ts";
+import type { ResourceLoader } from "./extensions/resource-loader";
 import type { Static, TSchema } from "typebox";
 import type { SkillSource } from "agents/skills";
 import type { Streams } from "agents/streams";
@@ -258,6 +259,13 @@ export type PiExtensionFactory = ExtensionFactory;
  */
 export type PiExtensionUiContext = ExtensionUIContext;
 
+/**
+ * Pi's resource surface: extensions, skills, prompt templates, themes and
+ * context files. The harness serves an in-memory one built from its own
+ * configuration.
+ */
+export type PiResourceLoader = ResourceLoader;
+
 /** One extension: a bare factory, or a factory with a display name. */
 export type PiExtension =
   | PiExtensionFactory
@@ -349,16 +357,20 @@ export type PiHarnessConfig<
         context: PiContext
       ) => readonly PiExtension[] | Promise<readonly PiExtension[]>);
   /**
-   * Prompt templates offered as slash commands.
-   *
-   * @experimental Accepted now; command dispatch lands with the command
-   * surface.
+   * Prompt templates offered as slash commands. A submitted `/name args`
+   * that no extension command claims becomes a durable `prompt_template`
+   * operation; the templates are also added to the harness's resources.
    */
   readonly promptTemplates?: readonly PiPromptTemplate[];
   /** Working directory extensions and their tools see. @default "/" */
   readonly cwd?: string;
   /** Initial values for extension-registered flags, by flag name. */
   readonly flags?: Readonly<Record<string, boolean | string>>;
+  /**
+   * Resource surface served to pi, replacing the in-memory default built
+   * from this configuration.
+   */
+  readonly resourceLoader?: PiResourceLoader;
   /**
    * How long a blocking extension UI request waits for a client answer
    * before resolving to its default. @default 30000
@@ -717,6 +729,18 @@ export type PiEvent =
     }
   | { readonly type: "fault"; readonly code: string; readonly message: string };
 
+/**
+ * One custom transcript entry, as `pi.appendEntry` persists it. Custom
+ * entries are extension state, not model context: they carry no message and
+ * never reach the provider.
+ */
+export type PiCustomEntry = {
+  readonly id: string;
+  readonly customType: string;
+  readonly data?: PiJson;
+  readonly timestamp: number;
+};
+
 /** Envelope for events delivered to in-process listeners. */
 export type PiEventContext = {
   readonly lane: string;
@@ -760,6 +784,11 @@ export type PiSubmissionReceipt = {
    * operation was queued.
    */
   readonly handled?: boolean;
+  /**
+   * The extension slash command this submission ran instead of queueing an
+   * operation. Commands run out of band, so `accepted` is false.
+   */
+  readonly command?: string;
 };
 
 /** Receipt for a message queued into a lane's inbox. */

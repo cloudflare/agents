@@ -344,3 +344,90 @@ export function createWebSocketUIContext(deps: PiUiBridgeDeps): PiUiBridge {
     pending: () => pending.size
   };
 }
+
+/** Every lane's bridge, behind one `ExtensionUIContext`. */
+export type PiLaneUiBridges = {
+  /**
+   * The context handed to `ExtensionRunner.setUIContext`. The runner is
+   * per-harness while dialogs are per-lane, so every call routes to the
+   * bridge of the lane whose hook, event or tool is running.
+   */
+  readonly ui: ExtensionUIContext;
+  /** The bridge serving one lane, created on first use. */
+  bridge(lane: string): PiUiBridge;
+  /** Deliver a client's answer to whichever lane is waiting for it. */
+  resolve(requestId: string, response: PiExtensionUiResponse): boolean;
+  /** Settle every open dialog on every lane with its default value. */
+  abortAll(reason?: string): void;
+  /** How many dialogs are waiting for an answer, across every lane. */
+  pending(): number;
+};
+
+/** What the per-lane bridge set needs from its host. */
+export type PiLaneUiBridgeDeps = {
+  /** The lane extension code is currently running on. */
+  readonly lane: () => string;
+  /** Broadcast one request to a lane and report how many clients received it. */
+  readonly broadcast: (lane: string, request: PiExtensionUiRequest) => number;
+  readonly timeoutMs: number;
+};
+
+/**
+ * One {@link createWebSocketUIContext} per lane, addressed as a single
+ * context.
+ *
+ * Lanes are independent conversations with independent subscribers, so a
+ * dialog raised while a lane's hook runs has to reach that lane's clients and
+ * no one else's. The routing is a proxy rather than a hand-written forward of
+ * all ~28 members so that a member added upstream routes without a code
+ * change here.
+ */
+export function createLaneUiBridges(deps: PiLaneUiBridgeDeps): PiLaneUiBridges {
+  const bridges = new Map<string, PiUiBridge>();
+
+  const bridge = (lane: string): PiUiBridge => {
+    let existing = bridges.get(lane);
+    if (!existing) {
+      existing = createWebSocketUIContext({
+        lane,
+        broadcast: (request) => deps.broadcast(lane, request),
+        timeoutMs: deps.timeoutMs
+      });
+      bridges.set(lane, existing);
+    }
+    return existing;
+  };
+
+  const ui = new Proxy({} as ExtensionUIContext, {
+    // SAFETY: every read is served by a real ExtensionUIContext, so the
+    // proxy's shape is exactly that of the lane's bridge.
+    get: (_target, property) =>
+      Reflect.get(bridge(deps.lane()).ui, property) as unknown,
+    has: (_target, property) => property in bridge(deps.lane()).ui,
+    ownKeys: () => Reflect.ownKeys(bridge(deps.lane()).ui),
+    getOwnPropertyDescriptor: (_target, property) => ({
+      ...Reflect.getOwnPropertyDescriptor(bridge(deps.lane()).ui, property),
+      configurable: true,
+      enumerable: true
+    })
+  });
+
+  return {
+    ui,
+    bridge,
+    resolve(requestId, response) {
+      for (const candidate of bridges.values()) {
+        if (candidate.resolve(requestId, response)) return true;
+      }
+      return false;
+    },
+    abortAll(reason) {
+      for (const candidate of bridges.values()) candidate.abortAll(reason);
+    },
+    pending() {
+      let total = 0;
+      for (const candidate of bridges.values()) total += candidate.pending();
+      return total;
+    }
+  };
+}

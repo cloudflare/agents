@@ -14,6 +14,15 @@ export type ExtensionEventDeps = {
     modelId: string
   ) => Model<Api> | undefined;
   readonly report: PiExtensionErrorReporter;
+  /** Receive the resource paths extensions asked pi to load at startup. */
+  readonly resources?: (discovered: {
+    readonly skillPaths: ReadonlyArray<{ path: string; extensionPath: string }>;
+    readonly promptPaths: ReadonlyArray<{
+      path: string;
+      extensionPath: string;
+    }>;
+    readonly themePaths: ReadonlyArray<{ path: string; extensionPath: string }>;
+  }) => void;
 };
 
 /**
@@ -50,7 +59,11 @@ export class ExtensionEventAdapter {
       reason: "startup"
     });
     this.#run(this.#deps.states.defaultLane, "resources_discover", async () => {
-      await this.#runner.emitResourcesDiscover(this.#deps.cwd, "startup");
+      const discovered = await this.#runner.emitResourcesDiscover(
+        this.#deps.cwd,
+        "startup"
+      );
+      this.#deps.resources?.(discovered);
     });
   }
 

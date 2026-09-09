@@ -1,6 +1,10 @@
+import { Workspace } from "@cloudflare/shell";
 import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Type } from "typebox";
+import { createWorkspaceExecutionEnv } from "./harness/env";
+import { memoryGuard } from "./extensions/memory-guard";
+import { CONFIRM_DESTRUCTIVE_FLAG, notes } from "./extensions/notes";
 import { PiHarness } from "./harness/pi-harness";
 import type { PiEvent, PiTool } from "./harness/types";
 import { Lifecycle } from "agents/lifecycle";
@@ -222,31 +226,20 @@ const skills = fromManifest({
   ]
 });
 
-type ToolCallEvent = { readonly toolName: string; readonly args: unknown };
-
-function toolCallOf(event: unknown): ToolCallEvent | undefined {
-  return typeof event === "object" &&
-    event !== null &&
-    "toolName" in event &&
-    typeof event.toolName === "string" &&
-    "args" in event
-    ? { toolName: event.toolName, args: event.args }
-    : undefined;
-}
-
-function memoryKeyOf(call: ToolCallEvent): string {
-  return typeof call.args === "object" &&
-    call.args !== null &&
-    "key" in call.args &&
-    typeof call.args.key === "string"
-    ? call.args.key
-    : "";
-}
-
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
   readonly tasks = new Tasks();
   readonly streams = new Streams();
+  /** Durable filesystem behind pi's own read/write/edit/bash tools. */
+  readonly workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    namespace: "pi",
+    // Files past the inline threshold spill to R2; SQLite rows cannot hold
+    // them. Without the binding the workspace stays SQLite-only.
+    ...(this.env.WORKSPACE
+      ? { r2: this.env.WORKSPACE, r2Prefix: this.ctx.id.toString() }
+      : {})
+  });
   readonly harness = new PiHarness<ToolContext>({
     models: createModels({ providers: [workersAI(this.env.AI)] }),
     model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
@@ -257,25 +250,28 @@ export class PiAgent extends DurableObject<Env> {
     tools: () => createTools(),
     skills: [skills],
     systemPrompt:
-      "You are a concise playground assistant. Use tools whenever they can answer the request. Explain tool results plainly. You can calculate, roll dice, read the current time, and persist or recall facts for this session.",
+      "You are a concise playground assistant. Use tools whenever they can answer the request. Explain tool results plainly. You can calculate, roll dice, read the current time, persist or recall facts for this session, and read, write, edit and run bash over the durable workspace at /.",
+    // Pi's own execution tools, running against the workspace above.
+    executionEnv: createWorkspaceExecutionEnv({ workspace: this.workspace }),
+    builtinTools: ["read", "write", "edit", "bash"],
+    // Pi extensions: process-local, re-loaded on every wake.
+    extensions: [
+      { name: "memory-guard", factory: memoryGuard },
+      { name: "notes", factory: notes }
+    ],
+    flags: { [CONFIRM_DESTRUCTIVE_FLAG]: false },
+    promptTemplates: [
+      {
+        name: "summarize",
+        description: "Summarize the conversation in N bullet points.",
+        content: "Summarize the conversation so far in $1 bullet points."
+      }
+    ],
     retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
     compaction: {
       enabled: true,
       reserveTokens: 4000,
       keepRecentTokens: 12000
-    },
-    configure: (hooks) => {
-      // Pi hooks are process-local and re-registered on every wake.
-      hooks.on("before_tool", (event) => {
-        const call = toolCallOf(event);
-        if (
-          call?.toolName === "remember" &&
-          memoryKeyOf(call).startsWith("_")
-        ) {
-          return { block: { reason: "Memory names cannot start with _." } };
-        }
-        return undefined;
-      });
     }
   });
 

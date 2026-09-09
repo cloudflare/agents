@@ -23,8 +23,14 @@ import type {
 } from "../../../vendor/pi-coding-agent-src/core/extensions/types.ts";
 import type { SlashCommandInfo } from "../../../vendor/pi-coding-agent-src/core/slash-commands.ts";
 import type { PiModelRegistry } from "../../providers/models";
-import type { PiExtension, PiPromptTemplate } from "../types";
+import type {
+  PiExtension,
+  PiPromptTemplate,
+  PiSkill,
+  PiSlashCommand
+} from "../types";
 import { createExtensionActions } from "./actions";
+import { piSlashCommands, slashCommandInfos } from "./commands";
 import {
   createExtensionCommandContextActions,
   createExtensionContextActions,
@@ -33,6 +39,11 @@ import {
 import { ExtensionEventAdapter } from "./events-adapter";
 import { bindExtensionHooks } from "./hooks-adapter";
 import { createExtensionModelRegistry } from "./model-registry";
+import {
+  createResourceLoader,
+  extensionPathMetadata,
+  type ResourceLoader
+} from "./resource-loader";
 import { createSessionView } from "./session-view";
 import {
   ExtensionLaneStates,
@@ -52,6 +63,12 @@ export type PiExtensionRuntimeDeps = {
   readonly flags?: Readonly<Record<string, boolean | string>>;
   /** Prompt templates offered alongside extension commands. */
   readonly promptTemplates?: readonly PiPromptTemplate[];
+  /** Skills invocable by name, as the harness resolved them. */
+  readonly skills?: () => readonly PiSkill[];
+  /** The harness's system prompt, when the configuration fixed one. */
+  readonly systemPrompt?: string;
+  /** Resource surface served to pi, replacing the in-memory default. */
+  readonly resourceLoader?: ResourceLoader;
   /** Command runner behind `pi.exec`, when the harness has one. */
   readonly shell?: Shell;
   /** Resolve one lane of the attached harness. */
@@ -105,6 +122,8 @@ export class PiExtensionRuntime {
   readonly #deps: PiExtensionRuntimeDeps;
   readonly #events: ExtensionEventAdapter;
   readonly #eventBus: ReturnType<typeof createEventBus>;
+  readonly #resourcesFactory: () => ResourceLoader;
+  #resources: ResourceLoader | undefined;
   #unbindHooks: (() => void) | undefined;
   #stopped = false;
 
@@ -112,11 +131,13 @@ export class PiExtensionRuntime {
     runner: ExtensionRunner,
     states: ExtensionLaneStates,
     eventBus: ReturnType<typeof createEventBus>,
+    resources: () => ResourceLoader,
     deps: PiExtensionRuntimeDeps
   ) {
     this.#runner = runner;
     this.#states = states;
     this.#eventBus = eventBus;
+    this.#resourcesFactory = resources;
     this.#deps = deps;
     this.#events = new ExtensionEventAdapter(runner, {
       states,
@@ -125,7 +146,25 @@ export class PiExtensionRuntime {
         // SAFETY: the registry returns pi-ai catalog models; PiModel is the
         // narrow public projection of the same object.
         deps.models.getModel(provider, modelId) as Model<Api> | undefined,
-      report: deps.report
+      report: deps.report,
+      // Discovered paths cannot be read here; the loader records each one as
+      // a warning rather than dropping it silently.
+      resources: (discovered) => {
+        this.resourceLoader.extendResources({
+          skillPaths: discovered.skillPaths.map((entry) => ({
+            path: entry.path,
+            metadata: extensionPathMetadata(entry.extensionPath)
+          })),
+          promptPaths: discovered.promptPaths.map((entry) => ({
+            path: entry.path,
+            metadata: extensionPathMetadata(entry.extensionPath)
+          })),
+          themePaths: discovered.themePaths.map((entry) => ({
+            path: entry.path,
+            metadata: extensionPathMetadata(entry.extensionPath)
+          }))
+        });
+      }
     });
   }
 
@@ -143,6 +182,7 @@ export class PiExtensionRuntime {
     const runtime = createExtensionRuntime();
     const eventBus = createEventBus();
     const loaded: Extension[] = [];
+    const errors: { path: string; error: string }[] = [];
     for (const [index, extension] of deps.extensions.entries()) {
       const path = extensionName(extension, index);
       const factory =
@@ -161,6 +201,10 @@ export class PiExtensionRuntime {
         }
         loaded.push(created);
       } catch (error) {
+        errors.push({
+          path,
+          error: error instanceof Error ? error.message : String(error)
+        });
         deps.report({
           lane: deps.defaultLane,
           kind: "extension",
@@ -185,7 +229,20 @@ export class PiExtensionRuntime {
     for (const [name, value] of Object.entries(deps.flags ?? {})) {
       runner.setFlagValue(name, value);
     }
-    return new PiExtensionRuntime(runner, states, eventBus, deps);
+    // Built on first read, not here: skills and templates are resolved by the
+    // harness after the registration pass this method runs.
+    const resources = (): ResourceLoader =>
+      deps.resourceLoader ??
+      createResourceLoader({
+        extensions: { extensions: loaded, errors, runtime },
+        skills: deps.skills?.() ?? [],
+        promptTemplates: deps.promptTemplates ?? [],
+        ...(deps.systemPrompt === undefined
+          ? {}
+          : { systemPrompt: deps.systemPrompt }),
+        cwd: deps.cwd
+      });
+    return new PiExtensionRuntime(runner, states, eventBus, resources, deps);
   }
 
   /** The extension-registered tools, adapted for the durable harness. */
@@ -193,16 +250,65 @@ export class PiExtensionRuntime {
     return adaptExtensionTools(this.#runner);
   }
 
-  /** Slash commands the loaded extensions registered. */
+  /**
+   * Every slash command this session offers: extension commands first, then
+   * prompt templates, then skills.
+   */
   commands(): readonly SlashCommandInfo[] {
-    return this.#runner.getRegisteredCommands().map((command) => ({
-      name: command.invocationName,
-      ...(command.description === undefined
-        ? {}
-        : { description: command.description }),
-      source: "extension" as const,
-      sourceInfo: command.sourceInfo
-    }));
+    return slashCommandInfos({
+      extension: this.#runner.getRegisteredCommands().map((command) => ({
+        name: command.invocationName,
+        ...(command.description === undefined
+          ? {}
+          : { description: command.description }),
+        source: "extension" as const,
+        sourceInfo: command.sourceInfo
+      })),
+      promptTemplates: this.#deps.promptTemplates ?? [],
+      skills: this.#deps.skills?.() ?? []
+    });
+  }
+
+  /** The same commands, in the shape clients autocomplete from. */
+  slashCommands(): PiSlashCommand[] {
+    return piSlashCommands(this.commands());
+  }
+
+  /** Whether an extension registered a command under this name. */
+  hasCommand(name: string): boolean {
+    return this.#runner.getCommand(name) !== undefined;
+  }
+
+  /**
+   * Run one extension slash command out of band.
+   *
+   * Commands are not durable operations: they act through the same lane
+   * actions an event handler uses, and are gone if the isolate dies
+   * mid-handler. Resolves once the handler returned and the writes it queued
+   * on the lane have drained, so a caller's receipt means the command ran.
+   * Returns false when no extension owns the name.
+   */
+  async runCommand(lane: string, name: string, args: string): Promise<boolean> {
+    if (this.#stopped) return false;
+    const command = this.#runner.getCommand(name);
+    if (!command) return false;
+    this.enter(lane);
+    try {
+      await this.#refresh(lane);
+      await command.handler(args, this.#runner.createCommandContext());
+    } catch (error) {
+      this.#deps.report({
+        lane,
+        kind: "extension",
+        source: `command:${name}`,
+        message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof Error && error.stack !== undefined
+          ? { stack: error.stack }
+          : {})
+      });
+    }
+    await this.#states.get(lane).drain();
+    return true;
   }
 
   /** Current values of every registered flag. */
@@ -210,9 +316,25 @@ export class PiExtensionRuntime {
     return this.#runner.getFlagValues();
   }
 
+  /** Current values of every registered flag, as a plain object. */
+  flagValues(): Record<string, boolean | string> {
+    return Object.fromEntries(this.flags());
+  }
+
   /** Set one flag value. */
   setFlag(name: string, value: boolean | string): void {
     this.#runner.setFlagValue(name, value);
+  }
+
+  /** The lane whose hook, event or command is currently running. */
+  get currentLane(): string {
+    return this.#states.current.lane;
+  }
+
+  /** The resource surface this runtime serves to pi. */
+  get resourceLoader(): ResourceLoader {
+    this.#resources ??= this.#resourcesFactory();
+    return this.#resources;
   }
 
   /** The runner itself, for the command and UI surfaces built on top. */

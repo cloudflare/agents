@@ -36,9 +36,14 @@ import type { WebSocketsOptions } from "agents/websockets";
 import { DurableObjectPiDatabase, ensurePiSession } from "./do-sqlite";
 import { shellExecAdapter } from "./env";
 import {
+  createLaneUiBridges,
   describeTools,
+  piSlashCommands,
   PiExtensionRuntime,
-  type PiExtensionHandlerError
+  resolveSubmission,
+  slashCommandInfos,
+  type PiExtensionHandlerError,
+  type PiLaneUiBridges
 } from "./extensions";
 import {
   OperationStreamWriter,
@@ -47,6 +52,7 @@ import {
 } from "./events";
 import { PiSubmissions, type QueuedSubmission } from "./intake";
 import {
+  projectCustomEntries,
   projectMessages,
   projectQueue,
   projectAgentMessage,
@@ -60,7 +66,9 @@ import type {
   PiBuiltinToolName,
   PiExtension,
   PiContext,
+  PiCustomEntry,
   PiEvent,
+  PiEventContext,
   PiEventListener,
   PiHarnessConfig,
   PiHookRegistry,
@@ -76,8 +84,12 @@ import type {
   PiOperationStream,
   PiPendingSubmission,
   PiPromptResponse,
+  PiPromptTemplate,
   PiQueueReceipt,
+  PiExtensionUiResponse,
   PiResources,
+  PiSkill,
+  PiSlashCommand,
   PiSubmissionReceipt,
   PiSubmitOptions,
   PiTool,
@@ -112,6 +124,8 @@ const DEFERRED_POLL_MS = 30_000;
 const ERROR_BACKOFF_BASE_MS = 1_000;
 const ERROR_BACKOFF_MAX_MS = 5 * 60_000;
 const RESULT_POLL_MS = 500;
+/** Default wait for a client's answer to a blocking extension UI dialog. */
+const DEFAULT_UI_REQUEST_TIMEOUT_MS = 30_000;
 
 type LaneDriverInput = { readonly version: 1; readonly lane: string };
 
@@ -340,6 +354,11 @@ export class PiHarness<
   #refreshingTools: Promise<void> | undefined;
   #skills: Promise<ResolvedSkills> | undefined;
   #transport: PiTransport | undefined;
+  #uiBridges: PiLaneUiBridges | undefined;
+  #resources: {
+    readonly skills: readonly PiSkill[];
+    readonly promptTemplates: readonly PiPromptTemplate[];
+  } = { skills: [], promptTemplates: [] };
   readonly #listeners = new Set<PiEventListener>();
   readonly #writers = new Map<string, OperationStreamWriter>();
   readonly #laneWriters = new Map<string, OperationStreamWriter>();
@@ -425,6 +444,7 @@ export class PiHarness<
     this.#attaching = undefined;
     this.#extensions = undefined;
     for (const writer of this.#writers.values()) writer.flush();
+    this.#uiBridges?.abortAll("The pi harness is closing");
     await extensions?.stop().catch(() => {});
     if (attaching) {
       const attached = await attaching.catch(() => undefined);
@@ -452,6 +472,18 @@ export class PiHarness<
     if (admitted === undefined) {
       return { operationId, lane, accepted: false, handled: true };
     }
+    const resolved = resolveSubmission(admitted, {
+      hasCommand: (name) => this.#extensions?.hasCommand(name) ?? false,
+      promptTemplates: this.#resources.promptTemplates,
+      skills: this.#resources.skills
+    });
+    if (resolved.kind === "command") {
+      // Extension commands are not operations: they run here, against the
+      // same lane actions an event handler uses, and queue nothing.
+      await this.#extensions?.runCommand(lane, resolved.name, resolved.args);
+      return { operationId, lane, accepted: false, command: resolved.name };
+    }
+    const queued = resolved.request;
     const submissions = this.#requireSubmissions();
     if (
       submissions.has(operationId) ||
@@ -460,7 +492,7 @@ export class PiHarness<
     ) {
       return { operationId, lane, accepted: false };
     }
-    submissions.insert(lane, operationId, admitted);
+    submissions.insert(lane, operationId, queued);
     await this.#ensureLaneDriver(lane);
     return { operationId, lane, accepted: true };
   }
@@ -574,6 +606,25 @@ export class PiHarness<
     return projectMessages(entries);
   }
 
+  /**
+   * Read the custom entries extensions appended to one lane's transcript.
+   * They hold extension state, so they are absent from `getMessages`.
+   */
+  async getCustomEntries(
+    options: PiTranscriptOptions = {}
+  ): Promise<PiCustomEntry[]> {
+    const context = asUpstreamContext(options.context);
+    const upstream = await this.#upstreamLane(
+      options.lane ?? this.#defaultLane,
+      context
+    );
+    const entries: Entry[] = await upstream.findEntries(
+      { order: options.order ?? "oldestFirst" },
+      context
+    );
+    return projectCustomEntries(entries);
+  }
+
   /** Read one immutable terminal operation result. */
   async getResult(
     operationId: string,
@@ -654,6 +705,76 @@ export class PiHarness<
       () => this.lifecycle.sockets
     );
     return this.#transport.webSocketOptions();
+  }
+
+  // ── Extension surface ────────────────────────────────────────────────────
+
+  /**
+   * Every slash command one lane offers: extension commands, then prompt
+   * templates, then skills. Pi's terminal built-ins are not among them.
+   */
+  async getCommands(): Promise<PiSlashCommand[]> {
+    await this.lifecycle.ready();
+    await this.#attached();
+    const extensions = this.#extensions;
+    if (extensions) return extensions.slashCommands();
+    return piSlashCommands(
+      slashCommandInfos({
+        extension: [],
+        promptTemplates: this.#resources.promptTemplates,
+        skills: this.#resources.skills
+      })
+    );
+  }
+
+  /**
+   * Run one extension slash command by name, exactly as submitting
+   * `/name args` would. The receipt reports the command that ran; no
+   * operation is queued for it.
+   */
+  async runCommand(
+    name: string,
+    args: string | undefined,
+    options: PiSubmitOptions = {}
+  ): Promise<PiSubmissionReceipt> {
+    const text =
+      args === undefined || args === "" ? `/${name}` : `/${name} ${args}`;
+    return this.submit({ kind: "prompt", prompt: text }, options);
+  }
+
+  /** Set one extension flag and return every flag's current value. */
+  async setFlag(
+    name: string,
+    value: boolean | string
+  ): Promise<Record<string, boolean | string>> {
+    await this.lifecycle.ready();
+    await this.#attached();
+    const extensions = this.#extensions;
+    if (!extensions) {
+      throw new Error("This pi harness has no extensions, so it has no flags");
+    }
+    extensions.setFlag(name, value);
+    const flags = extensions.flagValues();
+    this.#transport?.flagsChanged(this.#defaultLane, flags);
+    return flags;
+  }
+
+  /** Current values of every extension-registered flag. */
+  async getFlags(): Promise<Record<string, boolean | string>> {
+    await this.lifecycle.ready();
+    await this.#attached();
+    return this.#extensions?.flagValues() ?? {};
+  }
+
+  /**
+   * Answer one open extension UI dialog. False when nothing is waiting on
+   * that request id, which includes a dialog already settled by its timeout.
+   */
+  resolveExtensionUi(
+    requestId: string,
+    response: PiExtensionUiResponse
+  ): boolean {
+    return this.#uiBridges?.resolve(requestId, response) ?? false;
   }
 
   // ── Attachment ───────────────────────────────────────────────────────────
@@ -758,6 +879,9 @@ export class PiHarness<
         attached.hooks as PiHookRegistry,
         context as PiContext
       );
+      // Registration is complete: publish the command set this attachment
+      // offers to whoever is already connected.
+      this.#broadcastCommands();
       return { harness: attached, open: created.open, extensions };
     } catch (error) {
       this.#extensions = undefined;
@@ -796,6 +920,16 @@ export class PiHarness<
       ...(config.promptTemplates === undefined
         ? {}
         : { promptTemplates: config.promptTemplates }),
+      skills: () => this.#resources.skills,
+      ...(typeof config.systemPrompt === "string"
+        ? { systemPrompt: config.systemPrompt }
+        : {}),
+      ...(config.resourceLoader === undefined
+        ? {}
+        : { resourceLoader: config.resourceLoader }),
+      // The blocking UI surface `ctx.ui` exposes, one bridge per lane over
+      // this harness's WebSocket protocol.
+      uiContext: this.#uiBridgeSet().ui,
       // `pi.exec` runs on the same shell pi's own bash tool uses.
       ...(env === undefined ? {} : { shell: shellExecAdapter(env) }),
       lane: (name) => this.#upstreamLane(name, BACKGROUND_CONTEXT),
@@ -883,6 +1017,8 @@ export class PiHarness<
       const { harness } = await this.#attached();
       const lane = await harness.lane(this.#defaultLane, BACKGROUND_CONTEXT);
       await this.#refreshProcessLocal(harness, lane, BACKGROUND_CONTEXT);
+      // A registration change can add commands as easily as tools.
+      this.#broadcastCommands();
     })()
       .catch((error: unknown) => {
         console.warn("PiHarness failed to refresh extension tools", error);
@@ -892,20 +1028,61 @@ export class PiHarness<
       });
   }
 
+  /**
+   * The per-lane extension UI bridges, created with the harness's first
+   * attachment and reused across them: a dialog is answered by request id,
+   * which outlives any one attachment.
+   */
+  #uiBridgeSet(): PiLaneUiBridges {
+    this.#uiBridges ??= createLaneUiBridges({
+      // Dialogs belong to the lane whose hook, event or tool raised them.
+      lane: () => this.#extensions?.currentLane ?? this.#defaultLane,
+      broadcast: (lane, request) =>
+        this.#transport?.extensionUiRequest(lane, request) ?? 0,
+      timeoutMs:
+        this.#config.uiRequestTimeoutMs ?? DEFAULT_UI_REQUEST_TIMEOUT_MS
+    });
+    return this.#uiBridges;
+  }
+
+  /** Tell a lane's clients which slash commands it now offers. */
+  #broadcastCommands(lane = this.#defaultLane): void {
+    const transport = this.#transport;
+    if (!transport) return;
+    void this.getCommands()
+      .then((commands) => {
+        transport.commandsChanged(lane, commands);
+      })
+      .catch((error: unknown) => {
+        console.warn("PiHarness failed to publish slash commands", error);
+      });
+  }
+
   /** Surface one hook, event, or extension failure on its lane. */
   #reportHandlerError(error: PiExtensionHandlerError): void {
-    this.#emitLaneEvent(
-      error.lane,
-      {
-        type: "handler_error",
-        kind: error.kind,
-        source: error.source,
-        message: error.message,
-        ...(error.stack === undefined ? {} : { stack: error.stack })
-      },
-      undefined,
-      this.#laneWriters.get(error.lane)
-    );
+    const event: PiEvent = {
+      type: "handler_error",
+      kind: error.kind,
+      source: error.source,
+      message: error.message,
+      ...(error.stack === undefined ? {} : { stack: error.stack })
+    };
+    const writer = this.#laneWriters.get(error.lane);
+    if (writer && !writer.closed) {
+      // Inside an operation the failure belongs on its durable stream, where
+      // clients replaying that operation see it in order.
+      this.#emitLaneEvent(error.lane, event, undefined, writer);
+      return;
+    }
+    // Outside one there is no stream to carry it: the dedicated frame does,
+    // and the lane event path is skipped so clients see it once.
+    this.#transport?.handlerError(error.lane, {
+      kind: error.kind,
+      source: error.source,
+      message: error.message,
+      ...(error.stack === undefined ? {} : { stack: error.stack })
+    });
+    this.#notifyListeners(event, { lane: error.lane });
   }
 
   /** Drop the current attachment and tear its extension runtime down. */
@@ -913,6 +1090,8 @@ export class PiHarness<
     this.#attaching = undefined;
     const extensions = this.#extensions;
     this.#extensions = undefined;
+    // Nothing will answer the dialogs this attachment left open.
+    this.#uiBridges?.abortAll("The pi harness detached");
     if (extensions) void extensions.stop().catch(() => {});
   }
 
@@ -1016,11 +1195,16 @@ export class PiHarness<
       typeof source === "function"
         ? await source(context as PiContext)
         : (source ?? {});
-    const skills = (await this.#resolvedSkills())?.skills ?? [];
-    return asUpstreamResources({
-      ...own,
-      skills: [...(own.skills ?? []), ...skills]
-    });
+    const resolved = (await this.#resolvedSkills())?.skills ?? [];
+    const skills = [...(own.skills ?? []), ...resolved];
+    const promptTemplates = [
+      ...(own.promptTemplates ?? []),
+      ...(this.#config.promptTemplates ?? [])
+    ];
+    // Cached for the synchronous command surfaces: pi's `getCommands` and the
+    // slash resolver both list skills and templates without awaiting.
+    this.#resources = { skills, promptTemplates };
+    return asUpstreamResources({ ...own, skills, promptTemplates });
   }
 
   /** Re-supply process-local configuration pi does not persist. */
@@ -1376,10 +1560,13 @@ export class PiHarness<
   ): void {
     if (writer && !writer.closed) writer.push(event);
     else this.#transport?.laneEvent(lane, event);
-    const context = {
+    this.#notifyListeners(event, {
       lane,
       ...(operationId === undefined ? {} : { operationId })
-    };
+    });
+  }
+
+  #notifyListeners(event: PiEvent, context: PiEventContext): void {
     for (const listener of this.#listeners) {
       try {
         listener(event, context);
@@ -1428,7 +1615,12 @@ export class PiHarness<
       snapshot: (options) => this.snapshot(options),
       submit: (request, options) => this.submit(request, options),
       abort: (options) => this.abort(options),
-      steer: (message, options) => this.steer(message, options)
+      steer: (message, options) => this.steer(message, options),
+      resolveUi: (requestId, response) =>
+        this.resolveExtensionUi(requestId, response),
+      commands: () => this.getCommands(),
+      setFlag: (name, value) => this.setFlag(name, value),
+      runCommand: (name, args, options) => this.runCommand(name, args, options)
     };
   }
 }
