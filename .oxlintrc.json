@@ -19,5 +19,9 @@
       }
     ]
   },
-  "ignorePatterns": ["**/env.d.ts", "**/routeTree.gen.ts"]
+  "ignorePatterns": [
+    "**/env.d.ts",
+    "**/routeTree.gen.ts",
+    "examples/next/harnesses/pi/vendor/pi-coding-agent-src/**"
+  ]
 }

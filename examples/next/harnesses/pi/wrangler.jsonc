@@ -5,6 +5,11 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI", "remote": true },
+  // Files past the workspace inline threshold spill to R2; SQLite rows cannot
+  // hold them.
+  "r2_buckets": [
+    { "binding": "WORKSPACE", "bucket_name": "pi-harness-workspace" }
+  ],
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*", "/agents/*"]

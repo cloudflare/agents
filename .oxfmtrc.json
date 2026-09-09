@@ -8,6 +8,7 @@
     "packages/channels/live-tests/snapshots",
     "site/agents/.astro",
     "**/routeTree.gen.ts",
-    "**/think.d.ts"
+    "**/think.d.ts",
+    "examples/next/harnesses/pi/vendor/pi-coding-agent-src/**"
   ]
 }

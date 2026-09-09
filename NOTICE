@@ -34,6 +34,12 @@ This project incorporates code and inspiration from the following open source pr
    - Copyright: 2024 Sunil Pai <spai@cloudflare.com>
    - Note: The Agents SDK vendors and adapts PartyServer's Durable Object server implementation.
 
+7. earendil-works/pi
+   - License: MIT License
+   - Repository: https://github.com/earendil-works/pi
+   - Copyright: (c) 2025 Mario Zechner
+   - Note: The pi harness example vendors pi's extension runtime from earendil-works/pi@c4b0e35a, partly patched, alongside prebuilt @earendil-works/* tarballs.
+
 The original licenses and copyright notices from these projects are preserved and should be included with any distribution of this software.
 
 For a complete list of third-party licenses, see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

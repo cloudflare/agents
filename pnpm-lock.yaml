@@ -2289,6 +2289,9 @@ importers:
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
+      '@cloudflare/shell':
+        specifier: '*'
+        version: link:../../../../packages/shell
       '@earendil-works/chord':
         specifier: file:vendor/pi-dev/earendil-works-chord-0.84.4.tgz
         version: file:examples/next/harnesses/pi/vendor/pi-dev/earendil-works-chord-0.84.4.tgz
@@ -2313,6 +2316,9 @@ importers:
       agents:
         specifier: '*'
         version: link:../../../../packages/agents
+      just-bash:
+        specifier: ^3.0.2
+        version: 3.0.2
       react:
         specifier: ^19.2.7
         version: 19.2.8

@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
+    "@cloudflare/shell": "*",
     "@earendil-works/chord": "file:vendor/pi-dev/earendil-works-chord-0.84.4.tgz",
     "@earendil-works/pi-agent-core": "file:vendor/pi-dev/earendil-works-pi-agent-core-0.84.4.tgz",
     "@earendil-works/pi-ai": "file:vendor/pi-dev/earendil-works-pi-ai-0.84.4.tgz",
@@ -22,6 +23,7 @@
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
     "agents": "*",
+    "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "streamdown": "^2.5.0",

@@ -36,8 +36,16 @@
       ],
       "@earendil-works/pi-telemetry/*": [
         "./node_modules/@earendil-works/pi-telemetry/dist/*"
+      ],
+      "@earendil-works/pi-tui": [
+        "./vendor/pi-coding-agent-src/_stubs/pi-tui.d.ts"
       ]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "env.d.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "env.d.ts",
+    "vendor/pi-coding-agent-src/**/*.ts"
+  ]
 }

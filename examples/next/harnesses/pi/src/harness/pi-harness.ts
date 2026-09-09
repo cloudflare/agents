@@ -2,6 +2,10 @@ import {
   AgentHarness as createAgentHarness,
   awaitWithContext,
   BACKGROUND_CONTEXT,
+  createBashTool,
+  createEditTool,
+  createReadTool,
+  createWriteTool,
   StorageBackedSession,
   uuidv7,
   type AgentHarness as UpstreamAgentHarness,
@@ -47,6 +51,7 @@ import { resolveSkillSources, type ResolvedSkills } from "./skills";
 import { PiTransport, type PiTransportHost } from "./transport";
 import type {
   PiAbortResult,
+  PiBuiltinToolName,
   PiContext,
   PiEvent,
   PiEventListener,
@@ -74,6 +79,19 @@ import type {
 
 /** Task definition that drives one lane's operations to settlement. */
 export const LANE_DRIVER_DEFINITION = "__cf_pi_harness_lane@v1";
+
+/** Pi's own execution tools, keyed by the name the config selects them with. */
+const BUILTIN_TOOL_FACTORIES: Record<
+  PiBuiltinToolName,
+  () => UpstreamAgentHarnessTool<object | undefined>
+> = {
+  // SAFETY: each factory produces a tool over pi's ExecutionToolContext; the
+  // harness's opaque context carries `env` for them.
+  bash: () => createBashTool() as UpstreamAgentHarnessTool<object | undefined>,
+  edit: () => createEditTool() as UpstreamAgentHarnessTool<object | undefined>,
+  read: () => createReadTool() as UpstreamAgentHarnessTool<object | undefined>,
+  write: () => createWriteTool() as UpstreamAgentHarnessTool<object | undefined>
+};
 
 const RECONCILE_JOB_ID = "reconcile";
 const RECONCILE_FN = "reconcile";
@@ -641,6 +659,7 @@ export class PiHarness<
     const config = this.#config;
     const tools = await this.#resolveTools(context);
     const resources = await this.#resolveResources(context);
+    const toolContextSource = this.#toolContextSource();
     const model = resolveModel(
       // SAFETY: the registry is pi-ai's Models; the opaque public type hides
       // the pinned upstream shape.
@@ -664,12 +683,12 @@ export class PiHarness<
             : [...config.activeToolNames],
         tools,
         resources,
-        ...(config.toolContext === undefined
+        ...(toolContextSource === undefined
           ? {}
           : {
               // SAFETY: the tool context is opaque to the harness; PiContext
               // projects the Chord Context a resolver receives.
-              toolContext: config.toolContext as UpstreamAgentHarnessOptions<
+              toolContext: toolContextSource as UpstreamAgentHarnessOptions<
                 object | undefined
               >["toolContext"]
             }),
@@ -758,10 +777,54 @@ export class PiHarness<
         ? await source(context as PiContext)
         : (source ?? []);
     const skillTools = (await this.#resolvedSkills())?.tools ?? [];
-    return asUpstreamTools<object | undefined>([
-      ...(own as readonly PiTool<object | undefined>[]),
-      ...skillTools
-    ]);
+    return [
+      ...this.#builtinTools(),
+      ...asUpstreamTools<object | undefined>([
+        ...(own as readonly PiTool<object | undefined>[]),
+        ...skillTools
+      ])
+    ];
+  }
+
+  /**
+   * Pi's own `read`/`write`/`edit`/`bash` tools over the configured execution
+   * environment. They read it from `toolContext.env`, which
+   * {@link PiHarness.#toolContextSource} supplies.
+   */
+  #builtinTools(): UpstreamAgentHarnessTool<object | undefined>[] {
+    const config = this.#config;
+    if (config.executionEnv === undefined) return [];
+    const selection = config.builtinTools ?? [];
+    return selection.map((name) => BUILTIN_TOOL_FACTORIES[name]());
+  }
+
+  /**
+   * Resolve the tool context each turn receives. With an execution
+   * environment configured, `env` is merged over the application's own
+   * context so pi's built-in tools find what they require.
+   */
+  #toolContextSource():
+    | UpstreamAgentHarnessOptions<object | undefined>["toolContext"]
+    | undefined {
+    const config = this.#config;
+    const source = config.toolContext;
+    const env = config.executionEnv;
+    if (env === undefined) {
+      return source as
+        | UpstreamAgentHarnessOptions<object | undefined>["toolContext"]
+        | undefined;
+    }
+    return async (context: UpstreamContext) => {
+      const base =
+        typeof source === "function"
+          ? await (
+              source as (
+                context: PiContext
+              ) => object | undefined | Promise<object | undefined>
+            )(context as PiContext)
+          : source;
+      return { ...(base ?? {}), env };
+    };
   }
 
   async #resolveResources(

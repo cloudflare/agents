@@ -1,3 +1,4 @@
+import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
 import type { Static, TSchema } from "typebox";
 import type { SkillSource } from "agents/skills";
 import type { Streams } from "agents/streams";
@@ -237,6 +238,15 @@ export type PiResources = {
 // ── Configuration ─────────────────────────────────────────────────────────
 
 /** Configuration for the Durable Object hosted pi harness. */
+/**
+ * Pi's filesystem and shell capability. Implementations never throw: every
+ * method resolves to pi's `Result`.
+ */
+export type PiExecutionEnv = ExecutionEnv;
+
+/** Pi's own execution tools, selectable through the harness config. */
+export type PiBuiltinToolName = "read" | "write" | "edit" | "bash";
+
 export type PiHarnessConfig<
   ToolContext extends object | undefined = object | undefined
 > = {
@@ -285,6 +295,16 @@ export type PiHarnessConfig<
   readonly toolExecution?: "sequential" | "parallel";
   /** Default lane used when a call names none. @default "main" */
   readonly defaultLane?: string;
+  /**
+   * Filesystem and shell pi's built-in tools run against. Also supplied to
+   * tools as `toolContext.env`, merged over any application tool context.
+   */
+  readonly executionEnv?: PiExecutionEnv;
+  /**
+   * Pi's own execution tools to offer, in order, ahead of application tools.
+   * Requires {@link PiHarnessConfig.executionEnv}; defaults to none.
+   */
+  readonly builtinTools?: readonly PiBuiltinToolName[];
   /** Register process-local hooks after each isolate wake. */
   readonly configure?: (
     hooks: PiHookRegistry,
