@@ -63,6 +63,20 @@ type PathRow = { id: string; bytes: number };
 /** The newest row of a session: what an append attaches to and numbers from. */
 type Tail = { leafId: string | null; nextSeq: number };
 
+/**
+ * The memoised context-size estimate for a session's active path: the leaf it
+ * was computed for, the ids on that path whose own estimate counts (rows under
+ * a compaction overlay are replaced by the summary and do not), and the total.
+ * A tail append and an update of a counted row adjust it in place; every other
+ * write (branch append, delete, clear, compaction, import) drops it, and the
+ * next `tokenEstimate` re-derives it from one path walk.
+ */
+type PathTokens = {
+  leafId: string | null;
+  counted: Set<string>;
+  total: number;
+};
+
 export type UpdateOutcome = "missing" | "unchanged" | "updated";
 
 export class SessionsCore {
@@ -70,6 +84,7 @@ export class SessionsCore {
   readonly #reservedMetadataKeys: readonly string[];
   readonly #listeners = new Set<SessionChangeListener>();
   readonly #tails = new Map<string, Tail>();
+  readonly #pathTokens = new Map<string, PathTokens>();
   readonly #attachments: AttachmentStore;
   #tablesEnsured = false;
   /** True once the FTS index exists; it is built on the first `search()`. */
@@ -198,6 +213,7 @@ export class SessionsCore {
    * belongs to Think, which lifts and drops it itself.
    */
   migrateLegacy(): boolean {
+    this.#pathTokens.clear();
     let complete = true;
     const drop = (name: string): void => {
       if (this.#tableExists(name)) this.io.sqlWrite(`DROP TABLE ${name}`, []);
@@ -788,7 +804,13 @@ export class SessionsCore {
    * triggers only, and model-reported usage stays authoritative.
    */
   tokenEstimate(sessionId: string): number {
+    const leafId = this.latestLeafId(sessionId);
+    const memo = this.#pathTokens.get(sessionId);
+    if (memo && memo.leafId === leafId)
+      return Math.max(0, Math.ceil(memo.total));
+
     const stats = this.pathRowStats(sessionId);
+    const counted = new Set(stats.map((row) => row.id));
     let tokens = stats.reduce((sum, row) => sum + row.tokenEstimate, 0);
     for (const span of planOverlays(
       stats.map((row) => row.id),
@@ -796,9 +818,11 @@ export class SessionsCore {
     )) {
       for (let i = span.startIndex; i <= span.endIndex; i++) {
         tokens -= stats[i].tokenEstimate;
+        counted.delete(stats[i].id);
       }
       tokens += estimateStringTokens(span.compaction.summary);
     }
+    this.#pathTokens.set(sessionId, { leafId, counted, total: tokens });
     return Math.max(0, Math.ceil(tokens));
   }
 
@@ -877,8 +901,12 @@ export class SessionsCore {
     parentId: string | null | undefined,
     tokenEstimate: number
   ): { inserted: boolean; message: SessionMessage } {
-    const existing = this.getMessage(sessionId, message.id);
-    if (existing) return { inserted: false, message: existing };
+    // A repeated append is answered from storage; the common path (a fresh
+    // id) costs a key-only probe rather than a content read.
+    if (this.exists(sessionId, message.id)) {
+      const existing = this.getMessage(sessionId, message.id);
+      if (existing) return { inserted: false, message: existing };
+    }
 
     // `undefined` attaches to the tail and needs no validation read. A
     // caller-supplied id is untrusted and falls back to a root append when
@@ -929,6 +957,17 @@ export class SessionsCore {
     // The freshly inserted row is the most recent childless node, so it is
     // now the latest leaf — true even for an explicit-parent branch append.
     this.#tails.set(sessionId, { leafId: message.id, nextSeq: seq + 1 });
+    const memo = this.#pathTokens.get(sessionId);
+    if (memo) {
+      if (memo.leafId === parent) {
+        // The row extends the memoised path: count it, no re-walk.
+        memo.leafId = message.id;
+        memo.counted.add(message.id);
+        memo.total += tokenEstimate;
+      } else {
+        this.#pathTokens.delete(sessionId);
+      }
+    }
     this.io.emit("session:message:appended", {
       sessionId,
       messageId: message.id,
@@ -947,8 +986,12 @@ export class SessionsCore {
     message: SessionMessage,
     tokenEstimate: number
   ): UpdateOutcome {
-    const oldRows = this.io.sql<{ content: string; content_chunks: number }>(
-      "SELECT content, content_chunks FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+    const oldRows = this.io.sql<{
+      content: string;
+      content_chunks: number;
+      token_estimate: number;
+    }>(
+      "SELECT content, content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
       [sessionId, message.id]
     );
     if (oldRows.length === 0) return "missing";
@@ -1001,6 +1044,10 @@ export class SessionsCore {
       );
       this.#indexFts(sessionId, staged, true);
     });
+    const memo = this.#pathTokens.get(sessionId);
+    if (memo?.counted.has(message.id)) {
+      memo.total += tokenEstimate - (old.token_estimate ?? 0);
+    }
     this.io.emit("session:message:updated", {
       sessionId,
       messageId: message.id
@@ -1072,6 +1119,7 @@ export class SessionsCore {
     });
     // The leaf may be among the deleted rows; re-derive on the next append.
     this.#tails.delete(sessionId);
+    this.#pathTokens.delete(sessionId);
     this.io.emit("session:messages:deleted", {
       sessionId,
       count: uniqueIds.length
@@ -1101,6 +1149,7 @@ export class SessionsCore {
       }
     });
     this.#tails.set(sessionId, { leafId: null, nextSeq: 1 });
+    this.#pathTokens.delete(sessionId);
     this.io.emit("session:cleared", { sessionId });
   }
 
@@ -1125,6 +1174,8 @@ export class SessionsCore {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [sessionId, id, seq, summary, fromMessageId, toMessageId, now]
     );
+    // The new overlay changes which rows count; re-derive on the next read.
+    this.#pathTokens.delete(sessionId);
     this.io.emit("session:compacted", { sessionId, compactionId: id });
     return {
       id,
@@ -1259,6 +1310,7 @@ export class SessionsCore {
       leafId: message.id,
       nextSeq: tail.nextSeq + 1
     });
+    this.#pathTokens.delete(sessionId);
     return true;
   }
 

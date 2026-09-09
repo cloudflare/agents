@@ -293,6 +293,45 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("keeps the auto-compaction estimate current across updates and branches", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      let compactions = 0;
+      session
+        .onCompaction(async (messages) => {
+          compactions++;
+          if (messages.length < 2) return null;
+          return {
+            fromMessageId: messages[0].id,
+            toMessageId: messages[messages.length - 2].id,
+            summary: "auto summary"
+          };
+        })
+        .compactAfter(100);
+
+      // Two small rows: the memoised total sits under the threshold.
+      await session.appendMessage(text("u1", "short"));
+      await session.appendMessage(text("u2", "short", "assistant"));
+      expect(compactions).toBe(0);
+
+      // An update that grows a counted row moves the total with it: the
+      // next append sees the transcript over the threshold.
+      await session.updateMessage(text("u2", "y".repeat(600), "assistant"));
+      await session.appendMessage(text("u3", "short"));
+      expect(compactions).toBe(1);
+
+      // A branch append leaves the grown row off the active path, so the
+      // total is re-derived for the new leaf rather than carried over.
+      await session.appendMessage(text("b1", "short", "assistant"), {
+        parentId: "u1"
+      });
+      expect(compactions).toBe(1);
+      await session.appendMessage(text("b2", "short"));
+      expect(compactions).toBe(1);
+    });
+  });
+
   it("streams history in bounded batches", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

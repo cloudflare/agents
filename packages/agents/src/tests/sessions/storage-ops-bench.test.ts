@@ -36,6 +36,17 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
+  it("checks the auto-compaction threshold without re-walking the path", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      // The first append derives the path total with one walk; every later
+      // tail append extends it in place. Without the memo each append pays a
+      // sized path walk, so 200 appends read O(200^2) rows.
+      const appends = await instance.benchThresholdAppends(200, 120);
+      expect(appends.rowsRead).toBeLessThan(200 * 6);
+    });
+  });
+
   it("adds an FTS delete and insert per changed row once the index exists", async () => {
     const stub = env.SessionSearchHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(

@@ -366,6 +366,33 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
     return { rowsWritten: this.#billed.stop() };
   }
 
+  /**
+   * Rows read by tail appends on a session with an auto-compaction threshold
+   * the transcript never reaches. The threshold check runs after every
+   * insert; its cost must not grow with the transcript.
+   */
+  async benchThresholdAppends(
+    count: number,
+    textBytes: number
+  ): Promise<{ rowsRead: number }> {
+    await this.lifecycle.start();
+    const session = this.sessions.session();
+    session
+      .onCompaction(async () => null)
+      .compactAfter(Number.MAX_SAFE_INTEGER);
+    await session.getLatestLeaf();
+    const filler = "x".repeat(textBytes);
+    this.#billed.start();
+    for (let i = 0; i < count; i++) {
+      await session.appendMessage({
+        id: `bench-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `${i}:${filler}` }]
+      });
+    }
+    return { rowsRead: this.#billed.stopAll().rowsRead };
+  }
+
   /** An update whose serialized row is byte-identical writes nothing. */
   async benchNoOpUpdate(
     id: string,
