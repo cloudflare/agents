@@ -264,6 +264,30 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     );
   });
 
+  it("keeps a request that lands while a pass is running", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-mid-pass")
+    )) as unknown as MediaEvictionStub & {
+      appendDuringPassForTest(): Promise<{
+        firstPassMessages: number;
+        lateId: string;
+      }>;
+    };
+
+    // The running guard used to drop the append's request outright, so
+    // media aged during a pass waited for the next append or refresh.
+    const { firstPassMessages, lateId } = await agent.appendDuringPassForTest();
+    expect(firstPassMessages).toBe(2);
+    await vi.waitFor(
+      async () => {
+        const message = await agent.getStoredMessageForTest(lateId);
+        expect(JSON.stringify(message)).toContain("[evicted image/png,");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
   it("re-arms a fruitless pass on a windowed cache once appends age a protected row", async () => {
     const agent = (await getAgentByName(
       env.ThinkMediaEvictionAutoAgent,

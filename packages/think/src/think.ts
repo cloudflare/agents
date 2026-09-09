@@ -3505,6 +3505,12 @@ export class Think<
 
   private _mediaEvictionRunning = false;
   private _mediaEvictionScheduled = false;
+  /**
+   * A request that arrived while a pass was running. That pass read its
+   * candidates before the request's append landed, so the request is kept
+   * and re-evaluated once the pass ends rather than dropped.
+   */
+  private _mediaEvictionPending = false;
   private _warnedEvictionUnsupported = false;
   /**
    * The last pass that found nothing to evict while aged rows were hidden
@@ -3545,7 +3551,11 @@ export class Think<
    * can never brick the object.
    */
   private _scheduleMediaEvictionPass(): void {
-    if (this._mediaEvictionScheduled || this._mediaEvictionRunning) return;
+    if (this._mediaEvictionScheduled) return;
+    if (this._mediaEvictionRunning) {
+      this._mediaEvictionPending = true;
+      return;
+    }
     const config = resolveMediaEvictionConfig(this.mediaEviction);
     if (!config) return;
     // Decide from memory whether a pass could evict anything, so a pass is
@@ -3714,6 +3724,13 @@ export class Think<
       // Only chain when this pass actually shrank something: a pass that
       // changed nothing would otherwise reschedule itself forever.
       if (totals.backlogRemains && totals.messages > 0) {
+        this._scheduleMediaEvictionPass();
+      }
+      // A request that landed mid-pass goes back through the gate now, so
+      // media aged by an append during this pass is not left until the
+      // next one. The gate, not the request, decides whether a pass runs.
+      if (this._mediaEvictionPending) {
+        this._mediaEvictionPending = false;
         this._scheduleMediaEvictionPass();
       }
     }

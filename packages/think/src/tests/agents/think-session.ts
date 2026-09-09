@@ -8678,6 +8678,46 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
+  /**
+   * An append that lands while a pass is running. The pass read its
+   * candidates before the append, so it cannot evict what the append aged;
+   * the request must survive the pass and run afterwards. Seeds two aged
+   * media rows, starts a pass, and while it runs appends a third media
+   * message plus the fillers that age it. Returns what the first pass
+   * evicted (the two it saw) and the id the follow-up pass must handle.
+   */
+  async appendDuringPassForTest(): Promise<{
+    firstPassMessages: number;
+    lateId: string;
+  }> {
+    await this.seedMediaHistoryForTest("m");
+    this.mediaEviction = { keepRecentMessages: 2, minPartBytes: 10_000 };
+    const pass = this._evictAgedMediaBestEffort();
+    // Let the pass read its row stats and enter its first eviction write.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await this.appendMessageToHistory({
+      id: "late-media",
+      role: "user",
+      parts: [
+        { type: "text", text: "one more" },
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"C".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `late-${i}`,
+        role: i % 2 === 0 ? "assistant" : "user",
+        parts: [{ type: "text", text: `late ${i}` }]
+      } as UIMessage);
+    }
+    const first = await pass;
+    return { firstPassMessages: first?.messages ?? 0, lateId: "late-media" };
+  }
+
   /** One bounded Think-owned eviction pass. */
   async runEvictionForTest(): Promise<{
     messages: number;
