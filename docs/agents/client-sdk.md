@@ -120,6 +120,30 @@ useAgent({
 });
 ```
 
+### Transport
+
+`useAgent` speaks the Agent protocol over one of two wires. The default,
+`"hibernating"`, is a plain WebSocket served by the Durable Object's
+hibernation API. The experimental `"capnweb"` transport carries the same
+frames over a single [Cap'n Web](https://github.com/cloudflare/capnweb) RPC
+session:
+
+```typescript
+useAgent({
+  agent: "ChatAgent",
+  name: "room-123",
+  transport: "capnweb" // default: "hibernating"
+});
+```
+
+Everything else about the hook is identical on both transports — identity,
+state sync, `call`/`stub`, chat, reconnection with backoff, and terminal close
+codes. Choose `"capnweb"` when you want the connection to share a Cap'n Web
+session's semantics (ordered, promise-pipelined delivery over one RPC
+session). Its trade-off is that the connection does not hibernate: the
+Durable Object stays in memory while a Cap'n Web connection is open.
+`transport` is a hook option only; there is no separate client class.
+
 ### Async Query Parameters
 
 For authentication tokens or other async data, pass a function that returns a Promise:
@@ -351,6 +375,7 @@ type UseAgentOptions<State> = {
   name?: string; // Instance name (default: "default")
   host?: string; // Custom host
   path?: string; // Custom path prefix
+  transport?: "hibernating" | "capnweb"; // Wire (default: "hibernating")
 
   // Query parameters
   query?:

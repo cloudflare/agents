@@ -24,6 +24,8 @@ import type {
   WebSocketsOptions
 } from "./options";
 import { isCallablesRpcUpgrade } from "./protocol";
+import { openCapnWebSession, type CapnWebSession } from "./transport";
+import { isCapnWebTransportUpgrade } from "./transport-protocol";
 
 /**
  * Reserved close codes the runtime synthesizes when there was no real
@@ -75,6 +77,18 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
  * }
  * ```
  *
+ * Connections speak one of two wire transports, chosen by the client:
+ *
+ * - **Hibernating WebSocket** (default): plain frames; idle clients
+ *   survive Durable Object eviction.
+ * - **Cap'n Web** (`?__agents_transport=capnweb`): the same frames
+ *   travel over a single Cap'n Web RPC session. The connection is
+ *   non-hibernating — the Durable Object stays pinned while it is open.
+ *
+ * The handlers are transport-agnostic: both kinds of connection
+ * dispatch the same `onConnect`/`onMessage`/`onClose` and appear in
+ * `getConnections()`.
+ *
  * `callables` exposes an `RpcTarget`'s prototype methods to remote
  * callers over a Cap'n Web session claimed from `?__agents_rpc=capnweb`
  * upgrades. Methods run through the host invocation boundary, may
@@ -94,6 +108,7 @@ export class WebSockets extends LifecycleCapability {
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #callablesTarget: RpcTarget | undefined;
+  readonly #capnWebSessions = new Map<string, CapnWebSession>();
   #manager: ConnectionManager | undefined;
 
   constructor(options: WebSocketsOptions = {}) {
@@ -107,7 +122,7 @@ export class WebSockets extends LifecycleCapability {
 
   // ── Lifecycle capability hooks ─────────────────────────────────────────
 
-  /** Claim callables RPC upgrades and, with handlers, plain upgrades. */
+  /** Claim callables RPC upgrades and, with handlers, connection upgrades. */
   onWebSocketUpgrade({
     request
   }: CapabilityWebSocketUpgradeContext):
@@ -119,6 +134,9 @@ export class WebSockets extends LifecycleCapability {
       return newWorkersWebSocketRpcResponse(request, this.#callablesTarget);
     }
     if (!this.#handlers) return undefined;
+    if (isCapnWebTransportUpgrade(request)) {
+      return this.#acceptCapnWebSession(request);
+    }
     return this.#acceptConnection(request);
   }
 
@@ -184,15 +202,26 @@ export class WebSockets extends LifecycleCapability {
 
   // ── Connections ────────────────────────────────────────────────────────
 
-  /** Open connections accepted by this capability, optionally by tag. */
-  getConnections<TState = unknown>(
+  /** Open connections on either transport, optionally by tag. */
+  *getConnections<TState = unknown>(
     tag?: string
   ): IterableIterator<Connection<TState>> {
-    return this.#connectionManager.getConnections<TState>(tag);
+    for (const { managed } of this.#capnWebSessions.values()) {
+      const connection = managed.connection;
+      if (connection.readyState !== WebSocket.OPEN) continue;
+      if (!tag || connection.tags.includes(tag)) {
+        yield connection as Connection<TState>;
+      }
+    }
+    yield* this.#connectionManager.getConnections<TState>(tag);
   }
 
-  /** One connection accepted by this capability, by id. */
+  /** One connection on either transport, by id. */
   getConnection<TState = unknown>(id: string): Connection<TState> | undefined {
+    const capnWeb = this.#capnWebSessions.get(id)?.managed.connection;
+    if (capnWeb && capnWeb.readyState === WebSocket.OPEN) {
+      return capnWeb as Connection<TState>;
+    }
     return this.#connectionManager.getConnection<TState>(id);
   }
 
@@ -239,6 +268,36 @@ export class WebSockets extends LifecycleCapability {
     );
 
     return new Response(null, { status: 101, webSocket: clientWebSocket });
+  }
+
+  // ── Cap'n Web connection transport ─────────────────────────────────────
+
+  /**
+   * Accept a Cap'n Web transport upgrade. The transport module owns the
+   * session mechanics; the capability supplies its handlers, tags,
+   * host-boundary dispatch, and session registry.
+   */
+  async #acceptCapnWebSession(request: Request): Promise<Response> {
+    // `||`, not `??`: an empty `?_pk=` value must fall back to a
+    // generated id, matching the hibernating accept path.
+    const connectionId =
+      new URL(request.url).searchParams.get("_pk") || nanoid();
+    // A reconnect reusing the id replaces the previous session.
+    this.#capnWebSessions.get(connectionId)?.session[Symbol.dispose]();
+
+    return openCapnWebSession({
+      request,
+      connectionId,
+      handlers: this.#handlers ?? {},
+      getTags: this.#getConnectionTags,
+      dispatch: (fn, scope) => this.lifecycle.runInHostContext(fn, scope),
+      register: (session) => this.#capnWebSessions.set(connectionId, session),
+      unregister: (session) => {
+        if (this.#capnWebSessions.get(connectionId) === session) {
+          this.#capnWebSessions.delete(connectionId);
+        }
+      }
+    });
   }
 
   // ── Callables ──────────────────────────────────────────────────────────

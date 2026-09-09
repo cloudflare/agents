@@ -284,9 +284,24 @@ export async function openCapnWebSession(
   );
   server.addEventListener(
     "error",
-    () => {
+    (event) => {
+      // An error that follows the close event has nothing left to
+      // report against — the session is already torn down.
+      if (disposed) return;
       wasClean = false;
-      void dispose();
+      // Mirror the hibernating path: the handler sees the error before
+      // the connection is torn down.
+      const error =
+        event instanceof ErrorEvent
+          ? (event.error ?? new Error(event.message))
+          : new Error("Cap'n Web transport socket error");
+      void dispatch(() => handlers.onError?.(connection, error), {
+        connection
+      })
+        .catch((handlerError: unknown) => {
+          console.error("Cap'n Web onError handler failed:", handlerError);
+        })
+        .finally(() => dispose());
     },
     { once: true }
   );

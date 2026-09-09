@@ -336,11 +336,22 @@ no new surface for this — its `@callable()`-decorated methods are its
 interface, served on every wire: natively over the legacy JSON RPC protocol
 and, through the decorator-derived target, over the Cap'n Web endpoint.
 
-Connections use Cloudflare's WebSocket Hibernation API. Idle clients remain
-connected while the Durable Object can leave memory; when a message wakes the
-object, its constructor and lifecycle startup run again before `onMessage`.
-State needed after a wake must be stored durably or through
-`connection.setState()`. There is no non-hibernating mode.
+Connections speak one of two wire transports, chosen by the client:
+
+- **Hibernating WebSocket** (default) uses Cloudflare's WebSocket Hibernation
+  API. Idle clients remain connected while the Durable Object can leave
+  memory; when a message wakes the object, its constructor and lifecycle
+  startup run again before `onMessage`. State needed after a wake must be
+  stored durably or through `connection.setState()`.
+- **Cap'n Web** (`?__agents_transport=capnweb`, or `useAgent({ transport:
+"capnweb" })`) carries the same frames over a single Cap'n Web RPC session.
+  The connection is an in-memory socket and does not hibernate: the Durable
+  Object stays pinned while it is open, and the connection is gone after an
+  eviction, so clients reconnect.
+
+The handlers are transport-agnostic. Both kinds of connection dispatch the
+same `onConnect`/`onMessage`/`onClose`/`onError`, appear in
+`getConnections()`, and honour `connection.close(code, reason)`.
 
 ## Native RPC
 
