@@ -234,15 +234,12 @@ import {
   sweepStaleChatRecoveryIncidents,
   listActiveChatRecoveryIncidents,
   readChatRecoveryProgress,
-  bumpChatRecoveryProgress,
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
-  StreamProgressCreditThrottle,
-  shouldCreditStreamProgress,
   classifyAgentToolChildRecovery,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
@@ -1088,12 +1085,12 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // persisted incident shape and key prefix are owned by the engine package so
 // both consumers round-trip the same record across the deploy that ships them.
 
-// The durable, monotonic forward-progress counter (`CHAT_RECOVERY_PROGRESS_KEY`)
-// and its read/bump helpers now live in the shared engine (agents/chat) —
-// `readChatRecoveryProgress` / `bumpChatRecoveryProgress`. Bumped on each durable
-// content flush (`_storeChunkDurably`) — production time, so it reflects genuinely
-// new content and is immune to reconnects/re-persists; never recomputed from the
-// (compactable) transcript.
+// The monotonic forward-progress marker the recovery budget keys off is
+// derived from the stream log (`ResumableStream.progressMarker`): durably
+// flushed segments, folded into a retired total as their rows are deleted.
+// Nothing is written per chunk. The pre-derivation KV counter
+// (`CHAT_RECOVERY_PROGRESS_KEY`) is read once per isolate and seeded into the
+// marker, so it is never read lower than an in-flight incident recorded.
 // Recovery budget defaults (maxAttempts, maxRecoveryWork, stableTimeoutMs,
 // terminalMessage, noProgressTimeoutMs, alarm debounce) now live in the shared
 // incident engine (agents/chat) and are applied by `resolveChatRecoveryConfig`
@@ -12964,32 +12961,12 @@ export class Think<
       state.chunksSinceFlush = 0;
       state.hasFlushedContent = true;
     }
-    // Forward progress: advance the monotonic, compaction-immune progress
-    // counter HERE (production time) rather than in `_persistOrphanedStream` —
-    // so it bumps only on genuinely new content and is immune to client
-    // reconnects / recovery re-persists (which don't flow through this path).
-    // Decoupled from the flush decision and routed through the shared
-    // host-agnostic rule ({@link shouldCreditStreamProgress}) so the bump TIMING
-    // matches `AIChatAgent`: a milestone (started segment / settled tool) always
-    // credits, and a long single segment's streaming deltas credit through a
-    // time throttle. This is what the recovery no-progress window keys off
-    // (#1637), and stays compaction-proof (#1628).
-    if (
-      shouldCreditStreamProgress({
-        codec: aiSdkRecoveryCodec,
-        type: chunk.type,
-        throttle: this._streamProgressCredit,
-        now: Date.now()
-      })
-    ) {
-      await this._bumpChatRecoveryProgress();
-    }
+    // Forward progress needs no write of its own: the flush above IS the
+    // durable record of new content, and the recovery marker is derived from
+    // the stream log (`_chatRecoveryProgressMarker`). A reconnect replay or a
+    // recovery re-persist reads the log without appending, so neither can
+    // fake progress (#1637), and compaction never touches it (#1628).
   }
-
-  /** Per-isolate throttle for crediting recovery progress from mid-segment
-   *  streaming-content deltas (the shared `agents/chat` rule); reset per isolate
-   *  so the first delta after a restart always credits. */
-  private _streamProgressCredit = new StreamProgressCreditThrottle();
 
   private async _streamResult(
     requestId: string,
@@ -14345,25 +14322,29 @@ export class Think<
    * recomputed from the live, mutable transcript. Compaction collapses older
    * assistant messages into a summary, lowering the count — so a turn that had
    * genuinely advanced could read as "no progress" between attempts and exhaust
-   * its budget prematurely (#1628). Instead we read a durably-persisted counter
-   * that only ever increments — bumped at production time when new content is
-   * durably flushed (see `_storeChunkDurably`), which is genuine forward
-   * progress and is immune to client reconnects / recovery re-persists — so
-   * compaction can never lower it and a reconnect can't fake it (#1637).
+   * its budget prematurely (#1628). It then became a KV counter bumped per
+   * credited chunk. It is now derived from the stream log the chunks were
+   * already flushed to (`ResumableStream.progressMarker`): the log only grows
+   * when new content lands durably, a reconnect replay or a recovery
+   * re-persist reads it without appending (#1637), and compaction rewrites
+   * the transcript, not the log. Nothing is written per chunk.
+   *
+   * The pre-derivation KV counter is folded in once per isolate, so a marker
+   * an in-flight incident already recorded is never read lower after the
+   * upgrade.
    */
   private async _chatRecoveryProgressMarker(): Promise<number> {
-    // Storage read lives in the shared engine (agents/chat); this is the
-    // package binding, symmetric with `AIChatAgent`.
-    return readChatRecoveryProgress(this.ctx.storage);
+    // Memoized as the promise, not a flag: two concurrent readers both wait
+    // for the seed to land, so neither can hand the engine an unseeded
+    // marker as an incident's work baseline.
+    this._progressSeed ??= readChatRecoveryProgress(this.ctx.storage).then(
+      (legacy) => this._resumableStream.seedProgress(legacy)
+    );
+    await this._progressSeed;
+    return this._resumableStream.progressMarker();
   }
 
-  /** Advance the durable recovery-progress counter. Called from
-   *  `_storeChunkDurably` when a stored chunk credits forward progress under the
-   *  shared rule (real, reconnect-immune forward progress). The increment lives
-   *  in the shared engine (agents/chat); this is the package binding. */
-  private async _bumpChatRecoveryProgress(): Promise<void> {
-    return bumpChatRecoveryProgress(this.ctx.storage);
-  }
+  private _progressSeed: Promise<void> | null = null;
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
    *  isolate so the first forwarded chunk after a restart always credits. */
@@ -14373,14 +14354,16 @@ export class Think<
    * N9: forwarding a sub-agent's chunks IS forward progress for this parent
    * turn, so credit the parent's recovery progress marker — otherwise a parent
    * whose turn merely `await`s a child banks no progress of its own and its
-   * no-progress window exhausts while the child is healthily streaming. Only
+   * no-progress window exhausts while the child is healthily streaming. The
+   * child's output goes to clients, not to this object's stream log, so the
+   * derived marker cannot see it; this is the one explicit credit left. Only
    * invoked after a child actually produced output (see
    * `_forwardAgentToolStream`), so a silent child still lets the parent exhaust.
    * Throttled (and reset per isolate) so we never write storage per token.
    */
   protected override async _onAgentToolStreamProgress(): Promise<void> {
     if (this._agentToolStreamProgress.shouldCredit(Date.now())) {
-      await this._bumpChatRecoveryProgress();
+      this._resumableStream.creditProgress();
     }
   }
 

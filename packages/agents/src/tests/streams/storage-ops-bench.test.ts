@@ -36,10 +36,12 @@ describe("Streams storage-ops benchmark", () => {
       // insert, one block write per 10-chunk segment, one settle update —
       // 12 for this workload. On top of that, each start() reclaims the
       // previous turn's completed stream (its one block row and its stream
-      // row): the cleanup the legacy pattern deferred to a sweep of ~13
-      // rows per turn, paid inline as 2. Any regression that adds a write
-      // to the streaming hot path breaks this equality.
-      expect(adapter.rowsWritten).toBe(legacy.rowsWritten + 2 * (TURNS - 1));
+      // row, plus one row folding its segments into the recovery progress
+      // total — the write that replaced a KV get+put per credited chunk):
+      // the cleanup the legacy pattern deferred to a sweep of ~13 rows per
+      // turn, paid inline as 3. Any regression that adds a write to the
+      // streaming hot path breaks this equality.
+      expect(adapter.rowsWritten).toBe(legacy.rowsWritten + 3 * (TURNS - 1));
       // Packing is the point: an order of magnitude under naive per-chunk
       // (12 vs 102 rows per turn here, ~8.5×).
       expect(adapter.rowsWritten * 5).toBeLessThan(perChunk.rowsWritten);

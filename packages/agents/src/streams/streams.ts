@@ -92,6 +92,11 @@ export interface StreamsSyncInternal {
    */
   lastChunkAt(streamId: string): number | null;
   /**
+   * Segments durably appended so far: the chunk log's tail, read in the
+   * calling synchronous block. Zero for an unknown stream.
+   */
+  cursor(streamId: string): number;
+  /**
    * Idempotent settlement with events and reader wakeup. With `options`,
    * the settle, the caller's `commit` writes and the log discard run in
    * one SQLite transaction (see {@link StreamSettleOptions}). Returns
@@ -427,6 +432,7 @@ export class Streams extends LifecycleCapability {
       },
       append: (streamId, chunk) => this.#append(streamId, chunk),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
+      cursor: (streamId) => this.#tail(streamId).nextSeq,
       settle: (streamId, state, reason, options) =>
         this.#settle(streamId, state, reason, options),
       deleteUnchecked: (streamId) => {

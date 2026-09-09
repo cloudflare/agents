@@ -4554,7 +4554,12 @@ describe("Think — onChatRecovery", () => {
       maxAttempts: 1,
       status: "scheduled",
       firstSeenAt: Date.now() - 60_000,
-      lastAttemptAt: Date.now() - 60_000
+      lastAttemptAt: Date.now() - 60_000,
+      // The marker is derived from the stream log, so the seeded stream's
+      // segments already count. Record them as the incident's last observed
+      // progress: this wake must see no NEW content, exactly as a real
+      // incident that opened over this stream would.
+      progress: await agent.readProgressMarkerForTest()
     });
 
     await agent.triggerFiberRecovery();
@@ -4751,7 +4756,12 @@ describe("Think — onChatRecovery", () => {
       maxAttempts: 1,
       status: "scheduled",
       firstSeenAt: Date.now() - 60_000,
-      lastAttemptAt: Date.now() - 60_000
+      lastAttemptAt: Date.now() - 60_000,
+      // The marker is derived from the stream log, so the seeded stream's
+      // segments already count. Record them as the incident's last observed
+      // progress: this wake must see no NEW content, exactly as a real
+      // incident that opened over this stream would.
+      progress: await agent.readProgressMarkerForTest()
     });
 
     await agent.triggerFiberRecovery();
