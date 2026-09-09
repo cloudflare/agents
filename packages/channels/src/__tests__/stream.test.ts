@@ -137,6 +137,32 @@ describe("consumeChunks", () => {
     expect(outcome).toEqual({ interrupted: true, error });
     expect(cancel).toHaveBeenCalledOnce();
   });
+
+  it("finalizes without waiting for a sibling tee branch to close", async () => {
+    const source = new ReadableStream<ChannelChunk>({
+      start(controller) {
+        controller.enqueue({ type: "text", text: "a" });
+      }
+    });
+    const [failedBranch, openSibling] = source.tee();
+    const consumption = consumeChunks(failedBranch, {
+      onChunk() {
+        throw new Error("provider rejected the append");
+      },
+      onFinish: () => "finished"
+    });
+
+    const settledFirst = await Promise.race([
+      consumption,
+      new Promise<"blocked">((resolve) =>
+        setTimeout(() => resolve("blocked"), 0)
+      )
+    ]);
+    await openSibling.cancel();
+    await consumption;
+
+    expect(settledFirst).toBe("finished");
+  });
 });
 
 describe("createPacer", () => {

@@ -39,8 +39,10 @@ export async function consumeChunks<TChunk, TResult>(
     }
   } catch (error) {
     outcome = { interrupted: true, error };
-    // Stop the producer, which is still generating when `onChunk` threw.
-    await reader.cancel().catch(() => {});
+    // Initiate cancellation without waiting for sibling tee branches. Their
+    // cancellation promises settle together, but this consumer still has to
+    // finalize its provider message immediately.
+    void reader.cancel().catch(() => {});
   } finally {
     reader.releaseLock();
   }
