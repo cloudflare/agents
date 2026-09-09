@@ -32,11 +32,13 @@ hosts pass `initialState` to `State` directly). Broadcast and the
 notification hook stay on `Agent`, and the `onMessage` state branch
 stays too; only its inner write delegates to the capability.
 
-The `cf_agents_state` table is shared: `State` ensures it in
-`onStart` and owns the state row, while `Agent` keeps its global
-schema-version row in `_ensureSchema` and ensures the table there too
-— each side idempotent, each tracking its own version, the same
-pattern as Scheduler's `ensureScheduleTable`.
+`State` is the only owner of `cf_agents_state`: it creates the table,
+holds the state row, and runs the legacy `cf_state_was_changed`
+cleanup in its own versioned migration. `Agent` used to keep its
+global schema version as a row in that table; it now lives under the
+`cf_agents:schema_version` KV key like every other capability's
+version. A DO created under the old layout has the row read once,
+moved to the key, and deleted on its next construction.
 
 `Agent`'s public API and wire protocol are unchanged: `state`,
 `setState()`, `onStateChanged`, and the `CF_AGENT_STATE` frames behave

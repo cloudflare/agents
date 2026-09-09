@@ -752,18 +752,17 @@ type AgentToolRecoveryInspection =
 /**
  * Schema version for the Agent's internal SQLite tables.
  * Bump this when adding new tables, columns, or migrations.
- * The constructor stores this as a row in cf_agents_state and checks it
- * on wake to skip DDL on established DOs.
+ * The constructor stores this under a namespaced KV key (the same convention
+ * every capability uses for its own schema version) and checks it on wake to
+ * skip DDL on established DOs.
  */
 const CURRENT_SCHEMA_VERSION = 11;
+const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
-const SCHEMA_VERSION_ROW_ID = "cf_schema_version"; // Agent global version row (stays)
-// STATE_ROW_ID moved to state/index.ts (the State capability owns the state row).
-// Legacy key — no longer written, but read for backward compatibility with
-// DOs that were created before the single-row state optimization. The
-// _ensureSchema cleanup that deletes this row from the shared cf_agents_state
-// table stays here until the State capability owns that migration.
-const STATE_WAS_CHANGED = "cf_state_was_changed";
+// Before the State capability owned `cf_agents_state`, Agent kept its schema
+// version as a row in that table. Read once for DOs created under that layout,
+// then moved to the KV key so the table has a single owner.
+const LEGACY_SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 
 // Sentinel for "no initial state provided" on the Agent's overridable
 // `initialState` field. The State capability owns state storage; this only
@@ -1651,26 +1650,10 @@ export class Agent<
    * local dev and the constructor only runs once per DO instance).
    */
   protected _ensureSchema(): void {
-    // The `cf_agents_state` table is shared: the State capability owns the
-    // state row (state/index.ts), but the Agent still stores its global
-    // schema-version row here. State.onStart also ensures this table
-    // idempotently — the same pattern as Scheduler's ensureScheduleTable
-    // below — so this CREATE TABLE stays.
     // Schema version gating: skip all DDL on established DOs whose schema
-    // is already up-to-date. We always create cf_agents_state first (cheap
-    // idempotent DDL) and store the version as a row inside it.
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_state (
-        id TEXT PRIMARY KEY NOT NULL,
-        state TEXT
-      )
-    `;
-
-    const versionRow = this.sql<{ state: string | null }>`
-      SELECT state FROM cf_agents_state WHERE id = ${SCHEMA_VERSION_ROW_ID}
-    `;
-    const schemaVersion =
-      versionRow.length > 0 ? Number(versionRow[0].state) : 0;
+    // is already up-to-date. `cf_agents_state` belongs to the State
+    // capability (state/index.ts), which creates and migrates it itself.
+    const schemaVersion = this._readSchemaVersion();
 
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
       ensureMcpServerTable(this.ctx.storage);
@@ -1729,12 +1712,6 @@ export class Agent<
       this.sql`
         CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
       `;
-
-      // Clean up legacy STATE_WAS_CHANGED rows from the single-row state optimization
-      this.ctx.storage.sql.exec(
-        "DELETE FROM cf_agents_state WHERE id = ?",
-        STATE_WAS_CHANGED
-      );
 
       // v3: durable fibers table for runFiber
       this.sql`
@@ -1892,10 +1869,7 @@ export class Agent<
       );
 
       // Mark schema as up-to-date
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_state (id, state)
-        VALUES (${SCHEMA_VERSION_ROW_ID}, ${String(CURRENT_SCHEMA_VERSION)})
-      `;
+      this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
     }
 
     this._schemaInitialization = {
@@ -1903,6 +1877,42 @@ export class Agent<
       currentVersion: CURRENT_SCHEMA_VERSION,
       migrated: schemaVersion < CURRENT_SCHEMA_VERSION
     };
+  }
+
+  /**
+   * Read the Agent's schema version from its KV key. A DO created before the
+   * State capability owned `cf_agents_state` has the version as a row in that
+   * table instead: read it once, move it to the key, and delete the row so the
+   * table is left with a single owner. Synchronous (`storage.kv`) because the
+   * constructor gates DDL on it.
+   */
+  private _readSchemaVersion(): number {
+    const stored = this.ctx.storage.kv.get<number>(SCHEMA_VERSION_KEY);
+    if (stored !== undefined) return stored;
+
+    const hasStateTable =
+      this.ctx.storage.sql
+        .exec(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_state'"
+        )
+        .toArray().length > 0;
+    if (!hasStateTable) return 0;
+
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT state FROM cf_agents_state WHERE id = ?",
+        LEGACY_SCHEMA_VERSION_ROW_ID
+      )
+      .toArray() as { state: string | null }[];
+    if (rows.length === 0) return 0;
+
+    const version = Number(rows[0].state) || 0;
+    this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, version);
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = ?",
+      LEGACY_SCHEMA_VERSION_ROW_ID
+    );
+    return version;
   }
 
   constructor(ctx: AgentContext, env: Env) {

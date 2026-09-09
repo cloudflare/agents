@@ -15,6 +15,12 @@ const CURRENT_STATE_SCHEMA_VERSION = 1;
 const STATE_ROW_ID = "cf_state_row_id";
 
 /**
+ * Legacy row written by SDKs that predate the single-row state optimization.
+ * Never written now; the v1 migration deletes it.
+ */
+const LEGACY_WAS_CHANGED_ROW_ID = "cf_state_was_changed";
+
+/**
  * Sentinel distinguishing "state not yet loaded / never set" from a stored
  * value. A distinct object reference means falsy states (null, 0, false, "")
  * still read back as set.
@@ -58,7 +64,11 @@ export class State<T = unknown> extends LifecycleCapability {
       return;
     }
 
+    // v1: own the table and clear the legacy wasChanged row left behind by
+    // pre-optimization SDKs (state itself lives in STATE_ROW_ID).
     this._ensureTable();
+    this.lifecycle
+      .sql`DELETE FROM cf_agents_state WHERE id = ${LEGACY_WAS_CHANGED_ROW_ID}`;
     await this.lifecycle.storage.put(
       STATE_SCHEMA_VERSION_KEY,
       CURRENT_STATE_SCHEMA_VERSION
