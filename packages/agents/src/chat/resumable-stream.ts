@@ -161,6 +161,14 @@ export type ResumableStreamOptions = {
   onProgress?: (durableSegments: number) => void;
 };
 
+/**
+ * The deletion hook each adapter holds on its Streams capability. One
+ * adapter per capability: a host whose startup retried constructs the
+ * adapter again on the same capability, and the earlier hook must go, or a
+ * deleted stream's segments would be retired once per construction.
+ */
+const deletionHooks = new WeakMap<Streams, () => void>();
+
 export class ResumableStream {
   private _activeStreamId: string | null = null;
   private _activeRequestId: string | null = null;
@@ -204,10 +212,15 @@ export class ResumableStream {
     // Every path that removes a chat row's log — this adapter's cutover,
     // reclaim and clear, and the capability's public `delete()` — folds the
     // row's segments into the retired total first. Registered before the
-    // legacy migration, which is itself a delete path.
-    this.ops.onDelete((row, cursor) => {
-      if (parseChatMetadata(row)) this._retire(cursor);
-    });
+    // legacy migration, which is itself a delete path, and replacing the
+    // hook of any adapter constructed earlier on this capability.
+    deletionHooks.get(streams)?.();
+    deletionHooks.set(
+      streams,
+      this.ops.onDelete((row, cursor) => {
+        if (parseChatMetadata(row)) this._retire(cursor);
+      })
+    );
     this._migrateLegacyTables(sql);
     // Restore any active stream from a previous session
     this.restore();

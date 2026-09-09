@@ -103,9 +103,11 @@ export interface StreamsSyncInternal {
    * (and, for a cutover, the same transaction). Hooks must be synchronous
    * and must not await: the cutover runs them inside `transactionSync`.
    * The chat adapter uses this to keep its recovery progress marker exact
-   * however a chat row leaves the table.
+   * however a chat row leaves the table. Returns the unsubscribe: an owner
+   * constructed again (a host whose startup retried) must drop its earlier
+   * hook, or a deletion is observed once per construction.
    */
-  onDelete(hook: (row: StreamRow, cursor: number) => void): void;
+  onDelete(hook: (row: StreamRow, cursor: number) => void): () => void;
   /**
    * Idempotent settlement with events and reader wakeup. With `options`,
    * the settle, the caller's `commit` writes and the log discard run in
@@ -445,6 +447,10 @@ export class Streams extends LifecycleCapability {
       cursor: (streamId) => this.#tail(streamId).nextSeq,
       onDelete: (hook) => {
         this.#deleteHooks.push(hook);
+        return () => {
+          const index = this.#deleteHooks.indexOf(hook);
+          if (index !== -1) this.#deleteHooks.splice(index, 1);
+        };
       },
       settle: (streamId, state, reason, options) =>
         this.#settle(streamId, state, reason, options),

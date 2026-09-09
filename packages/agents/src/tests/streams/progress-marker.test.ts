@@ -71,6 +71,18 @@ describe("ResumableStream.progressMarker", () => {
     });
   });
 
+  it("retires a stream once when the adapter was constructed more than once", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      const { marker, reports } = await instance.probeReconstruction();
+      // Three constructions, one cutover of a one-segment stream: the
+      // earlier hooks were replaced, so the segment is retired once and the
+      // host hears about it once.
+      expect(marker).toBe(1);
+      expect(reports).toBe(1);
+    });
+  });
+
   it("seeds the legacy counter beside segments retired before it, idempotently", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {

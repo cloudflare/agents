@@ -49,6 +49,26 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * A host whose startup retried constructs the adapter again on the same
+   * capability. A stream retired afterwards must count once, not once per
+   * construction.
+   */
+  async probeReconstruction(): Promise<{ marker: number; reports: number }> {
+    await this.lifecycle.start();
+    this.#adapter();
+    this.#adapter();
+    const adapter = this.#adapter();
+    const id = adapter.start("rebuilt-req");
+    for (let i = 0; i < 10; i++) adapter.storeChunk(id, this.#body(i, 60));
+    adapter.finish(id);
+    adapter.cutover(id, () => {});
+    return {
+      marker: adapter.progressMarker(),
+      reports: this.progressReports.length
+    };
+  }
+
+  /**
    * A completed chat stream deleted through the capability's public
    * `delete()`, which bypasses the adapter: the marker must not move.
    */
