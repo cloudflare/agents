@@ -2,12 +2,12 @@ import type {
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions
-} from "@cloudflare/voice";
+} from "agents/voice";
 import {
   logVoiceError,
   toVoiceError,
   VoiceProviderError
-} from "@cloudflare/voice/errors";
+} from "agents/voice/errors";
 
 export interface DeepgramSTTOptions {
   /** Deepgram API key. */
@@ -48,7 +48,7 @@ const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
  * @example
  * ```typescript
  * import { Agent } from "agents";
- * import { withVoice } from "@cloudflare/voice";
+ * import { withVoice } from "agents/voice";
  * import { DeepgramSTT } from "@cloudflare/voice-deepgram";
  *
  * const VoiceAgent = withVoice(Agent);

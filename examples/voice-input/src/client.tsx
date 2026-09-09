@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useState } from "react";
-import { useVoiceInput } from "@cloudflare/voice/react";
+import { useVoiceInput } from "agents/voice/react";
 import { Button, Surface, Text, PoweredByCloudflare } from "@cloudflare/kumo";
 import {
   MicrophoneIcon,
@@ -113,7 +113,7 @@ function App() {
                   Click the microphone to start dictating. Your speech is
                   transcribed in real time using Workers AI and displayed in the
                   text area below. Uses the useVoiceInput hook from
-                  @cloudflare/voice.
+                  agents/voice.
                 </Text>
               </span>
             </div>

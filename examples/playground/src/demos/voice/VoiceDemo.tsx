@@ -1,4 +1,4 @@
-import { useVoiceAgent, type VoiceStatus } from "@cloudflare/voice/react";
+import { useVoiceAgent, type VoiceStatus } from "agents/voice/react";
 import {
   MicrophoneIcon,
   MicrophoneSlashIcon,

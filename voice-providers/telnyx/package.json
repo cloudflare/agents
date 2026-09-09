@@ -11,7 +11,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "peerDependencies": {
-    "@cloudflare/voice": ">=0.3.3 <1.0.0"
+    "agents": ">=0.23.0 <2.0.0"
   },
   "dependencies": {
     "@telnyx/webrtc": "^2.27.1"
@@ -62,5 +62,8 @@
   "type": "module",
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "agents": "workspace:*"
   }
 }

@@ -1,5 +1,5 @@
 import { Agent, routeAgentRequest, type Connection } from "agents";
-import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
+import { withVoiceInput, WorkersAINova3STT } from "agents/voice";
 
 const InputAgent = withVoiceInput(Agent);
 

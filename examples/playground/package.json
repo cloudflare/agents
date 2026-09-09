@@ -12,7 +12,6 @@
     "@cloudflare/ai-chat": "*",
     "@cloudflare/codemode": "*",
     "@cloudflare/kumo": "^2.6.0",
-    "@cloudflare/voice": "*",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
     "@phosphor-icons/react": "^2.1.10",

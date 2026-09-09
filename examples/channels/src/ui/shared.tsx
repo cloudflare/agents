@@ -16,7 +16,7 @@ import {
   SunIcon,
   WarningCircleIcon
 } from "@phosphor-icons/react";
-import type { ChannelIdentity, UserIdentity } from "@cloudflare/channels";
+import type { ChannelIdentity, UserIdentity } from "agents/channels";
 
 type Presentation = { label: string; icon: ReactNode; badge: BadgeVariant };
 
