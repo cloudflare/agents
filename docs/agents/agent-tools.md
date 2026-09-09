@@ -262,11 +262,20 @@ async onImportDone(run: AgentToolRunInfo, result: AgentToolLifecycleResult) {
 }
 ```
 
+> The parent-side engine behind these methods lives in the `AgentTools`
+> Lifecycle capability, installed on every Agent as `this.agentTools`; it owns
+> the `cf_agent_tool_runs` table and its own schema version. `runAgentTool`,
+> `cancelAgentTool`, `hasAgentToolRun` and `clearAgentToolRuns` are thin
+> facades over it, and the hooks (`onAgentToolStart`, `onAgentToolFinish`,
+> `onProgress`) stay on the Agent.
+
 Key behaviors:
 
 - **Durable completion.** Delivery survives eviction and deploys: a warm fast
-  path delivers with low latency while the isolate is alive, and a
-  self-scheduling reconcile backbone finalizes anything the fast path missed.
+  path delivers with low latency while the isolate is alive, and a reconcile
+  backbone — one self-re-arming Lifecycle job on an escalating 5s/15s/30s/120s
+  cadence, which completes once nothing is outstanding — finalizes anything the
+  fast path missed.
   Delivery is exactly-once on the happy path; under a crash it is at-least-once,
   so `onFinish` handlers must be idempotent.
 - **Give-up vs. finish are independent.** A budget give-up is delivered as

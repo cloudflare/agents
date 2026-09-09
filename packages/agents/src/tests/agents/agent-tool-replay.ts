@@ -21,31 +21,6 @@ type StubRunInput = {
   summary?: string;
 };
 
-/**
- * Private framework internals this fixture drives directly to reproduce the
- * #1630 follow-up bug: the typed interrupted cause (`reason` /
- * `childStillRunning`) must survive a reconnect replay, not just live events.
- * Also used to exercise the detached-run delivery ledger (#1752) directly.
- */
-type AgentToolInternals = {
-  _updateAgentToolTerminal(
-    runId: string,
-    result: RunAgentToolResult,
-    completedAt?: number
-  ): void;
-  _readAgentToolRun(runId: string): unknown;
-  _resultFromAgentToolRow(row: unknown): RunAgentToolResult;
-  _replayAgentToolRuns(connection: Connection): Promise<void>;
-  _deliverDetachedTerminal(
-    runId: string,
-    kind: "finish" | "give_up",
-    result: RunAgentToolResult,
-    options?: { sequence?: number; serialize?: boolean },
-    completedAt?: number
-  ): Promise<void>;
-  _armDetachedBackbone(options?: { resetCadence?: boolean }): Promise<void>;
-};
-
 type DetachedDeliveryLogEntry = {
   hook: "onAgentToolFinish" | "onDetachedDone";
   runId: string;
@@ -59,8 +34,8 @@ type DetachedBackboneSchedule = {
 };
 
 export class TestAgentToolReplayAgent extends Agent {
-  private get _agentTool(): AgentToolInternals {
-    return this as unknown as AgentToolInternals;
+  private get _agentTool() {
+    return this.agentTools;
   }
 
   /**
@@ -82,7 +57,7 @@ export class TestAgentToolReplayAgent extends Agent {
         ${runId}, ${`call-${runId}`}, 'Child', 'starting', 0, ${Date.now()}
       )
     `;
-    this._agentTool._updateAgentToolTerminal(runId, {
+    this._agentTool.updateTerminal(runId, {
       runId,
       agentType: "Child",
       status: "interrupted",
@@ -97,7 +72,7 @@ export class TestAgentToolReplayAgent extends Agent {
    * does once the child self-heals. Asserts the persisted cause is CLEARED.
    */
   completeRunForTest(runId: string, summary: string): void {
-    this._agentTool._updateAgentToolTerminal(runId, {
+    this._agentTool.updateTerminal(runId, {
       runId,
       agentType: "Child",
       status: "completed",
@@ -107,8 +82,8 @@ export class TestAgentToolReplayAgent extends Agent {
 
   /** Round-trip: re-read the stored row back into a result object. */
   readPersistedResultForTest(runId: string): RunAgentToolResult | null {
-    const row = this._agentTool._readAgentToolRun(runId);
-    return row ? this._agentTool._resultFromAgentToolRow(row) : null;
+    const row = this._agentTool.readRun(runId);
+    return row ? this._agentTool.resultFromRow(row) : null;
   }
 
   /**
@@ -132,7 +107,7 @@ export class TestAgentToolReplayAgent extends Agent {
         }
       }
     } as unknown as Connection;
-    await this._agentTool._replayAgentToolRuns(connection);
+    await this._agentTool.replayToConnection(connection);
     const terminalKinds = new Set([
       "finished",
       "error",
@@ -244,10 +219,7 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   readRunNotifySourceForTest(runId: string): string | null {
-    const row = this._agentTool._readAgentToolRun(runId) as {
-      detached_notify_source?: string | null;
-    } | null;
-    return row?.detached_notify_source ?? null;
+    return this._agentTool.readRun(runId)?.detached_notify_source ?? null;
   }
 
   expireDetachedFinishClaimForTest(runId: string): void {
@@ -309,36 +281,40 @@ export class TestAgentToolReplayAgent extends Agent {
   /**
    * Arm the detached backbone `count` times concurrently (the fan-out a turn
    * dispatching several detached runs at once produces) and return the live
-   * backbone schedules. The mutex must collapse them to exactly one.
+   * backbone schedules. The fixed job id must collapse them to exactly one.
    */
   async armDetachedBackboneConcurrentlyForTest(
     count: number
   ): Promise<DetachedBackboneSchedule[]> {
     await Promise.all(
       Array.from({ length: count }, () =>
-        this._agentTool._armDetachedBackbone({ resetCadence: true })
+        this._agentTool.armDetachedBackbone({ resetCadence: true })
       )
     );
     return this.detachedBackboneSchedulesForTest();
   }
 
   async detachedReconcileTickForTest(cadenceIndex?: number): Promise<void> {
-    await this._cfDetachedReconcileTick(
+    await this._agentTool.reconcileTick(
       cadenceIndex !== undefined ? { cadenceIndex } : undefined
     );
   }
 
+  /**
+   * The pending backbone job projected into the shape the cadence assertions
+   * use: how far out it is armed, and the cadence position it carries.
+   */
   async detachedBackboneSchedulesForTest(): Promise<
     DetachedBackboneSchedule[]
   > {
-    const schedules = await this.listSchedules();
-    return schedules
-      .filter((schedule) => schedule.callback === "_cfDetachedReconcileTick")
-      .map((schedule) => ({
-        delayInSeconds:
-          "delayInSeconds" in schedule ? schedule.delayInSeconds : undefined,
-        payload: schedule.payload
-      }));
+    const pending = this._agentTool.pendingDetachedReconcile();
+    if (!pending) return [];
+    return [
+      {
+        delayInSeconds: Math.round((pending.dueAt - Date.now()) / 1000),
+        payload: { cadenceIndex: pending.cadenceIndex }
+      }
+    ];
   }
 
   async deliverFinishForTest(
@@ -346,7 +322,7 @@ export class TestAgentToolReplayAgent extends Agent {
     status: AgentToolTerminalStatus,
     text: string
   ): Promise<void> {
-    await this._agentTool._deliverDetachedTerminal(runId, "finish", {
+    await this._agentTool.deliverDetachedTerminal(runId, "finish", {
       runId,
       agentType: "Child",
       status,
@@ -368,7 +344,7 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   async deliverGiveUpForTest(runId: string): Promise<void> {
-    await this._agentTool._deliverDetachedTerminal(runId, "give_up", {
+    await this._agentTool.deliverDetachedTerminal(runId, "give_up", {
       runId,
       agentType: "Child",
       status: "interrupted",
@@ -379,10 +355,7 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   readRunStatusForTest(runId: string): string | null {
-    const row = this._agentTool._readAgentToolRun(runId) as {
-      status: string;
-    } | null;
-    return row ? row.status : null;
+    return this._agentTool.readRun(runId)?.status ?? null;
   }
 
   /**
