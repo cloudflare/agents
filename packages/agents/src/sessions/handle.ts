@@ -70,9 +70,10 @@ export class Session {
   // ── Reads ────────────────────────────────────────────────────────────────
 
   /**
-   * Stream the active branch path root → leaf with compaction overlays
-   * applied. Peak memory is one bounded content window, never the whole
-   * transcript.
+   * Stream the active branch path root → leaf (leaf → root with
+   * `newestFirst`) with compaction overlays applied. Peak memory is one
+   * bounded content window, never the whole transcript, and a consumer that
+   * breaks out early leaves the rows it never reached unread.
    */
   async *history(
     options: HistoryReadOptions = {}
@@ -317,14 +318,24 @@ export class Session {
 
   /**
    * Import one historical message verbatim (migrations, cross-object moves):
-   * explicit parent and timestamp, no change-feed event.
+   * explicit parent and timestamp. A row actually written dispatches an
+   * `import` change event so a host cache can mark itself stale; it is not
+   * an `append`, so a cache does not patch itself per imported row, and an
+   * id that already exists writes nothing and dispatches nothing.
    */
   async importMessage(
     message: SessionMessage,
     options: { parentId: string | null; createdAt: number }
   ): Promise<void> {
     await this.#ready();
-    this.#core.importMessage(this.sessionId, message, options);
+    const inserted = this.#core.importMessage(this.sessionId, message, options);
+    if (!inserted) return;
+    await this.#core.notify({
+      type: "import",
+      sessionId: this.sessionId,
+      message,
+      parentId: options.parentId
+    });
   }
 
   async deleteMessages(messageIds: string[]): Promise<void> {
@@ -345,18 +356,28 @@ export class Session {
 
   // ── Compaction ───────────────────────────────────────────────────────────
 
+  /**
+   * Store an overlay directly. Dispatches a `compaction` change event: the
+   * rows are untouched, but what a path read returns has changed.
+   */
   async addCompaction(
     summary: string,
     fromMessageId: string,
     toMessageId: string
   ): Promise<StoredCompaction> {
     await this.#ready();
-    return this.#core.addCompaction(
+    const compaction = this.#core.addCompaction(
       this.sessionId,
       summary,
       fromMessageId,
       toMessageId
     );
+    await this.#core.notify({
+      type: "compaction",
+      sessionId: this.sessionId,
+      compaction
+    });
+    return compaction;
   }
 
   async getCompactions(): Promise<StoredCompaction[]> {

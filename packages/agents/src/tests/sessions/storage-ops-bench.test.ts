@@ -61,6 +61,52 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
+  it("reads the newest window, not the transcript, to find a tool call's owner", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      const lookup = await instance.benchOwnerLookup(200);
+      expect(lookup.found).toBe("bench-197");
+      // A full read pays the sized path walk — several billed rows per
+      // message for the byte subqueries — and then hydrates every row. The
+      // newest-first read follows parent pointers from the leaf and stops at
+      // the owner, three rows in, so its cost has no transcript term at all:
+      // the rows it read, plus the compactions probe and the leaf lookup.
+      expect(lookup.fullRead).toBeGreaterThan(1000);
+      expect(lookup.newestFirst).toBeLessThan(12);
+    });
+  });
+
+  it("keeps the owner lookup lazy on a compacted session until it reaches the span", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      // The overlay covers the first 150 rows; the owner sits after it, so
+      // the walk never reaches the span and costs the same as without one.
+      const recent = await instance.benchOwnerLookup(200, {
+        compactedPrefix: 150
+      });
+      expect(recent.found).toBe("bench-197");
+      expect(recent.newestFirst).toBeLessThan(12);
+    });
+
+    const hiddenStub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      hiddenStub,
+      async (instance: SessionBenchObject) => {
+        // An owner inside the compacted span is hidden behind the overlay in
+        // either direction. The walk reaches the span's end, plans the prefix
+        // by id (one row per step, no byte subqueries) and stops at the
+        // overlay: bounded well under the full read, which pays the sized walk
+        // and hydrates everything.
+        const hidden = await instance.benchOwnerLookup(200, {
+          ownerFromLeaf: 100,
+          compactedPrefix: 150
+        });
+        expect(hidden.found).toBeNull();
+        expect(hidden.newestFirst).toBeLessThan(hidden.fullRead / 2);
+      }
+    );
+  });
+
   it("bills a message row plus the attachment rows for inline media", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
