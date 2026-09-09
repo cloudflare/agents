@@ -218,7 +218,7 @@ describe("Cap'n Web Agent transport", () => {
         "boom"
       );
       // Undecorated methods are reported as nonexistent, exactly as on
-      // the hibernating transport.
+      // the PartyKit transport.
       await expect(session.call("notCallableMethod", [])).rejects.toThrow(
         /does not exist/
       );
@@ -227,7 +227,7 @@ describe("Cap'n Web Agent transport", () => {
     }
   });
 
-  it("broadcasts state across capnweb and hibernating transports", async () => {
+  it("broadcasts state across capnweb and partykit transports", async () => {
     const capnWeb = await connectCapnWeb(
       "/agents/test-callable-agent/capnweb-mixed"
     );

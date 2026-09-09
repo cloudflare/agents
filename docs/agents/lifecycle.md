@@ -338,7 +338,7 @@ and, through the decorator-derived target, over the Cap'n Web endpoint.
 
 Connections speak one of two wire transports, chosen by the client:
 
-- **Hibernating WebSocket** (default) uses Cloudflare's WebSocket Hibernation
+- **PartyKit** (default) is a plain WebSocket using Cloudflare's WebSocket Hibernation
   API. Idle clients remain connected while the Durable Object can leave
   memory; when a message wakes the object, its constructor and lifecycle
   startup run again before `onMessage`. State needed after a wake must be

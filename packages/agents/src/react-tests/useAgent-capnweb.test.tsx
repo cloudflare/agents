@@ -3,7 +3,7 @@
  * (`transport: "capnweb"`) against a real miniflare worker.
  *
  * The transport must be behaviorally identical to the default
- * hibernating transport: identity, state sync, and RPC calls all run
+ * PartyKit transport: identity, state sync, and RPC calls all run
  * over the single Cap'n Web socket.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";

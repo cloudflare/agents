@@ -45,7 +45,7 @@ type TerminalReconnectOptions = {
 
 /**
  * The socket implementation behind `useAgent` — a PartySocket for the
- * hibernating transport or a CapnWebAgentClient for the Cap'n Web one.
+ * PartyKit transport or a CapnWebAgentClient for the Cap'n Web one.
  * Both expose the WebSocket-shaped surface the hook relies on
  * (send/close/readyState/shouldReconnect/events).
  */
@@ -170,7 +170,7 @@ export type UseAgentOptions<State = unknown> = Omit<
     basePath?: string;
     /**
      * WebSocket transport for all Agent traffic. Defaults to
-     * `"hibernating"`. Switching to `"capnweb"` changes only the wire
+     * `"partykit"`. Switching to `"capnweb"` changes only the wire
      * and the server-side connection lifecycle — the hook's surface
      * (`call`, `stub`, `setState`, handlers, ...) is identical.
      * @experimental The `"capnweb"` transport is experimental.
@@ -360,7 +360,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     defaultCallTimeout,
     onConnectionError,
     shouldReconnectOnClose,
-    transport = "hibernating",
+    transport = "partykit",
     ...restOptions
   } = options;
   const isCapnWeb = transport === "capnweb";
@@ -1083,7 +1083,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     if (isCapnWeb) {
       // The Cap'n Web client's URL is fully resolved at construction
       // (query params and `_pk` included), matching what `_pkurl`
-      // exposes on the hibernating transport.
+      // exposes on the PartyKit transport.
       return capnWebAgent.url
         .replace("ws://", "http://")
         .replace("wss://", "https://");

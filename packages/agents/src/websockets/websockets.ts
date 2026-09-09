@@ -79,7 +79,7 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
  *
  * Connections speak one of two wire transports, chosen by the client:
  *
- * - **Hibernating WebSocket** (default): plain frames; idle clients
+ * - **PartyKit** (default): a plain hibernating WebSocket; idle clients
  *   survive Durable Object eviction.
  * - **Cap'n Web** (`?__agents_transport=capnweb`): the same frames
  *   travel over a single Cap'n Web RPC session. The connection is
