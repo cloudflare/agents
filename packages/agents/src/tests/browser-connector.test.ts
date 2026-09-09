@@ -256,7 +256,8 @@ describe("browser_execute model output", () => {
             data: "AAAA"
           },
           `data:image/jpeg;base64,${image}`
-        ]
+        ],
+        raw: { data: image }
       },
       calls: [{ result: { data: image } }]
     };
@@ -267,6 +268,8 @@ describe("browser_execute model output", () => {
     expect(serialized).toContain("base64 image/jpeg data omitted");
     expect(serialized).toContain("base64 data omitted");
     expect(serialized).not.toContain(image);
+    // The durable call log is audit data for the UI, not model context.
+    expect(serialized).not.toContain("calls");
     expect(output.result.captures[0]).toHaveProperty("data", "AAAA");
     expect(output.calls[0].result.data).toBe(image);
   });

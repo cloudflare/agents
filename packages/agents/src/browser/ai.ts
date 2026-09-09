@@ -280,7 +280,13 @@ function browserExecuteModelOutput(
     };
   }
 
-  const redacted = redactBase64Payloads(output);
+  // `calls` is the durable audit log; like the codemode tool's own projection,
+  // it stays on the persisted part and never enters the model's context.
+  const modelFacing =
+    typeof output === "object" && output !== null && !Array.isArray(output)
+      ? (({ calls: _calls, ...rest }: { calls?: unknown }) => rest)(output)
+      : output;
+  const redacted = redactBase64Payloads(modelFacing);
   try {
     const serialized = JSON.stringify(redacted);
     return {

@@ -20,10 +20,11 @@ const CHARS_PER_TOKEN = 4;
 const DEFAULT_MAX_TOKENS = 6000;
 const TRUNCATION_MARKER = "--- TRUNCATED ---";
 /**
- * Below this many serialized characters a value cannot carry a useful prefix
- * plus a marker, so it is dropped in favour of its siblings instead.
+ * The least a string or container is worth keeping at (see `floorSize`). A
+ * value that would get fewer serialized characters than this is dropped in
+ * favour of its siblings rather than reduced to a bare marker.
  */
-const MIN_SLOT = 48;
+const MIN_SLOT = 128;
 
 export type TruncateOptions = {
   /**
@@ -94,8 +95,8 @@ export function truncateResult(
   // Re-parse so `toJSON`, class instances and `undefined` members are seen in
   // their serialized form — the shape the model would receive anyway.
   const shrunk = shrink(JSON.parse(serialized) as Json, maxChars);
-  // A value whose skeleton alone exceeds the budget (e.g. a tiny budget) falls
-  // back to a clipped serialization so the cap still holds.
+  // `shrink` honours its budget for anything a container can hold; only a
+  // scalar (a number too long for the budget) can still miss it.
   return size(shrunk) <= maxChars
     ? shrunk
     : truncateResponse(serialized, options);
@@ -104,6 +105,14 @@ export function truncateResult(
 // ---------------------------------------------------------------------------
 // Structural shrinking
 // ---------------------------------------------------------------------------
+//
+// Every `shrink*` below returns a value whose compact serialization fits the
+// budget it was given, provided the budget can hold an empty container (2
+// chars). Containers share their budget by water-filling: each child is owed
+// at least its floor (`floorSize`), small children keep their full size, and
+// the largest children absorb the cut. A container only drops children when
+// even their floors cannot fit — arrays drop from the tail (order carries
+// meaning), objects drop their largest values first (keys are all meaningful).
 
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
@@ -115,6 +124,18 @@ function size(value: Json): number {
 /** Only strings and containers can give up characters; scalars are atomic. */
 function shrinkable(value: Json): boolean {
   return typeof value === "string" || (typeof value === "object" && !!value);
+}
+
+/**
+ * The least budget a value is kept at; a scalar must fit whole. The floor
+ * never exceeds half the container's own budget, so tiny budgets still keep
+ * something rather than nothing.
+ */
+function floorSize(value: Json, maxChars: number): number {
+  const full = size(value);
+  return shrinkable(value)
+    ? Math.min(full, MIN_SLOT, Math.max(2, Math.floor(maxChars / 2)))
+    : full;
 }
 
 function shrink(value: Json, maxChars: number): Json {
@@ -133,30 +154,29 @@ function shrinkString(value: string, maxChars: number): string {
   let out = value.slice(0, keep) + suffix;
   // Escapes inflate the serialized form; back off until it fits.
   while (keep > 0 && size(out) > maxChars) {
-    keep = Math.floor(keep - (size(out) - maxChars) - 1);
-    out = value.slice(0, Math.max(0, keep)) + suffix;
+    keep = Math.max(0, keep - (size(out) - maxChars));
+    out = value.slice(0, keep) + suffix;
   }
-  return out;
+  // No room for a prefix and the size note: keep as much of the marker as fits.
+  return size(out) <= maxChars
+    ? out
+    : TRUNCATION_MARKER.slice(0, Math.max(0, maxChars - 2));
 }
 
 /**
- * Share `available` characters across values so small ones keep their full
- * size and the largest absorb the cut (water-filling). Returns `null` when
- * some value would be left with less than it can meaningfully use — a scalar
- * that does not fit, or a shrinkable value below {@link MIN_SLOT}.
+ * Share `available` characters across values by water-filling: values are
+ * admitted smallest first, each taking the lesser of its full size and an
+ * equal share of what is left. Requires `available >= Σ floorSize(values)`;
+ * then every value receives at least its floor.
  */
-function allocate(values: Json[], available: number): number[] | null {
+function allocate(values: Json[], available: number): number[] {
   const sizes = values.map(size);
   const order = sizes.map((_, i) => i).sort((a, b) => sizes[a] - sizes[b]);
   const allocation = new Array<number>(values.length);
   let remaining = available;
   let count = values.length;
   for (const i of order) {
-    const share = Math.floor(remaining / count);
-    const alloc = Math.min(sizes[i], share);
-    if (alloc < sizes[i] && (!shrinkable(values[i]) || alloc < MIN_SLOT)) {
-      return null;
-    }
+    const alloc = Math.min(sizes[i], Math.floor(remaining / count));
     allocation[i] = alloc;
     remaining -= alloc;
     count--;
@@ -164,41 +184,34 @@ function allocate(values: Json[], available: number): number[] | null {
   return allocation;
 }
 
-/** Largest `k` in `[0, max]` for which `feasible(k)` holds; feasibility is monotone. */
-function largestFeasible(
-  max: number,
-  feasible: (k: number) => boolean
-): number {
-  let lo = 0;
-  let hi = max;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (feasible(mid)) lo = mid;
-    else hi = mid - 1;
-  }
-  return lo;
-}
-
 function shrinkArray(items: Json[], maxChars: number): Json[] {
   const marker = (dropped: number) =>
     `${TRUNCATION_MARKER} ${dropped.toLocaleString()} more items`;
+  const floors = items.map((item) => floorSize(item, maxChars));
+  const skeleton = (count: number) => 2 + Math.max(0, count - 1);
 
-  // Keep the longest prefix whose members can share the budget; the tail is
-  // dropped because item order usually carries meaning (rows, pages, steps).
-  const plan = (keep: number): number[] | null => {
-    const dropped = items.length - keep;
-    const tail = dropped > 0 ? size(marker(dropped)) + (keep > 0 ? 1 : 0) : 0;
-    const overhead = 2 + Math.max(0, keep - 1) + tail;
-    if (overhead > maxChars) return null;
-    return allocate(items.slice(0, keep), maxChars - overhead);
-  };
+  // Keep everything when every floor fits.
+  let keep = items.length;
+  if (floors.reduce((n, f) => n + f, 0) + skeleton(keep) > maxChars) {
+    // Otherwise keep the longest prefix whose floors fit beside a tail marker
+    // (sized for the largest possible count, so the real one always fits).
+    const tail = size(marker(items.length)) + 1;
+    let used = skeleton(0) + tail;
+    keep = 0;
+    while (keep < items.length && used + floors[keep] + 1 <= maxChars) {
+      used += floors[keep] + 1;
+      keep++;
+    }
+  }
 
-  const keep = largestFeasible(items.length, (k) => plan(k) !== null);
-  const allocation = plan(keep) ?? [];
-  const out = items
-    .slice(0, keep)
-    .map((item, i) => shrink(item, allocation[i]));
-  if (keep < items.length) out.push(marker(items.length - keep));
+  const kept = items.slice(0, keep);
+  const dropped = items.length - keep;
+  const tail = dropped > 0 ? size(marker(dropped)) + (keep > 0 ? 1 : 0) : 0;
+  const allocation = allocate(kept, maxChars - skeleton(keep) - tail);
+  const out = kept.map((item, i) => shrink(item, allocation[i]));
+  if (dropped > 0 && size([...out, marker(dropped)]) <= maxChars) {
+    out.push(marker(dropped));
+  }
   return out;
 }
 
@@ -207,52 +220,61 @@ function shrinkObject(
   maxChars: number
 ): { [key: string]: Json } {
   const entries = Object.entries(value);
-  const marker = (omitted: string[]) =>
-    `${omitted.length.toLocaleString()} keys omitted: ${omitted.join(", ")}`;
+  // The marker entry must not shadow a real key.
+  let markerKey = TRUNCATION_MARKER;
+  while (markerKey in value) markerKey += " ";
+  const marker = (omitted: string[]): [string, string] => [
+    markerKey,
+    `${omitted.length.toLocaleString()} keys omitted: ${omitted.join(", ")}`
+  ];
+  const entryCost = ([key, v]: [string, Json]) =>
+    size(key) + 1 + floorSize(v, maxChars);
+  const skeleton = (count: number) => 2 + Math.max(0, count - 1);
 
-  // Keys are all equally meaningful, so entries are dropped largest-first and
-  // only when sharing the budget across the remaining values is impossible.
+  // Drop the largest values first, only until the remaining floors fit.
   const byValueSize = entries
-    .map((entry, i) => ({ i, size: size(entry[1]) }))
-    .sort((a, b) => b.size - a.size)
-    .map((e) => e.i);
-
-  const plan = (
-    keep: number
-  ): { kept: [string, Json][]; omitted: string[]; alloc: number[] } | null => {
-    const omitted = byValueSize
-      .slice(0, entries.length - keep)
-      .sort((a, b) => a - b);
-    const drop = new Set(omitted);
-    const kept = entries.filter((_, i) => !drop.has(i));
-    const omittedKeys = omitted.map((i) => entries[i][0]);
-    const markerEntry: [string, Json][] =
-      omittedKeys.length > 0 ? [[TRUNCATION_MARKER, marker(omittedKeys)]] : [];
-    const all = [...kept, ...markerEntry];
-    const overhead =
-      2 +
-      Math.max(0, all.length - 1) +
-      all.reduce((n, [k]) => n + size(k) + 1, 0) +
-      markerEntry.reduce((n, [, v]) => n + size(v), 0);
-    if (overhead > maxChars) return null;
-    const alloc = allocate(
-      kept.map(([, v]) => v),
-      maxChars - overhead
-    );
-    return alloc ? { kept, omitted: omittedKeys, alloc } : null;
+    .map((_, i) => i)
+    .sort((a, b) => size(entries[b][1]) - size(entries[a][1]));
+  const dropped = new Set<number>();
+  const fits = () => {
+    const kept = entries.filter((_, i) => !dropped.has(i));
+    const omitted = [...dropped]
+      .sort((a, b) => a - b)
+      .map((i) => entries[i][0]);
+    const extra = omitted.length > 0 ? [marker(omitted)] : [];
+    const cost =
+      kept.reduce((n, e) => n + entryCost(e), 0) +
+      extra.reduce((n, e) => n + entryCost(e), 0) +
+      skeleton(kept.length + extra.length);
+    return cost <= maxChars;
   };
+  for (const i of byValueSize) {
+    if (fits()) break;
+    dropped.add(i);
+  }
 
-  const keep = largestFeasible(entries.length, (k) => plan(k) !== null);
-  const chosen = plan(keep);
-  if (!chosen) {
-    return { [TRUNCATION_MARKER]: marker(entries.map(([k]) => k)) };
-  }
+  const kept = entries.filter((_, i) => !dropped.has(i));
+  const omitted = [...dropped].sort((a, b) => a - b).map((i) => entries[i][0]);
   const out: { [key: string]: Json } = {};
-  chosen.kept.forEach(([k, v], i) => {
-    out[k] = shrink(v, chosen.alloc[i]);
-  });
-  if (chosen.omitted.length > 0) {
-    out[TRUNCATION_MARKER] = marker(chosen.omitted);
+  if (kept.length === 0) {
+    // Nothing survives: the marker alone, clipped to whatever room there is.
+    const [key, note] = marker(omitted);
+    const room = maxChars - skeleton(1) - size(key) - 1;
+    if (room >= 2) out[key] = shrink(note, room);
+    return out;
   }
+  const extra = omitted.length > 0 ? [marker(omitted)] : [];
+  const fixed =
+    [...kept, ...extra].reduce((n, [k]) => n + size(k) + 1, 0) +
+    extra.reduce((n, [, note]) => n + size(note), 0) +
+    skeleton(kept.length + extra.length);
+  const allocation = allocate(
+    kept.map(([, v]) => v),
+    maxChars - fixed
+  );
+  kept.forEach(([k, v], i) => {
+    out[k] = shrink(v, allocation[i]);
+  });
+  for (const [k, note] of extra) out[k] = note;
   return out;
 }

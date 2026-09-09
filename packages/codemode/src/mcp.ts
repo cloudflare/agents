@@ -21,16 +21,22 @@ import type { JSONSchema7 } from "json-schema";
 
 // -- Shared utilities --
 
+/** Character budget for a tool response (~6,000 tokens). */
+const MAX_RESPONSE_CHARS = 24_000;
+
 /**
  * Model-facing text for a sandbox or executor result. Strings are clipped to
- * the token budget; structured values are truncated structurally (largest
- * values first) so the text stays valid JSON, then pretty-printed.
+ * the budget; structured values are truncated structurally (largest values
+ * first) so the text stays valid JSON. The budget applies to the emitted text:
+ * pretty-printed when that still fits, compact otherwise.
  */
 function responseText(content: unknown): string {
-  const shaped = truncateResult(content);
-  return typeof shaped === "string"
-    ? shaped
-    : (JSON.stringify(shaped, null, 2) ?? "undefined");
+  const shaped = truncateResult(content, { maxChars: MAX_RESPONSE_CHARS });
+  if (typeof shaped === "string") return shaped;
+  const pretty = JSON.stringify(shaped, null, 2) ?? "undefined";
+  return pretty.length <= MAX_RESPONSE_CHARS
+    ? pretty
+    : (JSON.stringify(shaped) ?? "undefined");
 }
 
 function formatError(error: unknown): string {

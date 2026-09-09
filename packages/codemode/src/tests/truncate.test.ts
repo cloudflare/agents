@@ -104,13 +104,103 @@ describe("truncateResult", () => {
     }
   });
 
-  it("falls back to a clipped serialization when even the skeleton cannot fit", () => {
+  it("returns a bounded empty container when nothing can fit", () => {
     const out = truncateResult(
       { a: [1, 2, 3], b: { c: "x" } },
       { maxChars: 8 }
     );
-    expect(typeof out).toBe("string");
-    expect(out as string).toContain("--- TRUNCATED ---");
+    expect(out).toEqual({});
+  });
+
+  it("keeps a prefix that fits instead of dropping everything", () => {
+    // A large first element beside tiny siblings: all three survive, the big
+    // one carries the cut.
+    const rows = truncateResult(
+      [{ id: 1, note: "n".repeat(4000) }, { id: 2 }, { id: 3 }],
+      { maxChars: 80 }
+    ) as Record<string, unknown>[];
+    expect(JSON.stringify(rows).length).toBeLessThanOrEqual(80);
+    expect(rows.map((r) => r.id)).toEqual([1, 2, 3]);
+
+    const mixed = truncateResult(["x".repeat(1000), 5], {
+      maxChars: 60
+    }) as unknown[];
+    expect(JSON.stringify(mixed).length).toBeLessThanOrEqual(60);
+    expect(mixed[1]).toBe(5);
+    expect(mixed[0]).toContain("--- TRUNCATED ---");
+  });
+
+  it("keeps a long list of small records structural at the default budget", () => {
+    const rows = Array.from({ length: 450 }, (_, i) => ({
+      id: i,
+      name: `customer_${i}`,
+      email: `a${i}@example.com`,
+      status: "active"
+    }));
+    const out = truncateResult({ schema: "f", rows }) as {
+      schema: string;
+      rows: unknown[];
+    };
+    expect(typeof out).toBe("object");
+    expect(out.schema).toBe("f");
+    expect(JSON.stringify(out).length).toBeLessThanOrEqual(24_000);
+    expect(out.rows.length).toBeGreaterThan(100);
+    expect(out.rows.slice(0, -1)).toEqual(rows.slice(0, out.rows.length - 1));
+  });
+
+  it("never lets a nested marker overshoot its slot", () => {
+    const nested: Record<string, string> = {};
+    for (let i = 0; i < 6; i++) nested["k".repeat(60) + i] = "v".repeat(200);
+    const out = truncateResult(
+      { small: "ok", nested, pad: "p".repeat(5000) },
+      { maxChars: 400 }
+    ) as Record<string, unknown>;
+    expect(typeof out).toBe("object");
+    expect(out.small).toBe("ok");
+    expect(JSON.stringify(out).length).toBeLessThanOrEqual(400);
+  });
+
+  it("does not shadow a real key named like the marker", () => {
+    const out = truncateResult(
+      {
+        "--- TRUNCATED ---": "real",
+        big: "b".repeat(5000),
+        other: "o".repeat(5000)
+      },
+      { maxChars: 100 }
+    ) as Record<string, unknown>;
+    expect(out["--- TRUNCATED ---"]).toBe("real");
+    expect(JSON.stringify(out).length).toBeLessThanOrEqual(100);
+  });
+
+  it("honours the budget for any structured input", () => {
+    let seed = 42;
+    const rnd = () =>
+      (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+    const gen = (depth: number): unknown => {
+      const t = rnd();
+      if (depth > 3 || t < 0.25) {
+        return t < 0.1
+          ? Math.floor(rnd() * 1e9)
+          : "s\u00e9".repeat(Math.floor(rnd() * 150));
+      }
+      if (t < 0.6) {
+        return Array.from({ length: Math.floor(rnd() * 12) }, () =>
+          gen(depth + 1)
+        );
+      }
+      const o: Record<string, unknown> = {};
+      for (let i = 0; i < rnd() * 8; i++) o[`k${i}`] = gen(depth + 1);
+      return o;
+    };
+    for (let i = 0; i < 2000; i++) {
+      const value = gen(0);
+      if (typeof value !== "object" || value === null) continue;
+      const maxChars = 16 + Math.floor(rnd() * 600);
+      const out = truncateResult(value, { maxChars });
+      expect(typeof out).toBe("object");
+      expect(JSON.stringify(out).length).toBeLessThanOrEqual(maxChars);
+    }
   });
 
   it("sees values the way they serialize", () => {

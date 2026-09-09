@@ -21,6 +21,7 @@
 import { RpcTarget } from "cloudflare:workers";
 import type { Executor, ResolvedProvider, ConnectorBinding } from "./executor";
 import { runCode } from "./run-code";
+import { truncateResult } from "./truncate";
 import { normalizeCode } from "./normalize";
 import type { CodemodeConnector, ConnectorDescription } from "./connectors";
 import type {
@@ -774,7 +775,12 @@ type JSONValue =
   | JSONValue[]
   | { [key: string]: JSONValue };
 
-/** Drop the audit-only `calls` log from a tool output bound for the model. */
+/**
+ * Project a tool output for the model: drop the audit-only `calls` log and
+ * bound the sandbox `logs` the same way `truncateResult` bounds a result.
+ * Never throws — a completed run must not fail at model assembly because its
+ * value carried a BigInt or a cycle.
+ */
 function toModelOutput(output: unknown): {
   type: "json";
   value: JSONValue;
@@ -782,15 +788,29 @@ function toModelOutput(output: unknown): {
   if (typeof output !== "object" || output === null || Array.isArray(output)) {
     return { type: "json", value: toJSONValue(output) };
   }
-  const { calls: _calls, ...rest } = output as { calls?: unknown };
+  const { calls: _calls, ...rest } = output as {
+    calls?: unknown;
+    logs?: unknown;
+  };
+  if (Array.isArray(rest.logs)) rest.logs = truncateResult(rest.logs);
   return { type: "json", value: toJSONValue(rest) };
 }
 
 function toJSONValue(value: unknown): JSONValue {
-  const serialized = JSON.stringify(value);
-  return serialized === undefined
-    ? null
-    : (JSON.parse(serialized) as JSONValue);
+  try {
+    const serialized = JSON.stringify(value, (_key, v: unknown) =>
+      typeof v === "bigint" ? v.toString() : v
+    );
+    return serialized === undefined
+      ? null
+      : (JSON.parse(serialized) as JSONValue);
+  } catch (err) {
+    return {
+      error: `Result could not be serialized for the model: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    };
+  }
 }
 
 export function createProxyTool(options: CreateProxyToolOptions): CodemodeTool {
