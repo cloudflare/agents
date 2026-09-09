@@ -7,7 +7,7 @@ import type { UIMessage as ChatMessage } from "ai";
  * Parity with `@cloudflare/think`'s
  * `agent-tool-reattach-recovery.test.ts`: when an AIChatAgent facet running as
  * an agent-tool child is interrupted mid-run and recovers, its recovery turn
- * mints a NEW request id. If `cf_ai_chat_agent_tool_runs.request_id` is not
+ * mints a NEW request id. If `cf_agent_tool_child_runs.request_id` is not
  * re-bound, the parent's re-attach tail can no longer attribute the recovered
  * turn's frames, so a healthy long-running child is abandoned as `interrupted`
  * once the no-progress budget elapses. The fix re-binds on both recovery paths.
