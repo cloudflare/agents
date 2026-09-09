@@ -79,7 +79,7 @@
     "@tanstack/ai": "0.38.0",
     "ai": "^7.0.0",
     "teleproto": "^1.228.5",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   },
   "publishConfig": {
     "access": "public"
