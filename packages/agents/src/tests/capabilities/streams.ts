@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
+import { Sessions } from "../../sessions";
 import { Streams } from "../../streams";
 import { Tasks, type TaskStep } from "../../tasks";
 
@@ -13,6 +14,19 @@ import { Tasks, type TaskStep } from "../../tasks";
 export class StreamHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly streams = new Streams({ maxChunkBytes: 1024 });
   readonly lifecycle = Lifecycle.install(this).use(this.streams);
+}
+
+/**
+ * Streams and Sessions on one Lifecycle: the cutover host. A finished
+ * stream becomes a session message and its rows are discarded in one
+ * SQLite transaction (`close({ commit, discard })`).
+ */
+export class CutoverHarnessObject extends DurableObject<Cloudflare.Env> {
+  readonly streams = new Streams();
+  readonly sessions = new Sessions();
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.streams)
+    .use(this.sessions);
 }
 
 /**

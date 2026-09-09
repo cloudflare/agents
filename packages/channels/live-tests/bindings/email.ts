@@ -1,9 +1,11 @@
+import { execFileSync } from "node:child_process";
 import {
   email,
   type ChannelEmailMessage,
   type EmailSendBinding
 } from "../../src/adapters/email/email";
 import type { ChannelMessageSurface } from "../../src/surface";
+import { ChannelHost } from "../../src/host";
 import {
   requiredEnv,
   type LiveDeliveryBinding,
@@ -12,6 +14,26 @@ import {
 
 const CORE = "urn:ietf:params:jmap:core";
 const MAIL = "urn:ietf:params:jmap:mail";
+
+function wranglerAuthToken(): string {
+  try {
+    const output = execFileSync("pnpm", ["exec", "wrangler", "auth", "token"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    const token = output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1);
+    if (!token) throw new Error("Wrangler returned an empty token");
+    return token;
+  } catch {
+    throw new Error(
+      "Could not obtain a Cloudflare API token from Wrangler. Run `pnpm exec wrangler login` before the email live tests."
+    );
+  }
+}
 
 type FastmailSession = { apiUrl: string; accountId: string };
 type FastmailEmail = {
@@ -94,9 +116,10 @@ export function emailBinding(): LiveDeliveryBinding {
     from,
     binding: cloudflareBinding(
       requiredEnv("CHANNELS_LIVE_CLOUDFLARE_ACCOUNT_ID"),
-      requiredEnv("CHANNELS_LIVE_CLOUDFLARE_API_TOKEN")
+      wranglerAuthToken()
     )
   });
+  const host = new ChannelHost({ channels: { email: channel } });
   const surface: ChannelMessageSurface = {
     channelKey: "email",
     version: 1,
@@ -113,6 +136,16 @@ export function emailBinding(): LiveDeliveryBinding {
         limit: 100
       })
     ).ids;
+  }
+
+  async function clear(): Promise<void> {
+    const emailIds = await ids();
+    if (emailIds.length > 0) {
+      await jmap(fastmailToken, session, "Email/set", {
+        accountId: session.accountId,
+        destroy: emailIds
+      });
+    }
   }
 
   async function messages(): Promise<FastmailEmail[]> {
@@ -135,22 +168,15 @@ export function emailBinding(): LiveDeliveryBinding {
 
   return {
     name: "email",
+    host,
+    surface,
     destination: `email inbox ${to}`,
     async open() {
       session = await openFastmail(fastmailToken);
+      await clear();
     },
-    async clear() {
-      const emailIds = await ids();
-      if (emailIds.length > 0) {
-        await jmap(fastmailToken, session, "Email/set", {
-          accountId: session.accountId,
-          destroy: emailIds
-        });
-      }
-    },
-    async deliver(text) {
-      return await channel.deliver!(surface, { markdown: text });
-    },
+    clear,
+
     async read(): Promise<ObservedMessage[]> {
       return (await messages()).map((message) => {
         const partId = message.textBody[0].partId;

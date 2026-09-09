@@ -1,0 +1,43 @@
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    "types": [
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types",
+      "vite/client"
+    ],
+    "paths": {
+      "@earendil-works/chord": [
+        "./node_modules/@earendil-works/chord/dist/index.d.ts"
+      ],
+      "@earendil-works/chord/*": [
+        "./node_modules/@earendil-works/chord/dist/*"
+      ],
+      "@earendil-works/pi-agent-core": [
+        "./node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"
+      ],
+      "@earendil-works/pi-agent-core/*": [
+        "./node_modules/@earendil-works/pi-agent-core/dist/*"
+      ],
+      "@earendil-works/pi-ai": [
+        "./node_modules/@earendil-works/pi-ai/dist/index.d.ts"
+      ],
+      "@earendil-works/pi-ai/*": [
+        "./node_modules/@earendil-works/pi-ai/dist/*"
+      ],
+      "@earendil-works/pi-session-backend-sqlite-node": [
+        "./node_modules/@earendil-works/pi-session-backend-sqlite-node/dist/index.d.ts"
+      ],
+      "@earendil-works/pi-session-backend-sqlite-node/*": [
+        "./node_modules/@earendil-works/pi-session-backend-sqlite-node/dist/*"
+      ],
+      "@earendil-works/pi-telemetry": [
+        "./node_modules/@earendil-works/pi-telemetry/dist/index.d.ts"
+      ],
+      "@earendil-works/pi-telemetry/*": [
+        "./node_modules/@earendil-works/pi-telemetry/dist/*"
+      ]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "env.d.ts"]
+}

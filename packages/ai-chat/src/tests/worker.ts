@@ -121,6 +121,7 @@ function makeHangingSSEResponse() {
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
+  OverridingPersistAgent: DurableObjectNamespace<OverridingPersistAgent>;
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
   SlowStreamAgent: DurableObjectNamespace<SlowStreamAgent>;
@@ -834,10 +835,15 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._resumableStream.getStreamChunks(streamId);
   }
 
-  /** Raw count of stored rows for a stream (packed segments count as 1 each). */
+  /**
+   * Number of stored segments for a stream (packed segments count as 1
+   * each): the appended-segment cursor, read from the block log's tail.
+   * Blocks pack many segments into one row, so a row count no longer
+   * reflects how the adapter batched its writes.
+   */
   getStreamChunkRowCount(streamId: string): number {
-    const result = this.sql<{ cnt: number }>`
-      select count(*) as cnt from cf_agents_stream_chunks
+    const result = this.sql<{ cnt: number | null }>`
+      select max(seq_to) as cnt from cf_agents_stream_blocks
       where stream_id = ${streamId}
     `;
     return result?.[0]?.cnt ?? 0;
@@ -859,18 +865,48 @@ export class TestChatAgent extends AIChatAgent<Env> {
       values (${streamId}, 'completed', ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${bodies.length}, ${now}, ${now}, ${now})
     `;
-    bodies.forEach((body, index) => {
+    if (bodies.length > 0) {
       this.sql`
-        insert into cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        values (${streamId}, ${index}, ${JSON.stringify(body)}, ${now})
+        insert into cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        values (${streamId}, 0, 0, ${bodies.length},
+                ${bodies.map((b) => JSON.stringify(b)).join(",")}, ${now}, ${now})
       `;
-    });
+    }
   }
 
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
     return this._resumableStream.getStreamMetadata(streamId);
+  }
+
+  /**
+   * Stream metadata captured at stream start, keyed by request id. The rows
+   * themselves are discarded as soon as the turn's message persists, so a
+   * test that wants to see what the live path recorded reads it here.
+   */
+  private _startedStreams = new Map<
+    string,
+    { id: string; message_id: string | null }
+  >();
+
+  protected override _startStream(
+    requestId: string,
+    options: { messageId?: string; continuation?: boolean } = {}
+  ): string {
+    const streamId = super._startStream(requestId, options);
+    this._startedStreams.set(requestId, {
+      id: streamId,
+      message_id: this._resumableStream.getStreamMessageId(streamId)
+    });
+    return streamId;
+  }
+
+  getStartedStreamMetadata(
+    requestId: string
+  ): { id: string; message_id: string | null } | null {
+    return this._startedStreams.get(requestId) ?? null;
   }
 
   getAllStreamMetadata(): Array<{
@@ -915,56 +951,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._restoreActiveStream();
   }
 
-  testTriggerStreamCleanup(): void {
-    // Force the cleanup interval to 0 so the next completeStream triggers it
-    // We do this by starting and immediately completing a dummy stream
-    const dummyId = this._startStream("cleanup-trigger");
-    this._completeStream(dummyId);
+  /** Reclaim leftover chat streams now, as the next stream start would. */
+  testReclaimStreams(nowMs?: number): number {
+    return this._resumableStream.reclaim(nowMs);
   }
 
-  /** Invoke the alarm-driven cleanup callback directly (no new stream needed). */
-  async testRunStreamCleanup(): Promise<void> {
-    await this._cleanupStreamBuffers();
-  }
-
-  /** Number of pending alarm-driven stream-cleanup schedules for this DO. */
+  /** Number of pending stream-cleanup schedules (always 0: none are armed). */
   testCountStreamCleanupSchedules(): number {
     return this.getSchedules().filter(
       (s) => s.callback === "_cleanupStreamBuffers"
     ).length;
-  }
-
-  /**
-   * The delay (seconds) of the pending cleanup schedule, or null if none.
-   * Locks the arming interval (STREAM_CLEANUP_DELAY_SECONDS) so a regression
-   * that lengthens it back toward the old 24h leak window is caught.
-   */
-  testStreamCleanupScheduleDelaySeconds(): number | null {
-    const schedule = this.getSchedules().find(
-      (s) => s.callback === "_cleanupStreamBuffers"
-    );
-    if (!schedule || schedule.type !== "delayed") return null;
-    return schedule.delayInSeconds;
-  }
-
-  /** Arm the cleanup alarm without finishing a stream (leaves no new buffer). */
-  async testArmStreamCleanup(): Promise<void> {
-    await this._ensureStreamCleanupScheduled();
-  }
-
-  /**
-   * Backdate any pending cleanup schedule so it is due, then run the REAL
-   * `alarm()` handler. This exercises the production path where `alarm()`
-   * deletes the fired one-shot row after the callback returns — so a re-arm
-   * must create a fresh row to survive (the idempotent-reschedule footgun).
-   */
-  async testFireDueCleanupAlarm(): Promise<void> {
-    this.sql`
-      update cf_agents_jobs
-      set time = ${Date.now() - 1_000}
-      where capability = 'scheduler' and fn = '_cleanupStreamBuffers'
-    `;
-    await this.alarm();
   }
 
   /**
@@ -1026,6 +1022,28 @@ export class TestChatAgent extends AIChatAgent<Env> {
  * Test agent that overrides sanitizeMessageForPersistence to strip custom data.
  * Used to verify the user-overridable hook runs after built-in sanitization.
  */
+/**
+ * A subclass that overrides `persistMessages` the way application code
+ * does: extra side effects, then `super` with only the messages. The
+ * cutover must still reach the session write — the finished turn leaves no
+ * stream row behind — even though the override forwards no third argument.
+ */
+export class OverridingPersistAgent extends TestChatAgent {
+  private _persistOverrideCalls = 0;
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = []
+  ) {
+    this._persistOverrideCalls++;
+    await super.persistMessages(messages, excludeBroadcastIds);
+  }
+
+  getPersistOverrideCalls(): number {
+    return this._persistOverrideCalls;
+  }
+}
+
 export class CustomSanitizeAgent extends AIChatAgent<Env> {
   async onChatMessage() {
     return new Response("ok");
@@ -2013,7 +2031,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+      this._resumableStream.progressMarker();
 
     const start = await read();
     const streamId = self._resumableStream.start("req-progress-immunity");
@@ -2734,10 +2752,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    *  partial. The recovery budget keys off this counter (not the live message
    *  count), so this is how a test marks "the turn advanced". */
   async bumpRecoveryProgressForTest(): Promise<void> {
-    const self = this as unknown as {
-      _bumpChatRecoveryProgress(): Promise<void>;
-    };
-    await self._bumpChatRecoveryProgress();
+    // One explicit credit — the same unit a flushed segment or a forwarded
+    // child chunk adds to the derived marker.
+    this._resumableStream.creditProgress();
+  }
+
+  /** The recovery progress marker as the engine would read it now. */
+  async readProgressMarkerForTest(): Promise<number> {
+    return this._resumableStream.progressMarker();
   }
 
   /** Simulate a parent re-attach that forwards `chunks` of a child's stream by
@@ -2761,7 +2783,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     };
     self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
-      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+      this._resumableStream.progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -3075,10 +3097,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       values (${streamId}, 'streaming', ${requestId}, ${JSON.stringify(streamMetadata)},
               ${chunks.length}, ${createdAt}, ${createdAt})
     `;
-    for (const chunk of chunks) {
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        insert into cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        values (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${createdAt})
+        insert into cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        values (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${createdAt}, ${createdAt})
       `;
     }
     this._resumableStream.restore();

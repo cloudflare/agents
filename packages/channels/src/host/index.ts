@@ -1,10 +1,13 @@
 import type {
   Channel,
   ChannelApprovalRequestOptions,
-  ChannelDeliveryContext,
+  ChannelChunk,
+  ChannelChunkSource,
+  ChannelDeliveryOptions,
   ChannelMessage,
   ChannelRoute,
   ChannelRouteContext,
+  ChannelStreamOptions,
   DeliveryResult
 } from "../channel";
 import { fallbackChannel } from "../fallback";
@@ -15,6 +18,7 @@ import type {
   UserIdentity
 } from "../identity";
 import { unsupported } from "../internal";
+import { collectText } from "../stream";
 import type {
   ChannelApprovalResponse,
   ChannelEmailInput,
@@ -143,7 +147,7 @@ export class ChannelHost {
   deliver(
     surface: ChannelMessageSurface,
     message: ChannelMessage,
-    context?: ChannelDeliveryContext
+    options?: ChannelDeliveryOptions
   ): Promise<DeliveryResult> {
     return this.#outbound(surface, (channel, destination) => {
       if (!channel.deliver) {
@@ -154,8 +158,39 @@ export class ChannelHost {
           )
         );
       }
-      return channel.deliver(destination, message, context);
+      return channel.deliver(destination, message, options);
     });
+  }
+
+  /**
+   * Deliver a progressively generated answer to the Channel or composite
+   * named by the surface.
+   *
+   * A Channel that can stream consumes the stream itself. A Channel that
+   * cannot never learns it was a stream, because the Host collects the answer
+   * and calls `deliver` once.
+   */
+  async stream(
+    surface: ChannelMessageSurface,
+    chunks: ChannelChunkSource,
+    options: ChannelStreamOptions = {}
+  ): Promise<DeliveryResult> {
+    if (!isChannelMessageSurface(surface)) {
+      await chunks.cancel().catch(() => {});
+      return invalidSurface();
+    }
+
+    const channel = this.#configuredChannel(surface.channelKey);
+    if (!channel.stream && !channel.deliver) {
+      await chunks.cancel().catch(() => {});
+      return unsupported(
+        "CHANNEL_DELIVERY_UNSUPPORTED",
+        `Channel "${surface.channelKey}" does not support delivery`
+      );
+    }
+
+    if (channel.stream) return channel.stream(surface, chunks, options);
+    return collectAndDeliver(channel, surface, chunks, options);
   }
 
   /** Request approval through the Channel or composite named by the surface. */
@@ -190,7 +225,7 @@ export class ChannelHost {
 
   /** Resolve whether a surface can currently be selected without delivery. */
   async isAvailable(surface: ChannelMessageSurface): Promise<boolean> {
-    if (!isChannelMessageSurface(surface)) return true;
+    if (!isChannelMessageSurface(surface)) return false;
     const channel = this.#configuredChannel(surface.channelKey);
     return channel.isAvailable?.(surface) ?? true;
   }
@@ -199,12 +234,7 @@ export class ChannelHost {
     surface: ChannelMessageSurface,
     operation: OutboundOperation
   ): Promise<DeliveryResult> {
-    if (!isChannelMessageSurface(surface)) {
-      return unsupported(
-        "CHANNEL_SURFACE_INVALID",
-        "Cannot resolve an invalid Channel message surface"
-      );
-    }
+    if (!isChannelMessageSurface(surface)) return invalidSurface();
     const channel = this.#configuredChannel(surface.channelKey);
     return operation(channel, surface);
   }
@@ -300,6 +330,58 @@ export class ChannelHost {
       }
     };
   }
+}
+
+/**
+ * Serve a Channel that cannot stream by collecting the answer first.
+ *
+ * A generation that failed part-way still delivers what it produced, because
+ * losing the partial answer helps nobody, but the result is downgraded to
+ * `uncertain` since the reader received an incomplete answer.
+ */
+function invalidSurface(): DeliveryResult {
+  return unsupported(
+    "CHANNEL_SURFACE_INVALID",
+    "Cannot resolve an invalid Channel message surface"
+  );
+}
+
+async function collectAndDeliver(
+  channel: Channel,
+  surface: ChannelMessageSurface,
+  stream: ReadableStream<ChannelChunk>,
+  options: ChannelStreamOptions
+): Promise<DeliveryResult> {
+  const collected = await collectText(stream);
+  if (collected.interrupted && collected.text.length === 0) {
+    return {
+      status: "failed",
+      retryable: false,
+      error: {
+        code: "CHANNEL_STREAM_INTERRUPTED",
+        message: "The stream ended before producing any content to deliver"
+      }
+    };
+  }
+
+  const result = await channel.deliver!(
+    surface,
+    {
+      ...(options.title !== undefined && { title: options.title }),
+      markdown: collected.text
+    },
+    options.delivery ? { delivery: options.delivery } : undefined
+  );
+  if (!collected.interrupted || result.status !== "delivered") return result;
+  return {
+    status: "uncertain",
+    ...(result.reference !== undefined && { reference: result.reference }),
+    error: {
+      code: "CHANNEL_STREAM_INTERRUPTED",
+      message:
+        "An incomplete answer was delivered because the stream ended early"
+    }
+  };
 }
 
 function stampSurface<TAddress extends ChannelMessageSurfaceInput["address"]>(

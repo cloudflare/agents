@@ -187,9 +187,7 @@ import {
   CHAT_MESSAGE_TYPES,
   TurnQueue,
   ResumableStream,
-  cleanupStreamBuffers,
   createChatStreams,
-  STREAM_CLEANUP_DELAY_SECONDS,
   ContinuationState,
   PreStreamTurns,
   AutoContinuationController,
@@ -236,15 +234,13 @@ import {
   sweepStaleChatRecoveryIncidents,
   listActiveChatRecoveryIncidents,
   readChatRecoveryProgress,
-  bumpChatRecoveryProgress,
+  CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
-  StreamProgressCreditThrottle,
-  shouldCreditStreamProgress,
   classifyAgentToolChildRecovery,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
@@ -1095,12 +1091,12 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // persisted incident shape and key prefix are owned by the engine package so
 // both consumers round-trip the same record across the deploy that ships them.
 
-// The durable, monotonic forward-progress counter (`CHAT_RECOVERY_PROGRESS_KEY`)
-// and its read/bump helpers now live in the shared engine (agents/chat) —
-// `readChatRecoveryProgress` / `bumpChatRecoveryProgress`. Bumped on each durable
-// content flush (`_storeChunkDurably`) — production time, so it reflects genuinely
-// new content and is immune to reconnects/re-persists; never recomputed from the
-// (compactable) transcript.
+// The monotonic forward-progress marker the recovery budget keys off is
+// derived from the stream log (`ResumableStream.progressMarker`): durably
+// flushed segments, folded into a retired total as their rows are deleted.
+// Nothing is written per chunk. The pre-derivation KV counter
+// (`CHAT_RECOVERY_PROGRESS_KEY`) is read once per isolate and seeded into the
+// marker, so it is never read lower than an in-flight incident recorded.
 // Recovery budget defaults (maxAttempts, maxRecoveryWork, stableTimeoutMs,
 // terminalMessage, noProgressTimeoutMs, alarm debounce) now live in the shared
 // incident engine (agents/chat) and are applied by `resolveChatRecoveryConfig`
@@ -1132,7 +1128,7 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // (The recovering-flag key/TTL and the stream-cleanup delay/re-arm loop now live
 // in agents/chat — the durable recovery UX is driven via the shared
 // `setChatRecovering` / `buildChatRecoveringFrame` helpers, and buffer cleanup via
-// `STREAM_CLEANUP_DELAY_SECONDS` / `cleanupStreamBuffers`. The N9 throttle lives
+// The N9 throttle lives
 // there too as `AgentToolStreamProgressThrottle`.)
 
 // Ephemeral user message appended when a model request would otherwise end in
@@ -3207,7 +3203,17 @@ export class Think<
         async () => {
           this._resumableStream = new ResumableStream(
             this.streams,
-            this.sql.bind(this)
+            this.sql.bind(this),
+            {
+              // Rollback insurance: a build still on the KV counter reads a
+              // marker no lower than one recorded under the derived marker.
+              // One put per stream retired, none per chunk.
+              onProgress: (durable) => {
+                void this.ctx.storage
+                  .put(CHAT_RECOVERY_PROGRESS_KEY, durable)
+                  .catch(() => {});
+              }
+            }
           );
           this._restoreClientTools();
           this._restoreBody();
@@ -12852,7 +12858,7 @@ export class Think<
       if (streamError) {
         this._errorResumableStream(streamId);
       } else {
-        this._completeResumableStream(streamId);
+        this._finishResumableStream(streamId);
       }
       streamFinalized = true;
       this._broadcastChat({
@@ -12865,9 +12871,16 @@ export class Think<
 
       assistantMsg = accumulator.toMessage();
       if (accumulator.parts.length > 0) {
-        await this._persistAssistantMessage(assistantMsg);
+        await this._persistAssistantMessageWithCutover(
+          streamId,
+          assistantMsg,
+          undefined,
+          { discard: this._discardStreamAtCutover(requestId) }
+        );
         this._broadcastMessages();
       }
+      // Nothing to persist (or the persist threw): settle the finished stream.
+      this._resumableStream.finalizePending();
 
       if (streamError) {
         await this._fireResponseHook({
@@ -13089,32 +13102,12 @@ export class Think<
       state.chunksSinceFlush = 0;
       state.hasFlushedContent = true;
     }
-    // Forward progress: advance the monotonic, compaction-immune progress
-    // counter HERE (production time) rather than in `_persistOrphanedStream` —
-    // so it bumps only on genuinely new content and is immune to client
-    // reconnects / recovery re-persists (which don't flow through this path).
-    // Decoupled from the flush decision and routed through the shared
-    // host-agnostic rule ({@link shouldCreditStreamProgress}) so the bump TIMING
-    // matches `AIChatAgent`: a milestone (started segment / settled tool) always
-    // credits, and a long single segment's streaming deltas credit through a
-    // time throttle. This is what the recovery no-progress window keys off
-    // (#1637), and stays compaction-proof (#1628).
-    if (
-      shouldCreditStreamProgress({
-        codec: aiSdkRecoveryCodec,
-        type: chunk.type,
-        throttle: this._streamProgressCredit,
-        now: Date.now()
-      })
-    ) {
-      await this._bumpChatRecoveryProgress();
-    }
+    // Forward progress needs no write of its own: the flush above IS the
+    // durable record of new content, and the recovery marker is derived from
+    // the stream log (`_chatRecoveryProgressMarker`). A reconnect replay or a
+    // recovery re-persist reads the log without appending, so neither can
+    // fake progress (#1637), and compaction never touches it (#1628).
   }
-
-  /** Per-isolate throttle for crediting recovery progress from mid-segment
-   *  streaming-content deltas (the shared `agents/chat` rule); reset per isolate
-   *  so the first delta after a restart always credits. */
-  private _streamProgressCredit = new StreamProgressCreditThrottle();
 
   private async _streamResult(
     requestId: string,
@@ -13337,7 +13330,7 @@ export class Think<
       if (streamError) {
         this._errorResumableStream(streamId);
       } else {
-        this._completeResumableStream(streamId);
+        this._finishResumableStream(streamId);
       }
       this._pendingResumeConnections.clear();
       this._broadcastChat({
@@ -13462,9 +13455,17 @@ export class Think<
         const assistantMsg = accumulator.toMessage();
 
         if (accumulator.parts.length > 0) {
-          await this._persistAssistantMessage(assistantMsg, parentId);
+          await this._persistAssistantMessageWithCutover(
+            streamId,
+            assistantMsg,
+            parentId,
+            { discard: this._discardStreamAtCutover(requestId) }
+          );
           this._broadcastMessages();
         }
+        // Nothing to persist (or the persist threw): settle the finished
+        // stream so it is not mistaken for an interrupted turn.
+        this._resumableStream.finalizePending();
 
         await this._fireResponseHook({
           message: assistantMsg,
@@ -13481,6 +13482,7 @@ export class Think<
         console.error("Failed to persist assistant message:", e);
       }
     }
+    this._resumableStream.finalizePending();
 
     // The message is now persisted (or the turn was cleared), so subsequent
     // tool results resolve against storage; stop exposing the accumulator and
@@ -13523,6 +13525,51 @@ export class Think<
     const toPersist = this._strippedForPersist(msg);
     if (toPersist === null) return;
     await this._upsertMessageInHistory(toPersist, parentId);
+  }
+
+  /**
+   * The cutover: persist the finished turn's assistant message, settle its
+   * resumable stream and delete the stream's rows in ONE SQLite transaction,
+   * so a crash leaves either the live stream (recovery rebuilds the message
+   * from it) or the message — never neither, never both. The session
+   * change feed and auto-compaction run once the transaction has committed.
+   */
+  private async _persistAssistantMessageWithCutover(
+    streamId: string,
+    msg: UIMessage,
+    parentId?: string,
+    options: { discard?: boolean } = {}
+  ): Promise<void> {
+    const toPersist = this._strippedForPersist(msg);
+    if (toPersist === null) return;
+    if (this._resumableStream.pendingCutoverId !== streamId) {
+      // The stream was settled by another path (a stall, an error): plain persist.
+      await this._upsertMessageInHistory(toPersist, parentId);
+      return;
+    }
+    const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
+    let after: (() => Promise<void>) | undefined;
+    this._resumableStream.cutover(
+      streamId,
+      () => {
+        after = sync.upsert(toPersist as SessionMessage, {
+          parentId,
+          source: "server"
+        }).after;
+      },
+      { discard: options.discard ?? true }
+    );
+    await after?.();
+  }
+
+  /**
+   * Whether this turn's stream rows can go with its cutover. An agent-tool
+   * child turn keeps them: the parent tails the stored chunks after the
+   * child completes (`getAgentToolChunks`), so the rows are reclaimed by
+   * the child's next `start()` instead, as `AIChatAgent` does.
+   */
+  private _discardStreamAtCutover(requestId: string): boolean {
+    return !this._agentToolRunsByRequestId.get(requestId);
   }
 
   /**
@@ -14603,25 +14650,35 @@ export class Think<
    * recomputed from the live, mutable transcript. Compaction collapses older
    * assistant messages into a summary, lowering the count — so a turn that had
    * genuinely advanced could read as "no progress" between attempts and exhaust
-   * its budget prematurely (#1628). Instead we read a durably-persisted counter
-   * that only ever increments — bumped at production time when new content is
-   * durably flushed (see `_storeChunkDurably`), which is genuine forward
-   * progress and is immune to client reconnects / recovery re-persists — so
-   * compaction can never lower it and a reconnect can't fake it (#1637).
+   * its budget prematurely (#1628). It then became a KV counter bumped per
+   * credited chunk. It is now derived from the stream log the chunks were
+   * already flushed to (`ResumableStream.progressMarker`): the log only grows
+   * when new content lands durably, a reconnect replay or a recovery
+   * re-persist reads it without appending (#1637), and compaction rewrites
+   * the transcript, not the log. Nothing is written per chunk.
+   *
+   * The pre-derivation KV counter is folded in once per isolate, so a marker
+   * an in-flight incident already recorded is never read lower after the
+   * upgrade.
    */
   private async _chatRecoveryProgressMarker(): Promise<number> {
-    // Storage read lives in the shared engine (agents/chat); this is the
-    // package binding, symmetric with `AIChatAgent`.
-    return readChatRecoveryProgress(this.ctx.storage);
+    // Memoized as the promise, not a flag: two concurrent readers both wait
+    // for the seed to land, so neither can hand the engine an unseeded
+    // marker as an incident's work baseline. A failed read is not cached:
+    // the next evaluation retries it instead of failing for the isolate's
+    // life on a transient storage error.
+    this._progressSeed ??= readChatRecoveryProgress(this.ctx.storage).then(
+      (legacy) => this._resumableStream.seedProgress(legacy),
+      (error: unknown) => {
+        this._progressSeed = null;
+        throw error;
+      }
+    );
+    await this._progressSeed;
+    return this._resumableStream.progressMarker();
   }
 
-  /** Advance the durable recovery-progress counter. Called from
-   *  `_storeChunkDurably` when a stored chunk credits forward progress under the
-   *  shared rule (real, reconnect-immune forward progress). The increment lives
-   *  in the shared engine (agents/chat); this is the package binding. */
-  private async _bumpChatRecoveryProgress(): Promise<void> {
-    return bumpChatRecoveryProgress(this.ctx.storage);
-  }
+  private _progressSeed: Promise<void> | null = null;
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
    *  isolate so the first forwarded chunk after a restart always credits. */
@@ -14631,14 +14688,16 @@ export class Think<
    * N9: forwarding a sub-agent's chunks IS forward progress for this parent
    * turn, so credit the parent's recovery progress marker — otherwise a parent
    * whose turn merely `await`s a child banks no progress of its own and its
-   * no-progress window exhausts while the child is healthily streaming. Only
+   * no-progress window exhausts while the child is healthily streaming. The
+   * child's output goes to clients, not to this object's stream log, so the
+   * derived marker cannot see it; this is the one explicit credit left. Only
    * invoked after a child actually produced output (see
    * `_forwardAgentToolStream`), so a silent child still lets the parent exhaust.
    * Throttled (and reset per isolate) so we never write storage per token.
    */
   protected override async _onAgentToolStreamProgress(): Promise<void> {
     if (this._agentToolStreamProgress.shouldCredit(Date.now())) {
-      await this._bumpChatRecoveryProgress();
+      this._resumableStream.creditProgress();
     }
   }
 
@@ -16513,58 +16572,35 @@ export class Think<
     // reconnected before the first chunk. (Continuation-turn parks live in
     // `_continuation` and are flushed by the caller.)
     this._preStream.flushOnStreamStart((c) => this._notifyStreamResuming(c));
-    void this._ensureStreamCleanupScheduled();
     return streamId;
   }
 
-  /**
-   * Mark a resumable stream completed and arm buffer cleanup. Wrapper around
-   * `ResumableStream.complete` so every stream-finish path also schedules the
-   * cleanup alarm (#1706).
-   */
+  /** Mark a resumable stream completed (settled now, rows kept until reclaim). */
   protected _completeResumableStream(streamId: string): void {
     this._resumableStream.complete(streamId);
-    void this._ensureStreamCleanupScheduled();
   }
 
   /**
-   * Mark a resumable stream errored and arm buffer cleanup. Wrapper around
-   * `ResumableStream.markError` — see {@link _completeResumableStream}.
+   * The producer finished; leave the row for the cutover that persists the
+   * assistant message (`_persistAssistantMessageWithCutover`). Every path
+   * that calls this must end in that cutover or `finalizePending()`.
    */
+  protected _finishResumableStream(streamId: string): void {
+    this._resumableStream.finish(streamId);
+  }
+
+  /** Mark a resumable stream errored. */
   protected _errorResumableStream(streamId: string): void {
     this._resumableStream.markError(streamId);
-    void this._ensureStreamCleanupScheduled();
   }
 
   /**
-   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
-   * buffers. Armed whenever a stream finishes so that idle/one-off chat DOs
-   * still reclaim their buffers — the lazy sweep in {@link ResumableStream}
-   * only fires when a *subsequent* stream completes, which never happens for a
-   * chat that receives a single turn (#1706).
-   *
-   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
-   * collapse onto one pending alarm rather than stacking.
-   */
-  protected async _ensureStreamCleanupScheduled({
-    idempotent = true
-  }: { idempotent?: boolean } = {}): Promise<void> {
-    await this.schedule(
-      STREAM_CLEANUP_DELAY_SECONDS,
-      "_cleanupStreamBuffers",
-      undefined,
-      { idempotent }
-    );
-  }
-
-  /**
-   * Alarm callback: sweep aged stream buffers, re-arming while rows remain (see
-   * the shared {@link cleanupStreamBuffers}).
+   * @deprecated Streams are reclaimed at cutover and on the next stream
+   * start; no alarm is armed any more. Kept so a cleanup alarm persisted by
+   * an earlier version still resolves to a callback when it fires.
    */
   async _cleanupStreamBuffers(): Promise<void> {
-    await cleanupStreamBuffers(this._resumableStream, () =>
-      this._ensureStreamCleanupScheduled({ idempotent: false })
-    );
+    this._resumableStream.reclaim();
   }
 
   private async _persistOrphanedStream(streamId: string): Promise<void> {

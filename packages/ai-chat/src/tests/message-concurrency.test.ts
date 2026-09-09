@@ -620,6 +620,11 @@ describe("AIChatAgent messageConcurrency", () => {
     await delay(20);
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
+    // Listen for the skipped request's `done` BEFORE sending the clear: it
+    // goes to this socket while the clear broadcast goes to the observer's,
+    // and delivery order across two sockets is not something the protocol
+    // promises. Registering after the broadcast arrives can miss it.
+    const skippedDone = waitForDone(ws, "req-clear-2");
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_CLEAR
@@ -627,7 +632,7 @@ describe("AIChatAgent messageConcurrency", () => {
     );
     await clearBroadcast;
 
-    await waitForDone(ws, "req-clear-2");
+    await skippedDone;
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-clear-1"]);

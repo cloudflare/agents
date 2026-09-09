@@ -90,8 +90,11 @@ await host.deliver(fanout([slackSurface, emailSurface]), message);
 ```
 
 `fallback()` tries destinations in order, advancing only after a _confirmed_
-failure, so it can never duplicate a delivery. `fanout()` sends to all of them;
-a partial or uncertain result is reported as `uncertain` for the same reason.
+failure, so it can never duplicate a delivery. For a stream, it advances only
+when that failure happens before the destination starts reading; replaying an
+arbitrarily large consumed prefix would require an unbounded buffer. `fanout()`
+sends to all destinations; a partial or uncertain result is reported as
+`uncertain` for the same reason.
 The Host installs both policies as ordinary Channels under reserved keys. You
 can register another composite policy as an ordinary Channel under your own key
 and pair it with a surface constructor that writes that key; inject only the
@@ -291,13 +294,15 @@ Returning `null` declines the request so another Channel can claim it.
 ## Durability contract
 
 Channels holds no state: no outbox, no retries, no deduplication, no scheduler.
-Durability is a property of how your application uses it.
+Durability is a property of how your application uses it. A caller-supplied
+`deliveryId` is correlation metadata, not an idempotency guarantee; an adapter
+may map it to a provider primitive when one exists.
 
 | Channels guarantees                                                     | Your application must                                                       |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | A `dispatchId` stable across redelivery and unaffected by routing       | Deduplicate on it before starting any side effect                           |
 | The Host awaits your callback before the provider is acknowledged       | Hand off durably before returning — a DO RPC, queue send, or workflow start |
-| One provider attempt per `deliver()`, reported honestly                 | Decide whether to retry; `uncertain` may duplicate a real delivery          |
+| One outbound attempt per `deliver()` or `stream()`, reported honestly   | Decide whether to retry; `uncertain` may duplicate a real delivery          |
 | Surfaces are plain JSON you can persist                                 | Keep configured channel keys stable                                         |
 | Decisions arrive as normalized events carrying your own `interactionId` | Own settlement; an interaction id is not an authorization credential        |
 
@@ -305,8 +310,10 @@ Durability is a property of how your application uses it.
 
 - [ ] Approval-link ingress: signing, verification, and a confirmation page, so
       link approvals return through the same normalized path as Slack buttons
-- [ ] Streaming output delivery — see
-      [`design/rfc-channel-streaming.md`](../../design/rfc-channel-streaming.md)
+- [ ] Reader-initiated stream cancellation: Slack's `message_stream_stopped`
+      and Telegram's `stopped_message_generation` should reach the running
+      generation as ordinary ingress, so aborting it errors the stream and
+      each Channel finalizes on the path it already has
 - [ ] More built-in channels
 - [ ] Rendering templates (pretty emails)
 - [ ] Automatic webhook registration

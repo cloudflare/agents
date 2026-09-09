@@ -105,10 +105,14 @@ export type ChatRecoveryIncident = {
 
 export const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 /**
- * Durable, monotonic forward-progress counter for recovery budget resets.
- * Bumped at production time when new content is streamed, so it reflects
- * genuinely new content and is immune to reconnects/re-persists; never
- * recomputed from the (compactable) transcript.
+ * The pre-derivation forward-progress counter: a KV integer bumped per
+ * credited chunk. The marker is now derived from the stream log
+ * (`ResumableStream.progressMarker`), and this key is only read — once per
+ * isolate, to seed the derived marker so it never reads lower than the
+ * high-water mark an incident recorded before the upgrade. Current code
+ * writes it only as a mirror of the derived marker's durable part — one put
+ * per stream retired, none per chunk — so a build rolled back to the
+ * counter never reads a marker lower than an incident recorded here.
  */
 export const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 /**
@@ -155,8 +159,17 @@ export const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
  * the incident is deleted). A very long agentic turn under heavy interruption
  * that legitimately needs more should raise `maxRecoveryWork` (or set it to
  * `Infinity` to restore the pre-#1825 unbounded behavior).
+ *
+ * The unit is one durable stream segment — about ten packed streaming chunks,
+ * or one settled tool result, which is flushed on its own — plus one per
+ * explicit credit for forwarded sub-agent output. The marker is derived from
+ * the stream log (`ResumableStream.progressMarker`), so that is what it can
+ * count. The earlier KV counter credited per milestone chunk and per five
+ * seconds of deltas, a coarser measure of streamed text; 10 000 segments
+ * (on the order of 100 000 chunks of re-run output) keeps the budget as
+ * generous as 1 000 credits was for delta-heavy turns, and still finite.
  */
-export const DEFAULT_CHAT_RECOVERY_MAX_WORK = 1000;
+export const DEFAULT_CHAT_RECOVERY_MAX_WORK = 10_000;
 /**
  * Tight, OOM-specific retry budget (#1825). A Durable Object memory-limit reset
  * (`isDurableObjectMemoryLimitReset`) is usually deterministic — the turn's
@@ -384,9 +397,13 @@ export async function readChatRecoveryProgress(
 }
 
 /**
- * Advance the durable recovery-progress counter by one. Called when genuinely new
- * content is durably flushed (real, reconnect-immune forward progress); shared by
- * `AIChatAgent` and `Think`.
+ * Advance the KV progress counter by one.
+ *
+ * @deprecated Hosts no longer bump a counter per credited chunk: the marker
+ * is derived from the stream log (`ResumableStream.progressMarker`) and
+ * explicit credits go through `ResumableStream.creditProgress`. Kept for
+ * code that still maintains the KV counter; a value written here is folded
+ * into the derived marker on the next seed.
  */
 export async function bumpChatRecoveryProgress(
   storage: Pick<DurableObjectStorage, "get" | "put">

@@ -48,7 +48,6 @@ import {
   ResumeHandshake,
   buildChatRecoveringFrame,
   bumpChatRecoveryProgress,
-  cleanupStreamBuffers,
   createChatFiberSnapshot,
   pendingChatTerminal,
   readChatRecoveryProgress,
@@ -906,7 +905,7 @@ export class TanStackAgent extends Agent<Env> {
 
   /** Stream-buffer cleanup alarm target (scheduled by ResumableStream cleanup). */
   async _cleanupStreamBuffers(): Promise<void> {
-    await cleanupStreamBuffers(this._resumableStream, async () => {});
+    this._resumableStream.reclaim();
   }
 
   // ── Inspection surface (server HTTP → e2e assertions) ───────────────────────

@@ -2789,6 +2789,25 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   /**
+   * A parent that attaches only after the child completed must still find
+   * the child's stored chunks: the child's cutover keeps its rows for the
+   * parent, which the child's next `start()` reclaims.
+   */
+  async readCompletedChildChunksForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{ status: string; chunks: number }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.startAgentToolRun(input, { runId });
+    const inspection = await this.waitForTerminalInspectionForTest(
+      child,
+      runId
+    );
+    const chunks = await child.getAgentToolChunks(runId);
+    return { status: inspection.status, chunks: chunks.length };
+  }
+
+  /**
    * A still-running child that reaches terminal *during* the parent's bounded
    * re-attach window: reconciliation should tail it to terminal and finalize
    * the parent row `completed` instead of abandoning it `interrupted` (#1630).
@@ -4975,10 +4994,13 @@ export class ThinkToolsTestAgent extends Think {
       VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
-    for (const chunk of chunks) {
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${now}, ${now})
       `;
     }
   }
@@ -6869,10 +6891,14 @@ export class ThinkRecoveryTestAgent extends Think {
    *  partial. The recovery budget keys off this counter (not the live message
    *  count), so this is how a test marks "the turn advanced". */
   async bumpRecoveryProgressForTest(): Promise<void> {
-    const self = this as unknown as {
-      _bumpChatRecoveryProgress(): Promise<void>;
-    };
-    await self._bumpChatRecoveryProgress();
+    // One explicit credit — the same unit a flushed segment or a forwarded
+    // child chunk adds to the derived marker.
+    this._resumableStream.creditProgress();
+  }
+
+  /** The recovery progress marker as the engine would read it now. */
+  async readProgressMarkerForTest(): Promise<number> {
+    return this._resumableStream.progressMarker();
   }
 
   /** Simulate compaction collapsing the transcript by dropping all assistant
@@ -6910,7 +6936,7 @@ export class ThinkRecoveryTestAgent extends Think {
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_agents_stream_chunks
+        SELECT COALESCE(MAX(seq_to), 0) as count FROM cf_agents_stream_blocks
         WHERE stream_id = ${streamId}
       `;
       return rows[0]?.count ?? 0;
@@ -6948,7 +6974,7 @@ export class ThinkRecoveryTestAgent extends Think {
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+      this._resumableStream.progressMarker();
 
     const start = await read();
     const streamId = self._resumableStream.start("req-progress-immunity");
@@ -7000,7 +7026,7 @@ export class ThinkRecoveryTestAgent extends Think {
     };
     self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
-      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+      this._resumableStream.progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -7775,10 +7801,13 @@ export class ThinkRecoveryTestAgent extends Think {
       VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
-    for (const chunk of chunks) {
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-        VALUES (${streamId}, ${chunk.index}, ${JSON.stringify(chunk.body)}, ${now})
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${now}, ${now})
       `;
     }
   }
@@ -7835,11 +7864,9 @@ export class ThinkRecoveryTestAgent extends Think {
     )._startResumableStream(requestId);
   }
 
-  /** Invoke the alarm-driven cleanup callback directly. */
-  async runStreamCleanupForTest(): Promise<void> {
-    await (
-      this as unknown as { _cleanupStreamBuffers(): Promise<void> }
-    )._cleanupStreamBuffers();
+  /** Reclaim leftover streams now, as the next stream start does. */
+  async runStreamCleanupForTest(nowMs?: number): Promise<number> {
+    return this._resumableStream.reclaim(nowMs);
   }
 
   /** Finish a stream via the cleanup-arming wrapper (mirrors a real turn end). */
@@ -7847,43 +7874,6 @@ export class ThinkRecoveryTestAgent extends Think {
     (
       this as unknown as { _completeResumableStream(id: string): void }
     )._completeResumableStream(streamId);
-  }
-
-  /** Arm the cleanup alarm without finishing a stream (leaves no new buffer). */
-  async armStreamCleanupForTest(): Promise<void> {
-    await (
-      this as unknown as { _ensureStreamCleanupScheduled(): Promise<void> }
-    )._ensureStreamCleanupScheduled();
-  }
-
-  /**
-   * The delay (seconds) of the pending cleanup schedule, or null if none.
-   * Locks the arming interval (STREAM_CLEANUP_DELAY_SECONDS) so a regression
-   * that lengthens it back toward the old 24h leak window is caught.
-   */
-  async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
-    const rows = this.sql<{ delayInSeconds: number | null }>`
-      SELECT json_extract(payload, '$.delayInSeconds') AS delayInSeconds
-      FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
-      LIMIT 1
-    `;
-    return rows[0]?.delayInSeconds ?? null;
-  }
-
-  /**
-   * Backdate any pending cleanup schedule so it is due, then run the REAL
-   * `alarm()` handler. This exercises the production path where `alarm()`
-   * deletes the fired one-shot row after the callback returns — so a re-arm
-   * must create a fresh row to survive (the idempotent-reschedule footgun).
-   */
-  async fireDueCleanupAlarmForTest(): Promise<void> {
-    this.sql`
-      UPDATE cf_agents_jobs
-      SET time = ${Date.now() - 1_000}
-      WHERE capability = 'scheduler' AND fn = '_cleanupStreamBuffers'
-    `;
-    await this.alarm();
   }
 
   async insertInterruptedFiber(
