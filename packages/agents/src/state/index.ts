@@ -1,7 +1,7 @@
 import { LifecycleCapability } from "../lifecycle/capability";
-import type { StateChangeSource, StateManagerOptions } from "./options";
+import type { StateChangeSource, StateOptions } from "./options";
 
-export type { StateChangeSource, StateManagerOptions } from "./options";
+export type { StateChangeSource, StateOptions } from "./options";
 
 /**
  * Namespaced KV key holding this capability's schema version. Kept separate
@@ -31,10 +31,10 @@ const DEFAULT_STATE = {} as unknown;
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class StateManager<State = unknown> extends LifecycleCapability {
-  private _state = DEFAULT_STATE as State;
+export class State<T = unknown> extends LifecycleCapability {
+  private _state = DEFAULT_STATE as T;
   private _tableEnsured = false;
-  private readonly _options: StateManagerOptions<State>;
+  private readonly _options: StateOptions<T>;
 
   /**
    * Create a durable state capability.
@@ -42,7 +42,7 @@ export class StateManager<State = unknown> extends LifecycleCapability {
    * @param options - Optional initial state and a synchronous validation hook
    * injected by the host.
    */
-  constructor(options: StateManagerOptions<State> = {}) {
+  constructor(options: StateOptions<T> = {}) {
     super("state");
     this._options = options;
   }
@@ -86,7 +86,7 @@ export class StateManager<State = unknown> extends LifecycleCapability {
    * set, so falsy values persist correctly. On a corrupt row, falls back to
    * the initial state (re-persisting it) or clears the row.
    */
-  get(): State | undefined {
+  get(): T | undefined {
     if (this._state !== DEFAULT_STATE) {
       // state was previously set, and populated internal state
       return this._state;
@@ -94,7 +94,7 @@ export class StateManager<State = unknown> extends LifecycleCapability {
     // looks like this is the first time the state is being accessed
     // check if the state was set in a previous life
     this._ensureTable();
-    const result = this.lifecycle.sql<{ state: State | undefined }>`
+    const result = this.lifecycle.sql<{ state: T | undefined }>`
       SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
     `;
 
@@ -147,7 +147,7 @@ export class StateManager<State = unknown> extends LifecycleCapability {
    * connection for client-originated changes.
    * @throws Whatever the injected `validateStateChange` throws.
    */
-  set(nextState: State, source: StateChangeSource = "server"): void {
+  set(nextState: T, source: StateChangeSource = "server"): void {
     // Validation/gating hook (sync only)
     this._options.validateStateChange?.(nextState, source);
     this._ensureTable();
@@ -164,7 +164,7 @@ export class StateManager<State = unknown> extends LifecycleCapability {
     try {
       pending = this._options.onChanged?.(nextState, source);
     } catch (error) {
-      console.error("StateManager onChanged hook failed:", error);
+      console.error("State onChanged hook failed:", error);
       return;
     }
 
@@ -172,7 +172,7 @@ export class StateManager<State = unknown> extends LifecycleCapability {
       // Durable Objects remain active for pending I/O without waitUntil. Keep
       // set() synchronous while ensuring asynchronous failures are observed.
       void pending.catch((error) => {
-        console.error("StateManager onChanged hook failed:", error);
+        console.error("State onChanged hook failed:", error);
       });
     }
   }

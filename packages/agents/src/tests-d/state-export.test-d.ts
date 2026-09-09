@@ -1,10 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
-import {
-  StateManager,
-  type StateChangeSource,
-  type StateManagerOptions
-} from "../state";
+import { State, type StateChangeSource, type StateOptions } from "../state";
 
 type CounterState = { count: number };
 
@@ -18,7 +14,7 @@ const options = {
     state satisfies CounterState;
     source satisfies StateChangeSource;
   }
-} satisfies StateManagerOptions<CounterState>;
+} satisfies StateOptions<CounterState>;
 
 const asyncOptions = {
   onChanged: async (state, source) => {
@@ -26,12 +22,12 @@ const asyncOptions = {
     source satisfies StateChangeSource;
     await Promise.resolve();
   }
-} satisfies StateManagerOptions<CounterState>;
+} satisfies StateOptions<CounterState>;
 
-new StateManager(asyncOptions);
+new State(asyncOptions);
 
 class CounterObject extends DurableObject {
-  readonly state = new StateManager(options);
+  readonly state = new State(options);
   readonly lifecycle = Lifecycle.install(this).use(this.state);
 }
 

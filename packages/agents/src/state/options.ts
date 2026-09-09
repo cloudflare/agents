@@ -13,7 +13,7 @@ export type StateChangeSource<Conn extends Connection = Connection> =
   | "server";
 
 /**
- * Optional callbacks and policy for a {@link StateManager} capability.
+ * Optional callbacks and policy for a {@link State} capability.
  *
  * State validation and the post-change notification hook stay on the host's
  * public surface (an Agent subclass overrides `validateStateChange` and
@@ -22,7 +22,7 @@ export type StateChangeSource<Conn extends Connection = Connection> =
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface StateManagerOptions<State = unknown> {
+export interface StateOptions<State = unknown> {
   /**
    * Initial state seeded on first access when no state was previously stored.
    * `undefined` seeds nothing.
@@ -37,7 +37,7 @@ export interface StateManagerOptions<State = unknown> {
 
   /**
    * Synchronous gating hook run before a change is persisted. Throw to reject
-   * the change; the throw propagates to the caller of {@link StateManager.set}.
+   * the change; the throw propagates to the caller of {@link State.set}.
    */
   readonly validateStateChange?: (
     nextState: State,
