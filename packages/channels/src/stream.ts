@@ -31,6 +31,7 @@ export async function consumeChunks<TChunk, TResult>(
 ): Promise<TResult> {
   const reader = chunks.getReader();
   let outcome: StreamOutcome = { interrupted: false };
+  let cancellation: Promise<void> | undefined;
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -39,14 +40,17 @@ export async function consumeChunks<TChunk, TResult>(
     }
   } catch (error) {
     outcome = { interrupted: true, error };
-    // Initiate cancellation without waiting for sibling tee branches. Their
-    // cancellation promises settle together, but this consumer still has to
-    // finalize its provider message immediately.
-    void reader.cancel().catch(() => {});
+    // Start cancellation before finalizing, but do not block the terminal
+    // provider call on sibling tee branches. Await cleanup only afterward.
+    cancellation = reader.cancel().catch(() => {});
   } finally {
     reader.releaseLock();
   }
-  return consumer.onFinish(outcome);
+  try {
+    return await consumer.onFinish(outcome);
+  } finally {
+    await cancellation;
+  }
 }
 
 /**

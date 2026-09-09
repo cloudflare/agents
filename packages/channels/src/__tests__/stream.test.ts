@@ -138,30 +138,43 @@ describe("consumeChunks", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  it("finalizes without waiting for a sibling tee branch to close", async () => {
+  it("finalizes before awaiting sibling-dependent producer cleanup", async () => {
     const source = new ReadableStream<ChannelChunk>({
       start(controller) {
         controller.enqueue({ type: "text", text: "a" });
       }
     });
     const [failedBranch, openSibling] = source.tee();
+    let markFinalized: (() => void) | undefined;
+    const finalized = new Promise<void>((resolve) => {
+      markFinalized = resolve;
+    });
     const consumption = consumeChunks(failedBranch, {
       onChunk() {
         throw new Error("provider rejected the append");
       },
-      onFinish: () => "finished"
+      onFinish() {
+        markFinalized?.();
+        return "finished";
+      }
     });
 
-    const settledFirst = await Promise.race([
+    const finalizedFirst = await Promise.race([
+      finalized.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 0))
+    ]);
+    const settledBeforeSibling = await Promise.race([
       consumption,
       new Promise<"blocked">((resolve) =>
         setTimeout(() => resolve("blocked"), 0)
       )
     ]);
-    await openSibling.cancel();
-    await consumption;
 
-    expect(settledFirst).toBe("finished");
+    expect(finalizedFirst).toBe(true);
+    expect(settledBeforeSibling).toBe("blocked");
+
+    await openSibling.cancel();
+    await expect(consumption).resolves.toBe("finished");
   });
 });
 
