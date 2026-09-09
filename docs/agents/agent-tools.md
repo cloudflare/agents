@@ -331,6 +331,57 @@ watching within budget", never as a terminal failure. Only a non-`null`
 inspection with a terminal `status` (`completed` / `error` / `aborted`)
 finalizes a run.
 
+### Make any Agent a child
+
+`Think` and `AIChatAgent` are children out of the box. Any other `Agent`
+subclass can be driven as an agent tool by installing the `AgentToolsChild`
+capability and binding a small host port that says how to run one turn and
+where its streamed chunks come from:
+
+```ts
+import { Agent, AgentToolsChild, setAgentToolsChildHost } from "agents";
+
+export class Worker extends Agent<Env> {
+  readonly agentToolsChild = new AgentToolsChild();
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.agentToolsChild);
+    setAgentToolsChildHost(this.agentToolsChild, {
+      runTurn: ({ requestId, message, signal }) =>
+        this.runOneTurn(requestId, message, signal)
+      // ... stream store, messages, formatting hooks
+    });
+  }
+
+  // The parent calls these over RPC; forward them to the capability.
+  startAgentToolRun(input: unknown, options: { runId: string }) {
+    return this.agentToolsChild.startAgentToolRun(input, options);
+  }
+  cancelAgentToolRun(runId: string, reason?: unknown) {
+    return this.agentToolsChild.cancelAgentToolRun(runId, reason);
+  }
+  inspectAgentToolRun(runId: string) {
+    return this.agentToolsChild.inspectAgentToolRun(runId);
+  }
+  getAgentToolChunks(runId: string, options?: { afterSequence?: number }) {
+    return this.agentToolsChild.getAgentToolChunks(runId, options);
+  }
+  tailAgentToolRun(
+    runId: string,
+    options?: { afterSequence?: number; signal?: AbortSignal }
+  ) {
+    return this.agentToolsChild.tailAgentToolRun(runId, options);
+  }
+}
+```
+
+The child capability owns `cf_agent_tool_child_runs` and
+`cf_agent_tool_milestones`. Chunk attribution is explicit: wherever the host
+sends a chat response frame to clients, it also calls
+`agentToolsChild.observeChunk(requestId, body)` (or `observeError` for an error
+frame) so live tailers and the durable chunk log stay on one sequence line.
+
 ## Report progress and milestones
 
 A sub-agent running as an agent tool — awaited or detached — can report mid-run
