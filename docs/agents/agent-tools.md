@@ -549,6 +549,34 @@ for (const message of messages) {
 Imperative runs without a parent tool call are available as
 `agentTools.unboundRuns`.
 
+### Cap what a reconnect replays
+
+On every (re)connect the parent replays its retained runs to that client as
+`replay: true` frames. By default that is **every** retained run with **all** of
+its stored chunks, which can be a large burst for a parent that has accumulated
+many runs or long child transcripts. Bound it with the `agentToolReplayOnConnect`
+static option:
+
+```ts
+class Assistant extends Agent<Env> {
+  static options = {
+    agentToolReplayOnConnect: { maxRuns: 20, maxChunksPerRun: 200 }
+  };
+}
+```
+
+- `maxRuns` — replay only the newest N runs by start time. A run that is cut
+  sends no frames at all; it is not part of the replayed timeline.
+- `maxChunksPerRun` — replay only the **last** N stored chunks of each run. The
+  tail is what a reconnecting client needs to render current state, and the
+  dropped chunks still advance the frame sequence, so the frames that are sent
+  carry the same sequence numbers an uncapped replay would use and the hook's
+  live-vs-replay dedupe is unaffected.
+
+Both default to `Infinity` (no cap). Capping the replay never deletes anything —
+the runs and their child facets are still retained, and a client can still drill
+into a cut run. Use `clearAgentToolRuns()` to actually drop runs.
+
 ## Drill in and gate access
 
 Agent tools are normal sub-agents. Connect to a retained child through the

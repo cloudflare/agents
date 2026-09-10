@@ -623,13 +623,26 @@ export class AgentTools extends LifecycleCapability {
   }
 
   /**
-   * Replay every recorded run onto one freshly connected client as
-   * `replay: true` agent-tool events, so a reconnecting UI rebuilds the same
-   * timeline a live client saw.
+   * Replay recorded runs onto one freshly connected client as `replay: true`
+   * agent-tool events, so a reconnecting UI rebuilds the same timeline a live
+   * client saw.
+   *
+   * Bounded by the `replayOnConnect` policy (both caps default to `Infinity`,
+   * i.e. every run with every stored chunk): `maxRuns` keeps only the newest
+   * runs by start time, `maxChunksPerRun` keeps only each run's last chunks.
+   * Dropped chunks still advance the frame sequence, so the frames a capped
+   * replay does send carry the same sequence numbers an uncapped replay would
+   * and the client's live/replay dedupe is unaffected.
    *
    * @param connection The connection to send the replay frames to.
    */
   async replayToConnection(connection: Connection): Promise<void> {
+    const { maxRuns, maxChunksPerRun } = this.#options.replayOnConnect;
+    // SQLite treats a negative LIMIT as "no limit", which is how an `Infinity`
+    // cap stays a single query.
+    const runLimit =
+      Number.isFinite(maxRuns) && maxRuns >= 0 ? Math.floor(maxRuns) : -1;
+    if (runLimit === 0) return;
     const rows = this.#sql<{
       run_id: string;
       parent_tool_call_id: string | null;
@@ -648,8 +661,12 @@ export class AgentTools extends LifecycleCapability {
              summary, output_json, error_message, interrupted_reason,
              child_still_running, display_metadata, display_order
       FROM cf_agent_tool_runs
-      ORDER BY started_at ASC
+      ORDER BY started_at DESC, rowid DESC
+      LIMIT ${runLimit}
     `;
+    // Selected newest-first to apply the cap, re-emitted oldest-first so the
+    // client rebuilds the timeline in display order.
+    rows.reverse();
 
     for (const row of rows) {
       const parentToolCallId = row.parent_tool_call_id ?? undefined;
@@ -676,7 +693,8 @@ export class AgentTools extends LifecycleCapability {
           row,
           sequence,
           true,
-          connection
+          connection,
+          maxChunksPerRun
         );
       } catch {
         // Keep replay best-effort per run.
@@ -1895,6 +1913,9 @@ export class AgentTools extends LifecycleCapability {
    * @param replay Mark the frames as a replay.
    * @param connection Send only to this connection instead of broadcasting.
    * @param timeoutMs Bounded wait for the child's chunk read.
+   * @param maxChunks Replay only this many chunks from the END of the run. The
+   * dropped chunks still advance the sequence, so the frames that are sent keep
+   * the numbers an uncapped replay would have given them.
    * @returns The next free sequence.
    */
   async #broadcastStoredChunksFromAdapter(
@@ -1903,7 +1924,8 @@ export class AgentTools extends LifecycleCapability {
     sequence: number,
     replay?: true,
     connection?: Connection,
-    timeoutMs?: number
+    timeoutMs?: number,
+    maxChunks?: number
   ): Promise<number> {
     const chunks = await this.#getChunksForRecovery(
       adapter,
@@ -1911,11 +1933,17 @@ export class AgentTools extends LifecycleCapability {
       timeoutMs
     );
     if (!chunks) return sequence;
+    const kept =
+      maxChunks !== undefined &&
+      Number.isFinite(maxChunks) &&
+      maxChunks < chunks.length
+        ? chunks.slice(chunks.length - Math.max(0, Math.floor(maxChunks)))
+        : chunks;
     return this.#broadcastChunks(
       row.parent_tool_call_id ?? undefined,
       row.run_id,
-      chunks,
-      sequence,
+      kept,
+      sequence + (chunks.length - kept.length),
       replay,
       connection
     );
@@ -2436,7 +2464,8 @@ export class AgentTools extends LifecycleCapability {
     >,
     sequence: number,
     replay?: true,
-    connection?: Connection
+    connection?: Connection,
+    maxChunks?: number
   ): Promise<number> {
     const adapter = await this.#childAdapter(row.agent_type, row.run_id);
     return this.#broadcastStoredChunksFromAdapter(
@@ -2444,7 +2473,9 @@ export class AgentTools extends LifecycleCapability {
       row,
       sequence,
       replay,
-      connection
+      connection,
+      undefined,
+      maxChunks
     );
   }
 

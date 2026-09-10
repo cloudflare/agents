@@ -834,6 +834,14 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
   detachedMaxBudgetMs: DEFAULT_DETACHED_MAX_BUDGET_MS,
   detachedNoProgressBudgetMs: DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS,
   /**
+   * Caps on the agent-tool timeline replayed to one reconnecting client.
+   * Uncapped by default: every retained run, with every stored chunk.
+   */
+  agentToolReplayOnConnect: {
+    maxRuns: Number.POSITIVE_INFINITY,
+    maxChunksPerRun: Number.POSITIVE_INFINITY
+  },
+  /**
    * Consecutive alarm invocations that may end in a Durable Object memory-limit
    * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
    * circuit breaker stops the platform's auto-retry loop and seals the looping
@@ -859,6 +867,10 @@ interface ResolvedAgentOptions {
   agentToolReattachMaxWindowMs: number;
   detachedMaxBudgetMs: number;
   detachedNoProgressBudgetMs: number;
+  agentToolReplayOnConnect: {
+    maxRuns: number;
+    maxChunksPerRun: number;
+  };
   maxAlarmMemoryLimitStrikes: number;
 }
 
@@ -946,6 +958,27 @@ export interface AgentStaticOptions {
    * `detached: { noProgressBudgetMs }`.
    */
   detachedNoProgressBudgetMs?: number;
+  /**
+   * Caps on the agent-tool timeline replayed to one client when it (re)connects.
+   * Both default to `Infinity`: every retained run is replayed with every stored
+   * chunk. A parent that accumulates many runs, or runs with long child
+   * transcripts, can bound the reconnect burst here.
+   *
+   * - `maxRuns`: replay only the newest N runs by start time. A run that is cut
+   *   sends no frames at all — it is simply not part of the replayed timeline.
+   * - `maxChunksPerRun`: replay only the LAST N stored chunks of each run (the
+   *   tail is what a reconnecting client needs to render current state). Dropped
+   *   chunks still advance the frame sequence, so the frames that are sent carry
+   *   the same sequence numbers an uncapped replay would use and the client hook
+   *   dedupes live-vs-replay exactly as before.
+   *
+   * Retention is unaffected: capping the replay never deletes a run. Use
+   * `clearAgentToolRuns()` for that.
+   */
+  agentToolReplayOnConnect?: {
+    maxRuns?: number;
+    maxChunksPerRun?: number;
+  };
   /**
    * Consecutive alarm invocations that may end in a Durable Object memory-limit
    * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
@@ -1445,6 +1478,14 @@ export class Agent<
       detachedNoProgressBudgetMs:
         ctor.options?.detachedNoProgressBudgetMs ??
         DEFAULT_AGENT_STATIC_OPTIONS.detachedNoProgressBudgetMs,
+      agentToolReplayOnConnect: {
+        maxRuns:
+          ctor.options?.agentToolReplayOnConnect?.maxRuns ??
+          DEFAULT_AGENT_STATIC_OPTIONS.agentToolReplayOnConnect.maxRuns,
+        maxChunksPerRun:
+          ctor.options?.agentToolReplayOnConnect?.maxChunksPerRun ??
+          DEFAULT_AGENT_STATIC_OPTIONS.agentToolReplayOnConnect.maxChunksPerRun
+      },
       maxAlarmMemoryLimitStrikes:
         ctor.options?.maxAlarmMemoryLimitStrikes ??
         DEFAULT_AGENT_STATIC_OPTIONS.maxAlarmMemoryLimitStrikes
@@ -1802,7 +1843,8 @@ export class Agent<
       reattachMaxWindowMs: this._resolvedOptions.agentToolReattachMaxWindowMs,
       detachedMaxBudgetMs: this._resolvedOptions.detachedMaxBudgetMs,
       detachedNoProgressBudgetMs:
-        this._resolvedOptions.detachedNoProgressBudgetMs
+        this._resolvedOptions.detachedNoProgressBudgetMs,
+      replayOnConnect: this._resolvedOptions.agentToolReplayOnConnect
     });
 
     // Host bindings for the agent-tool engine. Every entry delegates to a

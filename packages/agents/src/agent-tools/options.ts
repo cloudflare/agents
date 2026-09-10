@@ -111,6 +111,25 @@ export type AgentToolsOptions = {
    * `Infinity` disables it (the absolute ceiling still applies).
    */
   readonly detachedNoProgressBudgetMs?: number;
+  /**
+   * Caps on what one reconnecting client is replayed. Both default to
+   * `Infinity` — every retained run with all of its stored chunks, which is a
+   * lot of frames for a parent that has accumulated long child transcripts.
+   */
+  readonly replayOnConnect?: {
+    /**
+     * Replay only the newest N runs by start time (older runs are simply not
+     * replayed — a cut run sends no frames at all).
+     */
+    readonly maxRuns?: number;
+    /**
+     * Replay only the LAST N stored chunks of each run — the tail is what a
+     * reconnecting client needs. Dropped chunks still advance the frame
+     * sequence, so a capped replay numbers the chunks it does send exactly as
+     * an uncapped one would and the client's dedupe keeps working.
+     */
+    readonly maxChunksPerRun?: number;
+  };
 };
 
 /** @internal Every agent-tool policy knob with a concrete value. */
@@ -120,6 +139,10 @@ export type ResolvedAgentToolsOptions = {
   readonly reattachMaxWindowMs: number;
   readonly detachedMaxBudgetMs: number;
   readonly detachedNoProgressBudgetMs: number;
+  readonly replayOnConnect: {
+    readonly maxRuns: number;
+    readonly maxChunksPerRun: number;
+  };
 };
 
 /** @internal Apply the documented defaults to a partial option bag. */
@@ -137,6 +160,11 @@ export function resolveAgentToolsOptions(
       options.detachedMaxBudgetMs ?? DEFAULT_DETACHED_MAX_BUDGET_MS,
     detachedNoProgressBudgetMs:
       options.detachedNoProgressBudgetMs ??
-      DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS
+      DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS,
+    replayOnConnect: {
+      maxRuns: options.replayOnConnect?.maxRuns ?? Number.POSITIVE_INFINITY,
+      maxChunksPerRun:
+        options.replayOnConnect?.maxChunksPerRun ?? Number.POSITIVE_INFINITY
+    }
   };
 }
