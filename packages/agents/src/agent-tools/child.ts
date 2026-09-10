@@ -796,9 +796,6 @@ export class AgentToolsChild extends LifecycleCapability {
     outcome: ChildTurnOutcome
   ): void {
     const host = this.#host();
-    const messagesAfterStart = this.#messagesAfterStart(runId);
-    const output = host.output(runId, messagesAfterStart, input);
-    const summary = host.summary(runId, output, messagesAfterStart, input);
     const streamError = outcome.error ?? this.#lastErrors.get(runId);
     const status: ChildRunStatus =
       outcome.status === "error" || outcome.status === "skipped" || streamError
@@ -806,6 +803,21 @@ export class AgentToolsChild extends LifecycleCapability {
         : outcome.status === "aborted"
           ? "aborted"
           : "completed";
+    // Output/summary are COMPLETION projections: the host hooks behind them
+    // (`getAgentToolOutput` / `getAgentToolSummary`) are user overrides that may
+    // carry completion side effects, so an errored, aborted or skipped turn must
+    // not invoke them — and a non-completed row then carries neither value,
+    // matching what the parent surfaces for a non-completed inspection.
+    const messagesAfterStart =
+      status === "completed" ? this.#messagesAfterStart(runId) : [];
+    const output =
+      status === "completed"
+        ? host.output(runId, messagesAfterStart, input)
+        : undefined;
+    const summary =
+      status === "completed"
+        ? host.summary(runId, output, messagesAfterStart, input)
+        : null;
     // `skipped` is not an `AgentToolRunStatus`, so a turn that never ran is
     // sealed as `error` with prose that says so rather than being reported to
     // the parent as an empty success.
@@ -1057,6 +1069,13 @@ export class AgentToolsChild extends LifecycleCapability {
    * drop the legacy ones. `INSERT OR IGNORE` so a facet that somehow holds both
    * keeps the current rows. The legacy runs table has no `stream_id`; it is
    * re-derived from `request_id` on the next read.
+   *
+   * The copied column list is the INTERSECTION of what we want and what the
+   * legacy table actually has: `ai-chat` releases predating the progress work
+   * created `cf_ai_chat_agent_tool_runs` without `progress_json` /
+   * `last_signal_at` (later releases added them by ALTER), so naming them
+   * unconditionally would throw in `onStart` and leave such a deployment unable
+   * to start after upgrading straight to this version.
    */
   #adoptLegacyTables(): void {
     const sql = this.lifecycle.storage.sql;
@@ -1069,17 +1088,37 @@ export class AgentToolsChild extends LifecycleCapability {
         .toArray().length > 0;
 
     if (hasTable(LEGACY_RUNS_TABLE)) {
-      sql.exec(`
-        INSERT OR IGNORE INTO cf_agent_tool_child_runs
-          (run_id, request_id, status, summary, input_json, output_json,
-           error_message, started_at, completed_at, progress_json,
-           last_signal_at)
-        SELECT run_id, request_id, status, summary, input_json, output_json,
-               error_message, started_at, completed_at, progress_json,
-               last_signal_at
-        FROM ${LEGACY_RUNS_TABLE}
-      `);
-      sql.exec(`DROP TABLE ${LEGACY_RUNS_TABLE}`);
+      const present = new Set(
+        [
+          ...sql.exec<{ name: string }>(
+            "SELECT name FROM pragma_table_info(?)",
+            LEGACY_RUNS_TABLE
+          )
+        ].map((column) => column.name)
+      );
+      const copied = [
+        "run_id",
+        "request_id",
+        "status",
+        "summary",
+        "input_json",
+        "output_json",
+        "error_message",
+        "started_at",
+        "completed_at",
+        "progress_json",
+        "last_signal_at"
+      ].filter((column) => present.has(column));
+      // `run_id` identifies the row; without it there is nothing to fold (and
+      // the table is not one of ours), so leave it alone.
+      if (copied.includes("run_id")) {
+        const columns = copied.join(", ");
+        sql.exec(`
+          INSERT OR IGNORE INTO cf_agent_tool_child_runs (${columns})
+          SELECT ${columns} FROM ${LEGACY_RUNS_TABLE}
+        `);
+        sql.exec(`DROP TABLE ${LEGACY_RUNS_TABLE}`);
+      }
     }
 
     if (hasTable(LEGACY_MILESTONES_TABLE)) {

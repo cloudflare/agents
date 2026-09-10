@@ -223,6 +223,71 @@ describe("AgentToolsChild capability", () => {
     });
   });
 
+  it("folds a legacy ai-chat run table that predates the newer columns", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const child = new AgentToolsChild();
+      const host = new FakeChildHost();
+      const { lifecycle } = install(child);
+      setAgentToolsChildHost(child, host);
+      host.bind(child);
+
+      // An `ai-chat` deployment from before the progress work: the legacy table
+      // has only the base columns (`summary` / `input_json` / `output_json` /
+      // `progress_json` / `last_signal_at` were added by later ALTERs). Naming
+      // the missing ones in the fold used to throw in `onStart`, leaving the
+      // agent unable to start after the upgrade.
+      storage.sql.exec(`
+        CREATE TABLE cf_ai_chat_agent_tool_runs (
+          run_id TEXT PRIMARY KEY,
+          request_id TEXT,
+          status TEXT NOT NULL,
+          error_message TEXT,
+          started_at INTEGER NOT NULL,
+          completed_at INTEGER
+        )
+      `);
+      storage.sql.exec(
+        `INSERT INTO cf_ai_chat_agent_tool_runs
+           (run_id, request_id, status, error_message, started_at, completed_at)
+         VALUES ('legacy-1', 'req-1', 'completed', NULL, 10, 20)`
+      );
+      storage.sql.exec(`
+        CREATE TABLE cf_ai_chat_agent_tool_milestones (
+          run_id TEXT NOT NULL,
+          sequence INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          data_json TEXT,
+          at INTEGER NOT NULL,
+          PRIMARY KEY (run_id, sequence)
+        )
+      `);
+      storage.sql.exec(
+        `INSERT INTO cf_ai_chat_agent_tool_milestones
+           (run_id, sequence, name, data_json, at)
+         VALUES ('legacy-1', 0, 'indexed', '{"rows":4}', 15)`
+      );
+
+      await lifecycle.start();
+
+      expect(await child.inspectAgentToolRun("legacy-1")).toMatchObject({
+        runId: "legacy-1",
+        status: "completed",
+        requestId: "req-1",
+        startedAt: 10,
+        completedAt: 20,
+        milestones: [{ name: "indexed", sequence: 0, data: { rows: 4 } }]
+      });
+
+      const remaining = [
+        ...storage.sql.exec<{ name: string }>(
+          `SELECT name FROM sqlite_master WHERE type='table'
+             AND name LIKE 'cf_ai_chat_agent_tool_%'`
+        )
+      ];
+      expect(remaining).toEqual([]);
+    });
+  });
+
   it("seals a stale running row left behind by an evicted isolate", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const child = new AgentToolsChild();

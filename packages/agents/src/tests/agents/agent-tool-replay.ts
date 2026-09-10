@@ -5,9 +5,11 @@ import {
   setAgentToolsHost,
   type Connection
 } from "../../index.ts";
+import { AGENT_TOOL_MILESTONE_PART } from "../../agent-tool-types.ts";
 import type {
   AgentToolChildAdapter,
   AgentToolEvent,
+  AgentToolMilestone,
   AgentToolEventMessage,
   AgentToolInterruptedReason,
   AgentToolLifecycleResult,
@@ -46,6 +48,8 @@ type ScriptedChildScenario =
   | { kind: "running" }
   /** Cannot be inspected at all (an unreachable / broken child). */
   | { kind: "inspect-throws" }
+  /** Emits one milestone frame on its live tail, then completes. */
+  | { kind: "milestone-then-complete"; milestone: string }
   /** Already at a terminal result. */
   | {
       kind: "terminal";
@@ -69,6 +73,16 @@ type ScriptedChild = {
 function scriptedChild(scenario: ScriptedChildScenario): ScriptedChild {
   const cancelled: string[] = [];
   const inspection = (runId: string): AgentToolRunInspection => {
+    if (scenario.kind === "milestone-then-complete") {
+      // The tail has already closed by the time the parent inspects.
+      return {
+        runId,
+        status: "completed",
+        startedAt: 0,
+        completedAt: Date.now(),
+        summary: "milestone child"
+      };
+    }
     if (scenario.kind !== "terminal") {
       return { runId, status: "running", startedAt: 0 };
     }
@@ -97,6 +111,20 @@ function scriptedChild(scenario: ScriptedChildScenario): ScriptedChild {
     tailAgentToolRun: async () =>
       new ReadableStream<AgentToolStoredChunk>({
         start(controller) {
+          if (scenario.kind === "milestone-then-complete") {
+            // The reserved milestone frame a child's `reportProgress` rides.
+            controller.enqueue({
+              sequence: 0,
+              body: JSON.stringify({
+                type: AGENT_TOOL_MILESTONE_PART,
+                data: {
+                  name: scenario.milestone,
+                  sequence: 0,
+                  at: Date.now()
+                }
+              })
+            });
+          }
           // A still-running child holds its tail open with nothing to send, so
           // the parent's budgets (not the stream) decide when to stop waiting.
           if (scenario.kind !== "running") controller.close();
@@ -534,6 +562,62 @@ export class TestAgentToolReplayAgent extends Agent {
     await this._withScriptedChild({ kind: "running" }, async () => {
       await this._agentTool.reconcileTick();
     });
+  }
+
+  /** Milestone deliveries the framework routed to the chat seam, in order. */
+  milestoneDeliveriesForTest: Array<{
+    runId: string;
+    name: string;
+    mode: "react" | "narrate";
+  }> = [];
+
+  protected override async _deliverDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone,
+    mode: "react" | "narrate"
+  ): Promise<void> {
+    this.milestoneDeliveriesForTest.push({
+      runId: run.runId,
+      name: milestone.name,
+      mode
+    });
+  }
+
+  /**
+   * Dispatch a DETACHED run whose child reports a configured milestone on its
+   * live tail, and return the deliveries observed WITHOUT any backbone tick —
+   * the warm path must notify on its own (the parent row it reads has to carry
+   * the run's `onMilestones` configuration).
+   */
+  async runDetachedMilestoneOnWarmTailForTest(runId: string): Promise<{
+    deliveries: Array<{
+      runId: string;
+      name: string;
+      mode: "react" | "narrate";
+    }>;
+    backboneTicksRun: number;
+  }> {
+    this.milestoneDeliveriesForTest = [];
+    await this._withScriptedChild(
+      { kind: "milestone-then-complete", milestone: "indexed" },
+      async () => {
+        await this.runAgentTool<StubRunInput>(TestAgentToolStubChild, {
+          runId,
+          input: { chunkBodies: [] },
+          detached: { onMilestones: { names: ["indexed"], mode: "narrate" } }
+        });
+        // The warm fast path tails the child on `waitUntil`; wait for it rather
+        // than running a reconcile tick, which is the other delivery path.
+        for (let attempt = 0; attempt < 100; attempt++) {
+          if (this.milestoneDeliveriesForTest.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+    );
+    return {
+      deliveries: this.milestoneDeliveriesForTest,
+      backboneTicksRun: 0
+    };
   }
 
   /** Set the live detached-run cap read through the host port. */
