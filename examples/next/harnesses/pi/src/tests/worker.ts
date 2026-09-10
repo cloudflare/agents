@@ -398,6 +398,12 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
   #inputCalls = 0;
   /** Resolved by the extension tool once it is waiting on `ctx.signal`. */
   #toolWaiting: (() => void) | undefined;
+  /** The extension surface, captured when the extension loads. */
+  #pi: PiExtensionApi | undefined;
+  /** Held by the resource source to keep one tool refresh pass open. */
+  #refreshGate: Promise<void> | undefined;
+  /** Resolved once a refresh pass has reached {@link #refreshGate}. */
+  #refreshGateEntered: (() => void) | undefined;
   /** Whether the extension tool saw its own cancellation. */
   #toolSawAbort = false;
   readonly tasks = new Tasks();
@@ -426,15 +432,28 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
         content: "Say hello to $1"
       }
     ],
-    resources: {
-      skills: [
-        {
-          name: "tidy",
-          description: "Tidy the workspace.",
-          content: "Tidy everything you can find.",
-          filePath: "/skills/tidy.md"
-        }
-      ]
+    // A function, not an object, so a test can hold one refresh pass open.
+    // `#resolveResources` runs after `#resolveTools` has read the extension
+    // tool registry, which is exactly the window a late registration falls
+    // into.
+    resources: async () => {
+      const gate = this.#refreshGate;
+      if (gate !== undefined) {
+        this.#refreshGate = undefined;
+        this.#refreshGateEntered?.();
+        this.#refreshGateEntered = undefined;
+        await gate;
+      }
+      return {
+        skills: [
+          {
+            name: "tidy",
+            description: "Tidy the workspace.",
+            content: "Tidy everything you can find.",
+            filePath: "/skills/tidy.md"
+          }
+        ]
+      };
     },
     resourceLoader: deployResourceLoader(),
     uiRequestTimeoutMs: 5_000,
@@ -755,7 +774,71 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     }));
   }
 
+  /**
+   * Register two tools with the second landing after the refresh pass in
+   * flight has already read the tool registry, and report the lane's active
+   * tools once everything has settled.
+   *
+   * A pass that returned early on an overlapping request dropped the second
+   * registration: the registry held the tool, but no `setTools` or lane
+   * reconciliation ever saw it.
+   */
+  async overlappingToolRefresh(): Promise<readonly string[]> {
+    // One real turn first: it loads the extension, captures `pi`, and leaves
+    // the lane with a reconciliation baseline. Without one, the first refresh
+    // pass is the lane's first ever and leaves an existing selection alone
+    // by design, which is a different story from this one.
+    await this.runEcho("first");
+    const pi = this.#pi;
+    if (pi === undefined) throw new Error("the test extension did not load");
+
+    let release = () => {};
+    const entered = new Promise<void>((resolve) => {
+      this.#refreshGateEntered = resolve;
+    });
+    this.#refreshGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    // Starts a pass, which resolves the tools and then blocks in the
+    // resource source.
+    this.#registerLateTool(pi, "late-one");
+    await entered;
+    // Lands after that pass read the registry: only a repeat installs it.
+    this.#registerLateTool(pi, "late-two");
+    release();
+
+    return this.#settledTools("late-two");
+  }
+
+  /** Poll the lane's active tools until `name` appears, or give up. */
+  async #settledTools(name: string): Promise<readonly string[]> {
+    let active = await this.activeTools();
+    for (let attempt = 0; attempt < 200 && !active.includes(name); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active = await this.activeTools();
+    }
+    return active;
+  }
+
+  /** Register a tool the harness did not have when it started running. */
+  #registerLateTool(pi: PiExtensionApi, name: string): void {
+    pi.registerTool({
+      name,
+      label: name,
+      description: "Registered while a refresh was in flight.",
+      parameters: multiplyParameters,
+      async execute(_toolCallId, params) {
+        return {
+          content: [{ type: "text", text: `${name}:${params.value}` }],
+          details: { value: params.value }
+        };
+      }
+    });
+  }
+
   #register(pi: PiExtensionApi): void {
+    this.#pi = pi;
     // Closures rather than `this`: the tool's `execute` is a shorthand
     // method, so it has a `this` of its own.
     const waiting = () => {

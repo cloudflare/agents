@@ -113,6 +113,82 @@ describe("pi ExecutionEnv over a Workspace", () => {
       notes: "pre-existing"
     });
   });
+
+  /**
+   * The roots themselves are the shell's; what the workspace holds *under*
+   * them is the workspace's. Skipping every path under a sandbox root left a
+   * directory the script had deleted standing in the workspace, so the next
+   * run snapshotted a tree the previous one said it had removed.
+   */
+  it("removes a workspace directory under a sandbox root the script deleted", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/tmp/cache/data.txt", "cached\n");
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace
+      });
+
+      const exec = await env.exec(
+        "rm -rf /tmp/cache",
+        undefined,
+        BACKGROUND_CONTEXT
+      );
+
+      return {
+        ok: exec.ok,
+        message: exec.ok ? null : exec.error.message,
+        cache: (await instance.workspace.lstat("/tmp/cache")) ?? null,
+        data: await instance.workspace.readFile("/tmp/cache/data.txt")
+      };
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.cache).toBeNull();
+    expect(result.data).toBeNull();
+  });
+});
+
+/**
+ * Every run snapshots the whole workspace and syncs its interpreter's tree
+ * back, so two overlapping runs would each write back a tree that predates
+ * the other: the later sync would restore what the earlier one deleted and
+ * undo what it wrote.
+ */
+describe("overlapping shell runs", () => {
+  it("serializes concurrent execs so both runs' changes survive", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace
+      });
+
+      // Started without awaiting the first: the queue, not the caller,
+      // is what orders them.
+      const [first, second] = await Promise.all([
+        env.exec("echo one > /one.txt", undefined, BACKGROUND_CONTEXT),
+        env.exec(
+          "cat /one.txt > /seen.txt && echo two > /two.txt",
+          undefined,
+          BACKGROUND_CONTEXT
+        )
+      ]);
+
+      return {
+        first: first.ok,
+        second: second.ok,
+        secondMessage: second.ok ? null : second.error.message,
+        one: await instance.workspace.readFile("/one.txt"),
+        two: await instance.workspace.readFile("/two.txt"),
+        seen: await instance.workspace.readFile("/seen.txt")
+      };
+    });
+
+    expect(result.first).toBe(true);
+    expect(result.second).toBe(true);
+    // Both runs' writes are in the workspace, and the second ran against
+    // what the first had left there.
+    expect(result.one).toBe("one\n");
+    expect(result.two).toBe("two\n");
+    expect(result.seen).toBe("one\n");
+  });
 });
 
 describe("workspace symlinks", () => {

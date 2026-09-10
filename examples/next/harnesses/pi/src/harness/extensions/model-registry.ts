@@ -40,7 +40,9 @@ export interface PiExtensionModelRegistry extends ModelRegistry {
  * unregistering one would take the lane's own model away. An extension that
  * registers over a host provider's id shadows it for as long as its own
  * registration stands — unregistering puts the host's provider back rather
- * than leaving the id unresolvable.
+ * than leaving the id unresolvable. Either form shadows: a configuration
+ * registration that left the host's provider resolvable would go on serving
+ * models from the provider the extension replaced.
  */
 export function createExtensionModelRegistry(
   models: PiModelRegistry
@@ -58,13 +60,8 @@ export function createExtensionModelRegistry(
   ): void {
     if (typeof providerOrName !== "string") {
       const id = providerOrName.id;
-      overlay.delete(id);
-      // Only the first registration over an id displaces anything: after
-      // that the id holds this surface's own provider.
-      if (!native.has(id) && !displaced.has(id)) {
-        const previous = models.getProvider(id);
-        if (previous !== undefined) displaced.set(id, previous);
-      }
+      release(id);
+      captureHost(id);
       models.setProvider(providerOrName);
       native.add(id);
       return;
@@ -74,29 +71,50 @@ export function createExtensionModelRegistry(
         `Provider config is required when registering ${JSON.stringify(providerOrName)} by name`
       );
     }
-    // The configuration form resolves no models, so leaving the pi-ai
-    // provider in place would keep serving the registration it replaced.
-    removeNative(providerOrName);
+    // Both forms take the id outright. The configuration form resolves no
+    // models of its own, so a pi-ai provider left under the id would keep
+    // serving the registration it replaced — the host's as much as this
+    // surface's own, and an extension that registered over a broken host
+    // provider would find it still answering.
+    release(providerOrName);
+    captureHost(providerOrName);
     overlay.set(providerOrName, config);
   }
-  function removeNative(providerName: string): void {
-    if (!native.delete(providerName)) return;
+  /**
+   * Take `providerName` away from the host provider holding it, remembering
+   * that provider so the id can be handed back when the registration goes.
+   *
+   * Only ever called with the id already released, so whatever `models` holds
+   * here is the host's, never this surface's.
+   */
+  function captureHost(providerName: string): void {
+    const previous = models.getProvider(providerName);
+    if (previous === undefined) return;
+    displaced.set(providerName, previous);
+    models.deleteProvider(providerName);
+  }
+  /**
+   * Give up whatever this surface holds under `providerName`, in either form,
+   * and put back the host provider the registration displaced.
+   *
+   * An id this surface introduced goes away with it; one it took over from
+   * the host goes back to the host rather than being left unresolvable.
+   */
+  function release(providerName: string): void {
+    const hadOverlay = overlay.delete(providerName);
+    const hadNative = native.delete(providerName);
+    if (!hadOverlay && !hadNative) return;
     const previous = displaced.get(providerName);
     displaced.delete(providerName);
-    // An id an extension introduced goes away with it; one it took over from
-    // the host goes back to the host.
-    if (previous === undefined) {
-      models.deleteProvider(providerName);
+    if (previous !== undefined) {
+      models.setProvider(previous);
       return;
     }
-    models.setProvider(previous);
+    if (hadNative) models.deleteProvider(providerName);
   }
   return {
     registerProvider,
-    unregisterProvider: (providerName: string) => {
-      overlay.delete(providerName);
-      removeNative(providerName);
-    },
+    unregisterProvider: release,
     registrations: () =>
       [...overlay].map(([name, config]) => ({ name, config }))
   };

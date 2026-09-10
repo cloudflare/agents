@@ -88,10 +88,13 @@ const TEMP_ROOT = "/tmp";
  *   they are snapshotted into the shell, written back when the script changes
  *   them, and removed when the script removes them.
  *
- * The second half is why the sync passes must never delete a sandbox root or
- * anything under it wholesale. `/tmp` in particular holds the files
- * `createTempDir`/`createTempFile` just wrote, and the shell always
- * materializes these roots whether or not the workspace has content there.
+ * The second half is why the sync passes must never delete a sandbox root
+ * itself: the shell materializes these roots whether or not the workspace has
+ * content there, so a root missing from the shell's final tree says nothing.
+ * A path *under* a root is judged on the snapshot instead — `/tmp` in
+ * particular holds the files `createTempDir`/`createTempFile` just wrote, and
+ * one the snapshot walked is workspace content the script may legitimately
+ * have removed.
  */
 const SANDBOX_ROOTS = [TEMP_ROOT, "/bin", "/usr", "/dev", "/proc", "/sys"];
 
@@ -256,6 +259,8 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
   readonly #maxSnapshotFiles: number;
   readonly #maxSnapshotFileBytes: number;
   readonly #maxSnapshotTotalBytes: number;
+  /** Tail of the queue serializing {@link WorkspaceExecutionEnv.exec}. */
+  #shellQueue: Promise<unknown> = Promise.resolve();
 
   constructor(options: WorkspaceExecutionEnvOptions) {
     this.cwd = normalizeAbsolute(options.cwd ?? "/");
@@ -571,7 +576,40 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
 
   // ── Shell ───────────────────────────────────────────────────────────────
 
+  /**
+   * Run one shell command against the workspace.
+   *
+   * Shell runs on one environment are **sequential**: a call made while
+   * another is running waits for it. Each run snapshots the whole workspace
+   * into a fresh interpreter and syncs the interpreter's tree back when the
+   * script ends, so two overlapping runs would each write back a tree that
+   * predates the other — the later sync would restore the files the earlier
+   * run deleted and undo the ones it wrote. Serializing is the only ordering
+   * that leaves the workspace holding both runs' changes; the queue is
+   * per-environment, so lanes with their own environment still run in
+   * parallel.
+   *
+   * The timeout and the abort signal are armed once the run reaches the
+   * front of the queue, not while it waits: a queued command is not yet
+   * running, so time spent waiting is not time it took.
+   */
   async exec(
+    command: string,
+    options: ShellExecOptions | undefined,
+    context: Context
+  ): Promise<
+    Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>
+  > {
+    const run = this.#shellQueue.then(() =>
+      this.#execExclusive(command, options, context)
+    );
+    // One run's failure must not poison the queue for the next caller.
+    this.#shellQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** One shell run, with the workspace to itself. See {@link exec}. */
+  async #execExclusive(
     command: string,
     options: ShellExecOptions | undefined,
     context: Context
@@ -967,11 +1005,15 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     )) {
       if (path === "/" || finalDirectories.has(path)) continue;
       if (finalSymlinks.has(path) || finalFiles.has(path)) continue;
-      // A sandbox root is never absent from the shell's view because the
-      // shell owns it, so its absence from `finalDirectories` says nothing
-      // about the script's intent — and a recursive delete here would take
-      // the workspace's own `/tmp` content with it.
-      if (inSandboxRoot(path)) continue;
+      // A sandbox root itself is never absent from the shell's view because
+      // the shell owns it, so its absence from `finalDirectories` says
+      // nothing about the script's intent — and a recursive delete here
+      // would take the workspace's own `/tmp` content with it. A *descendant*
+      // is the opposite case: the snapshot walked it, so the workspace holds
+      // it, and the shell only stopped listing it because the script removed
+      // it. Skipping those left `rm -rf /tmp/cache` with the directory still
+      // in the workspace after the run said it had gone.
+      if (SANDBOX_ROOTS.includes(path)) continue;
       if (hasProtectedDescendant(path, snapshot.protectedPaths)) continue;
       await attempt(
         path,

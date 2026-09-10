@@ -47,7 +47,7 @@ export function notes(pi: PiExtensionApi): void {
     if (event.toolName !== "bash") return undefined;
     if (pi.getFlag("confirm_destructive") !== true) return undefined;
     const command = (event.input as { command?: unknown }).command;
-    if (typeof command !== "string" || !command.includes("rm ")) return;
+    if (typeof command !== "string" || !isDestructiveCommand(command)) return;
     return (await ctx.ui.confirm("Run a destructive command?", command))
       ? undefined
       : { block: true, reason: "The user declined the command." };
@@ -77,6 +77,15 @@ first replayed step after an eviction. `src/extensions/` holds this example's
 two: `memory-guard` blocks `remember` calls whose key starts with `_`, and
 `notes` adds the `/note` command, the `confirm_destructive` flag and the bash
 confirmation above.
+
+`isDestructiveCommand` splits the command on the shell's operators and asks
+whether any word in command position names something destructive, so
+`ls; rm -rf x` and `find . | xargs rm` open the dialog while `echo rm` does
+not. **It is a demo gate for the confirmation dialog, not a security
+boundary** — a shell has endless ways past a word list. The safety property
+that does hold is structural: the bash tool runs in an in-isolate interpreter
+over the Durable Object's own sandboxed `Workspace`, so a command reaches the
+session's virtual filesystem and nothing else.
 
 ### Events and hooks
 

@@ -23,6 +23,7 @@ import { PiExtensionRuntime } from "../harness/extensions/runtime";
 import { projectSessionEntry } from "../harness/extensions/session-view";
 import { ExtensionLaneStates } from "../harness/extensions/state";
 import { createExtensionModelRegistry } from "../harness/extensions/model-registry";
+import { isDestructiveCommand } from "../extensions/notes";
 import { createModels, resolveModel } from "../providers/models";
 import type { PiExtensionsTestObject } from "./worker";
 
@@ -965,5 +966,113 @@ describe("extension provider registration", () => {
     registry.registerProvider(faux.provider);
     expect(models.getModel("ext-both", modelId)).toBeDefined();
     expect(registry.registrations()).toEqual([]);
+  });
+
+  /**
+   * The configuration form takes the id as completely as the native one. A
+   * host provider left resolvable under a name an extension had registered
+   * over went on serving models from the provider the extension replaced —
+   * silently, since the overlay resolves nothing of its own to disagree with.
+   */
+  it("displaces a host provider the configuration form registered over", () => {
+    const models = createModels();
+    const host = fauxProvider({
+      provider: "shared",
+      models: [{ id: "host-model" }]
+    });
+    models.setProvider(host.provider);
+    const registry = createExtensionModelRegistry(models);
+
+    registry.registerProvider("shared", { api: "openai-completions" });
+    expect(models.getProvider("shared")).toBeUndefined();
+    expect(models.getModel("shared", "host-model")).toBeUndefined();
+    expect(registry.registrations()).toEqual([
+      { name: "shared", config: { api: "openai-completions" } }
+    ]);
+
+    registry.unregisterProvider("shared");
+    expect(models.getModel("shared", "host-model")).toBeDefined();
+    expect(registry.registrations()).toEqual([]);
+  });
+
+  /**
+   * The displaced host provider is held once, whichever form took the id and
+   * whatever replaces it in between: only unregistering hands it back.
+   */
+  it("hands a displaced host provider back across a change of form", () => {
+    const models = createModels();
+    const host = fauxProvider({
+      provider: "shared",
+      models: [{ id: "host-model" }]
+    });
+    const extension = fauxProvider({
+      provider: "shared",
+      models: [{ id: "ext-model" }]
+    });
+    models.setProvider(host.provider);
+    const registry = createExtensionModelRegistry(models);
+
+    registry.registerProvider("shared", { api: "openai-completions" });
+    registry.registerProvider(extension.provider);
+    expect(models.getModel("shared", "ext-model")).toBeDefined();
+    expect(models.getModel("shared", "host-model")).toBeUndefined();
+    expect(registry.registrations()).toEqual([]);
+
+    registry.registerProvider("shared", { api: "openai-completions" });
+    expect(models.getProvider("shared")).toBeUndefined();
+
+    registry.unregisterProvider("shared");
+    expect(models.getModel("shared", "host-model")).toBeDefined();
+    expect(models.getModel("shared", "ext-model")).toBeUndefined();
+  });
+});
+
+/**
+ * The gate in `src/extensions/notes.ts` is a demo of the confirmation dialog,
+ * not a security boundary — the sandboxed `Workspace` is what makes a bash
+ * command safe. It should still hold up against the shell writing the same
+ * command a different way, which the literal `rm ` it started as did not.
+ */
+describe("destructive command gate", () => {
+  it.each([
+    "rm -rf /",
+    "rm -rf /tmp/x",
+    "ls; rm -rf x",
+    "ls && rm -rf x",
+    "find . | xargs rm",
+    "echo hi\nrm -rf x",
+    "sudo rm -rf /",
+    "/bin/rm -rf /",
+    'sh -c "rm -rf /"',
+    "echo $(rm -rf x)",
+    "cat a && truncate -s 0 b",
+    "mv /a /b"
+  ])("asks about %j", (command) => {
+    expect(isDestructiveCommand(command)).toBe(true);
+  });
+
+  it.each([
+    "echo rm",
+    "echo 'rm -rf /'",
+    "ls -la",
+    "grep -r rm .",
+    "cat rm.txt",
+    "echo warm milk"
+  ])("stays out of the way of %j", (command) => {
+    expect(isDestructiveCommand(command)).toBe(false);
+  });
+});
+
+describe("overlapping tool refreshes", () => {
+  /**
+   * A registration that lands while a refresh is running used to be dropped:
+   * the pass in flight had already read the registry, and the request it
+   * suppressed was the only one that would have looked again. The tool then
+   * stayed off the lane until something else drove a turn.
+   */
+  it("installs a tool registered while a refresh is in flight", async () => {
+    const active = await fresh().overlappingToolRefresh();
+    expect(active).toContain("late-one");
+    expect(active).toContain("late-two");
   });
 });

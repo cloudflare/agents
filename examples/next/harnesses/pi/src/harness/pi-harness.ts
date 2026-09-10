@@ -130,6 +130,8 @@ const ERROR_BACKOFF_MAX_MS = 5 * 60_000;
 const RESULT_POLL_MS = 500;
 /** Default wait for a client's answer to a blocking extension UI dialog. */
 const DEFAULT_UI_REQUEST_TIMEOUT_MS = 30_000;
+/** Repeats one {@link PiHarness.#scheduleToolRefresh} will make. */
+const MAX_TOOL_REFRESH_PASSES = 8;
 
 /**
  * Durable key prefix for one lane's tool registry baseline.
@@ -429,6 +431,8 @@ export class PiHarness<
   #extensions: PiExtensionRuntime | undefined;
   #toolInfos: ReturnType<typeof describeTools> = [];
   #refreshingTools: Promise<void> | undefined;
+  /** A registration arrived while {@link PiHarness.#refreshingTools} ran. */
+  #toolsDirty = false;
   #skills: Promise<ResolvedSkills> | undefined;
   #transport: PiTransport | undefined;
   #uiBridges: PiLaneUiBridges | undefined;
@@ -1162,15 +1166,39 @@ export class PiHarness<
     }
   }
 
-  /** Re-resolve process-local tools after an extension registered one. */
+  /**
+   * Re-resolve process-local tools after an extension registered one.
+   *
+   * One pass at a time, but never a lost registration: a refresh asked for
+   * while a pass is in flight marks the registry dirty and the running pass
+   * repeats. A pass that simply returned early dropped the tool whenever the
+   * registration landed after {@link PiHarness.#resolveTools} had already
+   * read the registry — the reconciliation had no reason to look again until
+   * the next turn, so the tool stayed inactive for the rest of the session.
+   *
+   * The repeat is bounded: an extension that registers a tool from something
+   * a refresh itself triggers would otherwise keep the loop running forever,
+   * and a spin that never ends is worse than a refresh that arrives late.
+   */
   #scheduleToolRefresh(): void {
-    if (this.#refreshingTools) return;
+    if (this.#refreshingTools) {
+      this.#toolsDirty = true;
+      return;
+    }
+    this.#toolsDirty = false;
     this.#refreshingTools = (async () => {
       const { harness } = await this.#attached();
-      const lane = await harness.lane(this.#defaultLane, BACKGROUND_CONTEXT);
-      await this.#refreshProcessLocal(harness, lane, BACKGROUND_CONTEXT);
-      // A registration change can add commands as easily as tools.
-      this.#broadcastCommands();
+      for (let pass = 0; pass < MAX_TOOL_REFRESH_PASSES; pass++) {
+        const lane = await harness.lane(this.#defaultLane, BACKGROUND_CONTEXT);
+        await this.#refreshProcessLocal(harness, lane, BACKGROUND_CONTEXT);
+        // A registration change can add commands as easily as tools.
+        this.#broadcastCommands();
+        if (!this.#toolsDirty) return;
+        this.#toolsDirty = false;
+      }
+      console.warn(
+        `PiHarness stopped refreshing extension tools after ${MAX_TOOL_REFRESH_PASSES} passes; registrations kept arriving`
+      );
     })()
       .catch((error: unknown) => {
         console.warn("PiHarness failed to refresh extension tools", error);
