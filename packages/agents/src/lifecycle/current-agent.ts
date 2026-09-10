@@ -16,7 +16,7 @@ import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
  */
 export interface LifecycleObject<
   Env extends object = Cloudflare.Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > extends DurableObject<Env> {
   readonly lifecycle: Lifecycle<Env, Props>;
   onStart?(props?: Props): void | Promise<void>;
@@ -102,10 +102,7 @@ export function getCurrentAgent<
   };
 }
 
-type LifecycleHostContext<
-  Env extends object,
-  Props extends Record<string, unknown>
-> = {
+type LifecycleHostContext<Env extends object, Props extends object> = {
   readonly host: LifecycleObject<Env, Props>;
   readonly connection?: Connection;
   readonly request?: Request;
@@ -114,7 +111,7 @@ type LifecycleHostContext<
 /** Run one host hook in the context of its Lifecycle Object. */
 export function runInLifecycleHostContext<
   Env extends object,
-  Props extends Record<string, unknown>,
+  Props extends object,
   T
 >(context: LifecycleHostContext<Env, Props>, operation: () => T): T {
   return __DO_NOT_USE_WILL_BREAK__agentContext.run(

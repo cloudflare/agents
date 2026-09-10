@@ -384,7 +384,7 @@ const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > extends Agent<Env, State, Props> {
   private _activeChatRecoveryRootRequestId: string | undefined;
 

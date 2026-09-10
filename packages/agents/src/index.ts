@@ -1146,11 +1146,12 @@ type WorkflowName<E> = WorkflowBinding<E> | (string & {});
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
  * @template State State type to store within the Agent
+ * @template Props Properties supplied when the Agent starts
  */
 export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > extends DurableObject<Env> {
   /**
    * Runtime lifecycle and reusable durable capabilities for this Agent.

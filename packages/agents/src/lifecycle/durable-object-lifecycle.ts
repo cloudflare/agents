@@ -92,10 +92,10 @@ export type LifecycleRouteTransport = {
   ) => Promise<unknown>;
 };
 
-type LifecycleHost<
-  Env extends object,
-  Props extends Record<string, unknown>
-> = LifecycleObject<Env, Props> & {
+type LifecycleHost<Env extends object, Props extends object> = LifecycleObject<
+  Env,
+  Props
+> & {
   readonly ctx: DurableObjectState;
   readonly constructor: { readonly name: string };
 };
@@ -119,7 +119,7 @@ const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
 /** @internal Adapt the host invocation boundary at a composition root. */
 export function setLifecycleHostInvoker<
   Env extends object,
-  Props extends Record<string, unknown>
+  Props extends object
 >(lifecycle: Lifecycle<Env, Props>, invoker: LifecycleHostInvoker): void {
   lifecycleHostInvokers.set(lifecycle, invoker);
 }
@@ -127,16 +127,16 @@ export function setLifecycleHostInvoker<
 /** @internal Supply a host's routed Lifecycle transport. */
 export function setLifecycleRouteTransport<
   Env extends object,
-  Props extends Record<string, unknown>
+  Props extends object
 >(lifecycle: Lifecycle<Env, Props>, transport: LifecycleRouteTransport): void {
   lifecycleRouteTransports.set(lifecycle, transport);
 }
 
 /** @internal Adapt Lifecycle's default diagnostics sink at a composition root. */
-export function setLifecycleEventSink<
-  Env extends object,
-  Props extends Record<string, unknown>
->(lifecycle: Lifecycle<Env, Props>, sink: LifecycleEventSink): void {
+export function setLifecycleEventSink<Env extends object, Props extends object>(
+  lifecycle: Lifecycle<Env, Props>,
+  sink: LifecycleEventSink
+): void {
   lifecycleEventSinks.set(lifecycle, sink);
 }
 
@@ -172,7 +172,7 @@ export type LifecycleUseOptions = {
  */
 export class Lifecycle<
   Env extends object = Cloudflare.Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > {
   readonly #host: LifecycleHost<Env, Props>;
   readonly #ctx: DurableObjectState;
@@ -201,7 +201,7 @@ export class Lifecycle<
    */
   static install<
     Env extends object,
-    Props extends Record<string, unknown> = Record<string, unknown>
+    Props extends object = Record<string, unknown>
   >(
     host: DurableObject<Env>,
     options?: LifecycleOptions
