@@ -9,6 +9,7 @@ async function freshAgent(name: string) {
 describe("Think tool-set memoisation", () => {
   it("reuses built tools across turns and continuations, refreshes skills once per turn", async () => {
     const agent = await freshAgent(`tool-memo-${crypto.randomUUID()}`);
+    await agent.setSkillsRefreshForTest("every-turn");
 
     const turn1 = await agent.runTurnForTest("first");
     expect(turn1.status).toBe("completed");
@@ -50,6 +51,15 @@ describe("Think tool-set memoisation", () => {
     }
   });
 
+  it("defaults to one refresh per minute", async () => {
+    const agent = await freshAgent(`tool-memo-default-${crypto.randomUUID()}`);
+    await agent.runTurnForTest("first");
+    await agent.runTurnForTest("second");
+    const snapshot = await agent.snapshotForTest();
+    expect(snapshot.skillRefreshCalls).toBe(1);
+    expect(snapshot.skillListCalls).toBe(2);
+  });
+
   it("skillsRefresh: 'on-start' never re-lists sources after onStart", async () => {
     const agent = await freshAgent(`tool-memo-on-start-${crypto.randomUUID()}`);
     await agent.setSkillsRefreshForTest("on-start");
@@ -73,5 +83,49 @@ describe("Think tool-set memoisation", () => {
     // none within the following minute.
     expect(snapshot.skillRefreshCalls).toBe(1);
     expect(snapshot.skillListCalls).toBe(2);
+  });
+});
+
+describe("Think skill catalog changes between turns", () => {
+  it("re-renders the next turn's system prompt once and leaves persisted rows untouched", async () => {
+    const agent = await getAgentByName(
+      env.ThinkSkillChangeTestAgent,
+      `skill-change-${crypto.randomUUID()}`
+    );
+
+    // Turn 1 activates the skill so its v1 body lands in the transcript.
+    expect(
+      (await agent.runTurnForTest("first", { activateSkill: true })).status
+    ).toBe("completed");
+    const rowsAfterTurn1 = await agent.persistedRowsForTest();
+    expect(rowsAfterTurn1.length).toBeGreaterThanOrEqual(2);
+    expect(
+      rowsAfterTurn1.some((row) => row.json.includes("Hitch instructions v1."))
+    ).toBe(true);
+
+    await agent.bumpSkillForTest();
+    expect((await agent.runTurnForTest("second")).status).toBe("completed");
+    expect((await agent.runTurnForTest("third")).status).toBe("completed");
+
+    // Rows persisted before the change are byte-identical afterwards.
+    const rowsAfterTurn3 = await agent.persistedRowsForTest();
+    const byId = new Map(rowsAfterTurn3.map((row) => [row.id, row.json]));
+    for (const row of rowsAfterTurn1) {
+      expect(byId.get(row.id)).toBe(row.json);
+    }
+    expect(rowsAfterTurn3.some((row) => row.json.includes("Knots v2."))).toBe(
+      false
+    );
+
+    // Turn 1 (two model calls) saw v1; turns 2 and 3 saw v2, with an identical
+    // prompt so the cache prefix changed exactly once.
+    const prompts = await agent.systemPromptsForTest();
+    expect(prompts).toHaveLength(4);
+    expect(prompts[0]).toContain("Knots v1.");
+    expect(prompts[0]).not.toContain("Knots v2.");
+    expect(prompts[1]).toBe(prompts[0]);
+    expect(prompts[2]).toContain("Knots v2.");
+    expect(prompts[2]).not.toContain("Knots v1.");
+    expect(prompts[3]).toBe(prompts[2]);
   });
 });

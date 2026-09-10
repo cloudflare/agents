@@ -128,6 +128,10 @@
         "name": "ThinkToolMemoTestAgent"
       },
       {
+        "class_name": "ThinkSkillChangeTestAgent",
+        "name": "ThinkSkillChangeTestAgent"
+      },
+      {
         "class_name": "ThinkExecuteToolAgent",
         "name": "ThinkExecuteToolAgent"
       },
@@ -214,6 +218,7 @@
         "ThinkMessengerRouteTestAgent",
         "ThinkMcpToolMaterializationAgent",
         "ThinkToolMemoTestAgent",
+        "ThinkSkillChangeTestAgent",
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",
         "ThinkFetchToolsTestAgent",

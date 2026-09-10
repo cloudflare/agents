@@ -7,6 +7,7 @@ import { z } from "zod";
 import { action, skills, Think } from "../../think";
 import type { Action, TurnConfig, TurnContext } from "../../think";
 import type { SkillSource } from "agents/skills";
+import type { SessionMessage } from "agents/sessions";
 
 export type ToolMemoSnapshot = {
   getToolsCalls: number;
@@ -161,5 +162,131 @@ export class ThinkToolMemoTestAgent extends Think {
       skillRefreshCalls: this._skillRefreshCalls,
       attempts: [...this._attempts]
     };
+  }
+}
+
+// ── ThinkSkillChangeTestAgent ────────────────────────────────────────
+// A skill source that can be mutated between turns, with the system prompt
+// each model call received and the persisted transcript exposed, so a test
+// can show that a catalog change reaches only the next turn's prompt.
+
+const SKILL_CALL_ID = "skill-call-1";
+
+export class ThinkSkillChangeTestAgent extends Think {
+  override maxSteps = 2;
+  override skillsRefresh: Think["skillsRefresh"] = "every-turn";
+
+  private _skillVersion = 1;
+  private _systemPrompts: string[] = [];
+  private _activateOnNextTurn = false;
+
+  override getModel(): LanguageModel {
+    return {
+      specificationVersion: "v3",
+      provider: "test",
+      modelId: "skill-change-model",
+      supportedUrls: {},
+      doGenerate() {
+        throw new Error("doGenerate not implemented in mock");
+      },
+      doStream: (options: {
+        prompt?: Array<{ role: string; content: unknown }>;
+      }) => {
+        const prompt = options.prompt ?? [];
+        const system = prompt.find((m) => m.role === "system");
+        this._systemPrompts.push(
+          typeof system?.content === "string"
+            ? system.content
+            : JSON.stringify(system?.content ?? null)
+        );
+        const hasToolResult = prompt.some((m) => m.role === "tool");
+        const callSkill = this._activateOnNextTurn && !hasToolResult;
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            if (callSkill) {
+              const input = JSON.stringify({ name: "knot-tying" });
+              controller.enqueue({
+                type: "tool-input-start",
+                id: SKILL_CALL_ID,
+                toolName: "activate_skill"
+              });
+              controller.enqueue({
+                type: "tool-input-delta",
+                id: SKILL_CALL_ID,
+                delta: input
+              });
+              controller.enqueue({ type: "tool-input-end", id: SKILL_CALL_ID });
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId: SKILL_CALL_ID,
+                toolName: "activate_skill",
+                input
+              });
+              controller.enqueue({
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage
+              });
+            } else {
+              controller.enqueue({ type: "text-start", id: "text" });
+              controller.enqueue({
+                type: "text-delta",
+                id: "text",
+                delta: "ok"
+              });
+              controller.enqueue({ type: "text-end", id: "text" });
+              controller.enqueue({ type: "finish", finishReason, usage });
+            }
+            controller.close();
+          }
+        });
+        return Promise.resolve({ stream });
+      }
+    } as LanguageModel;
+  }
+
+  override getSkills(): SkillSource[] {
+    const self = this;
+    const entry = () => ({
+      name: "knot-tying",
+      description: `Knots v${self._skillVersion}.`,
+      body: `Hitch instructions v${self._skillVersion}.`,
+      sourceId: "mutable"
+    });
+    return [
+      {
+        id: "mutable",
+        get fingerprint() {
+          return `v${self._skillVersion}`;
+        },
+        list: async () => [entry()],
+        load: async (name) => (name === "knot-tying" ? entry() : null)
+      }
+    ];
+  }
+
+  bumpSkillForTest(): void {
+    this._skillVersion++;
+  }
+
+  async runTurnForTest(
+    text: string,
+    options: { activateSkill?: boolean } = {}
+  ): Promise<{ status: string }> {
+    this._activateOnNextTurn = options.activateSkill ?? false;
+    const { status } = await this.runTurn({ mode: "wait", input: text });
+    this._activateOnNextTurn = false;
+    return { status };
+  }
+
+  systemPromptsForTest(): string[] {
+    return [...this._systemPrompts];
+  }
+
+  /** Every persisted row on the active path, serialised for byte comparison. */
+  async persistedRowsForTest(): Promise<Array<{ id: string; json: string }>> {
+    const rows: SessionMessage[] = await this.session.getHistory();
+    return rows.map((row) => ({ id: row.id, json: JSON.stringify(row) }));
   }
 }

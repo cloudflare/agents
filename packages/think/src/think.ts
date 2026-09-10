@@ -2832,19 +2832,23 @@ export class Think<
   /**
    * When `getSkills()` sources are re-listed for catalog changes.
    *
-   * - `"every-turn"` (default): refresh at the start of every new turn, as
-   *   before. Sources with their own TTL (`skills.r2` defaults to 60s) still
-   *   only hit the network when that TTL lapses.
+   * - `{ intervalMs }` (default `{ intervalMs: 60_000 }`): refresh at most
+   *   once per interval, measured from the last refresh. Matches the default
+   *   `skills.r2` index TTL, so a bucket change is visible within a minute.
+   * - `"every-turn"`: refresh at the start of every new turn. Sources with
+   *   their own TTL still only hit the network when that TTL lapses.
    * - `"on-start"`: load once in `onStart()` and never refresh again; a new
    *   catalog needs a fresh object (deploy / eviction).
-   * - `{ intervalMs }`: refresh at most once per interval.
    *
    * Continuations of a turn already in flight (auto-continuation after a
    * client tool result, an overflow retry) never refresh: the catalog the
-   * turn started with is the one it finishes with.
+   * turn started with is the one it finishes with. A refresh that changes
+   * the catalog re-renders the system prompt once, for the next turn; rows
+   * already persisted are never rewritten.
    */
-  skillsRefresh: "every-turn" | "on-start" | { intervalMs: number } =
-    "every-turn";
+  skillsRefresh: "every-turn" | "on-start" | { intervalMs: number } = {
+    intervalMs: 60_000
+  };
 
   private _skillRegistry: SkillRegistry | null = null;
   /** Wall clock of the last `_skillRegistry.refresh()` (for `intervalMs`). */
