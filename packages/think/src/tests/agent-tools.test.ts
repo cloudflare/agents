@@ -35,10 +35,7 @@ type ThinkAgentToolTestStub = {
     runId: string,
     reason?: unknown
   ): ReturnType<ThinkTestAgent["cancelAgentToolRun"]>;
-  getAgentToolCleanupMapSizesForTest(): Promise<{
-    lastErrors: number;
-    preTurnAssistantIds: number;
-  }>;
+  awaitAgentToolTurnForTest(): Promise<void>;
   reconcileStaleChildRunViaRecoveryForTest(
     path: "continue" | "retry",
     withAssistantTurn: boolean
@@ -126,15 +123,19 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     maxWindowMs: number;
   }>;
   reattachNotTailableAdapterForTest(): Promise<{
-    reason?: string;
-    result: boolean;
+    reason: string | null;
+    status: string | null;
   }>;
   reattachScriptedAdapterForTest(
     scenario:
       | "rearm-then-complete"
       | "idle-after-progress"
       | "infinite-no-progress-ceiling"
-  ): Promise<{ status?: string; reason?: string; tailAttempts: number }>;
+  ): Promise<{
+    status: string | null;
+    reason: string | null;
+    tailAttempts: number;
+  }>;
   reconcileParallelThinkChildrenForTest(): Promise<{
     stuckStatus: string | null;
     fastStatus: string | null;
@@ -324,19 +325,11 @@ describe("Think agent tools", () => {
       error: "stop"
     });
 
-    // Let the parked turn resume and run its finish path to the end (the
-    // cleanup maps empty only when it has), then re-assert: the finalizer's
-    // guarded UPDATE must NOT clobber the aborted seal.
+    // Let the parked turn resume and run its finish path to the end, then
+    // re-assert: the finalizer's guarded UPDATE must NOT clobber the aborted
+    // seal.
     await agent.releaseBeforeStepForTest();
-    await vi.waitFor(
-      async () => {
-        expect(await agent.getAgentToolCleanupMapSizesForTest()).toEqual({
-          lastErrors: 0,
-          preTurnAssistantIds: 0
-        });
-      },
-      { timeout: 8000, interval: 25 }
-    );
+    await agent.awaitAgentToolTurnForTest();
     await expect(agent.inspectAgentToolRun(runId)).resolves.toMatchObject({
       runId,
       status: "aborted",
@@ -344,19 +337,27 @@ describe("Think agent tools", () => {
     });
   });
 
-  it("cleans in-memory agent-tool bookkeeping after a run completes", async () => {
+  it("seals a run whose turn broadcast an error frame", async () => {
     const agent = await freshAgent();
     const runId = crypto.randomUUID();
 
-    await agent.seedAgentToolLastErrorForTest(runId, "seeded stream error");
+    // Park the turn so the error frame is observed while the run is still in
+    // flight, exactly as an in-band stream failure would be.
+    await agent.holdBeforeStepForTest();
     await agent.startAgentToolRun("cleanup probe", { runId });
+    await vi.waitFor(
+      async () => {
+        expect(await agent.hasEnteredBeforeStepForTest()).toBe(true);
+      },
+      { timeout: 8000, interval: 25 }
+    );
+    await agent.seedAgentToolLastErrorForTest(runId, "seeded stream error");
+    await agent.releaseBeforeStepForTest();
+
     const inspection = await waitForAgentToolRun(agent, runId);
 
     expect(inspection?.status).toBe("error");
-    expect(await agent.getAgentToolCleanupMapSizesForTest()).toEqual({
-      lastErrors: 0,
-      preTurnAssistantIds: 0
-    });
+    expect(inspection?.error).toBe("seeded stream error");
   });
 
   it("runs a Think child through the parent agent-tool API", async () => {
@@ -675,7 +676,7 @@ describe("Think agent tools", () => {
     // re-attach re-armed (a second tail) and collected the real terminal result
     // rather than sealing interrupted.
     expect(status).toBe("completed");
-    expect(reason).toBeUndefined();
+    expect(reason).toBeNull();
     expect(tailAttempts).toBe(2);
   });
 
@@ -687,7 +688,7 @@ describe("Think agent tools", () => {
 
     // Progress then a full idle window is an honest stall: seal `no-progress`
     // after a SINGLE tail (no bonus window, no per-cycle abandoned reader).
-    expect(status).toBeUndefined();
+    expect(status).toBe("interrupted");
     expect(reason).toBe("no-progress");
     expect(tailAttempts).toBe(1);
   });
@@ -704,7 +705,7 @@ describe("Think agent tools", () => {
     // with ZERO tail attempts. Now it tails the silent child and, because the
     // no-progress idle timer is disabled, only the finite hard ceiling ends the
     // wait — sealing `window-exceeded`, never `no-progress`.
-    expect(status).toBeUndefined();
+    expect(status).toBe("interrupted");
     expect(reason).toBe("window-exceeded");
     expect(reason).not.toBe("no-progress");
     expect(tailAttempts).toBe(1);
@@ -713,14 +714,14 @@ describe("Think agent tools", () => {
   it("re-attach returns not-tailable for an adapter without a live-tail (#1630)", async () => {
     const parent = await freshParent();
 
-    // An adapter missing `tailAgentToolRun` cannot be re-attached: the re-attach
-    // returns no terminal result and the typed `not-tailable` cause. (Real RPC
+    // An adapter missing `tailAgentToolRun` cannot be re-attached, so recovery
+    // seals the run `interrupted` with the typed `not-tailable` cause. (Real RPC
     // children always pass the `typeof` guard, so this defensive branch is
     // exercised via a plain in-process adapter — see the seam doc.)
     const reattach = await parent.reattachNotTailableAdapterForTest();
 
     expect(reattach.reason).toBe("not-tailable");
-    expect(reattach.result).toBe(false);
+    expect(reattach.status).toBe("interrupted");
   });
 
   it("honors the public AgentStaticOptions re-attach budgets (#1630)", async () => {

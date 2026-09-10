@@ -10,8 +10,7 @@ import type {
   AgentToolProgress,
   AgentToolProgressSnapshot,
   AgentToolRunPart,
-  AgentToolRunState,
-  AgentToolStoredChunk
+  AgentToolRunState
 } from "../agent-tool-types";
 
 /**
@@ -421,89 +420,3 @@ export type {
   AgentToolRunPart,
   AgentToolRunState
 } from "../agent-tool-types";
-
-/**
- * @internal Host substrate the {@link interceptAgentToolBroadcast} snoop reads,
- * abstracting the divergent per-host run-lookup and response-frame constant.
- */
-export interface AgentToolBroadcastHooks {
-  /** Live tailers per run; iterated to forward each progress chunk. */
-  forwarders: Map<string, Set<(chunk: AgentToolStoredChunk) => void>>;
-  /**
-   * Per-run forwarded-chunk counter; advanced even with no tailer attached.
-   *
-   * This is deliberately a SEPARATE counter from the resumable stream's stored
-   * chunk_index — do NOT try to "simplify" it away by sequencing off the store
-   * position. Not every forwarded frame is durably stored: progress/milestone
-   * frames (`reportProgress`) ride the same `USE_CHAT_RESPONSE` wire type and
-   * are snooped + forwarded here, but persist out-of-band (progress snapshot /
-   * milestone rows), so they have no store position. Sourcing the sequence from
-   * the store would give them a colliding position and the tail's high-water
-   * dedupe (`emit`) would silently drop them, breaking live progress/milestone
-   * delivery to the parent. This counter sequences stored AND non-stored frames
-   * on one monotonic line; the tail realigns it to the stored high-water on each
-   * (re)attach so a replay→live handoff stays gap/duplicate-free.
-   */
-  liveSequences: Map<string, number>;
-  /** Per-run last error body, captured for replay to a late-attaching tailer. */
-  lastErrors: Map<string, string>;
-  /** The host's use-chat-response wire type (`CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE`). */
-  responseType: string;
-  /** Resolve the agent-tool run that owns a turn request id, or null. */
-  runForRequest: (requestId: string) => string | null;
-}
-
-/**
- * Snoop a host's outgoing chat frames while any agent-tool run is in flight and
- * forward the owning run's streamed body to its live tailers (or capture its
- * error), without altering the frame — the caller still broadcasts it (#1575).
- *
- * Shared verbatim by `@cloudflare/ai-chat` and `@cloudflare/think`; the only
- * per-host variance (the response-frame type constant and the run-lookup, whose
- * SQL differs) is supplied via {@link AgentToolBroadcastHooks}. Inspection runs
- * for a run's whole lifecycle (live sequences exist even with no tailer), so
- * error capture never depends on tailer timing. A frame belongs to a run iff it
- * carries that run's turn request id, so concurrent runs can't cross-contaminate
- * each other's progress or error state.
- */
-export function interceptAgentToolBroadcast(
-  msg: string | ArrayBuffer | ArrayBufferView,
-  hooks: AgentToolBroadcastHooks
-): void {
-  if (
-    (hooks.forwarders.size > 0 || hooks.liveSequences.size > 0) &&
-    typeof msg === "string"
-  ) {
-    try {
-      const parsed = JSON.parse(msg) as {
-        type?: unknown;
-        body?: unknown;
-        error?: unknown;
-        id?: unknown;
-      };
-      if (parsed.type === hooks.responseType && typeof parsed.id === "string") {
-        const runId = hooks.runForRequest(parsed.id);
-        if (runId !== null) {
-          if (parsed.error === true && typeof parsed.body === "string") {
-            hooks.lastErrors.set(runId, parsed.body);
-          } else if (
-            typeof parsed.body === "string" &&
-            parsed.body.length > 0
-          ) {
-            // Advance the live sequence even with no tailer attached so a tailer
-            // registering mid-run resumes at the right offset.
-            const sequence = hooks.liveSequences.get(runId) ?? 0;
-            hooks.liveSequences.set(runId, sequence + 1);
-            const chunk: AgentToolStoredChunk = { sequence, body: parsed.body };
-            const forwarders = hooks.forwarders.get(runId);
-            if (forwarders) {
-              for (const forward of forwarders) forward(chunk);
-            }
-          }
-        }
-      }
-    } catch {
-      // Non-chat frames pass through unchanged.
-    }
-  }
-}

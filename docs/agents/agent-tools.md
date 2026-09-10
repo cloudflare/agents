@@ -262,11 +262,20 @@ async onImportDone(run: AgentToolRunInfo, result: AgentToolLifecycleResult) {
 }
 ```
 
+> The parent-side engine behind these methods lives in the `AgentTools`
+> Lifecycle capability, installed on every Agent as `this.agentTools`; it owns
+> the `cf_agent_tool_runs` table and its own schema version. `runAgentTool`,
+> `cancelAgentTool`, `hasAgentToolRun` and `clearAgentToolRuns` are thin
+> facades over it, and the hooks (`onAgentToolStart`, `onAgentToolFinish`,
+> `onProgress`) stay on the Agent.
+
 Key behaviors:
 
 - **Durable completion.** Delivery survives eviction and deploys: a warm fast
-  path delivers with low latency while the isolate is alive, and a
-  self-scheduling reconcile backbone finalizes anything the fast path missed.
+  path delivers with low latency while the isolate is alive, and a reconcile
+  backbone — one self-re-arming Lifecycle job on an escalating 5s/15s/30s/120s
+  cadence, which completes once nothing is outstanding — finalizes anything the
+  fast path missed.
   Delivery is exactly-once on the happy path; under a crash it is at-least-once,
   so `onFinish` handlers must be idempotent.
 - **Give-up vs. finish are independent.** A budget give-up is delivered as
@@ -276,13 +285,35 @@ Key behaviors:
 - **Bounded.** Every detached run has an absolute `maxBudgetMs` ceiling
   (per-run, or the `detachedMaxBudgetMs` static option; default 24h). On expiry
   the parent gives up watching and tears the child down so an abandoned run
-  cannot hold a `maxConcurrentAgentTools` slot forever.
+  cannot hold a concurrency slot forever.
 - **No inherited signal.** A detached run must outlive the spawning turn, so it
   does **not** inherit `options.signal`. Cancel it explicitly:
 
 ```ts
 await this.cancelAgentTool(runId); // idempotent; delivers onFinish "aborted"
 ```
+
+### Bound how many runs a parent owns
+
+Two live fields cap concurrent, non-terminal runs. Both default to `Infinity`
+and are read on every dispatch, so a subclass may reassign them at any time:
+
+```ts
+class Assistant extends Agent<Env> {
+  override maxConcurrentAgentTools = 8; // every run, awaited or detached
+  override maxConcurrentDetachedAgentTools = 2; // background runs only
+}
+```
+
+A detached run counts toward **both** budgets. A dispatch that would exceed
+either fails the same way: a synchronous `error` result naming the cap it hit,
+an `error` run row, `started` + `error` events, and no child spawned.
+
+Cap detached runs separately because they hold their slot for their entire life
+and have no awaiting turn to notice them piling up — without a detached-only cap,
+a leak in background work starves the foreground turns that share the total
+budget. The framework also warns once when 50 detached runs are live at the same
+time.
 
 ### Notify the chat on completion (Think / AIChatAgent)
 
@@ -321,6 +352,57 @@ framework's own reconcile backbone — treat `null` as "not terminal, keep
 watching within budget", never as a terminal failure. Only a non-`null`
 inspection with a terminal `status` (`completed` / `error` / `aborted`)
 finalizes a run.
+
+### Make any Agent a child
+
+`Think` and `AIChatAgent` are children out of the box. Any other `Agent`
+subclass can be driven as an agent tool by installing the `AgentToolsChild`
+capability and binding a small host port that says how to run one turn and
+where its streamed chunks come from:
+
+```ts
+import { Agent, AgentToolsChild, setAgentToolsChildHost } from "agents";
+
+export class Worker extends Agent<Env> {
+  readonly agentToolsChild = new AgentToolsChild();
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.agentToolsChild);
+    setAgentToolsChildHost(this.agentToolsChild, {
+      runTurn: ({ requestId, message, signal }) =>
+        this.runOneTurn(requestId, message, signal)
+      // ... stream store, messages, formatting hooks
+    });
+  }
+
+  // The parent calls these over RPC; forward them to the capability.
+  startAgentToolRun(input: unknown, options: { runId: string }) {
+    return this.agentToolsChild.startAgentToolRun(input, options);
+  }
+  cancelAgentToolRun(runId: string, reason?: unknown) {
+    return this.agentToolsChild.cancelAgentToolRun(runId, reason);
+  }
+  inspectAgentToolRun(runId: string) {
+    return this.agentToolsChild.inspectAgentToolRun(runId);
+  }
+  getAgentToolChunks(runId: string, options?: { afterSequence?: number }) {
+    return this.agentToolsChild.getAgentToolChunks(runId, options);
+  }
+  tailAgentToolRun(
+    runId: string,
+    options?: { afterSequence?: number; signal?: AbortSignal }
+  ) {
+    return this.agentToolsChild.tailAgentToolRun(runId, options);
+  }
+}
+```
+
+The child capability owns `cf_agent_tool_child_runs` and
+`cf_agent_tool_milestones`. Chunk attribution is explicit: wherever the host
+sends a chat response frame to clients, it also calls
+`agentToolsChild.observeChunk(requestId, body)` (or `observeError` for an error
+frame) so live tailers and the durable chunk log stay on one sequence line.
 
 ## Report progress and milestones
 
@@ -488,6 +570,34 @@ for (const message of messages) {
 
 Imperative runs without a parent tool call are available as
 `agentTools.unboundRuns`.
+
+### Cap what a reconnect replays
+
+On every (re)connect the parent replays its retained runs to that client as
+`replay: true` frames. By default that is **every** retained run with **all** of
+its stored chunks, which can be a large burst for a parent that has accumulated
+many runs or long child transcripts. Bound it with the `agentToolReplayOnConnect`
+static option:
+
+```ts
+class Assistant extends Agent<Env> {
+  static options = {
+    agentToolReplayOnConnect: { maxRuns: 20, maxChunksPerRun: 200 }
+  };
+}
+```
+
+- `maxRuns` — replay only the newest N runs by start time. A run that is cut
+  sends no frames at all; it is not part of the replayed timeline.
+- `maxChunksPerRun` — replay only the **last** N stored chunks of each run. The
+  tail is what a reconnecting client needs to render current state, and the
+  dropped chunks still advance the frame sequence, so the frames that are sent
+  carry the same sequence numbers an uncapped replay would use and the hook's
+  live-vs-replay dedupe is unaffected.
+
+Both default to `Infinity` (no cap). Capping the replay never deletes anything —
+the runs and their child facets are still retained, and a client can still drill
+into a cut run. Use `clearAgentToolRuns()` to actually drop runs.
 
 ## Drill in and gate access
 

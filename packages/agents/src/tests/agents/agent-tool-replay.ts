@@ -1,6 +1,15 @@
-import { Agent, callable, type Connection } from "../../index.ts";
+import {
+  Agent,
+  callable,
+  getAgentToolsHost,
+  setAgentToolsHost,
+  type Connection
+} from "../../index.ts";
+import { AGENT_TOOL_MILESTONE_PART } from "../../agent-tool-types.ts";
 import type {
+  AgentToolChildAdapter,
   AgentToolEvent,
+  AgentToolMilestone,
   AgentToolEventMessage,
   AgentToolInterruptedReason,
   AgentToolLifecycleResult,
@@ -21,31 +30,6 @@ type StubRunInput = {
   summary?: string;
 };
 
-/**
- * Private framework internals this fixture drives directly to reproduce the
- * #1630 follow-up bug: the typed interrupted cause (`reason` /
- * `childStillRunning`) must survive a reconnect replay, not just live events.
- * Also used to exercise the detached-run delivery ledger (#1752) directly.
- */
-type AgentToolInternals = {
-  _updateAgentToolTerminal(
-    runId: string,
-    result: RunAgentToolResult,
-    completedAt?: number
-  ): void;
-  _readAgentToolRun(runId: string): unknown;
-  _resultFromAgentToolRow(row: unknown): RunAgentToolResult;
-  _replayAgentToolRuns(connection: Connection): Promise<void>;
-  _deliverDetachedTerminal(
-    runId: string,
-    kind: "finish" | "give_up",
-    result: RunAgentToolResult,
-    options?: { sequence?: number; serialize?: boolean },
-    completedAt?: number
-  ): Promise<void>;
-  _armDetachedBackbone(options?: { resetCadence?: boolean }): Promise<void>;
-};
-
 type DetachedDeliveryLogEntry = {
   hook: "onAgentToolFinish" | "onDetachedDone";
   runId: string;
@@ -58,57 +42,244 @@ type DetachedBackboneSchedule = {
   payload: unknown;
 };
 
+/** What a scripted child adapter should pretend to be doing. */
+type ScriptedChildScenario =
+  /** Non-terminal, and its live tail never produces anything or closes. */
+  | { kind: "running" }
+  /** Cannot be inspected at all (an unreachable / broken child). */
+  | { kind: "inspect-throws" }
+  /** Emits one milestone frame on its live tail, then completes. */
+  | { kind: "milestone-then-complete"; milestone: string }
+  /** Already at a terminal result. */
+  | {
+      kind: "terminal";
+      /** A child only ever reports a HARD terminal about itself. */
+      status: Exclude<AgentToolTerminalStatus, "interrupted">;
+      text?: string;
+    };
+
+/** A scripted child adapter plus what the capability did to it. */
+type ScriptedChild = {
+  readonly adapter: AgentToolChildAdapter;
+  /** Run ids the capability asked the child to cancel (teardown evidence). */
+  readonly cancelled: string[];
+};
+
+/**
+ * A scripted stand-in for a real (RPC) child facet. The parent engine only ever
+ * reaches a child through this adapter shape, so scripting it is how a test
+ * injects a child fault without touching the capability's internals.
+ */
+function scriptedChild(scenario: ScriptedChildScenario): ScriptedChild {
+  const cancelled: string[] = [];
+  const inspection = (runId: string): AgentToolRunInspection => {
+    if (scenario.kind === "milestone-then-complete") {
+      // The tail has already closed by the time the parent inspects.
+      return {
+        runId,
+        status: "completed",
+        startedAt: 0,
+        completedAt: Date.now(),
+        summary: "milestone child"
+      };
+    }
+    if (scenario.kind !== "terminal") {
+      return { runId, status: "running", startedAt: 0 };
+    }
+    return {
+      runId,
+      status: scenario.status,
+      startedAt: 0,
+      completedAt: Date.now(),
+      ...(scenario.status === "completed"
+        ? { summary: scenario.text, output: scenario.text }
+        : { error: scenario.text })
+    };
+  };
+  const adapter: AgentToolChildAdapter = {
+    startAgentToolRun: async (_input, options) => inspection(options.runId),
+    cancelAgentToolRun: async (runId) => {
+      cancelled.push(runId);
+    },
+    inspectAgentToolRun: async (runId) => {
+      if (scenario.kind === "inspect-throws") {
+        throw new Error("scripted child cannot be inspected");
+      }
+      return inspection(runId);
+    },
+    getAgentToolChunks: async () => [],
+    tailAgentToolRun: async () =>
+      new ReadableStream<AgentToolStoredChunk>({
+        start(controller) {
+          if (scenario.kind === "milestone-then-complete") {
+            // The reserved milestone frame a child's `reportProgress` rides.
+            controller.enqueue({
+              sequence: 0,
+              body: JSON.stringify({
+                type: AGENT_TOOL_MILESTONE_PART,
+                data: {
+                  name: scenario.milestone,
+                  sequence: 0,
+                  at: Date.now()
+                }
+              })
+            });
+          }
+          // A still-running child holds its tail open with nothing to send, so
+          // the parent's budgets (not the stream) decide when to stop waiting.
+          if (scenario.kind !== "running") controller.close();
+        }
+      })
+  };
+  return { adapter, cancelled };
+}
+
 export class TestAgentToolReplayAgent extends Agent {
-  private get _agentTool(): AgentToolInternals {
-    return this as unknown as AgentToolInternals;
+  private get _agentTool() {
+    return this.agentTools;
   }
 
   /**
-   * Seed a stranded `interrupted` agent-tool run row through the REAL persist
-   * path (`_updateAgentToolTerminal`) — exactly what parent recovery does when
-   * it gives up re-attaching to a still-running child (#1630). This is the write
-   * side of the round-trip the bug regressed.
+   * Run `body` with the capability's CHILD boundary replaced by a scripted
+   * in-process adapter.
+   *
+   * This is the seam every fault injection below uses: the capability resolves
+   * children through its installed host port, so re-installing that port with a
+   * different `resolveChild` scripts the child without reaching into the
+   * capability's internals. Restores the real port afterwards.
    */
-  @callable()
-  seedInterruptedRunForTest(
-    runId: string,
-    reason?: AgentToolInterruptedReason,
-    childStillRunning?: boolean
-  ): void {
+  private async _withScriptedChild<T>(
+    scenario: ScriptedChildScenario,
+    body: (script: ScriptedChild) => Promise<T>
+  ): Promise<T> {
+    const host = getAgentToolsHost(this.agentTools);
+    if (!host) throw new Error("agent-tool host bindings are not installed");
+    const script = scriptedChild(scenario);
+    setAgentToolsHost(this.agentTools, {
+      ...host,
+      resolveChild: async () => script.adapter
+    });
+    try {
+      return await body(script);
+    } finally {
+      setAgentToolsHost(this.agentTools, host);
+    }
+  }
+
+  /** Insert a `running` parent row the recovery paths can pick up. */
+  private _insertRunningRunForTest(runId: string): void {
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, status, display_order, started_at
       ) VALUES (
-        ${runId}, ${`call-${runId}`}, 'Child', 'starting', 0, ${Date.now()}
+        ${runId}, ${`call-${runId}`}, 'Child', 'running', 0, ${Date.now()}
       )
     `;
-    this._agentTool._updateAgentToolTerminal(runId, {
-      runId,
-      agentType: "Child",
-      status: "interrupted",
-      error: "parent recovery gave up re-attaching to the child",
-      ...(reason !== undefined ? { reason } : {}),
-      ...(childStillRunning !== undefined ? { childStillRunning } : {})
-    });
   }
 
   /**
-   * Repair an `interrupted` row to `completed`, exactly as a later re-attach
-   * does once the child self-heals. Asserts the persisted cause is CLEARED.
+   * Seal a stranded `interrupted` run row through the REAL recovery path — no
+   * test-only write into the capability's table. A `running` row is reconciled
+   * against a scripted child that never reaches terminal, which is exactly what
+   * parent recovery does when it gives up on a still-running child (#1630), and
+   * is the write side of the round-trip the bug regressed.
+   *
+   * - `no-progress`: the re-attach budget is spent without waiting (the child is
+   *   non-terminal), so the seal is SOFT and the child is left running.
+   * - `window-exceeded`: the hard wall-clock ceiling ends the wait on a silent
+   *   child, which also tears it down (`childStillRunning: false`).
+   * - `inspect-failed`: the child cannot be inspected at all, so the seal
+   *   records a reason with no knowledge of the child (no `childStillRunning`).
    */
-  completeRunForTest(runId: string, summary: string): void {
-    this._agentTool._updateAgentToolTerminal(runId, {
-      runId,
-      agentType: "Child",
-      status: "completed",
-      summary
-    });
+  @callable()
+  async sealInterruptedRunForTest(
+    runId: string,
+    cause: "no-progress" | "window-exceeded" | "inspect-failed"
+  ): Promise<void> {
+    this._insertRunningRunForTest(runId);
+    await this._withScriptedChild(
+      cause === "inspect-failed"
+        ? { kind: "inspect-throws" }
+        : { kind: "running" },
+      async () => {
+        await this._agentTool.reconcile({
+          runIds: [runId],
+          childInspectionTimeoutMs: 50,
+          // `no-progress` spends the budget without tailing; `window-exceeded`
+          // tails the silent child until the finite ceiling fires.
+          reattachTimeoutMs: cause === "window-exceeded" ? 5_000 : 0,
+          reattachMaxWindowMs:
+            cause === "window-exceeded" ? 150 : Number.POSITIVE_INFINITY
+        });
+      }
+    );
   }
 
-  /** Round-trip: re-read the stored row back into a result object. */
-  readPersistedResultForTest(runId: string): RunAgentToolResult | null {
-    const row = this._agentTool._readAgentToolRun(runId);
-    return row ? this._agentTool._resultFromAgentToolRow(row) : null;
+  /**
+   * Seed an `interrupted` row with NO persisted cause — the shape a row
+   * stranded before the cause columns existed has on disk.
+   */
+  @callable()
+  seedLegacyInterruptedRunForTest(runId: string): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, error_message,
+        display_order, started_at, completed_at
+      ) VALUES (
+        ${runId}, ${`call-${runId}`}, 'Child', 'interrupted',
+        'Agent tool run was still running and did not reach a terminal result.',
+        0, ${Date.now()}, ${Date.now()}
+      )
+    `;
+  }
+
+  /**
+   * Repair an `interrupted` row to `completed` the way a re-issue does once the
+   * child self-heals: re-dispatch the same runId and let the re-attach collect
+   * the child's real terminal result.
+   */
+  async repairRunViaReissueForTest(
+    runId: string,
+    summary: string
+  ): Promise<RunAgentToolResult> {
+    return this._withScriptedChild(
+      { kind: "terminal", status: "completed", text: summary },
+      async () =>
+        this._agentTool.run<StubRunInput>(TestAgentToolStubChild, {
+          runId,
+          input: { chunkBodies: [] }
+        })
+    );
+  }
+
+  /** The persisted cause columns, read straight from the capability's table. */
+  readPersistedRunRowForTest(runId: string): {
+    status: string;
+    summary: string | null;
+    error: string | null;
+    reason: string | null;
+    childStillRunning: number | null;
+  } | null {
+    const rows = this.sql<{
+      status: string;
+      summary: string | null;
+      error_message: string | null;
+      interrupted_reason: string | null;
+      child_still_running: number | null;
+    }>`
+      SELECT status, summary, error_message, interrupted_reason,
+             child_still_running
+      FROM cf_agent_tool_runs WHERE run_id = ${runId} LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      status: row.status,
+      summary: row.summary,
+      error: row.error_message,
+      reason: row.interrupted_reason,
+      childStillRunning: row.child_still_running
+    };
   }
 
   /**
@@ -132,7 +303,7 @@ export class TestAgentToolReplayAgent extends Agent {
         }
       }
     } as unknown as Connection;
-    await this._agentTool._replayAgentToolRuns(connection);
+    await this._agentTool.replayToConnection(connection);
     const terminalKinds = new Set([
       "finished",
       "error",
@@ -244,10 +415,11 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   readRunNotifySourceForTest(runId: string): string | null {
-    const row = this._agentTool._readAgentToolRun(runId) as {
-      detached_notify_source?: string | null;
-    } | null;
-    return row?.detached_notify_source ?? null;
+    const rows = this.sql<{ detached_notify_source: string | null }>`
+      SELECT detached_notify_source FROM cf_agent_tool_runs
+      WHERE run_id = ${runId} LIMIT 1
+    `;
+    return rows[0]?.detached_notify_source ?? null;
   }
 
   expireDetachedFinishClaimForTest(runId: string): void {
@@ -309,54 +481,64 @@ export class TestAgentToolReplayAgent extends Agent {
   /**
    * Arm the detached backbone `count` times concurrently (the fan-out a turn
    * dispatching several detached runs at once produces) and return the live
-   * backbone schedules. The mutex must collapse them to exactly one.
+   * backbone schedules. The fixed job id must collapse them to exactly one.
    */
   async armDetachedBackboneConcurrentlyForTest(
     count: number
   ): Promise<DetachedBackboneSchedule[]> {
     await Promise.all(
       Array.from({ length: count }, () =>
-        this._agentTool._armDetachedBackbone({ resetCadence: true })
+        this._agentTool.armDetachedBackbone({ resetCadence: true })
       )
     );
     return this.detachedBackboneSchedulesForTest();
   }
 
   async detachedReconcileTickForTest(cadenceIndex?: number): Promise<void> {
-    await this._cfDetachedReconcileTick(
+    await this._agentTool.reconcileTick(
       cadenceIndex !== undefined ? { cadenceIndex } : undefined
     );
   }
 
+  /**
+   * The pending backbone job projected into the shape the cadence assertions
+   * use: how far out it is armed, and the cadence position it carries.
+   */
   async detachedBackboneSchedulesForTest(): Promise<
     DetachedBackboneSchedule[]
   > {
-    const schedules = await this.listSchedules();
-    return schedules
-      .filter((schedule) => schedule.callback === "_cfDetachedReconcileTick")
-      .map((schedule) => ({
-        delayInSeconds:
-          "delayInSeconds" in schedule ? schedule.delayInSeconds : undefined,
-        payload: schedule.payload
-      }));
+    const pending = this._agentTool.pendingDetachedReconcile();
+    if (!pending) return [];
+    return [
+      {
+        delayInSeconds: Math.round((pending.dueAt - Date.now()) / 1000),
+        payload: { cadenceIndex: pending.cadenceIndex }
+      }
+    ];
   }
 
+  /**
+   * Deliver a detached run's real terminal the way production does: a child that
+   * now inspects terminal, collected by a backbone reconcile tick. No direct
+   * call into the delivery funnel — the tick is the public operation, the
+   * scripted child is the boundary.
+   */
   async deliverFinishForTest(
     runId: string,
-    status: AgentToolTerminalStatus,
+    status: Exclude<AgentToolTerminalStatus, "interrupted">,
     text: string
   ): Promise<void> {
-    await this._agentTool._deliverDetachedTerminal(runId, "finish", {
-      runId,
-      agentType: "Child",
-      status,
-      ...(status === "completed" ? { summary: text } : { error: text })
-    });
+    await this._withScriptedChild(
+      { kind: "terminal", status, text },
+      async () => {
+        await this._agentTool.reconcileTick();
+      }
+    );
   }
 
   async deliverFinishCatchingForTest(
     runId: string,
-    status: AgentToolTerminalStatus,
+    status: Exclude<AgentToolTerminalStatus, "interrupted">,
     text: string
   ): Promise<string | null> {
     try {
@@ -367,22 +549,107 @@ export class TestAgentToolReplayAgent extends Agent {
     }
   }
 
+  /**
+   * Drive a budget give-up: expire the seeded run's absolute ceiling, then let a
+   * backbone tick observe a still-running child past its budget.
+   */
   async deliverGiveUpForTest(runId: string): Promise<void> {
-    await this._agentTool._deliverDetachedTerminal(runId, "give_up", {
-      runId,
-      agentType: "Child",
-      status: "interrupted",
-      error: "detached run exceeded its budget before completing",
-      reason: "budget-exceeded",
-      childStillRunning: true
+    this.sql`
+      UPDATE cf_agent_tool_runs
+      SET detached_max_budget_at = 1
+      WHERE run_id = ${runId}
+    `;
+    await this._withScriptedChild({ kind: "running" }, async () => {
+      await this._agentTool.reconcileTick();
     });
   }
 
+  /** Milestone deliveries the framework routed to the chat seam, in order. */
+  milestoneDeliveriesForTest: Array<{
+    runId: string;
+    name: string;
+    mode: "react" | "narrate";
+  }> = [];
+
+  protected override async _deliverDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone,
+    mode: "react" | "narrate"
+  ): Promise<void> {
+    this.milestoneDeliveriesForTest.push({
+      runId: run.runId,
+      name: milestone.name,
+      mode
+    });
+  }
+
+  /**
+   * Dispatch a DETACHED run whose child reports a configured milestone on its
+   * live tail, and return the deliveries observed WITHOUT any backbone tick —
+   * the warm path must notify on its own (the parent row it reads has to carry
+   * the run's `onMilestones` configuration).
+   */
+  async runDetachedMilestoneOnWarmTailForTest(runId: string): Promise<{
+    deliveries: Array<{
+      runId: string;
+      name: string;
+      mode: "react" | "narrate";
+    }>;
+    backboneTicksRun: number;
+  }> {
+    this.milestoneDeliveriesForTest = [];
+    await this._withScriptedChild(
+      { kind: "milestone-then-complete", milestone: "indexed" },
+      async () => {
+        await this.runAgentTool<StubRunInput>(TestAgentToolStubChild, {
+          runId,
+          input: { chunkBodies: [] },
+          detached: { onMilestones: { names: ["indexed"], mode: "narrate" } }
+        });
+        // The warm fast path tails the child on `waitUntil`; wait for it rather
+        // than running a reconcile tick, which is the other delivery path.
+        for (let attempt = 0; attempt < 100; attempt++) {
+          if (this.milestoneDeliveriesForTest.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+    );
+    return {
+      deliveries: this.milestoneDeliveriesForTest,
+      backboneTicksRun: 0
+    };
+  }
+
+  /** Set the live detached-run cap read through the host port. */
+  setMaxConcurrentDetachedAgentToolsForTest(limit: number): void {
+    this.maxConcurrentDetachedAgentTools = limit;
+  }
+
+  /**
+   * Dispatch one run against the deterministic stub child and return its
+   * handle — used to prove the detached cap rejects a dispatch exactly like the
+   * total cap does.
+   */
+  async dispatchRunForTest(
+    runId: string,
+    mode: "awaited" | "detached"
+  ): Promise<{ status: string; error?: string }> {
+    const result = await this.runAgentTool<StubRunInput>(
+      TestAgentToolStubChild,
+      {
+        runId,
+        input: { chunkBodies: [] },
+        ...(mode === "detached" ? { detached: true as const } : {})
+      }
+    );
+    return {
+      status: result.status,
+      ...(result.error !== undefined ? { error: result.error } : {})
+    };
+  }
+
   readRunStatusForTest(runId: string): string | null {
-    const row = this._agentTool._readAgentToolRun(runId) as {
-      status: string;
-    } | null;
-    return row ? row.status : null;
+    return this.readPersistedRunRowForTest(runId)?.status ?? null;
   }
 
   /**
