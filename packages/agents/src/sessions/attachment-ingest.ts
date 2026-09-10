@@ -143,6 +143,14 @@ export interface ExtractionResult {
   message: SessionMessage;
   /** Payloads to write, deduplicated by address, in encounter order. */
   attachments: PendingAttachment[];
+  /**
+   * Every address the stored message points at: the payloads extracted on
+   * this pass plus pointers it already carried. A message read back without
+   * its payloads inlined keeps its pointers, and writing it again must keep
+   * the references that give those payloads their lifetime — so references
+   * follow what the row SAYS, not what this pass happened to extract.
+   */
+  references: string[];
 }
 
 /**
@@ -154,6 +162,7 @@ export interface ExtractionResult {
 export function extractAttachments(message: SessionMessage): ExtractionResult {
   const attachments: PendingAttachment[] = [];
   const seen = new Set<string>();
+  const references = new Set<string>();
 
   const walk = (value: unknown, depth: number): unknown => {
     if (depth > MAX_WALK_DEPTH || value === null || typeof value !== "object") {
@@ -176,6 +185,7 @@ export function extractAttachments(message: SessionMessage): ExtractionResult {
       // Hashing is pure CPU, so the address is known here and the write
       // transaction never has to hash anything.
       const hash = hashPayload(media.bytes);
+      references.add(hash);
       if (!seen.has(hash)) {
         seen.add(hash);
         attachments.push({
@@ -193,6 +203,15 @@ export function extractAttachments(message: SessionMessage): ExtractionResult {
       };
     }
 
+    // A pointer left by an earlier extraction is not media to store, but it
+    // is a reference to keep.
+    const pointed =
+      parseAttachmentUrl(record.url) ?? parseAttachmentUrl(record.data);
+    if (pointed) {
+      references.add(pointed);
+      return value;
+    }
+
     let changed = false;
     const next: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(record)) {
@@ -203,10 +222,13 @@ export function extractAttachments(message: SessionMessage): ExtractionResult {
     return changed ? next : value;
   };
 
-  if (message.parts.length === 0) return { message, attachments };
+  if (message.parts.length === 0) {
+    return { message, attachments, references: [] };
+  }
   const parts = walk(message.parts, 0) as SessionMessagePart[];
-  if (parts === message.parts) return { message, attachments };
-  return { message: { ...message, parts }, attachments };
+  const result = { attachments, references: [...references] };
+  if (parts === message.parts) return { message, ...result };
+  return { message: { ...message, parts }, ...result };
 }
 
 /**

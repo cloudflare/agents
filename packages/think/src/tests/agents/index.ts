@@ -30,6 +30,8 @@ export {
   ThinkMediaEvictionAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
+  ThinkTailMediaHydrationAgent,
+  ThinkFullMediaHydrationAgent,
   ThinkLegacySessionApiAgent
 } from "./think-session";
 export { ThinkFetchToolsTestAgent } from "./fetch-tools";

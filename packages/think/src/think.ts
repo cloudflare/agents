@@ -292,6 +292,15 @@ import {
 const MODEL_RECENT_WINDOW = 4;
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 
+/** Media hydration policy (see `Think.mediaHydration`). */
+export interface MediaHydrationConfig {
+  /**
+   * Newest messages on the active path whose media is held in memory with
+   * its bytes. Clamped to at least the model's recent window (4).
+   */
+  keepRecentMessages: number;
+}
+
 /** Whether a workspace can receive raw bytes, which skills projection needs. */
 function hasWriteFileBytes(
   workspace: WorkspaceLike
@@ -316,6 +325,7 @@ import {
   type MediaEvictionConfig,
   hasEvictableMedia
 } from "./media-eviction";
+import { withholdUnhydratedMedia } from "./media-hydration";
 import { createWorkspaceTools } from "./tools/workspace";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
@@ -2894,6 +2904,44 @@ export class Think<
   mediaEviction: MediaEvictionConfig | boolean = true;
 
   /**
+   * How much of the transcript's media is held in memory with its bytes.
+   *
+   * Sessions stores a message's media out of the row and puts it back on
+   * read. Think asks for that only on the newest `keepRecentMessages`
+   * messages of the active path: those are the ones the model replays at
+   * full fidelity, and a payload older than that would be a copy the isolate
+   * holds for its lifetime, serializes to every client on every broadcast,
+   * and walks on every turn without the model needing it. Older messages keep
+   * their `attachment:sha256:` pointers in the live cache and reach the model
+   * as a short marker; durable storage is untouched and a full read still
+   * returns the bytes.
+   *
+   * The cost is visible to clients: a message older than the window is sent
+   * with its pointer rather than its bytes, so a client cannot render that
+   * image from the transcript alone. `"all"` restores the previous behavior
+   * and hydrates every message in the window at full size.
+   *
+   * `keepRecentMessages` is clamped to at least the recent window the model
+   * replays at full fidelity (4 messages).
+   *
+   * @default { keepRecentMessages: 4 }
+   */
+  mediaHydration: MediaHydrationConfig | "all" = {
+    keepRecentMessages: MODEL_RECENT_WINDOW
+  };
+
+  /** The Sessions read policy `mediaHydration` resolves to. */
+  private _inlineAttachmentsPolicy(): "all" | { newest: number } {
+    if (this.mediaHydration === "all") return "all";
+    return {
+      newest: Math.max(
+        this.mediaHydration.keepRecentMessages,
+        MODEL_RECENT_WINDOW
+      )
+    };
+  }
+
+  /**
    * Durable chat recovery configuration. Every chat turn runs in `runFiber`,
    * enabling `onChatRecovery` and `this.stash()` during streaming. Assign an
    * object to tune recovery budgets and terminal behavior.
@@ -3544,6 +3592,9 @@ export class Think<
   private _agedRowsHiddenFromCache(): boolean {
     return (
       this._lastHydration?.truncated === true ||
+      // Aged rows hold pointers, not payloads, so the cache cannot say
+      // whether the stored bytes are worth evicting.
+      this.mediaHydration !== "all" ||
       this._cachedMessages.some((message) =>
         isCompactionMessage(message as SessionMessage)
       )
@@ -3842,7 +3893,9 @@ export class Think<
       return full;
     }
 
-    const recent = await this.session.getRecentHistory(budget);
+    const recent = await this.session.getRecentHistory(budget, {
+      inlineAttachments: this._inlineAttachmentsPolicy()
+    });
     this._lastHydration = {
       truncated: recent.truncated,
       totalContentBytes: recent.totalContentBytes,
@@ -5982,14 +6035,18 @@ export class Think<
    * and the proactive context guard so a mid-turn recompaction rebuilds the
    * head through the exact same pipeline.
    */
-  private async _assembleModelMessages(
+  protected async _assembleModelMessages(
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
     const history = await this._repairTranscriptForProvider(this.messages);
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
-    const truncated = truncateOlderMessages(providerSafeHistory) as UIMessage[];
+    // Media outside the hydrated window is a pointer the provider cannot
+    // fetch; it goes to the model as a marker (`mediaHydration`).
+    const truncated = (
+      truncateOlderMessages(providerSafeHistory) as UIMessage[]
+    ).map(withholdUnhydratedMedia);
     // `_repairTranscriptForProvider` above already heals orphan tool calls
     // (flipping them to errored results, preserving the record). This is the
     // last-line backstop: if any incomplete tool call still slips through

@@ -24,6 +24,7 @@ import {
 } from "./tokens";
 import type {
   HistoryReadOptions,
+  RecentHistoryReadOptions,
   RecentHistoryResult,
   SearchResult,
   SessionChangeEvent,
@@ -553,7 +554,8 @@ export class SessionsCore {
    */
   #contentByStats(
     sessionId: string,
-    rows: readonly PathRow[]
+    rows: readonly PathRow[],
+    inlined?: ReadonlySet<string>
   ): Map<string, SessionMessage> {
     const result = new Map<string, SessionMessage>();
     if (rows.length === 0) return result;
@@ -576,7 +578,11 @@ export class SessionsCore {
           ? row.content
           : row.content + (continued.get(row.id) ?? "")
       );
-      if (parsed) result.set(row.id, this.#inline(parsed));
+      if (!parsed) continue;
+      result.set(
+        row.id,
+        inlined && !inlined.has(row.id) ? parsed : this.#inline(parsed)
+      );
     }
     return result;
   }
@@ -595,7 +601,8 @@ export class SessionsCore {
     stats: readonly PathRow[],
     signal?: AbortSignal,
     newestFirst = false,
-    plannedSpans?: readonly OverlaySpan[]
+    plannedSpans?: readonly OverlaySpan[],
+    inlined?: ReadonlySet<string>
   ): AsyncGenerator<SessionMessage, void, undefined> {
     const spans =
       plannedSpans ??
@@ -635,7 +642,7 @@ export class SessionsCore {
         ? NEWEST_FIRST_WINDOW_ROWS
         : HISTORY_CONTENT_CHUNK_SIZE;
       for (const chunk of this.#boundedStatsChunks(rows, windowRows)) {
-        const content = this.#contentByStats(sessionId, chunk);
+        const content = this.#contentByStats(sessionId, chunk, inlined);
         for (const row of chunk) {
           const parsed = content.get(row.id);
           if (parsed) yield parsed;
@@ -779,7 +786,8 @@ export class SessionsCore {
   async getRecentHistory(
     sessionId: string,
     maxContentBytes: number,
-    leafId?: string | null
+    leafId?: string | null,
+    inlineAttachments: RecentHistoryReadOptions["inlineAttachments"] = "all"
   ): Promise<RecentHistoryResult> {
     const stats = this.pathRowStats(sessionId, leafId);
     if (stats.length === 0) {
@@ -795,10 +803,25 @@ export class SessionsCore {
       used += next;
     }
 
+    // Payloads come back inline only for the newest rows the policy names;
+    // older rows keep their pointers, and their bytes are never read.
+    const window = stats.slice(start);
+    const inlined =
+      inlineAttachments === "all"
+        ? undefined
+        : new Set(
+            window
+              .slice(Math.max(0, window.length - inlineAttachments.newest))
+              .map((row) => row.id)
+          );
     const messages: SessionMessage[] = [];
     for await (const message of this.#streamStats(
       sessionId,
-      stats.slice(start)
+      window,
+      undefined,
+      false,
+      undefined,
+      inlined
     )) {
       messages.push(message);
     }
@@ -940,7 +963,11 @@ export class SessionsCore {
     // Inline media leaves the message before it is serialized, so the row
     // holds a pointer and never the payload. Addresses are computed here, out
     // of the transaction; the transaction only writes.
-    const { message: staged, attachments } = extractAttachments(message);
+    const {
+      message: staged,
+      attachments,
+      references
+    } = extractAttachments(message);
     const slices = splitContent(JSON.stringify(staged));
     const seq = tail.nextSeq;
     this.io.transaction(() => {
@@ -964,11 +991,7 @@ export class SessionsCore {
         ]
       );
       this.#writeContinuations(sessionId, message.id, slices);
-      this.#attachments.addRefs(
-        sessionId,
-        message.id,
-        attachments.map((attachment) => attachment.hash)
-      );
+      this.#attachments.addRefs(sessionId, message.id, references);
       this.#indexFts(sessionId, staged, false);
     });
 
@@ -1024,7 +1047,11 @@ export class SessionsCore {
           (this.#continuations(sessionId, [message.id]).get(message.id) ?? "");
     // Compare in stored form: a re-sent identical image extracts to the same
     // address, so an unchanged update still writes nothing.
-    const { message: staged, attachments } = extractAttachments(message);
+    const {
+      message: staged,
+      attachments,
+      references
+    } = extractAttachments(message);
     const json = JSON.stringify(staged);
     if (oldContent === json) return "unchanged";
 
@@ -1058,11 +1085,7 @@ export class SessionsCore {
       this.#writeContinuations(sessionId, message.id, slices);
       // Payloads are stored before references move, so a hash this message
       // still uses is never momentarily unreferenced and collected.
-      this.#attachments.replaceRefs(
-        sessionId,
-        message.id,
-        attachments.map((attachment) => attachment.hash)
-      );
+      this.#attachments.replaceRefs(sessionId, message.id, references);
       this.#indexFts(sessionId, staged, true);
     });
     const memo = this.#pathTokens.get(sessionId);
@@ -1293,7 +1316,11 @@ export class SessionsCore {
     message: SessionMessage,
     options: { parentId: string | null; createdAt: number }
   ): boolean {
-    const { message: staged, attachments } = extractAttachments(message);
+    const {
+      message: staged,
+      attachments,
+      references
+    } = extractAttachments(message);
     const slices = splitContent(JSON.stringify(staged));
     const tail = this.#tail(sessionId);
     let inserted = 0;
@@ -1319,11 +1346,7 @@ export class SessionsCore {
       );
       if (inserted === 0) return;
       this.#writeContinuations(sessionId, message.id, slices);
-      this.#attachments.addRefs(
-        sessionId,
-        message.id,
-        attachments.map((attachment) => attachment.hash)
-      );
+      this.#attachments.addRefs(sessionId, message.id, references);
       this.#indexFts(sessionId, staged, false);
     });
     if (inserted === 0) return false;

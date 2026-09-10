@@ -19,6 +19,7 @@ export type {
   AppendResult,
   HistoryBatchReadOptions,
   HistoryReadOptions,
+  RecentHistoryReadOptions,
   RecentHistoryResult,
   SearchResult,
   SessionChangeEvent,

@@ -17,6 +17,7 @@ import type {
   AppendResult,
   HistoryBatchReadOptions,
   HistoryReadOptions,
+  RecentHistoryReadOptions,
   RecentHistoryResult,
   SearchResult,
   SessionMessage,
@@ -138,13 +139,14 @@ export class Session {
    */
   async getRecentHistory(
     maxContentBytes: number,
-    options: Pick<HistoryReadOptions, "leafId"> = {}
+    options: RecentHistoryReadOptions = {}
   ): Promise<RecentHistoryResult> {
     await this.#ready();
     return this.#core.getRecentHistory(
       this.sessionId,
       maxContentBytes,
-      options.leafId
+      options.leafId,
+      options.inlineAttachments
     );
   }
 

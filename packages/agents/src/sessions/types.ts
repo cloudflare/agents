@@ -139,6 +139,24 @@ export interface HistoryReadOptions {
   newestFirst?: boolean;
 }
 
+/**
+ * Options accepted by `getRecentHistory()`.
+ *
+ * `inlineAttachments` is policy only: it decides how many of the newest
+ * messages in the window get their attachment payloads put back inline.
+ * Older messages keep the stored pointer form (`attachment:sha256:<hash>` in
+ * the field that held the payload). A pointer is a truthful, re-writable
+ * record: writing such a message back keeps its references, so a host can
+ * hold pointer-form messages in memory and re-upsert them safely. Default
+ * `"all"`, which reads back exactly what was written.
+ */
+export interface RecentHistoryReadOptions extends Pick<
+  HistoryReadOptions,
+  "leafId"
+> {
+  inlineAttachments?: "all" | { newest: number };
+}
+
 /** Options accepted by batched history reads. */
 export interface HistoryBatchReadOptions extends HistoryReadOptions {
   /** Maximum messages per yielded batch. Default 50. */

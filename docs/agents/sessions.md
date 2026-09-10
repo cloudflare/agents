@@ -290,6 +290,16 @@ What you get is a message row that stays a few hundred bytes however large the p
 
 That budget is a hard ceiling with no message-count floor beneath it. `getRecentHistory()` returns the longest recent suffix that fits, and always at least the newest message; a window of unusually large messages is simply shorter. A floor that admitted rows regardless of size would defeat the bound it sits under, which is why there is no longer a `minRecentMessages` argument.
 
+A reader that does not need every payload can ask for fewer. `inlineAttachments` names how many of the newest messages in the window get their bytes put back; the rest keep the stored pointer form, `attachment:sha256:<hash>` in the field that held the payload, and their bytes are never read:
+
+```ts
+const recent = await session.getRecentHistory(32 * 1024 * 1024, {
+  inlineAttachments: { newest: 4 }
+});
+```
+
+A pointer is safe to hold and to write back. `updateMessage()`, `appendMessage()` and `importMessage()` keep the reference a pointer names, so a message read this way can be patched and stored again without collecting the bytes it points at; the next full read resolves it. The default, `"all"`, reads back exactly what was written.
+
 ## Full-text search
 
 ```ts

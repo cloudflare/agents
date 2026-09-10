@@ -220,6 +220,96 @@ describe("Sessions attachments", () => {
     });
   });
 
+  it("inlines payloads only for the newest rows the policy names", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      const urls: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        urls.push(dataUrl("image/png", 100_000, String(i)));
+        await session.appendMessage(fileMessage(`m${i}`, urls[i], "image/png"));
+      }
+
+      const all = await session.getRecentHistory(64 * 1024 * 1024);
+      const tail = await session.getRecentHistory(64 * 1024 * 1024, {
+        inlineAttachments: { newest: 2 }
+      });
+      expect(tail.messages.map((m) => m.id)).toEqual(
+        all.messages.map((m) => m.id)
+      );
+      expect(tail.truncated).toBe(false);
+
+      // The newest two read back verbatim; the rest keep their pointers,
+      // with every other field of the part intact.
+      const fileOf = (message: SessionMessage) =>
+        message.parts[1] as {
+          url: string;
+          mediaType: string;
+          filename: string;
+        };
+      expect(fileOf(tail.messages[5]).url).toBe(urls[5]);
+      expect(fileOf(tail.messages[4]).url).toBe(urls[4]);
+      for (const message of tail.messages.slice(0, 4)) {
+        const part = fileOf(message);
+        expect(part.url).toMatch(/^attachment:sha256:[0-9a-f]{64}$/);
+        expect(part.mediaType).toBe("image/png");
+        expect(part.filename).toBe("pic.png");
+      }
+
+      // What stays resident shrinks by the media share of the older rows.
+      const size = (messages: SessionMessage[]) =>
+        messages.reduce((sum, m) => sum + JSON.stringify(m).length, 0);
+      expect(size(all.messages)).toBeGreaterThan(6 * 130_000);
+      expect(size(tail.messages)).toBeLessThan(2 * 140_000 + 6 * 1_000);
+    });
+  });
+
+  it("keeps a pointer's reference when the message is written back", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      const url = dataUrl("image/png", 80_000);
+      await session.appendMessage(fileMessage("m1", url, "image/png"));
+      await session.appendMessage({
+        id: "m2",
+        role: "assistant",
+        parts: [{ type: "text", text: "nice picture" }]
+      });
+
+      const { messages } = await session.getRecentHistory(64 * 1024 * 1024, {
+        inlineAttachments: { newest: 1 }
+      });
+      const pointer = messages[0];
+      expect((pointer.parts[1] as { url: string }).url).toMatch(/^attachment:/);
+
+      // A host that holds the pointer form and patches the message — a tool
+      // update, a metadata stamp — writes the pointer back. The reference
+      // must survive, or the payload is collected under a live pointer.
+      await session.updateMessage({
+        ...pointer,
+        parts: [
+          { type: "text", text: "see attached (edited)" },
+          pointer.parts[1]
+        ]
+      });
+      expect(instance.attachmentRecords()).toHaveLength(1);
+      expect(instance.attachmentRefCount()).toBe(1);
+      const [full] = await session.getHistory();
+      expect((full.parts[1] as { url: string }).url).toBe(url);
+
+      // A copy under a new id (a regenerate or branch that re-appends cached
+      // messages) takes its own reference, so deleting the original does
+      // not take the bytes with it.
+      await session.appendMessage({ ...pointer, id: "m3" });
+      expect(instance.attachmentRefCount()).toBe(2);
+      await session.deleteMessages(["m1"]);
+      expect(instance.attachmentRecords()).toHaveLength(1);
+      const copy = await session.getMessage("m3");
+      expect(copy).not.toBeNull();
+      expect((copy!.parts[1] as { url: string }).url).toBe(url);
+    });
+  });
+
   it("returns null for an update whose target is gone and stores nothing", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

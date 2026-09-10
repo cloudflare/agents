@@ -45,6 +45,8 @@ export {
   ThinkMediaEvictionAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
+  ThinkTailMediaHydrationAgent,
+  ThinkFullMediaHydrationAgent,
   ThinkLegacySessionApiAgent
 } from "./agents";
 
@@ -86,6 +88,8 @@ import type {
   ThinkMediaEvictionAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
+  ThinkTailMediaHydrationAgent,
+  ThinkFullMediaHydrationAgent,
   ThinkLegacySessionApiAgent
 } from "./agents";
 
@@ -231,6 +235,8 @@ export type Env = {
   ThinkMediaEvictionAgent: DurableObjectNamespace<ThinkMediaEvictionAgent>;
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   ThinkPointerHydrationAgent: DurableObjectNamespace<ThinkPointerHydrationAgent>;
+  ThinkTailMediaHydrationAgent: DurableObjectNamespace<ThinkTailMediaHydrationAgent>;
+  ThinkFullMediaHydrationAgent: DurableObjectNamespace<ThinkFullMediaHydrationAgent>;
   ThinkLegacySessionApiAgent: DurableObjectNamespace<ThinkLegacySessionApiAgent>;
   BrowserToolsHost: DurableObjectNamespace<BrowserToolsHost>;
   LOADER: WorkerLoader;

@@ -29,6 +29,7 @@ import type {
   CompactResult,
   HistoryBatchReadOptions,
   HistoryReadOptions,
+  RecentHistoryReadOptions,
   RecentHistoryResult,
   SearchResult,
   Session,
@@ -185,7 +186,7 @@ export class ThinkSession {
    */
   getRecentHistory(
     maxContentBytes: number,
-    optionsOrMinRecentMessages?: number | Pick<HistoryReadOptions, "leafId">
+    optionsOrMinRecentMessages?: number | RecentHistoryReadOptions
   ): Promise<RecentHistoryResult> {
     const options =
       typeof optionsOrMinRecentMessages === "object"

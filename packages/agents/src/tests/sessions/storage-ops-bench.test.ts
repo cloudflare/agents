@@ -36,6 +36,19 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
+  it("reads no payload rows for messages outside the inline tail", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      // Ten image messages, two inlined: every message row is read, plus a
+      // metadata row and one chunk row for each of the two inlined payloads.
+      // Inlining all ten reads eight payloads more and holds ~5x the bytes.
+      const tail = await instance.benchTailInlineRead(10, 2);
+      const all = await instance.benchTailInlineRead(0, "all");
+      expect(all.rowsRead - tail.rowsRead).toBeGreaterThanOrEqual(8 * 2);
+      expect(all.residentBytes).toBeGreaterThan(tail.residentBytes * 4);
+    });
+  });
+
   it("checks the auto-compaction threshold without re-walking the path", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {

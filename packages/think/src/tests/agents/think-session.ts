@@ -29,6 +29,7 @@ import type {
   RunTurnWait,
   RunTurnOptions,
   MediaEvictionConfig,
+  MediaHydrationConfig,
   ThinkScheduledTask,
   ThinkScheduledTaskContext,
   ThinkScheduledTasks,
@@ -8973,6 +8974,100 @@ export class ThinkPointerHydrationAgent extends Think {
           ?.url ?? ""
     );
   }
+}
+
+// ── Tail media hydration ─────────────────────────────────────────
+
+/** Base64 chars per seeded image: 120 KB decoded, well past the row budget. */
+export const TAIL_MEDIA_CHARS = 160_000;
+export const TAIL_MEDIA_MESSAGES = 8;
+
+/**
+ * Eight image messages, all comfortably inside `hydrationByteBudget`. What
+ * `mediaHydration` decides is not WHICH rows the cache holds but which of
+ * them carry their bytes: by default only the newest four do, the rest keep
+ * pointers. Eviction stays off so the payloads stay stored and the test sees
+ * hydration alone.
+ */
+export class ThinkTailMediaHydrationAgent extends Think {
+  override mediaEviction: MediaEvictionConfig | boolean = false;
+
+  override async configureSession(session: Session): Promise<Session> {
+    const existing = await session.getHistory();
+    if (existing.length === 0) {
+      for (let i = 0; i < TAIL_MEDIA_MESSAGES; i++) {
+        await session.appendMessage({
+          id: `tail-${i}`,
+          role: i % 2 === 0 ? "user" : "assistant",
+          parts: [
+            { type: "text", text: `tail ${i}` },
+            {
+              type: "file",
+              mediaType: "image/png",
+              url: `data:image/png;base64,${String.fromCharCode(65 + i).repeat(
+                TAIL_MEDIA_CHARS
+              )}`
+            }
+          ]
+        });
+      }
+    }
+    return session;
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("tail media hydration agent response");
+  }
+
+  /** Serialized size of the live cache: what a broadcast sends. */
+  async getCachedBytesForTest(): Promise<number> {
+    return JSON.stringify(this.messages).length;
+  }
+
+  /** The file `url` of every cached message, in cache order. */
+  async getCachedFileUrlsForTest(): Promise<string[]> {
+    return this.messages.map(
+      (m) =>
+        (m.parts.find((p) => p.type === "file") as { url?: string } | undefined)
+          ?.url ?? ""
+    );
+  }
+
+  /** What the model would be sent for the current transcript, serialized. */
+  async getModelMessagesForTest(): Promise<string> {
+    return JSON.stringify(await this._assembleModelMessages({}), (_, value) =>
+      value instanceof URL ? value.href : value
+    );
+  }
+
+  /**
+   * Write a cached message back with a metadata stamp — what a tool update
+   * or transcript repair does to a row the window holds as a pointer — and
+   * read it back in full.
+   */
+  async touchCachedMessageForTest(id: string): Promise<{
+    cachedUrl: string;
+    storedUrl: string;
+  }> {
+    const cached = this.messages.find((m) => m.id === id);
+    if (!cached) throw new Error(`not cached: ${id}`);
+    await this.session.updateMessage({
+      ...cached,
+      metadata: { ...(cached.metadata as object | undefined), touched: true }
+    });
+    const stored = await this.session.getMessage(id);
+    const fileUrl = (m: { parts: unknown[] } | null) =>
+      ((m?.parts as Array<{ type: string; url?: string }> | undefined)?.find(
+        (p) => p.type === "file"
+      )?.url ?? "") as string;
+    const after = this.messages.find((m) => m.id === id) ?? null;
+    return { cachedUrl: fileUrl(after), storedUrl: fileUrl(stored) };
+  }
+}
+
+/** The same transcript with every payload hydrated, the previous behavior. */
+export class ThinkFullMediaHydrationAgent extends ThinkTailMediaHydrationAgent {
+  override mediaHydration: MediaHydrationConfig | "all" = "all";
 }
 
 /**

@@ -441,6 +441,46 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
     return { rowsWritten: this.#billed.stop() };
   }
 
+  /**
+   * Rows read by a budgeted hydration of `imageCount` image messages when
+   * only the newest `inlineNewest` have their payloads put back inline. Each
+   * inlined payload costs a metadata row and its chunk rows; a pointer row
+   * costs nothing beyond the message itself.
+   */
+  async benchTailInlineRead(
+    imageCount: number,
+    inlineNewest: number | "all"
+  ): Promise<{ rowsRead: number; residentBytes: number }> {
+    await this.lifecycle.start();
+    const session = this.sessions.session();
+    for (let i = 0; i < imageCount; i++) {
+      await session.appendMessage({
+        id: `img-${i}`,
+        role: "user",
+        parts: [
+          {
+            type: "file",
+            mediaType: "image/png",
+            url: `data:image/png;base64,${btoa(String(i).repeat(60_000))}`
+          }
+        ]
+      });
+    }
+    this.#billed.start();
+    const recent = await session.getRecentHistory(64 * 1024 * 1024, {
+      inlineAttachments:
+        inlineNewest === "all" ? "all" : { newest: inlineNewest }
+    });
+    const { rowsRead } = this.#billed.stopAll();
+    return {
+      rowsRead,
+      residentBytes: recent.messages.reduce(
+        (sum, message) => sum + JSON.stringify(message).length,
+        0
+      )
+    };
+  }
+
   /** A prefix delete rewires one surviving boundary child, not one per row. */
   async benchDeleteLinearPrefix(
     messageCount: number
