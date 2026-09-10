@@ -1,5 +1,19 @@
 # @cloudflare/codemode
 
+## 0.5.2
+
+### Patch Changes
+
+- [#2224](https://github.com/cloudflare/agents/pull/2224) [`dcca089`](https://github.com/cloudflare/agents/commit/dcca0896cc829e4a602a1feb47466ac79d1ca096) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Truncate structured results structurally instead of slicing their JSON.
+
+  `truncateResult` (the default `transformResult` in Think's execute tool and the browser tools) and the `codeMcpServer` / `openApiMcpServer` response path used to pretty-print an oversized object and cut it at a character count, leaving the model with half a JSON document. Oversized values are now shrunk in place, largest values first: strings are clipped with a `--- TRUNCATED --- <n> chars` suffix, arrays keep their leading items and end with a `--- TRUNCATED --- <n> more items` element, and an object only loses entries (largest first, named in a `"--- TRUNCATED ---"` entry) when its values cannot share the budget. The output is always valid JSON of the original shape and small values pass through untouched.
+
+  The Code Mode tool now carries a `toModelOutput` that projects `calls` out of what the model sees and bounds the sandbox `logs` the same way a result is bounded. The durable call log — every connector call's args and result — stays on the persisted tool part for UIs and audit, but no longer rides into the model's context uncapped alongside the transformed `result`. The projection never throws: a BigInt or cyclic value is rendered rather than failing a completed run at model assembly.
+
+  The MCP servers apply the response budget to the text they emit, pretty-printing only while that still fits.
+
+  Fixes [#2009](https://github.com/cloudflare/agents/issues/2009), [#2143](https://github.com/cloudflare/agents/issues/2143) and [#2182](https://github.com/cloudflare/agents/issues/2182).
+
 ## 0.5.1
 
 ### Patch Changes
@@ -134,12 +148,14 @@ type: "data", data } }` shape does not exist in v6).
 - [#1581](https://github.com/cloudflare/agents/pull/1581) [`b2b6762`](https://github.com/cloudflare/agents/commit/b2b67623deab327042b99344d8ee530ae37a71b2) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add the connector model and a durable runtime for codemode.
 
   **Connectors** — class-based integrations that bridge external services into the sandbox. A connector is three things: `name()`, optional `instructions()`, and `tools()` — one record, one entry per tool, with each tool carrying its own description, schema, `requiresApproval`, `execute`, and optional `revert`:
+
   - `CodemodeConnector` — abstract base; author `tools()` directly (AI SDK toolsets are shape-compatible and can be returned as-is). Its constructor accepts a `DurableObjectState` or an `ExecutionContext`, so you pass `this.ctx` from inside an Agent/DO with no cast.
   - `McpConnector` — derives `tools()` from an MCP connection (`createConnection()`); decorate derived tools via the `tool(name, t)` hook
   - **Per-execution resources** — a tool's `execute(args, ctx)`/`revert(args, result, ctx)` now receive the run's `executionId` (stable across pause/resume), and connectors can override `disposeExecution(executionId, status)` to tear down a resource scoped to one run (a browser/CDP session, a transaction). It fires on each terminal transition (`completed`/`error`/`rejected`/`rolled_back`) and **never on pause**, so a resource survives an approval pause and is released when the run truly ends. Must be idempotent (a completed-then-rolled-back run disposes twice). A stale/no-op `reject` no longer triggers teardown, so a still-resumable run keeps its resources
   - `OpenApiConnector` — derives one typed tool **per operation** from the spec (host-side, zero prompt tokens), so the model calls `api.get_repository({ owner, repo })` directly; `request()` remains as a low-level escape hatch. Derivation resolves local `$ref`s (including `allOf`/`oneOf`/`anyOf`) and is memoized by spec identity, so a static spec is parsed once even though connectors are reconstructed per message; operations whose names collide (or hit the reserved `request`/`spec`) are skipped with a warning
 
   **Runtime** — `CodemodeRuntime`, a DurableObject facet that wraps an `Executor` and makes execution durable via abort-and-replay:
+
   - Every tool call and `codemode.step(name, fn)` is recorded in a durable log
   - Reads and steps execute and record their result
   - Approval-required actions pause the run (abort)
@@ -169,6 +185,7 @@ type: "data", data } }` shape does not exist in v6).
   Executor-style ranked search with normalized tokenization and scoring.
 
 - [#1656](https://github.com/cloudflare/agents/pull/1656) [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b) Thanks [@cjol](https://github.com/cjol)! - Codemode runtime refinements (pre-release):
+
   - **SQL storage.** The `CodemodeRuntime` facet now stores executions, the tool-call log, and snippets in SQLite tables (one row per log entry) instead of single key-value blobs — appends no longer rewrite the whole execution, and pruning/expiry/listing are indexed. Args/results are serialized with a binary- and bigint-safe codec.
   - **Size guards.** Any single recorded value (call args, a recorded result, the final result) is capped at 1 MB serialized (`MAX_DURABLE_VALUE_BYTES`). Oversized args or call results fail the run with a model-actionable error; an oversized final result completes normally with a placeholder in the audit trail.
   - **Replay policy.** Connector tools can declare `replay: "reexecute"`: the call is logged for sequencing/divergence but its result is never stored — replays re-execute it. For idempotent reads with large results. Incompatible with `requiresApproval`.
@@ -269,6 +286,7 @@ type: "data", data } }` shape does not exist in v6).
   ```
 
   **Exports:**
+
   - `createCodeTool` — returns a TanStack AI `ServerTool` (via `toolDefinition().server()`)
   - `tanstackTools` — converts a `TanStackTool[]` into a `ToolProvider` with pre-generated types
   - `generateTypes` — generates TypeScript type definitions from TanStack AI tools
@@ -287,6 +305,7 @@ type: "data", data } }` shape does not exist in v6).
 ### Patch Changes
 
 - [#1114](https://github.com/cloudflare/agents/pull/1114) [`5d88b81`](https://github.com/cloudflare/agents/commit/5d88b810cda4edc4f55ea6bc619a376efa9b8f4d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `@cloudflare/codemode/mcp` barrel export with two functions:
+
   - `codeMcpServer({ server, executor })` — wraps an MCP server with a single `code` tool where each upstream tool becomes a typed `codemode.*` method
   - `openApiMcpServer({ spec, executor, request })` — creates `search` + `execute` MCP tools from an OpenAPI spec with host-side request proxying and automatic `$ref` resolution
 
@@ -309,6 +328,7 @@ type: "data", data } }` shape does not exist in v6).
   ```
 
   The main entry point (`@cloudflare/codemode`) no longer requires the `ai` or `zod` peer dependencies. It now exports:
+
   - `sanitizeToolName` — sanitize tool names into valid JS identifiers
   - `normalizeCode` — normalize LLM-generated code into async arrow functions
   - `generateTypesFromJsonSchema` — generate TypeScript type definitions from plain JSON Schema (no AI SDK needed)
@@ -341,6 +361,7 @@ type: "data", data } }` shape does not exist in v6).
 - [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
 
 - [#960](https://github.com/cloudflare/agents/pull/960) [`179b8cb`](https://github.com/cloudflare/agents/commit/179b8cbc60bc9e6ac0d2ee26c430d842950f5f08) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden JSON Schema to TypeScript converter for production use
+
   - Add depth and circular reference guards to prevent stack overflows on recursive or deeply nested schemas
   - Add `$ref` resolution for internal JSON Pointers (`#/definitions/...`, `#/$defs/...`, `#`)
   - Add tuple support (`prefixItems` for JSON Schema 2020-12, array `items` for draft-07)
