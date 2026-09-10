@@ -1081,7 +1081,7 @@ export class PiHarness<
       lane: (name) => this.#upstreamLane(name, BACKGROUND_CONTEXT),
       // Pi's snapshot counts only what it has admitted; the intake table
       // holds everything still waiting on the lane driver.
-      pendingSubmissions: (name) => this.#submissions?.count(name) ?? 0,
+      pendingSubmissions: (name) => this.#submissions?.countMessages(name) ?? 0,
       setSessionName: async (name) => {
         const { harness } = await this.#attached();
         await harness.setName(name, BACKGROUND_CONTEXT);

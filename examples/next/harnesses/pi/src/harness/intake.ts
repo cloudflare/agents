@@ -257,6 +257,23 @@ export class PiSubmissions {
       .one().pending;
   }
 
+  /**
+   * Waiting submissions on `lane` that will put a message in front of the
+   * model: prompts, skills and prompt templates. Compactions and navigations
+   * are operations without a message, so `ctx.hasPendingMessages()` must not
+   * count them.
+   */
+  countMessages(lane: string): number {
+    return this.#storage.sql
+      .exec<{ pending: number }>(
+        `SELECT COUNT(*) AS pending FROM cf_agents_pi_submissions
+          WHERE lane = ?
+            AND json_extract(request, '$.kind') IN ('prompt', 'skill', 'prompt_template')`,
+        lane
+      )
+      .one().pending;
+  }
+
   has(operationId: string): boolean {
     return (
       this.#storage.sql

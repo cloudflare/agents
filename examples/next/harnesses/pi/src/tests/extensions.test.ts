@@ -465,6 +465,13 @@ describe("pending messages", () => {
     expect(result.pendingAfter).toBe(1);
     expect(result.pendingSeen).toBe(true);
   });
+
+  it("does not count a waiting compaction as a pending message", async () => {
+    const result = await fresh().pendingDuringRun("compaction");
+
+    expect(result.pendingAfter).toBe(1);
+    expect(result.pendingSeen).toBe(false);
+  });
 });
 
 describe("extension notification lanes", () => {

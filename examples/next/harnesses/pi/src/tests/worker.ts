@@ -753,7 +753,7 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
    * The second prompt sits in the harness's intake table for as long as the
    * first operation holds the lane, so it is invisible in pi's own snapshot.
    */
-  async pendingDuringRun(): Promise<{
+  async pendingDuringRun(kind: "prompt" | "compaction" = "prompt"): Promise<{
     readonly pendingSeen: boolean | undefined;
     readonly pendingAfter: number;
   }> {
@@ -770,10 +770,9 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     });
     const run = this.harness.prompt("wait");
     await waiting;
-    const second = await this.harness.submit({
-      kind: "prompt",
-      prompt: "second"
-    });
+    const second = await this.harness.submit(
+      kind === "prompt" ? { kind: "prompt", prompt: "second" } : { kind }
+    );
     const pendingAfter = (await this.harness.pending()).length;
     this.#releaseTool?.();
     this.#releaseTool = undefined;
