@@ -701,4 +701,30 @@ describe("ExtensionManager", () => {
       expect(parsed.error).toContain("hook failed");
     });
   });
+
+  describe("getTools memo", () => {
+    it("returns the same tool set until an extension is loaded or unloaded", async () => {
+      await manager.load(
+        makeManifest({ name: "greeter" }),
+        GREET_EXTENSION_SOURCE
+      );
+      const first = manager.getTools();
+      expect(manager.getTools()).toBe(first);
+
+      await manager.load(makeManifest({ name: "math" }), MULTI_TOOL_SOURCE);
+      const second = manager.getTools();
+      expect(second).not.toBe(first);
+      expect(Object.keys(second)).toEqual([
+        "greeter_greet",
+        "math_add",
+        "math_multiply"
+      ]);
+      expect(manager.getTools()).toBe(second);
+
+      await manager.unload("greeter");
+      const third = manager.getTools();
+      expect(third).not.toBe(second);
+      expect(Object.keys(third)).toEqual(["math_add", "math_multiply"]);
+    });
+  });
 });

@@ -39,6 +39,7 @@ export {
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkMcpToolMaterializationAgent,
+  ThinkToolMemoTestAgent,
   ThinkOnStartReconcileFailureAgent,
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
@@ -80,6 +81,7 @@ import type {
   ThinkFetchToolsTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkMcpToolMaterializationAgent,
+  ThinkToolMemoTestAgent,
   ThinkOnStartReconcileFailureAgent,
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
@@ -222,6 +224,7 @@ export type Env = {
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   ThinkMcpToolMaterializationAgent: DurableObjectNamespace<ThinkMcpToolMaterializationAgent>;
+  ThinkToolMemoTestAgent: DurableObjectNamespace<ThinkToolMemoTestAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   ThinkFetchToolsTestAgent: DurableObjectNamespace<ThinkFetchToolsTestAgent>;

@@ -115,6 +115,8 @@ export class ExtensionManager {
     | null;
   #extensions = new Map<string, LoadedExtension>();
   #restored = false;
+  /** `getTools()` result, dropped whenever the extension set changes. */
+  #toolsMemo: ToolSet | null = null;
   #onUnload:
     | ((name: string, contextLabels: string[]) => void | Promise<void>)
     | null = null;
@@ -238,6 +240,7 @@ export class ExtensionManager {
       hooks,
       entrypoint
     });
+    this.#toolsMemo = null;
 
     return toExtensionInfo(manifest, tools);
   }
@@ -253,6 +256,7 @@ export class ExtensionManager {
     if (!ext) return false;
 
     const removed = this.#extensions.delete(name);
+    this.#toolsMemo = null;
     if (removed && this.#storage) {
       await this.#storage.delete(`${STORAGE_PREFIX}${name}`);
     }
@@ -333,8 +337,14 @@ export class ExtensionManager {
    *
    * Tool names are prefixed with the sanitized extension name to avoid
    * collisions: e.g. extension "github" with tool "create_pr" → "github_create_pr".
+   *
+   * The set is derived from the loaded extensions only, so it is built once
+   * per load/unload and the same object is returned until the next change.
+   * Tool `execute` closures re-check membership at call time, so a caller
+   * that kept an older set still fails cleanly after an unload.
    */
   getTools(): ToolSet {
+    if (this.#toolsMemo) return this.#toolsMemo;
     const tools: ToolSet = {};
 
     for (const ext of this.#extensions.values()) {
@@ -369,6 +379,7 @@ export class ExtensionManager {
       }
     }
 
+    this.#toolsMemo = tools;
     return tools;
   }
 }

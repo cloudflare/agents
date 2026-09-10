@@ -436,7 +436,18 @@ export class SkillRegistry {
     const modelSkillNames = [...this.descriptors.values()].map(
       (skill) => skill.name
     );
+    // The tool set depends only on the catalog names and whether scripts can
+    // run, so a refresh that found the same catalog hands back the same set.
+    const catalogKey = `${this.scriptRunner ? 1 : 0}|${modelSkillNames.join("\u0000")}`;
+    if (this.toolsMemo?.catalogKey === catalogKey) return this.toolsMemo.tools;
+    const tools = this.buildTools(modelSkillNames);
+    this.toolsMemo = { catalogKey, tools };
+    return tools;
+  }
 
+  private toolsMemo: { catalogKey: string; tools: ToolSet } | null = null;
+
+  private buildTools(modelSkillNames: string[]): ToolSet {
     const tools: ToolSet = {};
 
     if (modelSkillNames.length > 0) {

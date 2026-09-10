@@ -124,6 +124,10 @@
         "name": "ThinkMcpToolMaterializationAgent"
       },
       {
+        "class_name": "ThinkToolMemoTestAgent",
+        "name": "ThinkToolMemoTestAgent"
+      },
+      {
         "class_name": "ThinkExecuteToolAgent",
         "name": "ThinkExecuteToolAgent"
       },
@@ -209,6 +213,7 @@
         "ThinkExtensionHookAgent",
         "ThinkMessengerRouteTestAgent",
         "ThinkMcpToolMaterializationAgent",
+        "ThinkToolMemoTestAgent",
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",
         "ThinkFetchToolsTestAgent",
