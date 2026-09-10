@@ -6557,7 +6557,9 @@ export class Think<
         // Proactive context guard (Layer 1) runs first so `beforeStep` sees the
         // recompacted messages and can still override them if it wants to.
         const guarded = await this._maybeProactiveContextCompact(event);
-        const result = await this.beforeStep(event);
+        const result = await this.beforeStep(
+          guarded ? { ...event, messages: guarded } : event
+        );
         const base = result == null ? {} : result;
         // Only apply the guard's recompacted messages when the subclass didn't
         // set its own `messages` override for this step.
