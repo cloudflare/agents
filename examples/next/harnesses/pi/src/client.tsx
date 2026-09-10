@@ -1,7 +1,9 @@
 import {
   Badge,
   Button,
+  Dialog,
   Empty,
+  Input,
   InputArea,
   PoweredByCloudflare,
   Surface,
@@ -13,12 +15,16 @@ import {
   CheckCircleIcon,
   ClockIcon,
   DiceFiveIcon,
+  FlagIcon,
   GearIcon,
+  InfoIcon,
   MoonIcon,
   PaperPlaneRightIcon,
   PlusIcon,
   StopIcon,
   SunIcon,
+  TerminalWindowIcon,
+  WarningCircleIcon,
   WrenchIcon,
   XCircleIcon,
   XIcon
@@ -28,8 +34,15 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
-import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
+import type {
+  ExtensionUiResponse,
+  SlashCommand,
+  ToolInfo,
+  TranscriptMessage,
+  TranscriptPart
+} from "./protocol";
 import { usePiSession } from "./use-pi-session";
+import type { Notice, StatusSlot, UiDialog, Widget } from "./use-pi-session";
 import "./styles.css";
 
 const SESSION_KEY = "pi-harness-session";
@@ -321,12 +334,17 @@ function Message({
 function Sidebar({
   tools,
   activeTools,
+  flags,
+  onSetFlag,
   onClose
 }: {
   tools: readonly ToolInfo[];
   activeTools: readonly string[];
+  flags: Readonly<Record<string, boolean | string>>;
+  onSetFlag: (name: string, value: boolean | string) => void;
   onClose: () => void;
 }) {
+  const flagNames = Object.keys(flags);
   return (
     <aside
       className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
@@ -345,6 +363,36 @@ function Sidebar({
         />
       </div>
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+        {flagNames.length > 0 ? (
+          <Surface className="rounded-lg p-3 ring ring-kumo-line">
+            <div className="flex items-center gap-2">
+              <FlagIcon size={14} className="text-kumo-inactive" />
+              <Text size="sm" bold>
+                Extension flags
+              </Text>
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {flagNames.map((name) => (
+                <div key={name} className="flex items-center gap-2">
+                  <code className="min-w-0 flex-1 truncate text-xs">
+                    {name}
+                  </code>
+                  {typeof flags[name] === "boolean" ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => onSetFlag(name, !flags[name])}
+                    >
+                      {flags[name] ? "on" : "off"}
+                    </Button>
+                  ) : (
+                    <Badge variant="secondary">{String(flags[name])}</Badge>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Surface>
+        ) : null}
         {tools.map((tool) => (
           <Surface
             key={tool.name}
@@ -366,12 +414,284 @@ function Sidebar({
   );
 }
 
+/**
+ * The dialog half of the extension UI protocol: one `select`, `confirm`,
+ * `input` or `editor` request at a time. Dismissing answers `cancelled`, which
+ * is what the harness's bridge would settle with on its own timeout anyway.
+ */
+function ExtensionDialog({
+  dialog,
+  onAnswer
+}: {
+  dialog: UiDialog;
+  onAnswer: (requestId: string, response: ExtensionUiResponse) => void;
+}) {
+  const [draft, setDraft] = useState(
+    dialog.method === "editor" ? (dialog.prefill ?? "") : ""
+  );
+  const answer = (response: ExtensionUiResponse) =>
+    onAnswer(dialog.requestId, response);
+  const cancel = () => answer({ cancelled: true });
+
+  // The harness settles this dialog with its default when `timeoutMs` runs
+  // out and says so with an `extension_ui_settled` frame. Counting down here
+  // too tells the user how long they have, and takes the modal down on its own
+  // if that frame never arrives — a dead socket, say.
+  const [remainingMs, setRemainingMs] = useState(dialog.timeoutMs);
+  useEffect(() => {
+    const deadline = Date.now() + dialog.timeoutMs;
+    setRemainingMs(dialog.timeoutMs);
+    const timer = setInterval(() => {
+      const left = deadline - Date.now();
+      setRemainingMs(left > 0 ? left : 0);
+      if (left <= 0) onAnswer(dialog.requestId, { cancelled: true });
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [dialog.requestId, dialog.timeoutMs, onAnswer]);
+
+  return (
+    <Dialog.Root
+      open
+      onOpenChange={(open: boolean) => {
+        if (!open) cancel();
+      }}
+    >
+      <Dialog className="p-6" size={dialog.method === "editor" ? "lg" : "base"}>
+        <Dialog.Title>{dialog.title}</Dialog.Title>
+        {dialog.method === "confirm" ? (
+          <Dialog.Description>{dialog.message}</Dialog.Description>
+        ) : (
+          <Dialog.Description>
+            Requested by an extension on this session.
+          </Dialog.Description>
+        )}
+        <p className="mt-1 text-neutral-500 text-xs">
+          Answers in {Math.ceil(remainingMs / 1_000)}s if left alone.
+        </p>
+
+        {dialog.method === "select" ? (
+          <div className="mt-4 flex flex-col gap-2">
+            {dialog.options.map((option) => (
+              <Button
+                key={option}
+                variant="secondary"
+                className="justify-start"
+                onClick={() => answer({ value: option })}
+              >
+                {option}
+              </Button>
+            ))}
+          </div>
+        ) : null}
+
+        {dialog.method === "input" ? (
+          <form
+            className="mt-4 flex flex-col gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              answer({ value: draft });
+            }}
+          >
+            <Input
+              value={draft}
+              onValueChange={setDraft}
+              placeholder={dialog.placeholder}
+              aria-label={dialog.title}
+            />
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="secondary" onClick={cancel}>
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary">
+                Send
+              </Button>
+            </div>
+          </form>
+        ) : null}
+
+        {dialog.method === "editor" ? (
+          <div className="mt-4 flex flex-col gap-3">
+            <InputArea
+              value={draft}
+              onValueChange={setDraft}
+              rows={10}
+              aria-label={dialog.title}
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={cancel}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => answer({ value: draft })}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {dialog.method === "confirm" ? (
+          <div className="mt-4 flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => answer({ confirmed: false })}
+            >
+              No
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => answer({ confirmed: true })}
+            >
+              Yes
+            </Button>
+          </div>
+        ) : null}
+      </Dialog>
+    </Dialog.Root>
+  );
+}
+
+/** `notify` messages and failed hooks, newest last, dismissable. */
+function NoticeToasts({
+  notices,
+  onDismiss
+}: {
+  notices: readonly Notice[];
+  onDismiss: (id: string) => void;
+}) {
+  if (notices.length === 0) return null;
+  return (
+    <div className="pointer-events-none fixed right-4 top-4 z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2">
+      {notices.map((notice) => (
+        <Surface
+          key={notice.id}
+          aria-live="polite"
+          className={`pointer-events-auto rounded-xl p-3 ring ${
+            notice.level === "error"
+              ? "ring-kumo-danger"
+              : notice.level === "warning"
+                ? "ring-kumo-warning"
+                : "ring-kumo-line"
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            {notice.level === "info" ? (
+              <InfoIcon size={15} className="mt-0.5 text-kumo-accent" />
+            ) : (
+              <WarningCircleIcon
+                size={15}
+                className={`mt-0.5 ${
+                  notice.level === "error"
+                    ? "text-kumo-danger"
+                    : "text-kumo-warning"
+                }`}
+              />
+            )}
+            <div className="min-w-0 flex-1">
+              {notice.source ? (
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+                  {notice.source}
+                </p>
+              ) : null}
+              <p className="break-words text-xs leading-5">{notice.message}</p>
+            </div>
+            <Button
+              variant="ghost"
+              shape="square"
+              size="sm"
+              aria-label="Dismiss"
+              onClick={() => onDismiss(notice.id)}
+              icon={<XIcon size={13} />}
+            />
+          </div>
+        </Surface>
+      ))}
+    </div>
+  );
+}
+
+/** `setStatus` slots and `setWidget` lines, shown above the composer. */
+function StatusStrip({
+  statuses,
+  widgets
+}: {
+  statuses: readonly StatusSlot[];
+  widgets: readonly Widget[];
+}) {
+  if (statuses.length === 0 && widgets.length === 0) return null;
+  return (
+    <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 px-5 pt-3 text-xs text-kumo-subtle">
+      {statuses.map((slot) => (
+        <Badge key={slot.key} variant="secondary">
+          {slot.text}
+        </Badge>
+      ))}
+      {widgets.map((widget) => (
+        <span key={widget.key} className="truncate">
+          {widget.lines.join(" · ")}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Autocomplete over the lane's extension, template and skill commands. */
+function CommandMenu({
+  commands,
+  active,
+  onPick
+}: {
+  commands: readonly SlashCommand[];
+  active: number;
+  onPick: (command: SlashCommand) => void;
+}) {
+  if (commands.length === 0) return null;
+  return (
+    <Surface
+      className="mb-2 max-h-56 overflow-y-auto rounded-xl p-1 ring ring-kumo-line"
+      aria-label="Slash commands"
+    >
+      {commands.map((command, index) => (
+        <button
+          key={`${command.source}-${command.name}`}
+          type="button"
+          aria-current={index === active}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            onPick(command);
+          }}
+          className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left ${
+            index === active ? "bg-kumo-elevated" : ""
+          }`}
+        >
+          <TerminalWindowIcon size={13} className="text-kumo-inactive" />
+          <code className="text-xs font-semibold">/{command.name}</code>
+          <span className="min-w-0 flex-1 truncate text-xs text-kumo-subtle">
+            {command.description}
+          </span>
+          <Badge variant="secondary">{command.source}</Badge>
+        </button>
+      ))}
+    </Surface>
+  );
+}
+
+/** `/name rest` — null when the text is not a slash command. */
+function parseSlash(text: string): { name: string; args: string } | null {
+  const match = /^\/([^\s]+)\s*([\s\S]*)$/.exec(text);
+  return match?.[1] === undefined
+    ? null
+    : { name: match[1], args: match[2] ?? "" };
+}
+
 function App() {
   const [session, setSession] = useState(getSession);
   const [prompt, setPrompt] = useState("");
   const [toolsOpen, setToolsOpen] = useState(
     () => window.matchMedia("(min-width: 1100px)").matches
   );
+  const [activeCommand, setActiveCommand] = useState(0);
   const endRef = useRef<HTMLDivElement>(null);
   const {
     status,
@@ -381,19 +701,56 @@ function App() {
     runningTools,
     tools,
     error,
+    commands,
+    flags,
+    dialog,
+    notices,
+    statuses,
+    widgets,
+    title,
+    editorText,
     submit: submitPrompt,
-    abort
+    abort,
+    answerUi,
+    runCommand,
+    setFlag,
+    dismissNotice,
+    clearEditorText
   } = usePiSession(session);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, live, running]);
 
+  // An extension pushed text into the editor; the composer owns it from here.
+  useEffect(() => {
+    if (editorText === undefined) return;
+    setPrompt(editorText);
+    clearEditorText();
+  }, [editorText, clearEditorText]);
+
   const connected = status === "open";
+
+  const slash = prompt.startsWith("/") ? parseSlash(prompt) : null;
+  const suggestions =
+    slash && !prompt.includes(" ")
+      ? commands.filter((command) => command.name.startsWith(slash.name))
+      : [];
+
+  const pickCommand = (command: SlashCommand) => {
+    setPrompt(`/${command.name} `);
+    setActiveCommand(0);
+  };
 
   const submit = () => {
     const text = prompt.trim();
     if (!text || running || !connected) return;
+    const parsed = parseSlash(text);
+    if (parsed && commands.some((command) => command.name === parsed.name)) {
+      setPrompt("");
+      runCommand(parsed.name, parsed.args);
+      return;
+    }
     setPrompt("");
     submitPrompt(text);
   };
@@ -422,7 +779,9 @@ function App() {
                 <BrainIcon size={20} weight="bold" />
               </div>
               <div className="min-w-0">
-                <h1 className="truncate text-base font-semibold">Pi harness</h1>
+                <h1 className="truncate text-base font-semibold">
+                  {title ?? "Pi harness"}
+                </h1>
                 <p className="truncate text-xs text-kumo-subtle">
                   Session <code>{session.slice(0, 8)}</code>
                 </p>
@@ -528,6 +887,7 @@ function App() {
         </main>
 
         <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
+          <StatusStrip statuses={statuses} widgets={widgets} />
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -535,17 +895,50 @@ function App() {
             }}
             className="mx-auto max-w-3xl px-5 pt-4"
           >
+            <CommandMenu
+              commands={suggestions}
+              active={activeCommand}
+              onPick={pickCommand}
+            />
             <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
               <InputArea
                 value={prompt}
-                onValueChange={setPrompt}
+                onValueChange={(value: string) => {
+                  setPrompt(value);
+                  setActiveCommand(0);
+                }}
                 onKeyDown={(event) => {
+                  const open = suggestions.length > 0;
+                  if (open && event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setActiveCommand((index) =>
+                      Math.min(index + 1, suggestions.length - 1)
+                    );
+                    return;
+                  }
+                  if (open && event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setActiveCommand((index) => Math.max(index - 1, 0));
+                    return;
+                  }
+                  if (
+                    open &&
+                    (event.key === "Tab" ||
+                      (event.key === "Enter" && !event.shiftKey))
+                  ) {
+                    const picked = suggestions[activeCommand];
+                    if (picked) {
+                      event.preventDefault();
+                      pickCommand(picked);
+                      return;
+                    }
+                  }
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
                     submit();
                   }
                 }}
-                placeholder="Ask Pi to use a tool"
+                placeholder="Ask Pi to use a tool, or / for a command"
                 aria-label="Message Pi"
                 disabled={!connected || running}
                 rows={2}
@@ -588,7 +981,18 @@ function App() {
         <Sidebar
           tools={tools}
           activeTools={runningTools}
+          flags={flags}
+          onSetFlag={setFlag}
           onClose={() => setToolsOpen(false)}
+        />
+      ) : null}
+
+      <NoticeToasts notices={notices} onDismiss={dismissNotice} />
+      {dialog ? (
+        <ExtensionDialog
+          key={dialog.requestId}
+          dialog={dialog}
+          onAnswer={answerUi}
         />
       ) : null}
     </div>

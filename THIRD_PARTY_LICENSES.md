@@ -154,4 +154,13 @@ This project incorporates code from the following open-source projects.
   > WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
   > SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+### earendil-works/pi
+
+- **License**: MIT License
+- **Repository**: https://github.com/earendil-works/pi
+- **Copyright**: Copyright (c) 2025 Mario Zechner
+- **Full License**: [licenses/mit-earendil-pi.txt](licenses/mit-earendil-pi.txt)
+- **Vendored from**: [earendil-works/pi@c4b0e35a](https://github.com/earendil-works/pi/commit/c4b0e35abe631bc830190fa6cafbe81b098b97d7)
+- **Note**: `examples/next/harnesses/pi/vendor/pi-coding-agent-src` vendors pi's extension runtime (`packages/coding-agent/src`) so it can run under workerd; some files are patched and the rest of the tree is hand-written stubs. See that directory's README.md. The same example also vendors prebuilt `@earendil-works/*` tarballs under `vendor/pi-dev`.
+
 ---

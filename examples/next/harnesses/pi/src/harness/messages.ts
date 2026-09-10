@@ -6,6 +6,7 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessageFrame } from "@earendil-works/pi-ai";
 import type {
+  PiCustomEntry,
   PiJson,
   PiMessage,
   PiMessageDelta,
@@ -109,6 +110,24 @@ export function projectAgentMessage(
 export function projectEntry(entry: Entry): PiMessage | undefined {
   if (entry.type !== "message") return undefined;
   return projectAgentMessage(entry.message, entry.id, entry.timestamp);
+}
+
+/** Project the custom entries extensions appended, in transcript order. */
+export function projectCustomEntries(
+  entries: readonly Entry[]
+): PiCustomEntry[] {
+  return entries.flatMap((entry) =>
+    entry.type === "custom"
+      ? [
+          {
+            id: entry.id,
+            customType: entry.customType,
+            ...(entry.data === undefined ? {} : { data: asJson(entry.data) }),
+            timestamp: entry.timestamp
+          }
+        ]
+      : []
+  );
 }
 
 /** Project pi's internal entries into the stable public message shape. */

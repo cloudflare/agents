@@ -2,8 +2,11 @@ import { useAgent } from "agents/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ClientMessage,
+  ExtensionUiRequest,
+  ExtensionUiResponse,
   MessageDelta,
   ServerMessage,
+  SlashCommand,
   TranscriptEvent,
   TranscriptMessage,
   TranscriptPart,
@@ -11,6 +14,47 @@ import type {
 } from "./protocol";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
+
+/** A dialog waiting on the user: the four request methods that get answers. */
+export type UiDialog = Extract<
+  ExtensionUiRequest,
+  { method: "select" | "confirm" | "input" | "editor" }
+>;
+
+/** A transient message from an extension, a status slot, or a failed handler. */
+export type Notice = {
+  readonly id: string;
+  readonly level: "info" | "warning" | "error";
+  readonly message: string;
+  /** The hook, event or extension that produced an error notice. */
+  readonly source?: string;
+};
+
+/** One extension status slot, keyed by the extension's own key. */
+export type StatusSlot = { readonly key: string; readonly text: string };
+
+/** One extension widget: lines rendered above or below the editor. */
+export type Widget = {
+  readonly key: string;
+  readonly lines: readonly string[];
+  readonly placement: "aboveEditor" | "belowEditor";
+};
+
+export type PiSessionOptions = {
+  /**
+   * Answer extension dialogs headlessly. When set, dialogs never reach the
+   * `dialog` state — this handler owns every answer.
+   */
+  readonly onExtensionUi?: (
+    request: UiDialog
+  ) => Promise<ExtensionUiResponse> | ExtensionUiResponse;
+};
+
+const DIALOG_METHODS = ["select", "confirm", "input", "editor"] as const;
+
+function isDialog(request: ExtensionUiRequest): request is UiDialog {
+  return (DIALOG_METHODS as readonly string[]).includes(request.method);
+}
 
 type State = {
   readonly status: ConnectionStatus;
@@ -21,6 +65,17 @@ type State = {
   readonly runningTools: readonly string[];
   readonly tools: readonly ToolInfo[];
   readonly error: string | undefined;
+  /** Dialogs in arrival order; the head is the one on screen. */
+  readonly dialogs: readonly UiDialog[];
+  readonly commands: readonly SlashCommand[];
+  readonly flags: Readonly<Record<string, boolean | string>>;
+  readonly notices: readonly Notice[];
+  readonly statuses: readonly StatusSlot[];
+  readonly widgets: readonly Widget[];
+  /** The last title an extension asked the client to show. */
+  readonly title: string | undefined;
+  /** Text an extension pushed into the editor; clear it once consumed. */
+  readonly editorText: string | undefined;
 };
 
 const INITIAL_STATE: State = {
@@ -30,8 +85,67 @@ const INITIAL_STATE: State = {
   running: false,
   runningTools: [],
   tools: [],
-  error: undefined
+  error: undefined,
+  dialogs: [],
+  commands: [],
+  flags: {},
+  notices: [],
+  statuses: [],
+  widgets: [],
+  title: undefined,
+  editorText: undefined
 };
+
+const MAX_NOTICES = 4;
+
+function withNotice(state: State, notice: Notice): State {
+  return { ...state, notices: [...state.notices, notice].slice(-MAX_NOTICES) };
+}
+
+/** Apply one fire-and-forget UI update to the client's own view state. */
+function applyView(state: State, request: ExtensionUiRequest): State {
+  switch (request.method) {
+    case "notify":
+      return withNotice(state, {
+        id: request.requestId,
+        level: request.level ?? "info",
+        message: request.message
+      });
+    case "set_status": {
+      const rest = state.statuses.filter((slot) => slot.key !== request.key);
+      return {
+        ...state,
+        statuses:
+          request.text === undefined
+            ? rest
+            : [...rest, { key: request.key, text: request.text }]
+      };
+    }
+    case "set_widget": {
+      const rest = state.widgets.filter((widget) => widget.key !== request.key);
+      return {
+        ...state,
+        widgets:
+          request.lines === undefined
+            ? rest
+            : [
+                ...rest,
+                {
+                  key: request.key,
+                  lines: request.lines,
+                  placement: request.placement ?? "aboveEditor"
+                }
+              ]
+      };
+    }
+    case "set_title":
+      return { ...state, title: request.title };
+    case "set_editor_text":
+      return { ...state, editorText: request.text };
+    default:
+      return state;
+  }
+}
 
 function applyDelta(
   message: TranscriptMessage,
@@ -119,6 +233,16 @@ function reduce(state: State, event: TranscriptEvent): State {
       if (index >= 0) next.splice(index, 1);
       return { ...state, runningTools: next };
     }
+    case "handler_error":
+      // A hook, event listener or extension threw mid-turn. The run carries
+      // on, so this is a notice rather than a session error — but it has to
+      // be visible, or an extension fails in silence.
+      return withNotice(state, {
+        id: crypto.randomUUID(),
+        level: "error",
+        message: event.message,
+        source: `${event.kind}: ${event.source}`
+      });
     case "fault":
       return { ...state, error: event.message };
     default:
@@ -133,16 +257,40 @@ function reduce(state: State, event: TranscriptEvent): State {
  * connect and on reconnect, so a refresh mid-turn resumes exactly where the
  * last chunk left off.
  */
-export function usePiSession(session: string, lane = "main") {
+export function usePiSession(
+  session: string,
+  lane = "main",
+  options: PiSessionOptions = {}
+) {
   const [state, setState] = useState<State>(INITIAL_STATE);
   /** Last chunk sequence seen per stream, so a resubscribe resumes exactly. */
   const lastSeq = useRef(new Map<string, number>());
+  /** Dialog ids still owed an answer, so unmount can cancel every one. */
+  const owed = useRef(new Set<string>());
+  const handler = useRef(options.onExtensionUi);
+  handler.current = options.onExtensionUi;
 
   const agent = useAgent({
     agent: "pi-agent",
     name: session,
     query: { lane },
-    onOpen: () => setState((current) => ({ ...current, status: "open" })),
+    onOpen: () => {
+      setState((current) => ({ ...current, status: "open" }));
+      agent.send(
+        JSON.stringify({
+          type: "get_commands",
+          id: crypto.randomUUID()
+        } satisfies ClientMessage)
+      );
+      // Flags are only ever pushed when they change, so a client that
+      // connects after an extension registered them has to ask.
+      agent.send(
+        JSON.stringify({
+          type: "get_flags",
+          id: crypto.randomUUID()
+        } satisfies ClientMessage)
+      );
+    },
     onClose: () => setState((current) => ({ ...current, status: "closed" })),
     onMessage: (event) => {
       let message: ServerMessage;
@@ -203,7 +351,78 @@ export function usePiSession(session: string, lane = "main") {
             );
           }
           return;
+        case "event":
+          // A lane event outside any operation stream — the same events the
+          // `events` frames carry, so the same reducer applies.
+          setState((current) => reduce(current, message.event));
+          return;
+        case "extension_ui_settled":
+          // The harness stopped waiting on this dialog: take it off screen
+          // rather than leave a modal that can no longer be answered.
+          owed.current.delete(message.requestId);
+          setState((current) => ({
+            ...current,
+            dialogs: current.dialogs.filter(
+              (dialog) => dialog.requestId !== message.requestId
+            )
+          }));
+          return;
+        case "extension_ui_request": {
+          const request = message.request;
+          if (!isDialog(request)) {
+            setState((current) => applyView(current, request));
+            return;
+          }
+          owed.current.add(request.requestId);
+          const answer = handler.current;
+          if (!answer) {
+            setState((current) => ({
+              ...current,
+              dialogs: [...current.dialogs, request]
+            }));
+            return;
+          }
+          void Promise.resolve(answer(request))
+            .catch((): ExtensionUiResponse => ({ cancelled: true }))
+            .then((response) => {
+              owed.current.delete(request.requestId);
+              agent.send(
+                JSON.stringify({
+                  type: "extension_ui_response",
+                  id: crypto.randomUUID(),
+                  requestId: request.requestId,
+                  response
+                } satisfies ClientMessage)
+              );
+            });
+          return;
+        }
+        case "commands":
+          setState((current) => ({ ...current, commands: message.commands }));
+          return;
+        case "flags":
+          setState((current) => ({ ...current, flags: message.flags }));
+          return;
+        case "handler_error":
+          setState((current) =>
+            withNotice(current, {
+              id: crypto.randomUUID(),
+              level: "error",
+              message: message.message,
+              source: `${message.kind}: ${message.source}`
+            })
+          );
+          return;
         case "error":
+          // A host without the extension surface answers `unsupported: …`,
+          // and an answer that lost the race to a timeout answers `stale: …`.
+          // Neither is a session error.
+          if (
+            message.message.startsWith("unsupported:") ||
+            message.message.startsWith("stale:")
+          ) {
+            return;
+          }
           setState((current) => ({ ...current, error: message.message }));
           return;
         default:
@@ -212,10 +431,16 @@ export function usePiSession(session: string, lane = "main") {
     }
   });
 
+  // Every field of `State` is lane-local — dialogs, notices, statuses,
+  // widgets, flags, commands — and so are the stream cursors, so a lane
+  // change resets exactly as a session change does. `useAgent` keys its
+  // socket on the query too, so the reconnect re-runs `onOpen`, which asks
+  // the new lane for its commands and flags.
   useEffect(() => {
     setState(INITIAL_STATE);
     lastSeq.current.clear();
-  }, [session]);
+    owed.current.clear();
+  }, [session, lane]);
 
   const send = useCallback(
     (message: ClientMessage) => {
@@ -241,5 +466,90 @@ export function usePiSession(session: string, lane = "main") {
     [send]
   );
 
-  return { ...state, submit, abort };
+  const answerUi = useCallback(
+    (requestId: string, response: ExtensionUiResponse) => {
+      owed.current.delete(requestId);
+      setState((current) => ({
+        ...current,
+        dialogs: current.dialogs.filter(
+          (dialog) => dialog.requestId !== requestId
+        )
+      }));
+      send({
+        type: "extension_ui_response",
+        id: crypto.randomUUID(),
+        requestId,
+        response
+      });
+    },
+    [send]
+  );
+
+  const runCommand = useCallback(
+    (name: string, args?: string) =>
+      send({
+        type: "command",
+        id: crypto.randomUUID(),
+        name,
+        ...(args === undefined || args === "" ? {} : { args })
+      }),
+    [send]
+  );
+
+  const setFlag = useCallback(
+    (name: string, value: boolean | string) =>
+      send({ type: "set_flag", id: crypto.randomUUID(), name, value }),
+    [send]
+  );
+
+  const refreshCommands = useCallback(
+    () => send({ type: "get_commands", id: crypto.randomUUID() }),
+    [send]
+  );
+
+  const dismissNotice = useCallback((id: string) => {
+    setState((current) => ({
+      ...current,
+      notices: current.notices.filter((notice) => notice.id !== id)
+    }));
+  }, []);
+
+  const clearEditorText = useCallback(() => {
+    setState((current) => ({ ...current, editorText: undefined }));
+  }, []);
+
+  // Best effort only: `useAgent` closes the socket in its own cleanup, which
+  // may run before this one, so the sends below are often no-ops. The
+  // guarantee lives on the server, which cancels a lane's open dialogs once
+  // its last subscriber has gone.
+  useEffect(() => {
+    const pending = owed.current;
+    return () => {
+      for (const requestId of pending) {
+        if (agent.readyState !== WebSocket.OPEN) break;
+        agent.send(
+          JSON.stringify({
+            type: "extension_ui_response",
+            requestId,
+            response: { cancelled: true }
+          } satisfies ClientMessage)
+        );
+      }
+      pending.clear();
+    };
+  }, [agent]);
+
+  return {
+    ...state,
+    /** The dialog on screen, or null when nothing is waiting. */
+    dialog: state.dialogs[0] ?? null,
+    submit,
+    abort,
+    answerUi,
+    runCommand,
+    setFlag,
+    refreshCommands,
+    dismissNotice,
+    clearEditorText
+  };
 }

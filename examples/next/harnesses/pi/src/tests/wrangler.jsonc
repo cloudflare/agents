@@ -8,6 +8,18 @@
       {
         "name": "PI_HARNESS_TEST",
         "class_name": "PiHarnessTestObject"
+      },
+      {
+        "name": "PI_EXECUTION_ENV_TEST",
+        "class_name": "PiExecutionEnvTestObject"
+      },
+      {
+        "name": "PI_BUILTIN_TOOLS_TEST",
+        "class_name": "PiBuiltinToolsTestObject"
+      },
+      {
+        "name": "PI_EXTENSIONS_TEST",
+        "class_name": "PiExtensionsTestObject"
       }
     ]
   },
@@ -15,6 +27,18 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["PiHarnessTestObject"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["PiExecutionEnvTestObject"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["PiBuiltinToolsTestObject"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["PiExtensionsTestObject"]
     }
   ]
 }

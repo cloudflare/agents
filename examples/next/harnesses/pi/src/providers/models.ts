@@ -38,8 +38,24 @@ export interface PiModelRegistry {
   getModels(provider?: string): readonly PiModel[];
   /** Providers with configured credentials. */
   getProviders(): readonly { readonly id: string; readonly name: string }[];
+  /**
+   * The provider registered under one id, when there is one.
+   *
+   * Registration replaces by id, so a caller that registers over an id has
+   * to read what was there first if it means to put it back.
+   */
+  getProvider(id: string): PiProvider | undefined;
   /** Add or replace a provider by id. */
   setProvider(provider: PiProvider): void;
+  /**
+   * Remove a provider by id, with no effect when none is registered under it.
+   *
+   * Named for pi-ai's own `MutableModels.deleteProvider`, which this contract
+   * is satisfied by. Registration is reversible because extensions register
+   * providers at runtime: one that registers a provider and later drops it
+   * must leave nothing resolvable behind.
+   */
+  deleteProvider(id: string): void;
 }
 
 function envLookup(env: object | undefined) {

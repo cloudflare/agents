@@ -1,3 +1,5 @@
+import { Type } from "typebox";
+import { Check } from "typebox/value";
 import type {
   Connection,
   ConnectionContext,
@@ -9,12 +11,15 @@ import type {
   PiAbortResult,
   PiClientMessage,
   PiEvent,
+  PiExtensionUiRequest,
+  PiExtensionUiResponse,
   PiJson,
   PiLaneSnapshot,
   PiMessageInput,
   PiOperationRequest,
   PiQueueReceipt,
   PiServerMessage,
+  PiSlashCommand,
   PiSubmissionReceipt
 } from "./types";
 
@@ -35,7 +40,45 @@ export interface PiTransportHost {
     message: PiMessageInput,
     options: { lane: string }
   ): Promise<PiQueueReceipt>;
+  /**
+   * The extension surface. Optional so a harness built without extensions
+   * still satisfies the host contract; the transport answers the matching
+   * client frames with an `unsupported` error when a method is absent.
+   */
+  resolveUi?(
+    requestId: string,
+    response: PiExtensionUiResponse,
+    options: { lane: string }
+  ): boolean;
+  commands?(options: { lane: string }): Promise<readonly PiSlashCommand[]>;
+  /** Current extension flag values, for a client that has just connected. */
+  flags?(): Promise<Readonly<Record<string, boolean | string>>>;
+  setFlag?(
+    name: string,
+    value: boolean | string
+  ): Promise<Readonly<Record<string, boolean | string>>>;
+  runCommand?(
+    name: string,
+    args: string | undefined,
+    options: { lane: string }
+  ): Promise<PiSubmissionReceipt>;
 }
+
+/**
+ * The UI request methods that wait for an answer, each with the field its
+ * answer carries; the rest are view updates nobody replies to.
+ *
+ * A `confirm` answered with `{value: "yes"}` reads back to the bridge as
+ * neither a confirmation nor a cancellation, so the dialog settles with its
+ * default — `false` — and the extension is told the user declined something
+ * the user in fact approved. The pairing is checked rather than coerced.
+ */
+const DIALOG_METHODS: ReadonlyMap<string, "value" | "confirmed"> = new Map([
+  ["select", "value"],
+  ["confirm", "confirmed"],
+  ["input", "value"],
+  ["editor", "value"]
+]);
 
 const LANE_TAG_PREFIX = "pi:";
 const LANE_QUERY = "lane";
@@ -63,13 +106,233 @@ function laneOf(connection: Connection, fallback: string): string {
   return tag ? tag.slice(LANE_TAG_PREFIX.length) : fallback;
 }
 
-function isClientMessage(value: unknown): value is PiClientMessage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "type" in value &&
-    typeof value.type === "string"
-  );
+// ── Wire validation ───────────────────────────────────────────────────────
+
+/**
+ * Every client frame is validated against a schema before the host sees it.
+ *
+ * The socket is the harness's public edge: whatever arrives on it is a
+ * stranger's JSON, and `submit` reaches durable storage and the model. A
+ * `type` check alone lets a frame through with a missing `streamId`, a
+ * `request.kind` pi never defined, or a `value` of the wrong type, and the
+ * failure then surfaces deep inside the harness — or not at all.
+ */
+const Identifier = Type.String({ minLength: 1, maxLength: 200 });
+
+/**
+ * Every size a client controls is bounded here.
+ *
+ * A validated frame is a frame the harness will act on: the prompt reaches
+ * durable storage and the model, and an image is carried base64-encoded in
+ * the same row. Without a bound one socket message can cost the Durable
+ * Object as much storage and CPU as the sender cares to spend, and the
+ * refusal has to come before any of it — at the frame, then at each field.
+ */
+const MAX_FRAME_LENGTH = 8 * 1024 * 1024;
+const MAX_TEXT_LENGTH = 256 * 1024;
+const MAX_IMAGES = 8;
+const MAX_IMAGE_DATA_LENGTH = 4 * 1024 * 1024;
+
+/** Free text a client submits: a prompt, an instruction, a label. */
+const Text = Type.String({ maxLength: MAX_TEXT_LENGTH });
+
+const ImageSchema = Type.Object(
+  {
+    data: Type.String({ maxLength: MAX_IMAGE_DATA_LENGTH }),
+    mimeType: Type.String({ minLength: 1, maxLength: 200 })
+  },
+  { additionalProperties: false }
+);
+
+const ImagesSchema = Type.Array(ImageSchema, { maxItems: MAX_IMAGES });
+
+const MessageInputSchema = Type.Union([
+  Text,
+  Type.Object(
+    {
+      text: Text,
+      images: Type.Optional(ImagesSchema)
+    },
+    { additionalProperties: false }
+  )
+]);
+
+/** Pi's operation kinds, each with the fields that kind requires. */
+const OperationRequestSchema = Type.Union([
+  Type.Object(
+    {
+      kind: Type.Literal("prompt"),
+      operationId: Type.Optional(Identifier),
+      prompt: Text,
+      images: Type.Optional(ImagesSchema)
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("skill"),
+      operationId: Type.Optional(Identifier),
+      name: Type.String({ minLength: 1, maxLength: 200 }),
+      additionalInstructions: Type.Optional(Text)
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("prompt_template"),
+      operationId: Type.Optional(Identifier),
+      name: Type.String({ minLength: 1, maxLength: 200 }),
+      args: Type.Optional(Type.Array(Text, { maxItems: 32 }))
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("compaction"),
+      operationId: Type.Optional(Identifier),
+      customInstructions: Type.Optional(Text)
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("navigation"),
+      operationId: Type.Optional(Identifier),
+      targetId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+      summarize: Type.Optional(Type.Boolean()),
+      label: Type.Optional(Type.String({ maxLength: 200 })),
+      customInstructions: Type.Optional(Text)
+    },
+    { additionalProperties: false }
+  )
+]);
+
+const UiResponseSchema = Type.Union([
+  Type.Object({ value: Text }, { additionalProperties: false }),
+  Type.Object({ confirmed: Type.Boolean() }, { additionalProperties: false }),
+  Type.Object(
+    { cancelled: Type.Literal(true) },
+    { additionalProperties: false }
+  )
+]);
+
+/** One schema per frame type, mirroring the `PiClientMessage` union. */
+const CLIENT_MESSAGE_SCHEMAS = {
+  subscribe: Type.Object(
+    {
+      type: Type.Literal("subscribe"),
+      id: Type.Optional(Identifier),
+      streamId: Identifier,
+      from: Type.Optional(Type.Integer({ minimum: 0 }))
+    },
+    { additionalProperties: false }
+  ),
+  unsubscribe: Type.Object(
+    {
+      type: Type.Literal("unsubscribe"),
+      id: Type.Optional(Identifier),
+      streamId: Identifier
+    },
+    { additionalProperties: false }
+  ),
+  snapshot: Type.Object(
+    { type: Type.Literal("snapshot"), id: Identifier },
+    { additionalProperties: false }
+  ),
+  submit: Type.Object(
+    {
+      type: Type.Literal("submit"),
+      id: Identifier,
+      request: OperationRequestSchema
+    },
+    { additionalProperties: false }
+  ),
+  abort: Type.Object(
+    {
+      type: Type.Literal("abort"),
+      id: Identifier,
+      operationId: Type.Optional(Identifier)
+    },
+    { additionalProperties: false }
+  ),
+  steer: Type.Object(
+    {
+      type: Type.Literal("steer"),
+      id: Identifier,
+      message: MessageInputSchema
+    },
+    { additionalProperties: false }
+  ),
+  extension_ui_response: Type.Object(
+    {
+      type: Type.Literal("extension_ui_response"),
+      id: Type.Optional(Identifier),
+      requestId: Identifier,
+      response: UiResponseSchema
+    },
+    { additionalProperties: false }
+  ),
+  get_commands: Type.Object(
+    { type: Type.Literal("get_commands"), id: Identifier },
+    { additionalProperties: false }
+  ),
+  get_flags: Type.Object(
+    { type: Type.Literal("get_flags"), id: Identifier },
+    { additionalProperties: false }
+  ),
+  set_flag: Type.Object(
+    {
+      type: Type.Literal("set_flag"),
+      id: Identifier,
+      name: Type.String({ minLength: 1, maxLength: 200 }),
+      value: Type.Union([Type.Boolean(), Type.String({ maxLength: 4096 })])
+    },
+    { additionalProperties: false }
+  ),
+  command: Type.Object(
+    {
+      type: Type.Literal("command"),
+      id: Identifier,
+      name: Type.String({ minLength: 1, maxLength: 200 }),
+      args: Type.Optional(Text)
+    },
+    { additionalProperties: false }
+  )
+} satisfies Record<PiClientMessage["type"], unknown>;
+
+/** A validated frame, or the error frame the client gets instead. */
+type ParsedFrame =
+  | { readonly ok: true; readonly message: PiClientMessage }
+  | { readonly ok: false; readonly id?: string; readonly error: string };
+
+function parseClientMessage(value: unknown): ParsedFrame {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false, error: "Malformed pi message" };
+  }
+  const frame = value as Record<string, unknown>;
+  const id = typeof frame.id === "string" ? frame.id : undefined;
+  const withId = id === undefined ? {} : { id };
+  if (typeof frame.type !== "string") {
+    return { ok: false, ...withId, error: "Malformed pi message" };
+  }
+  const schema =
+    CLIENT_MESSAGE_SCHEMAS[frame.type as PiClientMessage["type"]] ?? undefined;
+  if (schema === undefined) {
+    return {
+      ok: false,
+      ...withId,
+      error: `Unknown pi message type ${JSON.stringify(frame.type)}`
+    };
+  }
+  if (!Check(schema, frame)) {
+    return {
+      ok: false,
+      ...withId,
+      error: `Malformed ${frame.type} message`
+    };
+  }
+  // SAFETY: the schema for this `type` mirrors that arm of PiClientMessage.
+  return { ok: true, message: frame as unknown as PiClientMessage };
 }
 
 function send(socket: WebSocket, message: PiServerMessage): void {
@@ -95,6 +358,23 @@ export class PiTransport {
   readonly #host: PiTransportHost;
   readonly #sockets: () => LifecycleSockets;
   readonly #tails = new WeakMap<WebSocket, Map<string, AbortController>>();
+  /**
+   * Dialogs broadcast to a lane and not yet settled. The transport is the only
+   * place that knows both which lane a request went to and whether anyone is
+   * still listening, so it owns the "last subscriber left" cancellation.
+   */
+  readonly #openDialogs = new Map<string, Set<string>>();
+  /**
+   * The lane and method of each open dialog.
+   *
+   * A request id is a bearer token for one answer, and lanes are independent
+   * conversations: a socket subscribed to one lane must not be able to
+   * confirm another lane's permission prompt by guessing — or by reading —
+   * its id. The bridge set resolves by id alone, and by then the method that
+   * raised the dialog is gone too, so both checks belong here, where the
+   * broadcast recorded them in the first place.
+   */
+  readonly #dialogs = new Map<string, { lane: string; method: string }>();
 
   constructor(host: PiTransportHost, sockets: () => LifecycleSockets) {
     this.#host = host;
@@ -111,8 +391,8 @@ export class PiTransport {
         onConnect: (connection, ctx) => this.#onConnect(connection, ctx),
         onMessage: (connection, message) =>
           this.#onMessage(connection, message),
-        onClose: (connection) => this.#stopTails(connection),
-        onError: (connection) => this.#stopTails(connection)
+        onClose: (connection) => this.#onClose(connection),
+        onError: (connection) => this.#onClose(connection)
       }
     };
   }
@@ -144,6 +424,85 @@ export class PiTransport {
     }
   }
 
+  /**
+   * Broadcast one extension UI request to a lane's connections and report how
+   * many received it. Zero is the bridge's cue to answer with the default
+   * rather than wait for a client that is not there.
+   */
+  extensionUiRequest(lane: string, request: PiExtensionUiRequest): number {
+    if (DIALOG_METHODS.has(request.method)) {
+      let open = this.#openDialogs.get(lane);
+      if (!open) {
+        open = new Set();
+        this.#openDialogs.set(lane, open);
+      }
+      open.add(request.requestId);
+      this.#dialogs.set(request.requestId, { lane, method: request.method });
+    }
+    let delivered = 0;
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      if (socket.readyState !== OPEN) continue;
+      send(socket, {
+        type: "extension_ui_request",
+        lane,
+        requestId: request.requestId,
+        request
+      });
+      delivered += 1;
+    }
+    return delivered;
+  }
+
+  /**
+   * Announce that a dialog is dead: its timeout elapsed, the run was aborted,
+   * or an answer already settled it. Clients take the modal down; without the
+   * frame a settled dialog sits on screen and its late answer is dropped in
+   * silence.
+   */
+  extensionUiSettled(lane: string, requestId: string): void {
+    this.#dialogs.delete(requestId);
+    const open = this.#openDialogs.get(lane);
+    if (open) {
+      open.delete(requestId);
+      if (open.size === 0) this.#openDialogs.delete(lane);
+    }
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      send(socket, { type: "extension_ui_settled", lane, requestId });
+    }
+  }
+
+  /** Broadcast a hook, event listener or extension failure to a lane. */
+  handlerError(
+    lane: string,
+    payload: {
+      readonly kind: "hook" | "event" | "extension";
+      readonly source: string;
+      readonly message: string;
+      readonly stack?: string;
+    }
+  ): void {
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      send(socket, { type: "handler_error", lane, ...payload });
+    }
+  }
+
+  /** Broadcast a changed slash command set to a lane's connections. */
+  commandsChanged(lane: string, commands: readonly PiSlashCommand[]): void {
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      send(socket, { type: "commands", lane, commands });
+    }
+  }
+
+  /** Broadcast changed extension flags to a lane's connections. */
+  flagsChanged(
+    lane: string,
+    flags: Readonly<Record<string, boolean | string>>
+  ): void {
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      send(socket, { type: "flags", flags });
+    }
+  }
+
   async #onConnect(
     connection: Connection,
     ctx: ConnectionContext
@@ -160,6 +519,16 @@ export class PiTransport {
     raw: WebSocketMessage
   ): Promise<void> {
     if (typeof raw !== "string") return;
+    // Parsing is itself work a sender controls, so the frame is measured
+    // before it is read: an oversized one is refused unparsed, with no id to
+    // answer it by.
+    if (raw.length > MAX_FRAME_LENGTH) {
+      send(connection, {
+        type: "error",
+        message: `Message is ${raw.length} characters, over the ${MAX_FRAME_LENGTH} character limit`
+      });
+      return;
+    }
     let message: unknown;
     try {
       message = JSON.parse(raw);
@@ -167,14 +536,20 @@ export class PiTransport {
       send(connection, { type: "error", message: "Malformed JSON" });
       return;
     }
-    if (!isClientMessage(message)) {
-      send(connection, { type: "error", message: "Malformed pi message" });
+    const parsed = parseClientMessage(message);
+    if (!parsed.ok) {
+      send(connection, {
+        type: "error",
+        ...(parsed.id === undefined ? {} : { id: parsed.id }),
+        message: parsed.error
+      });
       return;
     }
+    const frame = parsed.message;
     const lane = laneOf(connection, this.#host.defaultLane);
-    const id = "id" in message ? message.id : undefined;
+    const id = "id" in frame ? frame.id : undefined;
     try {
-      const result = await this.#dispatch(connection, lane, message);
+      const result = await this.#dispatch(connection, lane, frame);
       if (id !== undefined && result !== SUBSCRIPTION) {
         // SAFETY: every command reply is a projected JSON value.
         send(connection, { type: "result", id, result: result as PiJson });
@@ -231,6 +606,77 @@ export class PiTransport {
         });
       case "steer":
         return this.#host.steer(message.message, { lane });
+      case "extension_ui_response": {
+        const resolveUi = this.#host.resolveUi;
+        if (!resolveUi) throw unsupported(message.type);
+        const open = this.#dialogs.get(message.requestId);
+        if (open !== undefined && open.lane !== lane) {
+          // Another lane's dialog. Refuse without touching it, and without
+          // saying whether the id exists.
+          throw foreign(message.requestId, lane);
+        }
+        if (open !== undefined && !answers(open.method, message.response)) {
+          // A variant this method cannot read would settle the dialog with
+          // its default — an answer nobody gave. The dialog stays open for
+          // an answer of the right shape.
+          throw mismatched(message.requestId, open.method);
+        }
+        const answered =
+          open === undefined
+            ? false
+            : resolveUi.call(this.#host, message.requestId, message.response, {
+                lane
+              });
+        if (!answered) {
+          // The dialog settled before this answer arrived. Say so rather than
+          // dropping it: the client is still showing a modal for it.
+          send(connection, {
+            type: "extension_ui_settled",
+            lane,
+            requestId: message.requestId
+          });
+          throw stale(message.type);
+        }
+        return answered;
+      }
+      case "get_commands": {
+        const commands = this.#host.commands;
+        if (!commands) throw unsupported(message.type);
+        send(connection, {
+          type: "commands",
+          id: message.id,
+          lane,
+          commands: await commands.call(this.#host, { lane })
+        });
+        return SUBSCRIPTION;
+      }
+      case "get_flags": {
+        const flags = this.#host.flags;
+        if (!flags) throw unsupported(message.type);
+        send(connection, {
+          type: "flags",
+          id: message.id,
+          flags: await flags.call(this.#host)
+        });
+        return SUBSCRIPTION;
+      }
+      case "set_flag": {
+        const setFlag = this.#host.setFlag;
+        if (!setFlag) throw unsupported(message.type);
+        send(connection, {
+          type: "flags",
+          id: message.id,
+          flags: await setFlag.call(this.#host, message.name, message.value)
+        });
+        return SUBSCRIPTION;
+      }
+      case "command": {
+        const runCommand = this.#host.runCommand;
+        if (!runCommand) throw unsupported(message.type);
+        return runCommand.call(this.#host, message.name, message.args, {
+          lane
+        });
+      }
       default:
         throw new Error(
           `Unknown pi message type ${JSON.stringify((message as { type: string }).type)}`
@@ -273,16 +719,81 @@ export class PiTransport {
     }
   }
 
+  #onClose(connection: Connection): void {
+    this.#stopTails(connection);
+    this.#cancelOrphanedDialogs(
+      laneOf(connection, this.#host.defaultLane),
+      connection
+    );
+  }
+
   #stopTails(connection: Connection): void {
     const tails = this.#tails.get(connection);
     if (!tails) return;
     for (const controller of tails.values()) controller.abort();
     this.#tails.delete(connection);
   }
+
+  /**
+   * The last subscriber to a lane has gone. Every dialog it was owed is now
+   * unanswerable, and an extension waiting on one holds a hook gate open until
+   * the harness's timeout, so settle them with their defaults now — exactly as
+   * the bridge does for a dialog broadcast to nobody in the first place.
+   */
+  #cancelOrphanedDialogs(lane: string, closing: Connection): void {
+    const open = this.#openDialogs.get(lane);
+    if (!open || open.size === 0) return;
+    for (const socket of this.#sockets().get(laneTag(lane))) {
+      // The closing connection may still be listed, and may still report OPEN
+      // when the close came from this side.
+      if (socket !== closing && socket.readyState === OPEN) return;
+    }
+    const resolveUi = this.#host.resolveUi;
+    if (!resolveUi) return;
+    // The bridge answers back through `extensionUiSettled`, which mutates
+    // `open`, so cancel over a copy.
+    for (const requestId of [...open]) {
+      resolveUi.call(this.#host, requestId, { cancelled: true }, { lane });
+      this.#dialogs.delete(requestId);
+    }
+    this.#openDialogs.delete(lane);
+  }
 }
 
 /** Sentinel for commands whose reply is the subscription itself. */
 const SUBSCRIPTION = Symbol("pi-subscription");
+
+/** A frame this harness understands but this host does not implement. */
+function unsupported(type: string): Error {
+  return new Error(`unsupported: ${type}`);
+}
+
+/** An answer aimed at a dialog that belongs to some other lane. */
+function foreign(requestId: string, lane: string): Error {
+  return new Error(
+    `Dialog ${JSON.stringify(requestId)} does not belong to lane ${JSON.stringify(lane)}`
+  );
+}
+
+/** An answer in a shape the dialog's own method cannot read. */
+function mismatched(requestId: string, method: string): Error {
+  return new Error(
+    `Dialog ${JSON.stringify(requestId)} is a ${method} request and cannot be answered with this response`
+  );
+}
+
+/** Whether one response variant is an answer the dialog's method accepts. */
+function answers(method: string, response: PiExtensionUiResponse): boolean {
+  // Cancelling is an answer every dialog understands.
+  if ("cancelled" in response) return true;
+  const field = DIALOG_METHODS.get(method);
+  return field !== undefined && field in response;
+}
+
+/** A frame that arrived too late to change anything. */
+function stale(type: string): Error {
+  return new Error(`stale: ${type}`);
+}
 
 function operationIdOf(
   metadata: Record<string, unknown> | undefined

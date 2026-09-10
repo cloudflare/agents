@@ -9,6 +9,73 @@ CREATE TABLE IF NOT EXISTS cf_agents_pi_submissions (
   submitted_at INTEGER NOT NULL
 )`;
 
+/**
+ * Terminal record of a submission that never became an operation.
+ *
+ * Additive to {@link SCHEMA}: an existing database gains the table on its
+ * next start and keeps every pending row it already had.
+ */
+const DISPOSITION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS cf_agents_pi_dispositions (
+  operation_id TEXT PRIMARY KEY,
+  lane TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  command TEXT,
+  created_at INTEGER NOT NULL
+)`;
+
+/**
+ * How many dispositions one Durable Object keeps.
+ *
+ * The rows are an idempotency window, not a log: they exist so a client
+ * retrying a submission it never got a receipt for is answered instead of
+ * re-run. Keeping every one would grow the object's storage for the life of
+ * the session, so the newest {@link MAX_DISPOSITIONS} survive and older ones
+ * are dropped. A retry that arrives after its row was pruned is treated as a
+ * new submission — the window is far longer than any client's retry.
+ */
+export const MAX_DISPOSITIONS = 1024;
+
+/**
+ * What became of a submission the harness consumed out of band.
+ *
+ * `claimed` is the transient state: the row exists from before the `input`
+ * handler or the slash command runs until its outcome is known. A row left
+ * in it is a submission whose isolate died mid-handler — the handler may have
+ * run in part, so the retry is refused rather than replayed. Out-of-band
+ * commands are at-most-once.
+ */
+export type PiDispositionKind = "claimed" | "handled" | "command";
+
+/** A submission's terminal (or in-flight) out-of-band disposition. */
+export type PiDisposition = {
+  readonly operationId: string;
+  readonly lane: string;
+  readonly kind: PiDispositionKind;
+  /** The extension slash command that ran, for `kind: "command"`. */
+  readonly command?: string;
+  readonly createdAt: number;
+};
+
+type DispositionRow = {
+  operation_id: string;
+  lane: string;
+  kind: string;
+  command: string | null;
+  created_at: number;
+};
+
+function rowToDisposition(row: DispositionRow): PiDisposition {
+  return {
+    operationId: row.operation_id,
+    lane: row.lane,
+    kind:
+      row.kind === "handled" || row.kind === "command" ? row.kind : "claimed",
+    ...(row.command === null ? {} : { command: row.command }),
+    createdAt: row.created_at
+  };
+}
+
 type SubmissionRow = {
   seq: number;
   lane: string;
@@ -46,6 +113,84 @@ export class PiSubmissions {
 
   ensureTable(): void {
     this.#storage.sql.exec(SCHEMA);
+    this.#storage.sql.exec(DISPOSITION_SCHEMA);
+  }
+
+  /**
+   * Claim an operation id for out-of-band handling, atomically.
+   *
+   * False means the id was already claimed — by a retry of this submission,
+   * or by the submission itself before an eviction — and the caller must run
+   * no handler for it. The row is the only durable trace an `input` handler
+   * or a slash command leaves, so it has to exist before either runs.
+   */
+  claim(lane: string, operationId: string): boolean {
+    const cursor = this.#storage.sql.exec(
+      `INSERT INTO cf_agents_pi_dispositions
+        (operation_id, lane, kind, command, created_at)
+       VALUES (?, ?, 'claimed', NULL, ?)
+       ON CONFLICT(operation_id) DO NOTHING`,
+      operationId,
+      lane,
+      Date.now()
+    );
+    return cursor.rowsWritten > 0;
+  }
+
+  /**
+   * Record what a claimed submission turned out to be, and drop the
+   * dispositions that have aged out of the retention window.
+   *
+   * Settling is the only point a row becomes terminal, so it is where the
+   * table is bounded: the newest {@link MAX_DISPOSITIONS} rows stay and the
+   * rest go, in the same synchronous block as the update.
+   */
+  settle(
+    operationId: string,
+    kind: "handled" | "command",
+    command?: string
+  ): void {
+    this.#storage.sql.exec(
+      `UPDATE cf_agents_pi_dispositions
+         SET kind = ?, command = ?
+       WHERE operation_id = ?`,
+      kind,
+      command ?? null,
+      operationId
+    );
+    // `created_at` is a millisecond clock, so rows written in the same tick
+    // tie; the rowid breaks the tie in insertion order.
+    this.#storage.sql.exec(
+      `DELETE FROM cf_agents_pi_dispositions
+        WHERE rowid NOT IN (
+          SELECT rowid FROM cf_agents_pi_dispositions
+           ORDER BY created_at DESC, rowid DESC LIMIT ?
+        )`,
+      MAX_DISPOSITIONS
+    );
+  }
+
+  /**
+   * Drop a claim: the submission is an ordinary operation after all, and the
+   * queue row it is about to get is its idempotency record.
+   */
+  release(operationId: string): void {
+    this.#storage.sql.exec(
+      "DELETE FROM cf_agents_pi_dispositions WHERE operation_id = ?",
+      operationId
+    );
+  }
+
+  /** The out-of-band disposition of an operation id, when it has one. */
+  disposition(operationId: string): PiDisposition | undefined {
+    const row = this.#storage.sql
+      .exec<DispositionRow>(
+        `SELECT operation_id, lane, kind, command, created_at
+         FROM cf_agents_pi_dispositions WHERE operation_id = ? LIMIT 1`,
+        operationId
+      )
+      .toArray()[0];
+    return row ? rowToDisposition(row) : undefined;
   }
 
   insert(
@@ -100,6 +245,33 @@ export class PiSubmissions {
             )
             .toArray();
     return rows.map(rowToSubmission);
+  }
+
+  /** How many submissions are pending on one lane. */
+  count(lane: string): number {
+    return this.#storage.sql
+      .exec<{ pending: number }>(
+        "SELECT COUNT(*) AS pending FROM cf_agents_pi_submissions WHERE lane = ?",
+        lane
+      )
+      .one().pending;
+  }
+
+  /**
+   * Waiting submissions on `lane` that will put a message in front of the
+   * model: prompts, skills and prompt templates. Compactions and navigations
+   * are operations without a message, so `ctx.hasPendingMessages()` must not
+   * count them.
+   */
+  countMessages(lane: string): number {
+    return this.#storage.sql
+      .exec<{ pending: number }>(
+        `SELECT COUNT(*) AS pending FROM cf_agents_pi_submissions
+          WHERE lane = ?
+            AND json_extract(request, '$.kind') IN ('prompt', 'skill', 'prompt_template')`,
+        lane
+      )
+      .one().pending;
   }
 
   has(operationId: string): boolean {

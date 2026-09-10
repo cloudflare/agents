@@ -1,0 +1,83 @@
+{
+  "upstream": "https://github.com/earendil-works/pi",
+  "commit": "c4b0e35abe631bc830190fa6cafbe81b098b97d7",
+  "packageVersion": "0.84.4",
+  "generatedBy": "scripts/vendor-pi-coding-agent.ts",
+  "note": "sha256 covers the final vendored bytes (provenance banner + upstream source + patches). Stubs are hand-written and not generated.",
+  "files": {
+    "core/diagnostics.ts": {
+      "upstream": "packages/coding-agent/src/core/diagnostics.ts",
+      "patches": [],
+      "sha256": "4875f34cbb35c48cad959c975de10364f29f5a0fe5029baf48c4b031292f117b"
+    },
+    "core/extensions/loader.ts": {
+      "upstream": "packages/coding-agent/src/core/extensions/loader.ts",
+      "patches": [
+        "0001-loader-inline-only.patch"
+      ],
+      "sha256": "4d885ba25f203b2687f9d488082bc2914308167f3e4d3418b8a807bde3c77b9c"
+    },
+    "core/extensions/runner.ts": {
+      "upstream": "packages/coding-agent/src/core/extensions/runner.ts",
+      "patches": [],
+      "sha256": "d0a0352c7bb3e2c7a6a424a9e5a3ec4fcc84d3392c5c3d8f3826560c37196fda"
+    },
+    "core/extensions/types.ts": {
+      "upstream": "packages/coding-agent/src/core/extensions/types.ts",
+      "patches": [],
+      "sha256": "880d5a21ab5deb403829fb02e497b3fc81bc9a2181a4fc963a8c72ec8552094a"
+    },
+    "core/extensions/wrapper.ts": {
+      "upstream": "packages/coding-agent/src/core/extensions/wrapper.ts",
+      "patches": [],
+      "sha256": "0e71e502f0487f2fd0563fb635d8f65bd17117463a42832f3a7740a12dd25009"
+    },
+    "core/messages.ts": {
+      "upstream": "packages/coding-agent/src/core/messages.ts",
+      "patches": [],
+      "sha256": "91ff7beb263c55333accdae52a451949ede3196a6f40888b6f0cba98b4c6213a"
+    },
+    "core/prompt-templates.ts": {
+      "upstream": "packages/coding-agent/src/core/prompt-templates.ts",
+      "patches": [
+        "0002-prompt-templates-pure.patch"
+      ],
+      "sha256": "87015da9ed47693e31fb4d50a80193e6820ffbaf64d56d8849ce0543c43b927e"
+    },
+    "core/slash-commands.ts": {
+      "upstream": "packages/coding-agent/src/core/slash-commands.ts",
+      "patches": [],
+      "sha256": "6c2101cb15b3b882fbafa00a2acc6af716e041d55c01b9603d3e3d64649e0f44"
+    },
+    "core/source-info.ts": {
+      "upstream": "packages/coding-agent/src/core/source-info.ts",
+      "patches": [],
+      "sha256": "517e005508a7285c2df24d5cdbbe69d973b969217e6fb2ee6c63a35a9ff5ae4a"
+    },
+    "core/tools/tool-definition-wrapper.ts": {
+      "upstream": "packages/coding-agent/src/core/tools/tool-definition-wrapper.ts",
+      "patches": [],
+      "sha256": "73c538fd741b93aff9b74b590086213f3a62e8682f73dc97d554c6f28417f38b"
+    }
+  },
+  "stubs": [
+    "_stubs/pi-tui.d.ts",
+    "config.ts",
+    "core/bash-executor.ts",
+    "core/compaction/index.ts",
+    "core/event-bus.ts",
+    "core/exec.ts",
+    "core/footer-data-provider.ts",
+    "core/keybindings.ts",
+    "core/model-registry.ts",
+    "core/model-resolver.ts",
+    "core/package-manager.ts",
+    "core/session-manager.ts",
+    "core/skills.ts",
+    "core/system-prompt.ts",
+    "core/tools/bash.ts",
+    "core/tools/edit.ts",
+    "core/tools/index.ts",
+    "modes/interactive/theme/theme.ts"
+  ]
+}
