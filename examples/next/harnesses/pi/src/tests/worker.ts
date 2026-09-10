@@ -398,6 +398,10 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
   #inputCalls = 0;
   /** Resolved by the extension tool once it is waiting on `ctx.signal`. */
   #toolWaiting: (() => void) | undefined;
+  /** Releases the extension tool that blocks until a test lets it finish. */
+  #releaseTool: (() => void) | undefined;
+  /** What the first `tool_result` handler of a run saw of pending messages. */
+  #pendingSeen: boolean | undefined;
   /** The extension surface, captured when the extension loads. */
   #pi: PiExtensionApi | undefined;
   /** Held by the resource source to keep one tool refresh pass open. */
@@ -741,6 +745,43 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     return { status: response.status, sawAbort: this.#toolSawAbort };
   }
 
+  /**
+   * Run a turn whose extension tool blocks, submit a second prompt onto the
+   * same lane while it is blocked, and report what the extension's
+   * `tool_result` handler saw of `ctx.hasPendingMessages()`.
+   *
+   * The second prompt sits in the harness's intake table for as long as the
+   * first operation holds the lane, so it is invisible in pi's own snapshot.
+   */
+  async pendingDuringRun(): Promise<{
+    readonly pendingSeen: boolean | undefined;
+    readonly pendingAfter: number;
+  }> {
+    this.#faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("echo", { text: "wait" }), {
+        stopReason: "toolUse"
+      }),
+      fauxAssistantMessage("echoed"),
+      fauxAssistantMessage("second")
+    ]);
+    this.#pendingSeen = undefined;
+    const waiting = new Promise<void>((resolve) => {
+      this.#toolWaiting = resolve;
+    });
+    const run = this.harness.prompt("wait");
+    await waiting;
+    const second = await this.harness.submit({
+      kind: "prompt",
+      prompt: "second"
+    });
+    const pendingAfter = (await this.harness.pending()).length;
+    this.#releaseTool?.();
+    this.#releaseTool = undefined;
+    await run;
+    await this.harness.waitForResult(second.operationId);
+    return { pendingSeen: this.#pendingSeen, pendingAfter };
+  }
+
   /** Names of every tool currently offered to the model. */
   async toolNames(): Promise<readonly string[]> {
     return (await this.harness.snapshot()).tools.map((tool) => tool.name);
@@ -848,6 +889,11 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     const sawAbort = () => {
       this.#toolSawAbort = true;
     };
+    const blockUntilReleased = () =>
+      new Promise<void>((resolve) => {
+        this.#releaseTool = resolve;
+        waiting();
+      });
     pi.registerFlag("note-prefix", {
       type: "string",
       default: "note",
@@ -880,6 +926,15 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
           sawAbort();
           return {
             content: [{ type: "text", text: "echo:hang:aborted" }],
+            details: { text: params.text }
+          };
+        }
+        // "wait" blocks until the test releases it, which holds the lane
+        // open while a second prompt is submitted onto it.
+        if (params.text === "wait") {
+          await blockUntilReleased();
+          return {
+            content: [{ type: "text", text: "echo:wait" }],
             details: { text: params.text }
           };
         }
@@ -918,6 +973,13 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
         throw new Error("tool_call handler exploded");
       }
       return undefined;
+    });
+    // `tool_result` runs on a freshly refreshed lane read model, so it is
+    // where a run observes what is waiting behind it.
+    pi.on("tool_result", (_event, ctx) => {
+      if (this.#pendingSeen === undefined) {
+        this.#pendingSeen = ctx.hasPendingMessages();
+      }
     });
     pi.on("input", (event) => {
       this.#inputCalls += 1;

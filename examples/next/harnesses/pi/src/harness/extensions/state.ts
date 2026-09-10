@@ -42,6 +42,13 @@ export class ExtensionLaneState {
   model: Model<Api> | undefined;
   sessionName: string | undefined;
   busy = false;
+  /**
+   * Messages waiting to run on this lane: pi's own admitted queue plus the
+   * harness's intake rows, which are submissions the lane driver has not
+   * handed to pi yet. An extension asking whether anything is pending has to
+   * see both, or a prompt submitted while a run holds the lane reads as
+   * absent.
+   */
   queued = 0;
   contextUsage: ContextUsage | undefined;
   /** System prompt of the current provider request, as pi assembled it. */
@@ -85,8 +92,17 @@ export class ExtensionLaneState {
     await this.#chain;
   }
 
-  /** Re-read the lane so the synchronous extension API sees current values. */
-  async refresh(lane: AgentLane, context: Context): Promise<void> {
+  /**
+   * Re-read the lane so the synchronous extension API sees current values.
+   *
+   * `pendingSubmissions` is the harness's own intake count for this lane;
+   * pi's snapshot knows nothing about it.
+   */
+  async refresh(
+    lane: AgentLane,
+    context: Context,
+    pendingSubmissions = 0
+  ): Promise<void> {
     const handle = await lane.watch(context);
     handle.unsubscribe();
     const snapshot = handle.snapshot;
@@ -95,7 +111,7 @@ export class ExtensionLaneState {
     this.activeTools = snapshot.configuration.activeToolNames;
     this.thinkingLevel = snapshot.configuration.thinkingLevel;
     this.busy = snapshot.operation !== null;
-    this.queued = snapshot.queues.length;
+    this.queued = snapshot.queues.length + pendingSubmissions;
     this.model = await lane.getModel(context);
     this.contextUsage = {
       tokens: null,

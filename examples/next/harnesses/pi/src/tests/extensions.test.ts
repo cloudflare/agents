@@ -450,6 +450,23 @@ describe("extension cancellation", () => {
   });
 });
 
+describe("pending messages", () => {
+  /**
+   * A submission the harness accepted is durable in its own intake table
+   * until the lane driver admits it into pi, which cannot happen while an
+   * operation holds the lane. Pi's snapshot knows only its own admitted
+   * queue, so an extension asking whether anything is waiting has to be told
+   * about the intake rows as well — otherwise a prompt typed mid-turn reads
+   * as absent for the whole turn.
+   */
+  it("sees a submission waiting behind the running operation", async () => {
+    const result = await fresh().pendingDuringRun();
+
+    expect(result.pendingAfter).toBe(1);
+    expect(result.pendingSeen).toBe(true);
+  });
+});
+
 describe("extension notification lanes", () => {
   /**
    * Pi's `ExtensionContext` names no lane, so a notification handler's

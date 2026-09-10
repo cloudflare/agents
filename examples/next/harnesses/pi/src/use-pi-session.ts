@@ -431,11 +431,16 @@ export function usePiSession(
     }
   });
 
+  // Every field of `State` is lane-local — dialogs, notices, statuses,
+  // widgets, flags, commands — and so are the stream cursors, so a lane
+  // change resets exactly as a session change does. `useAgent` keys its
+  // socket on the query too, so the reconnect re-runs `onOpen`, which asks
+  // the new lane for its commands and flags.
   useEffect(() => {
     setState(INITIAL_STATE);
     lastSeq.current.clear();
     owed.current.clear();
-  }, [session]);
+  }, [session, lane]);
 
   const send = useCallback(
     (message: ClientMessage) => {

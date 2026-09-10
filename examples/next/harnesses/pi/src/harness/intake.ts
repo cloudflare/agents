@@ -247,6 +247,16 @@ export class PiSubmissions {
     return rows.map(rowToSubmission);
   }
 
+  /** How many submissions are pending on one lane. */
+  count(lane: string): number {
+    return this.#storage.sql
+      .exec<{ pending: number }>(
+        "SELECT COUNT(*) AS pending FROM cf_agents_pi_submissions WHERE lane = ?",
+        lane
+      )
+      .one().pending;
+  }
+
   has(operationId: string): boolean {
     return (
       this.#storage.sql

@@ -102,6 +102,13 @@ export type PiExtensionRuntimeDeps = {
   readonly shell?: Shell;
   /** Resolve one lane of the attached harness. */
   readonly lane: (name: string) => Promise<AgentLane>;
+  /**
+   * Submissions the harness has accepted for one lane but the lane driver
+   * has not yet admitted into pi. They are invisible in pi's own snapshot,
+   * so without this a prompt queued behind a running operation would make
+   * `ctx.hasPendingMessages()` answer false.
+   */
+  readonly pendingSubmissions?: (lane: string) => number;
   /** Rename the session. */
   readonly setSessionName: (name: string) => Promise<void>;
   /** Label one transcript entry. */
@@ -660,7 +667,11 @@ export class PiExtensionRuntime {
   async #refresh(lane: string): Promise<void> {
     const state = this.#states.get(lane);
     const context: Context = BACKGROUND_CONTEXT;
-    await state.refresh(await this.#deps.lane(lane), context);
+    await state.refresh(
+      await this.#deps.lane(lane),
+      context,
+      this.#deps.pendingSubmissions?.(lane) ?? 0
+    );
   }
 }
 
