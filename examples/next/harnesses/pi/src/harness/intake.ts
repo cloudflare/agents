@@ -25,6 +25,18 @@ CREATE TABLE IF NOT EXISTS cf_agents_pi_dispositions (
 )`;
 
 /**
+ * How many dispositions one Durable Object keeps.
+ *
+ * The rows are an idempotency window, not a log: they exist so a client
+ * retrying a submission it never got a receipt for is answered instead of
+ * re-run. Keeping every one would grow the object's storage for the life of
+ * the session, so the newest {@link MAX_DISPOSITIONS} survive and older ones
+ * are dropped. A retry that arrives after its row was pruned is treated as a
+ * new submission — the window is far longer than any client's retry.
+ */
+export const MAX_DISPOSITIONS = 1024;
+
+/**
  * What became of a submission the harness consumed out of band.
  *
  * `claimed` is the transient state: the row exists from before the `input`
@@ -125,7 +137,14 @@ export class PiSubmissions {
     return cursor.rowsWritten > 0;
   }
 
-  /** Record what a claimed submission turned out to be. */
+  /**
+   * Record what a claimed submission turned out to be, and drop the
+   * dispositions that have aged out of the retention window.
+   *
+   * Settling is the only point a row becomes terminal, so it is where the
+   * table is bounded: the newest {@link MAX_DISPOSITIONS} rows stay and the
+   * rest go, in the same synchronous block as the update.
+   */
   settle(
     operationId: string,
     kind: "handled" | "command",
@@ -138,6 +157,16 @@ export class PiSubmissions {
       kind,
       command ?? null,
       operationId
+    );
+    // `created_at` is a millisecond clock, so rows written in the same tick
+    // tie; the rowid breaks the tie in insertion order.
+    this.#storage.sql.exec(
+      `DELETE FROM cf_agents_pi_dispositions
+        WHERE rowid NOT IN (
+          SELECT rowid FROM cf_agents_pi_dispositions
+           ORDER BY created_at DESC, rowid DESC LIMIT ?
+        )`,
+      MAX_DISPOSITIONS
     );
   }
 

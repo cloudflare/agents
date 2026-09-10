@@ -411,6 +411,12 @@ export class PiHarness<
   readonly #settlementWaiters = new Map<string, Set<() => void>>();
   readonly #rejections = new Map<string, PiOperationRejectedError>();
   readonly #ensuring = new Map<string, Promise<void>>();
+  /**
+   * The tool registry as each lane last saw it, for {@link
+   * PiHarness.#refreshProcessLocal}. Process-local like the registry itself:
+   * a new attachment starts from the durable selection again.
+   */
+  readonly #registeredTools = new Map<string, ReadonlySet<string>>();
 
   constructor(config: PiHarnessConfig<ToolContext>) {
     super("pi-harness");
@@ -1204,6 +1210,7 @@ export class PiHarness<
   /** Drop the current attachment and tear its extension runtime down. */
   #discardAttachment(): void {
     this.#attaching = undefined;
+    this.#registeredTools.clear();
     const extensions = this.#extensions;
     this.#extensions = undefined;
     // Nothing will answer the dialogs this attachment left open.
@@ -1363,7 +1370,18 @@ export class PiHarness<
     return asUpstreamResources({ ...own, skills, promptTemplates });
   }
 
-  /** Re-supply process-local configuration pi does not persist. */
+  /**
+   * Re-supply process-local configuration pi does not persist.
+   *
+   * The tool registry is process-local and the lane's selection is durable,
+   * so the two are reconciled rather than one overwriting the other. A pass
+   * that wrote the whole registry back every time would undo
+   * `pi.setActiveTools([...])` before the next drive: an extension narrows
+   * the set, and the next refresh widens it again. Only a registry that
+   * actually changed since this isolate's last pass moves the selection —
+   * newly registered tools join it, withdrawn ones leave it, and whatever
+   * the lane selected in between stays selected.
+   */
   async #refreshProcessLocal(
     harness: UpstreamAgentHarness<object | undefined>,
     lane: UpstreamAgentLane,
@@ -1373,16 +1391,30 @@ export class PiHarness<
     await harness.setTools(tools, context);
     await harness.setResources(await this.#resolveResources(context), context);
     if (this.#config.activeToolNames !== undefined) return;
-    // Without an explicit selection the lane offers every registered tool;
-    // keep pi's durable selection aligned when the registry changes.
     const names = tools.map((tool) => tool.name);
+    const previous = this.#registeredTools.get(lane.name);
+    this.#registeredTools.set(lane.name, new Set(names));
     const active = await lane.getActiveTools(context);
-    if (
-      active.length !== names.length ||
-      names.some((name) => !active.includes(name))
-    ) {
+    if (previous === undefined) {
+      // First pass for this lane in this isolate. A lane that carries a
+      // selection keeps it — it is the durable one, extension edits and all;
+      // a lane with none is offered every registered tool.
+      if (active.length > 0) return;
       await lane.setActiveTools(names, context);
+      return;
     }
+    // Newly registered names join the selection, names that vanished from
+    // the registry leave it, and the rest of the lane's selection stands.
+    const next = names.filter(
+      (name) => !previous.has(name) || active.includes(name)
+    );
+    if (
+      next.length === active.length &&
+      next.every((name) => active.includes(name))
+    ) {
+      return;
+    }
+    await lane.setActiveTools(next, context);
   }
 
   // ── Lane driver ──────────────────────────────────────────────────────────

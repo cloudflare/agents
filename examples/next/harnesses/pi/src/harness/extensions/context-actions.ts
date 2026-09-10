@@ -70,7 +70,7 @@ export function createExtensionContextActions(
     getScopedModels: () => [],
     isIdle: () => !states.current.busy,
     isProjectTrusted: () => true,
-    getSignal: () => states.current.signal,
+    getSignal: () => states.currentSignal,
     abort: () => {
       const state = states.current;
       const runId = state.runId;

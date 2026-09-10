@@ -580,7 +580,6 @@ export class PiExtensionRuntime {
   async #refresh(lane: string): Promise<void> {
     const state = this.#states.get(lane);
     const context: Context = BACKGROUND_CONTEXT;
-    state.signal = context.abortSignal;
     await state.refresh(await this.#deps.lane(lane), context);
   }
 }

@@ -48,8 +48,6 @@ export class ExtensionLaneState {
   systemPrompt = "";
   /** Replacement an extension asked for in `before_agent_start`. */
   systemPromptOverride: string | undefined;
-  /** Cancellation of the work currently running on this lane. */
-  signal: AbortSignal | undefined;
 
   #chain: Promise<void> = Promise.resolve();
 
@@ -107,6 +105,28 @@ export class ExtensionLaneState {
   }
 }
 
+/**
+ * One `withLane` scope: the lane it runs on, and the cancellation of the
+ * work that opened it.
+ *
+ * The signal belongs to the scope rather than to the lane, because it is the
+ * hook invocation's, the tool call's or the operation's — a lane outlives all
+ * three, and a handler that read a lane-shaped signal would be watching
+ * something that never aborts.
+ */
+type ExtensionLaneScope = {
+  readonly state: ExtensionLaneState;
+  readonly signal: AbortSignal | undefined;
+};
+
+/** What a `withLane` scope carries besides the lane itself. */
+export type ExtensionLaneScopeOptions = {
+  /** Operation driving the lane, when the scope belongs to a run. */
+  readonly runId?: string;
+  /** Cancellation of the work the scope was opened for. */
+  readonly signal?: AbortSignal;
+};
+
 /** Every lane the extension runtime has observed, keyed by lane name. */
 export class ExtensionLaneStates {
   readonly #states = new Map<string, ExtensionLaneState>();
@@ -120,7 +140,7 @@ export class ExtensionLaneStates {
    * whatever lane B entered while A was suspended, so the current lane
    * travels with the async context that established it instead.
    */
-  readonly #currentLane = new AsyncLocalStorage<ExtensionLaneState>();
+  readonly #currentLane = new AsyncLocalStorage<ExtensionLaneScope>();
   /** Lane for synchronous `pi.*` calls made outside any `withLane` scope. */
   #fallback: string;
 
@@ -135,7 +155,18 @@ export class ExtensionLaneStates {
    * nothing is.
    */
   get current(): ExtensionLaneState {
-    return this.#currentLane.getStore() ?? this.get(this.#fallback);
+    return this.#currentLane.getStore()?.state ?? this.get(this.#fallback);
+  }
+
+  /**
+   * Cancellation of the work whose scope is running, for `ctx.signal`.
+   *
+   * Undefined outside a scope, and outside one opened for cancellable work:
+   * an extension that is told nothing aborts is better served than one handed
+   * a signal that never fires.
+   */
+  get currentSignal(): AbortSignal | undefined {
+    return this.#currentLane.getStore()?.signal;
   }
 
   get defaultLane(): string {
@@ -179,11 +210,12 @@ export class ExtensionLaneStates {
   async withLane<T>(
     lane: string,
     work: (state: ExtensionLaneState) => Promise<T>,
-    runId?: string
+    options: ExtensionLaneScopeOptions = {}
   ): Promise<T> {
     const state = this.get(lane);
-    if (runId !== undefined) state.runId = runId;
-    return this.#currentLane.run(state, () => work(state));
+    if (options.runId !== undefined) state.runId = options.runId;
+    const scope: ExtensionLaneScope = { state, signal: options.signal };
+    return this.#currentLane.run(scope, () => work(state));
   }
 
   all(): readonly ExtensionLaneState[] {

@@ -1,7 +1,7 @@
 import type { Provider } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "../../../vendor/pi-coding-agent-src/core/model-registry.ts";
 import type { ProviderConfig } from "../../../vendor/pi-coding-agent-src/core/extensions/types.ts";
-import type { PiModelRegistry } from "../../providers/models";
+import type { PiModelRegistry, PiProvider } from "../../providers/models";
 
 /**
  * A provider an extension registered by name and configuration rather than
@@ -37,7 +37,10 @@ export interface PiExtensionModelRegistry extends ModelRegistry {
  *
  * Only what an extension registered here is removable. The providers the host
  * configured the registry with are not the extension surface's to withdraw:
- * unregistering one would take the lane's own model away.
+ * unregistering one would take the lane's own model away. An extension that
+ * registers over a host provider's id shadows it for as long as its own
+ * registration stands — unregistering puts the host's provider back rather
+ * than leaving the id unresolvable.
  */
 export function createExtensionModelRegistry(
   models: PiModelRegistry
@@ -45,6 +48,8 @@ export function createExtensionModelRegistry(
   const overlay = new Map<string, ProviderConfig>();
   /** Names this surface registered pi-ai providers under. */
   const native = new Set<string>();
+  /** Host providers an extension registered over, by the id it took. */
+  const displaced = new Map<string, PiProvider>();
   function registerProvider(provider: Provider): void;
   function registerProvider(providerName: string, config: ProviderConfig): void;
   function registerProvider(
@@ -52,9 +57,16 @@ export function createExtensionModelRegistry(
     config?: ProviderConfig
   ): void {
     if (typeof providerOrName !== "string") {
-      overlay.delete(providerOrName.id);
+      const id = providerOrName.id;
+      overlay.delete(id);
+      // Only the first registration over an id displaces anything: after
+      // that the id holds this surface's own provider.
+      if (!native.has(id) && !displaced.has(id)) {
+        const previous = models.getProvider(id);
+        if (previous !== undefined) displaced.set(id, previous);
+      }
       models.setProvider(providerOrName);
-      native.add(providerOrName.id);
+      native.add(id);
       return;
     }
     if (!config) {
@@ -69,7 +81,15 @@ export function createExtensionModelRegistry(
   }
   function removeNative(providerName: string): void {
     if (!native.delete(providerName)) return;
-    models.deleteProvider(providerName);
+    const previous = displaced.get(providerName);
+    displaced.delete(providerName);
+    // An id an extension introduced goes away with it; one it took over from
+    // the host goes back to the host.
+    if (previous === undefined) {
+      models.deleteProvider(providerName);
+      return;
+    }
+    models.setProvider(previous);
   }
   return {
     registerProvider,

@@ -1,7 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { PiSubmissions } from "../harness/intake";
+import { MAX_DISPOSITIONS, PiSubmissions } from "../harness/intake";
 import type { PiExtensionsTestObject } from "./worker";
 
 /**
@@ -114,5 +114,42 @@ describe("out-of-band submissions are at most once", () => {
     });
 
     expect(result).toEqual({ first: true, second: false });
+  });
+});
+
+describe("disposition retention", () => {
+  /**
+   * The dispositions are an idempotency window, not a log: without a bound
+   * the table grows for the life of the session, one row per out-of-band
+   * submission. A retry older than the window is treated as a new
+   * submission, which is the trade the cap makes.
+   */
+  it("keeps only the newest window of dispositions", async () => {
+    const result = await inObject(async (_instance, state) => {
+      const submissions = new PiSubmissions(state.storage);
+      submissions.ensureTable();
+      const overflow = 25;
+      for (let index = 0; index < MAX_DISPOSITIONS + overflow; index += 1) {
+        const operationId = `op-${String(index).padStart(6, "0")}`;
+        submissions.claim("default", operationId);
+        submissions.settle(operationId, "handled");
+      }
+      const count = state.storage.sql
+        .exec<{ rows: number }>(
+          "SELECT COUNT(*) AS rows FROM cf_agents_pi_dispositions"
+        )
+        .one().rows;
+      return {
+        count,
+        oldest: submissions.disposition("op-000000"),
+        newest: submissions.disposition(
+          `op-${String(MAX_DISPOSITIONS + overflow - 1).padStart(6, "0")}`
+        )
+      };
+    });
+
+    expect(result.count).toBe(MAX_DISPOSITIONS);
+    expect(result.oldest).toBeUndefined();
+    expect(result.newest).toMatchObject({ kind: "handled" });
   });
 });

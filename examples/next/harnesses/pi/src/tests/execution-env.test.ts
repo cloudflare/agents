@@ -115,6 +115,68 @@ describe("pi ExecutionEnv over a Workspace", () => {
   });
 });
 
+describe("workspace symlinks", () => {
+  /**
+   * A snapshot that skipped links handed the script a workspace that does
+   * not exist: `readlink` failed on a name the workspace links, `ls` did not
+   * show it, and the sync pass then wrote that view back.
+   */
+  it("hands the shell the link, and writes through it land on its target", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/target.txt", "linked\n");
+      await instance.workspace.symlink("/target.txt", "/link.txt");
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace
+      });
+
+      const exec = await env.exec(
+        "readlink /link.txt && cat /link.txt && echo written > /link.txt",
+        undefined,
+        BACKGROUND_CONTEXT
+      );
+
+      return {
+        ok: exec.ok,
+        stdout: exec.ok ? exec.value.stdout : exec.error.message,
+        // The write followed the link, and the link is still a link.
+        target: await instance.workspace.readFile("/target.txt"),
+        stillLinked: (await instance.workspace.lstat("/link.txt"))?.type
+      };
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("/target.txt\nlinked\n");
+    expect(result.target).toBe("written\n");
+    expect(result.stillLinked).toBe("symlink");
+  });
+
+  it("writes back a link the script created", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/target.txt", "linked\n");
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace
+      });
+
+      const exec = await env.exec(
+        "ln -s /target.txt /made.txt",
+        undefined,
+        BACKGROUND_CONTEXT
+      );
+
+      return {
+        ok: exec.ok,
+        message: exec.ok ? null : exec.error.message,
+        type: (await instance.workspace.lstat("/made.txt"))?.type,
+        target: await instance.workspace.readlink("/made.txt")
+      };
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.type).toBe("symlink");
+    expect(result.target).toBe("/target.txt");
+  });
+});
+
 describe("a workspace that cannot take the shell's writes", () => {
   it("fails the exec, naming the paths that did not persist", async () => {
     const result = await inObject(fresh(), async (instance) => {

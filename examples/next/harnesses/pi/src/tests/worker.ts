@@ -354,6 +354,10 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
   readonly #agentEndTexts: string[][] = [];
   #throwOnMessageEnd = false;
   #inputCalls = 0;
+  /** Resolved by the extension tool once it is waiting on `ctx.signal`. */
+  #toolWaiting: (() => void) | undefined;
+  /** Whether the extension tool saw its own cancellation. */
+  #toolSawAbort = false;
   readonly tasks = new Tasks();
   readonly streams = new Streams();
   readonly harness = new PiHarness({
@@ -637,6 +641,38 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     });
   }
 
+  /** The lane's durable tool selection, as the snapshot reports it. */
+  async activeTools(): Promise<readonly string[]> {
+    return [...(await this.harness.snapshot()).activeTools].sort((a, b) =>
+      a.localeCompare(b)
+    );
+  }
+
+  /**
+   * Run a turn whose extension tool blocks until its own cancellation, abort
+   * it, and report what the tool saw.
+   */
+  async runAbortedTool(): Promise<{
+    readonly status: string;
+    readonly sawAbort: boolean;
+  }> {
+    this.#faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("echo", { text: "hang" }), {
+        stopReason: "toolUse"
+      }),
+      fauxAssistantMessage("done")
+    ]);
+    this.#toolSawAbort = false;
+    const waiting = new Promise<void>((resolve) => {
+      this.#toolWaiting = resolve;
+    });
+    const run = this.harness.prompt("hang");
+    await waiting;
+    await this.harness.abort();
+    const response = await run;
+    return { status: response.status, sawAbort: this.#toolSawAbort };
+  }
+
   /** Names of every tool currently offered to the model. */
   async toolNames(): Promise<readonly string[]> {
     return (await this.harness.snapshot()).tools.map((tool) => tool.name);
@@ -671,6 +707,15 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
   }
 
   #register(pi: PiExtensionApi): void {
+    // Closures rather than `this`: the tool's `execute` is a shorthand
+    // method, so it has a `this` of its own.
+    const waiting = () => {
+      this.#toolWaiting?.();
+      this.#toolWaiting = undefined;
+    };
+    const sawAbort = () => {
+      this.#toolSawAbort = true;
+    };
     pi.registerFlag("note-prefix", {
       type: "string",
       default: "note",
@@ -682,6 +727,30 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
       description: "Echo the supplied text back.",
       parameters: echoParameters,
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        // "hang" blocks on the extension surface's own `ctx.signal`, which
+        // is the cancellation of the call it is running inside.
+        if (params.text === "hang") {
+          const signal = ctx.signal;
+          if (signal === undefined) {
+            return {
+              content: [{ type: "text", text: "echo:hang:no-signal" }],
+              details: { text: params.text }
+            };
+          }
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) {
+              resolve();
+              return;
+            }
+            signal.addEventListener("abort", () => resolve(), { once: true });
+            waiting();
+          });
+          sawAbort();
+          return {
+            content: [{ type: "text", text: "echo:hang:aborted" }],
+            details: { text: params.text }
+          };
+        }
         // "mark ..." writes through the synchronous `pi.*` surface from
         // inside the tool body, which is what places the call on a lane.
         if (params.text.startsWith("mark")) {
@@ -757,6 +826,12 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
       description: "Append a note to the transcript.",
       handler: async (args) => {
         pi.appendEntry("test:note", { text: args });
+      }
+    });
+    pi.registerCommand("only", {
+      description: "Narrow the active tool set to the named tool.",
+      handler: async (args) => {
+        pi.setActiveTools([args.trim()]);
       }
     });
     pi.registerCommand("announce", {

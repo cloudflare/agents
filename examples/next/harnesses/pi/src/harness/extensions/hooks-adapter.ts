@@ -1,5 +1,6 @@
 import type {
   AgentMessage,
+  Context,
   HookName,
   Hooks,
   SettledAssistantMessage
@@ -130,10 +131,15 @@ export function bindExtensionHooks(
    * The lane is restored afterwards: hooks on two lanes are each other's
    * only contenders for the synchronous `pi.*` surface, and leaving the
    * second lane current would send the first lane's later writes to it.
+   *
+   * The invocation's own context supplies the scope's signal, so a handler
+   * that reads `ctx.signal` watches the operation it is running inside
+   * rather than something that never aborts.
    */
   const onLane = <T>(
     lane: string,
     runId: string,
+    context: Context,
     run: (state: ExtensionLaneState) => Promise<T>
   ): Promise<T> =>
     states.withLane(
@@ -142,7 +148,7 @@ export function bindExtensionHooks(
         await deps.refresh(lane);
         return run(state);
       },
-      runId
+      { runId, ...(context.abortSignal ? { signal: context.abortSignal } : {}) }
     );
 
   const guard = async <T>(
@@ -150,10 +156,11 @@ export function bindExtensionHooks(
     lane: string,
     fallback: T,
     runId: string,
+    context: Context,
     run: (state: ExtensionLaneState) => Promise<T>
   ): Promise<T> => {
     try {
-      return await onLane(lane, runId, run);
+      return await onLane(lane, runId, context, run);
     } catch (error) {
       fail(hook, lane, error);
       return fallback;
@@ -163,12 +170,13 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "before_run",
-      (event) =>
+      (event, context) =>
         guard(
           "before_run",
           event.lane,
           undefined,
           event.runId,
+          context,
           async (state) => {
             const result = await runner.emitBeforeAgentStart(
               promptText(event.prompt),
@@ -194,12 +202,13 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "transform_context",
-      (event) =>
+      (event, context) =>
         guard(
           "transform_context",
           event.lane,
           undefined,
           event.runId,
+          context,
           async (state) => {
             state.systemPrompt = event.systemPrompt;
             const messages = await runner.emitContext([...event.messages]);
@@ -217,12 +226,13 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "before_request",
-      (event) =>
+      (event, context) =>
         guard(
           "before_request",
           event.lane,
           undefined,
           event.runId,
+          context,
           async () => {
             const before = event.streamOptions.headers ?? {};
             const headers: ProviderHeaders = { ...before };
@@ -244,12 +254,13 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "before_payload",
-      (event) =>
+      (event, context) =>
         guard(
           "before_payload",
           event.lane,
           undefined,
           event.runId,
+          context,
           async () => {
             const payload = await runner.emitBeforeProviderRequest(
               event.payload
@@ -264,12 +275,13 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "after_response",
-      (event) =>
+      (event, context) =>
         guard(
           "after_response",
           event.lane,
           undefined,
           event.runId,
+          context,
           async () => {
             await runner.emit({
               type: "after_provider_response",
@@ -298,9 +310,9 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "before_tool",
-      async (event) => {
+      async (event, context) => {
         try {
-          return await onLane(event.lane, event.runId, async () => {
+          return await onLane(event.lane, event.runId, context, async () => {
             const input = { ...event.args };
             const call = {
               type: "tool_call",
@@ -334,32 +346,39 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "after_tool",
-      (event) =>
-        guard("after_tool", event.lane, undefined, event.runId, async () => {
-          const result = await runner.emitToolResult({
-            type: "tool_result",
-            toolCallId: event.toolCallId,
-            toolName: event.toolName,
-            input: event.args,
-            content: event.content,
-            details: event.details,
-            isError: event.isError,
-            ...(event.usage === undefined ? {} : { usage: event.usage })
-          } as unknown as ToolResultEvent);
-          if (!result) return undefined;
-          return {
-            ...(result.content === undefined
-              ? {}
-              : { content: result.content }),
-            ...(result.details === undefined
-              ? {}
-              : { details: result.details as never }),
-            ...(result.isError === undefined
-              ? {}
-              : { isError: result.isError }),
-            ...(result.usage === undefined ? {} : { usage: result.usage })
-          };
-        }),
+      (event, context) =>
+        guard(
+          "after_tool",
+          event.lane,
+          undefined,
+          event.runId,
+          context,
+          async () => {
+            const result = await runner.emitToolResult({
+              type: "tool_result",
+              toolCallId: event.toolCallId,
+              toolName: event.toolName,
+              input: event.args,
+              content: event.content,
+              details: event.details,
+              isError: event.isError,
+              ...(event.usage === undefined ? {} : { usage: event.usage })
+            } as unknown as ToolResultEvent);
+            if (!result) return undefined;
+            return {
+              ...(result.content === undefined
+                ? {}
+                : { content: result.content }),
+              ...(result.details === undefined
+                ? {}
+                : { details: result.details as never }),
+              ...(result.isError === undefined
+                ? {}
+                : { isError: result.isError }),
+              ...(result.usage === undefined ? {} : { usage: result.usage })
+            };
+          }
+        ),
       { id: EXTENSION_HOOK_ID }
     )
   );
@@ -367,12 +386,13 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "before_compaction",
-      (event) =>
+      (event, context) =>
         guard(
           "before_compaction",
           event.lane,
           undefined,
           event.runId,
+          context,
           async (state) => {
             const result = (await runner.emit({
               type: "session_before_compact",
@@ -383,7 +403,10 @@ export function bindExtensionHooks(
                 : { customInstructions: event.customInstructions }),
               reason: event.reason,
               willRetry: false,
-              signal: new AbortController().signal
+              // The compaction's own cancellation, not a stand-in: a handler
+              // that summarizes with a provider call has to see the
+              // operation go away.
+              signal: context.abortSignal ?? new AbortController().signal
             })) as SessionBeforeCompactResult | undefined;
             if (result?.cancel) return { decline: true };
             if (!result?.compaction) return undefined;
@@ -409,12 +432,13 @@ export function bindExtensionHooks(
   disposers.push(
     hooks.on(
       "before_navigation",
-      (event) =>
+      (event, context) =>
         guard(
           "before_navigation",
           event.lane,
           undefined,
           event.runId,
+          context,
           async (state) => {
             const result = (await runner.emit({
               type: "session_before_tree",
@@ -429,7 +453,7 @@ export function bindExtensionHooks(
                   ? {}
                   : { customInstructions: event.customInstructions })
               },
-              signal: new AbortController().signal
+              signal: context.abortSignal ?? new AbortController().signal
             })) as SessionBeforeTreeResult | undefined;
             if (result?.cancel) return { decline: true };
             if (!result?.summary) return undefined;

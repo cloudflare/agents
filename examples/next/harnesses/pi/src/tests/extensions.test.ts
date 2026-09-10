@@ -361,6 +361,43 @@ describe("pi extension surface", () => {
   });
 });
 
+describe("process-local tool refresh", () => {
+  /**
+   * The tool registry is process-local and the lane's selection is durable.
+   * A refresh that wrote the registry back on every drive pass would undo
+   * `pi.setActiveTools([...])` between the command that called it and the
+   * next turn — the extension narrows the set, the harness widens it again.
+   */
+  it("keeps an extension's tool selection across the next run", async () => {
+    const stub = fresh();
+    const before = await stub.activeTools();
+    await stub.submitText("/only echo");
+    const afterCommand = await stub.activeTools();
+    const run = await stub.runEcho("hello");
+    const afterRun = await stub.activeTools();
+
+    expect(before).toEqual(["echo", "multiply"]);
+    expect(afterCommand).toEqual(["echo"]);
+    // The drive pass reconciled nothing: the registry did not change.
+    expect(afterRun).toEqual(["echo"]);
+    expect(run.status).toBe("completed");
+  });
+});
+
+describe("extension cancellation", () => {
+  /**
+   * `ctx.signal` is the cancellation of the work the handler is running
+   * inside. A tool that waits on it has to come back when the operation is
+   * aborted, rather than waiting on a signal that never fires.
+   */
+  it("aborts a tool that is waiting on ctx.signal", async () => {
+    const result = await fresh().runAbortedTool();
+
+    expect(result.sawAbort).toBe(true);
+    expect(result.status).not.toBe("completed");
+  });
+});
+
 describe("extension notification lanes", () => {
   /**
    * Pi's `ExtensionContext` names no lane, so a notification handler's
@@ -687,6 +724,48 @@ describe("extension provider registration", () => {
     expect(() =>
       resolveModel(models, { provider: "ext-native", modelId })
     ).toThrow(/Unknown pi model/);
+  });
+
+  /**
+   * Registering over an id the host configured shadows it; unregistering has
+   * to put it back. Deleting it instead would take a provider the extension
+   * surface never owned — and, when the lane's own model came from it, the
+   * session's model with it.
+   */
+  it("restores a host provider an extension registered over", () => {
+    const models = createModels();
+    const host = fauxProvider({
+      provider: "shared",
+      models: [{ id: "host-model" }]
+    });
+    const extension = fauxProvider({
+      provider: "shared",
+      models: [{ id: "ext-model" }]
+    });
+    models.setProvider(host.provider);
+    const registry = createExtensionModelRegistry(models);
+
+    registry.registerProvider(extension.provider);
+    expect(models.getModel("shared", "ext-model")).toBeDefined();
+    expect(models.getModel("shared", "host-model")).toBeUndefined();
+
+    registry.unregisterProvider("shared");
+    expect(models.getModel("shared", "host-model")).toBeDefined();
+    expect(models.getModel("shared", "ext-model")).toBeUndefined();
+  });
+
+  it("deletes an id no host provider stood under", () => {
+    const models = createModels();
+    const registry = createExtensionModelRegistry(models);
+    const extension = fauxProvider({
+      provider: "ext-only",
+      models: [{ id: "ext-model" }]
+    });
+
+    registry.registerProvider(extension.provider);
+    registry.unregisterProvider("ext-only");
+
+    expect(models.getProvider("ext-only")).toBeUndefined();
   });
 
   it("lets either registration form replace the other under one name", () => {

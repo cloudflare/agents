@@ -629,6 +629,23 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       for (const directory of snapshot.directories) {
         await bash.fs.mkdir(directory, { recursive: true }).catch(() => {});
       }
+      // Links are made after the directories they live in, and a link that
+      // cannot be made refuses the run: a script that saw a dangling name
+      // where the workspace has a link would read and write the wrong path.
+      for (const [path, target] of snapshot.symlinks) {
+        try {
+          await bash.fs.symlink(target, path);
+        } catch (error) {
+          const cause = toError(error);
+          return err(
+            new ExecutionError(
+              "spawn_error",
+              `Workspace symlink ${path} -> ${target} could not be recreated for the shell: ${cause.message}`,
+              cause
+            )
+          );
+        }
+      }
 
       let stdout = "";
       let stderr = "";
@@ -723,13 +740,15 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
    * This snapshot/sync pair is a fork of Think's bash tool
    * (`packages/think/src/tools/workspace.ts`, the `#snapshot`/`#sync` engine
    * around its `BASH_EXCLUDED_SYNC_ROOTS`): same problem, same shape, one
-   * layer apart. Fix a bug in either engine in both — the divergence here is
-   * only the sandbox-root rule documented at {@link SANDBOX_ROOTS}.
+   * layer apart. Fix a bug in either engine in both — the divergences here
+   * are the sandbox-root rule documented at {@link SANDBOX_ROOTS} and the
+   * symlink pass below, which Think's engine has no counterpart for yet.
    */
   async #snapshot(): Promise<Snapshot> {
     const files: InitialFiles = {};
     const initialFiles = new Map<string, Uint8Array>();
     const initialDirectories = new Set<string>(["/"]);
+    const symlinks = new Map<string, string>();
     const protectedPaths = new Set<string>();
     const pending = ["/"];
     let totalBytes = 0;
@@ -743,6 +762,24 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
           pending.push(path);
           continue;
         }
+        if (entry.type === "symlink") {
+          if (initialFiles.size + symlinks.size >= this.#maxSnapshotFiles) {
+            throw new SnapshotLimitError(
+              `Workspace snapshot exceeds maxSnapshotFiles (${this.#maxSnapshotFiles} files) at ${path}; the shell cannot run against this workspace`
+            );
+          }
+          // A link is carried across as a link. Snapshotting the file it
+          // points at instead would hand the script a copy: `readlink` would
+          // answer for a path that is not a link, and a write through the
+          // link would land on the link rather than on its target. The
+          // listing usually names the target already; a listing that does
+          // not is asked.
+          symlinks.set(
+            path,
+            entry.target ?? (await this.#workspace.readlink(path))
+          );
+          continue;
+        }
         if (entry.type !== "file") continue;
         // Every limit refuses the run rather than hiding a file from the
         // shell. A snapshot that silently dropped one still syncs back over
@@ -754,7 +791,7 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
             `Workspace file ${path} is ${entry.size} bytes, over maxSnapshotFileBytes (${this.#maxSnapshotFileBytes}); the shell cannot run against this workspace`
           );
         }
-        if (initialFiles.size >= this.#maxSnapshotFiles) {
+        if (initialFiles.size + symlinks.size >= this.#maxSnapshotFiles) {
           throw new SnapshotLimitError(
             `Workspace snapshot exceeds maxSnapshotFiles (${this.#maxSnapshotFiles} files) at ${path}; the shell cannot run against this workspace`
           );
@@ -779,6 +816,7 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       files,
       initialFiles,
       initialDirectories,
+      symlinks,
       protectedPaths,
       directories: [...initialDirectories].sort((a, b) => a.localeCompare(b))
     };
@@ -805,11 +843,20 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     };
     const finalFiles = new Map<string, Uint8Array>();
     const finalDirectories = new Set<string>(["/"]);
+    const finalSymlinks = new Map<string, string>();
 
     for (const rawPath of bash.fs.getAllPaths()) {
       const path = normalizeAbsolute(rawPath);
       if (!shouldSync(path, snapshot)) continue;
-      const stat = await bash.fs.stat(path).catch(() => null);
+      // `lstat`, not `stat`: a link to a file is a file to `stat`, and
+      // writing its target's bytes back would replace the workspace's link
+      // with a copy of what it pointed at.
+      const stat = await bash.fs.lstat(path).catch(() => null);
+      if (stat?.isSymbolicLink) {
+        const target = await bash.fs.readlink(path).catch(() => null);
+        if (target !== null) finalSymlinks.set(path, target);
+        continue;
+      }
       if (stat?.isDirectory) {
         finalDirectories.add(path);
         continue;
@@ -835,10 +882,44 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       await attempt(path, this.#workspace.writeFileBytes(path, bytes));
     }
 
+    for (const [path, target] of finalSymlinks) {
+      if (snapshot.symlinks.get(path) === target) continue;
+      await this.#ensureParent(path).catch(() => {});
+      await attempt(
+        path,
+        (async () => {
+          // The workspace refuses to link over an existing name, so a
+          // changed link replaces the old one.
+          await this.#workspace.rm(path, { force: true }).catch(() => {});
+          await this.#workspace.symlink(target, path);
+        })()
+      );
+    }
+
+    for (const path of snapshot.symlinks.keys()) {
+      // A link the script replaced with a file or a directory of the same
+      // name was already written back above; only a name that is gone
+      // altogether is removed here.
+      if (
+        finalSymlinks.has(path) ||
+        finalFiles.has(path) ||
+        finalDirectories.has(path)
+      ) {
+        continue;
+      }
+      await attempt(path, this.#workspace.rm(path, { force: true }));
+    }
+
     for (const path of [...snapshot.initialFiles.keys()].sort((a, b) =>
       b.localeCompare(a)
     )) {
-      if (finalFiles.has(path) || snapshot.protectedPaths.has(path)) continue;
+      if (
+        finalFiles.has(path) ||
+        finalSymlinks.has(path) ||
+        snapshot.protectedPaths.has(path)
+      ) {
+        continue;
+      }
       await attempt(path, this.#workspace.rm(path, { force: true }));
     }
 
@@ -846,6 +927,7 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       b.localeCompare(a)
     )) {
       if (path === "/" || finalDirectories.has(path)) continue;
+      if (finalSymlinks.has(path)) continue;
       // A sandbox root is never absent from the shell's view because the
       // shell owns it, so its absence from `finalDirectories` says nothing
       // about the script's intent — and a recursive delete here would take
@@ -974,6 +1056,14 @@ interface Snapshot {
   initialFiles: Map<string, Uint8Array>;
   initialDirectories: Set<string>;
   /**
+   * Workspace symlinks, by link path, as the snapshot found them.
+   *
+   * just-bash's `files` option takes content only, so these are created on
+   * the interpreter's filesystem after it is built, and the sync pass has to
+   * know which paths were links rather than the files they resolve to.
+   */
+  symlinks: Map<string, string>;
+  /**
    * Workspace files the shell never saw, because the workspace would not
    * hand their bytes over. Every size limit refuses the run instead, so this
    * only ever holds unreadable paths — and the sync passes must leave them
@@ -989,6 +1079,7 @@ function shouldSync(path: string, snapshot: Snapshot): boolean {
   // Anything the snapshot carried in is workspace content, wherever it lives.
   if (snapshot.initialFiles.has(path)) return true;
   if (snapshot.initialDirectories.has(path)) return true;
+  if (snapshot.symlinks.has(path)) return true;
   if (snapshot.protectedPaths.has(path)) return true;
   return !inSandboxRoot(path);
 }

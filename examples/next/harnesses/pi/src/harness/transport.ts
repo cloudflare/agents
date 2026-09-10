@@ -119,20 +119,39 @@ function laneOf(connection: Connection, fallback: string): string {
  */
 const Identifier = Type.String({ minLength: 1, maxLength: 200 });
 
+/**
+ * Every size a client controls is bounded here.
+ *
+ * A validated frame is a frame the harness will act on: the prompt reaches
+ * durable storage and the model, and an image is carried base64-encoded in
+ * the same row. Without a bound one socket message can cost the Durable
+ * Object as much storage and CPU as the sender cares to spend, and the
+ * refusal has to come before any of it — at the frame, then at each field.
+ */
+const MAX_FRAME_LENGTH = 8 * 1024 * 1024;
+const MAX_TEXT_LENGTH = 256 * 1024;
+const MAX_IMAGES = 8;
+const MAX_IMAGE_DATA_LENGTH = 4 * 1024 * 1024;
+
+/** Free text a client submits: a prompt, an instruction, a label. */
+const Text = Type.String({ maxLength: MAX_TEXT_LENGTH });
+
 const ImageSchema = Type.Object(
   {
-    data: Type.String(),
-    mimeType: Type.String({ minLength: 1 })
+    data: Type.String({ maxLength: MAX_IMAGE_DATA_LENGTH }),
+    mimeType: Type.String({ minLength: 1, maxLength: 200 })
   },
   { additionalProperties: false }
 );
 
+const ImagesSchema = Type.Array(ImageSchema, { maxItems: MAX_IMAGES });
+
 const MessageInputSchema = Type.Union([
-  Type.String(),
+  Text,
   Type.Object(
     {
-      text: Type.String(),
-      images: Type.Optional(Type.Array(ImageSchema))
+      text: Text,
+      images: Type.Optional(ImagesSchema)
     },
     { additionalProperties: false }
   )
@@ -144,8 +163,8 @@ const OperationRequestSchema = Type.Union([
     {
       kind: Type.Literal("prompt"),
       operationId: Type.Optional(Identifier),
-      prompt: Type.String(),
-      images: Type.Optional(Type.Array(ImageSchema))
+      prompt: Text,
+      images: Type.Optional(ImagesSchema)
     },
     { additionalProperties: false }
   ),
@@ -153,8 +172,8 @@ const OperationRequestSchema = Type.Union([
     {
       kind: Type.Literal("skill"),
       operationId: Type.Optional(Identifier),
-      name: Type.String({ minLength: 1 }),
-      additionalInstructions: Type.Optional(Type.String())
+      name: Type.String({ minLength: 1, maxLength: 200 }),
+      additionalInstructions: Type.Optional(Text)
     },
     { additionalProperties: false }
   ),
@@ -162,8 +181,8 @@ const OperationRequestSchema = Type.Union([
     {
       kind: Type.Literal("prompt_template"),
       operationId: Type.Optional(Identifier),
-      name: Type.String({ minLength: 1 }),
-      args: Type.Optional(Type.Array(Type.String()))
+      name: Type.String({ minLength: 1, maxLength: 200 }),
+      args: Type.Optional(Type.Array(Text, { maxItems: 32 }))
     },
     { additionalProperties: false }
   ),
@@ -171,7 +190,7 @@ const OperationRequestSchema = Type.Union([
     {
       kind: Type.Literal("compaction"),
       operationId: Type.Optional(Identifier),
-      customInstructions: Type.Optional(Type.String())
+      customInstructions: Type.Optional(Text)
     },
     { additionalProperties: false }
   ),
@@ -181,15 +200,15 @@ const OperationRequestSchema = Type.Union([
       operationId: Type.Optional(Identifier),
       targetId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
       summarize: Type.Optional(Type.Boolean()),
-      label: Type.Optional(Type.String()),
-      customInstructions: Type.Optional(Type.String())
+      label: Type.Optional(Type.String({ maxLength: 200 })),
+      customInstructions: Type.Optional(Text)
     },
     { additionalProperties: false }
   )
 ]);
 
 const UiResponseSchema = Type.Union([
-  Type.Object({ value: Type.String() }, { additionalProperties: false }),
+  Type.Object({ value: Text }, { additionalProperties: false }),
   Type.Object({ confirmed: Type.Boolean() }, { additionalProperties: false }),
   Type.Object(
     { cancelled: Type.Literal(true) },
@@ -275,7 +294,7 @@ const CLIENT_MESSAGE_SCHEMAS = {
       type: Type.Literal("command"),
       id: Identifier,
       name: Type.String({ minLength: 1, maxLength: 200 }),
-      args: Type.Optional(Type.String())
+      args: Type.Optional(Text)
     },
     { additionalProperties: false }
   )
@@ -500,6 +519,16 @@ export class PiTransport {
     raw: WebSocketMessage
   ): Promise<void> {
     if (typeof raw !== "string") return;
+    // Parsing is itself work a sender controls, so the frame is measured
+    // before it is read: an oversized one is refused unparsed, with no id to
+    // answer it by.
+    if (raw.length > MAX_FRAME_LENGTH) {
+      send(connection, {
+        type: "error",
+        message: `Message is ${raw.length} characters, over the ${MAX_FRAME_LENGTH} character limit`
+      });
+      return;
+    }
     let message: unknown;
     try {
       message = JSON.parse(raw);

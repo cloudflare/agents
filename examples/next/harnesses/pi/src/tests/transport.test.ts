@@ -434,6 +434,77 @@ describe("pi transport frame validation", () => {
     ]);
   });
 
+  /**
+   * A validated frame is one the harness acts on: the prompt reaches durable
+   * storage and the model. Without a bound a single socket message costs the
+   * Durable Object whatever the sender cares to spend.
+   */
+  it("rejects a prompt over the size limit before the host sees it", async () => {
+    const submitted: unknown[] = [];
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection], {
+      submit: (request) => {
+        submitted.push(request);
+        return Promise.resolve({
+          operationId: "op",
+          lane: "main",
+          accepted: true
+        });
+      }
+    });
+
+    await deliver(transport, client.connection, {
+      type: "submit",
+      id: "1",
+      request: { kind: "prompt", prompt: "x".repeat(256 * 1024 + 1) }
+    });
+
+    expect(submitted).toEqual([]);
+    expect(client.frames).toEqual([
+      { type: "error", id: "1", message: "Malformed submit message" }
+    ]);
+  });
+
+  it("accepts a prompt at the size limit", async () => {
+    const submitted: unknown[] = [];
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection], {
+      submit: (request) => {
+        submitted.push(request);
+        return Promise.resolve({
+          operationId: "op",
+          lane: "main",
+          accepted: true
+        });
+      }
+    });
+
+    await deliver(transport, client.connection, {
+      type: "submit",
+      id: "1",
+      request: { kind: "prompt", prompt: "x".repeat(256 * 1024) }
+    });
+
+    expect(submitted).toHaveLength(1);
+  });
+
+  it("refuses an oversized frame without parsing it", async () => {
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection]);
+    const handlers = transport.webSocketOptions().handlers;
+
+    await handlers?.onMessage?.(
+      client.connection,
+      "x".repeat(8 * 1024 * 1024 + 1)
+    );
+
+    expect(client.frames).toHaveLength(1);
+    expect(client.frames[0]).toMatchObject({ type: "error" });
+    expect((client.frames[0] as { message: string }).message).toContain(
+      "character limit"
+    );
+  });
+
   it("rejects a frame that is not an object", async () => {
     const client = socket("pi:main");
     const { transport } = transportWith([client.connection]);

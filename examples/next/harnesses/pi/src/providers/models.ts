@@ -38,6 +38,13 @@ export interface PiModelRegistry {
   getModels(provider?: string): readonly PiModel[];
   /** Providers with configured credentials. */
   getProviders(): readonly { readonly id: string; readonly name: string }[];
+  /**
+   * The provider registered under one id, when there is one.
+   *
+   * Registration replaces by id, so a caller that registers over an id has
+   * to read what was there first if it means to put it back.
+   */
+  getProvider(id: string): PiProvider | undefined;
   /** Add or replace a provider by id. */
   setProvider(provider: PiProvider): void;
   /**
