@@ -642,6 +642,56 @@ describe("Think — agentic loop", () => {
       });
     });
 
+    it("beforeStep can append context without undoing proactive compaction", async () => {
+      const agent = await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      );
+
+      const result = await agent.testProactive("use the echo tool", "append");
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+      expect(result.compactionEvents).toBe(1);
+      const { compactionEventPayloads } = await agent.getOverflowStats();
+      expect(compactionEventPayloads[0]).toMatchObject({
+        reason: "proactive",
+        shortened: true
+      });
+
+      const prompts = await agent.getProactiveStepPrompts();
+      expect(prompts).toHaveLength(2);
+      expect(prompts[0].prompt).toContain("earlier question");
+      expect(prompts[0].prompt).toContain("Additional per-step context");
+      expect(prompts[1].prompt).toContain("compacted-summary");
+      expect(prompts[1].prompt).not.toContain("earlier question");
+      expect(prompts[1].prompt).toContain("Additional per-step context");
+      expect(prompts[1].toolCalls).toHaveLength(1);
+      expect(prompts[1].toolResults).toEqual(prompts[1].toolCalls);
+    });
+
+    it("beforeStep can explicitly replace compacted messages", async () => {
+      const agent = await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      );
+
+      const result = await agent.testProactive("use the echo tool", [
+        { role: "user", content: "Replacement context" }
+      ]);
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+      expect(result.compactionEvents).toBe(1);
+      const prompts = await agent.getProactiveStepPrompts();
+      expect(prompts).toHaveLength(2);
+      expect(JSON.parse(prompts[1].prompt)).toEqual([
+        expect.objectContaining({ role: "system" }),
+        {
+          role: "user",
+          content: [{ type: "text", text: "Replacement context" }]
+        }
+      ]);
+    });
+
     it("proactive guard fires twice in one turn (maxCompactions:2) without corrupting the spliced prompt", async () => {
       const room = crypto.randomUUID();
       const agent = (await getAgentByName(
@@ -708,28 +758,46 @@ describe("Think — agentic loop", () => {
       );
     });
 
-    it("proactive no-op compaction consumes its single slot and does not re-attempt on later steps", async () => {
-      const room = crypto.randomUUID();
-      const agent = (await getAgentByName(
-        env.OverflowRecoveryTestAgent,
-        room
-      )) as unknown as OverflowAgent;
+    it.each([false, true])(
+      "proactive no-op compaction consumes its single slot and preserves beforeStep context (throws: %s)",
+      async (compactionThrows) => {
+        const agent = await getAgentByName(
+          env.OverflowRecoveryTestAgent,
+          crypto.randomUUID()
+        );
 
-      // 3-step tool turn, default budget (proactive cap 1), compaction is a
-      // no-op. The guard trips before step 2, attempts once (a no-op), and is
-      // then spent — so it must NOT compact again before step 3.
-      const result = await agent.testProactiveNoOp("use the echo tool");
+        // A no-op or failed compaction consumes the guard's single attempt,
+        // so step 3 must proceed without trying again.
+        const result = await agent.testProactiveNoOp(
+          "use the echo tool",
+          compactionThrows
+        );
 
-      // The turn still completes — a proactive no-op is best-effort, the step
-      // just proceeds uncompacted.
-      expect(result.error).toBeUndefined();
-      expect(result.done).toBe(true);
-      expect(result.modelCalls).toBe(3);
-      // Exactly one compaction attempt (and one event) for the whole run — a
-      // persistent no-op does not compact/emit on every step.
-      expect(result.compactionCount).toBe(1);
-      expect(result.compactionEvents).toBe(1);
-    });
+        // The turn still completes — a proactive no-op is best-effort, the step
+        // just proceeds uncompacted.
+        expect(result.error).toBeUndefined();
+        expect(result.done).toBe(true);
+        expect(result.modelCalls).toBe(3);
+        // Exactly one compaction attempt (and one event) for the whole run — a
+        // persistent no-op does not compact/emit on every step.
+        expect(result.compactionCount).toBe(1);
+        expect(result.compactionEvents).toBe(1);
+        const { compactionEventPayloads } = await agent.getOverflowStats();
+        expect(compactionEventPayloads[0]).toMatchObject({
+          reason: "proactive",
+          shortened: false
+        });
+        const prompts = await agent.getProactiveStepPrompts();
+        expect(prompts).toHaveLength(3);
+        for (const prompt of prompts) {
+          expect(prompt.prompt).toContain("earlier question");
+          expect(prompt.prompt).not.toContain("compacted-summary");
+          expect(prompt.prompt).toContain("Additional per-step context");
+          expect(prompt.toolResults).toEqual(prompt.toolCalls);
+        }
+        expect(prompts[2].toolCalls).toHaveLength(2);
+      }
+    );
   });
 
   describe("defaultContextOverflowClassifier", () => {
