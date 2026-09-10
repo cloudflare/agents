@@ -441,6 +441,46 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
     return { rowsWritten: this.#billed.stop() };
   }
 
+  /**
+   * Updates of a message stored across continuation rows. `textBytes` is
+   * the body size; above `MAX_INLINE_ROW_BYTES` the row chunks. Each step
+   * reports both billed counters. `cold` drops the object's in-memory caches
+   * first, as a fresh isolate would find them, so the reads it reports are
+   * the fallback path's.
+   */
+  async benchChunkedUpdates(
+    textBytes: number,
+    cold: boolean
+  ): Promise<{
+    chunks: number;
+    noop: { rowsRead: number; rowsWritten: number };
+    changed: { rowsRead: number; rowsWritten: number };
+  }> {
+    await this.lifecycle.start();
+    const session = this.sessions.session();
+    await session.getLatestLeaf();
+    const id = "bench-chunked";
+    const body = "z".repeat(textBytes);
+    const message = (text: string) => ({
+      id,
+      role: "assistant" as const,
+      parts: [{ type: "text" as const, text }]
+    });
+    await session.appendMessage(message(body));
+    const chunks = this.continuationRowCount(id);
+
+    if (cold) session.__DO_NOT_USE_WILL_BREAK__sync().abandon();
+    this.#billed.start();
+    await session.updateMessage(message(body));
+    const noop = this.#billed.stopAll();
+
+    if (cold) session.__DO_NOT_USE_WILL_BREAK__sync().abandon();
+    this.#billed.start();
+    await session.updateMessage(message(`${body}!`));
+    const changed = this.#billed.stopAll();
+    return { chunks, noop, changed };
+  }
+
   /** A prefix delete rewires one surviving boundary child, not one per row. */
   async benchDeleteLinearPrefix(
     messageCount: number

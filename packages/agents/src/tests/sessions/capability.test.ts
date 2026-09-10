@@ -366,6 +366,54 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("forgets a rolled-back update's stored form, so the retry writes", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("u1", "first body"));
+
+      // The rewrite commits nothing, but the object saw itself write the
+      // new form. Abandoning must drop that memory: an update that re-sends
+      // the rolled-back body is a real change, not a no-op.
+      instance.appendThenRollback(text("u1", "second body"));
+      expect((await session.getMessage("u1"))?.parts[0].text).toBe(
+        "first body"
+      );
+
+      const events: SessionChangeEvent[] = [];
+      instance.sessions.subscribe((event) => {
+        events.push(event);
+      });
+      await session.updateMessage(text("u1", "second body"));
+      expect(events.map((event) => event.type)).toEqual(["update"]);
+      expect((await session.getMessage("u1"))?.parts[0].text).toBe(
+        "second body"
+      );
+    });
+  });
+
+  it("forgets deleted and cleared rows, so an upsert appends again", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("d1", "body"));
+      await session.appendMessage(text("d2", "body"));
+
+      await session.deleteMessages(["d1"]);
+      expect(await session.updateMessage(text("d1", "body"))).toBeNull();
+      expect((await session.upsertMessage(text("d1", "body"))).inserted).toBe(
+        true
+      );
+
+      await session.clearMessages();
+      expect(await session.updateMessage(text("d2", "body"))).toBeNull();
+      expect((await session.upsertMessage(text("d2", "body"))).inserted).toBe(
+        true
+      );
+      expect((await session.getHistory()).map((m) => m.id)).toEqual(["d2"]);
+    });
+  });
+
   it("re-derives the estimate once the path reaches the walk cap", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

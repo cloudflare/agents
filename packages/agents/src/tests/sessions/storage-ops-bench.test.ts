@@ -47,6 +47,41 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
+  it("recognises an unchanged chunked update without reading it back", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      // A 3.2 MiB body spans the 1.5 MiB row budget three times: one message
+      // row plus two continuations.
+      const warm = await instance.benchChunkedUpdates(3.2 * 1024 * 1024, false);
+      expect(warm.chunks).toBe(2);
+
+      // The object wrote the row, so it remembers the stored form: an
+      // identical re-send is decided in memory, no row read. Before the memo
+      // this read the message row and its continuations back to compare
+      // (5 rows below, on the cold path).
+      expect(warm.noop).toEqual({ rowsRead: 0, rowsWritten: 0 });
+
+      // A changed update skips the read-back too and rewrites the row and
+      // its two continuations; the one read is the UPDATE locating its row.
+      expect(warm.changed).toEqual({ rowsRead: 1, rowsWritten: 3 });
+    });
+  });
+
+  it("falls back to the full read-back when the caches are cold", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      const cold = await instance.benchChunkedUpdates(3.2 * 1024 * 1024, true);
+      expect(cold.chunks).toBe(2);
+
+      // Nothing remembered, so the guard reads the message row and the
+      // continuation rows (plus the `json_each` id list the continuation
+      // query scans) and still writes nothing for an identical body. This is
+      // what every update of this message cost before the memo.
+      expect(cold.noop).toEqual({ rowsRead: 5, rowsWritten: 0 });
+      expect(cold.changed).toEqual({ rowsRead: 6, rowsWritten: 3 });
+    });
+  });
+
   it("adds an FTS delete and insert per changed row once the index exists", async () => {
     const stub = env.SessionSearchHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
