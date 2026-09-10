@@ -64,12 +64,20 @@ export interface PiTransportHost {
   ): Promise<PiSubmissionReceipt>;
 }
 
-/** The UI request methods that wait for an answer; the rest are view updates. */
-const DIALOG_METHODS: ReadonlySet<string> = new Set([
-  "select",
-  "confirm",
-  "input",
-  "editor"
+/**
+ * The UI request methods that wait for an answer, each with the field its
+ * answer carries; the rest are view updates nobody replies to.
+ *
+ * A `confirm` answered with `{value: "yes"}` reads back to the bridge as
+ * neither a confirmation nor a cancellation, so the dialog settles with its
+ * default — `false` — and the extension is told the user declined something
+ * the user in fact approved. The pairing is checked rather than coerced.
+ */
+const DIALOG_METHODS: ReadonlyMap<string, "value" | "confirmed"> = new Map([
+  ["select", "value"],
+  ["confirm", "confirmed"],
+  ["input", "value"],
+  ["editor", "value"]
 ]);
 
 const LANE_TAG_PREFIX = "pi:";
@@ -338,15 +346,16 @@ export class PiTransport {
    */
   readonly #openDialogs = new Map<string, Set<string>>();
   /**
-   * The lane each open dialog was broadcast to.
+   * The lane and method of each open dialog.
    *
    * A request id is a bearer token for one answer, and lanes are independent
    * conversations: a socket subscribed to one lane must not be able to
    * confirm another lane's permission prompt by guessing — or by reading —
-   * its id. The bridge set resolves by id alone, so the check belongs here,
-   * where the broadcast recorded the lane in the first place.
+   * its id. The bridge set resolves by id alone, and by then the method that
+   * raised the dialog is gone too, so both checks belong here, where the
+   * broadcast recorded them in the first place.
    */
-  readonly #dialogLanes = new Map<string, string>();
+  readonly #dialogs = new Map<string, { lane: string; method: string }>();
 
   constructor(host: PiTransportHost, sockets: () => LifecycleSockets) {
     this.#host = host;
@@ -409,7 +418,7 @@ export class PiTransport {
         this.#openDialogs.set(lane, open);
       }
       open.add(request.requestId);
-      this.#dialogLanes.set(request.requestId, lane);
+      this.#dialogs.set(request.requestId, { lane, method: request.method });
     }
     let delivered = 0;
     for (const socket of this.#sockets().get(laneTag(lane))) {
@@ -432,7 +441,7 @@ export class PiTransport {
    * silence.
    */
   extensionUiSettled(lane: string, requestId: string): void {
-    this.#dialogLanes.delete(requestId);
+    this.#dialogs.delete(requestId);
     const open = this.#openDialogs.get(lane);
     if (open) {
       open.delete(requestId);
@@ -571,14 +580,20 @@ export class PiTransport {
       case "extension_ui_response": {
         const resolveUi = this.#host.resolveUi;
         if (!resolveUi) throw unsupported(message.type);
-        const owner = this.#dialogLanes.get(message.requestId);
-        if (owner !== undefined && owner !== lane) {
+        const open = this.#dialogs.get(message.requestId);
+        if (open !== undefined && open.lane !== lane) {
           // Another lane's dialog. Refuse without touching it, and without
           // saying whether the id exists.
           throw foreign(message.requestId, lane);
         }
+        if (open !== undefined && !answers(open.method, message.response)) {
+          // A variant this method cannot read would settle the dialog with
+          // its default — an answer nobody gave. The dialog stays open for
+          // an answer of the right shape.
+          throw mismatched(message.requestId, open.method);
+        }
         const answered =
-          owner === undefined
+          open === undefined
             ? false
             : resolveUi.call(this.#host, message.requestId, message.response, {
                 lane
@@ -710,7 +725,7 @@ export class PiTransport {
     // `open`, so cancel over a copy.
     for (const requestId of [...open]) {
       resolveUi.call(this.#host, requestId, { cancelled: true }, { lane });
-      this.#dialogLanes.delete(requestId);
+      this.#dialogs.delete(requestId);
     }
     this.#openDialogs.delete(lane);
   }
@@ -729,6 +744,21 @@ function foreign(requestId: string, lane: string): Error {
   return new Error(
     `Dialog ${JSON.stringify(requestId)} does not belong to lane ${JSON.stringify(lane)}`
   );
+}
+
+/** An answer in a shape the dialog's own method cannot read. */
+function mismatched(requestId: string, method: string): Error {
+  return new Error(
+    `Dialog ${JSON.stringify(requestId)} is a ${method} request and cannot be answered with this response`
+  );
+}
+
+/** Whether one response variant is an answer the dialog's method accepts. */
+function answers(method: string, response: PiExtensionUiResponse): boolean {
+  // Cancelling is an answer every dialog understands.
+  if ("cancelled" in response) return true;
+  const field = DIALOG_METHODS.get(method);
+  return field !== undefined && field in response;
 }
 
 /** A frame that arrived too late to change anything. */

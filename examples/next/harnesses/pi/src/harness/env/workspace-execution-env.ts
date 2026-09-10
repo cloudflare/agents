@@ -35,9 +35,22 @@ export interface WorkspaceExecutionEnvOptions {
   readonly cwd?: string;
   /** Default environment variables offered to shell commands. */
   readonly env?: Record<string, string>;
-  /** Maximum workspace files copied into one shell invocation. @default 2000 */
+  /**
+   * Maximum workspace files copied into one shell invocation.
+   *
+   * A workspace holding more fails the run, as with
+   * {@link maxSnapshotTotalBytes}: every limit here is a refusal, never a
+   * truncation.
+   *
+   * @default 2000
+   */
   readonly maxSnapshotFiles?: number;
-  /** Maximum size of a single file copied into a shell invocation. @default 1_000_000 */
+  /**
+   * Maximum size of a single file copied into a shell invocation. A workspace
+   * holding a larger one fails the run.
+   *
+   * @default 1_000_000
+   */
   readonly maxSnapshotFileBytes?: number;
   /**
    * Maximum total size of the snapshot copied into one shell invocation.
@@ -731,12 +744,20 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
           continue;
         }
         if (entry.type !== "file") continue;
-        if (
-          initialFiles.size >= this.#maxSnapshotFiles ||
-          entry.size > this.#maxSnapshotFileBytes
-        ) {
-          protectedPaths.add(path);
-          continue;
+        // Every limit refuses the run rather than hiding a file from the
+        // shell. A snapshot that silently dropped one still syncs back over
+        // the workspace, so a script that read a tree missing files would be
+        // reported as a success — and `grep`, `find` and `cp -r` would all
+        // answer for a workspace that does not exist.
+        if (entry.size > this.#maxSnapshotFileBytes) {
+          throw new SnapshotLimitError(
+            `Workspace file ${path} is ${entry.size} bytes, over maxSnapshotFileBytes (${this.#maxSnapshotFileBytes}); the shell cannot run against this workspace`
+          );
+        }
+        if (initialFiles.size >= this.#maxSnapshotFiles) {
+          throw new SnapshotLimitError(
+            `Workspace snapshot exceeds maxSnapshotFiles (${this.#maxSnapshotFiles} files) at ${path}; the shell cannot run against this workspace`
+          );
         }
         const bytes = await this.#workspace.readFileBytes(path);
         if (bytes === null) {
@@ -952,6 +973,13 @@ interface Snapshot {
   files: InitialFiles;
   initialFiles: Map<string, Uint8Array>;
   initialDirectories: Set<string>;
+  /**
+   * Workspace files the shell never saw, because the workspace would not
+   * hand their bytes over. Every size limit refuses the run instead, so this
+   * only ever holds unreadable paths — and the sync passes must leave them
+   * alone in both directions: the script could neither change nor delete a
+   * file it was never shown.
+   */
   protectedPaths: Set<string>;
   directories: string[];
 }

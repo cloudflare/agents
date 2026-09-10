@@ -1,11 +1,15 @@
 import type {
+  AgentHarnessToolInvocation,
   AgentLane,
   Entry,
   HarnessEvent,
   Hooks
 } from "@earendil-works/pi-agent-core";
+import { BACKGROUND_CONTEXT } from "@earendil-works/pi-agent-core";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
+import { fauxProvider } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { ExtensionRunner } from "../../vendor/pi-coding-agent-src/core/extensions/runner.ts";
 import { createExtensionActions } from "../harness/extensions/actions";
@@ -16,7 +20,8 @@ import {
 } from "../harness/extensions/events-adapter";
 import { PiExtensionRuntime } from "../harness/extensions/runtime";
 import { ExtensionLaneStates } from "../harness/extensions/state";
-import { createModels } from "../providers/models";
+import { createExtensionModelRegistry } from "../harness/extensions/model-registry";
+import { createModels, resolveModel } from "../providers/models";
 import type { PiExtensionsTestObject } from "./worker";
 
 function fresh(): DurableObjectStub<PiExtensionsTestObject> {
@@ -577,5 +582,132 @@ describe("extension write draining", () => {
     await runtime.drain("main");
     expect(appended).toEqual(["test:drain"]);
     await runtime.stop();
+  });
+  /**
+   * The same hazard one layer up. A tool body writes through the same
+   * synchronous surface a command handler does, and the harness settles the
+   * tool call on the result the adapter returns: a result handed back ahead
+   * of the write lets the operation complete, a client read the transcript,
+   * and the isolate be evicted, with the write still queued.
+   */
+  it("returns an extension tool's result only once its writes have landed", async () => {
+    const appended: string[] = [];
+    const lane = {
+      appendCustomEntry: async (customType: string) => {
+        // A macrotask, as a durable write is: returning to the event loop is
+        // not waiting for it.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        appended.push(customType);
+        return "entry";
+      },
+      watch: async () => ({
+        unsubscribe: () => {},
+        snapshot: {
+          transcript: [],
+          tipId: null,
+          configuration: { activeToolNames: [], thinkingLevel: "off" },
+          operation: null,
+          queues: []
+        }
+      }),
+      getModel: async () => undefined
+    } as unknown as AgentLane;
+
+    const runtime = await PiExtensionRuntime.create({
+      extensions: [
+        (pi) => {
+          pi.registerTool({
+            name: "note",
+            label: "Note",
+            description: "Append a note and return.",
+            parameters: Type.Object({ text: Type.String() }),
+            execute: async (_toolCallId, params) => {
+              pi.appendEntry("test:tool-drain", { text: params.text });
+              return {
+                content: [{ type: "text", text: `noted:${params.text}` }],
+                details: undefined
+              };
+            }
+          });
+        }
+      ],
+      cwd: "/",
+      defaultLane: "main",
+      sessionId: "session",
+      models: createModels(),
+      lane: async () => lane,
+      setSessionName: async () => {},
+      setLabel: async () => {},
+      refreshTools: () => {},
+      allTools: () => [],
+      compact: async () => {},
+      navigate: async () => {},
+      report: () => {}
+    });
+    runtime.attach({ on: () => () => {} } as unknown as Hooks);
+
+    const tool = runtime.tools().find((candidate) => candidate.name === "note");
+    expect(tool).toBeDefined();
+    const result = await tool?.execute(
+      "call-1",
+      { text: "hello" },
+      () => {},
+      undefined,
+      { turnId: "turn-1" } as unknown as AgentHarnessToolInvocation,
+      BACKGROUND_CONTEXT
+    );
+
+    // The result is observable, so the write it queued must already be done.
+    expect(appended).toEqual(["test:tool-drain"]);
+    expect(result?.content).toEqual([{ type: "text", text: "noted:hello" }]);
+    await runtime.stop();
+  });
+});
+
+describe("extension provider registration", () => {
+  /**
+   * A provider an extension withdrew has to stop resolving models. The
+   * configuration form is a process-local overlay the adapter owns, but the
+   * native form reaches pi-ai's own registry, and an unregistration that
+   * only dropped the overlay entry would leave the withdrawn provider fully
+   * resolvable — the model an extension pulled because it stopped working
+   * would still be selectable.
+   */
+  it("stops resolving a natively registered provider once it is unregistered", () => {
+    const models = createModels();
+    const registry = createExtensionModelRegistry(models);
+    const faux = fauxProvider({ provider: "ext-native" });
+    const modelId = faux.getModel().id;
+
+    registry.registerProvider(faux.provider);
+    expect(models.getModel("ext-native", modelId)).toBeDefined();
+
+    registry.unregisterProvider("ext-native");
+    expect(models.getModel("ext-native", modelId)).toBeUndefined();
+    expect(() =>
+      resolveModel(models, { provider: "ext-native", modelId })
+    ).toThrow(/Unknown pi model/);
+  });
+
+  it("lets either registration form replace the other under one name", () => {
+    const models = createModels();
+    const registry = createExtensionModelRegistry(models);
+    const faux = fauxProvider({ provider: "ext-both" });
+    const modelId = faux.getModel().id;
+
+    registry.registerProvider(faux.provider);
+    // The configuration form resolves no models of its own, so the pi-ai
+    // provider it replaced must not keep answering for the name.
+    registry.registerProvider("ext-both", { api: "openai-completions" });
+    expect(models.getModel("ext-both", modelId)).toBeUndefined();
+    expect(registry.registrations()).toEqual([
+      { name: "ext-both", config: { api: "openai-completions" } }
+    ]);
+
+    // And back the other way: the native registration wins, and the overlay
+    // entry it replaced is gone.
+    registry.registerProvider(faux.provider);
+    expect(models.getModel("ext-both", modelId)).toBeDefined();
+    expect(registry.registrations()).toEqual([]);
   });
 });

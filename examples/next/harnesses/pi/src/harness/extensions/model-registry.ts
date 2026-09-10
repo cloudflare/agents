@@ -27,13 +27,24 @@ export interface PiExtensionModelRegistry extends ModelRegistry {
  * turning a `ProviderConfig` into a pi-ai provider needs upstream's provider
  * composer, which reads `models.json` from disk and is not vendored. Those
  * registrations are recorded and readable — a host can compose them itself —
- * but they add no resolvable models on their own. Unregistering likewise only
- * drops the overlay entry; pi-ai's registry has no removal.
+ * but they add no resolvable models on their own.
+ *
+ * One name, one registration, either form: registering over a name replaces
+ * whatever it held, and `unregisterProvider` removes both the overlay entry
+ * and the pi-ai provider. A registration that survived its unregistration
+ * would keep resolving models an extension had withdrawn — the case a
+ * provider is unregistered for is usually that it stopped working.
+ *
+ * Only what an extension registered here is removable. The providers the host
+ * configured the registry with are not the extension surface's to withdraw:
+ * unregistering one would take the lane's own model away.
  */
 export function createExtensionModelRegistry(
   models: PiModelRegistry
 ): PiExtensionModelRegistry {
   const overlay = new Map<string, ProviderConfig>();
+  /** Names this surface registered pi-ai providers under. */
+  const native = new Set<string>();
   function registerProvider(provider: Provider): void;
   function registerProvider(providerName: string, config: ProviderConfig): void;
   function registerProvider(
@@ -41,7 +52,9 @@ export function createExtensionModelRegistry(
     config?: ProviderConfig
   ): void {
     if (typeof providerOrName !== "string") {
+      overlay.delete(providerOrName.id);
       models.setProvider(providerOrName);
+      native.add(providerOrName.id);
       return;
     }
     if (!config) {
@@ -49,12 +62,20 @@ export function createExtensionModelRegistry(
         `Provider config is required when registering ${JSON.stringify(providerOrName)} by name`
       );
     }
+    // The configuration form resolves no models, so leaving the pi-ai
+    // provider in place would keep serving the registration it replaced.
+    removeNative(providerOrName);
     overlay.set(providerOrName, config);
+  }
+  function removeNative(providerName: string): void {
+    if (!native.delete(providerName)) return;
+    models.deleteProvider(providerName);
   }
   return {
     registerProvider,
     unregisterProvider: (providerName: string) => {
       overlay.delete(providerName);
+      removeNative(providerName);
     },
     registrations: () =>
       [...overlay].map(([name, config]) => ({ name, config }))

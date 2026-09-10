@@ -155,6 +155,96 @@ describe("pi transport", () => {
     ]);
   });
 
+  it("refuses an answer whose shape the dialog's method cannot read", async () => {
+    const client = socket("pi:main");
+    const { transport, answered } = transportWith([client.connection]);
+
+    transport.extensionUiRequest("main", {
+      method: "confirm",
+      requestId: "r1",
+      title: "Delete everything?",
+      message: "really",
+      timeoutMs: 60_000
+    });
+    // `confirm` reads `confirmed`, and the bridge falls back to its default
+    // for anything else: a `value` answer would settle the prompt as a
+    // decline nobody made.
+    await deliver(transport, client.connection, {
+      type: "extension_ui_response",
+      id: "3",
+      requestId: "r1",
+      response: { value: "yes" }
+    });
+
+    expect(answered).toEqual([]);
+    expect(client.frames.at(-1)).toEqual({
+      type: "error",
+      id: "3",
+      message:
+        'Dialog "r1" is a confirm request and cannot be answered with this response'
+    });
+    // The dialog is untouched: a well-formed answer still settles it.
+    await deliver(transport, client.connection, {
+      type: "extension_ui_response",
+      id: "4",
+      requestId: "r1",
+      response: { confirmed: true }
+    });
+    expect(answered).toEqual([
+      { requestId: "r1", response: { confirmed: true } }
+    ]);
+  });
+
+  it("refuses a confirmation aimed at a dialog that asked for a value", async () => {
+    const client = socket("pi:main");
+    const { transport, answered } = transportWith([client.connection]);
+
+    for (const method of ["select", "input", "editor"] as const) {
+      transport.extensionUiRequest("main", {
+        method,
+        requestId: method,
+        title: "Pick",
+        options: ["a", "b"],
+        timeoutMs: 60_000
+      } as Parameters<typeof transport.extensionUiRequest>[1]);
+      await deliver(transport, client.connection, {
+        type: "extension_ui_response",
+        id: method,
+        requestId: method,
+        response: { confirmed: true }
+      });
+      expect(client.frames.at(-1)).toMatchObject({
+        type: "error",
+        id: method,
+        message: `Dialog ${JSON.stringify(method)} is a ${method} request and cannot be answered with this response`
+      });
+    }
+    expect(answered).toEqual([]);
+  });
+
+  it("accepts a cancellation for any dialog method", async () => {
+    const client = socket("pi:main");
+    const { transport, answered } = transportWith([client.connection]);
+
+    transport.extensionUiRequest("main", {
+      method: "input",
+      requestId: "r1",
+      title: "Name?",
+      timeoutMs: 60_000
+    });
+    await deliver(transport, client.connection, {
+      type: "extension_ui_response",
+      id: "5",
+      requestId: "r1",
+      response: { cancelled: true }
+    });
+
+    // Cancelling is an answer every dialog understands.
+    expect(answered).toEqual([
+      { requestId: "r1", response: { cancelled: true } }
+    ]);
+  });
+
   it("refuses an answer from a client on another lane", async () => {
     const owner = socket("pi:main");
     const intruder = socket("pi:side");

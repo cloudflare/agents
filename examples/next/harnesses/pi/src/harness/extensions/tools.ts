@@ -77,16 +77,31 @@ export function adaptExtensionTools(
         // whatever ran last.
         const lane =
           deps.laneForInvocation?.(invocation) ?? deps.states.defaultLane;
-        return deps.states.withLane(lane, async () =>
-          tool.execute(
+        return deps.states.withLane(lane, async (state) => {
+          const result = await tool.execute(
             toolCallId,
             parameters,
             context.abortSignal,
             (partial) => {
               onUpdate(partial);
             }
-          )
-        );
+          );
+          // A tool body's `pi.*` calls return the moment they are queued on
+          // the lane's write chain, so a tool that appended an entry and
+          // returned has not necessarily written one. The harness settles
+          // the call on this result: without the drain the operation can
+          // complete, a client can read the transcript back, and the isolate
+          // can be evicted, all before the write lands.
+          //
+          // Draining changes only when a write lands, never whether the tool
+          // succeeded. `ExtensionLaneState.enqueue` already absorbs a failed
+          // write and reports it as a `handler_error` on the lane, so a tool
+          // that produced a result keeps it even if one of its writes failed
+          // — the failure is visible to the client, not folded into the
+          // model's tool result.
+          await state.drain();
+          return result;
+        });
       }
     } satisfies AgentHarnessTool<object | undefined>;
   });

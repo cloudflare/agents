@@ -188,6 +188,59 @@ describe("a workspace too large to snapshot", () => {
     expect(result.message).toContain("100");
   });
 
+  it("refuses to run when one file is over the per-file limit", async () => {
+    // The file was protected from the sync passes but invisible to the
+    // shell, so `cat` reported an empty file and `grep` found nothing in a
+    // file that is full of matches. Refusing is the only honest answer.
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/small.txt", "ok");
+      await instance.workspace.writeFile("/huge.txt", "h".repeat(200));
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace,
+        maxSnapshotFileBytes: 100
+      });
+      const exec = await env.exec(
+        "cat /huge.txt",
+        undefined,
+        BACKGROUND_CONTEXT
+      );
+      return {
+        ok: exec.ok,
+        code: exec.ok ? null : exec.error.code,
+        message: exec.ok ? null : exec.error.message
+      };
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("spawn_error");
+    expect(result.message).toContain("/huge.txt");
+    expect(result.message).toContain("maxSnapshotFileBytes");
+    expect(result.message).toContain("100");
+  });
+
+  it("refuses to run when the workspace holds more files than the limit", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/a.txt", "a");
+      await instance.workspace.writeFile("/b.txt", "b");
+      await instance.workspace.writeFile("/c.txt", "c");
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace,
+        maxSnapshotFiles: 2
+      });
+      const exec = await env.exec("ls /", undefined, BACKGROUND_CONTEXT);
+      return {
+        ok: exec.ok,
+        code: exec.ok ? null : exec.error.code,
+        message: exec.ok ? null : exec.error.message
+      };
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("spawn_error");
+    expect(result.message).toContain("maxSnapshotFiles");
+    expect(result.message).toContain("2");
+  });
+
   it("runs when the workspace fits inside the limit", async () => {
     const result = await inObject(fresh(), async (instance) => {
       await instance.workspace.writeFile("/a.txt", "a".repeat(80));
