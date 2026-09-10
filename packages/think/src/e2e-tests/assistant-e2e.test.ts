@@ -27,6 +27,7 @@ const PERSIST_DIR = path.join(__dirname, ".wrangler-e2e-state");
 
 // Wire protocol constants (must match agent.ts)
 const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
+const MSG_CHAT_MESSAGES_DELTA = "cf_agent_chat_messages_delta";
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 
@@ -288,7 +289,8 @@ function sendChatAndWaitForDone(
 }
 
 /**
- * Wait for the next cf_agent_chat_messages broadcast. Best-effort sync barrier:
+ * Wait for the next transcript broadcast (a `cf_agent_chat_messages` snapshot
+ * or a `cf_agent_chat_messages_delta`). Best-effort sync barrier:
  * resolves with the broadcast, or `null` on timeout. It deliberately does NOT
  * reject — callers arm it before sending and await it after, so a reject timer
  * could fire on a dangling promise (if the intervening send throws or the
@@ -309,7 +311,10 @@ function waitForMessagesBroadcast(
     const handler = (e: MessageEvent) => {
       try {
         const msg = JSON.parse(e.data as string) as Record<string, unknown>;
-        if (msg.type === MSG_CHAT_MESSAGES) {
+        if (
+          msg.type === MSG_CHAT_MESSAGES ||
+          msg.type === MSG_CHAT_MESSAGES_DELTA
+        ) {
           clearTimeout(timer);
           ws.removeEventListener("message", handler);
           resolve(msg);

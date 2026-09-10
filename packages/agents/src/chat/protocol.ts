@@ -37,6 +37,16 @@ export const CHAT_MESSAGE_TYPES = {
   TOOL_RESULT: "cf_agent_tool_result",
   TOOL_APPROVAL: "cf_agent_tool_approval",
   MESSAGE_UPDATED: "cf_agent_message_updated",
+  // Server→client: a subset of the transcript changed (messages persisted at
+  // a turn boundary). Carries only the changed messages plus the `epoch` of
+  // the snapshot it applies to, so a client that never received that snapshot
+  // (or holds an older one) drops it instead of applying it out of order.
+  // The full `CHAT_MESSAGES` snapshot is still sent on connect/resume, after
+  // a branch/regeneration, transcript repair, compaction, and whenever the
+  // server cannot prove the client's base matches. Backward-compatible —
+  // clients that don't understand it ignore it and keep receiving snapshots
+  // wherever the server falls back to them.
+  CHAT_MESSAGES_DELTA: "cf_agent_chat_messages_delta",
   // Server→client: a durable chat turn is being recovered (interrupted by a
   // deploy/eviction or a stream-stall watchdog abort and now resuming). Sent
   // when a recovery continuation is scheduled and cleared on every terminal

@@ -1308,6 +1308,9 @@ export function useAgentChat<
     assistantId: string;
     anchorMessageId: string | null;
   } | null>(null);
+  // Epoch of the last `CF_AGENT_CHAT_MESSAGES` snapshot applied; deltas
+  // tagged with any other epoch are dropped (see the delta handler).
+  const transcriptEpochRef = useRef<string | null>(null);
 
   const preserveProtectedStreamingAssistant = useCallback(
     (
@@ -1353,6 +1356,52 @@ export function useAgentChat<
         ...messages.filter((message) => message.id !== protection.assistantId),
         protectedAssistant
       ];
+    },
+    []
+  );
+
+  /**
+   * Apply a server delta (`CF_AGENT_CHAT_MESSAGES_DELTA`) onto the current
+   * list: replace by id (or by a shared `toolCallId`, for an assistant the
+   * client minted under its own id), else append in delta order. A message
+   * this tab is protecting mid-stream keeps the local copy, exactly as the
+   * snapshot path does via `preserveProtectedStreamingAssistant`.
+   */
+  const upsertDeltaMessages = useCallback(
+    (
+      delta: readonly ChatMessage[],
+      currentMessages: readonly ChatMessage[]
+    ): ChatMessage[] => {
+      const next = [...currentMessages];
+      const protection = protectedStreamingAssistantRef.current;
+      for (const incoming of delta) {
+        let idx = next.findIndex((m) => m.id === incoming.id);
+        if (idx < 0 && incoming.role === "assistant") {
+          const toolCallIds = new Set(
+            incoming.parts
+              .filter((p) => "toolCallId" in p && p.toolCallId)
+              .map((p) => (p as { toolCallId: string }).toolCallId)
+          );
+          if (toolCallIds.size > 0) {
+            idx = next.findIndex((m) =>
+              m.parts.some(
+                (p) =>
+                  "toolCallId" in p &&
+                  toolCallIds.has((p as { toolCallId: string }).toolCallId)
+              )
+            );
+          }
+        }
+        if (idx < 0) {
+          next.push(incoming);
+          continue;
+        }
+        if (protection && next[idx].id === protection.assistantId) {
+          continue;
+        }
+        next[idx] = { ...incoming, id: next[idx].id };
+      }
+      return next;
     },
     []
   );
@@ -1855,6 +1904,42 @@ export function useAgentChat<
 
   const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
+  /**
+   * A cross-tab observer builds the in-flight assistant via the broadcast
+   * accumulator, not the local transport — so `protectedStreamingAssistantRef`
+   * is never armed for it. Without this, a behind-the-stream snapshot (or a
+   * cutover delta carrying a copy the replay hasn't caught up to) would
+   * replace the observed assistant's streamed parts until the next chunk
+   * re-merges them. Re-apply the accumulator — it adopted the server id from
+   * the `start` chunk, so `mergeInto` replaces the copy in place (or appends
+   * a not-yet-persisted turn).
+   *
+   * Only re-applied when the accumulator is at least as complete as the
+   * incoming copy of the same message. A fresh observer rebuilding from a
+   * chunk-0 replay can briefly trail a fully-persisted copy; merging then
+   * would drop parts until replay catches up.
+   */
+  const reapplyObservedAccumulator = useCallback(
+    (next: ChatMessage[]): ChatMessage[] => {
+      const observed = streamStateRef.current;
+      if (
+        observed.status !== "observing" ||
+        observed.accumulator.parts.length === 0
+      ) {
+        return next;
+      }
+      const idx = next.findIndex(
+        (m) => m.id === observed.accumulator.messageId
+      );
+      const incomingParts = idx >= 0 ? next[idx].parts.length : 0;
+      if (observed.accumulator.parts.length >= incomingParts) {
+        return observed.accumulator.mergeInto(next) as ChatMessage[];
+      }
+      return next;
+    },
+    []
+  );
+
   const [isServerStreaming, setIsServerStreaming] = useState(false);
   // #1620: a durable chat turn is being recovered (interrupted by a
   // deploy/eviction or a stream-stall watchdog abort and now resuming). Driven
@@ -1900,43 +1985,40 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES: {
-          setMessages((currentMessages: ChatMessage[]) => {
-            let next = preserveProtectedStreamingAssistant(
-              data.messages,
-              currentMessages
-            );
-            // A cross-tab observer builds the in-flight assistant via the
-            // broadcast accumulator, not the local transport — so
-            // `protectedStreamingAssistantRef` is never armed for it. Without
-            // this, a behind-the-stream snapshot would replace the observed
-            // assistant's streamed parts until the next chunk re-merges them
-            // (the same disappear/reappear the originating tab gets without the
-            // start-chunk re-arm above). Re-apply the accumulator — it adopted
-            // the server id from the `start` chunk, so `mergeInto` replaces the
-            // snapshot's copy in place (or appends a not-yet-persisted turn).
-            const observed = streamStateRef.current;
-            if (
-              observed.status === "observing" &&
-              observed.accumulator.parts.length > 0
-            ) {
-              // Only re-apply the live accumulator when it is at least as
-              // complete as the snapshot's copy of the same message. A fresh
-              // observer rebuilding its accumulator from a chunk-0 replay can
-              // briefly trail a fully-persisted snapshot; merging then would drop
-              // parts until replay catches up. In steady-state live observing the
-              // accumulator is always at or ahead of the snapshot, so this still
-              // fixes the disappear/reappear flicker.
-              const snapshotIdx = next.findIndex(
-                (m) => m.id === observed.accumulator.messageId
-              );
-              const snapshotParts =
-                snapshotIdx >= 0 ? next[snapshotIdx].parts.length : 0;
-              if (observed.accumulator.parts.length >= snapshotParts) {
-                next = observed.accumulator.mergeInto(next) as ChatMessage[];
-              }
-            }
-            return next;
-          });
+          // The snapshot is the base every later delta applies to. An
+          // epoch-less snapshot comes from a server that never sends deltas;
+          // record `null` so a stray delta can't match it.
+          transcriptEpochRef.current = data.epoch ?? null;
+          setMessages((currentMessages: ChatMessage[]) =>
+            reapplyObservedAccumulator(
+              preserveProtectedStreamingAssistant(
+                data.messages,
+                currentMessages
+              )
+            )
+          );
+          break;
+        }
+
+        case MessageType.CF_AGENT_CHAT_MESSAGES_DELTA: {
+          // Out-of-order guard: a delta is only meaningful against the
+          // snapshot it was minted for. This tab may never have received that
+          // snapshot (it connected mid-stream and the server owes it a full
+          // frame at the next boundary), or may hold an older one (the server
+          // re-derived its transcript since — branch, compaction, clear). In
+          // both cases the server follows up with a full snapshot; applying
+          // the delta now would splice rows onto the wrong base.
+          if (
+            transcriptEpochRef.current === null ||
+            data.epoch !== transcriptEpochRef.current
+          ) {
+            break;
+          }
+          setMessages((currentMessages: ChatMessage[]) =>
+            reapplyObservedAccumulator(
+              upsertDeltaMessages(data.messages, currentMessages)
+            )
+          );
           break;
         }
 
@@ -2413,6 +2495,8 @@ export function useAgentChat<
     resume,
     customTransport,
     preserveProtectedStreamingAssistant,
+    reapplyObservedAccumulator,
+    upsertDeltaMessages,
     resetToolContinuation,
     resetMatchingHydratedAssistantForReplay,
     restoreProtectedStreamingAssistant,
