@@ -1077,9 +1077,10 @@ describe("Think — auto-continuation", () => {
     expect(long.state).toBe("output-available");
     expect(short.cacheCoversPath).toBe(true);
     expect(long.cacheCoversPath).toBe(true);
-    // One point read of the owner and the rewrite locating its row. Sessions
-    // remembers the stored form of rows this object wrote, so its no-op
-    // guard no longer reads the owner back — and never a path walk.
+    // One point read of the owner, Sessions' key-side probe of the row (the
+    // apply vouches for the change, so the payload and any continuation
+    // rows are never read back), and the rewrite locating its row — never a
+    // path walk.
     expect(long.rowsRead).toBeLessThan(20);
     expect(long.rowsRead).toBe(short.rowsRead);
     expect(long.rowsWritten).toBe(short.rowsWritten);

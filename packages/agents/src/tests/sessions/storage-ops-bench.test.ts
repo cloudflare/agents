@@ -47,38 +47,43 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
-  it("recognises an unchanged chunked update without reading it back", async () => {
+  it("reads a chunked row back only when asked to compare against it", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
       // A 3.2 MiB body spans the 1.5 MiB row budget three times: one message
       // row plus two continuations.
-      const warm = await instance.benchChunkedUpdates(3.2 * 1024 * 1024, false);
-      expect(warm.chunks).toBe(2);
+      const stored = await instance.benchChunkedUpdates(
+        3.2 * 1024 * 1024,
+        "stored"
+      );
+      expect(stored.chunks).toBe(2);
 
-      // The object wrote the row, so it remembers the stored form: an
-      // identical re-send is decided in memory, no row read. Before the memo
-      // this read the message row and its continuations back to compare
-      // (5 rows below, on the cold path).
-      expect(warm.noop).toEqual({ rowsRead: 0, rowsWritten: 0 });
-
-      // A changed update skips the read-back too and rewrites the row and
-      // its two continuations; the one read is the UPDATE locating its row.
-      expect(warm.changed).toEqual({ rowsRead: 1, rowsWritten: 3 });
+      // The default guard reads the message row and both continuations (and
+      // the `json_each` id list the continuation query scans) to prove the
+      // body identical, then writes nothing.
+      expect(stored.noop).toEqual({ rowsRead: 5, rowsWritten: 0 });
+      // A changed body pays the same read-back before the rewrite of the
+      // row and its two continuations (the sixth read is the UPDATE locating
+      // its row).
+      expect(stored.changed).toEqual({ rowsRead: 6, rowsWritten: 3 });
     });
   });
 
-  it("falls back to the full read-back when the caches are cold", async () => {
+  it("skips the read-back for a change the caller already established", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      const cold = await instance.benchChunkedUpdates(3.2 * 1024 * 1024, true);
-      expect(cold.chunks).toBe(2);
+      const known = await instance.benchChunkedUpdates(
+        3.2 * 1024 * 1024,
+        "none"
+      );
+      expect(known.chunks).toBe(2);
+      expect(known.noop).toEqual({ rowsRead: 5, rowsWritten: 0 });
 
-      // Nothing remembered, so the guard reads the message row and the
-      // continuation rows (plus the `json_each` id list the continuation
-      // query scans) and still writes nothing for an identical body. This is
-      // what every update of this message cost before the memo.
-      expect(cold.noop).toEqual({ rowsRead: 5, rowsWritten: 0 });
-      expect(cold.changed).toEqual({ rowsRead: 6, rowsWritten: 3 });
+      // `compare: "none"`: one key-side probe of the message row (its
+      // continuation count and stamped estimate, no payload) and the UPDATE
+      // locating its row. The continuations are never read; the writes are
+      // unchanged.
+      expect(known.changed).toEqual({ rowsRead: 2, rowsWritten: 3 });
     });
   });
 

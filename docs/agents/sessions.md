@@ -95,6 +95,12 @@ await session.clearMessages();
 
 `updateMessage()` returns the stored form of the message, or `null` when the ID is not in this session. It does not throw for an absent row. An unchanged message writes nothing and dispatches no change event.
 
+Deciding "unchanged" means reading the stored row back — every continuation row of a large message included — and comparing byte-for-byte. A caller that already holds the stored message and has compared against it (a tool-result apply, a mirror that diffs before it persists) can hand that decision over with `compare: "none"`: the row is probed for its key-side columns only and rewritten, and the payload is never read. The default is `compare: "stored"`; with `"none"`, an identical message IS written and dispatched, so pass it only for a change you have established yourself.
+
+```ts
+await session.updateMessage(applied, { compare: "none" });
+```
+
 Deleting a message splices its children to its parent. Removing a message in the middle of a chain does not make older history unreachable.
 
 ### Row budget

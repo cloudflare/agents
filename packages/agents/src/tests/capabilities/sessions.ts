@@ -443,14 +443,13 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * Updates of a message stored across continuation rows. `textBytes` is
-   * the body size; above `MAX_INLINE_ROW_BYTES` the row chunks. Each step
-   * reports both billed counters. `cold` drops the object's in-memory caches
-   * first, as a fresh isolate would find them, so the reads it reports are
-   * the fallback path's.
+   * the body size; above `MAX_INLINE_ROW_BYTES` the row chunks. Reports both
+   * billed counters for an identical re-send under the default compare and
+   * for a changed body written with the given `compare`.
    */
   async benchChunkedUpdates(
     textBytes: number,
-    cold: boolean
+    compare: "stored" | "none"
   ): Promise<{
     chunks: number;
     noop: { rowsRead: number; rowsWritten: number };
@@ -469,14 +468,12 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
     await session.appendMessage(message(body));
     const chunks = this.continuationRowCount(id);
 
-    if (cold) session.__DO_NOT_USE_WILL_BREAK__sync().abandon();
     this.#billed.start();
     await session.updateMessage(message(body));
     const noop = this.#billed.stopAll();
 
-    if (cold) session.__DO_NOT_USE_WILL_BREAK__sync().abandon();
     this.#billed.start();
-    await session.updateMessage(message(`${body}!`));
+    await session.updateMessage(message(`${body}!`), { compare });
     const changed = this.#billed.stopAll();
     return { chunks, noop, changed };
   }

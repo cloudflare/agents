@@ -166,6 +166,16 @@ export interface WriteOptions {
    * Default `"server"`.
    */
   source?: "client" | "server";
+  /**
+   * How an update of an existing row decides whether it changed. `"stored"`
+   * (default) reads the row back — continuations included — and writes
+   * nothing when the stored form is byte-identical. `"none"` is for a caller
+   * that has already compared the message against its own copy and knows
+   * the content differs: the row is rewritten without being read first,
+   * so an unchanged message sent this way IS written and dispatched.
+   * Ignored by appends.
+   */
+  compare?: "stored" | "none";
 }
 
 /** Options accepted by append writes. */

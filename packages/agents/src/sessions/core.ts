@@ -6,12 +6,9 @@
  * Write economics: rows written cost ~1000× rows read on DO SQLite. Every
  * table is WITHOUT ROWID with no secondary index, so one row write bills one
  * row. State is derived from existing rows, never kept in counter rows, and
- * an unchanged update writes nothing. The in-memory state is derived and
- * droppable: the tail of each session (its leaf id and next `seq`), read
- * once per object lifetime because finding it means scanning the session's
- * rows; the active path's token total; and the stored form of recently
- * written rows, so re-sending one of them is recognised as unchanged
- * without reading it back.
+ * an unchanged update writes nothing. The only in-memory state is the tail
+ * of each session (its leaf id and next `seq`), read once per object
+ * lifetime because finding it means scanning the session's rows.
  */
 
 import { extractAttachments, resolveAttachments } from "./attachment-ingest";
@@ -60,15 +57,6 @@ const NEWEST_FIRST_WINDOW_ROWS = 8;
  */
 const MAX_PATH_DEPTH = 10_000;
 
-/**
- * Bytes of serialized rows the written-form memo holds across every session
- * of this object. It remembers the stored form of the rows this object wrote
- * most recently, so an update that re-sends one of them is recognised as
- * unchanged without reading the row and its continuations back. Oldest
- * entries go first; a row larger than the whole budget is never memoised.
- */
-const WRITTEN_FORM_MEMO_BYTES = 8 * 1024 * 1024;
-
 /** What a hydration window needs from a path row: its id, and its stored size when the window is byte-bounded. */
 type PathRow = { id: string; bytes: number };
 
@@ -91,22 +79,15 @@ type PathTokens = {
   depth: number;
 };
 
-/**
- * The stored form of a row this object wrote, as `update` needs it: the
- * serialized content the no-op guard compares against, and the continuation
- * count and stamped estimate a changed update reconciles. It is set only
- * after a write commits and dropped by everything that removes or replaces
- * the row, so a hit means the row holds exactly this.
- */
-type WrittenForm = {
-  sessionId: string;
-  id: string;
-  json: string;
-  chunks: number;
-  tokenEstimate: number;
-};
-
 export type UpdateOutcome = "missing" | "unchanged" | "updated";
+
+/**
+ * How `update` decides whether a row changed. `"stored"` reads the row and
+ * its continuations back and compares byte-for-byte. `"none"` trusts the
+ * caller, who has already compared against its own copy and knows the
+ * content differs: the row is rewritten without being read first.
+ */
+export type UpdateCompare = "stored" | "none";
 
 export class SessionsCore {
   readonly io: SessionsIo;
@@ -114,9 +95,6 @@ export class SessionsCore {
   readonly #listeners = new Set<SessionChangeListener>();
   readonly #tails = new Map<string, Tail>();
   readonly #pathTokens = new Map<string, PathTokens>();
-  /** Keyed by `#writtenKey`, oldest first: insertion order is the eviction order. */
-  readonly #written = new Map<string, WrittenForm>();
-  #writtenBytes = 0;
   readonly #attachments: AttachmentStore;
   #tablesEnsured = false;
   /** True once the FTS index exists; it is built on the first `search()`. */
@@ -246,8 +224,6 @@ export class SessionsCore {
    */
   migrateLegacy(): boolean {
     this.#pathTokens.clear();
-    this.#written.clear();
-    this.#writtenBytes = 0;
     let complete = true;
     const drop = (name: string): void => {
       if (this.#tableExists(name)) this.io.sqlWrite(`DROP TABLE ${name}`, []);
@@ -401,7 +377,6 @@ export class SessionsCore {
   }
 
   exists(sessionId: string, id: string): boolean {
-    if (this.#written.has(this.#writtenKey(sessionId, id))) return true;
     return (
       this.io.sql<{ id: string }>(
         "SELECT id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
@@ -445,48 +420,6 @@ export class SessionsCore {
   forgetCaches(sessionId: string): void {
     this.#tails.delete(sessionId);
     this.#pathTokens.delete(sessionId);
-    this.#forgetWritten(sessionId);
-  }
-
-  // ── Written-form memo ────────────────────────────────────────────────────
-
-  #writtenKey(sessionId: string, id: string): string {
-    return `${sessionId}\u0000${id}`;
-  }
-
-  /** Remember a row's stored form once its transaction has committed. */
-  #remember(form: WrittenForm): void {
-    const key = this.#writtenKey(form.sessionId, form.id);
-    this.#dropWritten(key);
-    if (form.json.length > WRITTEN_FORM_MEMO_BYTES) return;
-    for (const [oldest, old] of this.#written) {
-      if (this.#writtenBytes + form.json.length <= WRITTEN_FORM_MEMO_BYTES)
-        break;
-      this.#written.delete(oldest);
-      this.#writtenBytes -= old.json.length;
-    }
-    this.#written.set(key, form);
-    this.#writtenBytes += form.json.length;
-  }
-
-  #dropWritten(key: string): void {
-    const entry = this.#written.get(key);
-    if (!entry) return;
-    this.#written.delete(key);
-    this.#writtenBytes -= entry.json.length;
-  }
-
-  #forgetWritten(sessionId: string, ids?: Iterable<string>): void {
-    if (ids) {
-      for (const id of ids) this.#dropWritten(this.#writtenKey(sessionId, id));
-      return;
-    }
-    for (const [key, entry] of this.#written) {
-      if (entry.sessionId === sessionId) {
-        this.#written.delete(key);
-        this.#writtenBytes -= entry.json.length;
-      }
-    }
   }
 
   latestLeafId(sessionId: string): string | null {
@@ -1016,8 +949,7 @@ export class SessionsCore {
     // holds a pointer and never the payload. Addresses are computed here, out
     // of the transaction; the transaction only writes.
     const { message: staged, attachments } = extractAttachments(message);
-    const json = JSON.stringify(staged);
-    const slices = splitContent(json);
+    const slices = splitContent(JSON.stringify(staged));
     const seq = tail.nextSeq;
     this.io.transaction(() => {
       for (const attachment of attachments) {
@@ -1051,13 +983,6 @@ export class SessionsCore {
     // The freshly inserted row is the most recent childless node, so it is
     // now the latest leaf — true even for an explicit-parent branch append.
     this.#tails.set(sessionId, { leafId: message.id, nextSeq: seq + 1 });
-    this.#remember({
-      sessionId,
-      id: message.id,
-      json,
-      chunks: slices.length - 1,
-      tokenEstimate
-    });
     const memo = this.#pathTokens.get(sessionId);
     if (memo) {
       if (memo.leafId === parent && memo.depth <= MAX_PATH_DEPTH) {
@@ -1081,54 +1006,45 @@ export class SessionsCore {
   }
 
   /**
-   * What `update` compares against: the memoised form when this object wrote
-   * the row and nothing has touched it since, otherwise the row read back in
-   * full, continuations included. Null when the row does not exist.
-   */
-  #oldForm(
-    sessionId: string,
-    id: string
-  ): { json: string; chunks: number; tokenEstimate: number } | null {
-    const remembered = this.#written.get(this.#writtenKey(sessionId, id));
-    if (remembered) return remembered;
-    const rows = this.io.sql<{
-      content: string;
-      content_chunks: number;
-      token_estimate: number;
-    }>(
-      "SELECT content, content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
-      [sessionId, id]
-    );
-    if (rows.length === 0) return null;
-    const row = rows[0];
-    const json =
-      row.content_chunks === 0
-        ? row.content
-        : row.content + (this.#continuations(sessionId, [id]).get(id) ?? "");
-    return {
-      json,
-      chunks: row.content_chunks,
-      tokenEstimate: row.token_estimate ?? 0
-    };
-  }
-
-  /**
    * Durable update of an existing row. An identical row writes nothing: no
    * row, no continuation, no FTS, no event. The no-op guard compares the
    * FULL reassembled content, not just the slice the message row holds.
+   * A caller that already knows the row changed passes `compare: "none"`
+   * and the payload is never read back: the row is probed for its key-side
+   * columns only (the continuation count the surplus delete needs and the
+   * estimate the path total was counting), then rewritten.
    */
   update(
     sessionId: string,
     message: SessionMessage,
-    tokenEstimate: number
+    tokenEstimate: number,
+    compare: UpdateCompare = "stored"
   ): UpdateOutcome {
+    const oldRows = this.io.sql<{
+      content?: string;
+      content_chunks: number;
+      token_estimate: number | null;
+    }>(
+      compare === "stored"
+        ? "SELECT content, content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?"
+        : "SELECT content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      [sessionId, message.id]
+    );
+    if (oldRows.length === 0) return "missing";
+    const old = oldRows[0];
     // Compare in stored form: a re-sent identical image extracts to the same
     // address, so an unchanged update still writes nothing.
     const { message: staged, attachments } = extractAttachments(message);
     const json = JSON.stringify(staged);
-    const old = this.#oldForm(sessionId, message.id);
-    if (old === null) return "missing";
-    if (old.json === json) return "unchanged";
+    if (compare === "stored") {
+      const oldContent =
+        old.content_chunks === 0
+          ? old.content
+          : old.content +
+            (this.#continuations(sessionId, [message.id]).get(message.id) ??
+              "");
+      if (oldContent === json) return "unchanged";
+    }
 
     const slices = splitContent(json);
     this.io.transaction(() => {
@@ -1150,7 +1066,7 @@ export class SessionsCore {
       );
       // A message that shrank leaves surplus continuations behind; they go
       // in the same transaction as the row that stopped referencing them.
-      if (old.chunks > slices.length - 1) {
+      if (old.content_chunks > slices.length - 1) {
         this.io.sqlWrite(
           `DELETE FROM cf_agents_session_message_chunks
            WHERE session_id = ? AND id = ? AND idx > ?`,
@@ -1169,15 +1085,8 @@ export class SessionsCore {
     });
     const memo = this.#pathTokens.get(sessionId);
     if (memo?.counted.has(message.id)) {
-      memo.total += tokenEstimate - old.tokenEstimate;
+      memo.total += tokenEstimate - (old.token_estimate ?? 0);
     }
-    this.#remember({
-      sessionId,
-      id: message.id,
-      json,
-      chunks: slices.length - 1,
-      tokenEstimate
-    });
     this.io.emit("session:message:updated", {
       sessionId,
       messageId: message.id
@@ -1250,7 +1159,6 @@ export class SessionsCore {
     // The leaf may be among the deleted rows; re-derive on the next append.
     this.#tails.delete(sessionId);
     this.#pathTokens.delete(sessionId);
-    this.#forgetWritten(sessionId, uniqueIds);
     this.io.emit("session:messages:deleted", {
       sessionId,
       count: uniqueIds.length
@@ -1281,7 +1189,6 @@ export class SessionsCore {
     });
     this.#tails.set(sessionId, { leafId: null, nextSeq: 1 });
     this.#pathTokens.delete(sessionId);
-    this.#forgetWritten(sessionId);
     this.io.emit("session:cleared", { sessionId });
   }
 
@@ -1443,7 +1350,6 @@ export class SessionsCore {
       nextSeq: tail.nextSeq + 1
     });
     this.#pathTokens.delete(sessionId);
-    this.#forgetWritten(sessionId, [message.id]);
     return true;
   }
 
