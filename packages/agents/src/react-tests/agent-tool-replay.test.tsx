@@ -212,13 +212,13 @@ describe("agent-tool replay over a real Worker", () => {
     const name = `replay-interrupted-${crypto.randomUUID()}`;
     const runId = "run-interrupted";
 
-    // Seed a stranded `interrupted` row through the real persist path (what
-    // parent recovery writes when it gives up re-attaching to a live child),
-    // then observe it from a fresh client whose only source is the replay.
+    // Seal a stranded `interrupted` row through the real recovery path (the
+    // parent gives up re-attaching to a live, silent child), then observe it
+    // from a fresh client whose only source is the replay.
     const driver = await mount(name);
     await driver
       .getAgent()
-      .call("seedInterruptedRunForTest", [runId, "no-progress", true]);
+      .call("sealInterruptedRunForTest", [runId, "no-progress"]);
 
     const observer = await mount(name);
     await vi.waitFor(
