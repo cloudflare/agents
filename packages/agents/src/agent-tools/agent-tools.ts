@@ -309,34 +309,41 @@ export class AgentTools extends LifecycleCapability {
       inputPreview !== undefined ? JSON.stringify(inputPreview) : null;
     const startedAt = Date.now();
 
+    // Two budgets, checked in order: the TOTAL cap covers every non-terminal
+    // run, and a detached dispatch must additionally fit the detached-only cap
+    // (detached runs count toward both). Either rejection is synchronous — an
+    // `error` row plus `started`/`error` events, and no child is spawned.
     const maxConcurrent = this.#maxConcurrent();
     if (this.#activeRunCount() >= maxConcurrent) {
-      const error = `maxConcurrentAgentTools (${maxConcurrent}) exceeded`;
-      this.#sql`
-        INSERT INTO cf_agent_tool_runs (
-          run_id, parent_tool_call_id, agent_type, input_preview,
-          status, error_message, display_metadata,
-          display_order, started_at, completed_at
-        ) VALUES (
-          ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
-          ${inputPreviewJson}, 'error', ${error}, ${displayJson},
-          ${displayOrder}, ${startedAt}, ${Date.now()}
-        )
-      `;
-      this.#broadcastEvent(options.parentToolCallId, 0, {
-        kind: "started",
-        runId,
-        agentType,
-        inputPreview,
-        order: displayOrder,
-        display: options.display
-      });
-      this.#broadcastEvent(options.parentToolCallId, 1, {
-        kind: "error",
-        runId,
-        error
-      });
-      return { runId, agentType, status: "error", error };
+      return this.#rejectDispatch(
+        `maxConcurrentAgentTools (${maxConcurrent}) exceeded`,
+        {
+          runId,
+          agentType,
+          startedAt,
+          displayOrder,
+          inputPreview,
+          inputPreviewJson,
+          displayJson,
+          options
+        }
+      );
+    }
+    const maxConcurrentDetached = this.#maxConcurrentDetached();
+    if (detached && this.#liveDetachedRunCount() >= maxConcurrentDetached) {
+      return this.#rejectDispatch(
+        `maxConcurrentDetachedAgentTools (${maxConcurrentDetached}) exceeded`,
+        {
+          runId,
+          agentType,
+          startedAt,
+          displayOrder,
+          inputPreview,
+          inputPreviewJson,
+          displayJson,
+          options
+        }
+      );
     }
 
     const detachedMaxBudgetAt = detached
@@ -1965,6 +1972,59 @@ export class AgentTools extends LifecycleCapability {
     return this.#host.maxConcurrent?.() ?? this.#options.maxConcurrent;
   }
 
+  #maxConcurrentDetached(): number {
+    return (
+      this.#host.maxConcurrentDetached?.() ??
+      this.#options.maxConcurrentDetached
+    );
+  }
+
+  /**
+   * Reject a dispatch that would exceed a concurrency cap: record the terminal
+   * `error` row and project the same `started` + `error` pair a client would
+   * have seen, without ever resolving (or spawning) a child.
+   */
+  #rejectDispatch<Output>(
+    error: string,
+    dispatch: {
+      runId: string;
+      agentType: string;
+      startedAt: number;
+      displayOrder: number;
+      inputPreview: unknown;
+      inputPreviewJson: string | null;
+      displayJson: string | null;
+      options: RunAgentToolOptions;
+    }
+  ): RunAgentToolResult<Output> {
+    const { runId, agentType, options } = dispatch;
+    this.#sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        status, error_message, display_metadata,
+        display_order, started_at, completed_at
+      ) VALUES (
+        ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
+        ${dispatch.inputPreviewJson}, 'error', ${error}, ${dispatch.displayJson},
+        ${dispatch.displayOrder}, ${dispatch.startedAt}, ${Date.now()}
+      )
+    `;
+    this.#broadcastEvent(options.parentToolCallId, 0, {
+      kind: "started",
+      runId,
+      agentType,
+      inputPreview: dispatch.inputPreview,
+      order: dispatch.displayOrder,
+      display: options.display
+    });
+    this.#broadcastEvent(options.parentToolCallId, 1, {
+      kind: "error",
+      runId,
+      error
+    });
+    return { runId, agentType, status: "error", error };
+  }
+
   #emit(type: string, payload: Record<string, unknown>): void {
     this.lifecycle.events.emit(type, payload);
   }
@@ -2209,7 +2269,7 @@ export class AgentTools extends LifecycleCapability {
       threshold: DETACHED_LIVE_COUNT_WARN_THRESHOLD
     });
     console.warn(
-      `[agents] ${liveCount} detached agent-tool runs are live on this agent (threshold ${DETACHED_LIVE_COUNT_WARN_THRESHOLD}). Detached runs hold a concurrency slot until they finish — make sure they are completing or being cancelled, or lower \`maxConcurrentAgentTools\`.`
+      `[agents] ${liveCount} detached agent-tool runs are live on this agent (threshold ${DETACHED_LIVE_COUNT_WARN_THRESHOLD}). Detached runs hold a concurrency slot until they finish — make sure they are completing or being cancelled, or set \`maxConcurrentDetachedAgentTools\` to bound background work.`
     );
   }
 

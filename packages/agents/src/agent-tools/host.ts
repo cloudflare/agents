@@ -24,6 +24,12 @@ export type AgentToolsHost = {
    */
   readonly maxConcurrent?: () => number;
   /**
+   * The host's live DETACHED concurrency cap, when it exposes one of its own
+   * (Agent's `maxConcurrentDetachedAgentTools` field). Omitted hosts fall back
+   * to the capability's `maxConcurrentDetached` option.
+   */
+  readonly maxConcurrentDetached?: () => number;
+  /**
    * Resolve (creating or waking) the child facet running `runId` for an agent
    * class name, as an object implementing the agent-tool child adapter.
    */

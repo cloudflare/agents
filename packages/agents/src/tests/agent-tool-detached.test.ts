@@ -302,6 +302,34 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(events[0].runId).toBe("run-giveup-broadcast");
   });
 
+  it("rejects a detached dispatch that would exceed the detached-only cap", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-cap-${crypto.randomUUID()}`
+    );
+
+    // One live detached run already holds the only detached slot; the total cap
+    // stays Infinity, so only the detached budget can reject this dispatch.
+    agent.seedDetachedRunForTest("run-cap-live");
+    await agent.setMaxConcurrentDetachedAgentToolsForTest(1);
+
+    const rejected = await agent.dispatchRunForTest("run-cap-new", "detached");
+    expect(rejected.status).toBe("error");
+    expect(rejected.error).toContain(
+      "maxConcurrentDetachedAgentTools (1) exceeded"
+    );
+    // The dispatch failed synchronously: the row is the terminal error itself.
+    expect(await agent.readRunStatusForTest("run-cap-new")).toBe("error");
+
+    // An AWAITED run is unaffected — the detached cap only bounds background
+    // work inside the (still uncapped) total budget.
+    const awaited = await agent.dispatchRunForTest(
+      "run-cap-awaited",
+      "awaited"
+    );
+    expect(awaited.status).toBe("completed");
+  });
+
   it("collapses a concurrent backbone-arm fan-out to a single schedule", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,

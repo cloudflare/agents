@@ -536,6 +536,34 @@ export class TestAgentToolReplayAgent extends Agent {
     });
   }
 
+  /** Set the live detached-run cap read through the host port. */
+  setMaxConcurrentDetachedAgentToolsForTest(limit: number): void {
+    this.maxConcurrentDetachedAgentTools = limit;
+  }
+
+  /**
+   * Dispatch one run against the deterministic stub child and return its
+   * handle — used to prove the detached cap rejects a dispatch exactly like the
+   * total cap does.
+   */
+  async dispatchRunForTest(
+    runId: string,
+    mode: "awaited" | "detached"
+  ): Promise<{ status: string; error?: string }> {
+    const result = await this.runAgentTool<StubRunInput>(
+      TestAgentToolStubChild,
+      {
+        runId,
+        input: { chunkBodies: [] },
+        ...(mode === "detached" ? { detached: true as const } : {})
+      }
+    );
+    return {
+      status: result.status,
+      ...(result.error !== undefined ? { error: result.error } : {})
+    };
+  }
+
   readRunStatusForTest(runId: string): string | null {
     return this.readPersistedRunRowForTest(runId)?.status ?? null;
   }

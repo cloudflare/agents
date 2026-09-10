@@ -285,13 +285,35 @@ Key behaviors:
 - **Bounded.** Every detached run has an absolute `maxBudgetMs` ceiling
   (per-run, or the `detachedMaxBudgetMs` static option; default 24h). On expiry
   the parent gives up watching and tears the child down so an abandoned run
-  cannot hold a `maxConcurrentAgentTools` slot forever.
+  cannot hold a concurrency slot forever.
 - **No inherited signal.** A detached run must outlive the spawning turn, so it
   does **not** inherit `options.signal`. Cancel it explicitly:
 
 ```ts
 await this.cancelAgentTool(runId); // idempotent; delivers onFinish "aborted"
 ```
+
+### Bound how many runs a parent owns
+
+Two live fields cap concurrent, non-terminal runs. Both default to `Infinity`
+and are read on every dispatch, so a subclass may reassign them at any time:
+
+```ts
+class Assistant extends Agent<Env> {
+  override maxConcurrentAgentTools = 8; // every run, awaited or detached
+  override maxConcurrentDetachedAgentTools = 2; // background runs only
+}
+```
+
+A detached run counts toward **both** budgets. A dispatch that would exceed
+either fails the same way: a synchronous `error` result naming the cap it hit,
+an `error` run row, `started` + `error` events, and no child spawned.
+
+Cap detached runs separately because they hold their slot for their entire life
+and have no awaiting turn to notice them piling up — without a detached-only cap,
+a leak in background work starves the foreground turns that share the total
+budget. The framework also warns once when 50 detached runs are live at the same
+time.
 
 ### Notify the chat on completion (Think / AIChatAgent)
 

@@ -1852,6 +1852,7 @@ export class Agent<
     // the delivery and progress seams) stays in effect.
     setAgentToolsHost(this.agentTools, {
       maxConcurrent: () => this.maxConcurrentAgentTools,
+      maxConcurrentDetached: () => this.maxConcurrentDetachedAgentTools,
       resolveChild: (agentType, runId) =>
         this._cf_resolveSubAgent(agentType, runId),
       deleteChild: (agentType, runId) =>
@@ -5751,6 +5752,20 @@ export class Agent<
    * it at any time.
    */
   maxConcurrentAgentTools = Infinity;
+
+  /**
+   * Maximum number of non-terminal DETACHED ("background") agent-tool runs this
+   * parent may own at once, within the {@link Agent.maxConcurrentAgentTools}
+   * total. Read live by the agent-tools capability, so a subclass may reassign
+   * it at any time.
+   *
+   * A detached run holds its slot for its whole life and has no awaiting turn to
+   * notice it piling up, so this bounds background work without also capping the
+   * foreground runs that share the total budget. A detached dispatch that would
+   * exceed it fails exactly like the total cap does: a synchronous `error`
+   * result, no child spawned.
+   */
+  maxConcurrentDetachedAgentTools = Infinity;
 
   async onAgentToolStart(_run: AgentToolRunInfo): Promise<void> {}
 

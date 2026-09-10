@@ -65,12 +65,11 @@ export const DETACHED_DELIVERY_LEASE_MS = 60_000;
 // stops waking the object) once no detached run remains outstanding.
 export const DETACHED_BACKBONE_CADENCE_S = [5, 15, 30, 120];
 
-// Detached runs hold a `maxConcurrent` slot for their ENTIRE life and have no
-// observer to notice them piling up. With the default `Infinity` cap that is a
-// real leak footgun, so the framework emits an edge-triggered warning when the
-// live (non-terminal) detached count first crosses this threshold, rather than
-// silently accumulating. (A separate detached-only cap is deferred until
-// evidence shows the single cap conflates two budgets.)
+// Detached runs hold a concurrency slot for their ENTIRE life and have no
+// observer to notice them piling up. With both caps defaulting to `Infinity`
+// that is a real leak footgun, so the framework emits an edge-triggered warning
+// when the live (non-terminal) detached count first crosses this threshold,
+// rather than silently accumulating.
 export const DETACHED_LIVE_COUNT_WARN_THRESHOLD = 50;
 
 // Conventional method name a chat agent (Think / AIChatAgent) implements to
@@ -86,6 +85,17 @@ export type AgentToolsOptions = {
    * (Agent's `maxConcurrentAgentTools` field) overrides this per dispatch.
    */
   readonly maxConcurrent?: number;
+  /**
+   * Maximum number of non-terminal DETACHED runs one parent may own at once,
+   * within the total `maxConcurrent` budget. Default: `Infinity`. A host that
+   * exposes its own live knob (Agent's `maxConcurrentDetachedAgentTools` field)
+   * overrides this per dispatch.
+   *
+   * A detached run holds its slot for its ENTIRE life with no awaiting turn to
+   * notice it piling up, so bounding background work separately from the
+   * foreground turns that share the total budget is often what you want.
+   */
+  readonly maxConcurrentDetached?: number;
   /**
    * No-progress budget (ms) for re-attaching to a still-running child after a
    * deploy / parent recovery (#1630). Resets on every forwarded chunk, so a
@@ -135,6 +145,7 @@ export type AgentToolsOptions = {
 /** @internal Every agent-tool policy knob with a concrete value. */
 export type ResolvedAgentToolsOptions = {
   readonly maxConcurrent: number;
+  readonly maxConcurrentDetached: number;
   readonly reattachNoProgressTimeoutMs: number;
   readonly reattachMaxWindowMs: number;
   readonly detachedMaxBudgetMs: number;
@@ -151,6 +162,8 @@ export function resolveAgentToolsOptions(
 ): ResolvedAgentToolsOptions {
   return {
     maxConcurrent: options.maxConcurrent ?? Number.POSITIVE_INFINITY,
+    maxConcurrentDetached:
+      options.maxConcurrentDetached ?? Number.POSITIVE_INFINITY,
     reattachNoProgressTimeoutMs:
       options.reattachNoProgressTimeoutMs ??
       DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
