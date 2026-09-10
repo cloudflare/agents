@@ -43,7 +43,7 @@ interface AgentRouteMatch<Env = Cloudflare.Env> {
 
 interface AgentRouteOptions<
   Env = Cloudflare.Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > {
   /** URL prefix before the binding and instance name. Default: `agents`. */
   prefix?: string;
@@ -84,13 +84,26 @@ interface AgentRouteOptions<
     | Promise<Response | Request | undefined | void>;
 }
 
-/** Configuration options for {@link routeAgentRequest}. */
-export type AgentOptions<Env> = AgentRouteOptions<Env>;
+/**
+ * Configuration options for {@link routeAgentRequest}.
+ *
+ * @template Env Worker environment containing Durable Object bindings.
+ * @template Props Properties supplied before lifecycle startup.
+ */
+export type AgentOptions<
+  Env,
+  Props extends object = Record<string, unknown>
+> = AgentRouteOptions<Env, Props>;
 
-/** Options for resolving and starting a named Agent. */
+/**
+ * Options for resolving and starting a named Agent.
+ *
+ * @template Env Worker environment containing the Agent binding.
+ * @template Props Properties supplied before lifecycle startup.
+ */
 export type AgentGetOptions<
   Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > = Pick<
   AgentRouteOptions<Env, Props>,
   "jurisdiction" | "locationHint" | "props" | "routingRetry"
@@ -262,15 +275,20 @@ function resolveCorsHeaders(
  * Durable Object. The target may extend `Agent` or compose `Lifecycle`
  * directly into a plain `DurableObject`.
  *
+ * @template Env Worker environment containing Durable Object bindings.
+ * @template Props Properties supplied before lifecycle startup.
  * @param request - Incoming Worker request.
  * @param env - Worker environment containing Durable Object bindings.
  * @param options - Routing options.
  * @returns The matched response, or `null` when the path does not match.
  */
-export async function routeAgentRequest<Env>(
+export async function routeAgentRequest<
+  Env,
+  Props extends object = Record<string, unknown>
+>(
   request: Request,
   env: Env,
-  options?: AgentOptions<Env>
+  options?: AgentOptions<Env, Props>
 ): Promise<Response | null> {
   // SAFETY: Worker environments are object records. The unconstrained Env
   // generic is retained for compatibility with the previously published API.
@@ -385,6 +403,9 @@ export async function routeAgentRequest<Env>(
 /**
  * Get a named Agent stub after its lifecycle startup has completed.
  *
+ * @template Env Worker environment containing the Agent binding.
+ * @template T Agent class exposed by the namespace.
+ * @template Props Properties supplied before lifecycle startup.
  * @param namespace - Agent Durable Object namespace.
  * @param name - Agent instance name.
  * @param options - Placement, startup properties, and retry options.
@@ -392,8 +413,8 @@ export async function routeAgentRequest<Env>(
  */
 export async function getAgentByName<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  T extends Agent<Env> = Agent<Env>,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  T extends Agent<Env, unknown, object> = Agent<Env>,
+  Props extends object = Record<string, unknown>
 >(
   namespace: DurableObjectNamespace<T>,
   name: string,
