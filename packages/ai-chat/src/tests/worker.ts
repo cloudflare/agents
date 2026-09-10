@@ -12,11 +12,15 @@ import type {
 import {
   Agent,
   type AgentContext,
+  type AgentTools,
+  getAgentToolsHost,
   getCurrentAgent,
-  routeAgentRequest
+  routeAgentRequest,
+  setAgentToolsHost
 } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type {
+  AgentToolChildAdapter,
   AgentToolEventMessage,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
@@ -2779,13 +2783,41 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       sequence: i,
       body: `chunk-${i}`
     }));
-    const stream = new ReadableStream<AgentToolStoredChunk>({
-      start(controller) {
-        for (const b of bodies) controller.enqueue(b);
-        controller.close();
+    // Script the CHILD boundary: a child whose live tail emits `chunks` frames
+    // and then closes. Dispatching a real (awaited) run against it drives the
+    // parent's own forward path, which is what credits recovery progress.
+    await withScriptedAgentToolChildForTest(
+      this.agentTools,
+      {
+        startAgentToolRun: async (_input, options) => ({
+          runId: options.runId,
+          status: "running",
+          startedAt: Date.now()
+        }),
+        cancelAgentToolRun: async () => {},
+        inspectAgentToolRun: async (runId) => ({
+          runId,
+          status: "completed",
+          startedAt: 0,
+          completedAt: Date.now(),
+          summary: "scripted child"
+        }),
+        getAgentToolChunks: async () => [],
+        tailAgentToolRun: async () =>
+          new ReadableStream<AgentToolStoredChunk>({
+            start(controller) {
+              for (const b of bodies) controller.enqueue(b);
+              controller.close();
+            }
+          })
+      },
+      async () => {
+        await this.runAgentTool(AIChatAgentToolChild, {
+          runId: `n9-probe-${crypto.randomUUID()}`,
+          input: { prompt: "n9 probe" }
+        });
       }
-    });
-    await this.agentTools.forwardStream(stream, undefined, "n9-probe-run", 1);
+    );
     const after = await read();
     return { start, after };
   }
@@ -4187,6 +4219,32 @@ export class StuckAgentToolChild extends Agent<Env> {
   }
 }
 
+/**
+ * Run `body` with an agent-tool capability's CHILD boundary replaced by a
+ * scripted in-process adapter.
+ *
+ * The parent engine reaches every child through its installed host port, so
+ * re-installing that port with a different `resolveChild` scripts (or
+ * sabotages) the child without reaching into the capability's internals.
+ */
+async function withScriptedAgentToolChildForTest<T>(
+  agentTools: AgentTools,
+  adapter: Partial<AgentToolChildAdapter>,
+  body: () => Promise<T>
+): Promise<T> {
+  const host = getAgentToolsHost(agentTools);
+  if (!host) throw new Error("agent-tool host bindings are not installed");
+  setAgentToolsHost(agentTools, {
+    ...host,
+    resolveChild: async () => adapter
+  });
+  try {
+    return await body();
+  } finally {
+    setAgentToolsHost(agentTools, host);
+  }
+}
+
 type AgentToolFinishForTest = {
   run: AgentToolRunInfo;
   result: AgentToolLifecycleResult;
@@ -4652,10 +4710,15 @@ export class AIChatAgentToolParent extends Agent<Env> {
     await this.agentTools.scheduleStartupRecovery(options);
   }
 
-  private async runDeferredAgentToolFinishHooksForTest(
+  /**
+   * Drain hooks the test itself deferred out of a `reconcile` pass. The
+   * framework's own startup recovery drains (and isolates) them internally —
+   * that path is covered by `scheduleStartupRecovery` below.
+   */
+  private async drainDeferredAgentToolFinishHooksForTest(
     hooks: Array<() => Promise<void>>
   ): Promise<void> {
-    await this.agentTools.runDeferredFinishHooks(hooks);
+    for (const hook of hooks) await hook();
   }
 
   async reconcileCompletedChildForTest(
@@ -4884,7 +4947,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     });
     const finishesBeforeDrain = this.finishes.length;
     this.lifecycleOrder.push("after-on-start");
-    await this.runDeferredAgentToolFinishHooksForTest(hooks);
+    await this.drainDeferredAgentToolFinishHooksForTest(hooks);
 
     return {
       events: this.events,
@@ -4939,21 +5002,44 @@ export class AIChatAgentToolParent extends Agent<Env> {
     this.events = [];
     this.finishes = [];
 
-    type BroadcastStoredChunksFromAdapter =
-      typeof this.agentTools.broadcastStoredChunksFromAdapter;
-    const capability = this.agentTools as unknown as {
-      broadcastStoredChunksFromAdapter: BroadcastStoredChunksFromAdapter;
-    };
-    const original = capability.broadcastStoredChunksFromAdapter.bind(
-      this.agentTools
-    ) as BroadcastStoredChunksFromAdapter;
-    capability.broadcastStoredChunksFromAdapter = async () => {
-      throw new Error("test replay failure");
-    };
+    // Sabotage the CHILD's stored-chunk read: a chunk whose body cannot be read
+    // makes the parent's replay step throw while the run is otherwise a
+    // perfectly collectable `completed`.
+    const host = getAgentToolsHost(this.agentTools);
+    if (!host) throw new Error("agent-tool host bindings are not installed");
+    setAgentToolsHost(this.agentTools, {
+      ...host,
+      resolveChild: async (agentType, childRunId) => {
+        // SAFETY: the host resolves children as the adapter shape the parent
+        // calls; this delegates every method except the sabotaged one.
+        const child = (await host.resolveChild(
+          agentType,
+          childRunId
+        )) as AgentToolChildAdapter;
+        return {
+          startAgentToolRun: (input, options) =>
+            child.startAgentToolRun(input, options),
+          cancelAgentToolRun: (id, reason) =>
+            child.cancelAgentToolRun(id, reason),
+          inspectAgentToolRun: (id) => child.inspectAgentToolRun(id),
+          getAgentToolChunks: async () => [
+            {
+              sequence: 0,
+              get body(): string {
+                throw new Error("test replay failure");
+              }
+            }
+          ],
+          tailAgentToolRun: (id, options) =>
+            child.tailAgentToolRun?.(id, options) ??
+            Promise.reject(new Error("no tail"))
+        } satisfies AgentToolChildAdapter;
+      }
+    });
     try {
       await this.reconcileAgentToolRunsForTest();
     } finally {
-      capability.broadcastStoredChunksFromAdapter = original;
+      setAgentToolsHost(this.agentTools, host);
     }
 
     return { events: this.events, finishes: this.finishes };
@@ -4978,10 +5064,9 @@ export class AIChatAgentToolParent extends Agent<Env> {
     this.finishes = [];
     this.lifecycleOrder = [];
     this.finishRunIdsToThrow = new Set([firstRunId]);
-    const hooks = await this.reconcileAgentToolRunsForTest({
-      deferFinishHooks: true
-    });
-    await this.runDeferredAgentToolFinishHooksForTest(hooks);
+    // Startup recovery is the one path that defers finish hooks and drains them;
+    // the drain isolates each failure, which is what this asserts.
+    await this.scheduleAgentToolRunRecoveryForTest();
     this.finishRunIdsToThrow.clear();
 
     return { finishes: this.finishes, lifecycleOrder: this.lifecycleOrder };
@@ -5091,17 +5176,46 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return { result, abortListenerAdded, abortListenerRemoved };
   }
 
+  /**
+   * The parent's turn is cancelled in the window between resolving the child's
+   * tail and forwarding it — the race the forward loop's pre-aborted early
+   * return defends against. If that return had taken (and not released) the
+   * stream's reader lock, `getReader()` below would throw.
+   */
   async testPreAbortedForwardStreamReleasesReaderLock(): Promise<boolean> {
     const stream = new ReadableStream<AgentToolStoredChunk>();
     const controller = new AbortController();
-    controller.abort("already aborted");
 
-    await this.agentTools.forwardStream(
-      stream,
-      "test-tool-call",
-      crypto.randomUUID(),
-      1,
-      controller.signal
+    await withScriptedAgentToolChildForTest(
+      this.agentTools,
+      {
+        startAgentToolRun: async (_input, options) => ({
+          runId: options.runId,
+          status: "running",
+          startedAt: Date.now()
+        }),
+        cancelAgentToolRun: async () => {},
+        inspectAgentToolRun: async (runId) => ({
+          runId,
+          status: "aborted",
+          startedAt: 0,
+          completedAt: Date.now(),
+          error: "already aborted"
+        }),
+        getAgentToolChunks: async () => [],
+        tailAgentToolRun: async () => {
+          controller.abort("already aborted");
+          return stream;
+        }
+      },
+      async () => {
+        await this.runAgentTool(AIChatAgentToolChild, {
+          runId: crypto.randomUUID(),
+          parentToolCallId: "test-tool-call",
+          input: { prompt: "pre-aborted forward" },
+          signal: controller.signal
+        });
+      }
     );
 
     const reader = stream.getReader();
@@ -5109,32 +5223,59 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return true;
   }
 
+  /**
+   * A child whose live tail emits malformed NDJSON frames between good ones.
+   * Forwarding must skip the bad frames and keep streaming the rest.
+   */
   async forwardMalformedAgentToolStreamForTest(): Promise<
     AgentToolEventMessage[]
   > {
     this.events = [];
     const encoder = new TextEncoder();
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(
-          encoder.encode(
-            [
-              JSON.stringify({ sequence: 0, body: "first good frame" }),
-              "{malformed json}",
-              JSON.stringify({ sequence: 1, body: 42 }),
-              JSON.stringify({ sequence: 2, body: "second good frame" })
-            ].join("\n")
-          )
-        );
-        controller.close();
-      }
-    });
 
-    await this.agentTools.forwardStream(
-      stream as unknown as ReadableStream<AgentToolStoredChunk>,
-      "test-tool-call",
-      crypto.randomUUID(),
-      1
+    await withScriptedAgentToolChildForTest(
+      this.agentTools,
+      {
+        startAgentToolRun: async (_input, options) => ({
+          runId: options.runId,
+          status: "running",
+          startedAt: Date.now()
+        }),
+        cancelAgentToolRun: async () => {},
+        inspectAgentToolRun: async (runId) => ({
+          runId,
+          status: "completed",
+          startedAt: 0,
+          completedAt: Date.now(),
+          summary: "malformed stream child"
+        }),
+        getAgentToolChunks: async () => [],
+        tailAgentToolRun: async () =>
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  [
+                    JSON.stringify({ sequence: 0, body: "first good frame" }),
+                    "{malformed json}",
+                    JSON.stringify({ sequence: 1, body: 42 }),
+                    JSON.stringify({ sequence: 2, body: "second good frame" })
+                  ].join("\n")
+                )
+              );
+              controller.close();
+            }
+            // SAFETY: the child tail wire format is newline-delimited JSON
+            // bytes; the parent decodes either shape.
+          }) as unknown as ReadableStream<AgentToolStoredChunk>
+      },
+      async () => {
+        await this.runAgentTool(AIChatAgentToolChild, {
+          runId: crypto.randomUUID(),
+          parentToolCallId: "test-tool-call",
+          input: { prompt: "malformed frames" }
+        });
+      }
     );
 
     return this.events;

@@ -1,7 +1,7 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
-import { Agent } from "agents";
+import { Agent, getAgentToolsHost, setAgentToolsHost } from "agents";
 import type {
   Connection,
   AgentToolChildAdapter,
@@ -3053,17 +3053,70 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   /**
-   * Drive `_reattachAgentToolRunToTerminal` directly with an in-process adapter
-   * that does NOT implement `tailAgentToolRun`, to cover the `not-tailable`
-   * early return (#1630). This branch is unreachable through a real (RPC) child
-   * — a Durable Object stub reports every method as a `function`, so the
-   * `typeof` guard always passes and a genuinely non-tailable child instead
-   * surfaces as a tail-call failure — so we exercise it via a plain adapter,
-   * which is exactly the shape the guard defends against.
+   * Run one recovery pass with the capability's CHILD boundary replaced by a
+   * scripted in-process adapter.
+   *
+   * The parent engine reaches every child through its installed host port, so
+   * re-installing that port with a different `resolveChild` scripts the child
+   * without touching the capability's internals — and the pass itself is driven
+   * through the public `reconcile` operation, exactly as startup recovery does.
+   */
+  private async reconcileWithScriptedChildForTest(
+    adapter: Partial<AgentToolChildAdapter>,
+    options: {
+      reattachTimeoutMs?: number;
+      reattachMaxWindowMs?: number;
+    },
+    agentType: string
+  ): Promise<{ runId: string; status: string | null; reason: string | null }> {
+    const host = getAgentToolsHost(this.agentTools);
+    if (!host) throw new Error("agent-tool host bindings are not installed");
+    const runId = crypto.randomUUID();
+    this.insertRecoverableParentRunForTest(
+      runId,
+      agentType,
+      "scripted",
+      Date.now()
+    );
+    setAgentToolsHost(this.agentTools, {
+      ...host,
+      resolveChild: async () => adapter
+    });
+    try {
+      await this.agentTools.reconcile({
+        runIds: [runId],
+        childInspectionTimeoutMs: 1_000,
+        totalRecoveryTimeoutMs: 10_000,
+        ...options
+      });
+    } finally {
+      setAgentToolsHost(this.agentTools, host);
+    }
+    const rows = this.sql<{
+      status: string;
+      interrupted_reason: string | null;
+    }>`
+      SELECT status, interrupted_reason FROM cf_agent_tool_runs
+      WHERE run_id = ${runId} LIMIT 1
+    `;
+    return {
+      runId,
+      status: rows[0]?.status ?? null,
+      reason: rows[0]?.interrupted_reason ?? null
+    };
+  }
+
+  /**
+   * Recover a run whose child adapter does NOT implement `tailAgentToolRun`, to
+   * cover the `not-tailable` seal (#1630). This branch is unreachable through a
+   * real (RPC) child — a Durable Object stub reports every method as a
+   * `function`, so the `typeof` guard always passes and a genuinely non-tailable
+   * child instead surfaces as a tail-call failure — so we script a plain
+   * adapter, which is exactly the shape the guard defends against.
    */
   async reattachNotTailableAdapterForTest(): Promise<{
-    reason?: string;
-    result: boolean;
+    reason: string | null;
+    status: string | null;
   }> {
     const adapter = {
       startAgentToolRun: async (): Promise<AgentToolRunInspection> => {
@@ -3079,27 +3132,19 @@ export class ThinkAgentToolParent extends Agent {
       getAgentToolChunks: async (): Promise<AgentToolStoredChunk[]> => []
       // Intentionally NO `tailAgentToolRun`.
     };
-    const reattach = await this.agentTools.reattachToTerminal(
-      // SAFETY: the adapter is deliberately INCOMPLETE (no `tailAgentToolRun`)
-      // — that missing member is exactly what this exercises, and the parameter
-      // type cannot express it.
-      adapter as unknown as AgentToolChildAdapter,
-      {
-        run_id: crypto.randomUUID(),
-        agent_type: "NotTailableAdapter",
-        parent_tool_call_id: null
-      },
-      1
+    const { status, reason } = await this.reconcileWithScriptedChildForTest(
+      adapter,
+      {},
+      "NotTailableAdapter"
     );
-    return { reason: reattach.reason, result: reattach.result !== undefined };
+    return { status, reason };
   }
 
   /**
-   * Drive `_reattachAgentToolRunToTerminal` with a fully-scripted in-process
-   * adapter to pin the re-arm decision matrix at unit speed (#1630). A real
-   * re-eviction (stream closes mid-flight while the child keeps advancing) is
-   * only otherwise exercised by the slow e2e, so this isolates the two paths
-   * the re-arm logic turns on:
+   * Recover a run against a fully-scripted child adapter to pin the re-arm
+   * decision matrix at unit speed (#1630). A real re-eviction (stream closes
+   * mid-flight while the child keeps advancing) is only otherwise exercised by
+   * the slow e2e, so this isolates the paths the re-arm logic turns on:
    *
    *  - `"rearm-then-complete"`: attempt 1 streams chunks then closes cleanly
    *    (`done` + progress) while the child is still `running` ⇒ the loop
@@ -3121,9 +3166,12 @@ export class ThinkAgentToolParent extends Agent {
       | "rearm-then-complete"
       | "idle-after-progress"
       | "infinite-no-progress-ceiling"
-  ): Promise<{ status?: string; reason?: string; tailAttempts: number }> {
+  ): Promise<{
+    status: string | null;
+    reason: string | null;
+    tailAttempts: number;
+  }> {
     let tailAttempts = 0;
-    let inspectCalls = 0;
 
     const makeStream = (bodies: string[], close: boolean) =>
       new ReadableStream<AgentToolStoredChunk>({
@@ -3149,10 +3197,10 @@ export class ThinkAgentToolParent extends Agent {
       cancelAgentToolRun: async (): Promise<void> => {},
       getAgentToolChunks: async (): Promise<AgentToolStoredChunk[]> => [],
       inspectAgentToolRun: async (): Promise<AgentToolRunInspection | null> => {
-        inspectCalls++;
-        // rearm-then-complete: `running` after the first tail (so the loop
-        // re-arms), then `completed` so the second collect returns terminal.
-        if (scenario === "rearm-then-complete" && inspectCalls >= 2) {
+        // rearm-then-complete: `running` until the child has been tailed twice
+        // (so the first tail's clean close re-arms), then `completed` so the
+        // second collect returns the real terminal result.
+        if (scenario === "rearm-then-complete" && tailAttempts >= 2) {
           return {
             runId: "scripted",
             status: "completed",
@@ -3184,33 +3232,26 @@ export class ThinkAgentToolParent extends Agent {
       }
     };
 
-    const reattach = await this.agentTools.reattachToTerminal(
-      // SAFETY: a scripted stand-in for a real (RPC) child adapter; its methods
-      // match the adapter contract but the object literal is not one nominally.
-      adapter as unknown as AgentToolChildAdapter,
+    const { status, reason } = await this.reconcileWithScriptedChildForTest(
+      adapter,
       {
-        run_id: crypto.randomUUID(),
-        agent_type: "ScriptedAdapter",
-        parent_tool_call_id: null
+        // no-progress budget: tight for the stall scenario, Infinity for the
+        // "never seal on silence" scenario, generous otherwise.
+        reattachTimeoutMs:
+          scenario === "idle-after-progress"
+            ? 50
+            : scenario === "infinite-no-progress-ceiling"
+              ? Number.POSITIVE_INFINITY
+              : 5_000,
+        // hard ceiling: a short finite cap for the infinite-budget scenario so
+        // the otherwise-unbounded silent wait still terminates the test.
+        reattachMaxWindowMs:
+          scenario === "infinite-no-progress-ceiling" ? 150 : 10_000
       },
-      1,
-      // no-progress budget: tight for the stall scenario, Infinity for the
-      // "never seal on silence" scenario, generous otherwise.
-      scenario === "idle-after-progress"
-        ? 50
-        : scenario === "infinite-no-progress-ceiling"
-          ? Number.POSITIVE_INFINITY
-          : 5_000,
-      // hard ceiling: a short finite cap for the infinite-budget scenario so the
-      // otherwise-unbounded silent wait still terminates the test.
-      scenario === "infinite-no-progress-ceiling" ? 150 : 10_000
+      "ScriptedAdapter"
     );
 
-    return {
-      status: reattach.result?.status,
-      reason: reattach.reason,
-      tailAttempts
-    };
+    return { status, reason, tailAttempts };
   }
 
   async scheduleStuckThinkChildRecoveryForTest(
@@ -7009,12 +7050,10 @@ export class ThinkRecoveryTestAgent extends Think {
     return { start, afterFlush, afterPersist };
   }
 
-  /** Simulate a parent re-attach that forwards `chunks` of a child's stream by
-   *  driving the real `_forwardAgentToolStream` over a synthetic child stream
-   *  (each chunk closed normally). The in-memory throttle is reset first so this
-   *  models a fresh post-restart isolate (where the first forwarded chunk always
-   *  credits). Returns the durable recovery-progress counter before/after so a
-   *  test can assert that forwarding child output credits the PARENT's progress
+  /** Dispatch a real agent-tool run against a scripted child whose live tail
+   *  emits `chunks` frames, so the parent forwards them through its own stream
+   *  path. Returns the durable recovery-progress counter before/after so a test
+   *  can assert that forwarding child output credits the PARENT's progress
    *  marker (N9) — and that a SILENT child (chunks = 0) does NOT. */
   async forwardChildStreamProgressForTest(chunks: number): Promise<{
     start: number;
@@ -7026,20 +7065,49 @@ export class ThinkRecoveryTestAgent extends Think {
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
     }));
-    const stream = new ReadableStream<{ body: string }>({
-      start(controller) {
-        for (const b of bodies) controller.enqueue(b);
-        controller.close();
-      }
+    const host = getAgentToolsHost(this.agentTools);
+    if (!host) throw new Error("agent-tool host bindings are not installed");
+    // Script the CHILD boundary: a child whose live tail emits `chunks` frames
+    // and then closes. Dispatching a real (awaited) run against it drives the
+    // parent's own forward path, which is what credits recovery progress.
+    const adapter: Partial<AgentToolChildAdapter> = {
+      startAgentToolRun: async (_input, options) => ({
+        runId: options.runId,
+        status: "running",
+        startedAt: Date.now()
+      }),
+      cancelAgentToolRun: async () => {},
+      inspectAgentToolRun: async (runId) => ({
+        runId,
+        status: "completed",
+        startedAt: 0,
+        completedAt: Date.now(),
+        summary: "scripted child"
+      }),
+      getAgentToolChunks: async () => [],
+      tailAgentToolRun: async () =>
+        new ReadableStream<AgentToolStoredChunk>({
+          start(controller) {
+            let sequence = 1;
+            for (const b of bodies) {
+              controller.enqueue({ sequence: sequence++, body: b.body });
+            }
+            controller.close();
+          }
+        })
+    };
+    setAgentToolsHost(this.agentTools, {
+      ...host,
+      resolveChild: async () => adapter
     });
-    await this.agentTools.forwardStream(
-      // SAFETY: the forward loop only reads each chunk's `body`; the synthetic
-      // stream carries exactly that.
-      stream as unknown as ReadableStream<AgentToolStoredChunk>,
-      undefined,
-      "n9-probe-run",
-      1
-    );
+    try {
+      await this.runAgentTool(ThinkTestAgent, {
+        runId: `n9-probe-${crypto.randomUUID()}`,
+        input: "n9 probe"
+      });
+    } finally {
+      setAgentToolsHost(this.agentTools, host);
+    }
     const after = await read();
     return { start, after };
   }

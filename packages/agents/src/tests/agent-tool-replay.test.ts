@@ -17,15 +17,13 @@ describe("agent-tool interrupted cause survives reconnect replay (#1630)", () =>
       `replay-no-progress-${crypto.randomUUID()}`
     );
 
-    await agent.seedInterruptedRunForTest("run-np", "no-progress", true);
+    await agent.sealInterruptedRunForTest("run-np", "no-progress");
 
     // Round-trip through the stored row (the mechanism the bug regressed).
-    const persisted = await agent.readPersistedResultForTest("run-np");
-    expect(persisted).toMatchObject({
-      runId: "run-np",
+    expect(await agent.readPersistedRunRowForTest("run-np")).toMatchObject({
       status: "interrupted",
       reason: "no-progress",
-      childStillRunning: true
+      childStillRunning: 1
     });
 
     // The exact wire frames a reconnecting client receives on replay.
@@ -45,14 +43,12 @@ describe("agent-tool interrupted cause survives reconnect replay (#1630)", () =>
       `replay-window-exceeded-${crypto.randomUUID()}`
     );
 
-    await agent.seedInterruptedRunForTest("run-we", "window-exceeded", false);
+    await agent.sealInterruptedRunForTest("run-we", "window-exceeded");
 
-    const persisted = await agent.readPersistedResultForTest("run-we");
-    expect(persisted).toMatchObject({
-      runId: "run-we",
+    expect(await agent.readPersistedRunRowForTest("run-we")).toMatchObject({
       status: "interrupted",
       reason: "window-exceeded",
-      childStillRunning: false
+      childStillRunning: 0
     });
 
     const events = await agent.captureReplayTerminalEventsForTest();
@@ -66,29 +62,30 @@ describe("agent-tool interrupted cause survives reconnect replay (#1630)", () =>
   });
 
   it("persists + replays a reason without childStillRunning (the reconcile path)", async () => {
-    // recovery-deadline / inspect-* / not-tailable seals set `reason` but never
-    // `childStillRunning`, so the two NULL branches must clear independently.
+    // inspect-* / recovery-deadline seals set `reason` but never
+    // `childStillRunning` (the parent never learned the child's state), so the
+    // two NULL branches must clear independently.
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,
       `replay-reason-only-${crypto.randomUUID()}`
     );
 
-    await agent.seedInterruptedRunForTest("run-deadline", "recovery-deadline");
+    await agent.sealInterruptedRunForTest("run-deadline", "inspect-failed");
 
-    const persisted = await agent.readPersistedResultForTest("run-deadline");
-    expect(persisted).toMatchObject({
-      runId: "run-deadline",
+    expect(
+      await agent.readPersistedRunRowForTest("run-deadline")
+    ).toMatchObject({
       status: "interrupted",
-      reason: "recovery-deadline"
+      reason: "inspect-failed",
+      childStillRunning: null
     });
-    expect(persisted).not.toHaveProperty("childStillRunning");
 
     const events = await agent.captureReplayTerminalEventsForTest();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       kind: "interrupted",
       runId: "run-deadline",
-      reason: "recovery-deadline"
+      reason: "inspect-failed"
     });
     expect(events[0]).not.toHaveProperty("childStillRunning");
   });
@@ -102,15 +99,13 @@ describe("agent-tool interrupted cause survives reconnect replay (#1630)", () =>
       `replay-legacy-${crypto.randomUUID()}`
     );
 
-    await agent.seedInterruptedRunForTest("run-legacy");
+    await agent.seedLegacyInterruptedRunForTest("run-legacy");
 
-    const persisted = await agent.readPersistedResultForTest("run-legacy");
-    expect(persisted).toMatchObject({
-      runId: "run-legacy",
-      status: "interrupted"
+    expect(await agent.readPersistedRunRowForTest("run-legacy")).toMatchObject({
+      status: "interrupted",
+      reason: null,
+      childStillRunning: null
     });
-    expect(persisted).not.toHaveProperty("reason");
-    expect(persisted).not.toHaveProperty("childStillRunning");
 
     const events = await agent.captureReplayTerminalEventsForTest();
     expect(events).toHaveLength(1);
@@ -128,19 +123,26 @@ describe("agent-tool interrupted cause survives reconnect replay (#1630)", () =>
       `replay-repaired-${crypto.randomUUID()}`
     );
 
-    // Soft interrupt first (child left running), then a re-attach collects it.
-    await agent.seedInterruptedRunForTest("run-fix", "no-progress", true);
-    await agent.completeRunForTest("run-fix", "child finished after re-attach");
-
-    const persisted = await agent.readPersistedResultForTest("run-fix");
-    expect(persisted).toMatchObject({
+    // Soft interrupt first (child left running), then a re-issue whose
+    // re-attach collects the child's real terminal result.
+    await agent.sealInterruptedRunForTest("run-fix", "no-progress");
+    const repaired = await agent.repairRunViaReissueForTest(
+      "run-fix",
+      "child finished after re-attach"
+    );
+    expect(repaired).toMatchObject({
       runId: "run-fix",
       status: "completed",
       summary: "child finished after re-attach"
     });
-    // The stale interrupted cause must NOT leak onto the repaired terminal.
-    expect(persisted).not.toHaveProperty("reason");
-    expect(persisted).not.toHaveProperty("childStillRunning");
+
+    expect(await agent.readPersistedRunRowForTest("run-fix")).toMatchObject({
+      status: "completed",
+      summary: "child finished after re-attach",
+      // The stale interrupted cause must NOT leak onto the repaired terminal.
+      reason: null,
+      childStillRunning: null
+    });
 
     const events = await agent.captureReplayTerminalEventsForTest();
     expect(events).toHaveLength(1);

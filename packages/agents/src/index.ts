@@ -172,6 +172,7 @@ export {
   type ChildTurnOutcome,
   defaultDetachedCompletionText,
   defaultDetachedMilestoneText,
+  getAgentToolsHost,
   setAgentToolsChildHost,
   setAgentToolsHost,
   type AgentToolsHost,

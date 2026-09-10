@@ -5,7 +5,11 @@ export {
   type ClearAgentToolRunsOptions,
   type DeferredAgentToolFinish
 } from "./agent-tools";
-export { setAgentToolsHost, type AgentToolsHost } from "./host";
+export {
+  getAgentToolsHost,
+  setAgentToolsHost,
+  type AgentToolsHost
+} from "./host";
 export {
   type AgentToolsOptions,
   DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS,

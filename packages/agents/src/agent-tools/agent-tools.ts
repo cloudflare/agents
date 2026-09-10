@@ -208,7 +208,7 @@ export class AgentTools extends LifecycleCapability {
     const agentType = cls.name;
     const detached = this.#parseDetachedOption(options.detached);
 
-    const existing = this.readRun(runId);
+    const existing = this.#readRun(runId);
     if (existing) {
       // Detached re-dispatch (e.g. chat recovery re-running the dispatching
       // turn) is idempotent by runId: re-arm the durable backbone for a still
@@ -243,14 +243,14 @@ export class AgentTools extends LifecycleCapability {
                 agentType,
                 inspection
               );
-              this.updateTerminal(runId, result, inspection.completedAt);
+              this.#updateTerminal(runId, result, inspection.completedAt);
               return result;
             }
           } catch {
             // Fall back to the retained parent row.
           }
         }
-        return this.resultFromRow<Output>(existing);
+        return this.#resultFromRow<Output>(existing);
       }
       // Non-terminal or soft-terminal (`interrupted`) runId: the child may still
       // be in flight or may have reached terminal since we gave up (typically a
@@ -267,7 +267,7 @@ export class AgentTools extends LifecycleCapability {
           agentType,
           runId
         );
-        const reattach = await this.reattachToTerminal<Output>(
+        const reattach = await this.#reattachToTerminal<Output>(
           adapter,
           existing,
           1,
@@ -449,7 +449,7 @@ export class AgentTools extends LifecycleCapability {
           afterSequence: -1
         });
         sequence = (
-          await this.forwardStream(
+          await this.#forwardStream(
             stream,
             options.parentToolCallId,
             runId,
@@ -536,7 +536,7 @@ export class AgentTools extends LifecycleCapability {
    * @param reason Optional cancellation reason surfaced to the child.
    */
   async cancel(runId: string, reason?: unknown): Promise<void> {
-    const row = this.readRun(runId);
+    const row = this.#readRun(runId);
     if (!row) return;
     if (this.#isHardTerminal(row.status)) return;
     const isDetached = row.detached === 1;
@@ -552,7 +552,7 @@ export class AgentTools extends LifecycleCapability {
       // detached parent stops watching and any wired callback fires.
     }
     if (!isDetached) return;
-    await this.deliverDetachedTerminal(runId, "finish", {
+    await this.#deliverDetachedTerminal(runId, "finish", {
       runId,
       agentType: row.agent_type,
       status: "aborted",
@@ -597,7 +597,7 @@ export class AgentTools extends LifecycleCapability {
     const doomed = rows.filter((row) => {
       if (statusFilter && !statusFilter.has(row.status)) return false;
       if (options?.olderThan !== undefined) {
-        const full = this.readRun(row.run_id);
+        const full = this.#readRun(row.run_id);
         if (!full || full.started_at >= options.olderThan) return false;
       }
       return true;
@@ -752,7 +752,7 @@ export class AgentTools extends LifecycleCapability {
         reattachMaxWindowMs: options?.reattachMaxWindowMs,
         runIds: options?.runIds
       });
-      await this.runDeferredFinishHooks(recoveredFinishes);
+      await this.#runDeferredFinishHooks(recoveredFinishes);
       // Re-arm the detached backbone if this DO woke with outstanding detached
       // runs (the job row survives eviction, but this also recreates it if a
       // dispatching turn crashed after inserting the run row but before arming
@@ -892,7 +892,7 @@ export class AgentTools extends LifecycleCapability {
           row.agent_type,
           inspection
         );
-        await this.deliverDetachedTerminal(
+        await this.#deliverDetachedTerminal(
           runId,
           "finish",
           result,
@@ -952,7 +952,7 @@ export class AgentTools extends LifecycleCapability {
           // Could not confirm teardown; the child may complete anyway and the
           // finish slot (still open) will deliver the real result.
         }
-        await this.deliverDetachedTerminal(
+        await this.#deliverDetachedTerminal(
           runId,
           "give_up",
           {
@@ -989,6 +989,12 @@ export class AgentTools extends LifecycleCapability {
    * Reconcile every awaited run left non-terminal by an eviction or deploy:
    * classify each child, re-attach in parallel to the ones still streaming,
    * and seal the rest as `interrupted` with a typed cause.
+   *
+   * Public because it is a legitimate "recover now" operation: a host that
+   * learns out-of-band that its children may have been interrupted (a manual
+   * repair, a migration, a test driving recovery deterministically) can run a
+   * pass without waiting for the next wake. {@link
+   * AgentTools.scheduleStartupRecovery} is the automatic caller.
    *
    * @param options Recovery bounds and filters.
    * @returns The deferred finish hooks when `deferFinishHooks` was set.
@@ -1139,7 +1145,7 @@ export class AgentTools extends LifecycleCapability {
       }
       let sequenceAfterReplay = sequence;
       try {
-        sequenceAfterReplay = await this.broadcastStoredChunksFromAdapter(
+        sequenceAfterReplay = await this.#broadcastStoredChunksFromAdapter(
           recovery.adapter,
           row,
           sequence,
@@ -1181,7 +1187,7 @@ export class AgentTools extends LifecycleCapability {
     // never cause a sibling run to be wrongly abandoned (#1630).
     await Promise.all(
       reattachQueue.map(async ({ row, adapter }) => {
-        const reattach = await this.reattachToTerminal(
+        const reattach = await this.#reattachToTerminal(
           adapter,
           row,
           1,
@@ -1227,11 +1233,12 @@ export class AgentTools extends LifecycleCapability {
   }
 
   /**
-   * Run finish hooks deferred out of a recovery pass, isolating each failure.
-   *
-   * @param hooks The deferred hooks collected by {@link AgentTools.reconcile}.
+   * Run finish hooks deferred out of a recovery pass, isolating each failure so
+   * one throwing hook cannot strand the others. Only
+   * {@link AgentTools.scheduleStartupRecovery} defers hooks, so the drain is
+   * part of that pass rather than a separate operation.
    */
-  async runDeferredFinishHooks(
+  async #runDeferredFinishHooks(
     hooks: DeferredAgentToolFinish[]
   ): Promise<void> {
     for (const hook of hooks) {
@@ -1282,7 +1289,7 @@ export class AgentTools extends LifecycleCapability {
    * no-progress window, or the ceiling is reached while the child is still
    * non-terminal — the caller then seals `interrupted`.
    */
-  async reattachToTerminal<Output>(
+  async #reattachToTerminal<Output>(
     adapter: AgentToolChildAdapter<unknown, Output>,
     row: Pick<
       AgentToolRunStorageRow,
@@ -1410,7 +1417,7 @@ export class AgentTools extends LifecycleCapability {
           // Resolves when the child reaches terminal (the adapter closes the
           // tail), goes silent for a full no-progress window, or the ceiling
           // aborts our controller.
-          const forwarded = await this.forwardStream(
+          const forwarded = await this.#forwardStream(
             stream,
             row.parent_tool_call_id ?? undefined,
             row.run_id,
@@ -1473,7 +1480,7 @@ export class AgentTools extends LifecycleCapability {
    * @param options Broadcast sequence and turn-queue serialization.
    * @param completedAt Terminal timestamp; defaults to now.
    */
-  async deliverDetachedTerminal<Output>(
+  async #deliverDetachedTerminal<Output>(
     runId: string,
     kind: "finish" | "give_up",
     result: RunAgentToolResult<Output>,
@@ -1505,10 +1512,10 @@ export class AgentTools extends LifecycleCapability {
     ).rowsWritten;
     if (claimed === 0) return;
 
-    const row = this.readRun(runId);
+    const row = this.#readRun(runId);
     if (!row) return;
 
-    this.updateTerminal(runId, result, completedAt);
+    this.#updateTerminal(runId, result, completedAt);
     // Always project the terminal onto the parent's `agent-tool-event` stream so
     // a background-runs tray flips to its final state live. The backbone/fast
     // path supply a tail sequence; other paths (e.g. an explicit `cancel`, or a
@@ -1598,18 +1605,19 @@ export class AgentTools extends LifecycleCapability {
   // ── Storage projections ──────────────────────────────────────────────────
 
   /**
-   * Read one run row.
-   *
-   * @param runId The run id.
-   * @returns The stored row, or `null` when this parent has no such run.
+   * Read one run row. The projection is deliberately wide — every column a
+   * delivery, replay or milestone decision reads (including
+   * `detached_on_milestones`, which the warm-tail milestone delivery keys on)
+   * must be present, or that path silently degrades to the backbone tick.
    */
-  readRun(runId: string): AgentToolRunStorageRow | null {
+  #readRun(runId: string): AgentToolRunStorageRow | null {
     const rows = this.#sql<AgentToolRunStorageRow>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
              summary, output_json, error_message, interrupted_reason,
              child_still_running, display_metadata, display_order,
              started_at, completed_at, detached, detached_on_finish,
              detached_notify_source, detached_max_budget_at,
+             detached_on_milestones,
              finish_claimed_at, finish_delivered_at, give_up_claimed_at,
              give_up_delivered_at
       FROM cf_agent_tool_runs
@@ -1625,7 +1633,7 @@ export class AgentTools extends LifecycleCapability {
    * @param row The stored row.
    * @returns The same result object a live caller received.
    */
-  resultFromRow<Output>(
+  #resultFromRow<Output>(
     row: AgentToolRunStorageRow
   ): RunAgentToolResult<Output> {
     const output = this.#parseJson(row.output_json) as Output | undefined;
@@ -1653,7 +1661,7 @@ export class AgentTools extends LifecycleCapability {
    * @param result The terminal result.
    * @param completedAt Terminal timestamp; defaults to now.
    */
-  updateTerminal<Output>(
+  #updateTerminal<Output>(
     runId: string,
     result: RunAgentToolResult<Output>,
     completedAt = Date.now()
@@ -1705,7 +1713,7 @@ export class AgentTools extends LifecycleCapability {
    * @param idleTimeoutMs Optional resetting no-progress budget.
    * @returns The next free sequence and how the loop ended.
    */
-  async forwardStream(
+  async #forwardStream(
     stream: ReadableStream<AgentToolStoredChunk>,
     parentToolCallId: string | undefined,
     runId: string,
@@ -1889,7 +1897,7 @@ export class AgentTools extends LifecycleCapability {
    * @param timeoutMs Bounded wait for the child's chunk read.
    * @returns The next free sequence.
    */
-  async broadcastStoredChunksFromAdapter(
+  async #broadcastStoredChunksFromAdapter(
     adapter: AgentToolChildAdapter,
     row: Pick<AgentToolRunStorageRow, "run_id" | "parent_tool_call_id">,
     sequence: number,
@@ -2197,7 +2205,7 @@ export class AgentTools extends LifecycleCapability {
           afterSequence: -1
         });
         sequence = (
-          await this.forwardStream(
+          await this.#forwardStream(
             stream,
             runInfo.parentToolCallId,
             runId,
@@ -2215,7 +2223,7 @@ export class AgentTools extends LifecycleCapability {
           runInfo.agentType,
           inspection
         );
-        await this.deliverDetachedTerminal(
+        await this.#deliverDetachedTerminal(
           runId,
           "finish",
           result,
@@ -2341,7 +2349,7 @@ export class AgentTools extends LifecycleCapability {
     }
   ): Promise<DeferredAgentToolFinish | undefined> {
     const completedAt = options?.completedAt ?? Date.now();
-    this.updateTerminal(run.runId, result, completedAt);
+    this.#updateTerminal(run.runId, result, completedAt);
     if (options?.sequence !== undefined) {
       this.#broadcastTerminal(run.parentToolCallId, options.sequence, result);
     }
@@ -2431,7 +2439,7 @@ export class AgentTools extends LifecycleCapability {
     connection?: Connection
   ): Promise<number> {
     const adapter = await this.#childAdapter(row.agent_type, row.run_id);
-    return this.broadcastStoredChunksFromAdapter(
+    return this.#broadcastStoredChunksFromAdapter(
       adapter,
       row,
       sequence,
@@ -2537,7 +2545,7 @@ export class AgentTools extends LifecycleCapability {
       ...(data.data !== undefined ? { data: data.data } : {}),
       at
     };
-    const row = this.readRun(runId);
+    const row = this.#readRun(runId);
     if (!row) return;
     // The cached liveness timestamp only feeds the DETACHED no-progress budget;
     // skip the write for awaited runs (the `onProgress` hook still fires below).

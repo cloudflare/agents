@@ -1086,7 +1086,12 @@ describe("AIChatAgent as an agent-tool child", () => {
 
     const events = await parent.forwardMalformedAgentToolStreamForTest();
 
-    expect(events.map((event) => event.event)).toEqual([
+    // The run's own `started`/`finished` frames bracket the forwarded chunks.
+    expect(
+      events
+        .map((event) => event.event)
+        .filter((event) => event.kind === "chunk")
+    ).toEqual([
       expect.objectContaining({
         kind: "chunk",
         body: "first good frame"

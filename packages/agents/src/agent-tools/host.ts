@@ -96,7 +96,12 @@ export function setAgentToolsHost(
   agentToolsHosts.set(capability, host);
 }
 
-/** @internal Read the host bindings installed for one capability. */
+/**
+ * @internal Read the host bindings installed for one capability. Paired with
+ * {@link setAgentToolsHost} so a host (or a test) can re-install a WRAPPED port
+ * — scripting `resolveChild`, observing `broadcast` — without the capability
+ * exposing its internals.
+ */
 export function getAgentToolsHost(
   capability: AgentTools
 ): AgentToolsHost | undefined {
