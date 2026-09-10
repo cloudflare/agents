@@ -1,11 +1,29 @@
 import type {
   AgentHarnessTool,
+  AgentHarnessToolInvocation,
   AgentToolResult
 } from "@earendil-works/pi-agent-core";
 import type { ExtensionRunner } from "../../../vendor/pi-coding-agent-src/core/extensions/runner.ts";
 import type { ToolInfo } from "../../../vendor/pi-coding-agent-src/core/extensions/types.ts";
 import { wrapRegisteredTool } from "../../../vendor/pi-coding-agent-src/core/extensions/wrapper.ts";
 import { createSyntheticSourceInfo } from "../../../vendor/pi-coding-agent-src/core/source-info.ts";
+import type { ExtensionLaneStates } from "./state";
+
+/** What the tool adapter needs to place a call on the lane that made it. */
+export type ExtensionToolDeps = {
+  readonly states: ExtensionLaneStates;
+  /**
+   * The lane one tool invocation belongs to.
+   *
+   * `AgentHarnessToolInvocation` carries no lane, so only the harness can
+   * answer this — it knows which lane owns the invocation's operation. When
+   * the harness supplies no resolver, or the resolver cannot place a
+   * recovered invocation, the call runs on the default lane.
+   */
+  readonly laneForInvocation?: (
+    invocation: AgentHarnessToolInvocation
+  ) => string | undefined;
+};
 
 /**
  * Adapt every tool the loaded extensions registered into harness tools.
@@ -24,7 +42,8 @@ import { createSyntheticSourceInfo } from "../../../vendor/pi-coding-agent-src/c
  * effects happened, and re-running one would repeat them.
  */
 export function adaptExtensionTools(
-  runner: ExtensionRunner
+  runner: ExtensionRunner,
+  deps: ExtensionToolDeps
 ): AgentHarnessTool<object | undefined>[] {
   return runner.getAllRegisteredTools().map((registered) => {
     const tool = wrapRegisteredTool(registered, runner);
@@ -48,12 +67,27 @@ export function adaptExtensionTools(
         parameters,
         onUpdate,
         _toolContext,
-        _invocation,
+        invocation,
         context
-      ): Promise<AgentToolResult<unknown>> =>
-        tool.execute(toolCallId, parameters, context.abortSignal, (partial) => {
-          onUpdate(partial);
-        })
+      ): Promise<AgentToolResult<unknown>> => {
+        // A tool body calls the same synchronous `pi.*` and `ctx.ui`
+        // surfaces a hook does, and they resolve against the current lane.
+        // After an eviction the call is recovered with no hook having run
+        // for it, so the lane comes from the invocation rather than from
+        // whatever ran last.
+        const lane =
+          deps.laneForInvocation?.(invocation) ?? deps.states.defaultLane;
+        return deps.states.withLane(lane, async () =>
+          tool.execute(
+            toolCallId,
+            parameters,
+            context.abortSignal,
+            (partial) => {
+              onUpdate(partial);
+            }
+          )
+        );
+      }
     } satisfies AgentHarnessTool<object | undefined>;
   });
 }

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AgentLane,
   Context,
@@ -110,11 +111,22 @@ export class ExtensionLaneState {
 export class ExtensionLaneStates {
   readonly #states = new Map<string, ExtensionLaneState>();
   readonly #defaultLane: string;
-  #current: string;
+  /**
+   * The lane of the hook, event, command or tool call currently running.
+   *
+   * It is async-context state, not a variable: two lanes make progress
+   * concurrently, and each one awaits — a UI dialog, a lane read, a tool
+   * body. A saved-and-restored field would hand lane A's continuation
+   * whatever lane B entered while A was suspended, so the current lane
+   * travels with the async context that established it instead.
+   */
+  readonly #currentLane = new AsyncLocalStorage<ExtensionLaneState>();
+  /** Lane for synchronous `pi.*` calls made outside any `withLane` scope. */
+  #fallback: string;
 
   constructor(defaultLane: string) {
     this.#defaultLane = defaultLane;
-    this.#current = defaultLane;
+    this.#fallback = defaultLane;
   }
 
   /**
@@ -123,7 +135,7 @@ export class ExtensionLaneStates {
    * nothing is.
    */
   get current(): ExtensionLaneState {
-    return this.get(this.#current);
+    return this.#currentLane.getStore() ?? this.get(this.#fallback);
   }
 
   get defaultLane(): string {
@@ -139,38 +151,39 @@ export class ExtensionLaneStates {
     return state;
   }
 
-  /** Make one lane the target of subsequent synchronous extension calls. */
+  /**
+   * Make one lane the fallback target of synchronous extension calls made
+   * outside a `withLane` scope.
+   *
+   * Only legacy call sites need this: everything the runtime drives — hooks,
+   * notifications, commands, input handlers and extension tools — runs
+   * inside `withLane`, whose scope always wins over this.
+   */
   enter(lane: string, runId?: string): ExtensionLaneState {
-    this.#current = lane;
+    this.#fallback = lane;
     const state = this.get(lane);
     if (runId !== undefined) state.runId = runId;
     return state;
   }
 
   /**
-   * Run one serialized chain step with `lane` as the current lane, and put
-   * the previous lane back afterwards.
+   * Run `work` with `lane` as the current lane for everything it awaits.
    *
    * Pi's `ExtensionContext` names no lane, so a handler's synchronous
-   * `pi.*` calls resolve against whichever lane is current. Without the
-   * restore, a hook or notification on a second lane would leave that lane
-   * current for everything that followed it, and a handler on the quiet lane
-   * would write to the busy one. The callers are each other's only
-   * contenders and both serialize their work, so a save/restore around the
-   * awaited step is enough; nothing here makes concurrent chains safe.
+   * `pi.*` calls resolve against whichever lane is current. The scope is an
+   * `AsyncLocalStorage` run rather than a saved-and-restored field, because
+   * the callers are genuinely concurrent: a hook on one lane can suspend on
+   * a blocking UI dialog while a notification on another lane runs to
+   * completion, and the suspended hook has to resume on its own lane.
    */
   async withLane<T>(
     lane: string,
     work: (state: ExtensionLaneState) => Promise<T>,
     runId?: string
   ): Promise<T> {
-    const previous = this.#current;
-    const state = this.enter(lane, runId);
-    try {
-      return await work(state);
-    } finally {
-      this.#current = previous;
-    }
+    const state = this.get(lane);
+    if (runId !== undefined) state.runId = runId;
+    return this.#currentLane.run(state, () => work(state));
   }
 
   all(): readonly ExtensionLaneState[] {

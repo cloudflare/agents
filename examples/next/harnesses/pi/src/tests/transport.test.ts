@@ -56,7 +56,7 @@ function transportWith(
 function deliver(
   transport: PiTransport,
   connection: Connection,
-  message: PiClientMessage
+  message: PiClientMessage | Record<string, unknown>
 ): Promise<void> {
   const handlers = transport.webSocketOptions().handlers;
   return Promise.resolve(
@@ -155,6 +155,71 @@ describe("pi transport", () => {
     ]);
   });
 
+  it("refuses an answer from a client on another lane", async () => {
+    const owner = socket("pi:main");
+    const intruder = socket("pi:side");
+    const { transport, answered } = transportWith([
+      owner.connection,
+      intruder.connection
+    ]);
+
+    transport.extensionUiRequest("main", {
+      method: "confirm",
+      requestId: "r1",
+      title: "Delete everything?",
+      message: "really",
+      timeoutMs: 60_000
+    });
+    await deliver(transport, intruder.connection, {
+      type: "extension_ui_response",
+      id: "9",
+      requestId: "r1",
+      response: { confirmed: true }
+    });
+
+    // Nothing was resolved, and the dialog stays open for its own lane.
+    expect(answered).toEqual([]);
+    expect(intruder.frames).toEqual([
+      {
+        type: "error",
+        id: "9",
+        message: 'Dialog "r1" does not belong to lane "side"'
+      }
+    ]);
+    expect(owner.frames.at(-1)).toMatchObject({
+      type: "extension_ui_request",
+      requestId: "r1"
+    });
+  });
+
+  it("accepts the answer from the lane that owns the dialog", async () => {
+    const owner = socket("pi:main");
+    const { transport, answered } = transportWith([owner.connection]);
+
+    transport.extensionUiRequest("main", {
+      method: "confirm",
+      requestId: "r1",
+      title: "Sure?",
+      message: "really",
+      timeoutMs: 60_000
+    });
+    await deliver(transport, owner.connection, {
+      type: "extension_ui_response",
+      id: "9",
+      requestId: "r1",
+      response: { confirmed: true }
+    });
+
+    expect(answered).toEqual([
+      { requestId: "r1", response: { confirmed: true } }
+    ]);
+    expect(owner.frames.at(-1)).toEqual({
+      type: "result",
+      id: "9",
+      result: true
+    });
+  });
+
   it("keeps a dialog open while another subscriber is still listening", () => {
     const leaving = socket("pi:main");
     const staying = socket("pi:main");
@@ -173,5 +238,121 @@ describe("pi transport", () => {
     handlers?.onClose?.(leaving.connection, 1000, "", true);
 
     expect(answered).toEqual([]);
+  });
+});
+
+describe("pi transport frame validation", () => {
+  it("rejects a submit whose request is not a pi operation", async () => {
+    const submitted: unknown[] = [];
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection], {
+      submit: (request) => {
+        submitted.push(request);
+        return Promise.resolve({
+          operationId: "op",
+          lane: "main",
+          accepted: true
+        });
+      }
+    });
+
+    await deliver(transport, client.connection, {
+      type: "submit",
+      id: "1",
+      request: { kind: "sudo", prompt: "hi" }
+    });
+
+    expect(submitted).toEqual([]);
+    expect(client.frames).toEqual([
+      { type: "error", id: "1", message: "Malformed submit message" }
+    ]);
+  });
+
+  it("rejects a submit missing the field its kind requires", async () => {
+    const submitted: unknown[] = [];
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection], {
+      submit: (request) => {
+        submitted.push(request);
+        return Promise.resolve({
+          operationId: "op",
+          lane: "main",
+          accepted: true
+        });
+      }
+    });
+
+    await deliver(transport, client.connection, {
+      type: "submit",
+      id: "2",
+      request: { kind: "navigation" }
+    });
+
+    expect(submitted).toEqual([]);
+    expect(client.frames).toEqual([
+      { type: "error", id: "2", message: "Malformed submit message" }
+    ]);
+  });
+
+  it("rejects a set_flag whose value is neither a string nor a boolean", async () => {
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection], {
+      setFlag: () => Promise.reject(new Error("must not run"))
+    });
+
+    await deliver(transport, client.connection, {
+      type: "set_flag",
+      id: "3",
+      name: "verbose",
+      value: 1
+    });
+
+    expect(client.frames).toEqual([
+      { type: "error", id: "3", message: "Malformed set_flag message" }
+    ]);
+  });
+
+  it("rejects a subscribe with no stream id", async () => {
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection]);
+
+    await deliver(transport, client.connection, {
+      type: "subscribe",
+      id: "4"
+    });
+
+    expect(client.frames).toEqual([
+      { type: "error", id: "4", message: "Malformed subscribe message" }
+    ]);
+  });
+
+  it("names an unknown frame type and keeps the id", async () => {
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection]);
+
+    await deliver(transport, client.connection, {
+      type: "drop_table",
+      id: "5"
+    });
+
+    expect(client.frames).toEqual([
+      {
+        type: "error",
+        id: "5",
+        message: 'Unknown pi message type "drop_table"'
+      }
+    ]);
+  });
+
+  it("rejects a frame that is not an object", async () => {
+    const client = socket("pi:main");
+    const { transport } = transportWith([client.connection]);
+    const handlers = transport.webSocketOptions().handlers;
+
+    await handlers?.onMessage?.(client.connection, JSON.stringify(["submit"]));
+
+    expect(client.frames).toEqual([
+      { type: "error", message: "Malformed pi message" }
+    ]);
   });
 });

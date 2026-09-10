@@ -50,7 +50,11 @@ import {
   projectHarnessEvent,
   SUBSCRIBED_EVENT_TYPES
 } from "./events";
-import { PiSubmissions, type QueuedSubmission } from "./intake";
+import {
+  PiSubmissions,
+  type PiDisposition,
+  type QueuedSubmission
+} from "./intake";
 import {
   projectCustomEntries,
   projectMessages,
@@ -314,6 +318,27 @@ function outOfBandResult(operationId: string): PiOperationResult {
   };
 }
 
+/**
+ * The receipt a retried out-of-band submission gets: the same one its first
+ * attempt returned, with no handler re-run.
+ *
+ * A claim that never reached a terminal kind — the isolate died between the
+ * claim and the handler's return — is reported as handled. The handler may
+ * have run in part and there is no operation to wait for either way, so the
+ * retry is answered rather than replayed: out-of-band submissions are
+ * at-most-once.
+ */
+function dispositionReceipt(disposition: PiDisposition): PiSubmissionReceipt {
+  const base = {
+    operationId: disposition.operationId,
+    lane: disposition.lane,
+    accepted: false as const
+  };
+  return disposition.kind === "command" && disposition.command !== undefined
+    ? { ...base, command: disposition.command }
+    : { ...base, handled: true };
+}
+
 function operationStatus(
   operation: NonNullable<LaneSnapshot["operation"]>
 ): PiOperationStatus {
@@ -494,6 +519,13 @@ export class PiHarness<
     // submission carries the operation id of the first one, and an `input`
     // handler or a slash command is a side effect that must not run twice
     // for it — so this check comes ahead of both, not after them.
+    //
+    // A queued operation is its own record: pi keeps its result forever and
+    // the intake row covers the window before it starts. A submission
+    // consumed out of band queues nothing, so it leaves a disposition row
+    // instead — without one, a retry would replay the handler.
+    const disposition = submissions.disposition(operationId);
+    if (disposition) return dispositionReceipt(disposition);
     if (
       submissions.has(operationId) ||
       (await upstream.getResult(operationId, context)) !== undefined ||
@@ -501,23 +533,55 @@ export class PiHarness<
     ) {
       return { operationId, lane, accepted: false };
     }
-    const admitted = await this.#interceptInput(lane, request);
-    if (admitted === undefined) {
-      return { operationId, lane, accepted: false, handled: true };
+    // Only a typed prompt can be consumed out of band: every other kind is
+    // queued verbatim, and pays for no claim.
+    if (request.kind !== "prompt" || this.#extensions === undefined) {
+      return this.#queue(lane, operationId, request);
     }
-    const resolved = resolveSubmission(admitted, {
-      hasCommand: (name) => this.#extensions?.hasCommand(name) ?? false,
-      promptTemplates: this.#resources.promptTemplates,
-      skills: this.#resources.skills
-    });
-    if (resolved.kind === "command") {
-      // Extension commands are not operations: they run here, against the
-      // same lane actions an event handler uses, and queue nothing.
-      await this.#extensions?.runCommand(lane, resolved.name, resolved.args);
-      return { operationId, lane, accepted: false, command: resolved.name };
+    if (!submissions.claim(lane, operationId)) {
+      // A concurrent submission of the same id holds the claim; it, not this
+      // one, runs whatever the submission turns out to be.
+      return { operationId, lane, accepted: false };
     }
-    const queued = resolved.request;
-    submissions.insert(lane, operationId, queued);
+    let queued: PiOperationRequest;
+    try {
+      const admitted = await this.#interceptInput(lane, request);
+      if (admitted === undefined) {
+        submissions.settle(operationId, "handled");
+        return { operationId, lane, accepted: false, handled: true };
+      }
+      const resolved = resolveSubmission(admitted, {
+        hasCommand: (name) => this.#extensions?.hasCommand(name) ?? false,
+        promptTemplates: this.#resources.promptTemplates,
+        skills: this.#resources.skills
+      });
+      if (resolved.kind === "command") {
+        // Extension commands are not operations: they run here, against the
+        // same lane actions an event handler uses, and queue nothing. The
+        // disposition is terminal before the handler runs, so an eviction
+        // mid-command cannot replay its side effects on the retry.
+        submissions.settle(operationId, "command", resolved.name);
+        await this.#extensions?.runCommand(lane, resolved.name, resolved.args);
+        return { operationId, lane, accepted: false, command: resolved.name };
+      }
+      queued = resolved.request;
+    } catch (error) {
+      // Nothing was consumed, so the id goes back to being free.
+      submissions.release(operationId);
+      throw error;
+    }
+    // An ordinary operation after all: the queue row is its record from here.
+    submissions.release(operationId);
+    return this.#queue(lane, operationId, queued);
+  }
+
+  /** Durably enqueue one resolved request and wake the lane's driver. */
+  async #queue(
+    lane: string,
+    operationId: string,
+    request: PiOperationRequest
+  ): Promise<PiSubmissionReceipt> {
+    this.#requireSubmissions().insert(lane, operationId, request);
     await this.#ensureLaneDriver(lane);
     return { operationId, lane, accepted: true };
   }
@@ -877,17 +941,8 @@ export class PiHarness<
                 object | undefined
               >["toolContext"]
             }),
-        systemPrompt: async (toolContext, upstreamContext) => {
-          const base =
-            typeof config.systemPrompt === "function"
-              ? await config.systemPrompt(
-                  toolContext as ToolContext,
-                  upstreamContext as PiContext
-                )
-              : (config.systemPrompt ?? "");
-          const catalog = (await this.#resolvedSkills())?.catalog;
-          return catalog ? [base, catalog].filter(Boolean).join("\n\n") : base;
-        },
+        systemPrompt: (toolContext, upstreamContext) =>
+          this.#systemPrompt(toolContext, upstreamContext),
         ...(config.streamOptions === undefined
           ? {}
           : { streamOptions: config.streamOptions }),
@@ -964,6 +1019,18 @@ export class PiHarness<
       ...(typeof config.systemPrompt === "string"
         ? { systemPrompt: config.systemPrompt }
         : {}),
+      // `before_agent_start` is handed the prompt pi is about to send, not
+      // the configured one: a dynamic `systemPrompt` and the skills catalog
+      // both only exist once assembled.
+      resolveSystemPrompt: (lane) => this.#resolveSystemPrompt(lane),
+      // The lane driver opens an operation's stream writer on its lane
+      // before every pass of `drive`, and a tool call only ever runs inside
+      // one — a call recovered after an eviction included, because the pass
+      // that recovers it opens the writer first. The map is therefore
+      // derived from durable state on every wake rather than maintained as
+      // a table of its own, which would cost a write per operation.
+      laneForInvocation: (invocation) =>
+        this.#writers.get(invocation.operationId)?.lane,
       ...(config.resourceLoader === undefined
         ? {}
         : { resourceLoader: config.resourceLoader }),
@@ -1024,18 +1091,25 @@ export class PiHarness<
   ): Promise<PiOperationRequest | undefined> {
     const { extensions } = await this.#attached();
     if (!extensions || request.kind !== "prompt") return request;
-    extensions.enter(lane);
+    // The submitting lane is named rather than inferred: a submission can
+    // arrive while some other lane's handler is the current scope.
     const outcome = await extensions.emitInput(
       request.prompt,
       request.images?.map(
         (image): ImageContent => ({ type: "image", ...image })
       ),
-      "rpc"
+      "rpc",
+      lane
     );
     switch (outcome.action) {
       case "handled":
+        // A consumed submission answers the caller, so whatever the handler
+        // wrote to the lane has to be durable before the receipt is: a
+        // client that reads the transcript on the receipt must see it.
+        await extensions.drain(lane);
         return undefined;
       case "transform":
+        await extensions.drain(lane);
         return {
           ...request,
           prompt: outcome.text,
@@ -1227,6 +1301,46 @@ export class PiHarness<
           : source;
       return { ...(base ?? {}), env };
     };
+  }
+
+  /**
+   * The system prompt a turn is given: the application's own prompt, with the
+   * skills catalog appended when skills are configured.
+   *
+   * It lives on the harness rather than inside the `AgentHarness` options so
+   * that the extension runtime can ask for the same string pi is about to
+   * send — `before_agent_start` receives the prompt as it will actually be
+   * assembled, not a stale copy of the configured one.
+   */
+  async #systemPrompt(
+    toolContext: object | undefined,
+    upstreamContext: UpstreamContext
+  ): Promise<string> {
+    const config = this.#config;
+    const base =
+      typeof config.systemPrompt === "function"
+        ? await config.systemPrompt(
+            toolContext as ToolContext,
+            upstreamContext as PiContext
+          )
+        : (config.systemPrompt ?? "");
+    const catalog = (await this.#resolvedSkills())?.catalog;
+    return catalog ? [base, catalog].filter(Boolean).join("\n\n") : base;
+  }
+
+  /**
+   * {@link PiHarness.#systemPrompt} resolved for one lane's tool context.
+   *
+   * The prompt this harness assembles does not vary by lane — the lane is
+   * part of the contract because an extension asks per invocation, and a
+   * harness whose prompt did vary would need it.
+   */
+  async #resolveSystemPrompt(_lane: string): Promise<string> {
+    const context = BACKGROUND_CONTEXT;
+    const source = this.#toolContextSource();
+    const toolContext =
+      typeof source === "function" ? await source(context) : source;
+    return this.#systemPrompt(toolContext, context);
   }
 
   async #resolveResources(

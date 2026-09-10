@@ -1,3 +1,5 @@
+import { Type } from "typebox";
+import { Check } from "typebox/value";
 import type {
   Connection,
   ConnectionContext,
@@ -96,13 +98,214 @@ function laneOf(connection: Connection, fallback: string): string {
   return tag ? tag.slice(LANE_TAG_PREFIX.length) : fallback;
 }
 
-function isClientMessage(value: unknown): value is PiClientMessage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "type" in value &&
-    typeof value.type === "string"
-  );
+// ── Wire validation ───────────────────────────────────────────────────────
+
+/**
+ * Every client frame is validated against a schema before the host sees it.
+ *
+ * The socket is the harness's public edge: whatever arrives on it is a
+ * stranger's JSON, and `submit` reaches durable storage and the model. A
+ * `type` check alone lets a frame through with a missing `streamId`, a
+ * `request.kind` pi never defined, or a `value` of the wrong type, and the
+ * failure then surfaces deep inside the harness — or not at all.
+ */
+const Identifier = Type.String({ minLength: 1, maxLength: 200 });
+
+const ImageSchema = Type.Object(
+  {
+    data: Type.String(),
+    mimeType: Type.String({ minLength: 1 })
+  },
+  { additionalProperties: false }
+);
+
+const MessageInputSchema = Type.Union([
+  Type.String(),
+  Type.Object(
+    {
+      text: Type.String(),
+      images: Type.Optional(Type.Array(ImageSchema))
+    },
+    { additionalProperties: false }
+  )
+]);
+
+/** Pi's operation kinds, each with the fields that kind requires. */
+const OperationRequestSchema = Type.Union([
+  Type.Object(
+    {
+      kind: Type.Literal("prompt"),
+      operationId: Type.Optional(Identifier),
+      prompt: Type.String(),
+      images: Type.Optional(Type.Array(ImageSchema))
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("skill"),
+      operationId: Type.Optional(Identifier),
+      name: Type.String({ minLength: 1 }),
+      additionalInstructions: Type.Optional(Type.String())
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("prompt_template"),
+      operationId: Type.Optional(Identifier),
+      name: Type.String({ minLength: 1 }),
+      args: Type.Optional(Type.Array(Type.String()))
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("compaction"),
+      operationId: Type.Optional(Identifier),
+      customInstructions: Type.Optional(Type.String())
+    },
+    { additionalProperties: false }
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("navigation"),
+      operationId: Type.Optional(Identifier),
+      targetId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+      summarize: Type.Optional(Type.Boolean()),
+      label: Type.Optional(Type.String()),
+      customInstructions: Type.Optional(Type.String())
+    },
+    { additionalProperties: false }
+  )
+]);
+
+const UiResponseSchema = Type.Union([
+  Type.Object({ value: Type.String() }, { additionalProperties: false }),
+  Type.Object({ confirmed: Type.Boolean() }, { additionalProperties: false }),
+  Type.Object(
+    { cancelled: Type.Literal(true) },
+    { additionalProperties: false }
+  )
+]);
+
+/** One schema per frame type, mirroring the `PiClientMessage` union. */
+const CLIENT_MESSAGE_SCHEMAS = {
+  subscribe: Type.Object(
+    {
+      type: Type.Literal("subscribe"),
+      id: Type.Optional(Identifier),
+      streamId: Identifier,
+      from: Type.Optional(Type.Integer({ minimum: 0 }))
+    },
+    { additionalProperties: false }
+  ),
+  unsubscribe: Type.Object(
+    {
+      type: Type.Literal("unsubscribe"),
+      id: Type.Optional(Identifier),
+      streamId: Identifier
+    },
+    { additionalProperties: false }
+  ),
+  snapshot: Type.Object(
+    { type: Type.Literal("snapshot"), id: Identifier },
+    { additionalProperties: false }
+  ),
+  submit: Type.Object(
+    {
+      type: Type.Literal("submit"),
+      id: Identifier,
+      request: OperationRequestSchema
+    },
+    { additionalProperties: false }
+  ),
+  abort: Type.Object(
+    {
+      type: Type.Literal("abort"),
+      id: Identifier,
+      operationId: Type.Optional(Identifier)
+    },
+    { additionalProperties: false }
+  ),
+  steer: Type.Object(
+    {
+      type: Type.Literal("steer"),
+      id: Identifier,
+      message: MessageInputSchema
+    },
+    { additionalProperties: false }
+  ),
+  extension_ui_response: Type.Object(
+    {
+      type: Type.Literal("extension_ui_response"),
+      id: Type.Optional(Identifier),
+      requestId: Identifier,
+      response: UiResponseSchema
+    },
+    { additionalProperties: false }
+  ),
+  get_commands: Type.Object(
+    { type: Type.Literal("get_commands"), id: Identifier },
+    { additionalProperties: false }
+  ),
+  get_flags: Type.Object(
+    { type: Type.Literal("get_flags"), id: Identifier },
+    { additionalProperties: false }
+  ),
+  set_flag: Type.Object(
+    {
+      type: Type.Literal("set_flag"),
+      id: Identifier,
+      name: Type.String({ minLength: 1, maxLength: 200 }),
+      value: Type.Union([Type.Boolean(), Type.String({ maxLength: 4096 })])
+    },
+    { additionalProperties: false }
+  ),
+  command: Type.Object(
+    {
+      type: Type.Literal("command"),
+      id: Identifier,
+      name: Type.String({ minLength: 1, maxLength: 200 }),
+      args: Type.Optional(Type.String())
+    },
+    { additionalProperties: false }
+  )
+} satisfies Record<PiClientMessage["type"], unknown>;
+
+/** A validated frame, or the error frame the client gets instead. */
+type ParsedFrame =
+  | { readonly ok: true; readonly message: PiClientMessage }
+  | { readonly ok: false; readonly id?: string; readonly error: string };
+
+function parseClientMessage(value: unknown): ParsedFrame {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false, error: "Malformed pi message" };
+  }
+  const frame = value as Record<string, unknown>;
+  const id = typeof frame.id === "string" ? frame.id : undefined;
+  const withId = id === undefined ? {} : { id };
+  if (typeof frame.type !== "string") {
+    return { ok: false, ...withId, error: "Malformed pi message" };
+  }
+  const schema =
+    CLIENT_MESSAGE_SCHEMAS[frame.type as PiClientMessage["type"]] ?? undefined;
+  if (schema === undefined) {
+    return {
+      ok: false,
+      ...withId,
+      error: `Unknown pi message type ${JSON.stringify(frame.type)}`
+    };
+  }
+  if (!Check(schema, frame)) {
+    return {
+      ok: false,
+      ...withId,
+      error: `Malformed ${frame.type} message`
+    };
+  }
+  // SAFETY: the schema for this `type` mirrors that arm of PiClientMessage.
+  return { ok: true, message: frame as unknown as PiClientMessage };
 }
 
 function send(socket: WebSocket, message: PiServerMessage): void {
@@ -134,6 +337,16 @@ export class PiTransport {
    * still listening, so it owns the "last subscriber left" cancellation.
    */
   readonly #openDialogs = new Map<string, Set<string>>();
+  /**
+   * The lane each open dialog was broadcast to.
+   *
+   * A request id is a bearer token for one answer, and lanes are independent
+   * conversations: a socket subscribed to one lane must not be able to
+   * confirm another lane's permission prompt by guessing — or by reading —
+   * its id. The bridge set resolves by id alone, so the check belongs here,
+   * where the broadcast recorded the lane in the first place.
+   */
+  readonly #dialogLanes = new Map<string, string>();
 
   constructor(host: PiTransportHost, sockets: () => LifecycleSockets) {
     this.#host = host;
@@ -196,6 +409,7 @@ export class PiTransport {
         this.#openDialogs.set(lane, open);
       }
       open.add(request.requestId);
+      this.#dialogLanes.set(request.requestId, lane);
     }
     let delivered = 0;
     for (const socket of this.#sockets().get(laneTag(lane))) {
@@ -218,6 +432,7 @@ export class PiTransport {
    * silence.
    */
   extensionUiSettled(lane: string, requestId: string): void {
+    this.#dialogLanes.delete(requestId);
     const open = this.#openDialogs.get(lane);
     if (open) {
       open.delete(requestId);
@@ -283,14 +498,20 @@ export class PiTransport {
       send(connection, { type: "error", message: "Malformed JSON" });
       return;
     }
-    if (!isClientMessage(message)) {
-      send(connection, { type: "error", message: "Malformed pi message" });
+    const parsed = parseClientMessage(message);
+    if (!parsed.ok) {
+      send(connection, {
+        type: "error",
+        ...(parsed.id === undefined ? {} : { id: parsed.id }),
+        message: parsed.error
+      });
       return;
     }
+    const frame = parsed.message;
     const lane = laneOf(connection, this.#host.defaultLane);
-    const id = "id" in message ? message.id : undefined;
+    const id = "id" in frame ? frame.id : undefined;
     try {
-      const result = await this.#dispatch(connection, lane, message);
+      const result = await this.#dispatch(connection, lane, frame);
       if (id !== undefined && result !== SUBSCRIPTION) {
         // SAFETY: every command reply is a projected JSON value.
         send(connection, { type: "result", id, result: result as PiJson });
@@ -350,12 +571,18 @@ export class PiTransport {
       case "extension_ui_response": {
         const resolveUi = this.#host.resolveUi;
         if (!resolveUi) throw unsupported(message.type);
-        const answered = resolveUi.call(
-          this.#host,
-          message.requestId,
-          message.response,
-          { lane }
-        );
+        const owner = this.#dialogLanes.get(message.requestId);
+        if (owner !== undefined && owner !== lane) {
+          // Another lane's dialog. Refuse without touching it, and without
+          // saying whether the id exists.
+          throw foreign(message.requestId, lane);
+        }
+        const answered =
+          owner === undefined
+            ? false
+            : resolveUi.call(this.#host, message.requestId, message.response, {
+                lane
+              });
         if (!answered) {
           // The dialog settled before this answer arrived. Say so rather than
           // dropping it: the client is still showing a modal for it.
@@ -483,6 +710,7 @@ export class PiTransport {
     // `open`, so cancel over a copy.
     for (const requestId of [...open]) {
       resolveUi.call(this.#host, requestId, { cancelled: true }, { lane });
+      this.#dialogLanes.delete(requestId);
     }
     this.#openDialogs.delete(lane);
   }
@@ -494,6 +722,13 @@ const SUBSCRIPTION = Symbol("pi-subscription");
 /** A frame this harness understands but this host does not implement. */
 function unsupported(type: string): Error {
   return new Error(`unsupported: ${type}`);
+}
+
+/** An answer aimed at a dialog that belongs to some other lane. */
+function foreign(requestId: string, lane: string): Error {
+  return new Error(
+    `Dialog ${JSON.stringify(requestId)} does not belong to lane ${JSON.stringify(lane)}`
+  );
 }
 
 /** A frame that arrived too late to change anything. */

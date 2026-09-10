@@ -39,6 +39,19 @@ export interface WorkspaceExecutionEnvOptions {
   readonly maxSnapshotFiles?: number;
   /** Maximum size of a single file copied into a shell invocation. @default 1_000_000 */
   readonly maxSnapshotFileBytes?: number;
+  /**
+   * Maximum total size of the snapshot copied into one shell invocation.
+   *
+   * The per-file and per-count caps bound each dimension on its own, and a
+   * workspace can exceed neither while still holding more bytes than an
+   * isolate can hold at once — the snapshot lives in memory twice, as the
+   * workspace's copy and the interpreter's. A run that would cross this
+   * limit fails rather than truncating: a shell whose input silently lost
+   * files reports success for a script that read the wrong tree.
+   *
+   * @default 8_388_608
+   */
+  readonly maxSnapshotTotalBytes?: number;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -47,6 +60,7 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 const DEFAULT_MAX_SNAPSHOT_FILES = 2_000;
 const DEFAULT_MAX_SNAPSHOT_FILE_BYTES = 1_000_000;
+const DEFAULT_MAX_SNAPSHOT_TOTAL_BYTES = 8 * 1024 * 1024;
 const READDIR_PAGE_SIZE = 1_000;
 const TEMP_ROOT = "/tmp";
 
@@ -228,6 +242,7 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
   readonly #env: Record<string, string>;
   readonly #maxSnapshotFiles: number;
   readonly #maxSnapshotFileBytes: number;
+  readonly #maxSnapshotTotalBytes: number;
 
   constructor(options: WorkspaceExecutionEnvOptions) {
     this.cwd = normalizeAbsolute(options.cwd ?? "/");
@@ -238,6 +253,8 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       options.maxSnapshotFiles ?? DEFAULT_MAX_SNAPSHOT_FILES;
     this.#maxSnapshotFileBytes =
       options.maxSnapshotFileBytes ?? DEFAULT_MAX_SNAPSHOT_FILE_BYTES;
+    this.#maxSnapshotTotalBytes =
+      options.maxSnapshotTotalBytes ?? DEFAULT_MAX_SNAPSHOT_TOTAL_BYTES;
   }
 
   // ── Paths ───────────────────────────────────────────────────────────────
@@ -569,7 +586,17 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
           }, timeoutMs);
 
     try {
-      const snapshot = await this.#snapshot();
+      let snapshot: Snapshot;
+      try {
+        snapshot = await this.#snapshot();
+      } catch (error) {
+        // The workspace is too big to hand to the interpreter. Say so instead
+        // of running the script against a silently truncated tree.
+        if (error instanceof SnapshotLimitError) {
+          return err(new ExecutionError("spawn_error", error.message, error));
+        }
+        throw error;
+      }
       let bash: Bash;
       try {
         bash = new Bash({
@@ -614,7 +641,7 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
 
       // Side effects survive a failed or cancelled script, exactly as they
       // would on a real filesystem.
-      await this.#sync(bash, snapshot);
+      const syncFailures = await this.#sync(bash, snapshot);
 
       // Output a killed script produced before it was killed is still output:
       // pi builds a tool's visible result from these callbacks alone, so it
@@ -631,6 +658,9 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       if (signal?.aborted) return err(new ExecutionError("aborted", "aborted"));
       if (failure) return err(failure);
       if (callbackError) return err(callbackError);
+      // The script ran; its writes did not all land. Reporting success here
+      // would tell the model the files it wrote exist.
+      if (syncFailures.length > 0) return err(syncError(syncFailures));
       return ok({ stdout, stderr, exitCode });
     } catch (error) {
       const cause = toError(error);
@@ -689,6 +719,7 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     const initialDirectories = new Set<string>(["/"]);
     const protectedPaths = new Set<string>();
     const pending = ["/"];
+    let totalBytes = 0;
 
     while (pending.length > 0) {
       const dir = pending.shift() as string;
@@ -712,6 +743,12 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
           protectedPaths.add(path);
           continue;
         }
+        totalBytes += bytes.byteLength;
+        if (totalBytes > this.#maxSnapshotTotalBytes) {
+          throw new SnapshotLimitError(
+            `Workspace snapshot exceeds maxSnapshotTotalBytes (${this.#maxSnapshotTotalBytes} bytes); the shell cannot run against this workspace`
+          );
+        }
         files[path] = bytes;
         initialFiles.set(path, bytes);
       }
@@ -726,8 +763,25 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     };
   }
 
-  /** Write back everything the script created, changed, or deleted. */
-  async #sync(bash: Bash, snapshot: Snapshot): Promise<void> {
+  /**
+   * Write back everything the script created, changed, or deleted, and report
+   * every change that would not persist.
+   *
+   * A failed write-back is not a cosmetic problem: the script ran, the caller
+   * is told it succeeded, and the file it wrote is not there. Every path is
+   * still attempted — one unwritable file must not strand the rest — and the
+   * failures come back for {@link WorkspaceExecutionEnv.exec} to turn into an
+   * error the model can read.
+   */
+  async #sync(bash: Bash, snapshot: Snapshot): Promise<SyncFailure[]> {
+    const failures: SyncFailure[] = [];
+    const attempt = async (path: string, write: Promise<unknown>) => {
+      try {
+        await write;
+      } catch (error) {
+        failures.push({ path, message: toError(error).message });
+      }
+    };
     const finalFiles = new Map<string, Uint8Array>();
     const finalDirectories = new Set<string>(["/"]);
 
@@ -749,7 +803,7 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     )) {
       if (path === "/" || snapshot.initialDirectories.has(path)) continue;
       if (hasProtectedDescendant(path, snapshot.protectedPaths)) continue;
-      await this.#workspace.mkdir(path, { recursive: true }).catch(() => {});
+      await attempt(path, this.#workspace.mkdir(path, { recursive: true }));
     }
 
     for (const [path, bytes] of finalFiles) {
@@ -757,14 +811,14 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       const existing = snapshot.initialFiles.get(path);
       if (existing && bytesEqual(existing, bytes)) continue;
       await this.#ensureParent(path).catch(() => {});
-      await this.#workspace.writeFileBytes(path, bytes).catch(() => {});
+      await attempt(path, this.#workspace.writeFileBytes(path, bytes));
     }
 
     for (const path of [...snapshot.initialFiles.keys()].sort((a, b) =>
       b.localeCompare(a)
     )) {
       if (finalFiles.has(path) || snapshot.protectedPaths.has(path)) continue;
-      await this.#workspace.rm(path, { force: true }).catch(() => {});
+      await attempt(path, this.#workspace.rm(path, { force: true }));
     }
 
     for (const path of [...snapshot.initialDirectories].sort((a, b) =>
@@ -777,10 +831,13 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       // the workspace's own `/tmp` content with it.
       if (inSandboxRoot(path)) continue;
       if (hasProtectedDescendant(path, snapshot.protectedPaths)) continue;
-      await this.#workspace
-        .rm(path, { recursive: true, force: true })
-        .catch(() => {});
+      await attempt(
+        path,
+        this.#workspace.rm(path, { recursive: true, force: true })
+      );
     }
+
+    return failures;
   }
 }
 
@@ -865,6 +922,31 @@ export function shellExecAdapter(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/** One workspace change a completed script left unpersisted. */
+type SyncFailure = {
+  readonly path: string;
+  readonly message: string;
+};
+
+/** Raised when a workspace is too large to copy into one shell invocation. */
+class SnapshotLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SnapshotLimitError";
+  }
+}
+
+/** Name every path whose write-back failed, in the order they were tried. */
+function syncError(failures: readonly SyncFailure[]): ExecutionError {
+  const listed = failures
+    .map((failure) => `${failure.path} (${failure.message})`)
+    .join(", ");
+  return new ExecutionError(
+    "unknown",
+    `The shell ran but the workspace could not be updated: ${listed}`
+  );
+}
 
 interface Snapshot {
   files: InitialFiles;

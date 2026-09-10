@@ -1,6 +1,7 @@
 import {
   BACKGROUND_CONTEXT,
   type AgentHarnessTool,
+  type AgentHarnessToolInvocation,
   type AgentLane,
   type Context,
   type HarnessEvent,
@@ -47,6 +48,7 @@ import {
 import { createSessionView } from "./session-view";
 import {
   ExtensionLaneStates,
+  type ExtensionLaneState,
   type PiExtensionErrorReporter,
   type PiExtensionHandlerError
 } from "./state";
@@ -67,6 +69,27 @@ export type PiExtensionRuntimeDeps = {
   readonly skills?: () => readonly PiSkill[];
   /** The harness's system prompt, when the configuration fixed one. */
   readonly systemPrompt?: string;
+  /**
+   * The system prompt the harness would send for one lane right now.
+   *
+   * `before_agent_start` runs before the harness assembles the prompt, so
+   * the cached read model still holds the previous run's prompt — an empty
+   * string on the very first run. A harness that can compute its own prompt
+   * ahead of the request supplies it here; without one the adapter falls
+   * back to the cached value and then to the configured prompt.
+   */
+  readonly resolveSystemPrompt?: (lane: string) => Promise<string>;
+  /**
+   * The lane one tool invocation belongs to.
+   *
+   * `AgentHarnessToolInvocation` carries no lane of its own, so only the
+   * harness can map an invocation — recovered ones included — onto the lane
+   * whose operation made the call. Without it extension tools run on the
+   * default lane.
+   */
+  readonly laneForInvocation?: (
+    invocation: AgentHarnessToolInvocation
+  ) => string | undefined;
   /** Resource surface served to pi, replacing the in-memory default. */
   readonly resourceLoader?: ResourceLoader;
   /** Command runner behind `pi.exec`, when the harness has one. */
@@ -271,7 +294,14 @@ export class PiExtensionRuntime {
 
   /** The extension-registered tools, adapted for the durable harness. */
   tools(): AgentHarnessTool<object | undefined>[] {
-    return adaptExtensionTools(this.#runner);
+    return adaptExtensionTools(this.#runner, {
+      states: this.#states,
+      // The harness's own mapping is authoritative; without one the live
+      // turn the call belongs to still names its lane.
+      laneForInvocation: (invocation) =>
+        this.#deps.laneForInvocation?.(invocation) ??
+        this.#events.laneForTurn(invocation.turnId)
+    });
   }
 
   /**
@@ -332,7 +362,7 @@ export class PiExtensionRuntime {
           : {})
       });
     }
-    await this.#states.get(lane).drain();
+    await this.drain(lane);
     return true;
   }
 
@@ -432,6 +462,7 @@ export class PiExtensionRuntime {
       states: this.#states,
       cwd: deps.cwd,
       refresh: (lane) => this.#refresh(lane),
+      systemPrompt: (lane, state) => this.#systemPrompt(lane, state),
       report: deps.report
     });
     this.#events.start();
@@ -453,19 +484,25 @@ export class PiExtensionRuntime {
   async emitInput(
     text: string,
     images: readonly ImageContent[] | undefined,
-    source: InputSource
+    source: InputSource,
+    lane: string = this.#states.current.lane
   ): Promise<InputEventResult> {
     if (this.#stopped) return { action: "continue" };
     try {
-      await this.#refresh(this.#states.current.lane);
-      return await this.#runner.emitInput(
-        text,
-        images === undefined ? undefined : [...images],
-        source
-      );
+      // An input handler writes through the same synchronous surface a hook
+      // does, so it runs inside the submitting lane's scope rather than
+      // against whichever lane happened to be current.
+      return await this.#states.withLane(lane, async () => {
+        await this.#refresh(lane);
+        return this.#runner.emitInput(
+          text,
+          images === undefined ? undefined : [...images],
+          source
+        );
+      });
     } catch (error) {
       this.#deps.report({
-        lane: this.#states.current.lane,
+        lane,
         kind: "event",
         source: "input",
         message: error instanceof Error ? error.message : String(error),
@@ -475,6 +512,20 @@ export class PiExtensionRuntime {
       });
       return { action: "continue" };
     }
+  }
+
+  /**
+   * Wait for one lane's queued extension writes to reach durable storage.
+   *
+   * Extension actions are synchronous to their caller and append to a
+   * per-lane write chain, so a handler that returned has not necessarily
+   * written yet. A caller that reports an outcome to a client — a handled
+   * or transformed submission, a slash command — awaits this first, or the
+   * client reads the transcript back before the handler's writes landed.
+   */
+  async drain(lane: string): Promise<void> {
+    await this.#events.drain();
+    await this.#states.get(lane).drain();
   }
 
   /** Make one lane the target of subsequent synchronous extension calls. */
@@ -493,6 +544,37 @@ export class PiExtensionRuntime {
       await state.drain().catch(() => {});
     }
     this.#eventBus.clear();
+  }
+
+  /**
+   * The system prompt to show `before_agent_start`, best first.
+   *
+   * The harness's own resolver is authoritative; the cached read model holds
+   * the last request's prompt, which is empty before the first one; the
+   * configured prompt is the last resort and is at least the prompt the
+   * session was built with.
+   */
+  async #systemPrompt(
+    lane: string,
+    state: ExtensionLaneState
+  ): Promise<string> {
+    const resolve = this.#deps.resolveSystemPrompt;
+    if (resolve) {
+      try {
+        return await resolve(lane);
+      } catch (error) {
+        this.#deps.report({
+          lane,
+          kind: "hook",
+          source: "before_run",
+          message: error instanceof Error ? error.message : String(error),
+          ...(error instanceof Error && error.stack !== undefined
+            ? { stack: error.stack }
+            : {})
+        });
+      }
+    }
+    return state.systemPrompt || (this.#deps.systemPrompt ?? "");
   }
 
   async #refresh(lane: string): Promise<void> {

@@ -33,6 +33,17 @@ export type ExtensionHookDeps = {
   readonly cwd: string;
   /** Re-read one lane into its cached read model before handlers run. */
   readonly refresh: (lane: string) => Promise<void>;
+  /**
+   * The system prompt `before_agent_start` should see.
+   *
+   * `before_run` fires before the harness assembles the request, so the
+   * lane's cached prompt is the previous run's — and empty on the first
+   * one. The runtime resolves the current prompt instead.
+   */
+  readonly systemPrompt: (
+    lane: string,
+    state: ExtensionLaneState
+  ) => Promise<string>;
   readonly report: PiExtensionErrorReporter;
 };
 
@@ -162,7 +173,7 @@ export function bindExtensionHooks(
             const result = await runner.emitBeforeAgentStart(
               promptText(event.prompt),
               promptImages(event.prompt),
-              state.systemPrompt,
+              await deps.systemPrompt(event.lane, state),
               { cwd: deps.cwd }
             );
             if (!result) return undefined;

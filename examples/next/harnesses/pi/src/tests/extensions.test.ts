@@ -1,10 +1,22 @@
-import type { HarnessEvent } from "@earendil-works/pi-agent-core";
+import type {
+  AgentLane,
+  Entry,
+  HarnessEvent,
+  Hooks
+} from "@earendil-works/pi-agent-core";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ExtensionRunner } from "../../vendor/pi-coding-agent-src/core/extensions/runner.ts";
-import { ExtensionEventAdapter } from "../harness/extensions/events-adapter";
+import { createExtensionActions } from "../harness/extensions/actions";
+import {
+  ExtensionEventAdapter,
+  compactionEntry,
+  messagesSince
+} from "../harness/extensions/events-adapter";
+import { PiExtensionRuntime } from "../harness/extensions/runtime";
 import { ExtensionLaneStates } from "../harness/extensions/state";
+import { createModels } from "../providers/models";
 import type { PiExtensionsTestObject } from "./worker";
 
 function fresh(): DurableObjectStub<PiExtensionsTestObject> {
@@ -287,6 +299,48 @@ describe("pi extension surface", () => {
     expect(await stub.flags()).not.toHaveProperty("not-a-flag");
   });
 
+  it("runs an extension tool on the lane whose run called it", async () => {
+    const stub = fresh();
+    // The tool body writes through the synchronous `pi.*` surface, which
+    // resolves against whichever lane is current. A run on a second lane
+    // must not leave its writes on the default one.
+    const run = await stub.runEcho("mark-side", "side");
+    expect(run).toMatchObject({ status: "completed", toolError: false });
+
+    expect(await stub.customEntries("side")).toEqual([
+      { customType: "test:tool-lane", text: "mark-side" }
+    ]);
+    expect(await stub.customEntries("main")).toEqual([]);
+  });
+
+  it("shows before_agent_start the configured system prompt on the first run", async () => {
+    const stub = fresh();
+    // `before_run` fires before the harness assembles the request, so the
+    // lane's cached prompt is still empty on the first run of a session.
+    await stub.runEcho("first");
+    const seen = await stub.systemPromptsSeen();
+    expect(seen[0]).toContain("Use the supplied test tools.");
+    expect(seen[0]).not.toBe("");
+  });
+
+  it("reports the run's own messages to agent_end", async () => {
+    const stub = fresh();
+    await stub.runEcho("first");
+    const first = await stub.agentEndTexts();
+    expect(first).toHaveLength(1);
+    // The run's own entries: its assistant turns and the tool result. The
+    // prompt was recorded before the run opened, so it is not one of them.
+    expect(first[0]?.join("\n")).toContain("echo:first");
+    expect(first[0]?.join("\n")).toContain("echoed");
+
+    // The second run reports only what it added, not the whole transcript.
+    await stub.runEcho("second");
+    const second = await stub.agentEndTexts();
+    expect(second).toHaveLength(2);
+    expect(second[1]?.join("\n")).toContain("echo:second");
+    expect(second[1]?.join("\n")).not.toContain("echo:first");
+  });
+
   it("lists extension, template and skill commands", async () => {
     const stub = fresh();
     const commands = await stub.commands();
@@ -347,5 +401,181 @@ describe("extension notification lanes", () => {
     expect(refreshed).toEqual(["side"]);
     // And the lane that was current before the notification still is.
     expect(states.current.lane).toBe("main");
+  });
+});
+
+describe("extension lane scoping", () => {
+  /**
+   * Two lanes make progress at the same time and both await: a hook on one
+   * can suspend on a blocking dialog while a handler on the other runs to
+   * completion. A saved-and-restored current lane hands the suspended
+   * handler the other lane when it resumes, so the scope has to travel with
+   * the async context instead.
+   */
+  it("keeps a suspended handler on its own lane while another lane runs", async () => {
+    const states = new ExtensionLaneStates("main");
+    const written: string[] = [];
+    const actions = createExtensionActions({
+      states,
+      lane: async (name) => {
+        written.push(name);
+        return {
+          appendCustomEntry: async () => "entry"
+        } as unknown as AgentLane;
+      },
+      setSessionName: async () => {},
+      setLabel: async () => {},
+      refreshTools: () => {},
+      allTools: () => [],
+      commands: () => [],
+      report: () => {}
+    });
+
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow = states.withLane("a", async () => {
+      await gate;
+      actions.appendEntry("test:a", { text: "a" });
+      await states.get("a").drain();
+    });
+    const quick = states.withLane("b", async () => {
+      actions.appendEntry("test:b", { text: "b" });
+      await states.get("b").drain();
+      release();
+    });
+    await Promise.all([quick, slow]);
+
+    expect(written).toEqual(["b", "a"]);
+    // And nothing leaked out of either scope.
+    expect(states.current.lane).toBe("main");
+  });
+});
+
+describe("run-scoped event payloads", () => {
+  const entry = (id: string, text: string): Entry =>
+    ({
+      type: "message",
+      id,
+      parentId: null,
+      seq: 0,
+      timestamp: 0,
+      message: { role: "user", content: text, timestamp: 0 }
+    }) as Entry;
+
+  it("slices agent_end messages from the tip the run started at", () => {
+    const entries = [entry("1", "old"), entry("2", "new"), entry("3", "also")];
+    expect(
+      messagesSince(entries, { from: 1, tipId: "1" }).map((message) =>
+        "content" in message ? message.content : ""
+      )
+    ).toEqual(["new", "also"]);
+    // Nothing ran: no mark, no messages.
+    expect(messagesSince(entries, undefined)).toEqual([]);
+    // A run that started on an empty branch reports everything it added.
+    expect(messagesSince(entries, { from: 0, tipId: null })).toHaveLength(3);
+    // The tip was compacted away, so the recorded index is the only cursor.
+    expect(messagesSince(entries, { from: 2, tipId: "gone" })).toHaveLength(1);
+  });
+
+  it("projects the real compaction entry, or none at all", () => {
+    const compaction = {
+      type: "compaction",
+      id: "c1",
+      parentId: null,
+      seq: 1,
+      timestamp: 0,
+      summary: "the story so far",
+      retainedTail: [],
+      tokensBefore: 4321,
+      fromHook: false
+    } as unknown as Entry;
+    expect(
+      compactionEntry([entry("1", "old"), compaction], "c1")
+    ).toMatchObject({
+      type: "compaction",
+      summary: "the story so far",
+      tokensBefore: 4321
+    });
+    // A summary and a token count nobody produced read to an extension
+    // exactly like real ones, so an absent entry projects to nothing.
+    expect(compactionEntry([entry("1", "old")], "c1")).toBeUndefined();
+    expect(
+      compactionEntry([entry("1", "old"), compaction], "c2")
+    ).toBeUndefined();
+  });
+});
+
+describe("extension write draining", () => {
+  /**
+   * Extension actions are synchronous to their caller and land on a per-lane
+   * write chain, so a handler that returned has not necessarily written yet.
+   * A caller reporting an outcome to a client has to wait for the chain, or
+   * the client reads the transcript back before the writes arrive.
+   */
+  it("resolves drain only once the lane's queued writes have landed", async () => {
+    const appended: string[] = [];
+    const lane = {
+      appendCustomEntry: async (customType: string) => {
+        // A real durable write takes a task, not a microtask: a caller that
+        // merely returned to the event loop has not waited for it.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        appended.push(customType);
+        return "entry";
+      },
+      watch: async () => ({
+        unsubscribe: () => {},
+        snapshot: {
+          transcript: [],
+          tipId: null,
+          configuration: { activeToolNames: [], thinkingLevel: "off" },
+          operation: null,
+          queues: []
+        }
+      }),
+      getModel: async () => undefined
+    } as unknown as AgentLane;
+
+    const runtime = await PiExtensionRuntime.create({
+      extensions: [
+        (pi) => {
+          pi.registerCommand("note", {
+            description: "Append a note.",
+            handler: async (args) => {
+              pi.appendEntry("test:drain", { text: args });
+            }
+          });
+        }
+      ],
+      cwd: "/",
+      defaultLane: "main",
+      sessionId: "session",
+      models: createModels(),
+      lane: async () => lane,
+      setSessionName: async () => {},
+      setLabel: async () => {},
+      refreshTools: () => {},
+      allTools: () => [],
+      compact: async () => {},
+      navigate: async () => {},
+      report: () => {}
+    });
+    // Actions only exist once the runtime is attached to a live harness.
+    runtime.attach({ on: () => () => {} } as unknown as Hooks);
+
+    const ran = runtime.runCommand("main", "note", "hello");
+    // The handler returns as soon as it has queued the write.
+    await Promise.resolve();
+    expect(appended).toEqual([]);
+
+    // `runCommand` waits on `drain`, so a receipt means the write landed.
+    expect(await ran).toBe(true);
+    expect(appended).toEqual(["test:drain"]);
+
+    // And an idle lane drains rather than hanging.
+    await runtime.drain("main");
+    expect(appended).toEqual(["test:drain"]);
+    await runtime.stop();
   });
 });

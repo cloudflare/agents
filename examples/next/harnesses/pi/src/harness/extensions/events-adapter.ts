@@ -1,8 +1,68 @@
-import type { HarnessEvent } from "@earendil-works/pi-agent-core";
+import type {
+  AgentMessage,
+  Entry,
+  HarnessEvent
+} from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionRunner } from "../../../vendor/pi-coding-agent-src/core/extensions/runner.ts";
 import type { ExtensionEvent } from "../../../vendor/pi-coding-agent-src/core/extensions/types.ts";
-import type { ExtensionLaneStates, PiExtensionErrorReporter } from "./state";
+import type { SessionEntry } from "../../../vendor/pi-coding-agent-src/core/session-manager.ts";
+import { projectSessionEntry } from "./session-view";
+import type {
+  ExtensionLaneState,
+  ExtensionLaneStates,
+  PiExtensionErrorReporter
+} from "./state";
+
+/** Where one run's transcript stood when it started. */
+type RunMark = {
+  /** Index the run's own entries begin at, in the lane's entry list. */
+  readonly from: number;
+  /** Tip when the run started, which survives entries being re-read. */
+  readonly tipId: string | null;
+};
+
+/**
+ * The messages one run added, as `agent_end` reports them.
+ *
+ * The mark's tip is preferred over its index: entries are re-read between
+ * the two events and a compaction can renumber them, while the tip entry
+ * either is still on the branch or was compacted away — in which case the
+ * recorded index is the only cursor left.
+ */
+export function messagesSince(
+  entries: readonly Entry[],
+  mark: RunMark | undefined
+): AgentMessage[] {
+  if (!mark) return [];
+  const tipIndex =
+    mark.tipId === null
+      ? -1
+      : entries.findIndex((entry) => entry.id === mark.tipId);
+  const from = tipIndex >= 0 ? tipIndex + 1 : mark.from;
+  return entries
+    .slice(from)
+    .filter((entry) => entry.type === "message")
+    .map((entry) => entry.message);
+}
+
+/**
+ * Project the compaction entry a `compaction_end` names, as pi's own
+ * `session_compact` event carries it. Absent when the entry is no longer on
+ * the lane's branch — a fabricated stand-in would tell an extension a
+ * summary and a token count nobody produced.
+ */
+export function compactionEntry(
+  entries: readonly Entry[],
+  entryId: string
+): Extract<SessionEntry, { type: "compaction" }> | undefined {
+  const entry = entries.find(
+    (candidate) => candidate.id === entryId && candidate.type === "compaction"
+  );
+  if (entry === undefined) return undefined;
+  const projected = projectSessionEntry(entry);
+  return projected.type === "compaction" ? projected : undefined;
+}
 
 /** What the event adapter needs from the runtime. */
 export type ExtensionEventDeps = {
@@ -46,6 +106,8 @@ export class ExtensionEventAdapter {
   readonly #runner: ExtensionRunner;
   readonly #deps: ExtensionEventDeps;
   readonly #turnIndex = new Map<string, number>();
+  readonly #runMarks = new Map<string, RunMark>();
+  readonly #turnLanes = new Map<string, string>();
   readonly #toolArgs = new Map<string, unknown>();
   #chain: Promise<void> = Promise.resolve();
 
@@ -78,6 +140,19 @@ export class ExtensionEventAdapter {
     await this.#chain;
   }
 
+  /**
+   * The lane one in-flight turn belongs to, from the `turn_start` the
+   * harness dispatched for it.
+   *
+   * This is the best the runtime can do unaided: it covers every tool call
+   * of a live turn, and nothing of a call recovered after an eviction,
+   * whose turn started in a dead isolate. A harness that can map an
+   * invocation durably supplies `laneForInvocation` instead.
+   */
+  laneForTurn(turnId: string): string | undefined {
+    return this.#turnLanes.get(turnId);
+  }
+
   /** Wait for every queued notification to settle. */
   async drain(): Promise<void> {
     await this.#chain;
@@ -91,21 +166,43 @@ export class ExtensionEventAdapter {
         : this.#deps.states.defaultLane;
     const state = this.#deps.states.get(lane);
     switch (event.type) {
-      case "run_start":
+      case "run_start": {
         this.#turnIndex.set(event.runId, 0);
         state.runId = event.runId;
-        this.#emit(lane, { type: "agent_start" });
+        const runId = event.runId;
+        // Where the transcript stood, read after the refresh this step does,
+        // so `agent_end` can report exactly what the run added.
+        this.#emitFrom(lane, "agent_start", (current) => {
+          this.#runMarks.set(runId, {
+            from: current.entries.length,
+            tipId: current.tipId
+          });
+          return { type: "agent_start" };
+        });
         return;
-      case "run_end":
+      }
+      case "run_end": {
         this.#turnIndex.delete(event.runId);
         state.runId = undefined;
         state.systemPromptOverride = undefined;
-        this.#emit(lane, { type: "agent_end", messages: [] });
+        const runId = event.runId;
+        this.#emitFrom(lane, "agent_end", (current) => {
+          const mark = this.#runMarks.get(runId);
+          this.#runMarks.delete(runId);
+          return {
+            type: "agent_end",
+            messages: messagesSince(current.entries, mark)
+          };
+        });
         this.#emit(lane, { type: "agent_settled" });
         return;
+      }
       case "turn_start": {
         const index = this.#turnIndex.get(event.runId) ?? 0;
         this.#turnIndex.set(event.runId, index + 1);
+        // Recorded synchronously, before the turn's tool calls execute: a
+        // tool invocation names its turn but not its lane.
+        this.#turnLanes.set(event.turnId, lane);
         this.#emit(lane, {
           type: "turn_start",
           turnIndex: index,
@@ -114,6 +211,9 @@ export class ExtensionEventAdapter {
         return;
       }
       case "turn_end":
+        // Tool calls settle before the turn does, so nothing still needs the
+        // mapping once it ends.
+        this.#turnLanes.delete(event.turnId);
         this.#emit(lane, {
           type: "turn_end",
           turnIndex: Math.max(0, (this.#turnIndex.get(event.runId) ?? 1) - 1),
@@ -194,20 +294,24 @@ export class ExtensionEventAdapter {
       }
       case "compaction_end":
         if (event.status === "completed") {
-          this.#emit(lane, {
-            type: "session_compact",
-            compactionEntry: {
-              type: "compaction",
-              id: event.entryId,
-              parentId: null,
-              timestamp: new Date(event.endedAt).toISOString(),
-              summary: "",
-              firstKeptEntryId: event.entryId,
-              tokensBefore: 0
-            },
-            fromExtension: false,
-            reason: event.reason,
-            willRetry: false
+          const entryId = event.entryId;
+          const reason = event.reason;
+          this.#emitFrom(lane, "session_compact", (current) => {
+            const entry = compactionEntry(current.entries, entryId);
+            if (entry === undefined) {
+              // Nothing here knows the summary or the token count, and an
+              // invented pair reads to an extension exactly like a real one.
+              throw new Error(
+                `compaction entry ${entryId} is not on lane ${lane}`
+              );
+            }
+            return {
+              type: "session_compact",
+              compactionEntry: entry,
+              fromExtension: false,
+              reason,
+              willRetry: false
+            };
           });
           return;
         }
@@ -242,22 +346,40 @@ export class ExtensionEventAdapter {
   }
 
   #emit(lane: string, event: ExtensionEvent): void {
-    this.#run(lane, event.type, async () => {
+    this.#emitFrom(lane, event.type, () => event);
+  }
+
+  /**
+   * Emit one event whose payload is read off the lane, after the refresh
+   * this step performs. Everything derived from the transcript is built
+   * here rather than at dispatch, where the lane read model is one event
+   * behind.
+   */
+  #emitFrom(
+    lane: string,
+    source: string,
+    build: (state: ExtensionLaneState) => ExtensionEvent
+  ): void {
+    this.#run(lane, source, async (state) => {
       // SAFETY: notification events carry no result; the runner's emit union
       // is wider than the notification subset built here.
-      await this.#runner.emit(event as never);
+      await this.#runner.emit(build(state) as never);
     });
   }
 
-  #run(lane: string, source: string, work: () => Promise<void>): void {
+  #run(
+    lane: string,
+    source: string,
+    work: (state: ExtensionLaneState) => Promise<void>
+  ): void {
     this.#chain = this.#chain.then(async () => {
       try {
         // Notification handlers call the synchronous `pi.*` actions, which
         // resolve against the current lane and read the cached read model,
         // so this step owns both for as long as it runs.
-        await this.#deps.states.withLane(lane, async () => {
+        await this.#deps.states.withLane(lane, async (state) => {
           await this.#refresh(lane, source);
-          await work();
+          await work(state);
         });
       } catch (error) {
         this.#deps.report({

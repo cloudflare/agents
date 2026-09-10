@@ -350,6 +350,8 @@ const echoParameters = Type.Object({ text: Type.String() });
 export class PiExtensionsTestObject extends DurableObject<Env> {
   readonly #faux = fauxProvider();
   readonly #contextSeen: string[] = [];
+  readonly #systemPromptSeen: string[] = [];
+  readonly #agentEndTexts: string[][] = [];
   #throwOnMessageEnd = false;
   #inputCalls = 0;
   readonly tasks = new Tasks();
@@ -411,7 +413,10 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     .use(this.harness);
 
   /** Run one faux turn whose tool call goes to the extension's own tool. */
-  async runEcho(text: string): Promise<{
+  async runEcho(
+    text: string,
+    lane?: string
+  ): Promise<{
     readonly operationId: string;
     readonly status: string;
     readonly output: string;
@@ -423,7 +428,10 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
       }),
       fauxAssistantMessage("echoed")
     ]);
-    const response = await this.harness.prompt(`echo ${text}`);
+    const response = await this.harness.prompt(
+      `echo ${text}`,
+      lane === undefined ? {} : { lane }
+    );
     const result = toolResult(response.messages);
     return {
       operationId: response.operationId,
@@ -525,6 +533,16 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     this.#throwOnMessageEnd = fail;
   }
 
+  /** The system prompt every `before_agent_start` handler saw, in order. */
+  async systemPromptsSeen(): Promise<readonly string[]> {
+    return [...this.#systemPromptSeen];
+  }
+
+  /** The message texts every `agent_end` reported, one entry per run. */
+  async agentEndTexts(): Promise<readonly (readonly string[])[]> {
+    return this.#agentEndTexts.map((texts) => [...texts]);
+  }
+
   /** User-role text every provider request carried, across runs. */
   async contextSeen(): Promise<readonly string[]> {
     return [...this.#contextSeen];
@@ -599,11 +617,13 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
    * Custom entries extensions appended to the transcript, flattened: the
    * recursive JSON payload type crosses the RPC boundary poorly.
    */
-  async customEntries(): Promise<
+  async customEntries(
+    lane?: string
+  ): Promise<
     readonly { readonly customType: string; readonly text: string | null }[]
   > {
     const entries: readonly PiCustomEntry[] =
-      await this.harness.getCustomEntries();
+      await this.harness.getCustomEntries(lane === undefined ? {} : { lane });
     return entries.map((entry) => {
       const data = entry.data;
       const text =
@@ -662,6 +682,15 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
       description: "Echo the supplied text back.",
       parameters: echoParameters,
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        // "mark ..." writes through the synchronous `pi.*` surface from
+        // inside the tool body, which is what places the call on a lane.
+        if (params.text.startsWith("mark")) {
+          pi.appendEntry("test:tool-lane", { text: params.text });
+          return {
+            content: [{ type: "text", text: `echo:${params.text}` }],
+            details: { text: params.text }
+          };
+        }
         // "pick ..." asks the client to choose, which is the blocking
         // extension UI surface running inside a tool call.
         if (!params.text.startsWith("pick")) {
@@ -708,6 +737,21 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     pi.on("message_end", () => {
       if (this.#throwOnMessageEnd)
         throw new Error("message_end handler failed");
+    });
+    pi.on("before_agent_start", (event) => {
+      this.#systemPromptSeen.push(event.systemPrompt);
+      return undefined;
+    });
+    pi.on("agent_end", (event) => {
+      this.#agentEndTexts.push(
+        event.messages.map((message) => {
+          const content = "content" in message ? message.content : "";
+          if (typeof content === "string") return content;
+          return content
+            .map((part) => (part.type === "text" ? part.text : ""))
+            .join("");
+        })
+      );
     });
     pi.registerCommand("note", {
       description: "Append a note to the transcript.",

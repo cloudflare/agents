@@ -1,7 +1,9 @@
+import type { WorkspaceFsLike } from "@cloudflare/shell";
 import { BACKGROUND_CONTEXT } from "@earendil-works/pi-agent-core";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { createWorkspaceExecutionEnv } from "../harness/env";
 import type {
   PiBuiltinToolsTestObject,
   PiExecutionEnvTestObject
@@ -110,6 +112,94 @@ describe("pi ExecutionEnv over a Workspace", () => {
       temp: "keep me",
       notes: "pre-existing"
     });
+  });
+});
+
+describe("a workspace that cannot take the shell's writes", () => {
+  it("fails the exec, naming the paths that did not persist", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      // One path the workspace refuses; everything else writes normally.
+      const workspace = Object.create(
+        instance.workspace
+      ) as unknown as WorkspaceFsLike;
+      Object.assign(workspace, {
+        writeFileBytes: (path: string, bytes: Uint8Array) => {
+          if (path === "/blocked.txt") {
+            return Promise.reject(new Error("workspace is read-only"));
+          }
+          return instance.workspace.writeFileBytes(path, bytes);
+        }
+      });
+      const env = createWorkspaceExecutionEnv({ workspace });
+
+      const streamed: string[] = [];
+      const exec = await env.exec(
+        "echo hi > /blocked.txt && echo fine > /kept.txt && echo done",
+        { onStdout: (chunk: string) => streamed.push(chunk) },
+        BACKGROUND_CONTEXT
+      );
+
+      return {
+        ok: exec.ok,
+        code: exec.ok ? null : exec.error.code,
+        message: exec.ok ? null : exec.error.message,
+        streamed: streamed.join(""),
+        // The writes that could land still did.
+        kept: await instance.workspace.readFile("/kept.txt")
+      };
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("unknown");
+    expect(result.message).toContain("/blocked.txt");
+    expect(result.message).toContain("workspace is read-only");
+    expect(result.message).not.toContain("/kept.txt");
+    // Output the script produced is still delivered before the failure.
+    expect(result.streamed).toBe("done\n");
+    expect(result.kept).toBe("fine\n");
+  });
+});
+
+describe("a workspace too large to snapshot", () => {
+  it("refuses to run rather than truncating the shell's view", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/a.txt", "a".repeat(80));
+      await instance.workspace.writeFile("/b.txt", "b".repeat(80));
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace,
+        maxSnapshotTotalBytes: 100
+      });
+
+      const exec = await env.exec(
+        "cat /a.txt /b.txt",
+        undefined,
+        BACKGROUND_CONTEXT
+      );
+      return {
+        ok: exec.ok,
+        code: exec.ok ? null : exec.error.code,
+        message: exec.ok ? null : exec.error.message
+      };
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("spawn_error");
+    expect(result.message).toContain("maxSnapshotTotalBytes");
+    expect(result.message).toContain("100");
+  });
+
+  it("runs when the workspace fits inside the limit", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/a.txt", "a".repeat(80));
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace,
+        maxSnapshotTotalBytes: 100
+      });
+      const exec = await env.exec("cat /a.txt", undefined, BACKGROUND_CONTEXT);
+      return { ok: exec.ok, stdout: exec.ok ? exec.value.stdout : null };
+    });
+
+    expect(result).toEqual({ ok: true, stdout: "a".repeat(80) });
   });
 });
 

@@ -9,6 +9,61 @@ CREATE TABLE IF NOT EXISTS cf_agents_pi_submissions (
   submitted_at INTEGER NOT NULL
 )`;
 
+/**
+ * Terminal record of a submission that never became an operation.
+ *
+ * Additive to {@link SCHEMA}: an existing database gains the table on its
+ * next start and keeps every pending row it already had.
+ */
+const DISPOSITION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS cf_agents_pi_dispositions (
+  operation_id TEXT PRIMARY KEY,
+  lane TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  command TEXT,
+  created_at INTEGER NOT NULL
+)`;
+
+/**
+ * What became of a submission the harness consumed out of band.
+ *
+ * `claimed` is the transient state: the row exists from before the `input`
+ * handler or the slash command runs until its outcome is known. A row left
+ * in it is a submission whose isolate died mid-handler — the handler may have
+ * run in part, so the retry is refused rather than replayed. Out-of-band
+ * commands are at-most-once.
+ */
+export type PiDispositionKind = "claimed" | "handled" | "command";
+
+/** A submission's terminal (or in-flight) out-of-band disposition. */
+export type PiDisposition = {
+  readonly operationId: string;
+  readonly lane: string;
+  readonly kind: PiDispositionKind;
+  /** The extension slash command that ran, for `kind: "command"`. */
+  readonly command?: string;
+  readonly createdAt: number;
+};
+
+type DispositionRow = {
+  operation_id: string;
+  lane: string;
+  kind: string;
+  command: string | null;
+  created_at: number;
+};
+
+function rowToDisposition(row: DispositionRow): PiDisposition {
+  return {
+    operationId: row.operation_id,
+    lane: row.lane,
+    kind:
+      row.kind === "handled" || row.kind === "command" ? row.kind : "claimed",
+    ...(row.command === null ? {} : { command: row.command }),
+    createdAt: row.created_at
+  };
+}
+
 type SubmissionRow = {
   seq: number;
   lane: string;
@@ -46,6 +101,67 @@ export class PiSubmissions {
 
   ensureTable(): void {
     this.#storage.sql.exec(SCHEMA);
+    this.#storage.sql.exec(DISPOSITION_SCHEMA);
+  }
+
+  /**
+   * Claim an operation id for out-of-band handling, atomically.
+   *
+   * False means the id was already claimed — by a retry of this submission,
+   * or by the submission itself before an eviction — and the caller must run
+   * no handler for it. The row is the only durable trace an `input` handler
+   * or a slash command leaves, so it has to exist before either runs.
+   */
+  claim(lane: string, operationId: string): boolean {
+    const cursor = this.#storage.sql.exec(
+      `INSERT INTO cf_agents_pi_dispositions
+        (operation_id, lane, kind, command, created_at)
+       VALUES (?, ?, 'claimed', NULL, ?)
+       ON CONFLICT(operation_id) DO NOTHING`,
+      operationId,
+      lane,
+      Date.now()
+    );
+    return cursor.rowsWritten > 0;
+  }
+
+  /** Record what a claimed submission turned out to be. */
+  settle(
+    operationId: string,
+    kind: "handled" | "command",
+    command?: string
+  ): void {
+    this.#storage.sql.exec(
+      `UPDATE cf_agents_pi_dispositions
+         SET kind = ?, command = ?
+       WHERE operation_id = ?`,
+      kind,
+      command ?? null,
+      operationId
+    );
+  }
+
+  /**
+   * Drop a claim: the submission is an ordinary operation after all, and the
+   * queue row it is about to get is its idempotency record.
+   */
+  release(operationId: string): void {
+    this.#storage.sql.exec(
+      "DELETE FROM cf_agents_pi_dispositions WHERE operation_id = ?",
+      operationId
+    );
+  }
+
+  /** The out-of-band disposition of an operation id, when it has one. */
+  disposition(operationId: string): PiDisposition | undefined {
+    const row = this.#storage.sql
+      .exec<DispositionRow>(
+        `SELECT operation_id, lane, kind, command, created_at
+         FROM cf_agents_pi_dispositions WHERE operation_id = ? LIMIT 1`,
+        operationId
+      )
+      .toArray()[0];
+    return row ? rowToDisposition(row) : undefined;
   }
 
   insert(
