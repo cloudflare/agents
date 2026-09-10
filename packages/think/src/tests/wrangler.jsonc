@@ -12,6 +12,14 @@
   "durable_objects": {
     "bindings": [
       {
+        "class_name": "ConnectionStateParent",
+        "name": "ConnectionStateParent"
+      },
+      {
+        "class_name": "ConnectionStateThink",
+        "name": "ConnectionStateThink"
+      },
+      {
         "class_name": "TestAssistantToolsAgent",
         "name": "TestAssistantToolsAgent"
       },
@@ -181,6 +189,8 @@
   "migrations": [
     {
       "new_sqlite_classes": [
+        "ConnectionStateParent",
+        "ConnectionStateThink",
         "TestAssistantToolsAgent",
         "TestAssistantAgentAgent",
         "BareAssistantAgent",

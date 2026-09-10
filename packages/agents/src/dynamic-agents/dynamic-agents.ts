@@ -1245,6 +1245,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       this.storeVirtualConnection(connection);
       await this.#host.onConnect(connection, { request });
       this.storeVirtualConnection(connection);
+      // Publish onConnect state to the root before the first client frame can
+      // replace the virtual connection's state with root-owned metadata.
+      await this.#connectionOperationTails.get(meta.id);
     });
   }
 
