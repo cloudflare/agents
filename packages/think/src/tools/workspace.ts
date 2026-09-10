@@ -1368,7 +1368,16 @@ async function syncBashFilesToWorkspace({
 
   for (const rawPath of bash.fs.getAllPaths()) {
     const path = normalizeWorkspacePath(rawPath);
-    if (!shouldSyncBashPath(path, initialFiles, protectedPaths)) continue;
+    if (
+      !shouldSyncBashPath(
+        path,
+        initialFiles,
+        initialDirectories,
+        protectedPaths
+      )
+    ) {
+      continue;
+    }
     const stat = await bash.fs.stat(path).catch(() => null);
     if (stat?.isDirectory) {
       finalDirectories.add(path);
@@ -1431,6 +1440,11 @@ async function syncBashFilesToWorkspace({
     b.localeCompare(a)
   )) {
     if (path === "/" || finalDirectories.has(path)) continue;
+    // The shell always materializes the sandbox roots, so their presence in
+    // the final tree says nothing about the script; never delete the roots
+    // themselves. Workspace-owned directories *below* a root were mounted
+    // from the snapshot and sync like any other directory.
+    if (isBashSandboxRoot(path)) continue;
     if (hasProtectedDescendant(path, protectedPaths)) {
       errors.push(`Skipped deleting protected workspace directory: ${path}`);
       continue;
@@ -1505,13 +1519,27 @@ async function writeWorkspaceBytes(
     });
 }
 
+function isBashSandboxRoot(path: string): boolean {
+  return path === "/tmp" || BASH_EXCLUDED_SYNC_ROOTS.includes(path);
+}
+
+/**
+ * Whether a path in the shell's final tree belongs to the workspace.
+ *
+ * Anything the workspace already held syncs both ways, including files and
+ * directories that happen to live under a sandbox root such as `/tmp`. Paths
+ * the script created under a sandbox root are the shell's own scratch and
+ * builtins and never persist.
+ */
 function shouldSyncBashPath(
   path: string,
   initialFiles: Map<string, Uint8Array>,
+  initialDirectories: Set<string>,
   protectedPaths: Set<string>
 ): boolean {
   if (path === "/") return false;
   if (initialFiles.has(path)) return true;
+  if (initialDirectories.has(path)) return true;
   if (protectedPaths.has(path)) return true;
   if (path === "/tmp" || path.startsWith("/tmp/")) return false;
   return !BASH_EXCLUDED_SYNC_ROOTS.some(
