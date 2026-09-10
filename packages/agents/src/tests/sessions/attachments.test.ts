@@ -220,6 +220,48 @@ describe("Sessions attachments", () => {
     });
   });
 
+  it("keeps a pointer's reference when the message is written back", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      const url = dataUrl("image/png", 80_000);
+      await session.appendMessage(fileMessage("m1", url, "image/png"));
+
+      // The stored form: the same message with a pointer where the bytes
+      // were. A host can hold this form — a read whose payload did not
+      // resolve, or code that works on the row — and write it back.
+      const pointer = instance.storedMessage("", "m1");
+      expect((pointer.parts[1] as { url: string }).url).toMatch(
+        /^attachment:sha256:[0-9a-f]{64}$/
+      );
+
+      // An update that changes anything else must keep the reference. It
+      // used to be replaced with what the write extracted — nothing — and
+      // the payload was collected under a live pointer.
+      await session.updateMessage({
+        ...pointer,
+        parts: [
+          { type: "text", text: "see attached (edited)" },
+          pointer.parts[1]
+        ]
+      });
+      expect(instance.attachmentRecords()).toHaveLength(1);
+      expect(instance.attachmentRefCount()).toBe(1);
+      const [full] = await session.getHistory();
+      expect((full.parts[1] as { url: string }).url).toBe(url);
+
+      // A copy under a new id takes its own reference, so deleting the
+      // original does not take the bytes with it.
+      await session.appendMessage({ ...pointer, id: "m2" });
+      expect(instance.attachmentRefCount()).toBe(2);
+      await session.deleteMessages(["m1"]);
+      expect(instance.attachmentRecords()).toHaveLength(1);
+      const copy = await session.getMessage("m2");
+      expect(copy).not.toBeNull();
+      expect((copy!.parts[1] as { url: string }).url).toBe(url);
+    });
+  });
+
   it("returns null for an update whose target is gone and stores nothing", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
