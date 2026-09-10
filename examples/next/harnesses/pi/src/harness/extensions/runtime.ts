@@ -20,6 +20,7 @@ import type {
   ExtensionUIContext,
   InputEventResult,
   InputSource,
+  RegisteredCommand,
   ToolInfo
 } from "../../../vendor/pi-coding-agent-src/core/extensions/types.ts";
 import type { SlashCommandInfo } from "../../../vendor/pi-coding-agent-src/core/slash-commands.ts";
@@ -63,8 +64,13 @@ export type PiExtensionRuntimeDeps = {
   readonly models: PiModelRegistry;
   /** Initial flag values, overriding the defaults extensions register. */
   readonly flags?: Readonly<Record<string, boolean | string>>;
-  /** Prompt templates offered alongside extension commands. */
-  readonly promptTemplates?: readonly PiPromptTemplate[];
+  /**
+   * Prompt templates offered alongside extension commands, as the harness
+   * resolved them. A thunk like {@link PiExtensionRuntimeDeps.skills}: the
+   * set is not final when the runtime is built, and a configured resource
+   * loader can add to it.
+   */
+  readonly promptTemplates?: () => readonly PiPromptTemplate[];
   /** Skills invocable by name, as the harness resolved them. */
   readonly skills?: () => readonly PiSkill[];
   /** The harness's system prompt, when the configuration fixed one. */
@@ -105,6 +111,12 @@ export type PiExtensionRuntimeDeps = {
   ) => Promise<void>;
   /** Re-resolve the process-local tool registry after a registration change. */
   readonly refreshTools: () => void;
+  /**
+   * Republish the slash commands after an extension registered or withdrew
+   * one. Unlike tools, commands have no registration callback in pi's
+   * extension API, so this fires from the `Extension` record itself.
+   */
+  readonly commandsChanged?: () => void;
   /** Every tool currently offered to the model. */
   readonly allTools: () => readonly ToolInfo[];
   /** Durably submit one compaction. */
@@ -125,6 +137,62 @@ export type PiExtensionRuntimeDeps = {
 
 function quoted(name: string): string {
   return JSON.stringify(name);
+}
+
+/**
+ * A `Map` that reports every change it takes.
+ *
+ * Nothing is reported during construction: the map is created empty and
+ * filled through {@link ObservedMap.observe}, because `Map`'s own
+ * constructor would call `set` before the change callback exists.
+ */
+class ObservedMap<K, V> extends Map<K, V> {
+  #onChange: (() => void) | undefined;
+
+  /** Adopt `entries` silently, then report every later change. */
+  observe(entries: Iterable<readonly [K, V]>, onChange: () => void): this {
+    for (const [key, value] of entries) super.set(key, value);
+    this.#onChange = onChange;
+    return this;
+  }
+
+  override set(key: K, value: V): this {
+    super.set(key, value);
+    this.#onChange?.();
+    return this;
+  }
+
+  override delete(key: K): boolean {
+    const deleted = super.delete(key);
+    if (deleted) this.#onChange?.();
+    return deleted;
+  }
+
+  override clear(): void {
+    const had = this.size > 0;
+    super.clear();
+    if (had) this.#onChange?.();
+  }
+}
+
+/**
+ * Report a loaded extension's later command registrations.
+ *
+ * `pi.registerCommand` writes straight into the `Extension` record's plain
+ * `commands` map (vendored `core/extensions/loader.ts`), and pi's extension
+ * API has no registration callback for commands the way it has
+ * `runtime.refreshTools()` for tools. An extension that registers one from a
+ * `session_start` handler — after the harness published the command set the
+ * attachment offers — would leave every connected client's autocomplete a
+ * command short until something else republished. Swapping the map for an
+ * observed one is the only interception point that does not mean editing the
+ * vendored loader.
+ */
+function observeCommands(extension: Extension, onChange: () => void): void {
+  extension.commands = new ObservedMap<string, RegisteredCommand>().observe(
+    extension.commands,
+    onChange
+  );
 }
 
 function extensionName(extension: PiExtension, index: number): string {
@@ -212,6 +280,17 @@ export class PiExtensionRuntime {
     const eventBus = createEventBus();
     const loaded: Extension[] = [];
     const errors: { path: string; error: string }[] = [];
+    // One broadcast per microtask: a handler that registers several commands
+    // in a row publishes the finished set, not each intermediate one.
+    let publishing = false;
+    const notifyCommandsChanged = (): void => {
+      if (publishing || deps.commandsChanged === undefined) return;
+      publishing = true;
+      queueMicrotask(() => {
+        publishing = false;
+        deps.commandsChanged?.();
+      });
+    };
     for (const [index, extension] of deps.extensions.entries()) {
       const path = extensionName(extension, index);
       const factory =
@@ -228,6 +307,7 @@ export class PiExtensionRuntime {
         if (typeof extension !== "function" && extension.hidden) {
           created.hidden = true;
         }
+        observeCommands(created, notifyCommandsChanged);
         loaded.push(created);
       } catch (error) {
         errors.push({
@@ -283,7 +363,7 @@ export class PiExtensionRuntime {
       createResourceLoader({
         extensions: { extensions: loaded, errors, runtime },
         skills: deps.skills?.() ?? [],
-        promptTemplates: deps.promptTemplates ?? [],
+        promptTemplates: deps.promptTemplates?.() ?? [],
         ...(deps.systemPrompt === undefined
           ? {}
           : { systemPrompt: deps.systemPrompt }),
@@ -318,7 +398,7 @@ export class PiExtensionRuntime {
         source: "extension" as const,
         sourceInfo: command.sourceInfo
       })),
-      promptTemplates: this.#deps.promptTemplates ?? [],
+      promptTemplates: this.#deps.promptTemplates?.() ?? [],
       skills: this.#deps.skills?.() ?? []
     });
   }

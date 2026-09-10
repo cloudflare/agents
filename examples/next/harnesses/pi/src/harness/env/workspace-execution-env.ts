@@ -844,6 +844,27 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     const finalFiles = new Map<string, Uint8Array>();
     const finalDirectories = new Set<string>(["/"]);
     const finalSymlinks = new Map<string, string>();
+    /**
+     * Drop a workspace entry whose kind no longer matches what the script
+     * left under that name, without following it.
+     *
+     * `writeFileBytes` resolves symlinks, so writing a file back over a name
+     * the script turned from a link into a regular file would overwrite the
+     * link's *target* and leave the link in place — the workspace would then
+     * disagree with the tree the script produced, and the target's old
+     * content would be gone. The same holds for a name that changed between
+     * file and directory. The snapshot already recorded every synced path's
+     * kind, so the comparison costs nothing; a path the snapshot never saw
+     * is checked with `lstat`, which reports the link itself.
+     */
+    const clearTypeChange = async (path: string, final: EntryKind) => {
+      const before = snapshotKind(snapshot, path);
+      if (before === final) return;
+      const current =
+        before ?? (await this.#workspace.lstat(path).catch(() => null))?.type;
+      if (current === undefined || current === final) return;
+      await this.#workspace.rm(path, { recursive: true, force: true });
+    };
 
     for (const rawPath of bash.fs.getAllPaths()) {
       const path = normalizeAbsolute(rawPath);
@@ -871,7 +892,13 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     )) {
       if (path === "/" || snapshot.initialDirectories.has(path)) continue;
       if (hasProtectedDescendant(path, snapshot.protectedPaths)) continue;
-      await attempt(path, this.#workspace.mkdir(path, { recursive: true }));
+      await attempt(
+        path,
+        (async () => {
+          await clearTypeChange(path, "directory");
+          await this.#workspace.mkdir(path, { recursive: true });
+        })()
+      );
     }
 
     for (const [path, bytes] of finalFiles) {
@@ -879,7 +906,13 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       const existing = snapshot.initialFiles.get(path);
       if (existing && bytesEqual(existing, bytes)) continue;
       await this.#ensureParent(path).catch(() => {});
-      await attempt(path, this.#workspace.writeFileBytes(path, bytes));
+      await attempt(
+        path,
+        (async () => {
+          await clearTypeChange(path, "file");
+          await this.#workspace.writeFileBytes(path, bytes);
+        })()
+      );
     }
 
     for (const [path, target] of finalSymlinks) {
@@ -889,8 +922,11 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
         path,
         (async () => {
           // The workspace refuses to link over an existing name, so a
-          // changed link replaces the old one.
-          await this.#workspace.rm(path, { force: true }).catch(() => {});
+          // changed link replaces the old one — as does a name the script
+          // turned from a file or a directory into a link.
+          await this.#workspace
+            .rm(path, { recursive: true, force: true })
+            .catch(() => {});
           await this.#workspace.symlink(target, path);
         })()
       );
@@ -913,9 +949,12 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
     for (const path of [...snapshot.initialFiles.keys()].sort((a, b) =>
       b.localeCompare(a)
     )) {
+      // A file the script replaced with a directory of the same name was
+      // written back above; only a name that is gone altogether is removed.
       if (
         finalFiles.has(path) ||
         finalSymlinks.has(path) ||
+        finalDirectories.has(path) ||
         snapshot.protectedPaths.has(path)
       ) {
         continue;
@@ -927,7 +966,7 @@ class WorkspaceExecutionEnv implements ExecutionEnv {
       b.localeCompare(a)
     )) {
       if (path === "/" || finalDirectories.has(path)) continue;
-      if (finalSymlinks.has(path)) continue;
+      if (finalSymlinks.has(path) || finalFiles.has(path)) continue;
       // A sandbox root is never absent from the shell's view because the
       // shell owns it, so its absence from `finalDirectories` says nothing
       // about the script's intent — and a recursive delete here would take
@@ -1072,6 +1111,21 @@ interface Snapshot {
    */
   protectedPaths: Set<string>;
   directories: string[];
+}
+
+/** Workspace entry kinds, as `lstat` reports them. */
+type EntryKind = "file" | "directory" | "symlink";
+
+/**
+ * The kind the snapshot found at `path`, or `undefined` for a name it never
+ * walked. The snapshot is authoritative for every path it carried in, so the
+ * sync pass can tell a changed kind from an unchanged one without a read.
+ */
+function snapshotKind(snapshot: Snapshot, path: string): EntryKind | undefined {
+  if (snapshot.symlinks.has(path)) return "symlink";
+  if (snapshot.initialDirectories.has(path)) return "directory";
+  if (snapshot.initialFiles.has(path)) return "file";
+  return undefined;
 }
 
 function shouldSync(path: string, snapshot: Snapshot): boolean {

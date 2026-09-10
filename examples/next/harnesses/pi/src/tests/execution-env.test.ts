@@ -121,7 +121,7 @@ describe("workspace symlinks", () => {
    * not exist: `readlink` failed on a name the workspace links, `ls` did not
    * show it, and the sync pass then wrote that view back.
    */
-  it("hands the shell the link, and writes through it land on its target", async () => {
+  it("hands the shell the link, and leaves an untouched one alone", async () => {
     const result = await inObject(fresh(), async (instance) => {
       await instance.workspace.writeFile("/target.txt", "linked\n");
       await instance.workspace.symlink("/target.txt", "/link.txt");
@@ -130,7 +130,7 @@ describe("workspace symlinks", () => {
       });
 
       const exec = await env.exec(
-        "readlink /link.txt && cat /link.txt && echo written > /link.txt",
+        "readlink /link.txt && cat /link.txt",
         undefined,
         BACKGROUND_CONTEXT
       );
@@ -138,7 +138,6 @@ describe("workspace symlinks", () => {
       return {
         ok: exec.ok,
         stdout: exec.ok ? exec.value.stdout : exec.error.message,
-        // The write followed the link, and the link is still a link.
         target: await instance.workspace.readFile("/target.txt"),
         stillLinked: (await instance.workspace.lstat("/link.txt"))?.type
       };
@@ -146,7 +145,7 @@ describe("workspace symlinks", () => {
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("/target.txt\nlinked\n");
-    expect(result.target).toBe("written\n");
+    expect(result.target).toBe("linked\n");
     expect(result.stillLinked).toBe("symlink");
   });
 
@@ -174,6 +173,103 @@ describe("workspace symlinks", () => {
     expect(result.ok).toBe(true);
     expect(result.type).toBe("symlink");
     expect(result.target).toBe("/target.txt");
+  });
+});
+
+/**
+ * A script is free to replace a name with an entry of another kind, and the
+ * write-back has to follow it. `writeFileBytes` resolves symlinks, so a link
+ * the script turned into a regular file used to leave the link in place and
+ * overwrite whatever it pointed at — the workspace kept a tree the script had
+ * already thrown away, and the target's content was lost with it.
+ */
+describe("entry kind transitions", () => {
+  it("replaces a link the script turned into a regular file", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/target.txt", "linked\n");
+      await instance.workspace.symlink("/target.txt", "/link.txt");
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace
+      });
+
+      // just-bash's truncating redirect replaces the name rather than
+      // writing through it, so the shell's own tree ends with `/link.txt` a
+      // regular file and `/target.txt` untouched. The workspace has to say
+      // the same thing.
+      const exec = await env.exec(
+        "echo replaced > /link.txt",
+        undefined,
+        BACKGROUND_CONTEXT
+      );
+
+      return {
+        ok: exec.ok,
+        message: exec.ok ? null : exec.error.message,
+        kind: (await instance.workspace.lstat("/link.txt"))?.type,
+        link: await instance.workspace.readFile("/link.txt"),
+        target: await instance.workspace.readFile("/target.txt")
+      };
+    });
+
+    expect(result.message).toBe(null);
+    expect(result.kind).toBe("file");
+    expect(result.link).toBe("replaced\n");
+    // The link is gone, so the write never reached what it pointed at.
+    expect(result.target).toBe("linked\n");
+  });
+
+  it("replaces a file the script turned into a directory", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/thing", "a file\n");
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace
+      });
+
+      const exec = await env.exec(
+        "rm /thing && mkdir /thing && echo inner > /thing/inner.txt",
+        undefined,
+        BACKGROUND_CONTEXT
+      );
+
+      return {
+        ok: exec.ok,
+        message: exec.ok ? null : exec.error.message,
+        kind: (await instance.workspace.lstat("/thing"))?.type,
+        inner: await instance.workspace.readFile("/thing/inner.txt")
+      };
+    });
+
+    expect(result.message).toBe(null);
+    expect(result.kind).toBe("directory");
+    expect(result.inner).toBe("inner\n");
+  });
+
+  it("replaces a directory the script turned into a file", async () => {
+    const result = await inObject(fresh(), async (instance) => {
+      await instance.workspace.writeFile("/thing/inner.txt", "inner\n");
+      const env = createWorkspaceExecutionEnv({
+        workspace: instance.workspace
+      });
+
+      const exec = await env.exec(
+        "rm -rf /thing && echo now-a-file > /thing",
+        undefined,
+        BACKGROUND_CONTEXT
+      );
+
+      return {
+        ok: exec.ok,
+        message: exec.ok ? null : exec.error.message,
+        kind: (await instance.workspace.lstat("/thing"))?.type,
+        text: await instance.workspace.readFile("/thing"),
+        innerGone: !(await instance.workspace.exists("/thing/inner.txt"))
+      };
+    });
+
+    expect(result.message).toBe(null);
+    expect(result.kind).toBe("file");
+    expect(result.text).toBe("now-a-file\n");
+    expect(result.innerGone).toBe(true);
   });
 });
 

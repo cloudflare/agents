@@ -13,11 +13,47 @@ function isoTimestamp(timestamp: number): string {
 }
 
 /**
+ * The first entry a compaction retained, as upstream's `firstKeptEntryId`.
+ *
+ * pi-agent-core records what a compaction kept as messages
+ * (`CompactionEntry.retainedTail`), not as a cursor into the branch, so the
+ * cursor is derived: the retained tail is the last `retainedTail.length`
+ * message entries before the compaction. Reporting the compaction's own id
+ * instead claims everything before it was dropped — false whenever a tail
+ * was kept, and an extension reading back from that cursor finds none of the
+ * messages the model can still see.
+ *
+ * A compaction that retained nothing does start at itself, and so does one
+ * whose branch is not to hand: both are the honest answer to "nothing before
+ * this is retained", and the field cannot be absent.
+ */
+function firstKeptEntryId(
+  entry: Extract<Entry, { type: "compaction" }>,
+  branch: readonly Entry[]
+): string {
+  const kept = entry.retainedTail.length;
+  if (kept === 0) return entry.id;
+  const index = branch.findIndex((candidate) => candidate.id === entry.id);
+  if (index < 0) return entry.id;
+  const retained = branch
+    .slice(0, index)
+    .filter((candidate) => candidate.type === "message")
+    .slice(-kept);
+  return retained[0]?.id ?? entry.id;
+}
+
+/**
  * Project one durable harness entry into the session entry shape extensions
  * read. The two differ in bookkeeping only: the harness numbers entries and
  * keeps compaction tails, upstream keeps file offsets and ISO timestamps.
+ *
+ * `branch` is the entry list this one belongs to, which a compaction needs
+ * to resolve its retained tail back into a cursor.
  */
-export function projectSessionEntry(entry: Entry): SessionEntry {
+export function projectSessionEntry(
+  entry: Entry,
+  branch: readonly Entry[] = []
+): SessionEntry {
   const base = {
     id: entry.id,
     parentId: entry.parentId,
@@ -32,7 +68,7 @@ export function projectSessionEntry(entry: Entry): SessionEntry {
         type: "compaction",
         summary: entry.summary,
         // The harness retains a message tail rather than an entry cursor.
-        firstKeptEntryId: entry.id,
+        firstKeptEntryId: firstKeptEntryId(entry, branch),
         tokensBefore: entry.tokensBefore,
         ...(entry.details === undefined ? {} : { details: entry.details }),
         ...(entry.usage === undefined ? {} : { usage: entry.usage }),
@@ -76,8 +112,10 @@ export function createSessionView(
   states: ExtensionLaneStates,
   options: SessionViewOptions
 ): ReadonlySessionManager {
-  const entries = (): SessionEntry[] =>
-    states.current.entries.map(projectSessionEntry);
+  const entries = (): SessionEntry[] => {
+    const branch = states.current.entries;
+    return branch.map((entry) => projectSessionEntry(entry, branch));
+  };
   return {
     getCwd: () => options.cwd,
     getSessionDir: () => options.cwd,

@@ -14,6 +14,7 @@ import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
 import { WebSockets } from "agents/websockets";
 import { Type } from "typebox";
+import { createSyntheticSourceInfo } from "../../vendor/pi-coding-agent-src/core/source-info.ts";
 import { createWorkspaceExecutionEnv } from "../harness/env";
 import { PiHarness } from "../harness/pi-harness";
 import type {
@@ -21,6 +22,7 @@ import type {
   PiEvent,
   PiExtensionApi,
   PiMessage,
+  PiResourceLoader,
   PiSlashCommand,
   PiSubmissionReceipt,
   PiTool
@@ -29,10 +31,50 @@ import { createModels } from "../providers/models";
 
 const multiplyParameters = Type.Object({ value: Type.Number() });
 const TOOL_REVISION_KEY = "test:pi:revision";
+/** Set when a test simulates a deployment that registers an extra tool. */
+const DEPLOYED_TOOL_KEY = "test:pi:deployed-tool";
 
 type ToolContext = {
   readonly revision: number;
 };
+
+/**
+ * A resource loader serving one prompt template of its own, standing in for
+ * a host that keeps its resources somewhere the harness configuration does
+ * not reach.
+ *
+ * Only the surface the harness reads is real. `getExtensions` is not part of
+ * that surface — the runtime loads extensions from the configuration — so it
+ * answers with an empty result rather than a fabricated runtime.
+ */
+function deployResourceLoader(): PiResourceLoader {
+  const filePath = "<loader:deploy>";
+  const prompts = [
+    {
+      name: "deploy",
+      description: "Deploy to an environment.",
+      content: "Deploy to $1",
+      filePath,
+      sourceInfo: createSyntheticSourceInfo(filePath, { source: "loader" })
+    }
+  ];
+  return {
+    getExtensions: () =>
+      ({ extensions: [], errors: [] }) as unknown as ReturnType<
+        PiResourceLoader["getExtensions"]
+      >,
+    getSkills: () => ({ skills: [], diagnostics: [] }),
+    getPrompts: () => ({ prompts: [...prompts], diagnostics: [] }),
+    getThemes: () => ({ themes: [], diagnostics: [] }),
+    getAgentsFiles: () => ({ agentsFiles: [] }),
+    getSystemPrompt: () => undefined,
+    getSystemPromptSource: () => undefined,
+    getAppendSystemPrompt: () => [],
+    getAppendSystemPromptSources: () => [],
+    extendResources: () => {},
+    reload: async () => {}
+  };
+}
 
 /** The last tool result in a projected transcript, as text and error flag. */
 function toolResult(messages: readonly PiMessage[]): {
@@ -368,7 +410,13 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
     thinkingLevel: "off",
     retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
     compaction: { enabled: false, reserveTokens: 0, keepRecentTokens: 0 },
-    tools: () => [this.#multiplyTool()],
+    // Durable, not process-local: a test that simulates a deploy adding a
+    // tool has to keep the addition across the eviction that stands in for
+    // the new isolate.
+    tools: async () =>
+      (await this.ctx.storage.get<boolean>(DEPLOYED_TOOL_KEY)) === true
+        ? [this.#multiplyTool(), this.#deployedTool()]
+        : [this.#multiplyTool()],
     extensions: [{ name: "test", factory: (pi) => this.#register(pi) }],
     flags: { "note-prefix": "flagged" },
     promptTemplates: [
@@ -388,6 +436,7 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
         }
       ]
     },
+    resourceLoader: deployResourceLoader(),
     uiRequestTimeoutMs: 5_000,
     systemPrompt: "Use the supplied test tools.",
     configure: (hooks) => {
@@ -847,6 +896,31 @@ export class PiExtensionsTestObject extends DurableObject<Env> {
         );
       }
     });
+  }
+
+  /** Stand in for a deploy that registers a tool this object did not have. */
+  async deployTool(): Promise<void> {
+    await this.ctx.storage.put(DEPLOYED_TOOL_KEY, true);
+  }
+
+  #deployedTool(): PiTool<
+    object | undefined,
+    typeof multiplyParameters,
+    { readonly result: number }
+  > {
+    return {
+      name: "deployed",
+      label: "Deployed",
+      description: "A tool a later deployment registered.",
+      parameters: multiplyParameters,
+      async execute(_id, input) {
+        const result = input.value;
+        return {
+          content: [{ type: "text", text: String(result) }],
+          details: { result }
+        };
+      }
+    };
   }
 
   #multiplyTool(): PiTool<

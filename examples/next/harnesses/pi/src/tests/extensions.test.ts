@@ -16,9 +16,11 @@ import { createExtensionActions } from "../harness/extensions/actions";
 import {
   ExtensionEventAdapter,
   compactionEntry,
-  messagesSince
+  messagesSince,
+  runMessages
 } from "../harness/extensions/events-adapter";
 import { PiExtensionRuntime } from "../harness/extensions/runtime";
+import { projectSessionEntry } from "../harness/extensions/session-view";
 import { ExtensionLaneStates } from "../harness/extensions/state";
 import { createExtensionModelRegistry } from "../harness/extensions/model-registry";
 import { createModels, resolveModel } from "../providers/models";
@@ -359,6 +361,32 @@ describe("pi extension surface", () => {
     // Pi's terminal built-ins are not offered by a Durable Object.
     expect(commands.some((command) => command.name === "model")).toBe(false);
   });
+
+  /**
+   * A configured resource loader replaces the surface pi's extension runtime
+   * reads, so its prompt templates have to reach the harness's own resources
+   * as well. Left out, a template the loader serves is neither offered by
+   * autocomplete nor resolvable when a client submits it.
+   */
+  it("lists and resolves a prompt template a resource loader serves", async () => {
+    const stub = fresh();
+    expect(await stub.commands()).toEqual(
+      expect.arrayContaining([
+        {
+          name: "deploy",
+          description: "Deploy to an environment.",
+          source: "template"
+        },
+        // The configuration's own template is not displaced by the loader.
+        { name: "greet", description: expect.any(String), source: "template" }
+      ])
+    );
+
+    const receipt = await stub.submitText("/deploy staging");
+    expect(receipt).toMatchObject({ accepted: true, status: "completed" });
+    // The template was formatted and run as a prompt, not sent verbatim.
+    expect(await stub.messages()).toContain("Deploy to staging");
+  });
 });
 
 describe("process-local tool refresh", () => {
@@ -381,6 +409,29 @@ describe("process-local tool refresh", () => {
     // The drive pass reconciled nothing: the registry did not change.
     expect(afterRun).toEqual(["echo"]);
     expect(run.status).toBe("completed");
+  });
+
+  /**
+   * The baseline the reconciliation compares against has to outlive the
+   * isolate. A deploy that registers a tool starts every isolate with an
+   * empty memory, and a lane that already carries a selection would then be
+   * read as never seen before — its selection left alone, and the new tool
+   * inactive for the life of the session.
+   */
+  it("activates a newly deployed tool on a lane that already has a selection", async () => {
+    const stub = fresh();
+    // One pass against the registry as it stands, then a narrowing.
+    expect((await stub.runEcho("first")).status).toBe("completed");
+    await stub.submitText("/only echo");
+    expect(await stub.activeTools()).toEqual(["echo"]);
+
+    await stub.deployTool();
+    await evictDurableObject(stub);
+
+    // The first drive pass of the new isolate reconciles against the stored
+    // baseline: the tool the deploy added joins, the narrowing stands.
+    expect((await stub.runEcho("after deploy")).status).toBe("completed");
+    expect(await stub.activeTools()).toEqual(["deployed", "echo"]);
   });
 });
 
@@ -521,6 +572,28 @@ describe("run-scoped event payloads", () => {
     expect(messagesSince(entries, { from: 2, tipId: "gone" })).toHaveLength(1);
   });
 
+  it("builds agent_end from the ids the run's own events carried", () => {
+    const entries = [entry("1", "old"), entry("2", "new"), entry("3", "also")];
+    const texts = (messages: ReturnType<typeof runMessages>) =>
+      messages.map((message) => ("content" in message ? message.content : ""));
+
+    // The mark landed after the run committed — the failure mode a fast
+    // provider produces — and the ids still name what the run added.
+    expect(
+      texts(runMessages(entries, new Set(["2", "3"]), { from: 3, tipId: "3" }))
+    ).toEqual(["new", "also"]);
+    // Ids the branch no longer holds contribute nothing, rather than
+    // shifting the window.
+    expect(
+      texts(runMessages(entries, new Set(["gone", "3"]), undefined))
+    ).toEqual(["also"]);
+    // No event carried an id, so the mark is the only cursor left.
+    expect(
+      texts(runMessages(entries, new Set(), { from: 1, tipId: "1" }))
+    ).toEqual(["new", "also"]);
+    expect(runMessages(entries, undefined, undefined)).toEqual([]);
+  });
+
   it("projects the real compaction entry, or none at all", () => {
     const compaction = {
       type: "compaction",
@@ -546,6 +619,55 @@ describe("run-scoped event payloads", () => {
     expect(
       compactionEntry([entry("1", "old"), compaction], "c2")
     ).toBeUndefined();
+  });
+
+  /**
+   * pi-agent-core records what a compaction kept as messages, not as a
+   * cursor. Reporting the compaction's own id as `firstKeptEntryId` tells an
+   * extension that nothing before it survived, so an extension paging back
+   * from that cursor misses the very messages the model can still see.
+   */
+  it("derives a compaction's retained cursor from the branch", () => {
+    const compaction = (id: string, retained: number): Entry =>
+      ({
+        type: "compaction",
+        id,
+        parentId: null,
+        seq: 9,
+        timestamp: 0,
+        summary: "the story so far",
+        retainedTail: Array.from({ length: retained }, () => ({
+          role: "user",
+          content: "kept",
+          timestamp: 0
+        })),
+        tokensBefore: 10,
+        fromHook: false
+      }) as unknown as Entry;
+
+    const branch = [
+      entry("1", "first"),
+      entry("2", "second"),
+      entry("3", "third"),
+      compaction("c1", 2)
+    ];
+    const projected = projectSessionEntry(branch[3]!, branch);
+    expect(projected.type).toBe("compaction");
+    // Two messages were kept, so the cursor is the earlier of the last two.
+    expect(
+      projected.type === "compaction" ? projected.firstKeptEntryId : null
+    ).toBe("2");
+
+    // A compaction that kept nothing genuinely starts at itself.
+    const none = projectSessionEntry(compaction("c2", 0), branch);
+    expect(none.type === "compaction" ? none.firstKeptEntryId : null).toBe(
+      "c2"
+    );
+
+    // A tail longer than the branch keeps every message there is.
+    const all = [entry("1", "first"), compaction("c3", 5)];
+    const wide = projectSessionEntry(all[1]!, all);
+    expect(wide.type === "compaction" ? wide.firstKeptEntryId : null).toBe("1");
   });
 });
 
@@ -620,6 +742,61 @@ describe("extension write draining", () => {
     expect(appended).toEqual(["test:drain"]);
     await runtime.stop();
   });
+
+  /**
+   * `pi.registerCommand` writes straight into the extension record, and pi's
+   * extension API has no registration callback for commands. An extension
+   * that registers one from a `session_start` handler does so after the
+   * harness published the set this attachment offers, so without a report
+   * from the record itself every connected client autocompletes a command
+   * short for the rest of the session.
+   */
+  it("reports a command an extension registers after load", async () => {
+    const published: string[][] = [];
+    const runtime = await PiExtensionRuntime.create({
+      extensions: [
+        (pi) => {
+          pi.registerCommand("note", {
+            description: "Append a note.",
+            handler: async () => {}
+          });
+          pi.on("session_start", () => {
+            pi.registerCommand("late", {
+              description: "Registered from session_start.",
+              handler: async () => {}
+            });
+          });
+        }
+      ],
+      cwd: "/",
+      defaultLane: "main",
+      sessionId: "session",
+      models: createModels(),
+      lane: async () => ({}) as unknown as AgentLane,
+      setSessionName: async () => {},
+      setLabel: async () => {},
+      refreshTools: () => {},
+      commandsChanged: () => {
+        published.push(runtime.commands().map((command) => command.name));
+      },
+      allTools: () => [],
+      compact: async () => {},
+      navigate: async () => {},
+      report: () => {}
+    });
+    // Nothing is reported for the registrations the load itself made: the
+    // harness publishes that set once the attachment is complete.
+    runtime.attach({ on: () => () => {} } as unknown as Hooks);
+    expect(published).toEqual([]);
+
+    await runtime.drain("main");
+    // The debounce publishes on a microtask of its own.
+    await Promise.resolve();
+    expect(published.at(-1)).toContain("late");
+    expect(published.at(-1)).toContain("note");
+    await runtime.stop();
+  });
+
   /**
    * The same hazard one layer up. A tool body writes through the same
    * synchronous surface a command handler does, and the harness settles the

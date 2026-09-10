@@ -47,6 +47,33 @@ export function messagesSince(
 }
 
 /**
+ * The messages one run added, from the entry ids its own events carried.
+ *
+ * The mark alone is not enough. It is read on the queued refresh
+ * `agent_start` performs, and a fast run — a stub provider answering in the
+ * same microtask — commits its entries before that step ever runs, leaving
+ * the mark pointing past them and `agent_end` reporting nothing. The ids
+ * come off the harness events themselves, recorded synchronously as they are
+ * dispatched, so they describe the run whatever order the queue settles in.
+ *
+ * The mark stays as the fallback for a run whose events carried no ids at
+ * all — a recovered run whose entries were committed in a dead isolate.
+ */
+export function runMessages(
+  entries: readonly Entry[],
+  entryIds: ReadonlySet<string> | undefined,
+  mark: RunMark | undefined
+): AgentMessage[] {
+  if (entryIds === undefined || entryIds.size === 0) {
+    return messagesSince(entries, mark);
+  }
+  return entries
+    .filter((entry) => entryIds.has(entry.id))
+    .filter((entry) => entry.type === "message")
+    .map((entry) => entry.message);
+}
+
+/**
  * Project the compaction entry a `compaction_end` names, as pi's own
  * `session_compact` event carries it. Absent when the entry is no longer on
  * the lane's branch — a fabricated stand-in would tell an extension a
@@ -60,7 +87,7 @@ export function compactionEntry(
     (candidate) => candidate.id === entryId && candidate.type === "compaction"
   );
   if (entry === undefined) return undefined;
-  const projected = projectSessionEntry(entry);
+  const projected = projectSessionEntry(entry, entries);
   return projected.type === "compaction" ? projected : undefined;
 }
 
@@ -107,6 +134,13 @@ export class ExtensionEventAdapter {
   readonly #deps: ExtensionEventDeps;
   readonly #turnIndex = new Map<string, number>();
   readonly #runMarks = new Map<string, RunMark>();
+  /**
+   * Entry ids each in-flight run has committed, collected at dispatch time.
+   *
+   * Dispatch is synchronous and emission is not, so this is the only view of
+   * a run's boundary that cannot arrive after the run has already written.
+   */
+  readonly #runEntryIds = new Map<string, Set<string>>();
   readonly #turnLanes = new Map<string, string>();
   readonly #toolArgs = new Map<string, unknown>();
   #chain: Promise<void> = Promise.resolve();
@@ -165,11 +199,13 @@ export class ExtensionEventAdapter {
         ? event.lane
         : this.#deps.states.defaultLane;
     const state = this.#deps.states.get(lane);
+    this.#recordRunEntry(event, state);
     switch (event.type) {
       case "run_start": {
         this.#turnIndex.set(event.runId, 0);
         state.runId = event.runId;
         const runId = event.runId;
+        this.#runEntryIds.set(runId, new Set());
         // Where the transcript stood, read after the refresh this step does,
         // so `agent_end` can report exactly what the run added.
         this.#emitFrom(lane, "agent_start", (current) => {
@@ -186,12 +222,16 @@ export class ExtensionEventAdapter {
         state.runId = undefined;
         state.systemPromptOverride = undefined;
         const runId = event.runId;
+        // Read here, not in the emit below: the ids are the run's own, and
+        // `run_end` is the last event that can add to them.
+        const entryIds = this.#runEntryIds.get(runId);
+        this.#runEntryIds.delete(runId);
         this.#emitFrom(lane, "agent_end", (current) => {
           const mark = this.#runMarks.get(runId);
           this.#runMarks.delete(runId);
           return {
             type: "agent_end",
-            messages: messagesSince(current.entries, mark)
+            messages: runMessages(current.entries, entryIds, mark)
           };
         });
         this.#emit(lane, { type: "agent_settled" });
@@ -342,6 +382,32 @@ export class ExtensionEventAdapter {
         return;
       default:
         return;
+    }
+  }
+
+  /**
+   * Note any entry id one harness event carries against the run that is open
+   * on its lane.
+   *
+   * `entry_added` names every entry the run commits, and `message_end` and
+   * `compaction_end` name theirs; `state.runId` supplies the run for the
+   * events that do not carry one. Recording is synchronous with dispatch, so
+   * a run that finishes before the emit queue drains still has its boundary.
+   */
+  #recordRunEntry(event: HarnessEvent, state: ExtensionLaneState): void {
+    const runId =
+      "runId" in event && typeof event.runId === "string"
+        ? event.runId
+        : state.runId;
+    if (runId === undefined) return;
+    const ids = this.#runEntryIds.get(runId);
+    if (ids === undefined) return;
+    if (event.type === "entry_added") {
+      ids.add(event.entry.id);
+      return;
+    }
+    if ("entryId" in event && typeof event.entryId === "string") {
+      ids.add(event.entryId);
     }
   }
 

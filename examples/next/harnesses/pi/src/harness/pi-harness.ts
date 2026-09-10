@@ -131,6 +131,18 @@ const RESULT_POLL_MS = 500;
 /** Default wait for a client's answer to a blocking extension UI dialog. */
 const DEFAULT_UI_REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * Durable key prefix for one lane's tool registry baseline.
+ *
+ * The registry is process-local and the lane's active set is durable, so the
+ * reconciliation in {@link PiHarness.#refreshProcessLocal} needs a third
+ * durable fact: which tools the registry held the last time it reconciled.
+ * Held in isolate memory alone, that baseline is reborn empty after every
+ * deploy, and a lane that already carries a selection is then never told
+ * about a tool the deploy added.
+ */
+const TOOL_BASELINE_KEY = "cf_agents_pi:tool_baseline:";
+
 type LaneDriverInput = { readonly version: 1; readonly lane: string };
 
 type DrivePassOutcome =
@@ -268,6 +280,25 @@ function asUpstreamTools<ToolContext extends object | undefined>(
 ): UpstreamAgentHarnessTool<ToolContext>[] {
   // SAFETY: PiTool is the public structural projection of AgentHarnessTool.
   return tools as unknown as UpstreamAgentHarnessTool<ToolContext>[];
+}
+
+/**
+ * Keep the first entry of each name, in order.
+ *
+ * Resources arrive from several places — the configuration, resolved skill
+ * sources, a resource loader — and a name that appears twice is one command
+ * offered twice. The earlier source wins, so the configuration's own entry
+ * is never displaced by one a loader happens to share a name with.
+ */
+function byName<T extends { readonly name: string }>(
+  entries: readonly T[]
+): T[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    if (seen.has(entry.name)) return false;
+    seen.add(entry.name);
+    return true;
+  });
 }
 
 function asUpstreamResources(resources: PiResources): UpstreamResources {
@@ -1018,9 +1049,7 @@ export class PiHarness<
       // `createModels` returns.
       models: config.models as PiModelRegistry,
       ...(config.flags === undefined ? {} : { flags: config.flags }),
-      ...(config.promptTemplates === undefined
-        ? {}
-        : { promptTemplates: config.promptTemplates }),
+      promptTemplates: () => this.#resources.promptTemplates,
       skills: () => this.#resources.skills,
       ...(typeof config.systemPrompt === "string"
         ? { systemPrompt: config.systemPrompt }
@@ -1055,6 +1084,9 @@ export class PiHarness<
         await harness.setLabel(entryId, label, BACKGROUND_CONTEXT);
       },
       refreshTools: () => this.#scheduleToolRefresh(),
+      // Commands can be registered long after load — from a `session_start`
+      // handler, say — and clients autocomplete from what was published.
+      commandsChanged: () => this.#broadcastCommands(),
       allTools: () => this.#toolInfos,
       compact: async (lane, options) => {
         await this.submit(
@@ -1359,15 +1391,63 @@ export class PiHarness<
         ? await source(context as PiContext)
         : (source ?? {});
     const resolved = (await this.#resolvedSkills())?.skills ?? [];
-    const skills = [...(own.skills ?? []), ...resolved];
-    const promptTemplates = [
+    const loaded = this.#loaderResources();
+    const skills = byName([
+      ...(own.skills ?? []),
+      ...resolved,
+      ...loaded.skills
+    ]);
+    const promptTemplates = byName([
       ...(own.promptTemplates ?? []),
-      ...(this.#config.promptTemplates ?? [])
-    ];
+      ...(this.#config.promptTemplates ?? []),
+      ...loaded.promptTemplates
+    ]);
     // Cached for the synchronous command surfaces: pi's `getCommands` and the
     // slash resolver both list skills and templates without awaiting.
     this.#resources = { skills, promptTemplates };
     return asUpstreamResources({ ...own, skills, promptTemplates });
+  }
+
+  /**
+   * Skills and prompt templates a configured resource loader serves.
+   *
+   * The loader replaces the in-memory surface pi's extension runtime reads,
+   * so its resources have to reach the harness's own resources and the
+   * command cache too. Otherwise a `/deploy` the loader supplies is neither
+   * listed by `getCommands` nor resolvable when submitted — the runtime
+   * knows about it and nothing else does.
+   *
+   * pi's `Skill` names a file rather than carrying its body, and a Durable
+   * Object has no filesystem to read one from. A loader skill therefore
+   * counts only when it carries its own `content`; listing one without a
+   * body would offer a command no run could execute.
+   */
+  #loaderResources(): {
+    readonly skills: readonly PiSkill[];
+    readonly promptTemplates: readonly PiPromptTemplate[];
+  } {
+    const loader = this.#config.resourceLoader;
+    if (loader === undefined) return { skills: [], promptTemplates: [] };
+    const skills: PiSkill[] = [];
+    for (const skill of loader.getSkills().skills) {
+      const content = "content" in skill ? skill.content : undefined;
+      if (typeof content !== "string") continue;
+      skills.push({
+        name: skill.name,
+        description: skill.description,
+        content,
+        filePath: skill.filePath,
+        ...(skill.disableModelInvocation === true
+          ? { disableModelInvocation: true }
+          : {})
+      });
+    }
+    const promptTemplates = loader.getPrompts().prompts.map((prompt) => ({
+      name: prompt.name,
+      description: prompt.description,
+      content: prompt.content
+    }));
+    return { skills, promptTemplates };
   }
 
   /**
@@ -1378,9 +1458,15 @@ export class PiHarness<
    * that wrote the whole registry back every time would undo
    * `pi.setActiveTools([...])` before the next drive: an extension narrows
    * the set, and the next refresh widens it again. Only a registry that
-   * actually changed since this isolate's last pass moves the selection —
-   * newly registered tools join it, withdrawn ones leave it, and whatever
-   * the lane selected in between stays selected.
+   * actually changed since the last pass moves the selection — newly
+   * registered tools join it, withdrawn ones leave it, and whatever the lane
+   * selected in between stays selected.
+   *
+   * The baseline the comparison needs is durable, not process-local. A
+   * deploy that registers a new tool starts every isolate with an empty
+   * memory; a purely in-memory baseline would read that first pass as "first
+   * time this lane was seen", leave the stored selection untouched, and the
+   * new tool would never become active on any lane that had one.
    */
   async #refreshProcessLocal(
     harness: UpstreamAgentHarness<object | undefined>,
@@ -1392,13 +1478,16 @@ export class PiHarness<
     await harness.setResources(await this.#resolveResources(context), context);
     if (this.#config.activeToolNames !== undefined) return;
     const names = tools.map((tool) => tool.name);
-    const previous = this.#registeredTools.get(lane.name);
+    const previous =
+      this.#registeredTools.get(lane.name) ??
+      (await this.#storedToolBaseline(lane.name));
     this.#registeredTools.set(lane.name, new Set(names));
+    await this.#storeToolBaseline(lane.name, names, previous);
     const active = await lane.getActiveTools(context);
     if (previous === undefined) {
-      // First pass for this lane in this isolate. A lane that carries a
-      // selection keeps it — it is the durable one, extension edits and all;
-      // a lane with none is offered every registered tool.
+      // First pass for this lane, ever. A lane that carries a selection
+      // keeps it — it is the durable one, extension edits and all; a lane
+      // with none is offered every registered tool.
       if (active.length > 0) return;
       await lane.setActiveTools(names, context);
       return;
@@ -1415,6 +1504,37 @@ export class PiHarness<
       return;
     }
     await lane.setActiveTools(next, context);
+  }
+
+  /** The tool registry as this lane last reconciled against it, if ever. */
+  async #storedToolBaseline(
+    lane: string
+  ): Promise<ReadonlySet<string> | undefined> {
+    const stored = await this.lifecycle.storage.get<string[]>(
+      `${TOOL_BASELINE_KEY}${lane}`
+    );
+    return stored === undefined ? undefined : new Set(stored);
+  }
+
+  /**
+   * Record the registry this lane just reconciled against, when it moved.
+   *
+   * Writes are ~1000× the cost of reads here, and the registry is the same
+   * on every pass of a stable deployment, so the common case writes nothing.
+   */
+  async #storeToolBaseline(
+    lane: string,
+    names: readonly string[],
+    previous: ReadonlySet<string> | undefined
+  ): Promise<void> {
+    if (
+      previous !== undefined &&
+      previous.size === names.length &&
+      names.every((name) => previous.has(name))
+    ) {
+      return;
+    }
+    await this.lifecycle.storage.put(`${TOOL_BASELINE_KEY}${lane}`, [...names]);
   }
 
   // ── Lane driver ──────────────────────────────────────────────────────────

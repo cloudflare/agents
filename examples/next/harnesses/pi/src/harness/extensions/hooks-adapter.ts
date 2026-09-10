@@ -397,7 +397,9 @@ export function bindExtensionHooks(
             const result = (await runner.emit({
               type: "session_before_compact",
               preparation: event.preparation,
-              branchEntries: state.entries.map(projectSessionEntry),
+              branchEntries: state.entries.map((entry) =>
+                projectSessionEntry(entry, state.entries)
+              ),
               ...(event.customInstructions === undefined
                 ? {}
                 : { customInstructions: event.customInstructions }),
