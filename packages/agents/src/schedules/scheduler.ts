@@ -736,7 +736,7 @@ export class Scheduler<
     callback: string,
     options?: ScheduleOptions
   ): void {
-    if (!this.lifecycle.starting()) return;
+    if (this.lifecycle.status() !== "starting") return;
     if (options?.idempotent !== undefined) return;
     if (typeof when === "string") return;
     if (this.#warnedStartupCallbacks.has(callback)) return;

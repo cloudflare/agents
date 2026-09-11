@@ -421,7 +421,7 @@ export class Queue<
     payload?: QueuePayload<Handlers[Name]>,
     options?: QueuePushOptions
   ): Promise<QueueItem<QueuePayload<Handlers[Name]>>> {
-    if (!this.lifecycle.started()) await this.lifecycle.ready();
+    if (this.lifecycle.status() !== "started") await this.lifecycle.ready();
     this.#validatePush(callback, options);
     const item = this.lifecycle.routes.source
       ? ((await this.lifecycle.routes.toRoot({

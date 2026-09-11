@@ -21,6 +21,9 @@ export type LifecycleRouteContext = {
   readonly payload: unknown;
 };
 
+/** Startup state of a Lifecycle. */
+export type LifecycleStatus = "zero" | "starting" | "started";
+
 /** Best-effort telemetry available to every Lifecycle capability. */
 export type LifecycleEvents = {
   /** Publish an event under this capability's stable identity. */
@@ -73,10 +76,12 @@ export type LifecycleServices = {
   readonly storage: DurableObjectStorage;
   readonly sockets: LifecycleSockets;
   readonly ready: () => Promise<void>;
-  /** True while capability and host startup hooks are still running. */
-  readonly starting: () => boolean;
-  /** True once startup has completed and `ready()` resolves without waiting. */
-  readonly started: () => boolean;
+  /**
+   * Startup state: `"zero"` before startup, `"starting"` while capability
+   * and host startup hooks run, `"started"` once `ready()` resolves without
+   * waiting.
+   */
+  readonly status: () => LifecycleStatus;
   /**
    * This capability's scoped access to the Lifecycle-owned work queue.
    * Pushed items are dispatched to `onJob` when due; every queue mutation
