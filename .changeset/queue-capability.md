@@ -9,4 +9,4 @@ Add the `Queue` Lifecycle capability (`agents/queue`) for durable background wor
 
 Think's workflow-notification outbox and submission drain now run as queue items; the `cf_think_workflow_notifications` table migrates and is dropped on start.
 
-Both one-shot migrations (`cf_agents_queues` in Queue, `cf_think_workflow_notifications` in Think) are temporary upgrade paths and will be removed in the next minor release, by which point every started object has migrated. Deployments skipping this release should upgrade through it. Workflow-notification delivery is retried 5 times in-process, then dropped with a `queue:error` event, instead of retrying indefinitely with backoff.
+Both one-shot migrations (`cf_agents_queues` in Queue, `cf_think_workflow_notifications` in Think) are temporary upgrade paths and will be removed in the next minor release, by which point every started object has migrated. Deployments skipping this release should upgrade through it.

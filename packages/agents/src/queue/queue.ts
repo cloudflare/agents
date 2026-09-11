@@ -20,6 +20,7 @@ import type {
 import {
   isDurableObjectCodeUpdateReset,
   isPlatformFailure,
+  resolveRetryConfig,
   tryN,
   validateRetryOptions
 } from "../retries";
@@ -91,17 +92,6 @@ type QueueRouteMessage =
       readonly type: "dispatch";
       readonly item: QueueItem<unknown>;
     };
-
-function resolveRetryConfig(
-  retry: RetryOptions | undefined,
-  defaults: Required<RetryOptions>
-): Required<RetryOptions> {
-  return {
-    maxAttempts: retry?.maxAttempts ?? defaults.maxAttempts,
-    baseDelayMs: retry?.baseDelayMs ?? defaults.baseDelayMs,
-    maxDelayMs: retry?.maxDelayMs ?? defaults.maxDelayMs
-  };
-}
 
 function isQueueJobPayload(value: unknown): value is QueueJobPayload {
   // `payload` is absent after a JSON round trip when the item carried none.

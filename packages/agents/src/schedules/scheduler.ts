@@ -20,6 +20,7 @@ import type {
 import {
   isDurableObjectCodeUpdateReset,
   isPlatformFailure,
+  resolveRetryConfig,
   tryN,
   validateRetryOptions
 } from "../retries";
@@ -142,17 +143,6 @@ type InsertResult<T> = {
   readonly schedule: Schedule<T>;
   readonly created: boolean;
 };
-
-function resolveRetryConfig(
-  retry: RetryOptions | undefined,
-  defaults: Required<RetryOptions>
-): Required<RetryOptions> {
-  return {
-    maxAttempts: retry?.maxAttempts ?? defaults.maxAttempts,
-    baseDelayMs: retry?.baseDelayMs ?? defaults.baseDelayMs,
-    maxDelayMs: retry?.maxDelayMs ?? defaults.maxDelayMs
-  };
-}
 
 function isSchedulerJobPayload(value: unknown): value is SchedulerJobPayload {
   return (
