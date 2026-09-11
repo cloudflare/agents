@@ -173,7 +173,7 @@ export type {
   ScheduleCriteria,
   ScheduleOptions
 } from "./schedules/types";
-import { State as StateCapability } from "./state";
+import { State } from "./state";
 export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
@@ -1150,11 +1150,11 @@ type WorkflowName<E> = WorkflowBinding<E> | (string & {});
 /**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
- * @template State State type to store within the Agent
+ * @template TState State type to store within the Agent
  */
 export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  State = unknown,
+  TState = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
   /**
@@ -1198,16 +1198,16 @@ export class Agent<
    * Durable state: the `cf_agents_state` row, lazy load, validated persistence.
    * `initialState` stays on Agent (a subclass field, initialized after this
    * one) and is seeded by the `state` getter. Typed `<unknown>` rather than
-   * `<State>` because `State` appears in both `get()` and `set()` positions,
-   * which would make `Agent`'s own `State` parameter invariant and break
+   * `<TState>` because `TState` appears in both `get()` and `set()` positions,
+   * which would make `Agent`'s own `TState` parameter invariant and break
    * `Subclass -> Agent<Env, unknown>` assignability; the typed boundary is
    * re-established in `state` / `setState`.
    */
-  readonly _state: StateCapability<unknown> = new StateCapability<unknown>({
+  readonly _state: State<unknown> = new State<unknown>({
     validateStateChange: (nextState, source) =>
-      this.validateStateChange(nextState as State, source),
+      this.validateStateChange(nextState as TState, source),
     onChanged: (nextState, source) =>
-      this._handleStateChanged(nextState as State, source)
+      this._handleStateChanged(nextState as TState, source)
   });
 
   /** Run user initialization after lifecycle components have started. */
@@ -1370,7 +1370,7 @@ export class Agent<
   /** @internal Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
 
-  private _ParentClass: typeof Agent<Env, State> =
+  private _ParentClass: typeof Agent<Env, TState> =
     Object.getPrototypeOf(this).constructor;
 
   /**
@@ -1416,7 +1416,7 @@ export class Agent<
    * Initial state for the Agent
    * Override to provide default state values
    */
-  initialState: State = DEFAULT_STATE as State;
+  initialState: TState = DEFAULT_STATE as TState;
 
   /**
    * Stable key for Workers AI session affinity (prefix-cache optimization).
@@ -1445,12 +1445,12 @@ export class Agent<
    * Delegates to the State capability, which owns lazy load and the
    * in-memory cache; Agent seeds `initialState` on first access.
    */
-  get state(): State {
+  get state(): TState {
     const stored = this._state.get();
     // `undefined` is not JSON-representable, so it uniquely means "no row":
     // nothing stored yet, or a corrupt row the capability just cleared.
-    if (stored !== undefined) return stored as State;
-    if (this.initialState === DEFAULT_STATE) return undefined as State;
+    if (stored !== undefined) return stored as TState;
+    if (this.initialState === DEFAULT_STATE) return undefined as TState;
     // First access with nothing stored: seed the initial state. Goes through
     // set() so it persists, broadcasts, and runs the notification hook.
     this._state.set(this.initialState, "server");
@@ -2182,7 +2182,7 @@ export class Agent<
               return;
             }
             try {
-              this._state.set(parsed.state as State, connection);
+              this._state.set(parsed.state as TState, connection);
             } catch (e) {
               // validateStateChange (or another sync error) rejected the update.
               // Log the full error server-side, send a generic message to the client.
@@ -2368,7 +2368,7 @@ export class Agent<
 
             const wasExcludedFromStateInitBroadcast =
               this._protocolBroadcastExcludeIds.has(connection.id);
-            let currentState: State | undefined;
+            let currentState: TState | undefined;
             this._protocolBroadcastExcludeIds.add(connection.id);
             try {
               currentState = this.state;
@@ -2618,7 +2618,7 @@ export class Agent<
    * run the notification hook off the invocation tail.
    */
   private _handleStateChanged(
-    nextState: State,
+    nextState: TState,
     source: Connection | "server"
   ): void {
     // Broadcast state to protocol-enabled connections, excluding the source
@@ -2663,7 +2663,7 @@ export class Agent<
    * @param state New state to set
    * @throws Error if called from a readonly connection context
    */
-  setState(state: State): void {
+  setState(state: TState): void {
     // Check if the current context has a readonly connection
     const store = agentContext.getStore();
     if (store?.connection && this.isConnectionReadonly(store.connection)) {
@@ -2929,7 +2929,7 @@ export class Agent<
    * IMPORTANT: This hook must be synchronous.
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  validateStateChange(_nextState: State, _source: Connection | "server") {
+  validateStateChange(_nextState: TState, _source: Connection | "server") {
     // override this to validate state updates
   }
 
@@ -2942,7 +2942,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateChanged(_state: State | undefined, _source: Connection | "server") {
+  onStateChanged(_state: TState | undefined, _source: Connection | "server") {
     // override this to handle state updates after persist + broadcast
   }
 
@@ -2958,7 +2958,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
+  onStateUpdate(_state: TState | undefined, _source: Connection | "server") {
     // override this to handle state updates (deprecated — use onStateChanged)
   }
 
@@ -2967,7 +2967,7 @@ export class Agent<
    * cached in the constructor. No prototype walks at call time.
    */
   private async _callStatePersistenceHook(
-    state: State | undefined,
+    state: TState | undefined,
     source: Connection | "server"
   ): Promise<void> {
     switch (this._persistenceHookMode) {
@@ -9679,13 +9679,13 @@ export class Agent<
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
     if (action === "set") {
-      this.setState(state as State);
+      this.setState(state as TState);
     } else if (action === "merge") {
-      const currentState = this.state ?? ({} as State);
+      const currentState = this.state ?? ({} as TState);
       this.setState({
         ...currentState,
         ...(state as Record<string, unknown>)
-      } as State);
+      } as TState);
     } else if (action === "reset") {
       this.setState(this.initialState);
     }
