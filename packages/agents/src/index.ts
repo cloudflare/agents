@@ -18,10 +18,7 @@ export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
  * on this symbol **will** break your code in a future release.
  */
 export { withInvocationScope as __DO_NOT_USE_WILL_BREAK__withInvocationScope } from "./observability/tracing/tracer";
-import {
-  parseSubAgentPath as _parseSubAgentPath,
-  type AgentPathStep
-} from "./sub-routing";
+import type { AgentPathStep } from "./sub-routing";
 export {
   buildAgentPath,
   buildAgentUrl,
@@ -40,25 +37,16 @@ import {
   registerFacetStreamingDelivery,
   sendFacetRpcResponseIfOpen,
   sendFacetStreamingResponse,
-  DynamicAgentConnectionBridge as SubAgentConnectionBridge,
   dynamicAgentRpcReplyContext as subAgentRpcReplyContext,
   waitForFacetStreamingResponseDeliveries
 } from "./dynamic-agents/bridges";
 import {
   CF_SUB_AGENT_OUTER_URL_KEY,
-  CF_SUB_AGENT_TAGS_KEY,
-  SUB_AGENT_OUTER_URL_HEADER
-} from "./dynamic-agents/dynamic-agents";
-import { logicalNameFromPathV2Identity } from "./dynamic-agents/identity";
-import { DynamicAgentsInternal } from "./dynamic-agents/dynamic-agents";
-import { DynamicAgents as DynamicAgentsApi } from "./dynamic-agents/api";
-import type { DynamicAgentHostPort } from "./dynamic-agents/host";
+  CF_SUB_AGENT_TAGS_KEY
+} from "./dynamic-agents/sockets";
+import { DynamicAgents } from "./dynamic-agents/dynamic-agents";
 import type {
-  FacetCapableCtx,
-  RootFacetRpcSurface,
   DynamicAgentClass as SubAgentClass,
-  DynamicAgentConnectionMeta as SubAgentConnectionMeta,
-  DynamicAgentPathInvokeEndpoint as SubAgentPathInvokeEndpoint,
   DynamicAgentStub as SubAgentStub
 } from "./dynamic-agents/types";
 export type {
@@ -67,6 +55,7 @@ export type {
   DynamicAgentClass as SubAgentClass,
   DynamicAgentStub as SubAgentStub
 } from "./dynamic-agents/types";
+export { DynamicAgents } from "./dynamic-agents/dynamic-agents";
 import { signAgentHeaders, type SendEmailOptions } from "./email";
 import { sendAgentEmail } from "./email-send";
 export type { EmailSendBinding, SendEmailOptions } from "./email";
@@ -86,12 +75,10 @@ import {
   type LifecycleJobOutcome,
   setLifecycleEventSink,
   setLifecycleHostInvoker,
-  setLifecycleRouteTransport,
   type LifecycleRouteEnvelope,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 import { abortWithoutAlarmRetry } from "./lifecycle/abort";
-import type { LifecycleRouteAddress } from "./lifecycle/capability";
 import {
   getCurrentAgent as getCurrentLifecycleAgent,
   type CurrentAgentContext
@@ -1255,26 +1242,7 @@ export class Agent<
    */
   private _persistenceHookMode: "new" | "old" | "none" = "none";
 
-  /** True when this agent runs as a facet (sub-agent) inside a parent. */
-  private _isFacet = false;
-
   private _protocolBroadcastExcludeIds = new Set<string>();
-
-  /**
-   * User-facing facet name. For legacy facets this is the same as
-   * `ctx.id.name`; path-scoped facets use an internal routing id and
-   * keep the logical name here instead.
-   * @internal
-   */
-  private _facetName?: string;
-
-  /**
-   * Ancestor chain, root-first. Empty for top-level DOs; populated at
-   * facet init time from the parent's own `selfPath`. Exposed publicly
-   * via the `parentPath` getter.
-   * @internal
-   */
-  private _parentPath: ReadonlyArray<AgentPathStep> = [];
 
   /** Warn-once guard: `chatRecovery` reassigned during onStart() (too late for wake recovery). */
   private _warnedChatRecoveryInOnStart = false;
@@ -1288,19 +1256,17 @@ export class Agent<
    */
   _keepAliveRefs = 0;
 
-  /** @internal The extracted dynamic-agent (facet) machinery. */
-  private _dynamicAgentsInstance: DynamicAgentsInternal | undefined;
-
-  /** @internal */
-  private get _dynamicAgents(): DynamicAgentsInternal {
-    this._dynamicAgentsInstance ??= new DynamicAgentsInternal(
-      this as unknown as DynamicAgentHostPort
-    );
-    return this._dynamicAgentsInstance;
-  }
-
-  /** @internal */
-  private _dynamicAgentsApi: DynamicAgentsApi | undefined;
+  /**
+   * The dynamic-agents capability, constructed as a field initializer so
+   * it exists before the constructor installs it. Its policy arrows call
+   * through `this.*` so subclass overrides keep intercepting.
+   * @internal
+   */
+  private readonly _dynamicAgents = new DynamicAgents({
+    onBeforeChild: (request, child) => this.onBeforeSubAgent(request, child),
+    checkLeases: () => this._checkRunFibersForLease(),
+    keepAliveIntervalMs: this._resolvedOptions.keepAliveIntervalMs
+  });
 
   /**
    * The dynamic-agents capability: facet-backed child agents that run
@@ -1321,9 +1287,17 @@ export class Agent<
    *
    * @experimental The API surface may change before stabilizing.
    */
-  get dynamicAgents(): DynamicAgentsApi {
-    this._dynamicAgentsApi ??= new DynamicAgentsApi(this._dynamicAgents);
-    return this._dynamicAgentsApi;
+  get dynamicAgents(): DynamicAgents {
+    return this._dynamicAgents;
+  }
+
+  /**
+   * The one native-RPC aperture routed capabilities travel through
+   * (dynamic agents address their parent and children with it).
+   * @internal
+   */
+  _cf_lifecycle(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    return this.lifecycle.route(envelope);
   }
 
   /** @internal In-memory set of fiber IDs running in this process. */
@@ -1906,14 +1880,6 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
-    const routeHost = this;
-    setLifecycleRouteTransport(this.lifecycle, {
-      get source() {
-        return routeHost._lifecycleRouteAddress();
-      },
-      toRoot: (envelope) => this._routeLifecycleToRoot(envelope),
-      to: (target, envelope) => this._routeLifecycleToTarget(target, envelope)
-    });
     setLifecycleEventSink(this.lifecycle, (event) => {
       const payload =
         event.payload !== null &&
@@ -2044,20 +2010,22 @@ export class Agent<
       }
     );
 
+    // Dynamic agents install first: they provide the route transport the
+    // Scheduler and Tasks address children through, restore this agent's
+    // own child identity before anything else starts, and claim `/sub/`
+    // requests and upgrades ahead of MCP and the WebSockets fallback.
     // Agent's WebSocket connections ride the WebSockets capability —
     // Lifecycle itself no longer models connections. The handlers call
     // through `this.*` so they always hit the framework-wrapped hooks.
     this.lifecycle
+      .use(this._dynamicAgents)
       .use(this.scheduler)
       .use(this.mcp)
       .use(this._webSockets, { fallback: true })
-      .use(this.tasks)
-      // Registered for capability identity/services; its hot paths are
-      // wired directly (see the DynamicAgentsInternal class doc).
-      .use(this._dynamicAgents);
+      .use(this.tasks);
 
-    // MCP starts before Agent restores facet routing state. Defer its initial
-    // publication until broadcasts can be routed to the correct owner.
+    // MCP starts before Agent's own startup. Defer its initial publication
+    // until broadcasts can be routed to the correct owner.
     let mcpBroadcastReady = false;
     this._disposables.add(
       this.mcp.onServerStateChanged(() => {
@@ -2137,19 +2105,6 @@ export class Agent<
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       const replyBridge = subAgentRpcReplyContext.getStore()?.bridge;
-      // Lifecycle establishes the root socket context before entering this
-      // wrapper. Do not carry root-owned native I/O into the facet RPC.
-      if (
-        await agentContext.exit(() =>
-          this._cf_forwardSubAgentWebSocketMessage(
-            connection,
-            message,
-            replyBridge
-          )
-        )
-      ) {
-        return;
-      }
       this._ensureConnectionWrapped(connection);
       return runInInvocation(
         { agent: this, connection, request: undefined, email: undefined },
@@ -2288,27 +2243,6 @@ export class Agent<
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
       this._ensureConnectionWrapped(connection);
-      const subAgentOuterUrl = ctx.request.headers.get(
-        SUB_AGENT_OUTER_URL_HEADER
-      );
-      if (subAgentOuterUrl) {
-        this._unsafe_setConnectionFlag(
-          connection,
-          CF_SUB_AGENT_OUTER_URL_KEY,
-          subAgentOuterUrl
-        );
-      }
-      // Lifecycle establishes the root socket/request context before entering
-      // this wrapper. Do not carry root-owned native I/O into the facet RPC.
-      if (
-        await agentContext.exit(() =>
-          this._cf_forwardSubAgentWebSocketConnect(connection, ctx.request, {
-            gate: false
-          })
-        )
-      ) {
-        return;
-      }
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
       return runInInvocation(
@@ -2334,10 +2268,10 @@ export class Agent<
                 // Facets are always addressed via `/sub/{class}/{name}`
                 // in the OUTER client URL, even though the request the
                 // facet itself receives has that segment stripped by
-                // `_cf_forwardToFacet`. The sendIdentityOnConnect
+                // the parent's forwarding. The sendIdentityOnConnect
                 // concern (name only reachable via identity push) does
                 // not apply — skip the warning entirely for facets.
-                !this._isFacet
+                !this._dynamicAgents.isChild
               ) {
                 // Only warn when using custom routing — with default routing
                 // the name is already visible in the URL path (/agents/{class}/{name})
@@ -2408,20 +2342,6 @@ export class Agent<
       reason: string,
       wasClean: boolean
     ) => {
-      // Lifecycle establishes the root socket context before entering this
-      // wrapper. Do not carry root-owned native I/O into the facet RPC.
-      if (
-        await agentContext.exit(() =>
-          this._cf_forwardSubAgentWebSocketClose(
-            connection,
-            code,
-            reason,
-            wasClean
-          )
-        )
-      ) {
-        return;
-      }
       return runInInvocation(
         { agent: this, connection, request: undefined, email: undefined },
         () => {
@@ -2448,8 +2368,6 @@ export class Agent<
           email: undefined
         },
         async () => {
-          await this._restoreAgentFacetContext();
-
           await this._tryCatch(async () => {
             mcpBroadcastReady = true;
             this.broadcastMcpServers();
@@ -2468,7 +2386,7 @@ export class Agent<
               }
             );
             update({
-              "cloudflare.agents.start.facet": this._isFacet,
+              "cloudflare.agents.start.facet": this._dynamicAgents.isChild,
               "cloudflare.agents.recovery.agent_tools.count":
                 startupAgentToolRunIds.length
             });
@@ -2532,12 +2450,6 @@ export class Agent<
       this._withAgentSpan("agent_start", "startup", {}, (update) =>
         startAgent(props, update)
       );
-  }
-
-  private async _restoreAgentFacetContext(): Promise<void> {
-    await this._withAgentSpan("restore_agent_state", "startup", {}, () =>
-      this._dynamicAgents.restoreFacetContext()
-    );
   }
 
   /**
@@ -3491,97 +3403,7 @@ export class Agent<
       }));
   }
 
-  private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
-    return this._dynamicAgents.lifecycleRouteAddress();
-  }
-
-  private _routeLifecycleToRoot(
-    envelope: LifecycleRouteEnvelope
-  ): Promise<unknown> {
-    return this._dynamicAgents.routeLifecycleToRoot(envelope);
-  }
-
-  private _routeLifecycleToTarget(
-    target: LifecycleRouteAddress,
-    envelope: LifecycleRouteEnvelope
-  ): Promise<unknown> {
-    return this._dynamicAgents.routeLifecycleToTarget(target, envelope);
-  }
-
-  /** Single native-RPC aperture for routed Lifecycle capabilities. */
-  _cf_routeLifecycle(
-    target: LifecycleRouteAddress | undefined,
-    envelope: LifecycleRouteEnvelope
-  ): Promise<unknown> {
-    return this._dynamicAgents.routeLifecycle(target, envelope);
-  }
-
-  private _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
-    return this._dynamicAgents.rootAlarmOwner();
-  }
-
   // ── Scheduling (delegates to agents/schedules) ─────────────────────────
-
-  /**
-   * Clean root-owned bookkeeping for a sub-tree of facets. This
-   * bulk-cancels schedules whose `owner_path` starts with the given
-   * prefix and deletes root-side facet fiber recovery leases for the
-   * same sub-tree. Used by `deleteSubAgent` and recursive facet
-   * destroy. Emits `schedule:cancel` on this agent (the alarm-owning
-   * root) for each schedule row removed — the facets being torn down
-   * may not be alive to receive the events themselves.
-   * @internal
-   */
-  async _cf_cleanupFacetPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void> {
-    await this._dynamicAgents.cleanupPrefix(ownerPath);
-  }
-
-  /**
-   * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
-   * Facets run in separate colocated isolates but cannot set their own
-   * physical alarm, so this lets facet work use the root alarm heartbeat.
-   * @internal
-   */
-  _cf_acquireFacetKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string> {
-    return this._dynamicAgents.acquireKeepAlive(ownerPath);
-  }
-
-  /**
-   * Release a root-owned keepAlive ref previously acquired for a facet.
-   * Idempotent so disposer calls can safely race or run twice.
-   * @internal
-   */
-  _cf_releaseFacetKeepAlive(token: string): Promise<void> {
-    return this._dynamicAgents.releaseKeepAlive(token);
-  }
-
-  /**
-   * Register a facet's durable run row in the root-side index so root
-   * alarm housekeeping can dispatch recovery checks into idle facets.
-   * The facet remains authoritative for snapshots and recovery hooks.
-   * @internal
-   */
-  _cf_registerFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    return this._dynamicAgents.registerRun(ownerPath, runId);
-  }
-
-  /**
-   * Remove a completed facet fiber from the root-side index.
-   * @internal
-   */
-  _cf_unregisterFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    return this._dynamicAgents.unregisterRun(ownerPath, runId);
-  }
 
   /**
    * Schedule a task to be executed in the future
@@ -3720,7 +3542,7 @@ export class Agent<
    * created. To clear every schedule under a sub-agent (and its
    * descendants), call `parent.deleteSubAgent(Cls, name)` from the
    * parent — that bulk-cleans root-owned bookkeeping via
-   * {@link _cf_cleanupFacetPrefix}.
+   * the dynamic-agents capability's route retirement.
    *
    * @param id ID of the task to cancel
    * @returns true if the task was cancelled, false if the task was not found
@@ -3753,18 +3575,8 @@ export class Agent<
    * ```
    */
   async keepAlive(): Promise<() => void> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      const token = await root._cf_acquireFacetKeepAlive(this.selfPath);
-      let disposed = false;
-      return () => {
-        if (disposed) return;
-        disposed = true;
-        const release = root._cf_releaseFacetKeepAlive(token).catch((e) => {
-          console.error("[Agent] Failed to release facet keepAlive:", e);
-        });
-        this.ctx.waitUntil(release);
-      };
+    if (this._dynamicAgents.isChild) {
+      return this._dynamicAgents.keepAlive();
     }
 
     this._keepAliveRefs++;
@@ -3782,7 +3594,7 @@ export class Agent<
       // state so a short-lived keepAlive does not leave a stale
       // `now + keepAliveIntervalMs` heartbeat armed. The dispose contract is
       // synchronous, so fire-and-forget the async reschedule via waitUntil
-      // (mirrors `_cf_releaseFacetKeepAlive`).
+      // (mirrors the capability's keep-alive release).
       if (this._keepAliveRefs === 0) {
         this.ctx.waitUntil(
           this._syncHostJobs().catch((e) => {
@@ -4613,7 +4425,6 @@ export class Agent<
       );
     };
 
-    let root: RootFacetRpcSurface | undefined;
     let registeredFacetRun = false;
     let dispose: () => void = () => {};
     try {
@@ -4621,9 +4432,8 @@ export class Agent<
         writeSnapshot(options?.initialSnapshot);
       }
 
-      if (this._isFacet) {
-        root = await this._rootAlarmOwner();
-        await root._cf_registerFacetRun(this.selfPath, id);
+      if (this._dynamicAgents.isChild) {
+        await this._dynamicAgents.holdLease(id);
         registeredFacetRun = true;
       }
 
@@ -4669,9 +4479,9 @@ export class Agent<
         }
       );
       dispose();
-      if (root && registeredFacetRun) {
+      if (registeredFacetRun) {
         try {
-          await root._cf_unregisterFacetRun(this.selfPath, id);
+          await this._dynamicAgents.releaseLease(id);
         } catch (e) {
           // Leave the root-side lease behind if cleanup fails; root
           // housekeeping will re-enter the facet and prune stale rows
@@ -4928,74 +4738,21 @@ export class Agent<
   /** @internal */
   async _onAlarmHousekeeping(): Promise<void> {
     await this._checkRunFibers();
-    await this._checkFacetRunFibers();
-  }
-
-  private _isSameAgentPathPrefix(
-    prefix: ReadonlyArray<AgentPathStep>,
-    path: ReadonlyArray<AgentPathStep>
-  ): boolean {
-    if (prefix.length > path.length) return false;
-    return prefix.every(
-      (step, index) =>
-        step.className === path[index].className &&
-        step.name === path[index].name
-    );
+    // Facet fiber leases sweep on every heartbeat, not only when the
+    // capability's own sweep job is due.
+    await this._dynamicAgents.sweepLeases();
   }
 
   /**
-   * Root-side scan for durable fibers owned by descendant facets.
-   * `cf_agents_facet_runs` is only an index; actual snapshots and
-   * recovery hooks live in each facet's own `cf_agents_runs` table.
-   * @internal
+   * Lease check policy for the dynamic-agents capability: recover this
+   * agent's own fibers, then report how many durable runs remain.
    */
-  private _checkFacetRunFibers(): Promise<void> {
-    return this._dynamicAgents.checkRunFibers();
-  }
-
-  /**
-   * Dispatch a runFiber recovery check into the facet identified by
-   * `ownerPath`. Returns the number of remaining local `cf_agents_runs`
-   * rows on the target facet after recovery.
-   * @internal
-   */
-  _cf_checkRunFibersForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<number> {
-    return this._dynamicAgents.checkRunFibersAtPath(ownerPath);
-  }
-
-  /**
-   * Invoke an RPC method on this Agent or a descendant facet identified
-   * by a root-first path. Used by AgentWorkflow to route callbacks and
-   * `this.agent` calls back to the exact sub-agent that started a workflow.
-   * @internal
-   */
-  _cf_invokeAgentPath(
-    targetPath: ReadonlyArray<AgentPathStep>,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown> {
-    return this._dynamicAgents.invokeAgentPath(targetPath, method, args);
-  }
-
-  /**
-   * Recursively destroy a descendant facet identified by
-   * `targetPath`. Walks down from `selfPath` until reaching the
-   * target's immediate parent, where it cancels the target's
-   * parent-owned schedules (and any descendants), removes the
-   * target from the registry, and calls `ctx.facets.delete` to
-   * wipe the target's storage.
-   *
-   * Called by a facet's own `destroy()` (via the root) so that
-   * `this.destroy()` inside a sub-agent results in the same
-   * cleanup as `parent.deleteSubAgent(Cls, name)` from the parent.
-   * @internal
-   */
-  _cf_destroyDescendantFacet(
-    targetPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void> {
-    return this._dynamicAgents.destroyDescendant(targetPath);
+  private async _checkRunFibersForLease(): Promise<number> {
+    await this._checkRunFibers();
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_runs
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   /**
@@ -5103,17 +4860,6 @@ export class Agent<
         base * 2 ** exp
       );
       nextTimeMs = nowMs + recoveryDelayMs;
-    }
-
-    const facetRuns = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_facet_runs
-    `;
-    if ((facetRuns[0]?.count ?? 0) > 0) {
-      const facetRecoveryMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
-      nextTimeMs =
-        nextTimeMs === null
-          ? facetRecoveryMs
-          : Math.min(nextTimeMs, facetRecoveryMs);
     }
 
     return nextTimeMs;
@@ -5234,68 +4980,30 @@ export class Agent<
    * @experimental The API surface may change before stabilizing.
    */
   async fetch(request: Request): Promise<Response> {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const match = _parseSubAgentPath(request.url, {
-      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-    });
-
-    if (!match) {
-      return this.lifecycle.fetch(request);
-    }
-
-    // Hook runs in the parent's isolate before any facet work.
-    const decision = await this.onBeforeSubAgent(request, {
-      className: match.childClass,
-      name: match.childName
-    });
-    if (decision instanceof Response) return decision;
-    const forwardReq = decision instanceof Request ? decision : request;
-
-    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-      const acceptHeaders = new Headers(forwardReq.headers);
-      const routedUrl = new URL(forwardReq.url);
-      routedUrl.pathname = new URL(request.url).pathname;
-      acceptHeaders.set(SUB_AGENT_OUTER_URL_HEADER, routedUrl.toString());
-      return this.lifecycle.fetch(
-        new Request(forwardReq, { headers: acceptHeaders })
-      );
-    }
-
-    return this._cf_forwardToFacet(forwardReq, match);
+    return this.lifecycle.fetch(request);
   }
 
   broadcast(
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    if (this._isFacet) {
-      void this._dynamicAgents.broadcastToParent(msg, without);
+    if (this._dynamicAgents.isChild) {
+      void this._dynamicAgents.broadcast(msg, without);
       return;
     }
 
     for (const connection of this._webSockets.getConnections()) {
       if (without?.includes(connection.id)) continue;
-      if (this._dynamicAgents.connectionHasChildTarget(connection)) continue;
+      // Sockets a previous release accepted on a child's behalf still
+      // live in the WebSockets capability; they belong to the child.
+      if (this._dynamicAgents.ownsConnection(connection)) continue;
       connection.send(msg);
     }
   }
 
   getConnection<TState = unknown>(id: string): Connection<TState> | undefined {
-    if (this._isFacet) {
-      // Do not read lifecycle-owned root connections from a facet — that
-      // resolves to the host/root DO's hibernatable sockets and reading them
-      // from the facet's I/O context throws a cross-DO Native I/O error. See
-      // issue #1677. Only virtual (bridged) connections are visible here.
-      return this._dynamicAgents.getVirtualConnection(id) as
-        | Connection<TState>
-        | undefined;
-    }
-
     const connection = this._webSockets.getConnection<TState>(id);
-    if (
-      !connection ||
-      this._dynamicAgents.connectionHasChildTarget(connection)
-    ) {
+    if (!connection || this._dynamicAgents.ownsConnection(connection)) {
       return undefined;
     }
     return connection;
@@ -5304,155 +5012,27 @@ export class Agent<
   *getConnections<TState = unknown>(
     tag?: string
   ): Iterable<Connection<TState>> {
-    if (this._isFacet) {
-      // A facet's client connections are all virtual — they are real
-      // WebSockets owned by the ROOT DO and bridged in. We must NOT fall
-      // through to `this._webSockets.getConnections()` here: on a facet that resolves to
-      // the host/root DO's hibernatable sockets, and reading their attachments
-      // from the facet's I/O context throws
-      // "Cannot perform I/O on behalf of a different Durable Object (Native)".
-      // See issue #1677.
-      yield* this._dynamicAgents.getVirtualConnections(tag) as Iterable<
-        Connection<TState>
-      >;
-      return;
-    }
-
+    // On a child, the WebSockets capability presents only the connections
+    // bridged in from the root (a child owns no platform sockets, #1677).
     for (const connection of this._webSockets.getConnections<TState>(tag)) {
-      if (this._dynamicAgents.connectionHasChildTarget(connection)) continue;
+      if (this._dynamicAgents.ownsConnection(connection)) continue;
       yield connection;
     }
   }
 
-  async _cf_broadcastToSubAgent(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void> {
-    await this._dynamicAgents.broadcastToPath(ownerPath, message, without);
-  }
-
-  _cf_subAgentConnectionMetas(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<SubAgentConnectionMeta[]> {
-    return this._dynamicAgents.connectionMetas(ownerPath);
-  }
-
-  _cf_sendToSubAgentConnection(
-    connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
-  ): Promise<void> {
-    return this._dynamicAgents.sendToConnection(connectionId, message);
-  }
-
-  _cf_closeSubAgentConnection(
-    connectionId: string,
-    code?: number,
-    reason?: string
-  ): Promise<void> {
-    return this._dynamicAgents.closeConnection(connectionId, code, reason);
-  }
-
-  _cf_setSubAgentConnectionState(
-    connectionId: string,
-    state: unknown
-  ): Promise<unknown> {
-    return this._dynamicAgents.setConnectionState(connectionId, state);
-  }
-
+  /**
+   * @deprecated Child-targeted sockets never reach an Agent's own
+   * connection hooks any more — the DynamicAgents capability claims them.
+   * Kept so previously published `@cloudflare/think` and
+   * `@cloudflare/ai-chat` releases keep loading against this package.
+   */
   protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
     return this._dynamicAgents.connectionTargetsChild(connection);
   }
 
-  /**
-   * Returns true when the current request is addressed to a child facet of
-   * this agent rather than to this agent itself.
-   *
-   * Chat-style subclasses wrap `onConnect` before the base Agent forwarding
-   * wrapper runs, so they need a request-level check to avoid sending their
-   * own protocol frames on sockets that are about to be forwarded to a child.
-   */
+  /** @deprecated See {@link _cf_connectionTargetsSubAgent}. */
   protected _cf_requestTargetsSubAgent(request: Request): boolean {
     return this._dynamicAgents.requestTargetsChild(request);
-  }
-
-  private _cf_forwardSubAgentWebSocketConnect(
-    connection: Connection,
-    request: Request,
-    options: { gate: boolean }
-  ): Promise<boolean> {
-    return this._dynamicAgents.forwardWebSocketConnect(
-      connection,
-      request,
-      options
-    );
-  }
-
-  private _cf_forwardSubAgentWebSocketMessage(
-    connection: Connection,
-    message: WSMessage,
-    replyBridge?: SubAgentConnectionBridge
-  ): Promise<boolean> {
-    return this._dynamicAgents.forwardWebSocketMessage(
-      connection,
-      message,
-      replyBridge
-    );
-  }
-
-  private _cf_forwardSubAgentWebSocketClose(
-    connection: Connection,
-    code: number,
-    reason: string,
-    wasClean: boolean
-  ): Promise<boolean> {
-    return this._dynamicAgents.forwardWebSocketClose(
-      connection,
-      code,
-      reason,
-      wasClean
-    );
-  }
-
-  _cf_handleSubAgentWebSocketConnect(
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
-  ): Promise<void> {
-    return this._dynamicAgents.handleWebSocketConnect(bridge, meta);
-  }
-
-  _cf_handleSubAgentWebSocketMessage(
-    message: WSMessage,
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta,
-    replyBridge: SubAgentConnectionBridge = bridge
-  ): Promise<void> {
-    return this._dynamicAgents.handleWebSocketMessage(
-      message,
-      bridge,
-      meta,
-      replyBridge
-    );
-  }
-
-  _cf_handleSubAgentWebSocketClose(
-    code: number,
-    reason: string,
-    wasClean: boolean,
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
-  ): Promise<void> {
-    return this._dynamicAgents.handleWebSocketClose(
-      code,
-      reason,
-      wasClean,
-      bridge,
-      meta
-    );
-  }
-
-  protected _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
-    return this._dynamicAgents.hydrateConnectionsFromRoot();
   }
 
   /**
@@ -5506,94 +5086,10 @@ export class Agent<
     return undefined;
   }
 
-  /**
-   * Resolve the facet Fetcher for the match and forward the
-   * request to it with `/sub/{class}/{name}` stripped.
-   *
-   * @internal
-   */
-  private _cf_forwardToFacet(
-    req: Request,
-    match: {
-      childClass: string;
-      childName: string;
-      remainingPath: string;
-    }
-  ): Promise<Response> {
-    return this._dynamicAgents.forward(req, match);
-  }
-
-  /**
-   * Bridge method used by `getSubAgentByName`. Resolves the facet
-   * on each call (idempotent via `subAgent`) and dispatches one
-   * RPC method. Stateless — no cached references.
-   *
-   * @internal
-   */
-  _cf_invokeSubAgent(
-    className: string,
-    name: string,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown> {
-    return this._dynamicAgents.invoke(className, name, method, args);
-  }
-
-  /**
-   * Bridge method used by `parentAgent()` when the requested parent is
-   * itself a facet (and therefore has no top-level env namespace).
-   * The root receives the full root-first target path, then each hop
-   * delegates to the next facet using that facet's own `ctx.facets`.
-   *
-   * @internal
-   */
-  _cf_invokeSubAgentPath(
-    path: ReadonlyArray<{ className: string; name: string }>,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown> {
-    return this._dynamicAgents.invokePath(path, method, args);
-  }
-
   // ── Sub-agent (facet) management ────────────────────────────────────────
 
-  /**
-   * Initialize this agent as a facet in a single RPC.
-   *
-   * Runs entirely inside the child's isolate, so every storage write
-   * and `onStart()` I/O is owned by the child DO. This replaces the
-   * previous "construct a Request in the parent DO and `stub.fetch()`
-   * it on the child" handshake, whose native I/O was tied to the
-   * parent and triggered "Cannot perform I/O on behalf of a different
-   * Durable Object" on the child.
-   *
-   * We set `_isFacet` eagerly (before `__unsafe_ensureInitialized`
-   * runs `onStart()`) so any code that legitimately branches on it
-   * — e.g. skipping parent-owned alarms in schedule guards — sees
-   * the flag during the first `onStart()` run. Protocol broadcasts are
-   * suppressed only during this bootstrap window; afterward, facets can
-   * broadcast to their own WebSocket clients reached via sub-agent
-   * routing.
-   *
-   * The facet's logical name is persisted separately from its routing id.
-   * Legacy facets used the logical name directly as `ctx.id.name`; newer
-   * facets can use path-scoped routing ids while preserving `this.name`.
-   *
-   * @internal Called by {@link subAgent}.
-   */
-  _cf_initAsFacet(
-    name: string,
-    parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    identityName = name
-  ): Promise<void> {
-    return this._dynamicAgents.init(name, parentPath, identityName);
-  }
-
   get name(): string {
-    const routedName = this.lifecycle.name;
-    return (
-      this._facetName ?? logicalNameFromPathV2Identity(routedName) ?? routedName
-    );
+    return this._dynamicAgents.name;
   }
 
   /**
@@ -5613,7 +5109,7 @@ export class Agent<
    * @experimental The API surface may change before stabilizing.
    */
   get parentPath(): ReadonlyArray<AgentPathStep> {
-    return this._parentPath;
+    return this._dynamicAgents.parentPath;
   }
 
   /**
@@ -5622,13 +5118,7 @@ export class Agent<
    * @experimental The API surface may change before stabilizing.
    */
   get selfPath(): ReadonlyArray<AgentPathStep> {
-    return [
-      ...this._parentPath,
-      {
-        className: (this.constructor as { name: string }).name,
-        name: this.name
-      }
-    ];
+    return this._dynamicAgents.selfPath;
   }
 
   /**
@@ -5683,12 +5173,13 @@ export class Agent<
   async parentAgent<T extends Agent>(
     cls: SubAgentClass<T>
   ): Promise<DurableObjectStub<T>> {
-    // `_parentPath` is root-first, so the *direct* parent is the
+    // `parentPath` is root-first, so the *direct* parent is the
     // last entry. Destructuring with `[parent] = ...` would grab the
     // root ancestor instead — wrong for any chain deeper than one
     // level and silently routes to the wrong DO if the root and the
     // direct parent happen to be the same class.
-    const parent = this._parentPath[this._parentPath.length - 1];
+    const parentPath = this.parentPath;
+    const parent = parentPath[parentPath.length - 1];
     if (!parent) {
       throw new Error(
         `parentAgent(): ${this.constructor.name} is not a facet — ` +
@@ -5702,11 +5193,8 @@ export class Agent<
           `whose constructor actually spawned this facet.`
       );
     }
-    if (this._parentPath.length > 1) {
-      return await this._cf_parentAgentFacetProxy<T>(
-        cls.name,
-        this._parentPath
-      );
+    if (parentPath.length > 1) {
+      return await this._cf_parentAgentFacetProxy<T>(cls.name, parentPath);
     }
 
     const binding = this._cf_getTopLevelNamespaceByClassName<T>(cls.name);
@@ -5770,8 +5258,13 @@ export class Agent<
     const targetPath = parentPath.map((step) => ({ ...step }));
     const invokeBridge = async (method: string, args: unknown[]) => {
       const rootStub = await rootStubPromise;
-      const bridge = rootStub as unknown as SubAgentPathInvokeEndpoint;
-      return await bridge._cf_invokeSubAgentPath(targetPath, method, args);
+      // The root walks the path with its DynamicAgents capability; the
+      // last hop is a real RPC on the parent's stub.
+      return await rootStub._cf_lifecycle({
+        capability: "dynamic-agents",
+        source: undefined,
+        payload: { type: "invoke:path", path: targetPath, method, args }
+      });
     };
     const owner = this;
     return new Proxy(
@@ -6238,7 +5731,7 @@ export class Agent<
         ? reason.message
         : String(reason ?? "cancelled by parent");
     try {
-      const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+      const child = await this._dynamicAgents.resolve(row.agent_type, runId);
       const adapter = this._asAgentToolChildAdapter(child);
       await adapter.cancelAgentToolRun(runId, reason);
     } catch {
@@ -6683,7 +6176,7 @@ export class Agent<
       const runId = row.run_id;
       let inspection: AgentToolRunInspection | null = null;
       try {
-        const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+        const child = await this._dynamicAgents.resolve(row.agent_type, runId);
         const adapter = this._asAgentToolChildAdapter(child);
         inspection = await adapter.inspectAgentToolRun(runId);
       } catch {
@@ -6761,7 +6254,10 @@ export class Agent<
       ) {
         let childTornDown = false;
         try {
-          const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+          const child = await this._dynamicAgents.resolve(
+            row.agent_type,
+            runId
+          );
           const adapter = this._asAgentToolChildAdapter(child);
           await adapter.cancelAgentToolRun(
             runId,
@@ -7168,7 +6664,7 @@ export class Agent<
     replay?: true,
     connection?: Connection
   ): Promise<number> {
-    const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
+    const child = await this._dynamicAgents.resolve(row.agent_type, row.run_id);
     const adapter = this._asAgentToolChildAdapter(child);
     return this._broadcastAgentToolStoredChunksFromAdapter(
       adapter,
@@ -7596,7 +7092,9 @@ export class Agent<
   }
 
   private _agentToolClassByName(className: string): SubAgentClass<Agent> {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const ctx = this.ctx as unknown as {
+      exports?: Record<string, unknown>;
+    };
     const cls = ctx.exports?.[className];
     if (!cls) {
       throw new Error(`Agent tool class "${className}" is not exported.`);
@@ -8211,7 +7709,10 @@ export class Agent<
     timeoutMs = DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
   ): Promise<AgentToolRecoveryInspection> {
     const inspect = (async (): Promise<AgentToolRecoveryInspection> => {
-      const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
+      const child = await this._dynamicAgents.resolve(
+        row.agent_type,
+        row.run_id
+      );
       const adapter = this._asAgentToolChildAdapter(child);
       const inspection = await adapter.inspectAgentToolRun(row.run_id);
       return { status: "inspected", adapter, inspection };
@@ -8308,40 +7809,6 @@ export class Agent<
     const result = await Promise.race([chunks, timeout]);
     if (timeoutId !== undefined) clearTimeout(timeoutId);
     return result;
-  }
-
-  /**
-   * Shared facet resolution — takes a CamelCase class name string
-   * (matching `ctx.exports`) rather than a class reference. Both
-   * `subAgent(cls, name)` and `_cf_invokeSubAgent(className, ...)`
-   * funnel through here so registry bookkeeping and the
-   * `_cf_initAsFacet` handshake are consistent.
-   *
-   * @internal
-   */
-  private _cf_resolveSubAgent(
-    className: string,
-    name: string
-  ): Promise<unknown> {
-    return this._dynamicAgents.resolve(className, name);
-  }
-
-  /**
-   * Run `body` in a fresh invocation scope with no native request/
-   * connection context attached, so a child-facet RPC never sees
-   * parent-owned I/O handles.
-   * @internal
-   */
-  private _runFacetInitInvocation<T>(body: () => Promise<T>): Promise<T> {
-    return runInInvocation(
-      {
-        agent: this,
-        connection: undefined,
-        request: undefined,
-        email: undefined
-      },
-      body
-    );
   }
 
   /**
@@ -8448,14 +7915,13 @@ export class Agent<
    * callers should treat it as fire-and-forget.
    */
   async destroy() {
-    if (this._isFacet) {
+    if (this._dynamicAgents.isChild) {
       this._emit("destroy");
-      const root = await this._rootAlarmOwner();
       // The chain: root → … → direct-parent runs ctx.facets.delete
       // on this facet, which aborts this isolate. The await may
       // throw an abort error or never resolve depending on timing —
       // either is acceptable, the cleanup has already been applied.
-      await root._cf_destroyDescendantFacet(this.selfPath);
+      await this._dynamicAgents.deleteSelf();
       return;
     }
 
@@ -8519,7 +7985,7 @@ export class Agent<
     // itself: the `alarm()` preamble calls `destroy()` precisely to avoid
     // running `onStart` on a condemned agent.
     await this.__unsafe_ensureInitialized();
-    if (this._isFacet) {
+    if (this._dynamicAgents.isChild) {
       // Facet teardown is coordinated by the root (`ctx.facets.delete` wipes
       // the facet's storage in one step), so there is nothing to defer.
       await this.destroy();
@@ -9434,8 +8900,8 @@ export class Agent<
   private _workflowOrigin(
     options: RunWorkflowOptions | undefined
   ): AgentWorkflowOrigin | undefined {
-    if (this._isFacet) {
-      const root = this._parentPath[0];
+    if (this._dynamicAgents.isChild) {
+      const root = this.parentPath[0];
       const rootBindingName =
         options?.agentBinding ??
         (root ? this._findAgentBindingNameForClass(root.className) : undefined);

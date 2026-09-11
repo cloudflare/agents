@@ -118,12 +118,8 @@ export class SpikeSubChild extends Agent {
   }
 
   async rehydrateConnectionSnapshotForTest(tag?: string) {
-    (
-      this as unknown as {
-        _dynamicAgents: { clearVirtualConnections(): void };
-      }
-    )._dynamicAgents.clearVirtualConnections();
-    await this._cf_hydrateSubAgentConnectionsFromRoot();
+    await this.dynamicAgents.clearVirtualConnections();
+    await this.dynamicAgents.hydrateConnectionsFromRoot();
     return this.connectionSnapshot(tag);
   }
 
@@ -183,7 +179,7 @@ export class SpikeSubChild extends Agent {
 // and facet forwarding inside its own `fetch()` override, and exposed
 // an `invokeSubAgent` method for cross-DO RPC. After phase 2 landed,
 // both responsibilities moved into the `Agent` base class (the `fetch`
-// arm + `_cf_invokeSubAgent`). The spike parent is now a thin Agent
+// arm + the `invoke:child` route). The spike parent is now a thin Agent
 // that overrides `onBeforeSubAgent` purely so the "parent is on the
 // hot path at connect time, and only at connect time" invariant can
 // be confirmed by counting hook invocations.

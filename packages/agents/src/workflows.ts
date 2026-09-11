@@ -48,18 +48,16 @@ import type {
   WaitForApprovalOptions
 } from "./workflow-types";
 import { WorkflowRejectedError } from "./workflow-types";
-import type {
-  AgentWorkflowOrigin,
-  AgentWorkflowPathStep
-} from "./workflow-types";
+import type { AgentWorkflowOrigin } from "./workflow-types";
 import { isInternalJsStubProp } from "./utils";
 
+/** The routing aperture every dynamic-agent host exposes. */
 type AgentPathInvoker = {
-  _cf_invokeAgentPath(
-    path: ReadonlyArray<AgentWorkflowPathStep>,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown>;
+  _cf_lifecycle(envelope: {
+    capability: string;
+    source: undefined;
+    payload: unknown;
+  }): Promise<unknown>;
 };
 
 /**
@@ -295,7 +293,11 @@ export class AgentWorkflow<
             };
           }
           return async (...args: unknown[]) =>
-            rootAgent._cf_invokeAgentPath(origin.path, prop, args);
+            rootAgent._cf_lifecycle({
+              capability: "dynamic-agents",
+              source: undefined,
+              payload: { type: "invoke", path: origin.path, method: prop, args }
+            });
         }
       }
     ) as DurableObjectStub<AgentType>;

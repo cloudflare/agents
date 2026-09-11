@@ -1755,7 +1755,7 @@ describe("SubAgent", () => {
       await agent.subAgentAbort(childName); // kill the instance
 
       // Re-fetch. The child's in-memory _parentPath was lost, but
-      // `_cf_initAsFacet` persisted `cf_agents_parent_path` to the
+      // the child's bootstrap persisted `cf_agents_parent_path` to the
       // child's storage and the wrapped `onStart()` rehydrates it on
       // boot. Since `subAgent()` always calls init, it also re-sets
       // _parentPath in-memory on re-access — this test just confirms

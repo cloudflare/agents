@@ -671,7 +671,7 @@ describe("routeSubAgentRequest — query-param preservation", () => {
 
 describe("sub-agent routing — error bodies", () => {
   it("returns a terse 'Bad Request' body (no implementation leak) when the child name contains a null char", async () => {
-    // `%00` in a URL decodes to `\0`, which `_cf_resolveSubAgent`
+    // `%00` in a URL decodes to `\0`, which child resolution
     // rejects. The class is known (passes the strict filter in the
     // parent's fetch override) so routing reaches the bridge — and
     // the resulting 400 body must be the scrubbed string, not the

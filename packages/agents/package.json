@@ -200,6 +200,11 @@
       "import": "./dist/websockets/index.js",
       "require": "./dist/websockets/index.js"
     },
+    "./dynamic-agents": {
+      "types": "./dist/dynamic-agents/index.d.ts",
+      "import": "./dist/dynamic-agents/index.js",
+      "require": "./dist/dynamic-agents/index.js"
+    },
     "./schedule": {
       "types": "./dist/schedule.d.ts",
       "import": "./dist/schedule.js",

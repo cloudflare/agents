@@ -73,3 +73,36 @@ export function agentPathKey(
     )
     .join("/");
 }
+
+/** Whether `path` starts with every step of `prefix`. */
+export function isSameAgentPathPrefix(
+  prefix: ReadonlyArray<AgentPathStep>,
+  path: ReadonlyArray<AgentPathStep>
+): boolean {
+  if (prefix.length > path.length) return false;
+  return prefix.every(
+    (step, index) =>
+      step.className === path[index]?.className &&
+      step.name === path[index]?.name
+  );
+}
+
+export function isSameAgentPath(
+  a: ReadonlyArray<AgentPathStep>,
+  b: ReadonlyArray<AgentPathStep>
+): boolean {
+  return a.length === b.length && isSameAgentPathPrefix(a, b);
+}
+
+/** The route address of the object at `path`, or undefined at the root. */
+export function routeAddressForPath(
+  path: ReadonlyArray<AgentPathStep>
+): { key: string; data: string } | undefined {
+  const key = agentPathKey(path);
+  return key ? { key, data: JSON.stringify(path) } : undefined;
+}
+
+/** Whether an owner key (a route address key) lies at or under `prefixKey`. */
+export function ownerKeyUnder(prefixKey: string, ownerKey: string): boolean {
+  return ownerKey === prefixKey || ownerKey.startsWith(`${prefixKey}/`);
+}

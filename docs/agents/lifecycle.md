@@ -238,14 +238,37 @@ when delivery is part of the durable business operation.
 
 Every `LifecycleCapability` also receives `lifecycle.routes`. `toRoot()` routes
 a message to the matching capability ID on the root Lifecycle; `to(address, …)`
-routes to another addressed Lifecycle. Lifecycle owns the generic envelope and
-dispatch. A host with child objects supplies the transport internally.
+routes to another addressed Lifecycle; `retire(retirement)` announces that a
+routed subtree no longer exists, and every installed capability's
+`onRouteRetired` drops the durable work it mirrors for those owners. Lifecycle
+owns the generic envelope and dispatch.
 
-Agent uses this for facet schedules: Scheduler sends owner-scoped CRUD to the
-root Scheduler and routes due callbacks back to the matching facet Scheduler.
-Facet schedules live as jobs in the root's queue. Scheduler does not
-implement facet traversal, and Agent exposes only one internal generic Lifecycle
-route aperture.
+The transport is provided by a capability: at most one installed capability
+implements `provideRouteTransport(inbound)`, returning the object's address and
+`toRoot`/`to` senders. `DynamicAgents` is that capability — it walks the
+parent/child tree one hop at a time over the hosts' `_cf_lifecycle` aperture,
+the one native-RPC entry point routed capabilities need
+(`_cf_lifecycle(envelope) { return this.lifecycle.route(envelope); }`). The
+`inbound.deliver()` side delivers envelopes locally; envelopes handed over
+while startup runs wait, in order, until it completes, so a capability that
+starts early can address one that starts later.
+
+An envelope marked `bootstrap: true` reaches its capability before the
+Lifecycle has started (`context.started === false`); the capability writes
+whatever startup must observe — a child's identity, for example — and starts
+the object itself with `lifecycle.ready()`. Once started, a bootstrap envelope
+is an ordinary route.
+
+Scheduler and Tasks use routing for children: a child's Scheduler sends
+owner-scoped CRUD to the root Scheduler, which routes due callbacks back to the
+matching child. Child schedules live as jobs in the root's queue. Neither
+capability implements traversal; both implement `onRouteRetired`.
+
+Capabilities also receive narrow platform services alongside storage and
+sockets: `facets` (`ctx.facets`, for colocated children), `exports` (class
+lookup and loopback namespaces from `ctx.exports`), `object` (the routed name,
+class name, and identity comparison), and `waitUntil`. The whole
+`DurableObjectState` is never handed to a capability.
 
 ## Explicit disposal
 
@@ -341,6 +364,15 @@ connected while the Durable Object can leave memory; when a message wakes the
 object, its constructor and lifecycle startup run again before `onMessage`.
 State needed after a wake must be stored durably or through
 `connection.setState()`. There is no non-hibernating mode.
+
+A socket another object owns can be bridged in: the owner's capability sends
+`bridged:connect` / `bridged:message` / `bridged:close` messages to this
+capability's route (`lifecycle.route({ capability: "websockets", … })`) with a
+link for the operations that must travel back, and the capability presents the
+socket as a connection the handlers and `getConnections()` see like any other.
+This is how a dynamic agent's sockets, which live on its parent, reach the
+child's handlers. A routed (child) Lifecycle owns no platform sockets, so there
+the bridged connections are the only ones.
 
 ## Native RPC
 

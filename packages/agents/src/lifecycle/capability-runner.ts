@@ -1,5 +1,10 @@
 import { lifecycleCapabilityId } from "./capability";
-import type { LifecycleRouteContext } from "./capability";
+import type {
+  LifecycleRouteContext,
+  LifecycleRouteInbound,
+  LifecycleRouteRetirement,
+  LifecycleRouteTransport
+} from "./capability";
 import type { WSMessage } from "./types";
 import type {
   LifecycleJob,
@@ -101,12 +106,25 @@ export type MemoryLimitContext = {
  * - `onRoute` is addressed to one capability by its id; `onJob` is
  *   addressed by the due job's owning capability, with Lifecycle owning
  *   the queue and the one physical alarm.
+ * - At most one capability provides the route transport
+ *   (`provideRouteTransport`); `onRouteRetired` is offered to every
+ *   capability when a routed subtree is torn down.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export interface DurableObjectCapability<Props extends object = object> {
   /** Initialize or recover the capability before the host handles work. */
   onStart?(context: CapabilityStartContext<Props>): MaybePromise<void>;
+
+  /**
+   * Supply this Lifecycle's route transport. Lifecycle asks once, at
+   * `use()`; a second provider is an installation error. `inbound`
+   * delivers envelopes to this Lifecycle locally, queued while startup
+   * runs.
+   */
+  provideRouteTransport?(
+    inbound: LifecycleRouteInbound
+  ): LifecycleRouteTransport;
 
   /**
    * Act as middleware over HTTP requests, ahead of the host's request handler.
@@ -191,6 +209,12 @@ export interface DurableObjectCapability<Props extends object = object> {
 
   /** Handle one message routed to this capability identity. */
   onRoute?(context: LifecycleRouteContext): MaybePromise<unknown>;
+
+  /**
+   * Drop durable work mirrored for owners under a retired routed subtree
+   * (`LifecycleRoutes.retire`). Failures propagate to the retiring caller.
+   */
+  onRouteRetired?(retirement: LifecycleRouteRetirement): MaybePromise<void>;
 
   /** Release live or in-memory resources during explicit host destruction. */
   dispose?(): MaybePromise<void>;
@@ -343,12 +367,18 @@ export class CapabilityRunner<Props extends object = object> {
     );
   }
 
-  /** Route one message to an installed named capability. */
+  /**
+   * Route one message to an installed named capability. A bootstrap
+   * message (`context.started === false`) is delivered without waiting
+   * for startup — the capability owns what happens next.
+   */
   async route(
     capabilityId: string,
     context: LifecycleRouteContext
   ): Promise<unknown> {
-    await this.#ensureReady("route a capability message");
+    if (context.started) {
+      await this.#ensureReady("route a capability message");
+    }
     const capability = this.#getCapabilities().find(
       (candidate) => lifecycleCapabilityId(candidate) === capabilityId
     );
@@ -358,6 +388,14 @@ export class CapabilityRunner<Props extends object = object> {
       );
     }
     return capability.onRoute(context);
+  }
+
+  /** Announce a retired routed subtree to every capability, in order. */
+  async retire(retirement: LifecycleRouteRetirement): Promise<void> {
+    await this.#ensureReady("retire a routed subtree");
+    for (const capability of this.#getCapabilities()) {
+      await capability.onRouteRetired?.(retirement);
+    }
   }
 
   /**

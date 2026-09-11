@@ -17,7 +17,8 @@ import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
 import type {
   LifecycleRouteAddress,
-  LifecycleRouteContext
+  LifecycleRouteContext,
+  LifecycleRouteRetirement
 } from "../lifecycle/capability";
 import type { MemoryLimitContext } from "../lifecycle/capability-runner";
 import type {
@@ -821,15 +822,13 @@ export class Tasks<
   }
 
   /**
-   * @internal Framework aperture: bulk-cancel this root's routed wake
-   * mirrors for every run owned by a deleted facet subtree. The runs and
-   * their step journals live on the deleted facets' own storage and are
-   * wiped with them; only this root's mirror job needs an explicit cancel,
-   * or it stays due forever, retrying a dispatch to a facet that is gone.
+   * Bulk-cancel this root's routed wake mirrors for every run owned by a
+   * retired subtree. The runs and their step journals live on the retired
+   * objects' own storage and are wiped with them; only this root's mirror
+   * job needs an explicit cancel, or it stays due forever, retrying a
+   * dispatch to an object that is gone.
    */
-  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-    prefix: string
-  ): Promise<void> {
+  async onRouteRetired({ covers }: LifecycleRouteRetirement): Promise<void> {
     for (const job of this.lifecycle.jobs.list()) {
       const timing = isTaskWakeJobPayload(job.payload)
         ? job.payload
@@ -838,7 +837,7 @@ export class Tasks<
       if (!timing?.owner_path || ownerKey === null || ownerKey === undefined) {
         continue;
       }
-      if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
+      if (!covers(ownerKey)) continue;
       await this.lifecycle.jobs.cancel(job.id);
     }
   }

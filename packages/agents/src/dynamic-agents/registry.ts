@@ -8,9 +8,9 @@ import {
 } from "./identity";
 
 /**
- * SQL access the registry needs from its owning Agent: the tagged
- * template helper plus raw DDL execution (for additive column
- * migrations whose errors must be inspected).
+ * SQL access the registry needs: a tagged template helper plus raw DDL
+ * execution (for additive column migrations whose errors must be
+ * inspected).
  */
 export type DynamicAgentRegistrySqlHost = {
   sql<T = Record<string, string | number | boolean | null>>(
@@ -20,11 +20,29 @@ export type DynamicAgentRegistrySqlHost = {
   execRawSql(sql: string): void;
 };
 
+/** The registry's SQL access over Durable Object storage. */
+export function registrySqlHost(
+  storage: DurableObjectStorage
+): DynamicAgentRegistrySqlHost {
+  return {
+    sql(strings, ...values) {
+      const query = strings.reduce(
+        (acc, str, i) => acc + str + (i < values.length ? "?" : ""),
+        ""
+      );
+      return [...storage.sql.exec(query, ...values)] as never[];
+    },
+    execRawSql(sql) {
+      storage.sql.exec(sql);
+    }
+  };
+}
+
 /**
  * The parent-side registry of spawned dynamic agents (facets), stored
- * in the parent's own SQLite. Backs `hasSubAgent` / `listSubAgents`
- * and the identity-versioning decision (legacy bare-name facets vs
- * path-scoped v2 identities).
+ * in the parent's own SQLite. Backs `has` / `list` and the
+ * identity-versioning decision (legacy bare-name facets vs path-scoped
+ * v2 identities).
  *
  * Table and column names are storage-frozen — never rename them.
  */

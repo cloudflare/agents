@@ -1,7 +1,7 @@
 /**
  * Request-body forwarding across a parent↔facet boundary (issue #2015).
  *
- * `Agent._cf_forwardToFacet` and `routeSubAgentRequest` both used to
+ * the parent's `/sub/` forwarding and `routeSubAgentRequest` both used to
  * do `forwardInit.body = await req.arrayBuffer()` before dispatching to
  * the child. That read is unbounded and runs in the *parent* Durable
  * Object, in front of any application-level intake limit — an app that
@@ -182,7 +182,7 @@ describe("body forwarding — canonical control path", () => {
 
 // ── The regression: parent → facet ──────────────────────────────────
 
-describe("body forwarding — parent to facet (_cf_forwardToFacet)", () => {
+describe("body forwarding — parent to facet (the capability's onRequest)", () => {
   it("dispatches to the child before the upload completes", async () => {
     const parent = uniqueName();
     const child = uniqueName();

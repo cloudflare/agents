@@ -29,6 +29,7 @@ const entries = [
   "src/context/index.ts",
   "src/sessions/index.ts",
   "src/websockets/index.ts",
+  "src/dynamic-agents/index.ts",
   "src/codemode/ai.ts",
   "src/browser/index.ts",
   "src/browser/ai.ts",

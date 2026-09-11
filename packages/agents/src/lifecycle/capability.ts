@@ -19,6 +19,61 @@ export type LifecycleRouteContext = {
   readonly source: LifecycleRouteAddress | undefined;
   /** Capability-owned message payload. */
   readonly payload: unknown;
+  /**
+   * False when a `bootstrap` envelope reached this Lifecycle before it
+   * started. The receiving capability then writes whatever startup must
+   * observe and calls `lifecycle.ready()` itself.
+   */
+  readonly started: boolean;
+};
+
+/** Envelope transported between routed Lifecycle instances. */
+export type LifecycleRouteEnvelope = {
+  readonly capability: string;
+  readonly source: LifecycleRouteAddress | undefined;
+  readonly payload: unknown;
+  /**
+   * Deliver before startup when the receiving Lifecycle has not started,
+   * instead of starting it first. Ignored once it has started. For
+   * messages that establish state startup itself depends on (a child's
+   * identity, for example).
+   */
+  readonly bootstrap?: boolean;
+};
+
+/**
+ * Transport supplied by the capability that owns routed child Lifecycles
+ * (see `DurableObjectCapability.provideRouteTransport`).
+ */
+export type LifecycleRouteTransport = {
+  /** This Lifecycle's address, or undefined at the route root. */
+  readonly source: LifecycleRouteAddress | undefined;
+  readonly toRoot: (envelope: LifecycleRouteEnvelope) => Promise<unknown>;
+  readonly to: (
+    target: LifecycleRouteAddress,
+    envelope: LifecycleRouteEnvelope
+  ) => Promise<unknown>;
+};
+
+/** Inbound side of a Lifecycle route transport. */
+export type LifecycleRouteInbound = {
+  /**
+   * Hand an envelope to this Lifecycle. Envelopes handed over while startup
+   * is running are delivered, in order, once startup completes.
+   */
+  readonly deliver: (envelope: LifecycleRouteEnvelope) => Promise<unknown>;
+};
+
+/**
+ * A retired routed subtree: the address and every address beneath it no
+ * longer exist, so capabilities drop the durable work they mirror for
+ * those owners.
+ */
+export type LifecycleRouteRetirement = {
+  /** The retired address. */
+  readonly address: LifecycleRouteAddress;
+  /** Whether an owner key (an address `key`) falls under this retirement. */
+  readonly covers: (ownerKey: string) => boolean;
 };
 
 /** Best-effort telemetry available to every Lifecycle capability. */
@@ -38,6 +93,53 @@ export type LifecycleRoutes = {
     target: LifecycleRouteAddress,
     payload: unknown
   ) => Promise<unknown>;
+  /**
+   * Announce that a routed subtree no longer exists. Every installed
+   * capability's `onRouteRetired` runs, in order, so mirrors keyed by the
+   * retired owners are dropped.
+   */
+  readonly retire: (retirement: LifecycleRouteRetirement) => Promise<void>;
+};
+
+/**
+ * The platform's facet surface (`ctx.facets`), exposed narrowly so a
+ * capability can spawn colocated child Durable Objects without holding the
+ * whole `DurableObjectState`.
+ */
+export type LifecycleFacets = {
+  /** False when the runtime predates facets; the other members then throw. */
+  readonly supported: boolean;
+  readonly get: (
+    key: string,
+    startup: () => { class: DurableObjectClass; id: DurableObjectId }
+  ) => Fetcher;
+  readonly abort: (key: string, reason?: unknown) => void;
+  readonly delete: (key: string) => void;
+};
+
+/**
+ * The worker's exports (`ctx.exports`), exposed narrowly: class lookup for
+ * facet startup and loopback namespaces for addressing top-level objects.
+ */
+export type LifecycleExports = {
+  /** False when the runtime predates `ctx.exports`. */
+  readonly supported: boolean;
+  /** Export names, for matching URL segments to classes. */
+  readonly names: () => readonly string[];
+  /** The Durable Object class exported under `name`, if any. */
+  readonly durableObjectClass: (name: string) => DurableObjectClass | undefined;
+  /** The loopback namespace under `name`, when that export is a bound class. */
+  readonly namespace: (name: string) => DurableObjectNamespace | undefined;
+};
+
+/** Identity of the object this Lifecycle belongs to. */
+export type LifecycleObjectIdentity = {
+  /** The routed name (`Lifecycle.name`). */
+  readonly name: () => string;
+  /** The host class name. */
+  readonly className: string;
+  /** Whether `id` addresses this very object. */
+  readonly isSelf: (id: DurableObjectId) => boolean;
 };
 
 /**
@@ -100,6 +202,11 @@ export type LifecycleServices = {
   ) => Promise<unknown>;
   readonly events: LifecycleEvents;
   readonly routes: LifecycleRoutes;
+  readonly facets: LifecycleFacets;
+  readonly exports: LifecycleExports;
+  readonly object: LifecycleObjectIdentity;
+  /** Extend the current invocation until `work` settles. */
+  readonly waitUntil: (work: Promise<unknown>) => void;
 };
 
 const installedServices = new WeakMap<object, LifecycleServices>();

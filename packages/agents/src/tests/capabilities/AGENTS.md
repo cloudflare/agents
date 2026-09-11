@@ -31,6 +31,13 @@ per capability, all registered in the shared workers project
   capability); its driver `withMcpHarness()` (in `../shared/mcp-harness.ts`)
   creates per-test managers over shared real storage, simulating hibernation
   wake-ups.
+- `dynamic-agents.ts` — `DynamicParentObject` (DynamicAgents + Scheduler +
+  WebSockets on a plain root, with probes for the registry, root-owned
+  sockets, keep-alive holds, leases, and jobs, plus a probe capability that
+  accepts child sockets the way the previous release did), `DynamicChildObject`
+  (a child with its own Scheduler and WebSocket handlers; records the identity
+  its `onStart` observed), and `DynamicGrandchildObject` (nesting, no
+  WebSockets).
 
 Files here are part of the shared test worker's module graph, so they must
 stay loadable outside the vitest pool (the React project boots the worker
@@ -56,6 +63,10 @@ Tests mirror source modules (`src/<module>` ↔ `src/tests/<module>`):
   coexistence.
 - `../mcp/client-capability.test.ts` — the MCP client manager as an installed
   capability; the manager suites in `../mcp/` drive `withMcpHarness`.
+- `../dynamic-agents/*.test.ts` — the DynamicAgents capability on plain
+  Durable Objects: spawn and identity, HTTP forwarding and the child gate,
+  bridged WebSockets, teardown and route retirement, keep-alive and leases,
+  and the route transport (child schedules through the root).
 - Agent-surface suites stay top-level (`../schedule.test.ts`,
   `../alarms.test.ts`, …).
 

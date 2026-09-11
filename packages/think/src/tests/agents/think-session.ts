@@ -633,16 +633,19 @@ export class ThinkTestAgent extends Think {
     this._nextSubAgentConnectionSendDelayMs = delayMs;
   }
 
-  override async _cf_sendToSubAgentConnection(
-    connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
-  ): Promise<void> {
-    if (this._nextSubAgentConnectionSendDelayMs > 0) {
+  override async _cf_lifecycle(
+    envelope: Parameters<Agent["_cf_lifecycle"]>[0]
+  ): Promise<unknown> {
+    const type = (envelope.payload as { type?: unknown } | undefined)?.type;
+    if (
+      type === "connection:send" &&
+      this._nextSubAgentConnectionSendDelayMs > 0
+    ) {
       const delayMs = this._nextSubAgentConnectionSendDelayMs;
       this._nextSubAgentConnectionSendDelayMs = 0;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    await super._cf_sendToSubAgentConnection(connectionId, message);
+    return super._cf_lifecycle(envelope);
   }
 
   /** Slow the streamed turn so the parent tails it while it's still live. */
@@ -2218,14 +2221,16 @@ type AgentToolFinishForTest = {
 };
 
 export class StuckThinkAgentToolChild extends Agent {
-  override async _cf_initAsFacet(
-    _name: string,
-    _parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    _identityName = _name
-  ): Promise<void> {
-    await new Promise<void>(() => {
-      // Intentionally never resolves: simulates a child facet wedged in startup.
-    });
+  override async _cf_lifecycle(
+    envelope: Parameters<Agent["_cf_lifecycle"]>[0]
+  ): Promise<unknown> {
+    const type = (envelope.payload as { type?: unknown } | undefined)?.type;
+    if (type === "init") {
+      await new Promise<void>(() => {
+        // Intentionally never resolves: simulates a child facet wedged in startup.
+      });
+    }
+    return super._cf_lifecycle(envelope);
   }
 
   async startAgentToolRun(): Promise<AgentToolRunInspection> {

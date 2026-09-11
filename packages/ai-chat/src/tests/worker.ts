@@ -4166,14 +4166,16 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 }
 
 export class StuckAgentToolChild extends Agent<Env> {
-  override async _cf_initAsFacet(
-    _name: string,
-    _parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    _identityName = _name
-  ): Promise<void> {
-    await new Promise<void>(() => {
-      // Intentionally never resolves: simulates a child facet wedged in startup.
-    });
+  override async _cf_lifecycle(
+    envelope: Parameters<Agent["_cf_lifecycle"]>[0]
+  ): Promise<unknown> {
+    const type = (envelope.payload as { type?: unknown } | undefined)?.type;
+    if (type === "init") {
+      await new Promise<void>(() => {
+        // Intentionally never resolves: simulates a child facet wedged in startup.
+      });
+    }
+    return super._cf_lifecycle(envelope);
   }
 
   async startAgentToolRun(): Promise<AgentToolRunInspection> {

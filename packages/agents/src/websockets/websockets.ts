@@ -6,12 +6,14 @@ import {
   type CapabilityWebSocketUpgradeContext,
   type Connection,
   type ConnectionSetStateFn,
-  type ConnectionState
+  type ConnectionState,
+  type LifecycleRouteContext
 } from "../lifecycle";
 import {
   ConnectionManager,
   createConnection,
-  isManagedWebSocket
+  isManagedWebSocket,
+  prepareTags
 } from "./connection";
 import {
   buildCallablesRoot,
@@ -24,32 +26,21 @@ import type {
   WebSocketsOptions
 } from "./options";
 import { isCallablesRpcUpgrade } from "./protocol";
+import { reciprocateClose } from "./close";
+import {
+  isWebSocketsRouteMessage,
+  type BridgedConnectionEntry,
+  type BridgedConnectionLink
+} from "./bridged";
 
-/**
- * Reserved close codes the runtime synthesizes when there was no real
- * Close frame from the peer (1005 NoStatusReceived, 1006 AbnormalClosure,
- * 1015 TLSHandshake). They cannot appear in an outgoing Close frame, and
- * there is no peer left to receive a reciprocation.
- */
-function isReservedCloseCode(code: number): boolean {
-  return code === 1005 || code === 1006 || code === 1015;
-}
-
-/**
- * Reciprocate a peer-initiated Close frame to complete the handshake, as
- * the Hibernation API contract requires. Best-effort: swallows errors
- * from already-closed sockets or invalid codes/reasons, and skips
- * reciprocation entirely for reserved codes (dead transport).
- */
-function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
-  if (isReservedCloseCode(code)) return;
-  try {
-    ws.close(code, reason);
-  } catch {
-    // Already closed, oversize reason, or another unrecoverable
-    // invariant — the handshake is either done or out of our control.
-  }
-}
+/** One connection whose socket another Lifecycle Object owns. */
+type BridgedRecord = {
+  readonly connection: Connection;
+  link: BridgedConnectionLink;
+  uri: string | null;
+  tags: readonly string[];
+  state: unknown;
+};
 
 /**
  * Opt-in WebSocket support for Lifecycle Objects.
@@ -88,6 +79,13 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
  * protocol socket. A plain host's endpoint is reached with capnweb
  * directly — `newWebSocketRpcSession(new WebSocket(callablesRpcUrl(url)))`.
  *
+ * A capability that owns sockets on another Lifecycle Object (dynamic
+ * agents' parent holds its children's sockets) bridges them in through
+ * this capability's route: `bridged:*` messages present each remote
+ * socket as a connection the handlers and `getConnections()` see like
+ * any other. A routed (child) Lifecycle owns no platform sockets, so
+ * there the bridged connections are the only ones.
+ *
  * @experimental The API surface may change before stabilizing.
  */
 export class WebSockets extends LifecycleCapability {
@@ -95,6 +93,7 @@ export class WebSockets extends LifecycleCapability {
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #callablesTarget: RpcTarget | undefined;
   #manager: ConnectionManager | undefined;
+  readonly #bridged = new Map<string, BridgedRecord>();
 
   constructor(options: WebSocketsOptions = {}) {
     super("websockets");
@@ -167,6 +166,69 @@ export class WebSockets extends LifecycleCapability {
     return true;
   }
 
+  /** Present sockets another Lifecycle Object owns as local connections. */
+  async onRoute({ payload }: LifecycleRouteContext): Promise<void> {
+    if (!isWebSocketsRouteMessage(payload)) {
+      throw new Error("Unknown WebSockets route message");
+    }
+    switch (payload.type) {
+      case "bridged:sync": {
+        if (payload.reset) {
+          const keep = new Set(payload.connections.map(({ meta }) => meta.id));
+          for (const id of this.#bridged.keys()) {
+            if (!keep.has(id)) this.#bridged.delete(id);
+          }
+        }
+        for (const entry of payload.connections) this.#bridgedRecord(entry);
+        return;
+      }
+      case "bridged:connect": {
+        const record = this.#bridgedRecord(payload);
+        const { connection } = record;
+        const ctx = { request: payload.request };
+        const tags = prepareTags(
+          connection.id,
+          this.#getConnectionTags
+            ? await this.#getConnectionTags(connection, ctx)
+            : []
+        );
+        record.tags = tags;
+        record.link.setTags(tags);
+        await this.lifecycle.runInHostContext(
+          () => this.#handlers?.onConnect?.(connection, ctx),
+          { connection, request: payload.request }
+        );
+        return;
+      }
+      case "bridged:message": {
+        const { connection } = this.#bridgedRecord(payload);
+        await this.lifecycle.runInHostContext(
+          () => this.#handlers?.onMessage?.(connection, payload.message),
+          { connection }
+        );
+        return;
+      }
+      case "bridged:close": {
+        const { connection } = this.#bridgedRecord(payload);
+        try {
+          await this.lifecycle.runInHostContext(
+            () =>
+              this.#handlers?.onClose?.(
+                connection,
+                payload.code,
+                payload.reason,
+                payload.wasClean
+              ),
+            { connection }
+          );
+        } finally {
+          this.#bridged.delete(connection.id);
+        }
+        return;
+      }
+    }
+  }
+
   /**
    * Close every owned connection during explicit host destruction. The
    * capability owns its sockets' lifetimes, so it also owns tearing
@@ -184,21 +246,61 @@ export class WebSockets extends LifecycleCapability {
 
   // ── Connections ────────────────────────────────────────────────────────
 
-  /** Open connections accepted by this capability, optionally by tag. */
-  getConnections<TState = unknown>(
+  /**
+   * Open connections this capability presents, optionally by tag: the
+   * sockets it accepted (none on a routed Lifecycle, which owns no
+   * platform sockets) and the connections bridged in from their owner.
+   */
+  *getConnections<TState = unknown>(
     tag?: string
   ): IterableIterator<Connection<TState>> {
-    return this.#connectionManager.getConnections<TState>(tag);
+    if (!this.lifecycle.routes.source) {
+      yield* this.#connectionManager.getConnections<TState>(tag);
+    }
+    for (const record of this.#bridged.values()) {
+      if (tag === undefined || record.tags.includes(tag)) {
+        yield record.connection as Connection<TState>;
+      }
+    }
   }
 
-  /** One connection accepted by this capability, by id. */
+  /** One connection this capability presents, by id. */
   getConnection<TState = unknown>(id: string): Connection<TState> | undefined {
-    return this.#connectionManager.getConnection<TState>(id);
+    const accepted = this.lifecycle.routes.source
+      ? undefined
+      : this.#connectionManager.getConnection<TState>(id);
+    return (
+      accepted ?? (this.#bridged.get(id)?.connection as Connection<TState>)
+    );
   }
 
   get #connectionManager(): ConnectionManager {
     this.#manager ??= new ConnectionManager(this.lifecycle.sockets);
     return this.#manager;
+  }
+
+  /** The record for a bridged connection, created or refreshed from its owner's view. */
+  #bridgedRecord({ meta, link }: BridgedConnectionEntry): BridgedRecord {
+    const existing = this.#bridged.get(meta.id);
+    if (existing) {
+      existing.link = link;
+      existing.uri = meta.uri;
+      existing.tags = meta.tags;
+      existing.state = meta.state;
+      return existing;
+    }
+    const record = {
+      link,
+      uri: meta.uri,
+      tags: meta.tags,
+      state: meta.state
+    } as BridgedRecord;
+    (record as { connection: Connection }).connection = createBridgedConnection(
+      meta.id,
+      record
+    );
+    this.#bridged.set(meta.id, record);
+    return record;
   }
 
   async #acceptConnection(request: Request): Promise<Response> {
@@ -280,4 +382,59 @@ export class WebSockets extends LifecycleCapability {
       throw error;
     }
   }
+}
+
+/**
+ * A `Connection` over a socket another object owns. Every property is
+ * configurable, like an accepted connection's, so a host may redefine
+ * `state`/`setState` to project its own view; `state` reads the owner's
+ * latest snapshot and `setState` writes through the link.
+ */
+function createBridgedConnection(
+  id: string,
+  record: Omit<BridgedRecord, "connection">
+): Connection {
+  const connection = {
+    readyState: WebSocket.OPEN,
+    send(message: WebSocketMessage) {
+      record.link.send(message);
+    },
+    close(code?: number, reason?: string) {
+      record.link.close(code, reason);
+    },
+    addEventListener() {},
+    removeEventListener() {}
+  };
+  Object.defineProperties(connection, {
+    id: { configurable: true, enumerable: true, value: id },
+    uri: {
+      configurable: true,
+      enumerable: true,
+      get: () => record.uri
+    },
+    tags: {
+      configurable: true,
+      enumerable: true,
+      get: () => record.tags
+    },
+    state: {
+      configurable: true,
+      enumerable: true,
+      get: () => (record.state ?? null) as ConnectionState<unknown>
+    },
+    setState: {
+      configurable: true,
+      writable: true,
+      value: function setState<T>(next: T | ConnectionSetStateFn<T>) {
+        const state =
+          next instanceof Function
+            ? next(record.state as ConnectionState<T>)
+            : next;
+        record.state = state ?? null;
+        record.link.setState(record.state);
+        return record.state as ConnectionState<T>;
+      }
+    }
+  });
+  return connection as unknown as Connection;
 }
