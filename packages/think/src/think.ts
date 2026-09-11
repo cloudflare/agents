@@ -264,7 +264,11 @@ import type {
   OrphanPersistStore
 } from "agents/chat";
 import { truncateOlderMessages } from "agents/chat";
-import { Sessions, type SessionMessage } from "agents/sessions";
+import {
+  Sessions,
+  isCompactionMessage,
+  type SessionMessage
+} from "agents/sessions";
 import { ThinkSession } from "./session";
 import {
   AgentContextProvider,
@@ -309,7 +313,8 @@ import {
   evictMediaFromMessage,
   evictedFilePath,
   resolveMediaEvictionConfig,
-  type MediaEvictionConfig
+  type MediaEvictionConfig,
+  hasEvictableMedia
 } from "./media-eviction";
 import { createWorkspaceTools } from "./tools/workspace";
 import { createFetchTools } from "./tools/fetch";
@@ -1953,6 +1958,47 @@ const THINK_WORKFLOW_NOTIFICATIONS_JOB_ID = "think:workflow-notifications";
  */
 const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
 
+const cachedMessageEncoder = new TextEncoder();
+
+/**
+ * A cached message's size in the unit the hydration budget is measured in:
+ * UTF-8 bytes of its serialized form, not UTF-16 code units.
+ */
+function cachedMessageBytes(message: UIMessage): number {
+  return cachedMessageEncoder.encode(JSON.stringify(message)).byteLength;
+}
+
+/**
+ * The stored form of a client-sourced message's metadata: Sessions drops the
+ * reserved keys on every client write, so a compare against a stored row has
+ * to drop them too. Mirrors `SessionCore.stripReservedMetadata` for the keys
+ * Think registers.
+ */
+function stripReservedMetadata(message: UIMessage): UIMessage {
+  const metadata = message.metadata;
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    Array.isArray(metadata)
+  ) {
+    return message;
+  }
+  const remaining: Record<string, unknown> = { ...metadata };
+  let changed = false;
+  for (const key of RESERVED_MESSAGE_METADATA_KEYS) {
+    if (key in remaining) {
+      delete remaining[key];
+      changed = true;
+    }
+  }
+  if (!changed) return message;
+  if (Object.keys(remaining).length > 0) {
+    return { ...message, metadata: remaining };
+  }
+  const { metadata: _dropped, ...withoutMetadata } = message;
+  return withoutMetadata as UIMessage;
+}
+
 /** Stable id prefix for fallback notes that preserve orphaned execution outcomes. */
 const EXECUTION_OUTCOME_MESSAGE_PREFIX = "exec-outcome-";
 
@@ -3074,7 +3120,29 @@ export class Think<
                     await this._syncMessages();
                   } else {
                     this._upsertCachedMessage(event.message as UIMessage);
+                    // A linear append is what ages older messages, so this
+                    // is where an eviction pass becomes worth scheduling;
+                    // the gate decides from memory. It also grows the cache
+                    // past what the last refresh measured.
+                    this._noteCachedGrowth(
+                      cachedMessageBytes(event.message as UIMessage)
+                    );
+                    if (this._mediaEvictionFruitless) {
+                      this._mediaEvictionFruitless.appendsSince++;
+                    }
+                    if (this._mediaEvictionRunning) {
+                      this._mediaEvictionAppendsDuringPass++;
+                    }
+                    this._scheduleMediaEvictionPass();
                   }
+                  break;
+                case "import":
+                  // A row the cache never saw. Re-derive at the next safe
+                  // boundary instead of mirroring a migration row by row.
+                  this._cacheCoversActivePath = false;
+                  break;
+                case "compaction":
+                  await this._syncMessages();
                   break;
                 case "update":
                   if (
@@ -3087,6 +3155,7 @@ export class Think<
                   break;
                 case "clear":
                   this._replaceCachedMessages([]);
+                  this._cacheCoversActivePath = true;
                   break;
                 case "delete":
                   await this._syncMessages();
@@ -3261,11 +3330,12 @@ export class Think<
    *
    * Intentionally UNBUDGETED — unlike the cache refresh in `_syncMessages`,
    * which routes through `session.getRecentHistory(hydrationByteBudget)`, this
-   * returns the full active path. Callers (message reconciliation, tool-update
-   * application) must see every message: reconciliation diffs incoming client
-   * messages against the complete server transcript, and a tool result can
-   * target any message on the path, so a windowed read would drop rows and
-   * corrupt the result.
+   * returns the full active path. Its caller, message reconciliation, must see
+   * every message: it diffs incoming client messages against the complete
+   * server transcript, so a windowed read would drop rows and corrupt the
+   * result. It is reached only when the live cache does not already cover the
+   * path (`_serverTranscriptForReconcile`); tool-update application resolves
+   * its one target row without it (`_resolveToolCallOwner`).
    *
    * These full reads are not the unbounded boot-time hydration that bricked the
    * DO in #1710: they run during a live turn (never in `onStart`), so an
@@ -3438,7 +3508,47 @@ export class Think<
 
   private _mediaEvictionRunning = false;
   private _mediaEvictionScheduled = false;
+  /**
+   * A request that arrived while a pass was running. That pass read its
+   * candidates before the request's append landed, so the request is kept
+   * and re-evaluated once the pass ends rather than dropped.
+   */
+  private _mediaEvictionPending = false;
+  /**
+   * Linear appends that landed while a pass was running. The pass read its
+   * candidates before them, so a fruitless result records them as appends
+   * since — not zero — and the request they left pending can pass the gate.
+   */
+  private _mediaEvictionAppendsDuringPass = 0;
   private _warnedEvictionUnsupported = false;
+  /**
+   * The last pass that found nothing to evict while aged rows were hidden
+   * from the cache: the stored size it saw, and how many linear appends have
+   * landed since. Until either changes enough, another pass would scan the
+   * same rows to the same answer. A refresh that measures a different size
+   * re-arms it, and so do `keepRecentMessages` appends: that is what it takes
+   * for a row the pass had to protect to age into a candidate. An update
+   * that grows a cached row clears it outright (`_patchCachedMessage`).
+   */
+  private _mediaEvictionFruitless: {
+    storedBytes: number;
+    appendsSince: number;
+  } | null = null;
+
+  /**
+   * Whether the cache can stand in for the stored path when deciding if an
+   * eviction pass is worth running. It cannot when the hydration is a window
+   * of the path, or when a compaction overlay collapses rows the pass would
+   * still read and rewrite.
+   */
+  private _agedRowsHiddenFromCache(): boolean {
+    return (
+      this._lastHydration?.truncated === true ||
+      this._cachedMessages.some((message) =>
+        isCompactionMessage(message as SessionMessage)
+      )
+    );
+  }
 
   /**
    * Schedule a bounded media-eviction pass (see `mediaEviction`).
@@ -3450,18 +3560,45 @@ export class Think<
    * can never brick the object.
    */
   private _scheduleMediaEvictionPass(): void {
-    if (this._mediaEvictionScheduled || this._mediaEvictionRunning) return;
+    if (this._mediaEvictionScheduled) return;
+    if (this._mediaEvictionRunning) {
+      this._mediaEvictionPending = true;
+      return;
+    }
     const config = resolveMediaEvictionConfig(this.mediaEviction);
     if (!config) return;
-    // Cheap "is there anything aged at all" gate. A windowed hydration is
-    // itself proof of a longer stored path, so it qualifies even though the
-    // in-memory window is exactly the protected tail.
+    // Decide from memory whether a pass could evict anything, so a pass is
+    // not the way to find out: its first act is a content-free scan of the
+    // whole stored path, and this runs after every cache refresh and every
+    // linear append.
+    //
+    // When the cache holds every aged row, it is the same rows the pass
+    // would read, so a pass is scheduled only when an aged cached message
+    // still carries an inline payload. When it does not — a windowed
+    // hydration, or rows hidden under a compaction overlay — a pass is
+    // scheduled once per distinct stored size, since until the bytes change
+    // it would scan the same rows to the same answer.
     const keepRecent = Math.max(config.keepRecentMessages, MODEL_RECENT_WINDOW);
-    if (
-      this._lastHydration?.truncated !== true &&
-      this._cachedMessages.length <= keepRecent
-    ) {
-      return;
+    if (this._agedRowsHiddenFromCache()) {
+      const fruitless = this._mediaEvictionFruitless;
+      if (
+        fruitless !== null &&
+        this._lastHydration !== null &&
+        fruitless.storedBytes === this._lastHydration.totalContentBytes &&
+        fruitless.appendsSince < keepRecent
+      ) {
+        return;
+      }
+    } else {
+      const aged = this._cachedMessages.slice(
+        0,
+        Math.max(0, this._cachedMessages.length - keepRecent)
+      );
+      if (
+        !aged.some((message) => hasEvictableMedia(message, config.minPartBytes))
+      ) {
+        return;
+      }
     }
     this._mediaEvictionScheduled = true;
     setTimeout(() => {
@@ -3500,6 +3637,7 @@ export class Think<
     const config = resolveMediaEvictionConfig(this.mediaEviction);
     if (!config) return null;
     this._mediaEvictionRunning = true;
+    this._mediaEvictionAppendsDuringPass = 0;
     const totals = {
       messages: 0,
       parts: 0,
@@ -3571,12 +3709,18 @@ export class Think<
       }
 
       if (totals.messages > 0) {
+        this._mediaEvictionFruitless = null;
         this._emit("chat:media:evicted", {
           messages: totals.messages,
           parts: totals.parts,
           bytes: totals.bytes,
           externalizedBytes: totals.bytes
         });
+      } else if (this._agedRowsHiddenFromCache() && this._lastHydration) {
+        this._mediaEvictionFruitless = {
+          storedBytes: this._lastHydration.totalContentBytes,
+          appendsSince: this._mediaEvictionAppendsDuringPass
+        };
       }
       return totals;
     } catch (error) {
@@ -3590,6 +3734,13 @@ export class Think<
       // Only chain when this pass actually shrank something: a pass that
       // changed nothing would otherwise reschedule itself forever.
       if (totals.backlogRemains && totals.messages > 0) {
+        this._scheduleMediaEvictionPass();
+      }
+      // A request that landed mid-pass goes back through the gate now, so
+      // media aged by an append during this pass is not left until the
+      // next one. The gate, not the request, decides whether a pass runs.
+      if (this._mediaEvictionPending) {
+        this._mediaEvictionPending = false;
         this._scheduleMediaEvictionPass();
       }
     }
@@ -3615,6 +3766,46 @@ export class Think<
   private _warnedHydrationWindowed = false;
 
   /**
+   * `true` while `this.messages` holds every message on the active path.
+   * That is the common case: the default `hydrationByteBudget` admits whole
+   * transcripts, and the Sessions change feed patches the cache after every
+   * durable write. Set by `_syncMessages()`; `false` when the last refresh
+   * was windowed, failed, or has not run yet. Readers that need the complete
+   * path — reconciliation, tool-update lookups — consult it to decide whether
+   * the cache can answer or storage must be read.
+   */
+  private _cacheCoversActivePath = false;
+
+  /**
+   * Serialized bytes the cache has grown by since the last refresh — new
+   * messages and updates that enlarged existing ones, measured as UTF-8 the
+   * way the budget is. The hydration budget was measured at that refresh;
+   * once the growth since would carry the cache past it, the cache stops
+   * claiming to cover the path, so the next boundary re-reads storage and
+   * re-windows (#1710).
+   */
+  private _cachedBytesSinceSync = 0;
+
+  private _noteCachedGrowth(bytes: number): void {
+    const budget = this.hydrationByteBudget;
+    if (
+      bytes <= 0 ||
+      !Number.isFinite(budget) ||
+      budget <= 0 ||
+      !this._lastHydration
+    ) {
+      return;
+    }
+    this._cachedBytesSinceSync += bytes;
+    if (
+      this._lastHydration.totalContentBytes + this._cachedBytesSinceSync >
+      budget
+    ) {
+      this._cacheCoversActivePath = false;
+    }
+  }
+
+  /**
    * Snapshot of the last `chat:hydration:windowed` emit, used to emit on
    * CHANGE rather than on every safe-boundary sync — a chronically
    * oversized session syncs many times per turn and would otherwise spam
@@ -3636,6 +3827,9 @@ export class Think<
    * `MODEL_RECENT_WINDOW`; `getHistory()` still reads the full path.
    */
   private async _syncMessages(): Promise<UIMessage[]> {
+    // A refresh that throws leaves the cache unreliable until the next one.
+    this._cacheCoversActivePath = false;
+    this._cachedBytesSinceSync = 0;
     const budget = this.hydrationByteBudget;
     if (!Number.isFinite(budget) || budget <= 0) {
       this._lastHydration = null;
@@ -3643,6 +3837,7 @@ export class Think<
       const full = this._replaceCachedMessages(
         await this._readMessagesFromStorage()
       );
+      this._cacheCoversActivePath = true;
       this._scheduleMediaEvictionPass();
       return full;
     }
@@ -3685,6 +3880,7 @@ export class Think<
     const hydrated = this._replaceCachedMessages(
       recent.messages as UIMessage[]
     );
+    this._cacheCoversActivePath = !recent.truncated;
     this._scheduleMediaEvictionPass();
     return hydrated;
   }
@@ -3699,11 +3895,23 @@ export class Think<
     }
   }
 
-  /** Patch a message that is already present in the live cache. */
+  /**
+   * Patch a message that is already present in the live cache. An update
+   * that enlarges the message (a tool result landing on it) grows the cache
+   * exactly as an append does, so it is charged against the hydration
+   * budget the same way; and it may have put an inline payload on an aged
+   * row, so a fruitless eviction pass no longer stands.
+   */
   private _patchCachedMessage(message: UIMessage): void {
     const index = this._cachedMessages.findIndex((m) => m.id === message.id);
-    if (index !== -1) {
-      this._cachedMessages[index] = message;
+    if (index === -1) return;
+    const grew =
+      cachedMessageBytes(message) -
+      cachedMessageBytes(this._cachedMessages[index]);
+    this._cachedMessages[index] = message;
+    if (grew > 0) {
+      this._noteCachedGrowth(grew);
+      this._mediaEvictionFruitless = null;
     }
   }
 
@@ -4079,12 +4287,22 @@ export class Think<
     this.#configTableReady = true;
   }
 
+  /**
+   * Last value each `think_config` key was seen to hold in this isolate.
+   * Only this object writes the table, so a write whose value matches is a
+   * no-op and skips the row — the request body and client-tool schemas are
+   * re-persisted on every chat request and rarely change.
+   */
+  readonly #configMemo = new Map<string, string | undefined>();
+
   private _configSet(key: string, value: string): void {
     this._ensureConfigTable();
+    if (this.#configMemo.get(key) === value) return;
     this.sql`
       INSERT OR REPLACE INTO think_config (key, value)
       VALUES (${key}, ${value})
     `;
+    this.#configMemo.set(key, value);
   }
 
   private _configGet(key: string): string | undefined {
@@ -4093,15 +4311,21 @@ export class Think<
       SELECT value FROM think_config
       WHERE key = ${key}
     `;
-    return rows[0]?.value;
+    const value = rows[0]?.value;
+    this.#configMemo.set(key, value);
+    return value;
   }
 
   private _configDelete(key: string): void {
     this._ensureConfigTable();
+    if (this.#configMemo.has(key) && this.#configMemo.get(key) === undefined) {
+      return;
+    }
     this.sql`
       DELETE FROM think_config
       WHERE key = ${key}
     `;
+    this.#configMemo.set(key, undefined);
   }
 
   // ── Configuration overrides ─────────────────────────────────────
@@ -5179,10 +5403,12 @@ export class Think<
         }
       });
 
-      const previous = this._configGet("skillsFingerprint");
+      const previous = (this._skillsFingerprint ??=
+        this._configGet("skillsFingerprint") ?? null);
       if (previous !== registry.fingerprint) {
         await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", registry.fingerprint);
+        this._skillsFingerprint = registry.fingerprint;
       }
     } catch (error) {
       console.warn(
@@ -5253,6 +5479,12 @@ export class Think<
     return null;
   }
 
+  /**
+   * The persisted skills fingerprint, read from `think_config` once per
+   * object lifetime; `null` once read and absent. Saves the per-turn probe.
+   */
+  private _skillsFingerprint: string | null | undefined;
+
   private async _refreshSkillsIfChanged(): Promise<void> {
     if (!this._skillRegistry) return;
 
@@ -5262,10 +5494,12 @@ export class Think<
       await this._skillRegistry.refresh();
       this._logSkillWarnings(this._skillRegistry);
       await this._configureSkillWorkspace(this._skillRegistry);
-      const previous = this._configGet("skillsFingerprint");
+      const previous = (this._skillsFingerprint ??=
+        this._configGet("skillsFingerprint") ?? null);
       if (previous !== this._skillRegistry.fingerprint) {
         await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
+        this._skillsFingerprint = this._skillRegistry.fingerprint;
       }
     } catch (error) {
       console.warn(
@@ -6323,7 +6557,9 @@ export class Think<
         // Proactive context guard (Layer 1) runs first so `beforeStep` sees the
         // recompacted messages and can still override them if it wants to.
         const guarded = await this._maybeProactiveContextCompact(event);
-        const result = await this.beforeStep(event);
+        const result = await this.beforeStep(
+          guarded ? { ...event, messages: guarded } : event
+        );
         const base = result == null ? {} : result;
         // Only apply the guard's recompacted messages when the subclass didn't
         // set its own `messages` override for this step.
@@ -8152,7 +8388,13 @@ export class Think<
     this._broadcast({ type: MSG_CHAT_CLEAR });
   }
 
+  #agentToolChildRunTableReady = false;
+
   private _ensureAgentToolChildRunTable(): void {
+    // Runs ahead of every milestone, progress snapshot and child-run read, so
+    // the DDL (two CREATE IF NOT EXISTS plus three ALTER attempts that throw
+    // and are swallowed) is paid once per isolate, not per call.
+    if (this.#agentToolChildRunTableReady) return;
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agent_tool_child_runs (
         run_id TEXT PRIMARY KEY,
@@ -8191,6 +8433,7 @@ export class Think<
         PRIMARY KEY (run_id, sequence)
       )
     `;
+    this.#agentToolChildRunTableReady = true;
   }
 
   private _persistAgentToolMilestone(
@@ -11964,54 +12207,19 @@ export class Think<
       const clientToolsForTurn = this._lastClientTools;
       const bodyForTurn = this._lastBody;
 
-      const serverMessages = await withAgentSpan(
-        this,
-        "load_chat_history",
-        "interaction",
-        {
-          "cloudflare.agents.component": "think",
-          "cloudflare.agents.turn.request_id": requestId,
-          "cloudflare.agents.turn.trigger": "ws-chat"
-        },
-        () => this._readMessagesFromStorage()
-      );
-      const reconciled = reconcileMessages(
+      const reconciledTurn = await this._reconcileAndPersistIncoming(
         incomingMessages,
-        serverMessages,
-        sanitizeMessage
-      );
-
-      let branchParentId: string | undefined;
-      if (isRegeneration && reconciled.length > 0) {
-        branchParentId = reconciled[reconciled.length - 1].id;
-      }
-
-      const persisted = await withAgentSpan(
-        this,
-        "persist_incoming_messages",
-        "interaction",
         {
-          "cloudflare.agents.component": "think",
-          "cloudflare.agents.turn.request_id": requestId,
-          "cloudflare.agents.turn.trigger": "ws-chat"
-        },
-        async () => {
-          if (this._turnQueue.generation !== epoch) return false;
-
-          for (const msg of reconciled) {
-            if (this._turnQueue.generation !== epoch) return false;
-            await this._persistIncomingMessage(msg, serverMessages);
-          }
-
-          if (this._turnQueue.generation !== epoch) return false;
-          await this._syncMessages();
-          return true;
+          requestId,
+          isRegeneration,
+          isCurrent: () => this._turnQueue.generation === epoch
         }
       );
-      if (!persisted) {
+      if (!reconciledTurn) {
         this._completeSkippedRequest(connection, requestId);
         return;
       }
+      const { branchParentId } = reconciledTurn;
 
       this._broadcastMessages([connection.id]);
       messagesPersisted = true;
@@ -13424,16 +13632,23 @@ export class Think<
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
     let after: (() => Promise<void>) | undefined;
-    this._resumableStream.cutover(
-      streamId,
-      () => {
-        after = sync.upsert(toPersist as SessionMessage, {
-          parentId,
-          source: "server"
-        }).after;
-      },
-      { discard: options.discard ?? true }
-    );
+    try {
+      this._resumableStream.cutover(
+        streamId,
+        () => {
+          after = sync.upsert(toPersist as SessionMessage, {
+            parentId,
+            source: "server"
+          }).after;
+        },
+        { discard: options.discard ?? true }
+      );
+    } catch (error) {
+      // The settle transaction rolled back: the row never landed, but the
+      // session's in-memory caches already counted it.
+      sync.abandon();
+      throw error;
+    }
     await after?.();
   }
 
@@ -13479,30 +13694,158 @@ export class Think<
   }
 
   /**
+   * Turn-start persistence of the client's transcript: reconcile the posted
+   * messages against the server's active path, write only what changed, and
+   * leave the live cache current. Returns `null` when a newer request
+   * superseded this one part-way through (`isCurrent` turned false).
+   *
+   * Storage traffic here is independent of transcript length: the server
+   * transcript comes from the live cache when it covers the path, unchanged
+   * echoed messages are skipped before Sessions is asked, and the cache is
+   * re-read only when it is windowed.
+   */
+  private async _reconcileAndPersistIncoming(
+    incomingMessages: UIMessage[],
+    options: {
+      requestId: string;
+      isRegeneration: boolean;
+      isCurrent: () => boolean;
+    }
+  ): Promise<{ branchParentId: string | undefined } | null> {
+    const spanAttributes = {
+      "cloudflare.agents.component": "think",
+      "cloudflare.agents.turn.request_id": options.requestId,
+      "cloudflare.agents.turn.trigger": "ws-chat"
+    };
+    const serverMessages = await withAgentSpan(
+      this,
+      "load_chat_history",
+      "interaction",
+      spanAttributes,
+      () => this._serverTranscriptForReconcile()
+    );
+    const serverMessagesById = new Map(
+      serverMessages.map((message) => [message.id, message])
+    );
+    const reconciled = reconcileMessages(
+      incomingMessages,
+      serverMessages,
+      sanitizeMessage
+    );
+
+    let branchParentId: string | undefined;
+    if (options.isRegeneration && reconciled.length > 0) {
+      branchParentId = reconciled[reconciled.length - 1].id;
+    }
+
+    const persisted = await withAgentSpan(
+      this,
+      "persist_incoming_messages",
+      "interaction",
+      spanAttributes,
+      async () => {
+        if (!options.isCurrent()) return false;
+
+        for (const msg of reconciled) {
+          if (!options.isCurrent()) return false;
+          await this._persistIncomingMessage(
+            msg,
+            serverMessages,
+            serverMessagesById
+          );
+        }
+
+        if (!options.isCurrent()) return false;
+        // The change feed patched the cache for every write above (a linear
+        // append lands in place; a branch append already forced a full
+        // refresh), so a cache that covers the path is current. Only a
+        // windowed or unhydrated cache needs storage to re-derive its view.
+        if (!this._cacheCoversActivePath) {
+          await this._syncMessages();
+        }
+        return true;
+      }
+    );
+    return persisted ? { branchParentId } : null;
+  }
+
+  /**
+   * The server transcript that reconciliation diffs client messages against.
+   * The live cache answers when it holds the whole active path — the common
+   * case, kept current by the change feed after every durable write. A
+   * windowed or unhydrated cache falls back to the full storage read, since
+   * reconciliation must see every message (`_readMessagesFromStorage`).
+   *
+   * Returns a snapshot: the writes that follow patch the cache through the
+   * change feed while the caller is still iterating.
+   */
+  private async _serverTranscriptForReconcile(): Promise<UIMessage[]> {
+    if (this._cacheCoversActivePath) return [...this._cachedMessages];
+    return this._readMessagesFromStorage();
+  }
+
+  /**
    * Persist an incoming message after reconciliation. For assistant
    * messages, also resolve their ID against any server-side row that
    * already owns the same `toolCallId` so we update the existing row
    * instead of inserting an orphan duplicate.
+   *
+   * A message whose stored form is what the server already holds is skipped
+   * outright. The client posts its whole transcript on every request, so
+   * without this every prior message would cost Sessions an existence read
+   * plus a full-row compare (and, for media, a decode and hash of every
+   * payload) per turn — reads spent discovering nothing changed.
    */
   private async _persistIncomingMessage(
     msg: UIMessage,
-    serverMessages: readonly UIMessage[]
+    serverMessages: readonly UIMessage[],
+    serverMessagesById?: ReadonlyMap<string, UIMessage>
   ): Promise<void> {
     const resolved =
       msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
+    const prior = serverMessagesById?.get(resolved.id);
+    if (
+      prior &&
+      JSON.stringify(prior) ===
+        JSON.stringify(stripReservedMetadata(sanitizeMessage(resolved)))
+    ) {
+      return;
+    }
     await this._upsertMessageInHistory(resolved, undefined, "client");
   }
 
-  private _persistClientTools(): void {
-    if (this._lastClientTools) {
-      this._configSet("lastClientTools", JSON.stringify(this._lastClientTools));
+  /**
+   * The serialized form last written to (or read from) `think_config` for a
+   * request-context key. Every chat request re-sends its client tools and
+   * body; comparing here turns the per-request write into a no-op when
+   * nothing changed. `undefined` means "not persisted" (row absent).
+   */
+  private _persistedRequestContext: {
+    lastClientTools?: string;
+    lastBody?: string;
+  } = {};
+
+  private _persistRequestContextKey(
+    key: "lastClientTools" | "lastBody",
+    value: unknown
+  ): void {
+    const json = value ? JSON.stringify(value) : undefined;
+    if (this._persistedRequestContext[key] === json) return;
+    if (json === undefined) {
+      this._configDelete(key);
     } else {
-      this._configDelete("lastClientTools");
+      this._configSet(key, json);
     }
+    this._persistedRequestContext[key] = json;
+  }
+
+  private _persistClientTools(): void {
+    this._persistRequestContextKey("lastClientTools", this._lastClientTools);
   }
 
   private _restoreClientTools(): void {
     const raw = this._configGet("lastClientTools");
+    this._persistedRequestContext.lastClientTools = raw;
     if (raw) {
       try {
         this._lastClientTools = JSON.parse(raw);
@@ -13513,15 +13856,12 @@ export class Think<
   }
 
   private _persistBody(): void {
-    if (this._lastBody) {
-      this._configSet("lastBody", JSON.stringify(this._lastBody));
-    } else {
-      this._configDelete("lastBody");
-    }
+    this._persistRequestContextKey("lastBody", this._lastBody);
   }
 
   private _restoreBody(): void {
     const raw = this._configGet("lastBody");
+    this._persistedRequestContext.lastBody = raw;
     if (raw) {
       try {
         this._lastBody = JSON.parse(raw);
@@ -14111,55 +14451,59 @@ export class Think<
     // storage-only lookup and later repaired as "interrupted". Writing it in
     // place lets it ride into the persist.
     const streaming = this._streamingAssistant;
+    let accumulatorOwnsCall = false;
     if (streaming) {
       const accParts = streaming.parts as unknown as Array<
         Record<string, unknown>
       >;
       const result = applyToolUpdate(accParts, update);
-      if (result && result.parts[result.index] !== accParts[result.index]) {
-        // `accParts` is a typed alias of the accumulator's live array, so this
-        // in-place write is reflected by `streaming.toMessage()` and the
-        // eventual end-of-stream persist.
-        accParts[result.index] = result.parts[result.index];
-        broadcastMessage = streaming.toMessage();
+      if (result) {
+        accumulatorOwnsCall = true;
+        if (result.parts[result.index] !== accParts[result.index]) {
+          // `accParts` is a typed alias of the accumulator's live array, so
+          // this in-place write is reflected by `streaming.toMessage()` and
+          // the eventual end-of-stream persist.
+          accParts[result.index] = result.parts[result.index];
+          broadcastMessage = streaming.toMessage();
+        }
       }
     }
 
     // (2) Durable storage. Handles messages already persisted — including
     // partials written mid-stream by stall recovery and cross-message tool
     // results that target an earlier message than this turn's.
-    const history = (await this.session.getHistory()) as UIMessage[];
-    for (let i = 0; i < history.length; i++) {
-      const msg = history[i];
-      const msgParts = msg.parts as Array<Record<string, unknown>>;
-      const result = applyToolUpdate(msgParts, update);
-      if (result) {
-        // First-write-wins / idempotent re-apply: when `apply` leaves the
-        // matched part untouched (same reference) — e.g. a provider replay of
-        // an already-settled cross-message tool result (#1404) — there is
-        // nothing to persist. Skip the durable write and the redundant
-        // `MESSAGE_UPDATED` broadcast so clients don't churn on a no-op.
-        if (result.parts[result.index] === msgParts[result.index]) {
-          break;
-        }
+    //
+    // The owning row is resolved without reading the transcript (see
+    // `_resolveToolCallOwner`) and read as one row, so the apply stays a
+    // first-write-wins read-modify-write of the STORED form: when `apply`
+    // leaves the matched part untouched (same reference) — e.g. a provider
+    // replay of an already-settled cross-message tool result (#1404) — there
+    // is nothing to persist, and the durable write and the redundant
+    // `MESSAGE_UPDATED` broadcast are both skipped so clients don't churn.
+    const owner = await this._resolveToolCallOwner(
+      update.toolCallId,
+      accumulatorOwnsCall && streaming ? streaming.messageId : undefined
+    );
+    if (owner) {
+      const ownerParts = owner.parts as Array<Record<string, unknown>>;
+      const result = applyToolUpdate(ownerParts, update);
+      if (result && result.parts[result.index] !== ownerParts[result.index]) {
         const updatedMsg = {
-          ...msg,
+          ...owner,
           parts: result.parts as UIMessage["parts"]
         };
         const safe = await this._updateMessageInHistory(updatedMsg);
         // Session change callbacks may run after an immediately scheduled
         // continuation begins. Keep its input cache coherent synchronously.
-        this._patchCachedMessage(safe);
         // Patch the live cache in place instead of doing a full
-        // `_syncMessages()` round-trip.
-        // A full re-read during a streaming turn drops in-flight messages
-        // whose parent chain hasn't been persisted yet (see commits
-        // 3f615a24 "revert _syncMessages in _applyToolUpdateToMessages"
-        // and 6e76bd49 "update cached messages in-place"). The cache is
-        // the source of truth during a turn; we only reconcile it here to
-        // reflect the tool update that was just written to storage.
+        // `_syncMessages()` round-trip: a full re-read during a streaming
+        // turn drops in-flight messages whose parent chain hasn't been
+        // persisted yet (see commits 3f615a24 "revert _syncMessages in
+        // _applyToolUpdateToMessages" and 6e76bd49 "update cached messages
+        // in-place"). The cache is the source of truth during a turn; we only
+        // reconcile it here to reflect the tool update just written.
+        this._patchCachedMessage(safe);
         broadcastMessage = safe;
-        break;
       }
     }
 
@@ -14169,6 +14513,67 @@ export class Think<
         message: broadcastMessage
       });
     }
+  }
+
+  /**
+   * The persisted message that owns `toolCallId`, read as one row — or
+   * `null` when no persisted row owns it.
+   *
+   * Lookup order, cheapest first:
+   *
+   * 1. `liveMessageId`, when the in-flight accumulator owns the call. A row
+   *    under that id exists only when stall recovery persisted a partial
+   *    mid-stream. When it does not, the call is not on its own row — but a
+   *    provider can replay a prior tool round-trip into a fresh continuation
+   *    accumulator (#1404), so the persisted owner may still be an earlier
+   *    message; the cache is checked for that before concluding there is
+   *    nothing durable to update. Storage is never walked for a call the
+   *    live turn owns: every row it could target is on the cached path.
+   * 2. The live cache, for the id only. Whatever names the row, the returned
+   *    message is always the STORED form: the apply must compare against
+   *    what storage holds, and the cache may be patched ahead of it.
+   * 3. Storage, newest first, stopping at the first owner. Reached only when
+   *    the cache does not cover the active path (a windowed hydration, a
+   *    boot whose hydration failed, or rows imported behind the cache): a
+   *    cross-message result can target a row older than the window, and the
+   *    path is read from the leaf so a recent hit costs the rows it passed,
+   *    not the transcript.
+   *
+   * This is what keeps a long turn's tool updates independent of transcript
+   * length: the previous shape re-read the whole path per update.
+   */
+  private async _resolveToolCallOwner(
+    toolCallId: string,
+    liveMessageId: string | undefined
+  ): Promise<UIMessage | null> {
+    const owns = (message: UIMessage): boolean =>
+      message.parts.some(
+        (part) => (part as { toolCallId?: unknown }).toolCallId === toolCallId
+      );
+    const stored = async (id: string): Promise<UIMessage | null> => {
+      const row = (await this.session.getMessage(id)) as UIMessage | null;
+      return row && owns(row) ? row : null;
+    };
+    const cachedOwnerId = (): string | null => {
+      for (let i = this._cachedMessages.length - 1; i >= 0; i--) {
+        if (owns(this._cachedMessages[i])) return this._cachedMessages[i].id;
+      }
+      return null;
+    };
+
+    if (liveMessageId !== undefined) {
+      const live = await stored(liveMessageId);
+      if (live) return live;
+      const cachedId = cachedOwnerId();
+      return cachedId === null ? null : stored(cachedId);
+    }
+    const cachedId = cachedOwnerId();
+    if (cachedId !== null) return stored(cachedId);
+    if (this._cacheCoversActivePath) return null;
+    for await (const message of this.session.history({ newestFirst: true })) {
+      if (owns(message as UIMessage)) return message as UIMessage;
+    }
+    return null;
   }
 
   // ── Stability + pending interactions ─────────────────────────────

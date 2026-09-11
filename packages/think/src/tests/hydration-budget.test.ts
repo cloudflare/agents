@@ -29,6 +29,16 @@ type WindowedHydrationStub = {
   getPublicDegradationsForTest(): Promise<OnStartDegradationForTest[]>;
   resyncForTest(): Promise<number>;
   testChat(message: string): Promise<TestChatResult>;
+  applyToolResultOutsideWindowForTest(): Promise<{
+    inCache: boolean;
+    cacheCoversPath: boolean;
+    storedState: string | undefined;
+  }>;
+  growCachePastBudgetForTest(): Promise<{
+    coversAfterSync: boolean;
+    coversAfterUpdate: boolean;
+    coversAfterMultibyteAppend: boolean;
+  }>;
 };
 
 type MediaEvictionStub = {
@@ -86,6 +96,37 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     );
     const full = await agent.getFullHistoryIdsForTest();
     expect(full).toEqual(Array.from({ length: 10 }, (_, i) => `seed-${i}`));
+  });
+
+  it("charges updates and multibyte appends against the budget in bytes", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("windowed-growth")
+    )) as unknown as WindowedHydrationStub;
+
+    // Turn starts no longer refresh a cache that covers the path, so the
+    // cache's own growth accounting is what re-windows an oversized
+    // conversation. An update that enlarges a cached message counts, and
+    // growth is measured in the budget's unit — bytes — not string length.
+    const result = await agent.growCachePastBudgetForTest();
+    expect(result.coversAfterSync).toBe(true);
+    expect(result.coversAfterUpdate).toBe(false);
+    expect(result.coversAfterMultibyteAppend).toBe(false);
+  });
+
+  it("applies a tool result to a row the hydration window no longer holds", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("windowed-tool-update")
+    )) as unknown as WindowedHydrationStub;
+
+    // Tool updates resolve their target from the live cache. On a windowed
+    // hydration the owner may be older than the window, so the lookup falls
+    // back to a newest-first storage read — the result must still land.
+    const result = await agent.applyToolResultOutsideWindowForTest();
+    expect(result.inCache).toBe(false);
+    expect(result.cacheCoversPath).toBe(false);
+    expect(result.storedState).toBe("output-available");
   });
 
   it("emits chat:hydration:windowed on change, not on every sync", async () => {

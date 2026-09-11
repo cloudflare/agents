@@ -15,7 +15,7 @@
  *
  * @example
  * ```typescript
- * import { withVoice } from "@cloudflare/voice";
+ * import { withVoice } from "agents/voice";
  * import { TwilioAdapter } from "@cloudflare/voice-twilio";
  *
  * class MyAgent extends VoiceAgent<Env> {
@@ -34,7 +34,7 @@
  * ```
  */
 
-import { logVoiceError } from "@cloudflare/voice/errors";
+import { logVoiceError } from "agents/voice/errors";
 
 // --- Audio conversion utilities ---
 

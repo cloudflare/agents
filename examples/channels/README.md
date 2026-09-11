@@ -1,6 +1,6 @@
 # Channels support application
 
-A small support inbox built on [`@cloudflare/channels`](../../packages/channels).
+A small support inbox built on [`agents/channels`](../../docs/agents/channels.md).
 Slack, Telegram, email, and support-form messages become one normalized event;
 each conversation lives in a Durable Object; and stored surfaces let the
 application answer later on the same or another Channel.
@@ -132,5 +132,5 @@ Telegram events from linked identities therefore continue in one cross-channel
 conversation. Linking does not merge conversations that already exist; it
 changes where future events route.
 
-See [`packages/channels/README.md`](../../packages/channels/README.md) for the
-complete package API.
+See the [Channels reference](../../docs/agents/channels.md) for the complete
+API.

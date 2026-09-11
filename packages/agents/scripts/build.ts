@@ -33,7 +33,22 @@ const entries = [
   "src/browser/index.ts",
   "src/browser/ai.ts",
   "src/browser/tanstack-ai.ts",
-  "src/experimental/webmcp.ts"
+  "src/experimental/webmcp.ts",
+  "src/voice/index.ts",
+  "src/voice/types.ts",
+  "src/voice/client.ts",
+  "src/voice/react.tsx",
+  "src/voice/errors.ts",
+  "src/voice/workers-ai.ts",
+  "src/voice/sfu.ts",
+  "src/voice/text.ts",
+  "src/channels/index.ts",
+  "src/channels/email.ts",
+  "src/channels/slack.ts",
+  "src/channels/telegram.ts",
+  "src/channels/voice.ts",
+  "src/channels/ai-sdk.ts",
+  "src/channels/tanstack-ai.ts"
 ];
 
 for (const entry of entries) {

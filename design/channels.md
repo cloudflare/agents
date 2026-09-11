@@ -1,10 +1,10 @@
 # Channels design
 
-Why `@cloudflare/channels` is shaped the way it is, and what we decided against.
+Why `agents/channels` is shaped the way it is, and what we decided against.
 
 This document records decisions and reasoning only. It deliberately describes no
 API, so nothing in it goes stale as the package changes. For what the package
-currently does, read [`packages/channels/README.md`](../packages/channels/README.md).
+currently does, read [`docs/agents/channels.md`](../docs/agents/channels.md).
 
 ## The core decision: Channels is stateless
 

@@ -1,4 +1,4 @@
-import type { Transcriber } from "@cloudflare/voice";
+import type { Transcriber } from "agents/voice";
 import { ElevenLabsSTT } from "@cloudflare/voice-elevenlabs";
 import { getEnvString, getProviderKeyterms, optionalBoolean } from "./utils";
 

@@ -78,7 +78,11 @@ createMcpHandler(() => createServer(), {
 });
 ```
 
-All upstream SDK v2 handler options pass through. Use `createLegacyMcpHandler` for WorkerTransport, storage, session, and event-store options.
+`createMcpHandler` supports upstream SDK v2 handler options except `bus`, which is not exposed by the Agents SDK. Supplying `bus` throws a `TypeError`.
+
+To publish change events, use the returned handler's `notify` methods, such as `handler.notify.toolsChanged()`. Create the handler once at module scope and reuse it for requests and notifications. Notifications are isolate-local: they do not reach subscriptions in other Worker isolates. See the [handler notification API](https://developers.cloudflare.com/agents/model-context-protocol/apis/handler-api/#publish-list-and-resource-changes) for the available methods.
+
+Use `createLegacyMcpHandler` for SDK v1 WorkerTransport, storage, session, and event-store options. The SDK v2 `bus` option is not available on that handler either.
 
 The handler validates every present `Origin` header before serving the request. It rejects malformed, opaque, and non-HTTP origins. Requests without `Origin` remain valid for non-browser MCP clients.
 

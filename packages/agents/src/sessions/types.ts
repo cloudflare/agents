@@ -105,7 +105,21 @@ export type SessionChangeEvent =
   | { type: "update"; sessionId: string; message: SessionMessage }
   | { type: "delete"; sessionId: string; messageIds: string[] }
   | { type: "clear"; sessionId: string }
-  | { type: "compact"; sessionId: string };
+  | { type: "compact"; sessionId: string }
+  /**
+   * A row written verbatim by `importMessage()`. A host cache should treat
+   * the path as changed underneath it rather than patch itself: imports come
+   * in bulk with explicit parents, so re-deriving once later is the cheap
+   * response.
+   */
+  | {
+      type: "import";
+      sessionId: string;
+      message: SessionMessage;
+      parentId: string | null;
+    }
+  /** An overlay stored directly through `addCompaction()`. */
+  | { type: "compaction"; sessionId: string; compaction: StoredCompaction };
 
 export type SessionChangeListener = (
   event: SessionChangeEvent
@@ -117,6 +131,12 @@ export interface HistoryReadOptions {
   leafId?: string | null;
   /** Abort a streamed read between chunks. */
   signal?: AbortSignal;
+  /**
+   * Yield the path leaf → root instead of root → leaf. Content is still
+   * fetched in bounded windows, newest window first, so a consumer that
+   * stops after the message it was looking for reads only the newest rows.
+   */
+  newestFirst?: boolean;
 }
 
 /** Options accepted by batched history reads. */

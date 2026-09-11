@@ -1,5 +1,75 @@
 # @cloudflare/ai-chat
 
+## 0.12.0
+
+### Minor Changes
+
+- [#2196](https://github.com/cloudflare/agents/pull/2196) [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Store AIChatAgent messages through `agents/sessions` while preserving the mutable `messages` array, destructive regeneration, retention, broadcasts, and v4 message conversion.
+
+  **Migration on first wake, no rollback.** Existing `cf_ai_chat_agent_messages` rows are imported once into a linear Sessions chain. The old table is dropped only after every row imported; a row that fails to parse keeps the table in place so it stays recoverable, and the import retries on the next start. Once an object has migrated, rolling back to the previous release leaves it with an empty conversation. Rolling forward again is safe.
+
+  **`this.messages` is empty until `onStart`.** Boot no longer loads the transcript synchronously in the constructor. The legacy lift and a single bounded hydration run in `onStart`, so a subclass that read `this.messages` in its constructor now sees `[]`; read it from `onStart` or later. The array is then mirrored from the Sessions change feed.
+
+  `hydrationByteBudget` (32 MiB) bounds wake-time hydration. `maxPersistedMessages` counts stored rows rather than the hydrated window, so retention trims the oldest stored messages even when the transcript is larger than the budget. `get-messages` streams its response instead of serializing the whole transcript; clients calling `.json()` on it are unaffected.
+
+  There is nothing to configure about how a message is stored: a message too large for one SQLite row is split across continuation rows and reassembled on read, and a stored row is exactly what the write returned.
+
+- [#2216](https://github.com/cloudflare/agents/pull/2216) [`dd09d44`](https://github.com/cloudflare/agents/commit/dd09d44913e60aa519aac51e53b13eac2111c732) Thanks [@mattzcarey](https://github.com/mattzcarey)! - feat(streams): rollover block log and an atomic stream → message cutover; no more stream-buffer sweeps.
+
+  The Streams chunk log is now mutable rollover blocks: an append grows the open block row (an UPDATE) until it reaches 256 KB, then opens the next. Same one billed row per append as before, but a stream of thousands of chunks is a handful of rows to delete instead of thousands. Existing `cf_agents_stream_chunks` rows are folded into blocks lazily, one stream at a time on first touch, so startup never reads the whole legacy log; the table is dropped once it is empty.
+
+  `writer.close({ commit, discard })` (and `error(reason, { … })`) settles the stream, runs the caller's synchronous writes and deletes the stream's rows in one SQLite transaction. `Session.__DO_NOT_USE_WILL_BREAK__sync().upsert()` is the matching synchronous message write; its `after()` dispatches the change feed and auto-compaction once the transaction commits.
+
+  Chat hosts (`AIChatAgent`, `Think`) now persist the finished turn's assistant message inside that cutover: the message, the stream's settlement and the deletion of its temporary rows commit together, so a crash leaves either the live stream (recovery rebuilds the message from it) or the message, never neither. `ResumableStream.start()` reclaims anything a crash left behind. The `_cleanupStreamBuffers` alarm is no longer armed (`cleanupStreamBuffers` and `STREAM_CLEANUP_DELAY_SECONDS` are removed from `agents/chat`; the host callback is kept as a no-op so alarms persisted by earlier versions still resolve).
+
+### Patch Changes
+
+- [#2194](https://github.com/cloudflare/agents/pull/2194) [`6da4c44`](https://github.com/cloudflare/agents/commit/6da4c44ba4ba778c2fd981b40adbba2b4f02ba37) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Run root-agent chat recovery continuations as chained Tasks instead of schedule rows. Initial recovery attempts deduplicate by incident, delayed retries use durable Task sleeps, and platform failures replay through Task claims. AI Chat and Think share one reserved recovery definition and preserve their existing bounded callback handoff behavior: a failure before handoff stays with the current queue execution, while a detached post-handoff platform failure enqueues exactly one replacement.
+
+  Tasks now propagate condemned-isolate failures out of journaled steps and apply alarm memory-limit backoff and sealing to the run whose wake struck — claim stripped and deadline pushed, so startup reconciliation cannot resurrect it and the reclaim still sees an interrupted attempt. Task wake jobs are pushed with a single dispatch attempt so a platform failure rejects the alarm instead of being retried into a silent reschedule of the still-claimed run. Lifecycle gains `trackAlarmWork()`: work a job hands off at a bounded return stays inside that alarm's memory-limit breaker domain after the alarm returns, so other jobs stay live while a memory reset from the handoff still records a strike — one strike per reset however many flows observe it — and strikes clear only once no handed-off work is outstanding and the last of it settled clean. `retain: false` now removes failed and cancelled runs as well as completed runs, releasing journals and idempotency keys after every terminal outcome. Routed dynamic agents temporarily retain the root-owned schedule transport until Tasks supports routed child wakes.
+
+  AI Chat and Think require `agents >=0.23.0`, the pending release batch containing the shared recovery Task definition and internal enqueue support.
+
+- [#2173](https://github.com/cloudflare/agents/pull/2173) [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Replatform chat's resumable streams onto the `agents/streams` capability.
+
+  `ResumableStream` is now a thin adapter over `Streams`: chat's in-flight turn output lives in the shared durable chunk log (`cf_agents_streams` / `cf_agents_stream_chunks`), packed ~10 wire chunks per stored segment for write economy, with completion/error mapped onto stream settlement and retention keyed off the stream row's `updated_at` (sweeps no longer scan the chunk table). Existing `cf_ai_chat_stream_*` tables migrate wholesale — including an in-flight stream — on first construction after upgrade, then are dropped. `AIChatAgent` and `Think` expose the backing capability as `readonly streams`, so any `streams.read()` consumer on the same Durable Object can observe chat streams. The chat wire protocol, replay handshake, and recovery behavior are unchanged.
+
+- [#2223](https://github.com/cloudflare/agents/pull/2223) [`dd8bf90`](https://github.com/cloudflare/agents/commit/dd8bf9061298a38003751a59b70745a50e6557e7) Thanks [@mattzcarey](https://github.com/mattzcarey)! - perf(chat): derive the recovery forward-progress marker from the stream log instead of bumping a KV counter per credited chunk. `ResumableStream.progressMarker()` counts durably flushed segments — live streams from their log tails, deleted streams from a retired total folded in as their rows are removed — so the marker stays monotonic across cutover and reclaim, never moves on a reconnect replay or a recovery re-persist, and ignores compaction. A parent forwarding a sub-agent's output credits it explicitly through `creditProgress()`. Nothing is written per chunk any more; one row is written per stream retired. The old KV counter is read once per isolate and seeded into the marker so an in-flight incident never sees it drop, and the hosts mirror the marker's durable part back to that key per stream retired, so a rollback reads no lower either. The Streams sync aperture gains an `onDelete` hook so a chat row deleted through the public capability is retired like any other. `AIChatAgent` now flushes a settled tool result to SQLite the moment it is stored, as `Think` already did, so it is durable before the next packed flush and counts as progress immediately. The work budget's unit is now the durable segment, and `DEFAULT_CHAT_RECOVERY_MAX_WORK` moves from 1000 to 10000 to stay as generous as before for delta-heavy turns. Two cutover fixes ride along: a Think agent-tool child now keeps its stream rows for the parent to tail after completion, as ai-chat already did, and the Streams capability re-derives its legacy-table flag after a rolled-back cutover.
+
+- [#2190](https://github.com/cloudflare/agents/pull/2190) [`58c586a`](https://github.com/cloudflare/agents/commit/58c586aa179690f78a4327288fe27ee9875e8624) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Make the alarm memory-limit circuit breaker ([#1825](https://github.com/cloudflare/agents/issues/1825)) a self-contained
+  Lifecycle concern instead of an Agent-mediated one.
+
+  Recovery-loop membership is now a property of the job row
+  (`LifecycleJobPushOptions.recoveryLoop`): flagged jobs are backed off by
+  the breaker on a strike and purged when it seals at the strike budget,
+  without disturbing unrelated rows — a recovery schedule can no longer
+  silently escape the breaker. The public `ScheduleOptions` vocabulary is
+  unchanged: schedules only shape future work, and chat recovery reaches the
+  flag through internal scaffolding (`RecoveryLoopScheduleOptions`) retained
+  only for legacy rows and routed dynamic agents. Root recovery moves to Tasks;
+  the scaffolding can be deleted when Tasks supports routed child wakes.
+  Capabilities can react to a strike through the new optional `onMemoryLimit`
+  hook, hosts through `onAlarmMemoryLimit`, and the context identifies the job
+  that was executing when one exists. The strike budget is real Lifecycle
+  configuration (`Lifecycle.install(host, { maxAlarmMemoryLimitStrikes })`)
+  rather than a composition-root side channel. Until Tasks supports routed
+  child wakes, a sealed recovery schedule also forwards the seal to its owning
+  dynamic agent so a chat child under a plain Agent root persists its exhausted
+  incident and terminal notification.
+
+  Removed accordingly: `Agent.onAlarmMemoryLimit`'s policy relay, the
+  `_cf_recoveryAlarmCallbacks` template hook, `Scheduler.applyMemoryLimitPolicy`,
+  and
+  `setLifecycleAlarmMemoryLimitStrikes`. `AIChatAgent` and `Think` flag their
+  routed recovery fallback via `chatRecoverySchedulePolicy` and seal in-flight
+  incidents from their own protected `onAlarmMemoryLimit` hooks; both now
+  require `agents >= 0.23.0` from the pending release batch (they consume its
+  new `agents/chat` recovery exports and no longer implement the old
+  template-method breaker hooks). Agent retains a
+  sealed-only call to `_cf_sealMemoryLimitedRecovery` so already-published chat
+  packages whose peer ranges accept agents 0.23 keep terminal notifications;
+  that fallback carries no callback-name or queue policy.
+
 ## 0.11.0
 
 ### Minor Changes

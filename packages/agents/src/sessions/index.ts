@@ -8,7 +8,9 @@
 export { Sessions } from "./sessions";
 export { Session, type CompactionFunction } from "./handle";
 export {
+  COMPACTION_PREFIX,
   createCompactFunction,
+  isCompactionMessage,
   type CompactOptions,
   type CompactResult
 } from "./compaction-helpers";

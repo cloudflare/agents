@@ -6,6 +6,7 @@ import {
   ROW_MAX_BYTES
 } from "../../chat/sanitize";
 import { createCompactFunction, type SessionMessage } from "../../sessions";
+import { buildSummaryPrompt } from "../../sessions/compaction-helpers";
 import {
   COMPACTION_PREFIX,
   isCompactionMessage
@@ -156,5 +157,32 @@ describe("enforceRowSizeLimit", () => {
     );
     expect(output.__truncated).toBe(true);
     expect(output.__truncatedChars).toBeGreaterThan(ROW_MAX_BYTES);
+  });
+});
+
+describe("buildSummaryPrompt", () => {
+  it("renders structured tool outputs as JSON", () => {
+    const prompt = buildSummaryPrompt(
+      [
+        {
+          id: "m1",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-lookup",
+              toolCallId: "tc-1",
+              toolName: "lookup",
+              state: "output-available",
+              input: { id: 7 },
+              output: { customer: "ACME", amount: 1200 }
+            } as UIMessage["parts"][number]
+          ]
+        }
+      ],
+      null,
+      10_000
+    );
+    expect(prompt).toContain('Output: {"customer":"ACME","amount":1200}');
+    expect(prompt).not.toContain("[object Object]");
   });
 });

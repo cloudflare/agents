@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { TelnyxPhoneTransport } from "../../src/transport/phone-transport.js";
-import type { VoiceTransport } from "@cloudflare/voice/client";
+import type { VoiceTransport } from "agents/voice/client";
 import type { TelnyxCallBridge } from "../../src/providers/call-bridge.js";
 
 type MockTransport = VoiceTransport & {

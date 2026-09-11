@@ -1,4 +1,4 @@
-import type { VoiceAudioInput } from "@cloudflare/voice/client";
+import type { VoiceAudioInput } from "agents/voice/client";
 import { TelnyxRTC } from "@telnyx/webrtc";
 import {
   float32ToInt16,
@@ -80,7 +80,7 @@ function getRemoteStream(call: TelnyxCallLike): MediaStream | null {
 /**
  * Bridges Telnyx phone calls into the Cloudflare voice pipeline.
  *
- * Implements `VoiceAudioInput` from @cloudflare/voice — extracts PCM
+ * Implements `VoiceAudioInput` from agents/voice — extracts PCM
  * audio from inbound phone calls and feeds it to the AI pipeline.
  * Also provides `playAudio()` for injecting response audio back
  * into the phone call.

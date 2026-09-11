@@ -20,8 +20,8 @@ import {
   addSFUTracks,
   renegotiateSFUSession,
   createSFUWebSocketAdapter
-} from "@cloudflare/voice";
-import type { SFUConfig } from "@cloudflare/voice";
+} from "agents/voice";
+import type { SFUConfig } from "agents/voice";
 
 // --- Main SFU handler ---
 

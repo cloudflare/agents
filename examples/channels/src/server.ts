@@ -1,11 +1,7 @@
-import {
-  ChannelHost,
-  email,
-  routes,
-  telegram,
-  type Channel
-} from "@cloudflare/channels";
-import { slack } from "@cloudflare/channels/slack";
+import { ChannelHost, routes, type Channel } from "agents/channels";
+import { email } from "agents/channels/email";
+import { slack } from "agents/channels/slack";
+import { telegram } from "agents/channels/telegram";
 import { handleApi } from "./api";
 import { Conversation } from "./conversation";
 import { Directory, directoryFor } from "./directory";

@@ -4,7 +4,7 @@ import {
   type ChannelIdentity,
   type ChannelInboundMessage,
   type ChannelMessageSurface
-} from "@cloudflare/channels";
+} from "agents/channels";
 import { directoryFor } from "./directory";
 import { createHost } from "./server";
 import {
