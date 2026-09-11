@@ -1954,7 +1954,14 @@ const WORKFLOW_NOTIFICATION_CALLBACK = "_cfDeliverWorkflowNotification";
  */
 const WORKFLOW_NOTIFICATION_RETRY: RetryOptions = { maxAttempts: 1 };
 /** Longest wait between two delivery attempts of one workflow notification. */
-const WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS = 5 * 60;
+const WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS = 10 * 60;
+/**
+ * How long delivery of one workflow notification keeps being retried after
+ * its first failure. Long enough to ride out an outage of the workflow
+ * binding; a target still failing after this is treated as permanently
+ * unreachable rather than waking the object every ten minutes forever.
+ */
+const WORKFLOW_NOTIFICATION_GIVE_UP_MS = 12 * 60 * 60 * 1000;
 /** Queue callback that runs one connection-less continuation turn. */
 const CONNECTIONLESS_CONTINUATION_CALLBACK = "_cfRunConnectionlessContinuation";
 /** Queue callback that runs one media-eviction pass. */
@@ -2132,6 +2139,8 @@ type WorkflowNotificationPayload = {
   event: { type: string; payload: unknown };
   /** Failed deliveries so far; drives the retry backoff. */
   attempts?: number;
+  /** Epoch ms of the first failed delivery; bounds the retry window. */
+  firstFailedAt?: number;
 };
 
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
@@ -10518,9 +10527,11 @@ export class Think<
   /**
    * Deliver one workflow notification. Runs from the queue on first
    * delivery; a failed delivery schedules this same callback again with
-   * exponential backoff (2s doubling, capped at five minutes) and keeps
-   * doing so until the event lands, so a temporarily unreachable workflow
-   * never loses its terminal event.
+   * exponential backoff (2s doubling, capped at ten minutes) so a
+   * temporarily unreachable workflow still gets its terminal event. Once
+   * the first failure is twelve hours old delivery gives up by throwing:
+   * the dispatching capability reports it through its error event and the
+   * Agent's `onError`.
    * @internal Queue and schedule callback.
    */
   async _cfDeliverWorkflowNotification(
@@ -10534,9 +10545,19 @@ export class Think<
       );
     } catch (error) {
       const attempts = (payload.attempts ?? 0) + 1;
+      const firstFailedAt = payload.firstFailedAt ?? Date.now();
+      if (Date.now() - firstFailedAt >= WORKFLOW_NOTIFICATION_GIVE_UP_MS) {
+        throw new Error(
+          `Workflow notification for submission ${JSON.stringify(
+            (payload.event.payload as { submissionId?: string })?.submissionId
+          )} (${payload.workflowName}/${payload.workflowId}, ${payload.event.type}) ` +
+            `could not be delivered after ${attempts} attempts over 12h; giving up`,
+          { cause: error }
+        );
+      }
       const delaySeconds = Math.min(
         WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS,
-        2 ** Math.min(attempts, 8)
+        2 ** Math.min(attempts, 20)
       );
       console.error(
         `[Think] Workflow notification delivery failed (attempt ${attempts}); ` +
@@ -10545,7 +10566,8 @@ export class Think<
       );
       await this.schedule(delaySeconds, WORKFLOW_NOTIFICATION_CALLBACK, {
         ...payload,
-        attempts
+        attempts,
+        firstFailedAt
       } satisfies WorkflowNotificationPayload);
     }
   }

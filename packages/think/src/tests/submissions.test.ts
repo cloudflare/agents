@@ -51,6 +51,7 @@ type ThinkSubmissionTestStub = {
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
   setWorkflowEventFailuresForTest(count: number): Promise<void>;
+  getErrorsForTest(): Promise<string[]>;
   getWorkflowEventsForTest(): Promise<
     Array<{
       workflowName: string;
@@ -150,6 +151,7 @@ type ThinkSubmissionTestStub = {
     workflowId?: string;
     eventType?: string;
     payload?: unknown;
+    firstFailedAt?: number;
   }): Promise<void>;
   listWorkflowNotificationsForTest(): Promise<
     Array<{
@@ -1045,6 +1047,28 @@ describe("Think durable submissions", () => {
       }
     ]);
     await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
+  });
+
+  it("gives up on a workflow notification once its first failure is twelve hours old", async () => {
+    const agent = await freshAgent();
+    await agent.setWorkflowEventFailuresForTest(1);
+    await agent.insertWorkflowNotificationForTest({
+      notificationId: "notification-give-up",
+      submissionId: "sub-give-up",
+      workflowName: "TEST_WORKFLOW",
+      workflowId: "workflow-give-up",
+      eventType: "think-prompt-give-up",
+      firstFailedAt: Date.now() - 13 * 60 * 60 * 1000
+    });
+
+    await agent.drainWorkflowNotificationsForTest();
+
+    // No retry was scheduled and nothing was delivered; the failure went to
+    // the terminal error path instead of another backoff round.
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
+    await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
+    const errors = await agent.getErrorsForTest();
+    expect(errors.some((message) => message.includes("giving up"))).toBe(true);
   });
 
   it("runs durable pending rows through the scheduled drain callback path", async () => {

@@ -5437,6 +5437,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._workflowEventFailuresRemaining = count;
   }
 
+  private readonly _serverErrorLog: string[] = [];
+
+  override onError(connectionOrError: unknown, error?: unknown): void {
+    const theError = error ?? connectionOrError;
+    this._serverErrorLog.push(
+      theError instanceof Error ? theError.message : String(theError)
+    );
+  }
+
+  /** Messages of every error reported through `onError`. */
+  async getErrorsForTest(): Promise<string[]> {
+    return this._serverErrorLog;
+  }
+
   async getWorkflowEventsForTest(): Promise<
     Array<{
       workflowName: string;
@@ -5999,6 +6013,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     workflowId?: string;
     eventType?: string;
     payload?: unknown;
+    firstFailedAt?: number;
   }): Promise<void> {
     await this.queue(
       "_cfDeliverWorkflowNotification",
@@ -6011,9 +6026,13 @@ export class ThinkProgrammaticTestAgent extends Think {
             submissionId: options.submissionId,
             status: "error"
           }
-        }
+        },
+        ...(options.firstFailedAt !== undefined && {
+          firstFailedAt: options.firstFailedAt
+        })
       },
-      { id: options.notificationId }
+      // Same policy as production pushes: no in-process retries.
+      { id: options.notificationId, retry: { maxAttempts: 1 } }
     );
   }
 
