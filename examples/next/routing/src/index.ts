@@ -152,9 +152,9 @@ export class ChatAgent extends Agent<Env> {
 }
 
 /**
- * The hub's remote interface. Prototype methods are the complete surface
- * served to the browser over a Cap'n Web session at
- * `/agents/user-hub/{user}?__agents_rpc=capnweb`.
+ * The hub's remote interface. Prototype methods are the complete surface;
+ * the WebSockets capability answers `useAgent().stub` calls against it on
+ * either transport.
  */
 class HubCallables extends RpcTarget {
   readonly #hub: UserHub;

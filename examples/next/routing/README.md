@@ -18,12 +18,11 @@ UserHub "alice" (plain DurableObject)      ChatAgent (one per chat, opaque name)
    read and write ONLY the hub                 owns its WebSocket
 ```
 
-| URL                                           | Handled by                                  |
-| --------------------------------------------- | ------------------------------------------- |
-| `/agents/user-hub/alice`                      | `UserHub` "alice", JSON view of the catalog |
-| `/agents/user-hub/alice?__agents_rpc=capnweb` | `UserHub` "alice", callables over Cap'n Web |
-| `/agents/user-hub/alice/chats/{id}`           | the `ChatAgent` behind that entry           |
-| `/agents/user-hub/alice/chats/{id}/messages`  | same `ChatAgent`, sees the path `/messages` |
+| URL                                          | Handled by                                  |
+| -------------------------------------------- | ------------------------------------------- |
+| `/agents/user-hub/alice`                     | `UserHub` "alice", JSON view of the catalog |
+| `/agents/user-hub/alice/chats/{id}`          | the `ChatAgent` behind that entry           |
+| `/agents/user-hub/alice/chats/{id}/messages` | same `ChatAgent`, sees the path `/messages` |
 
 ```ts
 export class UserHub extends DurableObject<Env> {
