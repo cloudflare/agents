@@ -43,7 +43,7 @@ interface AgentRouteMatch<Env = Cloudflare.Env> {
 
 interface AgentRouteOptions<
   Env = Cloudflare.Env,
-  Props extends object = Record<string, unknown>
+  Props extends object = object
 > {
   /** URL prefix before the binding and instance name. Default: `agents`. */
   prefix?: string;
@@ -92,7 +92,7 @@ interface AgentRouteOptions<
  */
 export type AgentOptions<
   Env,
-  Props extends object = Record<string, unknown>
+  Props extends object = object
 > = AgentRouteOptions<Env, Props>;
 
 /**
@@ -101,10 +101,7 @@ export type AgentOptions<
  * @template Env Worker environment containing the Agent binding.
  * @template Props Properties supplied before lifecycle startup.
  */
-export type AgentGetOptions<
-  Env,
-  Props extends object = Record<string, unknown>
-> = Pick<
+export type AgentGetOptions<Env, Props extends object = object> = Pick<
   AgentRouteOptions<Env, Props>,
   "jurisdiction" | "locationHint" | "props" | "routingRetry"
 >;
@@ -282,10 +279,7 @@ function resolveCorsHeaders(
  * @param options - Routing options.
  * @returns The matched response, or `null` when the path does not match.
  */
-export async function routeAgentRequest<
-  Env,
-  Props extends object = Record<string, unknown>
->(
+export async function routeAgentRequest<Env, Props extends object = object>(
   request: Request,
   env: Env,
   options?: AgentOptions<Env, Props>
@@ -414,7 +408,7 @@ export async function routeAgentRequest<
 export async function getAgentByName<
   Env extends Cloudflare.Env = Cloudflare.Env,
   T extends Agent<Env, unknown, object> = Agent<Env>,
-  Props extends object = Record<string, unknown>
+  Props extends object = object
 >(
   namespace: DurableObjectNamespace<T>,
   name: string,
