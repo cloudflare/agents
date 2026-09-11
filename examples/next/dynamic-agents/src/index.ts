@@ -15,7 +15,7 @@ import { Agent, callable, routeAgentRequest } from "agents";
  * For statically-known Agent child classes, the same supervision is
  * available through `this.dynamicAgents` (see `examples/agents-as-tools`).
  * For many independent peers like chats, do NOT use this pattern —
- * see `examples/next/chats`.
+ * see `examples/next/routing`.
  */
 
 import { DEFAULT_GADGET_CODE } from "./shared";

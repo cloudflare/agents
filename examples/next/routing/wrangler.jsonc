@@ -4,22 +4,26 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
   "durable_objects": {
     "bindings": [
       {
-        "name": "HubObject",
-        "class_name": "HubObject"
+        "name": "UserHub",
+        "class_name": "UserHub"
       },
       {
-        "name": "NoteAgent",
-        "class_name": "NoteAgent"
+        "name": "ChatAgent",
+        "class_name": "ChatAgent"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["HubObject", "NoteAgent"]
+      "new_sqlite_classes": ["UserHub", "ChatAgent"]
     }
   ],
   "observability": {

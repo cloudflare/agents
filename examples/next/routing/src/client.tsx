@@ -15,14 +15,15 @@ import {
   SunIcon,
   TrashIcon
 } from "@phosphor-icons/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import type { RoutedAgentEntry } from "agents/routing";
+import { newWebSocketRpcSession } from "capnweb";
 import "./styles.css";
 
-const USER_KEY = "next-chats-user";
+const USER_KEY = "next-routing-user";
 const userId =
   localStorage.getItem(USER_KEY) ?? crypto.randomUUID().slice(0, 8);
 localStorage.setItem(USER_KEY, userId);
@@ -38,6 +39,33 @@ type ChatMessage = {
   text: string;
   at: number;
 };
+
+/** The hub's RpcTarget, as seen from the browser. */
+type HubApi = {
+  createChat(): Promise<string>;
+  listChats(): Promise<ChatEntry[]>;
+  searchChats(query: string): Promise<ChatEntry[]>;
+  deleteChat(chatId: string): Promise<boolean>;
+};
+
+/**
+ * One Cap'n Web session to the per-user hub. The hub is a plain Durable
+ * Object, so its methods are reached through the WebSockets capability's
+ * callables endpoint (`?__agents_rpc=capnweb`) rather than the Agent
+ * protocol. The URL is built by hand: `callablesRpcUrl` from
+ * `agents/websockets` is server-side and must not enter a browser bundle.
+ */
+function useHub(): HubApi {
+  return useMemo(() => {
+    const url = new URL(
+      `/agents/user-hub/${encodeURIComponent(userId)}`,
+      location.origin
+    );
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("__agents_rpc", "capnweb");
+    return newWebSocketRpcSession<HubApi>(url.toString());
+  }, []);
+}
 
 function ModeToggle() {
   const [mode, setMode] = useState(
@@ -73,7 +101,7 @@ function ChatPane({
   // so the hub is not on the message path.
   const chat = useAgent({
     agent: "chat-agent",
-    basePath: `agents/user-agent/${encodeURIComponent(userId)}/chats/${encodeURIComponent(chatId)}`
+    basePath: `agents/user-hub/${encodeURIComponent(userId)}/chats/${encodeURIComponent(chatId)}`
   });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
@@ -161,17 +189,18 @@ function ChatPane({
 }
 
 function App() {
-  // One connection to the per-user index DO. Listing and search read
-  // only this object — no chat DO wakes up for the sidebar.
-  const user = useAgent({ agent: "user-agent", name: userId });
+  // One connection to the per-user hub. Listing and search read only
+  // this object — no chat DO wakes up for the sidebar.
+  const user = useHub();
   const [chats, setChats] = useState<ChatEntry[]>([]);
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
 
   const refreshChats = useCallback(async () => {
-    const method = query.trim() === "" ? "listChats" : "searchChats";
-    const args = query.trim() === "" ? [] : [query.trim()];
-    setChats((await user.call(method, args)) as ChatEntry[]);
+    const needle = query.trim();
+    setChats(
+      needle === "" ? await user.listChats() : await user.searchChats(needle)
+    );
   }, [query, user]);
 
   useEffect(() => {
@@ -179,14 +208,14 @@ function App() {
   }, [refreshChats]);
 
   const createChat = useCallback(async () => {
-    const chatId = (await user.call("createChat")) as string;
+    const chatId = await user.createChat();
     setActiveId(chatId);
     await refreshChats();
   }, [refreshChats, user]);
 
   const deleteChat = useCallback(
     async (chatId: string) => {
-      await user.call("deleteChat", [chatId]);
+      await user.deleteChat(chatId);
       if (activeId === chatId) setActiveId(null);
       await refreshChats();
     },
@@ -197,7 +226,7 @@ function App() {
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-kumo-line px-4 py-3">
         <div className="flex items-center gap-2">
-          <Text bold>Chats</Text>
+          <Text bold>Routing</Text>
           <Badge variant="secondary">one DO per chat</Badge>
           <Badge variant="secondary">user {userId}</Badge>
         </div>

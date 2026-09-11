@@ -1,108 +1,123 @@
 # Next: routing
 
-An early-access, server-only example showing `RoutedAgents` from
-`agents/routing` installed on a plain Cloudflare `DurableObject`. The hub does
-not extend `Agent`; its targets do.
+An early-access example showing `RoutedAgents` from `agents/routing`
+installed on a plain Cloudflare `DurableObject`. The hub does not extend
+`Agent`; its targets do. It is the recommended shape for "many chats per
+user": **one top-level Durable Object per chat** (`ChatAgent`), owned and
+routed to by **one per-user hub** (`UserHub`).
+
+```
+UserHub "alice" (plain DurableObject)      ChatAgent (one per chat, opaque name)
+┌────────────────────────────────┐         ┌──────────────────────────┐
+│ RoutedAgents route "chats"     │ forward │ messages                 │
+│  id → physical name,           │────────▶│  role, text, at          │
+│       title, lastMessage       │         │  (own SQLite, own alarms,│
+│ WebSockets callables           │◀────────│   own placement)         │
+└────────────────────────────────┘  push   └──────────────────────────┘
+   listChats / searchChats / deleteChat       addMessage / getMessages
+   read and write ONLY the hub                 owns its WebSocket
+```
+
+| URL                                           | Handled by                                  |
+| --------------------------------------------- | ------------------------------------------- |
+| `/agents/user-hub/alice`                      | `UserHub` "alice", JSON view of the catalog |
+| `/agents/user-hub/alice?__agents_rpc=capnweb` | `UserHub` "alice", callables over Cap'n Web |
+| `/agents/user-hub/alice/chats/{id}`           | the `ChatAgent` behind that entry           |
+| `/agents/user-hub/alice/chats/{id}/messages`  | same `ChatAgent`, sees the path `/messages` |
 
 ```ts
-export class NoteAgent extends Agent<Env> {
-  // An ordinary top-level Agent: its own storage, alarms, and placement.
-}
-
-export class HubObject extends DurableObject<Env> {
-  readonly notes = new RoutedAgents<NoteAgent, { title: string }>({
-    namespace: this.env.NoteAgent,
-    route: "notes"
+export class UserHub extends DurableObject<Env> {
+  readonly chats = new RoutedAgents<ChatAgent, ChatMeta>({
+    namespace: this.env.ChatAgent,
+    route: "chats"
   });
-  readonly lifecycle = Lifecycle.install(this).use(this.notes);
-
-  async onRequest(request: Request) {
-    // Catalog CRUD: create(), list(), setMetadata(), delete(), get().
-  }
+  readonly webSockets = new WebSockets({ callables: new HubCallables(this) });
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.chats)
+    .use(this.webSockets);
 }
 ```
 
-A hub often owns an open-ended set of independent peers: one Durable Object
-per notebook, chat, or document for a user. `RoutedAgents` codifies that
-topology as a Lifecycle capability. The hub keeps a durable catalog of public
-entry IDs mapped to opaque physical names, and forwards every request and
-WebSocket upgrade under one route segment to the selected Agent:
+## Why not facets (dynamic agents)?
 
-| URL                                         | Handled by                               |
-| ------------------------------------------- | ---------------------------------------- |
-| `/agents/hub-object/alice`                  | `HubObject` "alice"                      |
-| `/agents/hub-object/alice/catalog`          | `HubObject` "alice", catalog CRUD        |
-| `/agents/hub-object/alice/notes/{id}`       | the `NoteAgent` behind that entry        |
-| `/agents/hub-object/alice/notes/{id}/notes` | same `NoteAgent`, sees the path `/notes` |
+A chat fails the facet test on every axis: it needs no isolation
+boundary from a parent, it wants its own alarms (facets cannot set
+alarms), a user accumulates an unbounded number of them (a facet tree is
+pinned to one machine and stored as one logical root object), and
+every WebSocket frame to a facet wakes the root parent. Facets are for
+code the parent _supervises_ — dynamically-loaded or generated code,
+per-run tool agents — reached via `this.dynamicAgents`. See
+`docs/agents/sub-agents.md` for the decision rule.
 
-What the capability guarantees:
+## What `RoutedAgents` does for the hub
 
-- `create()`, `list()`, and `setMetadata()` touch only the hub's SQLite. No
-  target wakes. `list()` orders most-recently-updated first.
-- `get(id)` returns an initialized, typed stub for RPC, or `null`. The
-  `/catalog/{id}` route uses it to ask the target for its note count.
-- A forwarded WebSocket upgrade is answered by the target, which then owns
-  the socket. Frames never wake the hub.
-- `delete(id)` hides the entry first, condemns the target, then removes the
-  row. The target wipes its own storage on its next wake. A failed call
-  leaves a hidden row, and calling `delete` again retries.
-- Physical names are random UUIDs that never leave the hub. Clients only
-  ever see entry IDs.
+- **Creation** allocates a public chat ID and an opaque physical name
+  without waking anything. The hub then calls `init()` on the new chat
+  once, through the typed stub `get(id)` returns, so the chat knows its
+  owner.
+- **Routing.** Requests and WebSocket upgrades under `/chats/{id}` are
+  forwarded to that chat. The chat answers the upgrade and owns the
+  socket, so chat frames never wake the hub. An unknown or deleted ID is
+  a `404` from the capability; the hub's `onRequest` never sees it.
+- **Listing and search** read only the hub. Each chat pushes its title
+  and last message back with `recordChatActivity()`, which fences the
+  push's own chat-local message ordinal against the entry's current one,
+  inside `blockConcurrencyWhile`, before calling `setMetadata()` — a
+  push delayed by a slow round-trip can't overwrite one that arrived
+  first, two concurrent pushes can't both read the same stale value, and
+  two messages landing in the same millisecond never tie the way a
+  wall-clock fence would. Entries list most recently updated first, ties
+  broken by write order.
+- **Deletion** is `chats.delete(id)`: the entry is hidden, the chat is
+  condemned so it wipes its own storage moments later, and the row is
+  removed. A push for a deleted chat returns `false`, so delayed
+  activity cannot resurrect it.
+
+The pushed metadata is derived data. A failed push leaves it stale until
+the chat's next message; the chat itself stays the source of truth.
+Idempotency and repair belong to the production design in
+[`design/rfc-user-chat-durable-objects.md`](../../../design/rfc-user-chat-durable-objects.md).
+
+## The hub is a plain Durable Object
+
+The hub has no `@callable()` methods and no Agent protocol. Its browser
+interface is an `RpcTarget` served by the `WebSockets` capability as
+Cap'n Web callables: the client opens one session with
+`newWebSocketRpcSession(callablesRpcUrl(hubUrl))` and calls `createChat()`,
+`listChats()`, `searchChats()`, and `deleteChat()` as ordinary methods.
+Each chat still reaches its owner with a plain Durable Object stub,
+`env.UserHub.getByName(userId)`.
+
+Install order matters: `RoutedAgents` goes first so a forwarded upgrade
+under `/chats/{id}` reaches the chat, and only the hub's own upgrades fall
+through to the callables endpoint.
 
 Two sharp edges to design around:
 
 - **Pick a route that cannot collide.** Forwarding matches every occurrence
-  of the route segment in the path, so the hub's own routes live under
-  `/catalog`, not `/notes`. A coincidental match with no active entry behind
-  it is answered `404` instead of reaching the hub's `onRequest`.
-- **A routed suffix cannot address a target's own dynamic agents.** A
-  `/sub/{class}/{name}` marker is resolved against the hub's exported classes
-  before this capability runs. Reach a target's dynamic agents through a
-  direct connection to that target.
-
-For the richer many-chats pattern where targets push metadata back into the
-hub's index, see [`../chats`](../chats).
+  of the route segment in the path. If the hub's own name, or a path the
+  hub handles itself, is literally `chats`, a coincidental match with no
+  active entry behind it is answered `404` instead of reaching the hub.
+- **A routed suffix cannot address a chat's own dynamic agents.** A
+  `/sub/{class}/{name}` marker is resolved against the hub before this
+  capability runs. Reach a chat's dynamic agents through a direct
+  connection to that chat.
 
 ## Run
 
 ```sh
 pnpm install
-pnpm run dev
+pnpm run start
 ```
 
-Exercise the hub `alice`:
-
-```sh
-# Create two notebooks. No NoteAgent wakes.
-curl -X POST http://localhost:8787/agents/hub-object/alice/catalog \
-  -H "content-type: application/json" -d '{"title": "work"}'
-curl -X POST http://localhost:8787/agents/hub-object/alice/catalog \
-  -H "content-type: application/json" -d '{"title": "home"}'
-
-# List entries, most recently updated first.
-curl http://localhost:8787/agents/hub-object/alice/catalog
-
-# Write to one notebook through the hub's route. Only that NoteAgent wakes.
-curl -X POST http://localhost:8787/agents/hub-object/alice/notes/<id>/notes \
-  -H "content-type: application/json" -d '{"text": "buy milk"}'
-curl http://localhost:8787/agents/hub-object/alice/notes/<id>/notes
-
-# Rename, inspect via a typed stub, and delete.
-curl -X PATCH http://localhost:8787/agents/hub-object/alice/catalog/<id> \
-  -H "content-type: application/json" -d '{"title": "errands"}'
-curl http://localhost:8787/agents/hub-object/alice/catalog/<id>
-curl -X DELETE http://localhost:8787/agents/hub-object/alice/catalog/<id>
-```
-
-A WebSocket to `/agents/hub-object/alice/notes/<id>` is answered by that
-notebook's Agent, which echoes every frame:
-
-```sh
-websocat ws://localhost:8787/agents/hub-object/alice/notes/<id>
-```
+The React UI (Vite + Kumo) shows the whole pattern: the sidebar and
+search use one Cap'n Web session to the hub, and each open chat gets
+its own `useAgent` WebSocket through the hub's route via `basePath`.
+No model is wired in; the "assistant" reply is an echo that proves both
+roles land in the chat's own SQLite.
 
 ## Test
 
 ```sh
-pnpm test
+pnpm run test
 ```

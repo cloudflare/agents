@@ -14,19 +14,19 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "HubObject",
-        "name": "HubObject"
+        "class_name": "UserHub",
+        "name": "UserHub"
       },
       {
-        "class_name": "NoteAgent",
-        "name": "NoteAgent"
+        "class_name": "ChatAgent",
+        "name": "ChatAgent"
       }
     ]
   },
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["HubObject", "NoteAgent"],
+      "new_sqlite_classes": ["UserHub", "ChatAgent"],
       "tag": "v1"
     }
   ]
