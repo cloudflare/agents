@@ -198,14 +198,16 @@ export class State<T = unknown> extends LifecycleCapability {
     this.#options.validateStateChange?.(nextState, source);
     this.#ensureTable();
 
-    // Persist state — row existence in cf_agents_state is the signal that
-    // state was set (no separate wasChanged flag needed).
-    this.#state = nextState;
+    // Persist first, cache second: a value that fails to serialize or to
+    // write must not be served by later get() calls. Row existence in
+    // cf_agents_state is the signal that state was set.
+    const serialized = JSON.stringify(nextState);
     this.lifecycle.storage.sql.exec(
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES (?, ?)",
       STATE_ROW_ID,
-      JSON.stringify(nextState)
+      serialized
     );
+    this.#state = nextState;
 
     let pending: void | Promise<void>;
     try {
