@@ -161,4 +161,34 @@ describe("useAgent with transport: capnweb", () => {
       /not a function|does not exist/
     );
   });
+
+  it("keeps native semantics for a call issued before the socket opens", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    let early: Promise<unknown> | null = null;
+
+    const { container } = await render(
+      <SuspenseWrapper>
+        <TestAgentComponent
+          options={{
+            agent: "TestCallableAgent",
+            name: "capnweb-hook-early",
+            host,
+            protocol,
+            transport: "capnweb"
+          }}
+          onAgent={(agent: TestAgent) => {
+            // Issued while still connecting. Over JSON frames this would
+            // resolve to 5 through the Agent's decorated method; a native
+            // call has no such method on the root and rejects.
+            early ??= agent.call("add", [2, 3]).catch((e: Error) => e);
+          }}
+        />
+      </SuspenseWrapper>
+    );
+
+    await waitForConnected(container);
+    const outcome = await early!;
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/not a function|does not exist/);
+  });
 });

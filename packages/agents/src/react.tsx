@@ -19,6 +19,7 @@ import {
   AgentConnectionError as AgentConnectionErrorCtor,
   isTerminalCloseEvent,
   nativeCall,
+  NativeCallQueue,
   splitCallOptions
 } from "./client";
 import {
@@ -370,6 +371,10 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   const capnWebRef = useRef<CapnWebSocket | null>(null);
   const transportRef = useRef(transport);
   transportRef.current = transport;
+  // Native calls issued before the Cap'n Web socket is open wait here
+  // instead of degrading to JSON frames; flushed on open, rejected on a
+  // permanent close.
+  const nativeQueueRef = useRef(new NativeCallQueue());
   const socketClass = useMemo(
     () =>
       transport === "capnweb"
@@ -476,10 +481,14 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         pending.sentOn = socket;
       }
     }
+    const native =
+      transportRef.current === "capnweb" ? capnWebRef.current : null;
+    if (native) nativeQueueRef.current.flush(native);
   };
 
   /** Reject (and remove) every still-queued (never transmitted) call. */
   const rejectQueuedCalls = (reason: string) => {
+    nativeQueueRef.current.rejectAll(reason);
     const error = new Error(reason);
     for (const [id, pending] of pendingCallsRef.current) {
       if (pending.sentOn === null) {
@@ -969,11 +978,28 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       // session root: invoke them directly so an RpcTarget result arrives
       // as a live stub and chained calls pipeline. The JSON `rpc` frame
       // below is the WebSocket wire's protocol.
-      const native =
-        transportRef.current === "capnweb" ? capnWebRef.current : null;
-      if (native && socketRef.current?.readyState === WebSocket.OPEN) {
-        return nativeCall<T>(
-          native,
+      if (transportRef.current === "capnweb") {
+        const native = capnWebRef.current;
+        const socket = socketRef.current;
+        if (native && socket?.readyState === WebSocket.OPEN) {
+          return nativeCall<T>(
+            native,
+            method,
+            args,
+            options,
+            defaultCallTimeoutRef.current
+          );
+        }
+        if (
+          socket &&
+          connectionErrorRef.current &&
+          socket.readyState === socket.CLOSED
+        ) {
+          return Promise.reject(new Error("Connection closed"));
+        }
+        // Connecting or between reconnects: hold the call as a native call
+        // rather than queueing a JSON frame that would change its meaning.
+        return nativeQueueRef.current.enqueue<T>(
           method,
           args,
           options,

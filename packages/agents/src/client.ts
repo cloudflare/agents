@@ -175,10 +175,11 @@ export function splitCallOptions(
 
 /**
  * One native call on the Cap'n Web transport, with the timeout and
- * stream-callback contract `call()` has on the JSON wire. A
- * `ReadableStream` result is drained into the stream callbacks when they
- * are given; any other value, live stubs included, passes straight
- * through.
+ * stream-callback contract `call()` has on the JSON wire. The timeout
+ * covers the whole call, draining included: on expiry the stream reader is
+ * cancelled and the promise rejects once. A `ReadableStream` result is
+ * drained into the stream callbacks when they are given; any other value,
+ * live stubs included, passes straight through.
  */
 export async function nativeCall<T>(
   socket: CapnWebSocket,
@@ -190,37 +191,121 @@ export async function nativeCall<T>(
   const { stream, timeout } = splitCallOptions(options);
   const effectiveTimeout =
     timeout !== undefined ? timeout : stream ? undefined : defaultTimeout;
+  let reader: ReadableStreamDefaultReader<unknown> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const invocation = socket.invoke(method, args);
-  const raced = effectiveTimeout
-    ? Promise.race([
-        invocation,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `RPC call to ${method} timed out after ${effectiveTimeout}ms`
-                )
-              ),
-            effectiveTimeout
-          );
-        })
-      ])
-    : invocation;
-  try {
-    const result = await raced;
+
+  const work = (async () => {
+    const result = await socket.invoke(method, args);
     if (stream && result instanceof ReadableStream) {
-      for await (const chunk of result) stream.onChunk?.(chunk);
+      reader = (result as ReadableStream<unknown>).getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        stream.onChunk?.(value);
+      }
       stream.onDone?.(undefined);
       return undefined as T;
     }
     return result as T;
+  })();
+
+  const expiry = effectiveTimeout
+    ? new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          void reader?.cancel().catch(() => {});
+          reject(
+            new Error(
+              `RPC call to ${method} timed out after ${effectiveTimeout}ms`
+            )
+          );
+        }, effectiveTimeout);
+      })
+    : undefined;
+
+  try {
+    return await (expiry ? Promise.race([work, expiry]) : work);
   } catch (error) {
+    // Keep the rejection observed on the losing side of the race.
+    void work.catch(() => {});
     stream?.onError?.(error instanceof Error ? error.message : String(error));
     throw error;
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Native calls issued while the Cap'n Web socket is still connecting or
+ * between reconnects. They must not fall back to JSON frames — that would
+ * change which methods are reachable and lose return-by-reference — so
+ * they wait here and run on the next open socket, or reject when the
+ * connection ends for good. Their timeout starts when they are issued.
+ */
+export class NativeCallQueue {
+  #pending: Array<{
+    run: (socket: CapnWebSocket) => void;
+    reject: (error: Error) => void;
+  }> = [];
+
+  enqueue<T>(
+    method: string,
+    args: unknown[],
+    options: CallOptions | StreamOptions | undefined,
+    defaultTimeout: number
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const { stream, timeout } = splitCallOptions(options);
+      const effectiveTimeout =
+        timeout !== undefined ? timeout : stream ? undefined : defaultTimeout;
+      const startedAt = Date.now();
+      const entry = {
+        run: (socket: CapnWebSocket) => {
+          // Spend the remaining budget, not a fresh one.
+          const remaining =
+            effectiveTimeout === undefined
+              ? undefined
+              : Math.max(1, effectiveTimeout - (Date.now() - startedAt));
+          const opts =
+            remaining === undefined ? options : { stream, timeout: remaining };
+          nativeCall<T>(socket, method, args, opts, defaultTimeout).then(
+            resolve,
+            reject
+          );
+        },
+        reject: (error: Error) => {
+          stream?.onError?.(error.message);
+          reject(error);
+        }
+      };
+      this.#pending.push(entry);
+      if (effectiveTimeout) {
+        setTimeout(() => {
+          const index = this.#pending.indexOf(entry);
+          if (index === -1) return;
+          this.#pending.splice(index, 1);
+          entry.reject(
+            new Error(
+              `RPC call to ${method} timed out after ${effectiveTimeout}ms`
+            )
+          );
+        }, effectiveTimeout);
+      }
+    });
+  }
+
+  /** Run everything queued on a socket that just opened. */
+  flush(socket: CapnWebSocket): void {
+    const pending = this.#pending;
+    this.#pending = [];
+    for (const entry of pending) entry.run(socket);
+  }
+
+  /** Reject everything queued; the connection will not come back. */
+  rejectAll(reason: string): void {
+    const pending = this.#pending;
+    this.#pending = [];
+    const error = new Error(reason);
+    for (const entry of pending) entry.reject(error);
   }
 }
 
@@ -431,6 +516,7 @@ export class AgentClient<
    * into this holder, which exists before `super()` runs.
    */
   readonly #capnWeb: { current: CapnWebSocket | null };
+  readonly #nativeQueue = new NativeCallQueue();
 
   constructor(options: AgentClientOptions<State>) {
     const capnWeb: { current: CapnWebSocket | null } = { current: null };
@@ -591,6 +677,8 @@ export class AgentClient<
       for (const pending of this._pendingCalls.values()) {
         pending.transmitted = true;
       }
+      const native = this.#capnWeb.current;
+      if (native) this.#nativeQueue.flush(native);
     });
 
     // Clean up pending calls and reset ready state when connection closes
@@ -611,6 +699,7 @@ export class AgentClient<
         // Permanent close (close() called or retries exhausted): nothing
         // will ever flush the buffer, so reject everything.
         this._rejectPendingCalls("Connection closed");
+        this.#nativeQueue.rejectAll("Connection closed");
         if (terminalClose) {
           const error = new AgentConnectionError(event);
           this.connectionError = error;
@@ -678,15 +767,19 @@ export class AgentClient<
     // On the Cap'n Web transport, callables are native methods on the
     // session root: invoke them directly so an RpcTarget result arrives as
     // a live stub. The JSON `rpc` frame below is the WebSocket wire's protocol.
-    const native = this.#capnWeb.current;
-    if (native && this.readyState === this.OPEN) {
-      return nativeCall(
-        native,
-        method,
-        args,
-        options,
-        this.options.defaultCallTimeout ?? DEFAULT_CALL_TIMEOUT_MS
-      );
+    if (this.options.transport === "capnweb") {
+      const timeout =
+        this.options.defaultCallTimeout ?? DEFAULT_CALL_TIMEOUT_MS;
+      const native = this.#capnWeb.current;
+      if (native && this.readyState === this.OPEN) {
+        return nativeCall(native, method, args, options, timeout);
+      }
+      if (this.connectionError && this.readyState === this.CLOSED) {
+        throw new Error("Connection closed");
+      }
+      // Connecting or between reconnects: hold the call as a native call
+      // rather than queueing a JSON frame that would change its meaning.
+      return this.#nativeQueue.enqueue(method, args, options, timeout);
     }
     if (this.connectionError && this.readyState === this.CLOSED) {
       throw new Error("Connection closed");
