@@ -12,6 +12,7 @@ lands.
 | [`tasks`](./tasks)                                       | This PR   | Durable replayable `Tasks` installed as a reusable lifecycle capability                                                                    |
 | [`streams`](./streams)                                   | This PR   | Durable `Streams` composed with `Tasks`, served over SSE                                                                                   |
 | [`sessions`](./sessions)                                 | This PR   | Durable message trees, streamed reads, and Sessions-owned attachments                                                                      |
+| [`websockets`](./websockets)                             | This PR   | One plain `DurableObject`, `useAgent` over the WebSocket or Cap'n Web transport, callables on every wire, hibernating connections and tags |
 | [`mcp-client`](./mcp-client)                             | Available | `MCPClientManager` installed as a reusable lifecycle capability                                                                            |
 | [`chats`](./chats)                                       | This PR   | One DO per chat plus a per-user push-based index, the recommended many-chats pattern                                                       |
 | [`dynamic-agents`](./dynamic-agents)                     | This PR   | A supervisor runs user-submitted code as facets: isolated storage, supervised abort, code upgrades over stable state                       |

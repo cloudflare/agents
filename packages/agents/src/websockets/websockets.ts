@@ -345,7 +345,7 @@ export class WebSockets extends LifecycleCapability {
     // A reconnect reusing the id replaces the previous session.
     this.#sessions.get(connectionId)?.dispose();
 
-    const { response, session } = await openCapnWebSession({
+    const { response } = await openCapnWebSession({
       request,
       connectionId,
       tags: (connection, ctx) =>
@@ -356,13 +356,13 @@ export class WebSockets extends LifecycleCapability {
         this.#close(connection, code, reason, wasClean).then(() => undefined),
       onError: (connection, error) =>
         this.#error(connection, error).then(() => undefined),
+      onOpen: (session) => this.#sessions.set(connectionId, session),
       onDispose: (ended) => {
         if (this.#sessions.get(connectionId) === ended) {
           this.#sessions.delete(connectionId);
         }
       }
     });
-    this.#sessions.set(connectionId, session);
     return response;
   }
 
