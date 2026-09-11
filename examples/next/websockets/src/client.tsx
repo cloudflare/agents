@@ -8,7 +8,6 @@ import {
   Text
 } from "@cloudflare/kumo";
 import {
-  BroadcastIcon,
   MoonIcon,
   PaperPlaneRightIcon,
   PlugsConnectedIcon,
@@ -18,7 +17,6 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent, type AgentTransport } from "agents/react";
-import { newWebSocketRpcSession } from "capnweb";
 import type { Member, RoomMessage, ServerFrame } from "./index";
 import "./styles.css";
 
@@ -216,48 +214,6 @@ function RoomPane({ transport }: { transport: AgentTransport }) {
   );
 }
 
-/**
- * A non-React client: the same RoomCallables served natively as a Cap'n Web
- * session at `?__agents_rpc=capnweb`. This is what a CLI or another Worker
- * would use; there is no Agent protocol on this wire, just the methods.
- */
-function RawCallablesPane() {
-  const [result, setResult] = useState("");
-  const run = useCallback(async () => {
-    const url = new URL(`/agents/room-object/${room}`, location.origin);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    url.searchParams.set("__agents_rpc", "capnweb");
-    const rpc = newWebSocketRpcSession<RoomApi>(url.toString());
-    try {
-      await rpc.say(
-        `${nick}@raw-capnweb`,
-        "hello from a raw Cap'n Web session"
-      );
-      const history = await rpc.history();
-      setResult(JSON.stringify(history.slice(-3), null, 2));
-    } finally {
-      rpc[Symbol.dispose]();
-    }
-  }, []);
-  return (
-    <Surface className="rounded-lg border border-kumo-line p-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <BroadcastIcon size={16} />
-          <Text bold>raw Cap'n Web callables</Text>
-          <Badge variant="secondary">?__agents_rpc=capnweb</Badge>
-        </div>
-        <Button size="sm" variant="secondary" onClick={() => void run()}>
-          say() then history()
-        </Button>
-      </div>
-      {result && (
-        <pre className="mt-2 whitespace-pre-wrap text-xs">{result}</pre>
-      )}
-    </Surface>
-  );
-}
-
 function App() {
   return (
     <div className="flex h-screen flex-col gap-3 p-3">
@@ -276,7 +232,6 @@ function App() {
         <RoomPane transport="cf-websocket" />
         <RoomPane transport="capnweb" />
       </div>
-      <RawCallablesPane />
       <div className="flex justify-end">
         <PoweredByCloudflare />
       </div>

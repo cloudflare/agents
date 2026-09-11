@@ -2579,9 +2579,6 @@ importers:
       agents:
         specifier: '*'
         version: link:../../../packages/agents
-      capnweb:
-        specifier: ^0.12.0
-        version: 0.12.0
       react:
         specifier: ^19.2.7
         version: 19.2.8
@@ -2610,6 +2607,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.3
         version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.2.6)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      capnweb:
+        specifier: ^0.12.0
+        version: 0.12.0
       tailwindcss:
         specifier: ^4.3.2
         version: 4.3.3

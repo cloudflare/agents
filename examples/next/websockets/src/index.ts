@@ -83,9 +83,8 @@ function parseClientFrame(raw: unknown): ClientFrame | null {
 
 /**
  * The room's remote interface. Prototype methods are the complete surface.
- * The capability serves it three ways: as the `rpc` frames `useAgent().stub`
- * sends on either transport, and as a native Cap'n Web session at
- * `?__agents_rpc=capnweb`. Each call runs through the host invocation
+ * The capability answers the `rpc` frames `useAgent().stub` sends on either
+ * transport against it. Each call runs through the host invocation
  * boundary with the calling connection in scope, so a method may broadcast
  * to the hibernating members like a handler does.
  */

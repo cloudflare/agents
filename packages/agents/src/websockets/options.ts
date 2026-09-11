@@ -48,11 +48,11 @@ export interface WebSocketsOptions {
 
   /**
    * An `RpcTarget` whose prototype methods are the host's complete remote
-   * interface. The capability serves it on every wire: as `rpc` frames
-   * on connections (what `useAgent().call` and `.stub` send, on either
-   * transport) and as a native Cap'n Web session at `?__agents_rpc=capnweb`.
-   * Methods run through the host invocation boundary with the calling
-   * connection in scope, and may return a `ReadableStream` to stream.
+   * interface, answered as `rpc` frames — what `useAgent().call` and
+   * `.stub` send — on either transport. Methods run through the host
+   * invocation boundary with the calling connection in scope, and may
+   * return a `ReadableStream` to stream. `Agent` answers its own frames
+   * and does not set this.
    */
   readonly callables?: RpcTarget;
 

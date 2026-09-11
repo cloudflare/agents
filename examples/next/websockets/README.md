@@ -1,10 +1,9 @@
 # Next: websockets
 
-One plain Cloudflare `DurableObject`, one interface, reached three ways. The
+One plain Cloudflare `DurableObject`, one interface, two transports. The
 `WebSockets` capability from `agents/websockets` owns connections end to end
 and speaks the Agent protocol for the host, so `useAgent` works against a
-plain object on either transport, and the same `RpcTarget` is callable on
-every wire.
+plain object on either transport and the same `RpcTarget` answers on both.
 
 ```ts
 export class RoomObject extends DurableObject<Env> {
@@ -56,25 +55,6 @@ frames (`history`, `join`, `message`, `leave`), reconnection and backoff are
 PartySocket's. The demo page opens both transports side by side into the
 same room so you can watch one broadcast reach both.
 
-## The third way: a raw Cap'n Web session
-
-The same `RoomCallables` is also served natively at `?__agents_rpc=capnweb`.
-There is no Agent protocol on this wire, just the methods. It is what a CLI
-or another Worker uses:
-
-```ts
-import { newWebSocketRpcSession } from "capnweb";
-
-const rpc = newWebSocketRpcSession<RoomApi>(
-  "wss://<host>/agents/room-object/lobby?__agents_rpc=capnweb"
-);
-await rpc.say("cli", "hi");
-console.log(await rpc.history());
-```
-
-Build the URL by hand in browser code. `callablesRpcUrl` from
-`agents/websockets` is server-side and pulls Node modules into a bundle.
-
 ## What else the room shows
 
 - **Hibernation.** Idle members stay connected while the object leaves
@@ -116,6 +96,6 @@ curl -X POST http://localhost:8787/agents/room-object/lobby/say \
 pnpm test
 ```
 
-The suite drives hibernating sockets, the Cap'n Web transport pipe, rpc
-frames including a streamed result, and a native Cap'n Web session against
-the worker in the Workers vitest pool.
+The suite drives hibernating sockets, the Cap'n Web transport pipe, and rpc
+frames including a streamed result against the worker in the Workers vitest
+pool.

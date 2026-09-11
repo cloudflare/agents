@@ -9,7 +9,8 @@ A plain Durable Object composed with `WebSockets` now works with `useAgent`
 and `AgentClient` like an `Agent` does: the capability sends the identity
 frame on connect (`identity: false` opts out) and answers `rpc` frames
 against `callables`, so `call()` and `stub` reach the host's `RpcTarget`.
-The same target is still served natively at `?__agents_rpc=capnweb`.
+The experimental `?__agents_rpc=capnweb` callables endpoint from 0.23.0 is
+removed: the same target is reached through `useAgent` on either transport.
 
 Clients can pick the wire with `useAgent({ transport: "capnweb" })` (also on
 `AgentClient`). The default `"cf-websocket"` is the hibernating socket;
