@@ -6,7 +6,7 @@
  */
 
 /** Wire a `useAgent` / `AgentClient` connection travels on. */
-export type AgentTransport = "websocket" | "capnweb";
+export type AgentTransport = "cf-websocket" | "capnweb";
 
 /** Query parameter selecting the Cap'n Web connection transport. */
 export const CAPNWEB_TRANSPORT_QUERY = "__agents_transport";

@@ -162,7 +162,7 @@ export type UseAgentOptions<State = unknown> = Omit<
      */
     basePath?: string;
     /**
-     * Wire the connection travels on. `"websocket"` (default) is a
+     * Wire the connection travels on. `"cf-websocket"` (default) is a
      * hibernating WebSocket; `"capnweb"` carries the same frames over a
      * Cap'n Web session and keeps the Durable Object in memory while
      * connected. Everything else about the hook is identical.
@@ -353,7 +353,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     defaultCallTimeout,
     onConnectionError,
     shouldReconnectOnClose,
-    transport = "websocket",
+    transport = "cf-websocket",
     ...restOptions
   } = options;
   // PartySocket keeps reconnection, buffering, and backoff; the transport

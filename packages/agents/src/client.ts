@@ -50,7 +50,7 @@ export type AgentClientOptions<State = unknown> = Omit<
 > &
   TerminalReconnectOptions & {
     /**
-     * Wire the connection travels on. `"websocket"` (default) is a
+     * Wire the connection travels on. `"cf-websocket"` (default) is a
      * hibernating WebSocket; `"capnweb"` carries the same frames over a
      * Cap'n Web session and keeps the Durable Object in memory while
      * connected.

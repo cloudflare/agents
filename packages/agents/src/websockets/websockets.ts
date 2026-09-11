@@ -104,7 +104,7 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  *
  * Connections arrive on one of two wires, chosen by the client:
  *
- * - **WebSocket** (default): accepted with the Hibernation API. Idle
+ * - **cf-websocket** (default): accepted with the Hibernation API. Idle
  *   clients stay connected while the Durable Object leaves memory.
  * - **Cap'n Web** (`?__agents_transport=capnweb`): the same frames over a
  *   Cap'n Web session. Non-hibernating — the object stays pinned while
