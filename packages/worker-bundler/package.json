@@ -39,7 +39,7 @@
     "fflate": "^0.8.2",
     "resolve.exports": "^2.0.3",
     "semver": "^7.8.5",
-    "smol-toml": "^1.7.0",
+    "smol-toml": "^1.7.2",
     "sucrase": "^3.35.1",
     "typescript": "^6.0.3"
   },

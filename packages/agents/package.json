@@ -50,7 +50,7 @@
     "glob": "^13.0.6",
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
-    "valibot": "1.4.1",
+    "valibot": "1.4.2",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
