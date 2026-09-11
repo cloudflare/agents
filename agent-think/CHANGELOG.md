@@ -1,5 +1,14 @@
 # @cloudflare/agent-think
 
+## 0.0.8
+
+### Patch Changes
+
+- Updated dependencies [[`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16), [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5), [`dcca089`](https://github.com/cloudflare/agents/commit/dcca0896cc829e4a602a1feb47466ac79d1ca096), [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5), [`6da4c44`](https://github.com/cloudflare/agents/commit/6da4c44ba4ba778c2fd981b40adbba2b4f02ba37), [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16), [`dcca089`](https://github.com/cloudflare/agents/commit/dcca0896cc829e4a602a1feb47466ac79d1ca096), [`87bd594`](https://github.com/cloudflare/agents/commit/87bd59401f4644d1fd2c82cae439e9848ce437b1), [`b40bc5b`](https://github.com/cloudflare/agents/commit/b40bc5bbbfb96151baf7c524834cae27bcae0b6a), [`8ffb3ad`](https://github.com/cloudflare/agents/commit/8ffb3ad14a0aed72b047b8968981f10b141c700b), [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16), [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5), [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5), [`b9142be`](https://github.com/cloudflare/agents/commit/b9142be5af530b5a07510bf57ae1126caa2f05ae), [`dd8bf90`](https://github.com/cloudflare/agents/commit/dd8bf9061298a38003751a59b70745a50e6557e7), [`99e5e2e`](https://github.com/cloudflare/agents/commit/99e5e2ecfed8ffb94b5d8fab1a80e3a62d7d9ee9), [`0966a0b`](https://github.com/cloudflare/agents/commit/0966a0b076cde9b4f04d29c12c469690fd65491f), [`ec93caf`](https://github.com/cloudflare/agents/commit/ec93caf6ec1efebb521aa9ab30c0a8cb2b4d50d5), [`dd09d44`](https://github.com/cloudflare/agents/commit/dd09d44913e60aa519aac51e53b13eac2111c732), [`0966a0b`](https://github.com/cloudflare/agents/commit/0966a0b076cde9b4f04d29c12c469690fd65491f), [`58c586a`](https://github.com/cloudflare/agents/commit/58c586aa179690f78a4327288fe27ee9875e8624), [`e18d42f`](https://github.com/cloudflare/agents/commit/e18d42f48c84eb9bd944cb62124071e396cc964f), [`8c8f86d`](https://github.com/cloudflare/agents/commit/8c8f86d84f99397fde06431d78ed1f9a82eda85d), [`b12dc0b`](https://github.com/cloudflare/agents/commit/b12dc0b9c1293e8ce8c417de1de43f4661067854), [`71ce28a`](https://github.com/cloudflare/agents/commit/71ce28a83ee6677aae6a42c5b8d6e72db7310f16)]:
+  - agents@0.23.0
+  - @cloudflare/think@0.18.0
+  - @cloudflare/ai-chat@0.12.0
+
 ## 0.0.7
 
 ### Patch Changes

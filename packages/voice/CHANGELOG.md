@@ -1,5 +1,15 @@
 # @cloudflare/voice
 
+## 0.5.0
+
+### Minor Changes
+
+- [#2225](https://github.com/cloudflare/agents/pull/2225) [`8c8f86d`](https://github.com/cloudflare/agents/commit/8c8f86d84f99397fde06431d78ed1f9a82eda85d) Thanks [@cjol](https://github.com/cjol)! - Deprecate `@cloudflare/voice` in favor of the Voice exports in `agents`.
+
+  All existing entry points remain compatible re-export wrappers. Replace imports
+  from `@cloudflare/voice`, `/client`, `/react`, and `/errors` with the matching
+  `agents/voice` paths.
+
 ## 0.4.0
 
 ### Minor Changes
