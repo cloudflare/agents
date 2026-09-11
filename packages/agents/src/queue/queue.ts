@@ -523,9 +523,9 @@ export class Queue<
   /** The next strictly increasing due time, never before now. */
   #nextTime(): number {
     if (this.#lastTime === null) {
-      this.#lastTime = Math.max(
-        0,
-        ...this.#ownedJobs().map(({ job }) => job.time)
+      this.#lastTime = this.#ownedJobs().reduce(
+        (lastTime, { job }) => Math.max(lastTime, job.time),
+        0
       );
     }
     const time = Math.max(Date.now(), this.#lastTime + 1);
