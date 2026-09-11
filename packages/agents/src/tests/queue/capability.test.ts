@@ -188,18 +188,19 @@ describe("Queue capability", () => {
     }
   });
 
-  it("replaces an item pushed again with the same id", async () => {
+  it("replaces an item pushed again with the same id, keeping its position", async () => {
     const stub = env.QueueHarnessObject.getByName(crypto.randomUUID());
 
     await runInDurableObject(stub, async (instance: QueueHarnessObject) => {
       instance.hold();
       await instance.queue.push("record", { value: "first" }, { id: "stable" });
+      await instance.queue.push("record", { value: "later" });
       await instance.queue.push(
         "record",
         { value: "second" },
         { id: "stable" }
       );
-      expect(await instance.queue.list()).toHaveLength(1);
+      expect(await instance.queue.list()).toHaveLength(2);
       expect((await instance.queue.get("stable"))?.payload).toEqual({
         value: "second"
       });
@@ -208,8 +209,10 @@ describe("Queue capability", () => {
 
     await runInDurableObject(stub, async (instance: QueueHarnessObject) => {
       await waitForQueueDrain(instance);
+      // The replacement kept the original slot, ahead of the later push.
       expect(instance.invocations.map((entry) => entry.payload)).toEqual([
-        { value: "second" }
+        { value: "second" },
+        { value: "later" }
       ]);
     });
   });

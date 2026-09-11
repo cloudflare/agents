@@ -1367,6 +1367,24 @@ export class TestSubAgentParent extends Agent {
     return child.queueCallback(value);
   }
 
+  /**
+   * Queue from a facet, park the item in the far future so the alarm cannot
+   * run it, then delete the facet. Returns the root queue rows after each
+   * step so a test can assert the deletion cleaned the routed item up.
+   */
+  async subAgentQueueThenDelete(subAgentName: string): Promise<{
+    beforeDelete: string[];
+    afterDelete: string[];
+  }> {
+    const itemId = await this.subAgentQueue(subAgentName, "orphan");
+    this
+      .sql`UPDATE cf_agents_jobs SET time = ${Date.now() + 86_400_000} WHERE id = ${itemId}`;
+    const beforeDelete = (await this.rootQueueRows()).map((row) => row.id);
+    await this.deleteSubAgent(CounterSubAgent, subAgentName);
+    const afterDelete = (await this.rootQueueRows()).map((row) => row.id);
+    return { beforeDelete, afterDelete };
+  }
+
   async rootQueueRows(): Promise<
     Array<{ id: string; callback: string; ownerPath: string | null }>
   > {

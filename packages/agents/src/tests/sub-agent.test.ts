@@ -461,6 +461,16 @@ describe("SubAgent", () => {
     expect(await agent.rootQueueRows()).toEqual([]);
   });
 
+  it("deleteSubAgent removes the sub-agent's pending queue items from the root", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const { beforeDelete, afterDelete } =
+      await agent.subAgentQueueThenDelete("queue-orphan-child");
+    expect(beforeDelete).toHaveLength(1);
+    expect(afterDelete).toEqual([]);
+  });
+
   it("should keep sub-agent interval schedules recurring and idempotent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

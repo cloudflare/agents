@@ -123,10 +123,12 @@ export class Queue<
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
   /**
    * Last due time handed to a job. The Lifecycle driver dispatches due jobs
-   * in due-time order, so pushes made within the same millisecond get
-   * strictly increasing times to keep push order (FIFO) among them.
+   * in due-time order, so pushes get strictly increasing times to keep push
+   * order (FIFO) even within one millisecond. Seeded from the persisted
+   * queue tail on first use so a fresh instance never sorts a new item ahead
+   * of items an earlier instance already queued.
    */
-  #lastTime = 0;
+  #lastTime: number | null = null;
 
   /**
    * Create a durable Queue.
@@ -520,6 +522,12 @@ export class Queue<
 
   /** The next strictly increasing due time, never before now. */
   #nextTime(): number {
+    if (this.#lastTime === null) {
+      this.#lastTime = Math.max(
+        0,
+        ...this.#ownedJobs().map(({ job }) => job.time)
+      );
+    }
     const time = Math.max(Date.now(), this.#lastTime + 1);
     this.#lastTime = time;
     return time;
@@ -531,10 +539,19 @@ export class Queue<
     payload: unknown,
     options?: QueuePushOptions
   ): Promise<QueueItem<T>> {
+    // A stable-id push replaces the item in place: it keeps the existing
+    // item's due time, and so its position in the queue.
+    const existing =
+      options?.id !== undefined
+        ? this.lifecycle.jobs.get(options.id)
+        : undefined;
+    const keepTime =
+      existing !== undefined &&
+      this.#getForOwner(owner, existing.id) !== undefined;
     const job = await this.lifecycle.jobs.push({
       id: options?.id,
       fn: callback,
-      time: this.#nextTime(),
+      time: keepTime ? existing.time : this.#nextTime(),
       payload: {
         payload,
         owner_path: owner?.data ?? null,
@@ -608,6 +625,18 @@ export class Queue<
       if (await this.lifecycle.jobs.cancel(item.id)) cancelled++;
     }
     return cancelled;
+  }
+
+  /** @internal Remove items owned by one routed Lifecycle subtree. */
+  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
+    prefix: string
+  ): Promise<void> {
+    for (const { job, envelope } of this.#ownedJobs()) {
+      const ownerKey = envelope.owner_path_key ?? envelope.owner_path;
+      if (!envelope.owner_path || ownerKey === null) continue;
+      if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
+      await this.lifecycle.jobs.cancel(job.id);
+    }
   }
 
   // ── Events ───────────────────────────────────────────────────────────────

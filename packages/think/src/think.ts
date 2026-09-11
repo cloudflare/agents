@@ -10547,13 +10547,16 @@ export class Think<
       const attempts = (payload.attempts ?? 0) + 1;
       const firstFailedAt = payload.firstFailedAt ?? Date.now();
       if (Date.now() - firstFailedAt >= WORKFLOW_NOTIFICATION_GIVE_UP_MS) {
-        throw new Error(
+        const summary =
           `Workflow notification for submission ${JSON.stringify(
             (payload.event.payload as { submissionId?: string })?.submissionId
           )} (${payload.workflowName}/${payload.workflowId}, ${payload.event.type}) ` +
-            `could not be delivered after ${attempts} attempts over 12h; giving up`,
-          { cause: error }
-        );
+          `could not be delivered after ${attempts} attempts over 12h; giving up`;
+        console.error(`[Think] ${summary}`, error);
+        // Deliberately no `cause`: the dispatching capability preserves any
+        // error whose cause chain is a platform-class failure, which would
+        // keep the item alive past this cutoff.
+        throw new Error(summary);
       }
       const delaySeconds = Math.min(
         WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS,
@@ -10875,17 +10878,16 @@ export class Think<
   }
 
   /**
-   * Queue the run of one pending submission. Idempotent: an item already
-   * queued for the submission is left in place (keeping its FIFO slot) and
-   * only the physical alarm is re-armed, so a lost alarm recovers.
+   * Queue the run of one pending submission. Idempotent: the stable id
+   * replaces an item already queued for the submission in place, keeping
+   * its FIFO slot, and re-arms the physical alarm so a lost alarm recovers.
    */
   private async _queueSubmissionRun(submissionId: string): Promise<void> {
-    const id = submissionRunItemId(submissionId);
-    if (await this.getQueue(id)) {
-      await this.lifecycle.rearmAlarm();
-      return;
-    }
-    await this.queue(SUBMISSION_RUN_CALLBACK, { submissionId }, { id });
+    await this.queue(
+      SUBMISSION_RUN_CALLBACK,
+      { submissionId },
+      { id: submissionRunItemId(submissionId) }
+    );
   }
 
   /** Queue a run for every pending submission that has none. */

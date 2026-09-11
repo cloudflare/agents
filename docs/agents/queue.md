@@ -70,8 +70,9 @@ never waits for the callback.
 
 - `options.retry` overrides the Queue's retry policy for this item.
 - `options.id` sets a stable id. A push with an existing id replaces that
-  item in place (and supersedes a dispatch of it still in flight); use it for
-  idempotent enqueues keyed by your own identifier.
+  item in place, keeping its position in the queue (and superseding a
+  dispatch of it still in flight); use it for idempotent enqueues keyed by
+  your own identifier.
 
 Once the Lifecycle has started, the item row is written synchronously before
 `push()` returns its promise, so a push made in the same synchronous block as
