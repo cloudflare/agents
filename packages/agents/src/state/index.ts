@@ -1,7 +1,39 @@
 import { LifecycleCapability } from "../lifecycle/capability";
-import type { StateChangeSource, StateOptions } from "./options";
+import type { Connection } from "../lifecycle/durable-object-lifecycle";
 
-export type { StateChangeSource, StateOptions } from "./options";
+/**
+ * Source of a state change: `"server"` for host code (e.g. `setState()`), or
+ * the {@link Connection} the change arrived from. Hosts use it to exclude the
+ * originating connection from a broadcast.
+ */
+export type StateChangeSource = Connection | "server";
+
+/**
+ * Options for a {@link State} capability. Validation and the post-change hook
+ * stay on the host, which passes them in; the capability owns storage and
+ * change ordering.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export interface StateOptions<T = unknown> {
+  /** Seeded on first access when nothing is stored. `undefined` seeds nothing. */
+  readonly initialState?: T;
+
+  /** Called after a change is validated and persisted. May be async. */
+  readonly onChanged?: (
+    state: T,
+    source: StateChangeSource
+  ) => void | Promise<void>;
+
+  /**
+   * Synchronous gating hook run before a change is persisted. Throw to reject
+   * the change; the throw propagates to the caller of {@link State.set}.
+   */
+  readonly validateStateChange?: (
+    nextState: T,
+    source: StateChangeSource
+  ) => void;
+}
 
 /**
  * Namespaced KV key holding this capability's schema version. Kept separate
@@ -67,8 +99,10 @@ export class State<T = unknown> extends LifecycleCapability {
     // v1: own the table and clear the legacy wasChanged row left behind by
     // pre-optimization SDKs (state itself lives in STATE_ROW_ID).
     this._ensureTable();
-    this.lifecycle
-      .sql`DELETE FROM cf_agents_state WHERE id = ${LEGACY_WAS_CHANGED_ROW_ID}`;
+    this.lifecycle.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = ?",
+      LEGACY_WAS_CHANGED_ROW_ID
+    );
     await this.lifecycle.storage.put(
       STATE_SCHEMA_VERSION_KEY,
       CURRENT_STATE_SCHEMA_VERSION
@@ -77,12 +111,12 @@ export class State<T = unknown> extends LifecycleCapability {
 
   private _ensureTable(): void {
     if (this._tableEnsured) return;
-    this.lifecycle.sql`
+    this.lifecycle.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
         state TEXT
       )
-    `;
+    `);
     this._tableEnsured = true;
   }
 
@@ -104,9 +138,9 @@ export class State<T = unknown> extends LifecycleCapability {
     // looks like this is the first time the state is being accessed
     // check if the state was set in a previous life
     this._ensureTable();
-    const result = this.lifecycle.sql<{ state: T | undefined }>`
-      SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
-    `;
+    const result = this.lifecycle.storage.sql
+      .exec("SELECT state FROM cf_agents_state WHERE id = ?", STATE_ROW_ID)
+      .toArray() as { state: string | null }[];
 
     // Row existence is the signal that state was previously set.
     // This handles all values including falsy ones (null, 0, false, "").
@@ -127,8 +161,10 @@ export class State<T = unknown> extends LifecycleCapability {
           this.set(initial, "server");
         } else {
           // No initialState defined - clear corrupted data to prevent infinite retry loop
-          this.lifecycle
-            .sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
+          this.lifecycle.storage.sql.exec(
+            "DELETE FROM cf_agents_state WHERE id = ?",
+            STATE_ROW_ID
+          );
           return undefined;
         }
       }
@@ -165,10 +201,11 @@ export class State<T = unknown> extends LifecycleCapability {
     // Persist state — row existence in cf_agents_state is the signal that
     // state was set (no separate wasChanged flag needed).
     this._state = nextState;
-    this.lifecycle.sql`
-      INSERT OR REPLACE INTO cf_agents_state (id, state)
-      VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
-    `;
+    this.lifecycle.storage.sql.exec(
+      "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES (?, ?)",
+      STATE_ROW_ID,
+      JSON.stringify(nextState)
+    );
 
     let pending: void | Promise<void>;
     try {

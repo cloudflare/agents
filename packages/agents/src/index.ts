@@ -1195,21 +1195,13 @@ export class Agent<
   });
 
   /**
-   * Durable state subsystem. Owns the `cf_agents_state` state row, lazy load,
-   * and validated persistence. Agent keeps `initialState` on itself (a
-   * subclass field, initialized after this one) and seeds it from the `state`
-   * getter, so the capability is constructed with plain, static options. The
-   * `onChanged` hook broadcasts the change and runs Agent's notification hook.
-   *
-   * Typed as `StateCapability<unknown>`, not `StateCapability<State>`, on
-   * purpose. `StateCapability<State>` uses `State` both covariantly
-   * (`get(): State`) and contravariantly (`set(next: State)`, `onChanged`), so
-   * the parameter is invariant. Holding it as a `StateCapability<State>` field
-   * would propagate that invariance to `Agent`'s own `State` parameter and
-   * break `Subclass -> Agent<Env, unknown>` assignability for every consumer
-   * (sub-agents, `DurableObjectNamespace<Subclass>`, etc.). Erasing to
-   * `unknown` keeps the field's runtime typing intact; the typed `State`
-   * boundary is re-established at the delegating call sites below.
+   * Durable state: the `cf_agents_state` row, lazy load, validated persistence.
+   * `initialState` stays on Agent (a subclass field, initialized after this
+   * one) and is seeded by the `state` getter. Typed `<unknown>` rather than
+   * `<State>` because `State` appears in both `get()` and `set()` positions,
+   * which would make `Agent`'s own `State` parameter invariant and break
+   * `Subclass -> Agent<Env, unknown>` assignability; the typed boundary is
+   * re-established in `state` / `setState`.
    */
   readonly _state: StateCapability<unknown> = new StateCapability<unknown>({
     validateStateChange: (nextState, source) =>
@@ -1454,8 +1446,6 @@ export class Agent<
    * in-memory cache; Agent seeds `initialState` on first access.
    */
   get state(): State {
-    // Field is erased to StateCapability<unknown> for variance (see field
-    // docs); re-establish the typed State boundary here.
     const stored = this._state.get();
     // `undefined` is not JSON-representable, so it uniquely means "no row":
     // nothing stored yet, or a corrupt row the capability just cleared.

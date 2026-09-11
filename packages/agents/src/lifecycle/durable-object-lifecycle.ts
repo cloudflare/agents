@@ -341,7 +341,6 @@ export class Lifecycle<
     });
     return Object.freeze({
       storage: this.#ctx.storage,
-      sql: this.sql.bind(this),
       sockets: Object.freeze({
         accept: (ws: WebSocket, tags: string[]) =>
           this.#ctx.acceptWebSocket(ws, tags),

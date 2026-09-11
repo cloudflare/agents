@@ -21,7 +21,7 @@ The capability owns the `cf_agents_state` state row, lazy load with an
 in-memory cache, initial-state seeding, and validated persistence. It
 runs only the `onStart` hook (versioned schema init under its own
 `cf_agents:state_schema_version` key) and reaches Lifecycle only for
-storage — no alarm, no request path. It never touches connections.
+`storage` — no alarm, no request path. It never touches connections.
 
 Host-owned behavior is injected, not moved: `validateStateChange`
 stays an overridable `Agent` method and the post-change `onChanged`
