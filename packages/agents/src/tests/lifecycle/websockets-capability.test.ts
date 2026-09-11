@@ -254,4 +254,118 @@ describe("plain host Agent protocol on the Cap'n Web wire", () => {
       /frame pipe/
     );
   });
+
+  it("settles a JSON-wire call whose result cannot be serialized", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(
+      new URL(`/agents/plain-lifecycle-object/${name}`, "https://example.com")
+    );
+    const next = frameReader(socket);
+    try {
+      expect(await next()).toMatchObject({ type: "cf_agent_identity" });
+      socket.send(
+        JSON.stringify({ type: "rpc", id: "1", method: "bigint", args: [] })
+      );
+      expect(await next()).toMatchObject({
+        id: "1",
+        success: false,
+        error: expect.stringContaining("not JSON-serializable")
+      });
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("applies the same tag limits on the Cap'n Web wire", async () => {
+    const name = crypto.randomUUID();
+    const base = new URL(
+      `/agents/plain-lifecycle-object/${name}`,
+      "https://example.com"
+    );
+    base.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+
+    // Ten user tags plus the id is eleven: both wires reject the upgrade
+    // the same way — Lifecycle answers 101 and closes the socket with 1011.
+    const closeCodeOf = async (response: Response | null) => {
+      const ws = response?.webSocket;
+      if (!ws) throw new Error(`expected an upgrade, got ${response?.status}`);
+      ws.accept();
+      return new Promise<number>((resolve) =>
+        ws.addEventListener("close", (event) => resolve(event.code), {
+          once: true
+        })
+      );
+    };
+    const tooMany = new URL(base);
+    tooMany.searchParams.set("tags", "10");
+    const plain = new URL(tooMany);
+    plain.searchParams.delete(CAPNWEB_TRANSPORT_QUERY);
+    for (const url of [tooMany, plain]) {
+      const response = await routeAgentRequest(
+        new Request(url, { headers: { Upgrade: "websocket" } }),
+        env
+      );
+      expect(await closeCodeOf(response)).toBe(1011);
+    }
+    expect(
+      await env.PlainLifecycleObject.getByName(name).connectionCount()
+    ).toBe(0);
+
+    const ok = new URL(base);
+    ok.searchParams.set("tags", "9");
+    ok.searchParams.set("_pk", "tagged-" + name);
+    const socket = await upgrade(ok);
+    class Inbox extends RpcTarget {
+      message() {}
+    }
+    const root = newWebSocketRpcSession<TransportHostPipe>(socket, new Inbox());
+    try {
+      const tags = await env.PlainLifecycleObject.getByName(
+        name
+      ).connectionTags("tagged-" + name);
+      expect(tags).toHaveLength(10);
+      expect(tags?.[0]).toBe("tagged-" + name);
+    } finally {
+      root[Symbol.dispose]();
+    }
+  });
+
+  it("keeps a Cap'n Web connection tracked when close() is given an invalid code", async () => {
+    const name = crypto.randomUUID();
+    const url = new URL(
+      `/agents/plain-lifecycle-object/${name}`,
+      "https://example.com"
+    );
+    url.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+    url.searchParams.set("_pk", "c-" + name);
+    const socket = await upgrade(url);
+    class Inbox extends RpcTarget {
+      message() {}
+    }
+    const root = newWebSocketRpcSession<TransportHostPipe>(socket, new Inbox());
+    const host = env.PlainLifecycleObject.getByName(name);
+    const closedEvent = new Promise<number>((resolve) =>
+      socket.addEventListener("close", (event) => resolve(event.code), {
+        once: true
+      })
+    );
+    try {
+      // 1006 is reserved: WebSocket.close() throws, and so does ours, with
+      // the connection left open and still counted.
+      expect(await host.closeConnection("c-" + name, 1006, "nope")).toMatch(
+        /./
+      );
+      expect(await host.connectionCount()).toBe(1);
+
+      expect(await host.closeConnection("c-" + name, 4000, "bye")).toBeNull();
+      expect(await closedEvent).toBe(4000);
+      expect(await host.connectionCount()).toBe(0);
+    } finally {
+      try {
+        root[Symbol.dispose]();
+      } catch {
+        // already closed by the host
+      }
+    }
+  });
 });

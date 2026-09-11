@@ -247,6 +247,11 @@ class PlainHostCallables extends RpcTarget {
     return new Counter();
   }
 
+  /** A value JSON cannot carry; the JSON wire must still settle the call. */
+  bigint(): { value: bigint } {
+    return { value: 1n };
+  }
+
   streamNumbers(): ReadableStream<number> {
     return new ReadableStream<number>({
       start(controller) {
@@ -300,6 +305,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
         this.#webSocketContexts.push(currentWebSocketContext("close"));
       }
     },
+    // `?tags=N` asks for N user tags, to probe the shared tag policy.
+    getConnectionTags: (_connection, { request }) => {
+      const count = Number(new URL(request.url).searchParams.get("tags") ?? 0);
+      return Array.from({ length: count }, (_, i) => `t${i}`);
+    },
     callables: new PlainHostCallables()
   });
   readonly #hostContexts: HostContextEvent[] = [];
@@ -342,6 +352,26 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   /** Open connections on either wire, for transport tests. */
   connectionCount(): number {
     return [...this.#webSockets.getConnections()].length;
+  }
+
+  /** Tags of one connection, for transport tests. */
+  connectionTags(id: string): readonly string[] | undefined {
+    return this.#webSockets.getConnection(id)?.tags;
+  }
+
+  /**
+   * Close one connection from the host side. Returns the error message when
+   * `close()` throws (reserved code, oversize reason), else null.
+   */
+  closeConnection(id: string, code: number, reason: string): string | null {
+    const connection = this.#webSockets.getConnection(id);
+    if (!connection) return "no such connection";
+    try {
+      connection.close(code, reason);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   onStart(props?: StartupProps): void {
