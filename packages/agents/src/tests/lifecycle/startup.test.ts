@@ -38,7 +38,7 @@ class HttpCatchAll extends LifecycleCapability {
   constructor(id = "http-catch-all") {
     super(id);
   }
-  override onRequest(): Response {
+  onRequest(): Response {
     return new Response("caught", { status: 404 });
   }
 }
@@ -49,7 +49,7 @@ class UpgradeCatchAll extends LifecycleCapability {
   constructor(id = "upgrade-catch-all") {
     super(id);
   }
-  override onWebSocketUpgrade(): Response {
+  onWebSocketUpgrade(): Response {
     return new Response(null, { status: 426 });
   }
 }
