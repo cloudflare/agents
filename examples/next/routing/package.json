@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-next-routing-example",
-  "description": "Next: RoutedAgents on a plain Durable Object hub \u2014 one Agent per chat, a per-user catalog, forwarded requests and sockets, and Cap'n Web callables",
+  "description": "Next: RoutedAgents on a plain Durable Object hub — one Agent per chat, a per-user catalog, forwarded requests and sockets, and Cap'n Web callables",
   "private": true,
   "type": "module",
   "version": "0.0.0",
