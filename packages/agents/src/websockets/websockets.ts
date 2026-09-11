@@ -23,7 +23,11 @@ import type {
   WebSocketMessage,
   WebSocketsOptions
 } from "./options";
-import { isCallablesRpcUpgrade } from "./protocol";
+import {
+  CALLABLES_RPC_QUERY,
+  CALLABLES_RPC_VALUE,
+  isCallablesRpcUpgrade
+} from "./protocol";
 
 /**
  * Reserved close codes the runtime synthesizes when there was no real
@@ -111,18 +115,21 @@ export class WebSockets extends LifecycleCapability {
   // ── Lifecycle capability hooks ─────────────────────────────────────────
 
   /**
-   * Claim every upgrade: callables RPC upgrades go to the callables target
-   * when one is configured, and every other upgrade becomes a tracked
-   * connection whether or not handlers are configured.
+   * Claim every upgrade, never declining: callables RPC upgrades go to
+   * the callables target, or are refused with a clear error when none is
+   * configured, and every other upgrade becomes a tracked connection
+   * whether or not handlers are configured.
    */
   onWebSocketUpgrade({
     request
-  }: CapabilityWebSocketUpgradeContext):
-    | Promise<Response>
-    | Response
-    | undefined {
+  }: CapabilityWebSocketUpgradeContext): Promise<Response> | Response {
     if (isCallablesRpcUpgrade(request)) {
-      if (!this.#callablesTarget) return undefined;
+      if (!this.#callablesTarget) {
+        return new Response(
+          `Callables RPC is not configured on this WebSockets capability. Pass \`callables\` to serve ?${CALLABLES_RPC_QUERY}=${CALLABLES_RPC_VALUE} upgrades.`,
+          { status: 404 }
+        );
+      }
       return newWorkersWebSocketRpcResponse(request, this.#callablesTarget);
     }
     return this.#acceptConnection(request);

@@ -2,7 +2,11 @@ import { env } from "cloudflare:workers";
 
 import { describe, expect, it } from "vitest";
 import { LifecycleCapability, type LifecycleServices } from "../../lifecycle";
-import { WebSockets } from "../../websockets";
+import {
+  CALLABLES_RPC_QUERY,
+  CALLABLES_RPC_VALUE,
+  WebSockets
+} from "../../websockets";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 class ServiceProbeCapability extends LifecycleCapability {
@@ -86,6 +90,16 @@ describe("Lifecycle startup", () => {
   it("WebSockets is a catch-all with or without handlers", () => {
     expect(new WebSockets().claims).toBe("catch-all");
     expect(new WebSockets({ handlers: {} }).claims).toBe("catch-all");
+  });
+
+  it("WebSockets refuses callables RPC upgrades itself when no target is configured", async () => {
+    const url = new URL("https://example.com/room");
+    url.searchParams.set(CALLABLES_RPC_QUERY, CALLABLES_RPC_VALUE);
+    const response = await new WebSockets().onWebSocketUpgrade({
+      request: new Request(url, { headers: { Upgrade: "websocket" } })
+    });
+    expect(response.status).toBe(404);
+    expect(await response.text()).toContain("Pass `callables`");
   });
 
   it("rejects installing a second catch-all capability", async () => {
