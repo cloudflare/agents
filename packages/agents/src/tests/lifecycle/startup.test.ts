@@ -2,6 +2,11 @@ import { env } from "cloudflare:workers";
 
 import { describe, expect, it } from "vitest";
 import { LifecycleCapability, type LifecycleServices } from "../../lifecycle";
+import {
+  CALLABLES_RPC_QUERY,
+  CALLABLES_RPC_VALUE,
+  WebSockets
+} from "../../websockets";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 class ServiceProbeCapability extends LifecycleCapability {
@@ -25,6 +30,10 @@ class OrderedStartCapability extends LifecycleCapability {
   override onStart(): void {
     this.order.push(this.capabilityId);
   }
+}
+
+class CatchAllStartCapability extends OrderedStartCapability {
+  override readonly claims = "catch-all";
 }
 
 describe("Lifecycle startup", () => {
@@ -65,16 +74,43 @@ describe("Lifecycle startup", () => {
     });
   });
 
-  it("dispatches fallback capabilities after later-installed ones", async () => {
+  it("dispatches a catch-all capability after later-installed ones", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const order: string[] = [];
       const { lifecycle } = install(new OrderedStartCapability("first", order));
       lifecycle
-        .use(new OrderedStartCapability("fallback", order), { fallback: true })
+        .use(new CatchAllStartCapability("catch-all", order))
         .use(new OrderedStartCapability("second", order));
 
       await lifecycle.start();
-      expect(order).toEqual(["first", "second", "fallback"]);
+      expect(order).toEqual(["first", "second", "catch-all"]);
+    });
+  });
+
+  it("WebSockets is a catch-all with or without handlers", () => {
+    expect(new WebSockets().claims).toBe("catch-all");
+    expect(new WebSockets({ handlers: {} }).claims).toBe("catch-all");
+  });
+
+  it("WebSockets refuses callables RPC upgrades itself when no target is configured", async () => {
+    const url = new URL("https://example.com/room");
+    url.searchParams.set(CALLABLES_RPC_QUERY, CALLABLES_RPC_VALUE);
+    const response = await new WebSockets().onWebSocketUpgrade({
+      request: new Request(url, { headers: { Upgrade: "websocket" } })
+    });
+    expect(response.status).toBe(404);
+    expect(await response.text()).toContain("Pass `callables`");
+  });
+
+  it("rejects installing a second catch-all capability", async () => {
+    await withCapabilityHarness(({ install }) => {
+      const order: string[] = [];
+      const { lifecycle } = install(new CatchAllStartCapability("one", order));
+      expect(() =>
+        lifecycle.use(new CatchAllStartCapability("two", order))
+      ).toThrow(
+        'Lifecycle already has a catch-all capability ("one"); a second one could never be reached'
+      );
     });
   });
 
