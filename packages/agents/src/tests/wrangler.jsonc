@@ -37,6 +37,10 @@
         "name": "SchedulerStartupWarnObject"
       },
       {
+        "class_name": "QueueHarnessObject",
+        "name": "QueueHarnessObject"
+      },
+      {
         "class_name": "TaskHarnessObject",
         "name": "TaskHarnessObject"
       },
@@ -409,6 +413,7 @@
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
+        "QueueHarnessObject",
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",

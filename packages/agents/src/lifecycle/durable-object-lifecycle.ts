@@ -348,6 +348,7 @@ export class Lifecycle<
       }),
       ready: () => this.#readyForCapabilityOperation(),
       starting: () => this.#status === "starting",
+      started: () => this.#status === "started",
       jobs: this.#jobsForOwner(capabilityId),
       trackAlarmWork: (work: Promise<unknown>) =>
         this.#jobDriver.trackAlarmWork(work),

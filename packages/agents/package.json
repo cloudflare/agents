@@ -205,6 +205,11 @@
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
     },
+    "./queue": {
+      "types": "./dist/queue/index.d.ts",
+      "import": "./dist/queue/index.js",
+      "require": "./dist/queue/index.js"
+    },
     "./schedules": {
       "types": "./dist/schedules/index.d.ts",
       "import": "./dist/schedules/index.js",

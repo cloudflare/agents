@@ -75,6 +75,8 @@ export type LifecycleServices = {
   readonly ready: () => Promise<void>;
   /** True while capability and host startup hooks are still running. */
   readonly starting: () => boolean;
+  /** True once startup has completed and `ready()` resolves without waiting. */
+  readonly started: () => boolean;
   /**
    * This capability's scoped access to the Lifecycle-owned work queue.
    * Pushed items are dispatched to `onJob` when due; every queue mutation

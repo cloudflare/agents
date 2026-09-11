@@ -5638,21 +5638,22 @@ export class ThinkProgrammaticTestAgent extends Think {
   }> {
     const submissionId = `alarm-owned-${crypto.randomUUID()}`;
     const internal = this as unknown as {
-      _drainThinkSubmissions(): Promise<void>;
-      _drainSubmissions(): Promise<void>;
-      _scheduleSubmissionDrain(): Promise<void>;
+      _cfRunSubmission(payload: { submissionId: string }): Promise<void>;
+      _executeSubmission(row: unknown): Promise<void>;
+      _queueSubmissionRun(submissionId: string): Promise<void>;
     };
-    const originalScheduledDrain = internal._drainThinkSubmissions;
-    const originalInlineDrain = internal._drainSubmissions;
+    const originalRun = internal._cfRunSubmission;
+    const originalExecute = internal._executeSubmission;
     let alarmDrainCalls = 0;
     let inlineDrainCalls = 0;
 
-    // Probe the two domain entrypoints directly. The named callback is the
-    // alarm-owned path; _drainSubmissions is the private inline implementation.
-    internal._drainThinkSubmissions = async () => {
+    // Probe the two entrypoints directly. The queue callback is the
+    // alarm-owned path; _executeSubmission is the private inline worker,
+    // which submitMessages must never reach on its own.
+    internal._cfRunSubmission = async () => {
       alarmDrainCalls += 1;
     };
-    internal._drainSubmissions = async () => {
+    internal._executeSubmission = async () => {
       inlineDrainCalls += 1;
     };
 
@@ -5660,7 +5661,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       const submission = await this.testSubmitMessages("alarm owned", {
         submissionId
       });
-      // The drain is delivered by a platform-scheduled alarm whose firing
+      // The run is delivered by a platform-scheduled alarm whose firing
       // latency is not bounded by our timer ticks — give it a generous (~5s)
       // deadline; the happy path still exits on the first tick after it fires.
       for (let attempt = 0; attempt < 200 && alarmDrainCalls === 0; attempt++) {
@@ -5668,11 +5669,11 @@ export class ThinkProgrammaticTestAgent extends Think {
       }
       return { alarmDrainCalls, inlineDrainCalls, submission };
     } finally {
-      internal._drainThinkSubmissions = originalScheduledDrain;
-      internal._drainSubmissions = originalInlineDrain;
-      // The probe's no-op alarm consumed its schedule row while leaving the
-      // submission pending. Re-arm the real drain for the eventual assertion.
-      await internal._scheduleSubmissionDrain();
+      internal._cfRunSubmission = originalRun;
+      internal._executeSubmission = originalExecute;
+      // The probe's no-op callback consumed the queue item while leaving the
+      // submission pending. Re-queue the real run for the eventual assertion.
+      await internal._queueSubmissionRun(submissionId);
     }
   }
 
@@ -5843,8 +5844,31 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.deleteSubmissions(options);
   }
 
+  /**
+   * Queue a run for every pending submission (rows inserted directly by a
+   * test have none) and wait until the alarm loop has run them all.
+   */
   async drainSubmissionsForTest(): Promise<void> {
-    await this._drainThinkSubmissions();
+    await (
+      this as unknown as { _queuePendingSubmissionRuns: () => Promise<void> }
+    )._queuePendingSubmissionRuns();
+    await this._waitForQueueDrainForTest("_cfRunSubmission");
+  }
+
+  private async _waitForQueueDrainForTest(
+    callback: string,
+    timeoutMs = 10_000
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const pending = this.sql<{ c: number }>`
+        SELECT COUNT(*) AS c FROM cf_agents_jobs
+        WHERE capability = 'queue' AND fn = ${callback}
+      `[0]?.c;
+      if (!pending) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`queued ${callback} items did not drain in time`);
   }
 
   async recoverSubmissionsForTest(): Promise<void> {
@@ -5963,16 +5987,9 @@ export class ThinkProgrammaticTestAgent extends Think {
     `;
   }
 
-  async recoverWorkflowNotificationsForTest(): Promise<void> {
-    (
-      this as unknown as { _recoverWorkflowNotifications: () => void }
-    )._recoverWorkflowNotifications();
-  }
-
+  /** Wait until the alarm loop has delivered every queued workflow notification. */
   async drainWorkflowNotificationsForTest(): Promise<void> {
-    await (
-      this as unknown as { _drainWorkflowNotifications: () => Promise<void> }
-    )._drainWorkflowNotifications();
+    await this._waitForQueueDrainForTest("_cfDeliverWorkflowNotification");
   }
 
   async insertWorkflowNotificationForTest(options: {
@@ -5983,73 +6000,53 @@ export class ThinkProgrammaticTestAgent extends Think {
     eventType?: string;
     payload?: unknown;
   }): Promise<void> {
-    (
-      this as unknown as { _ensureWorkflowNotificationTable: () => void }
-    )._ensureWorkflowNotificationTable();
-    const now = Date.now();
-    this.sql`
-      INSERT INTO cf_think_workflow_notifications (
-        notification_id, submission_id, workflow_name, workflow_id, event_type,
-        payload_json, attempts, last_error, created_at, updated_at, delivered_at
-      )
-      VALUES (
-        ${options.notificationId},
-        ${options.submissionId},
-        ${options.workflowName ?? "TEST_WORKFLOW"},
-        ${options.workflowId ?? "workflow-1"},
-        ${options.eventType ?? "think-prompt-test"},
-        ${JSON.stringify(options.payload ?? { submissionId: options.submissionId, status: "error" })},
-        0,
-        NULL,
-        ${now},
-        ${now},
-        NULL
-      )
-    `;
+    await this.queue(
+      "_cfDeliverWorkflowNotification",
+      {
+        workflowName: options.workflowName ?? "TEST_WORKFLOW",
+        workflowId: options.workflowId ?? "workflow-1",
+        event: {
+          type: options.eventType ?? "think-prompt-test",
+          payload: options.payload ?? {
+            submissionId: options.submissionId,
+            status: "error"
+          }
+        }
+      },
+      { id: options.notificationId }
+    );
   }
 
   async listWorkflowNotificationsForTest(): Promise<
     Array<{
       notificationId: string;
-      submissionId: string;
       workflowName: string;
       workflowId: string;
       eventType: string;
-      payloadJson: string;
-      attempts: number;
-      lastError: string | null;
-      deliveredAt: number | null;
+      payload: unknown;
     }>
   > {
-    (
-      this as unknown as { _ensureWorkflowNotificationTable: () => void }
-    )._ensureWorkflowNotificationTable();
-    return this.sql<{
-      notification_id: string;
-      submission_id: string;
-      workflow_name: string;
-      workflow_id: string;
-      event_type: string;
-      payload_json: string;
-      attempts: number;
-      last_error: string | null;
-      delivered_at: number | null;
-    }>`
-      SELECT notification_id, submission_id, workflow_name, workflow_id,
-             event_type, payload_json, attempts, last_error, delivered_at
-      FROM cf_think_workflow_notifications
-      ORDER BY created_at ASC, notification_id ASC
-    `.map((row) => ({
-      notificationId: row.notification_id,
-      submissionId: row.submission_id,
-      workflowName: row.workflow_name,
-      workflowId: row.workflow_id,
-      eventType: row.event_type,
-      payloadJson: row.payload_json,
-      attempts: row.attempts,
-      lastError: row.last_error,
-      deliveredAt: row.delivered_at
-    }));
+    const items = this.sql<{ id: string; payload: string }>`
+      SELECT id, payload FROM cf_agents_jobs
+      WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
+      ORDER BY time ASC
+    `;
+    return items.map((row) => {
+      const envelope = JSON.parse(row.payload) as {
+        payload: {
+          workflowName: string;
+          workflowId: string;
+          event: { type: string; payload?: unknown };
+        };
+      };
+      return {
+        notificationId: row.id,
+        workflowName: envelope.payload.workflowName,
+        workflowId: envelope.payload.workflowId,
+        eventType: envelope.payload.event.type,
+        payload: envelope.payload.event.payload
+      };
+    });
   }
 
   async insertMalformedSubmissionForTest(options: {

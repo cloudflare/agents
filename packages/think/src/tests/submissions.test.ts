@@ -142,7 +142,6 @@ type ThinkSubmissionTestStub = {
     requestId: string,
     createdAt: number
   ): Promise<void>;
-  recoverWorkflowNotificationsForTest(): Promise<void>;
   drainWorkflowNotificationsForTest(): Promise<void>;
   insertWorkflowNotificationForTest(options: {
     notificationId: string;
@@ -155,14 +154,10 @@ type ThinkSubmissionTestStub = {
   listWorkflowNotificationsForTest(): Promise<
     Array<{
       notificationId: string;
-      submissionId: string;
       workflowName: string;
       workflowId: string;
       eventType: string;
-      payloadJson: string;
-      attempts: number;
-      lastError: string | null;
-      deliveredAt: number | null;
+      payload: unknown;
     }>
   >;
   getStoredMessages(): Promise<
@@ -795,20 +790,17 @@ describe("Think durable submissions", () => {
     await expect(agent.getStoredMessages()).resolves.toHaveLength(0);
   });
 
-  it("recovers terminal workflow submissions into workflow notifications", async () => {
+  it("queues the aborted notification atomically when a pending workflow submission is cancelled", async () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({
-      submissionId: "sub-workflow-error",
-      status: "error",
-      completedAt: Date.now(),
-      errorMessage: "model failed",
+      submissionId: "sub-workflow-cancel",
       metadata: {
         [workflowPromptMetadataKey]: {
           workflow: {
             name: "TEST_WORKFLOW",
-            id: "workflow-recover",
+            id: "workflow-cancel",
             stepName: "draft-report",
-            eventType: "think-prompt-recover"
+            eventType: "think-prompt-cancel"
           },
           output: { schema: { type: "object" } },
           fingerprint: "fingerprint"
@@ -816,30 +808,20 @@ describe("Think durable submissions", () => {
       }
     });
 
-    await agent.recoverWorkflowNotificationsForTest();
-    const notifications = await agent.listWorkflowNotificationsForTest();
+    await agent.cancelSubmissionForTest("sub-workflow-cancel", "not needed");
+    await agent.drainWorkflowNotificationsForTest();
 
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0]).toMatchObject({
-      notificationId: "sub-workflow-error:think-prompt-recover",
-      submissionId: "sub-workflow-error",
-      workflowName: "TEST_WORKFLOW",
-      workflowId: "workflow-recover",
-      eventType: "think-prompt-recover",
-      attempts: 0,
-      payloadJson: "{}"
-    });
-    expect(notifications[0].deliveredAt).toBeTypeOf("number");
+    await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
     await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
       {
         workflowName: "TEST_WORKFLOW",
-        workflowId: "workflow-recover",
+        workflowId: "workflow-cancel",
         event: {
-          type: "think-prompt-recover",
+          type: "think-prompt-cancel",
           payload: {
-            submissionId: "sub-workflow-error",
-            status: "error",
-            error: "model failed"
+            submissionId: "sub-workflow-cancel",
+            status: "aborted",
+            error: "not needed"
           }
         }
       }
@@ -1005,7 +987,7 @@ describe("Think durable submissions", () => {
     expect(partTypes).not.toContain("tool-think_final_answer");
   });
 
-  it("drains workflow notifications and clears delivered payloads", async () => {
+  it("delivers queued workflow notifications from the alarm loop", async () => {
     const agent = await freshAgent();
     await agent.insertWorkflowNotificationForTest({
       notificationId: "notification-deliver",
@@ -1036,19 +1018,12 @@ describe("Think durable submissions", () => {
         }
       }
     ]);
-    const notifications = await agent.listWorkflowNotificationsForTest();
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0]).toMatchObject({
-      notificationId: "notification-deliver",
-      attempts: 0,
-      lastError: null,
-      payloadJson: "{}"
-    });
-    expect(notifications[0].deliveredAt).toBeTypeOf("number");
+    await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
   });
 
-  it("keeps workflow notifications pending when delivery fails", async () => {
+  it("retries a failed workflow notification delivery", async () => {
     const agent = await freshAgent();
+    await agent.setWorkflowEventFailuresForTest(1);
     await agent.insertWorkflowNotificationForTest({
       notificationId: "notification-retry",
       submissionId: "sub-retry",
@@ -1056,21 +1031,20 @@ describe("Think durable submissions", () => {
       workflowId: "workflow-retry",
       eventType: "think-prompt-retry"
     });
-    await agent.setWorkflowEventFailuresForTest(1);
 
     await agent.drainWorkflowNotificationsForTest();
 
-    const notifications = await agent.listWorkflowNotificationsForTest();
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0]).toMatchObject({
-      notificationId: "notification-retry",
-      attempts: 1,
-      deliveredAt: null
-    });
-    expect(notifications[0].lastError).toContain(
-      "simulated workflow event failure"
-    );
-    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
+      {
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-retry",
+        event: {
+          type: "think-prompt-retry",
+          payload: { submissionId: "sub-retry", status: "error" }
+        }
+      }
+    ]);
+    await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
   });
 
   it("runs durable pending rows through the scheduled drain callback path", async () => {

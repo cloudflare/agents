@@ -112,6 +112,18 @@ export class CounterSubAgent extends Agent {
     `;
   }
 
+  /** Queue callback: logs like scheduledCallback so the same reader works. */
+  queuedCallback(
+    payload: { value: string },
+    item: { id: string; callback: string }
+  ): void {
+    this.scheduledCallback(payload, item);
+  }
+
+  async queueCallback(value: string): Promise<string> {
+    return this.queue("queuedCallback", { value });
+  }
+
   async scheduleDelayedCallback(
     delaySeconds: number,
     value: string,
@@ -1348,6 +1360,32 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.scheduleDelayedCallback(delaySeconds, value, options);
+  }
+
+  async subAgentQueue(subAgentName: string, value: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.queueCallback(value);
+  }
+
+  async rootQueueRows(): Promise<
+    Array<{ id: string; callback: string; ownerPath: string | null }>
+  > {
+    return this.sql<{
+      id: string;
+      callback: string;
+      owner_path: string | null;
+    }>`
+      SELECT id,
+             fn AS callback,
+             json_extract(payload, '$.owner_path') AS owner_path
+      FROM cf_agents_jobs
+      WHERE capability = 'queue'
+      ORDER BY time
+    `.map((row) => ({
+      id: row.id,
+      callback: row.callback,
+      ownerPath: row.owner_path
+    }));
   }
 
   async subAgentScheduleInterval(
