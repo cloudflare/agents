@@ -70,9 +70,9 @@ const DEFAULT_STATE = {} as unknown;
  * @experimental The API surface may change before stabilizing.
  */
 export class State<T = unknown> extends LifecycleCapability {
-  private _state = DEFAULT_STATE as T;
-  private _tableEnsured = false;
-  private readonly _options: StateOptions<T>;
+  #state = DEFAULT_STATE as T;
+  #tableEnsured = false;
+  readonly #options: StateOptions<T>;
 
   /**
    * Create a durable state capability.
@@ -82,7 +82,7 @@ export class State<T = unknown> extends LifecycleCapability {
    */
   constructor(options: StateOptions<T> = {}) {
     super("state");
-    this._options = options;
+    this.#options = options;
   }
 
   // ── Lifecycle capability hooks ─────────────────────────────────────────────
@@ -92,13 +92,13 @@ export class State<T = unknown> extends LifecycleCapability {
     const version =
       (await this.lifecycle.storage.get<number>(STATE_SCHEMA_VERSION_KEY)) ?? 0;
     if (version >= CURRENT_STATE_SCHEMA_VERSION) {
-      this._tableEnsured = true;
+      this.#tableEnsured = true;
       return;
     }
 
     // v1: own the table and clear the legacy wasChanged row left behind by
     // pre-optimization SDKs (state itself lives in STATE_ROW_ID).
-    this._ensureTable();
+    this.#ensureTable();
     this.lifecycle.storage.sql.exec(
       "DELETE FROM cf_agents_state WHERE id = ?",
       LEGACY_WAS_CHANGED_ROW_ID
@@ -109,15 +109,15 @@ export class State<T = unknown> extends LifecycleCapability {
     );
   }
 
-  private _ensureTable(): void {
-    if (this._tableEnsured) return;
+  #ensureTable(): void {
+    if (this.#tableEnsured) return;
     this.lifecycle.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
         state TEXT
       )
     `);
-    this._tableEnsured = true;
+    this.#tableEnsured = true;
   }
 
   // ── State access ───────────────────────────────────────────────────────────
@@ -131,13 +131,13 @@ export class State<T = unknown> extends LifecycleCapability {
    * the initial state (re-persisting it) or clears the row.
    */
   get(): T | undefined {
-    if (this._state !== DEFAULT_STATE) {
+    if (this.#state !== DEFAULT_STATE) {
       // state was previously set, and populated internal state
-      return this._state;
+      return this.#state;
     }
     // looks like this is the first time the state is being accessed
     // check if the state was set in a previous life
-    this._ensureTable();
+    this.#ensureTable();
     const result = this.lifecycle.storage.sql
       .exec("SELECT state FROM cf_agents_state WHERE id = ?", STATE_ROW_ID)
       .toArray() as { state: string | null }[];
@@ -148,15 +148,15 @@ export class State<T = unknown> extends LifecycleCapability {
       const state = result[0].state as string;
 
       try {
-        this._state = JSON.parse(state);
+        this.#state = JSON.parse(state);
       } catch (e) {
         console.error(
           "Failed to parse stored state, falling back to initialState:",
           e
         );
-        const initial = this._options.initialState;
+        const initial = this.#options.initialState;
         if (initial !== undefined) {
-          this._state = initial;
+          this.#state = initial;
           // Persist the fixed state to prevent future parse errors
           this.set(initial, "server");
         } else {
@@ -168,13 +168,13 @@ export class State<T = unknown> extends LifecycleCapability {
           return undefined;
         }
       }
-      return this._state;
+      return this.#state;
     }
 
     // ok, this is the first time the state is being accessed
     // and the state was not set in a previous life
     // so we need to set the initial state (if provided)
-    const initial = this._options.initialState;
+    const initial = this.#options.initialState;
     if (initial === undefined) {
       // no initial state provided, so we return undefined
       return undefined;
@@ -195,12 +195,12 @@ export class State<T = unknown> extends LifecycleCapability {
    */
   set(nextState: T, source: StateChangeSource = "server"): void {
     // Validation/gating hook (sync only)
-    this._options.validateStateChange?.(nextState, source);
-    this._ensureTable();
+    this.#options.validateStateChange?.(nextState, source);
+    this.#ensureTable();
 
     // Persist state — row existence in cf_agents_state is the signal that
     // state was set (no separate wasChanged flag needed).
-    this._state = nextState;
+    this.#state = nextState;
     this.lifecycle.storage.sql.exec(
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES (?, ?)",
       STATE_ROW_ID,
@@ -209,7 +209,7 @@ export class State<T = unknown> extends LifecycleCapability {
 
     let pending: void | Promise<void>;
     try {
-      pending = this._options.onChanged?.(nextState, source);
+      pending = this.#options.onChanged?.(nextState, source);
     } catch (error) {
       console.error("State onChanged hook failed:", error);
       return;
