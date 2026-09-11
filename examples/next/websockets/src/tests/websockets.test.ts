@@ -2,19 +2,11 @@ import { exports, RpcTarget } from "cloudflare:workers";
 import { newWebSocketRpcSession } from "capnweb";
 import { describe, expect, it } from "vitest";
 import {
-  CALLABLES_RPC_QUERY,
-  CALLABLES_RPC_VALUE,
   CAPNWEB_TRANSPORT_QUERY,
   CAPNWEB_TRANSPORT_VALUE
 } from "agents/websockets";
 
 type Frame = { type: string } & Record<string, unknown>;
-
-type RoomApi = {
-  say(nick: string, text: string): Promise<{ id: number; text: string }>;
-  history(): Promise<{ nick: string; text: string }[]>;
-  members(): Promise<{ id: string; nick: string }[]>;
-};
 
 function roomUrl(room: string, suffix = "", nick?: string) {
   const url = new URL(`http://example.com/agents/room-object/${room}${suffix}`);
@@ -181,39 +173,6 @@ describe("WebSockets capability on a plain Durable Object", () => {
       message: { nick: "server", text: "from a webhook" }
     });
     await erin.close();
-  });
-
-  it("serves the RpcTarget over Cap'n Web callables", async () => {
-    const room = crypto.randomUUID();
-    const frank = await Member.join(room, "frank");
-    await frank.until("join");
-
-    const url = roomUrl(room);
-    url.searchParams.set(CALLABLES_RPC_QUERY, CALLABLES_RPC_VALUE);
-    const response = await exports.default.fetch(url, {
-      headers: { Upgrade: "websocket" }
-    });
-    expect(response.status).toBe(101);
-    const socket = response.webSocket;
-    if (!socket) throw new Error("Expected a WebSocket upgrade response");
-    socket.accept();
-    const rpc = newWebSocketRpcSession<RoomApi>(socket);
-    try {
-      const message = await rpc.say("grace", "over rpc");
-      expect(message).toMatchObject({ text: "over rpc" });
-      // A callable runs inside the host boundary and can reach the
-      // hibernating members like a handler does.
-      expect(await frank.until("message")).toMatchObject({
-        message: { nick: "grace", text: "over rpc" }
-      });
-      expect(await rpc.history()).toMatchObject([
-        { nick: "grace", text: "over rpc" }
-      ]);
-      expect(await rpc.members()).toMatchObject([{ nick: "frank" }]);
-    } finally {
-      (rpc as Partial<Disposable>)[Symbol.dispose]?.();
-      await frank.close();
-    }
   });
 
   it("answers useAgent's rpc frames against the callables target", async () => {

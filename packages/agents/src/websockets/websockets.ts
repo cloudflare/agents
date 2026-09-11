@@ -1,5 +1,3 @@
-import { RpcTarget } from "cloudflare:workers";
-import { newWorkersWebSocketRpcResponse } from "capnweb";
 import { nanoid } from "nanoid";
 import {
   LifecycleCapability,
@@ -16,18 +14,12 @@ import {
   createConnection,
   isManagedWebSocket
 } from "./connection";
-import {
-  buildCallablesRoot,
-  exposableMethods,
-  isHostServed,
-  type CallableInvoker
-} from "./callables-target";
+import { exposableMethods, type CallableInvoker } from "./callables-target";
 import type {
   WebSocketHandlers,
   WebSocketMessage,
   WebSocketsOptions
 } from "./options";
-import { isCallablesRpcUpgrade } from "./protocol";
 import { openCapnWebSession, type CapnWebSession } from "./transport";
 import { isCapnWebTransportUpgrade } from "./transport-protocol";
 
@@ -115,8 +107,7 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  * for `useAgent` and `AgentClient`: it sends the identity frame on
  * connect and answers `rpc` frames against `callables`, so `call()` and
  * `stub` work against a plain Durable Object exactly as against an
- * `Agent`. The same `callables` target is also served as a native
- * Cap'n Web session at `?__agents_rpc=capnweb`.
+ * `Agent`.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -125,9 +116,6 @@ export class WebSockets extends LifecycleCapability {
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #identity: boolean;
   readonly #callables: ReadonlyMap<string, CallableInvoker>;
-  /** `rpc` frames are answered here unless the host's handler owns them. */
-  readonly #answersRpcFrames: boolean;
-  readonly #callablesTarget: RpcTarget | undefined;
   readonly #sessions = new Map<string, CapnWebSession>();
   #manager: ConnectionManager | undefined;
 
@@ -139,11 +127,6 @@ export class WebSockets extends LifecycleCapability {
     this.#callables = options.callables
       ? exposableMethods(options.callables)
       : new Map();
-    this.#answersRpcFrames =
-      options.callables !== undefined && !isHostServed(options.callables);
-    this.#callablesTarget = options.callables
-      ? this.#buildCallablesTarget()
-      : undefined;
   }
 
   // ── Lifecycle capability hooks ─────────────────────────────────────────
@@ -151,14 +134,7 @@ export class WebSockets extends LifecycleCapability {
   /** Claim connection upgrades when handlers or callables are configured. */
   onWebSocketUpgrade({
     request
-  }: CapabilityWebSocketUpgradeContext):
-    | Promise<Response>
-    | Response
-    | undefined {
-    if (isCallablesRpcUpgrade(request)) {
-      if (!this.#callablesTarget) return undefined;
-      return newWorkersWebSocketRpcResponse(request, this.#callablesTarget);
-    }
+  }: CapabilityWebSocketUpgradeContext): Promise<Response> | undefined {
     if (!this.#handlers && this.#callables.size === 0) return undefined;
     return isCapnWebTransportUpgrade(request)
       ? this.#acceptCapnWebSession(request)
@@ -268,7 +244,7 @@ export class WebSockets extends LifecycleCapability {
     message: WebSocketMessage
   ): Promise<void> {
     if (
-      this.#answersRpcFrames &&
+      this.#callables.size > 0 &&
       (await this.#answerRpc(connection, message))
     ) {
       return;
@@ -451,34 +427,16 @@ export class WebSockets extends LifecycleCapability {
     }
   }
 
-  /**
-   * Wrap the callables target for the native Cap'n Web endpoint: every
-   * exposable method dispatches through the host invocation boundary
-   * and emits `rpc`/`rpc:error` events.
-   */
-  #buildCallablesTarget(): RpcTarget {
-    const dispatching = new Map<string, CallableInvoker>();
-    for (const [name, invoke] of this.#callables) {
-      dispatching.set(name, (...args) =>
-        this.#dispatchCallable(name, () => invoke(...args))
-      );
-    }
-    return buildCallablesRoot(dispatching);
-  }
-
   async #dispatchCallable(
     name: string,
     invoke: () => unknown,
-    connection?: Connection
+    connection: Connection
   ): Promise<unknown> {
     // Throws with installation guidance when the capability was never
     // installed with Lifecycle.use().
     const services = this.lifecycle;
     try {
-      const result = await services.runInHostContext(
-        invoke,
-        connection ? { connection } : undefined
-      );
+      const result = await services.runInHostContext(invoke, { connection });
       services.events.emit("rpc", {
         method: name,
         streaming: result instanceof ReadableStream

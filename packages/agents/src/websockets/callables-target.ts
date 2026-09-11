@@ -1,17 +1,4 @@
 import { RpcTarget } from "cloudflare:workers";
-import { decoratedMethods } from "../callable-decorator";
-
-/**
- * Targets whose `rpc` frames the host already answers in its own
- * `onMessage` (Agent), so the capability must not answer them a second
- * time. Everything else is served by the capability on every wire.
- */
-const hostServed = new WeakSet<RpcTarget>();
-
-/** Whether the host's own message handler answers `rpc` frames for this target. */
-export function isHostServed(target: RpcTarget): boolean {
-  return hostServed.has(target);
-}
 
 /** A named remote method ready to be exposed on a callables root. */
 export type CallableInvoker = (...args: unknown[]) => unknown;
@@ -71,63 +58,4 @@ export function exposableMethods(
     prototype = Object.getPrototypeOf(prototype);
   }
   return methods;
-}
-
-/**
- * Build a Cap'n Web session root exposing exactly the given methods.
- *
- * Cap'n Web resolves methods on the prototype chain, rejects own
- * instance properties, and breaks on Proxy-wrapped roots — so the root
- * is a private `RpcTarget` subclass whose prototype carries the
- * methods and nothing else.
- *
- * @param methods - Method names mapped to their invokers.
- * @returns A root suitable as a Cap'n Web session's local main.
- */
-export function buildCallablesRoot(
-  methods: ReadonlyMap<string, CallableInvoker>
-): RpcTarget {
-  class CallablesRoot extends RpcTarget {}
-  for (const [name, invoke] of methods) {
-    Object.defineProperty(CallablesRoot.prototype, name, {
-      value: invoke,
-      writable: true,
-      configurable: true,
-      enumerable: false
-    });
-  }
-  return new CallablesRoot();
-}
-
-/**
- * Build a callables target from a host's `@callable()`-decorated
- * methods — the fallback interface source when no `RpcTarget` is
- * configured (an explicit target is preferred and wins).
- *
- * Methods are resolved on the host at call time, so framework wrapping
- * applied after construction (e.g. Agent's context auto-wrapping) is
- * honored. Methods registered with `streaming: true` expect the legacy
- * Agent RPC protocol's injected `StreamingResponse` and are not exposed
- * here — return a `ReadableStream` from an `RpcTarget` method instead.
- *
- * @param host - The object whose decorated methods form the interface.
- * @returns A target exposing the decorated methods, or `undefined`
- * when the host has none.
- */
-export function callablesFromDecorated(host: object): RpcTarget | undefined {
-  const methods = new Map<string, CallableInvoker>();
-  for (const [name, metadata] of decoratedMethods(host)) {
-    if (metadata.streaming || !assertExposable(name)) continue;
-    methods.set(name, (...args) => {
-      const method = Reflect.get(host, name) as unknown;
-      if (typeof method !== "function") {
-        throw new Error(`Method ${name} is not callable`);
-      }
-      return Reflect.apply(method, host, args);
-    });
-  }
-  if (methods.size === 0) return undefined;
-  const target = buildCallablesRoot(methods);
-  hostServed.add(target);
-  return target;
 }

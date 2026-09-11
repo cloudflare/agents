@@ -341,15 +341,13 @@ Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
   because it sends its own under `sendIdentityOnConnect`.
 - `callables` is an `RpcTarget` whose prototype methods are the host's
   complete remote interface. The capability answers the `rpc` frames that
-  `call()` and `stub` send, on either wire, and also serves the same target
-  as a native Cap'n Web session at `?__agents_rpc=capnweb`. Methods run
-  through the host invocation boundary with the calling connection in scope;
-  a returned `ReadableStream` streams to the caller.
+  `call()` and `stub` send, on either wire. Methods run through the host
+  invocation boundary with the calling connection in scope; a returned
+  `ReadableStream` streams to the caller.
 - Any other frame goes to `handlers.onMessage`.
 
 An `Agent` adds no new surface for this: its `@callable()`-decorated methods
-are its interface, answered by its own message handler and mirrored onto the
-Cap'n Web endpoint.
+are its interface, answered by its own message handler.
 
 ### Two wires
 
