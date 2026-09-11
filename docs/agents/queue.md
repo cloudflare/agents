@@ -90,7 +90,7 @@ type QueueItem<T = unknown> = {
   id: string; // Unique identifier
   callback: string; // Callback name
   payload: T; // Data passed to the callback
-  created_at: number; // Unix timestamp in seconds
+  createdAt: number; // Unix timestamp in seconds
   retry?: RetryOptions; // Resolved retry policy
 };
 ```

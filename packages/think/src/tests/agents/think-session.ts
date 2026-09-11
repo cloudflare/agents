@@ -5861,9 +5861,9 @@ export class ThinkProgrammaticTestAgent extends Think {
   ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      // Queue items and any scheduled retries of the same callback.
       const pending = this.sql<{ c: number }>`
-        SELECT COUNT(*) AS c FROM cf_agents_jobs
-        WHERE capability = 'queue' AND fn = ${callback}
+        SELECT COUNT(*) AS c FROM cf_agents_jobs WHERE fn = ${callback}
       `[0]?.c;
       if (!pending) return;
       await new Promise((resolve) => setTimeout(resolve, 25));

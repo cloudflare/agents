@@ -13,7 +13,7 @@ export type QueueItem<T = unknown> = {
   /** Data passed to the callback. */
   payload: T;
   /** Creation time as a Unix timestamp in seconds. */
-  created_at: number;
+  createdAt: number;
   /** Retry policy applied when the callback throws. */
   retry?: RetryOptions;
 };

@@ -556,7 +556,7 @@ export class Queue<
       id: job.id,
       callback: job.fn,
       payload: envelope.payload as T,
-      created_at: job.createdAt,
+      createdAt: job.createdAt,
       retry: job.retry
     };
   }

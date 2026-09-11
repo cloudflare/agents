@@ -1948,15 +1948,17 @@ const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
 /** Queue callback that delivers one terminal-submission workflow event. */
 const WORKFLOW_NOTIFICATION_CALLBACK = "_cfDeliverWorkflowNotification";
 /**
- * Delivery retries for a workflow notification. Attempts run in-process on
- * the Lifecycle alarm loop; an event still undeliverable afterwards is
- * dropped with `queue:error`.
+ * A workflow notification never retries in-process: a failed delivery
+ * schedules its own retry with backoff (see `_cfDeliverWorkflowNotification`)
+ * so the alarm loop is not held while a workflow is unreachable.
  */
-const WORKFLOW_NOTIFICATION_RETRY: RetryOptions = {
-  maxAttempts: 5,
-  baseDelayMs: 500,
-  maxDelayMs: 5000
-};
+const WORKFLOW_NOTIFICATION_RETRY: RetryOptions = { maxAttempts: 1 };
+/** Longest wait between two delivery attempts of one workflow notification. */
+const WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS = 5 * 60;
+/** Queue callback that runs one connection-less continuation turn. */
+const CONNECTIONLESS_CONTINUATION_CALLBACK = "_cfRunConnectionlessContinuation";
+/** Queue callback that runs one media-eviction pass. */
+const MEDIA_EVICTION_CALLBACK = "_cfEvictAgedMedia";
 /** Queue callback that runs one pending submission. */
 const SUBMISSION_RUN_CALLBACK = "_cfRunSubmission";
 
@@ -2128,6 +2130,8 @@ type WorkflowNotificationPayload = {
   workflowName: string;
   workflowId: string;
   event: { type: string; payload: unknown };
+  /** Failed deliveries so far; drives the retry backoff. */
+  attempts?: number;
 };
 
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
@@ -3514,7 +3518,6 @@ export class Think<
   }
 
   private _mediaEvictionRunning = false;
-  private _mediaEvictionScheduled = false;
   /**
    * A request that arrived while a pass was running. That pass read its
    * candidates before the request's append landed, so the request is kept
@@ -3558,16 +3561,17 @@ export class Think<
   }
 
   /**
-   * Schedule a bounded media-eviction pass (see `mediaEviction`).
+   * Queue a bounded media-eviction pass (see `mediaEviction`).
    *
-   * Coalesces repeated requests and defers past the current event-loop work,
-   * so it is safe to call from the cache-refresh path that `onStart` runs
-   * inside `blockConcurrencyWhile`: the pass itself never runs in `onStart`,
-   * and `_evictAgedMediaBestEffort` swallows its own failures, so a bad pass
-   * can never brick the object.
+   * The pass is one queue item with a stable id, so repeated requests
+   * coalesce and the pass runs from the alarm loop, never inside the
+   * request or the `blockConcurrencyWhile` cache refresh that asked for it.
+   * A request that lands while a pass is running is re-evaluated once the
+   * pass ends, so media aged by an append during the pass is not left until
+   * the next one. `_evictAgedMediaBestEffort` swallows its own failures, so
+   * a bad pass can never brick the object.
    */
   private _scheduleMediaEvictionPass(): void {
-    if (this._mediaEvictionScheduled) return;
     if (this._mediaEvictionRunning) {
       this._mediaEvictionPending = true;
       return;
@@ -3607,11 +3611,19 @@ export class Think<
         return;
       }
     }
-    this._mediaEvictionScheduled = true;
-    setTimeout(() => {
-      this._mediaEvictionScheduled = false;
-      void this._evictAgedMediaBestEffort();
-    }, 0);
+    void this.queue(MEDIA_EVICTION_CALLBACK, undefined, {
+      id: "media-eviction"
+    }).catch((error) => {
+      console.error("[Think] Failed to queue media eviction pass", error);
+    });
+  }
+
+  /**
+   * Run one media-eviction pass.
+   * @internal Queue callback.
+   */
+  async _cfEvictAgedMedia(): Promise<void> {
+    await this._evictAgedMediaBestEffort();
   }
 
   /**
@@ -10504,18 +10516,38 @@ export class Think<
   }
 
   /**
-   * Deliver one queued workflow notification. Runs on the Lifecycle alarm
-   * loop through the Queue capability's retry policy.
-   * @internal Queue callback.
+   * Deliver one workflow notification. Runs from the queue on first
+   * delivery; a failed delivery schedules this same callback again with
+   * exponential backoff (2s doubling, capped at five minutes) and keeps
+   * doing so until the event lands, so a temporarily unreachable workflow
+   * never loses its terminal event.
+   * @internal Queue and schedule callback.
    */
   async _cfDeliverWorkflowNotification(
     payload: WorkflowNotificationPayload
   ): Promise<void> {
-    await this.sendWorkflowEvent(
-      payload.workflowName as string & {},
-      payload.workflowId,
-      payload.event
-    );
+    try {
+      await this.sendWorkflowEvent(
+        payload.workflowName as string & {},
+        payload.workflowId,
+        payload.event
+      );
+    } catch (error) {
+      const attempts = (payload.attempts ?? 0) + 1;
+      const delaySeconds = Math.min(
+        WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS,
+        2 ** Math.min(attempts, 8)
+      );
+      console.error(
+        `[Think] Workflow notification delivery failed (attempt ${attempts}); ` +
+          `retrying in ${delaySeconds}s`,
+        error
+      );
+      await this.schedule(delaySeconds, WORKFLOW_NOTIFICATION_CALLBACK, {
+        ...payload,
+        attempts
+      } satisfies WorkflowNotificationPayload);
+    }
   }
 
   /**
@@ -14253,7 +14285,7 @@ export class Think<
     if (target) {
       this._scheduleAutoContinuation(target);
     } else {
-      this._runConnectionlessContinuation();
+      await this._queueConnectionlessContinuation();
     }
     return true;
   }
@@ -16241,63 +16273,71 @@ export class Think<
   }
 
   /**
-   * Run a continuation turn that does NOT require a live client connection.
+   * Queue a continuation turn that does NOT require a live client connection.
    *
    * Used when a durable approval (a paused action or codemode execution) is
    * resolved via RPC from a surface with no open chat socket — e.g. an ops
    * dashboard, a webhook, or a voice backend approving hours/days later. The
-   * connection-bound auto-continuation barrier (`_fireAutoContinuation`) cannot
-   * fire without a `Connection`, so this mirrors its turn body but streams via
-   * `broadcast` (a no-op when nobody is attached) and always persists, so a
-   * client that reconnects later resumes the continued turn from history.
-   *
-   * Wrapped in `keepAliveWhile` because the resolving RPC returns before the
-   * continuation finishes (mirrors the submission-drain pattern).
+   * item is durable, so the turn still runs if the object leaves memory
+   * before the alarm fires; the last request body and client tools it needs
+   * are persisted config, restored on start. Approvals landing while one
+   * continuation is pending or running coalesce onto the single item.
    */
-  private _runConnectionlessContinuation(): void {
-    void this.keepAliveWhile(async () => {
-      const requestId = crypto.randomUUID();
-      const abortSignal = this._aborts.getSignal(requestId);
-      try {
-        await this._admitTurn({
-          admission: "queue",
-          trigger: "auto-continuation",
-          requestId,
-          continuation: true,
-          allowNested: true,
-          execute: async () => {
-            const continuationBody = async () => {
-              const result = await agentContext.run(
-                {
-                  agent: this,
-                  connection: undefined,
-                  request: undefined,
-                  email: undefined
-                },
-                () =>
-                  this._runInferenceLoop({
-                    signal: abortSignal,
-                    clientTools: this._lastClientTools,
-                    body: this._lastBody,
-                    continuation: true
-                  })
-              );
-              if (result) {
-                await this._streamResult(requestId, result, abortSignal, {
-                  continuation: true
-                });
-              }
-            };
-
-            await this._runChatRecoveryFiber(requestId, true, continuationBody);
-          }
-        });
-      } catch (error) {
-        console.error("[Think] Connection-less continuation failed:", error);
-      } finally {
-        this._aborts.remove(requestId);
-      }
+  private async _queueConnectionlessContinuation(): Promise<void> {
+    await this.queue(CONNECTIONLESS_CONTINUATION_CALLBACK, undefined, {
+      id: "connectionless-continuation"
     });
+  }
+
+  /**
+   * Run one connection-less continuation turn. Mirrors the connection-bound
+   * auto-continuation turn body but streams via `broadcast` (a no-op when
+   * nobody is attached) and always persists, so a client that reconnects
+   * later resumes the continued turn from history.
+   * @internal Queue callback.
+   */
+  async _cfRunConnectionlessContinuation(): Promise<void> {
+    const requestId = crypto.randomUUID();
+    const abortSignal = this._aborts.getSignal(requestId);
+    try {
+      await this._admitTurn({
+        admission: "queue",
+        trigger: "auto-continuation",
+        requestId,
+        continuation: true,
+        allowNested: true,
+        execute: async () => {
+          const continuationBody = async () => {
+            const result = await agentContext.run(
+              {
+                agent: this,
+                connection: undefined,
+                request: undefined,
+                email: undefined
+              },
+              () =>
+                this._runInferenceLoop({
+                  signal: abortSignal,
+                  clientTools: this._lastClientTools,
+                  body: this._lastBody,
+                  continuation: true
+                })
+            );
+            if (result) {
+              await this._streamResult(requestId, result, abortSignal, {
+                continuation: true
+              });
+            }
+          };
+
+          await this._runChatRecoveryFiber(requestId, true, continuationBody);
+        }
+      });
+    } catch (error) {
+      console.error("[Think] Connection-less continuation failed:", error);
+    } finally {
+      this._aborts.remove(requestId);
+    }
   }
 
   // ── Response hook ──────────────────────────────────────────────
