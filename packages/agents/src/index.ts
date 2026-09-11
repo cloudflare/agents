@@ -2048,7 +2048,7 @@ export class Agent<
     this.lifecycle
       .use(this.scheduler)
       .use(this.mcp)
-      .use(this._webSockets, { fallback: true })
+      .use(this._webSockets)
       .use(this.tasks)
       // Registered for capability identity/services; its hot paths are
       // wired directly (see the DynamicAgentsInternal class doc).

@@ -90,7 +90,7 @@ export type MemoryLimitContext = {
  *
  * Dispatch contract, hook by hook:
  * - `onRequest` and `onWebSocketUpgrade` are offered in declaration
- *   order, fallbacks last; the first capability to return a `Response`
+ *   order, the catch-all last; the first capability to return a `Response`
  *   claims the request, and a claimed upgrade's socket belongs to that
  *   capability for its whole lifetime.
  * - `onWebSocketMessage`/`onWebSocketClose`/`onWebSocketError` are
@@ -105,6 +105,18 @@ export type MemoryLimitContext = {
  * @experimental The API surface may change before stabilizing.
  */
 export interface DurableObjectCapability<Props extends object = object> {
+  /**
+   * How this capability claims traffic. Default: `"selective"`.
+   *
+   * A `"selective"` capability answers only requests and upgrades it
+   * recognizes and declines the rest. A `"catch-all"` claims everything
+   * offered to it, so Lifecycle always places it last, whenever it was
+   * installed, and refuses to install a second one. `WebSockets` is a
+   * catch-all: it claims every upgrade, so middleware an `Agent` subclass
+   * installs from its own constructor still runs first.
+   */
+  readonly claims?: "selective" | "catch-all";
+
   /** Initialize or recover the capability before the host handles work. */
   onStart?(context: CapabilityStartContext<Props>): MaybePromise<void>;
 

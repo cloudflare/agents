@@ -150,17 +150,6 @@ export type LifecycleOptions = {
   readonly maxAlarmMemoryLimitStrikes?: number;
 };
 
-/** Placement of a capability in the dispatch order. */
-export type LifecycleUseOptions = {
-  /**
-   * Dispatch after every non-fallback capability, whenever it was
-   * installed. For a host's catch-all, such as a WebSockets capability
-   * that claims every upgrade, so middleware installed later still runs
-   * first.
-   */
-  readonly fallback?: boolean;
-};
-
 /**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
@@ -190,7 +179,6 @@ export class Lifecycle<
   #pendingEvents: LifecycleEvent[] = [];
   #alarmsDisabled = false;
   #capabilitiesLocked = false;
-  readonly #fallbacks = new Set<DurableObjectCapability<Props>>();
   #handlersInstalled = false;
 
   /**
@@ -285,17 +273,15 @@ export class Lifecycle<
   /**
    * Add a reusable capability before this lifecycle starts.
    *
-   * Capabilities dispatch in registration order, except that fallbacks
-   * always come after non-fallbacks.
+   * Capabilities dispatch in registration order, except that a capability
+   * declaring `claims: "catch-all"` always comes last, whenever it was
+   * installed. At most one catch-all may be installed, since a second one
+   * could never be reached.
    *
    * @param capability - The capability to add.
-   * @param options - Dispatch placement.
    * @returns This lifecycle.
    */
-  use(
-    capability: DurableObjectCapability<Props>,
-    options?: LifecycleUseOptions
-  ): this {
+  use(capability: DurableObjectCapability<Props>): this {
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
@@ -311,17 +297,28 @@ export class Lifecycle<
       );
     }
 
-    const firstFallback = this.#capabilities.findIndex((candidate) =>
-      this.#fallbacks.has(candidate)
+    const catchAllIndex = this.#capabilities.findIndex(
+      (candidate) => candidate.claims === "catch-all"
     );
-    if (options?.fallback) this.#fallbacks.add(capability);
-    this.#capabilities.splice(
-      options?.fallback || firstFallback === -1
-        ? this.#capabilities.length
-        : firstFallback,
-      0,
-      capability
-    );
+    if (capability.claims === "catch-all") {
+      if (catchAllIndex !== -1) {
+        const installed = lifecycleCapabilityId(
+          this.#capabilities[catchAllIndex]
+        );
+        throw new Error(
+          `Lifecycle already has a catch-all capability${
+            installed ? ` (${JSON.stringify(installed)})` : ""
+          }; a second one could never be reached`
+        );
+      }
+      this.#capabilities.push(capability);
+    } else {
+      this.#capabilities.splice(
+        catchAllIndex === -1 ? this.#capabilities.length : catchAllIndex,
+        0,
+        capability
+      );
+    }
 
     if (capability instanceof LifecycleCapability) {
       bindLifecycleCapability(
