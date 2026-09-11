@@ -15,7 +15,6 @@ import { MessageType } from "./types";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 import {
   boundCapnWebSocket,
-  nativeCall,
   type CapnWebSocket
 } from "./websockets/capnweb-socket";
 import type { AgentTransport } from "./websockets/transport-protocol";
@@ -55,9 +54,11 @@ export type AgentClientOptions<State = unknown> = Omit<
   TerminalReconnectOptions & {
     /**
      * Wire the connection travels on. `"cf-websocket"` (default) is a
-     * hibernating WebSocket; `"capnweb"` carries the same frames over a
-     * Cap'n Web session and keeps the Durable Object in memory while
-     * connected.
+     * hibernating WebSocket where `call()` sends JSON `rpc` frames.
+     * `"capnweb"` carries protocol frames over a Cap'n Web session whose
+     * root also serves the host's `callables` natively, so `call()` and
+     * `stub` invoke them directly and an `RpcTarget` result is a live stub.
+     * The Durable Object stays in memory while a capnweb connection is open.
      * @experimental The `"capnweb"` transport is experimental.
      */
     transport?: AgentTransport;
@@ -149,6 +150,79 @@ export type CallOptions = {
   /** Streaming options for handling streaming responses */
   stream?: StreamOptions;
 };
+
+/**
+ * Normalize `call()` options. The legacy shape is the stream callbacks
+ * themselves (`{ onChunk, onDone, onError }`); the current shape nests
+ * them under `stream` beside `timeout`.
+ */
+export function splitCallOptions(
+  options: CallOptions | StreamOptions | undefined
+): {
+  stream: StreamOptions | undefined;
+  timeout: number | undefined;
+} {
+  const legacy =
+    options !== undefined &&
+    ("onChunk" in options || "onDone" in options || "onError" in options);
+  return legacy
+    ? { stream: options as StreamOptions, timeout: undefined }
+    : {
+        stream: (options as CallOptions | undefined)?.stream,
+        timeout: (options as CallOptions | undefined)?.timeout
+      };
+}
+
+/**
+ * One native call on the Cap'n Web transport, with the timeout and
+ * stream-callback contract `call()` has on the JSON wire. A
+ * `ReadableStream` result is drained into the stream callbacks when they
+ * are given; any other value, live stubs included, passes straight
+ * through.
+ */
+export async function nativeCall<T>(
+  socket: CapnWebSocket,
+  method: string,
+  args: unknown[],
+  options: CallOptions | StreamOptions | undefined,
+  defaultTimeout: number
+): Promise<T> {
+  const { stream, timeout } = splitCallOptions(options);
+  const effectiveTimeout =
+    timeout !== undefined ? timeout : stream ? undefined : defaultTimeout;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const invocation = socket.invoke(method, args);
+  const raced = effectiveTimeout
+    ? Promise.race([
+        invocation,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `RPC call to ${method} timed out after ${effectiveTimeout}ms`
+                )
+              ),
+            effectiveTimeout
+          );
+        })
+      ])
+    : invocation;
+  try {
+    const result = await raced;
+    if (stream && result instanceof ReadableStream) {
+      for await (const chunk of result) stream.onChunk?.(chunk);
+      stream.onDone?.(undefined);
+      return undefined as T;
+    }
+    return result as T;
+  } catch (error) {
+    stream?.onError?.(error instanceof Error ? error.message : String(error));
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * Options for the agentFetch function
@@ -351,11 +425,23 @@ export class AgentClient<
     });
   }
 
-  /** Live Cap'n Web socket on the `"capnweb"` transport; last one wins. */
-  #capnWeb: CapnWebSocket | null = null;
+  /**
+   * The live Cap'n Web socket on the `"capnweb"` transport. PartySocket
+   * constructs a new one on every reconnect; the bound class reports each
+   * into this holder, which exists before `super()` runs.
+   */
+  readonly #capnWeb: { current: CapnWebSocket | null };
 
   constructor(options: AgentClientOptions<State>) {
-    const capnWeb: CapnWebSocket[] = [];
+    const capnWeb: { current: CapnWebSocket | null } = { current: null };
+    const socketClass =
+      options.transport === "capnweb"
+        ? {
+            WebSocket: boundCapnWebSocket((socket) => {
+              capnWeb.current = socket;
+            })
+          }
+        : {};
     const agentNamespace = camelCaseToKebabCase(options.agent);
     const shouldReconnectOnClose = options.shouldReconnectOnClose;
     const classifyReconnect = (event: CloseEvent) =>
@@ -367,11 +453,7 @@ export class AgentClient<
           basePath: options.basePath,
           path: options.path,
           ...options,
-          ...(options.transport === "capnweb"
-            ? {
-                WebSocket: boundCapnWebSocket((socket) => capnWeb.push(socket))
-              }
-            : {}),
+          ...socketClass,
           shouldReconnectOnClose: classifyReconnect
         }
       : {
@@ -380,22 +462,12 @@ export class AgentClient<
           room: options.name || "default",
           path: options.path,
           ...options,
-          ...(options.transport === "capnweb"
-            ? {
-                WebSocket: boundCapnWebSocket((socket) => capnWeb.push(socket))
-              }
-            : {}),
+          ...socketClass,
           shouldReconnectOnClose: classifyReconnect
         };
 
     super(socketOptions);
-    // `super()` may already have constructed a socket; adopt it, then
-    // track every later reconnect.
-    this.#capnWeb = capnWeb.at(-1) ?? null;
-    capnWeb.push = (...sockets) => {
-      this.#capnWeb = sockets.at(-1) ?? this.#capnWeb;
-      return sockets.length;
-    };
+    this.#capnWeb = capnWeb;
     this.agent = agentNamespace;
     this.name = options.name || "default";
     this.options = options;
@@ -606,18 +678,13 @@ export class AgentClient<
     // On the Cap'n Web transport, callables are native methods on the
     // session root: invoke them directly so an RpcTarget result arrives as
     // a live stub. The JSON `rpc` frame below is the WebSocket wire's protocol.
-    const native = this.#capnWeb;
+    const native = this.#capnWeb.current;
     if (native && this.readyState === this.OPEN) {
-      const legacy =
-        options !== undefined &&
-        ("onChunk" in options || "onDone" in options || "onError" in options);
       return nativeCall(
         native,
         method,
         args,
-        legacy
-          ? { stream: options as StreamOptions }
-          : ((options as CallOptions | undefined) ?? {}),
+        options,
         this.options.defaultCallTimeout ?? DEFAULT_CALL_TIMEOUT_MS
       );
     }
@@ -629,16 +696,7 @@ export class AgentClient<
       const id = crypto.randomUUID();
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-      // Detect legacy format: { onChunk?, onDone?, onError? } vs new format: { timeout?, stream? }
-      const isLegacyFormat =
-        options &&
-        ("onChunk" in options || "onDone" in options || "onError" in options);
-      const streamOptions = isLegacyFormat
-        ? (options as StreamOptions)
-        : (options as CallOptions | undefined)?.stream;
-      const timeout = isLegacyFormat
-        ? undefined
-        : (options as CallOptions | undefined)?.timeout;
+      const { stream: streamOptions, timeout } = splitCallOptions(options);
 
       // Apply the default timeout as a backstop for non-streaming calls
       // so a lost response rejects instead of hanging forever. An

@@ -117,8 +117,9 @@ export type CapnWebSessionOptions = {
  * The session root carries the frame pipe plus the host's native
  * callables. The client's protocol frames arrive through the pipe and are
  * handed to `onMessage`; the host's frames go out through the client's
- * `message` callback; `useAgent().stub` calls hit the callables directly. The socket is a plain in-memory `WebSocketPair`, so it pins
- * the Durable Object and does not survive hibernation.
+ * `message` callback; `useAgent().stub` calls hit the callables directly.
+ * The socket is a plain in-memory `WebSocketPair`, so it pins the Durable
+ * Object and does not survive hibernation.
  */
 export async function openCapnWebSession(
   options: CapnWebSessionOptions

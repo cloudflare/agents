@@ -99,15 +99,15 @@ export class CapnWebSocket extends EventTarget {
     if (this.readyState !== CapnWebSocket.OPEN) {
       return Promise.reject(new Error("Connection closed"));
     }
-    const root = this.#root as unknown as Record<string, unknown>;
-    const remote = root[method];
-    if (typeof remote !== "function") {
-      return Promise.reject(new Error(`Method ${method} does not exist`));
-    }
-    // Cap'n Web returns an RpcPromise; awaiting it settles to the value
-    // (a stub for RpcTarget results). Resolve through a plain Promise so
-    // callers hold nothing exotic.
-    return Promise.resolve(Reflect.apply(remote, root, args));
+    // The root stub answers every property with a callable, so an unknown
+    // method is only detected by the host, which rejects the call. The
+    // result is an RpcPromise; resolve through a plain Promise so callers
+    // hold nothing exotic.
+    const root = this.#root as unknown as Record<
+      string,
+      (...a: unknown[]) => unknown
+    >;
+    return Promise.resolve(root[method](...args));
   }
 
   send(data: TransportMessage): void {
@@ -146,64 +146,4 @@ export function boundCapnWebSocket(
       onCreate(this);
     }
   };
-}
-
-/** Legacy `{ onChunk, onDone, onError }` or `{ timeout, stream }` options. */
-export type NativeCallOptions = {
-  readonly stream?: {
-    onChunk?: (chunk: unknown) => void;
-    onDone?: (finalValue: unknown) => void;
-    onError?: (error: string) => void;
-  };
-  readonly timeout?: number;
-};
-
-/**
- * Run one native call with the same timeout and stream-callback contract
- * `call()` has on the JSON wire. A `ReadableStream` result is drained
- * into the stream callbacks when they are given; otherwise it is returned
- * as is. Any other value, stubs included, passes straight through.
- */
-export async function nativeCall<T>(
-  socket: CapnWebSocket,
-  method: string,
-  args: unknown[],
-  options: NativeCallOptions,
-  defaultTimeout: number
-): Promise<T> {
-  const { stream, timeout } = options;
-  const effectiveTimeout =
-    timeout !== undefined ? timeout : stream ? undefined : defaultTimeout;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const invocation = socket.invoke(method, args);
-  const raced = effectiveTimeout
-    ? Promise.race([
-        invocation,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `RPC call to ${method} timed out after ${effectiveTimeout}ms`
-                )
-              ),
-            effectiveTimeout
-          );
-        })
-      ])
-    : invocation;
-  try {
-    const result = await raced;
-    if (stream && result instanceof ReadableStream) {
-      for await (const chunk of result) stream.onChunk?.(chunk);
-      stream.onDone?.(undefined);
-      return undefined as T;
-    }
-    return result as T;
-  } catch (error) {
-    stream?.onError?.(error instanceof Error ? error.message : String(error));
-    throw error;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
