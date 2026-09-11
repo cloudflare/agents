@@ -99,9 +99,10 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  *
  * - **cf-websocket** (default): accepted with the Hibernation API. Idle
  *   clients stay connected while the Durable Object leaves memory.
- * - **Cap'n Web** (`?__agents_transport=capnweb`): the same frames over a
- *   Cap'n Web session. Non-hibernating — the object stays pinned while
- *   the connection is open.
+ * - **capnweb** (`?__agents_transport=capnweb`): protocol frames through
+ *   one pipe method on a Cap'n Web session whose root also carries the
+ *   host's callables natively. Non-hibernating — the object stays pinned
+ *   while the connection is open.
  *
  * Both wires dispatch the same handlers and appear in `getConnections()`.
  * On both, the capability speaks the Agent protocol a plain host needs

@@ -17,11 +17,12 @@ import {
   createStubProxy,
   DEFAULT_CALL_TIMEOUT_MS,
   AgentConnectionError as AgentConnectionErrorCtor,
-  isTerminalCloseEvent
+  isTerminalCloseEvent,
+  nativeCall,
+  splitCallOptions
 } from "./client";
 import {
   boundCapnWebSocket,
-  nativeCall,
   type CapnWebSocket
 } from "./websockets/capnweb-socket";
 import {
@@ -30,10 +31,10 @@ import {
   type AgentTransport
 } from "./websockets/transport-protocol";
 import { buildSubAgentPathUnchecked } from "./sub-routing";
-
-export type { AgentTransport } from "./websockets/transport-protocol";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
+
+export type { AgentTransport } from "./websockets/transport-protocol";
 import {
   applyAgentToolEvent,
   createAgentToolEventState,
@@ -167,9 +168,12 @@ export type UseAgentOptions<State = unknown> = Omit<
     basePath?: string;
     /**
      * Wire the connection travels on. `"cf-websocket"` (default) is a
-     * hibernating WebSocket; `"capnweb"` carries the same frames over a
-     * Cap'n Web session and keeps the Durable Object in memory while
-     * connected. Everything else about the hook is identical.
+     * hibernating WebSocket where `call()` sends JSON `rpc` frames.
+     * `"capnweb"` carries protocol frames over a Cap'n Web session whose
+     * root also serves the host's `callables` natively, so `call()` and
+     * `stub` invoke them directly and an `RpcTarget` result is a live stub.
+     * The Durable Object stays in memory while a capnweb connection is open.
+     * Identity, state, and reconnection behave the same on both.
      * @experimental The `"capnweb"` transport is experimental.
      */
     transport?: AgentTransport;
@@ -364,6 +368,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // only swaps the socket class it instantiates. The bound subclass hands
   // the hook each live Cap'n Web socket so `call()` can invoke natively.
   const capnWebRef = useRef<CapnWebSocket | null>(null);
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
   const socketClass = useMemo(
     () =>
       transport === "capnweb"
@@ -963,18 +969,14 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       // session root: invoke them directly so an RpcTarget result arrives
       // as a live stub and chained calls pipeline. The JSON `rpc` frame
       // below is the WebSocket wire's protocol.
-      const native = capnWebRef.current;
+      const native =
+        transportRef.current === "capnweb" ? capnWebRef.current : null;
       if (native && socketRef.current?.readyState === WebSocket.OPEN) {
-        const legacy =
-          options !== undefined &&
-          ("onChunk" in options || "onDone" in options || "onError" in options);
         return nativeCall<T>(
           native,
           method,
           args,
-          legacy
-            ? { stream: options as StreamOptions }
-            : ((options as CallOptions | undefined) ?? {}),
+          options,
           defaultCallTimeoutRef.current
         );
       }
@@ -992,16 +994,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         const id = crypto.randomUUID();
         let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-        // Detect legacy format: { onChunk?, onDone?, onError? } vs new format: { timeout?, stream? }
-        const isLegacyFormat =
-          options &&
-          ("onChunk" in options || "onDone" in options || "onError" in options);
-        const streamOptions = isLegacyFormat
-          ? (options as StreamOptions)
-          : (options as CallOptions | undefined)?.stream;
-        const timeout = isLegacyFormat
-          ? undefined
-          : (options as CallOptions | undefined)?.timeout;
+        const { stream: streamOptions, timeout } = splitCallOptions(options);
 
         // Apply the default timeout as a backstop for non-streaming
         // calls so a lost response rejects instead of hanging forever.

@@ -124,8 +124,9 @@ useAgent({
 
 `useAgent` speaks the Agent protocol over one of two wires. The default,
 `"cf-websocket"`, is a hibernating WebSocket managed by PartySocket. The
-experimental `"capnweb"` transport carries the same frames over a single
-[Cap'n Web](https://github.com/cloudflare/capnweb) RPC session:
+experimental `"capnweb"` transport carries protocol frames through a single
+[Cap'n Web](https://github.com/cloudflare/capnweb) RPC session whose root
+also serves the host's callables natively:
 
 ```typescript
 useAgent({

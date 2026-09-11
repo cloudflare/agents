@@ -696,11 +696,6 @@ export class Lifecycle<
 
   #legacyName: string | undefined;
 
-  /** The host class name, as exported from the Worker. */
-  get className(): string {
-    return this.#parentClassName;
-  }
-
   /**
    * The name used to address this Durable Object.
    *
