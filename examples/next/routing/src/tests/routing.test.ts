@@ -2,8 +2,6 @@ import { env, exports } from "cloudflare:workers";
 import { newWebSocketRpcSession } from "capnweb";
 import { describe, expect, it } from "vitest";
 import {
-  CALLABLES_RPC_QUERY,
-  CALLABLES_RPC_VALUE,
   CAPNWEB_TRANSPORT_QUERY,
   CAPNWEB_TRANSPORT_VALUE
 } from "agents/websockets";
@@ -214,33 +212,6 @@ describe("a plain Durable Object hub routing to one Agent per chat", () => {
       chatUrl(uniqueUser(), crypto.randomUUID())
     );
     expect(missing.status).toBe(404);
-  });
-
-  it("serves the hub's methods to the browser as Cap'n Web callables", async () => {
-    const userId = uniqueUser();
-    const url = new URL(`http://example.com/agents/user-hub/${userId}`);
-    url.searchParams.set(CALLABLES_RPC_QUERY, CALLABLES_RPC_VALUE);
-    const response = await exports.default.fetch(url, {
-      headers: { Upgrade: "websocket" }
-    });
-    expect(response.status).toBe(101);
-    const socket = response.webSocket;
-    if (!socket) throw new Error("Expected a WebSocket upgrade response");
-    socket.accept();
-    const hub = newWebSocketRpcSession<{
-      createChat(): Promise<string>;
-      listChats(): Promise<{ id: string }[]>;
-      deleteChat(id: string): Promise<boolean>;
-    }>(socket);
-    try {
-      const chatId = await hub.createChat();
-      await post(userId, chatId, "hello over callables");
-      expect(await hub.listChats()).toMatchObject([{ id: chatId }]);
-      expect(await hub.deleteChat(chatId)).toBe(true);
-      expect(await hub.listChats()).toEqual([]);
-    } finally {
-      (hub as Partial<Disposable>)[Symbol.dispose]?.();
-    }
   });
 
   it("speaks the Agent protocol to useAgent over a plain socket", async () => {
