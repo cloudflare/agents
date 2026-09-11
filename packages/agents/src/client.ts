@@ -13,7 +13,11 @@ import type {
 } from "./serializable";
 import { MessageType } from "./types";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
-import { CapnWebSocket } from "./websockets/capnweb-socket";
+import {
+  boundCapnWebSocket,
+  nativeCall,
+  type CapnWebSocket
+} from "./websockets/capnweb-socket";
 import type { AgentTransport } from "./websockets/transport-protocol";
 
 export type { AgentTransport } from "./websockets/transport-protocol";
@@ -347,7 +351,11 @@ export class AgentClient<
     });
   }
 
+  /** Live Cap'n Web socket on the `"capnweb"` transport; last one wins. */
+  #capnWeb: CapnWebSocket | null = null;
+
   constructor(options: AgentClientOptions<State>) {
+    const capnWeb: CapnWebSocket[] = [];
     const agentNamespace = camelCaseToKebabCase(options.agent);
     const shouldReconnectOnClose = options.shouldReconnectOnClose;
     const classifyReconnect = (event: CloseEvent) =>
@@ -360,7 +368,9 @@ export class AgentClient<
           path: options.path,
           ...options,
           ...(options.transport === "capnweb"
-            ? { WebSocket: CapnWebSocket }
+            ? {
+                WebSocket: boundCapnWebSocket((socket) => capnWeb.push(socket))
+              }
             : {}),
           shouldReconnectOnClose: classifyReconnect
         }
@@ -371,12 +381,21 @@ export class AgentClient<
           path: options.path,
           ...options,
           ...(options.transport === "capnweb"
-            ? { WebSocket: CapnWebSocket }
+            ? {
+                WebSocket: boundCapnWebSocket((socket) => capnWeb.push(socket))
+              }
             : {}),
           shouldReconnectOnClose: classifyReconnect
         };
 
     super(socketOptions);
+    // `super()` may already have constructed a socket; adopt it, then
+    // track every later reconnect.
+    this.#capnWeb = capnWeb.at(-1) ?? null;
+    capnWeb.push = (...sockets) => {
+      this.#capnWeb = sockets.at(-1) ?? this.#capnWeb;
+      return sockets.length;
+    };
     this.agent = agentNamespace;
     this.name = options.name || "default";
     this.options = options;
@@ -584,6 +603,24 @@ export class AgentClient<
     args: unknown[] = [],
     options?: CallOptions | StreamOptions
   ): Promise<unknown> {
+    // On the Cap'n Web transport, callables are native methods on the
+    // session root: invoke them directly so an RpcTarget result arrives as
+    // a live stub. The JSON `rpc` frame below is the WebSocket wire's protocol.
+    const native = this.#capnWeb;
+    if (native && this.readyState === this.OPEN) {
+      const legacy =
+        options !== undefined &&
+        ("onChunk" in options || "onDone" in options || "onError" in options);
+      return nativeCall(
+        native,
+        method,
+        args,
+        legacy
+          ? { stream: options as StreamOptions }
+          : ((options as CallOptions | undefined) ?? {}),
+        this.options.defaultCallTimeout ?? DEFAULT_CALL_TIMEOUT_MS
+      );
+    }
     if (this.connectionError && this.readyState === this.CLOSED) {
       throw new Error("Connection closed");
     }

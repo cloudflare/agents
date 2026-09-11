@@ -1,3 +1,4 @@
+import { RpcTarget } from "cloudflare:workers";
 import { nanoid } from "nanoid";
 import {
   LifecycleCapability,
@@ -105,8 +106,10 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  * Both wires dispatch the same handlers and appear in `getConnections()`.
  * On both, the capability speaks the Agent protocol a plain host needs
  * for `useAgent` and `AgentClient`: it sends the identity frame on
- * connect and answers `rpc` frames against `callables`, so `call()` and
- * `stub` work against a plain Durable Object exactly as against an
+ * connect, and it serves `callables` — as `rpc` JSON frames on the
+ * WebSocket wire, and natively on the Cap'n Web session root, where an
+ * `RpcTarget` result becomes a live stub and calls pipeline. `call()`
+ * and `stub` work against a plain Durable Object exactly as against an
  * `Agent`.
  *
  * @experimental The API surface may change before stabilizing.
@@ -332,6 +335,7 @@ export class WebSockets extends LifecycleCapability {
         this.#close(connection, code, reason, wasClean).then(() => undefined),
       onError: (connection, error) =>
         this.#error(connection, error).then(() => undefined),
+      callables: (connection) => this.#nativeCallables(connection),
       onOpen: (session) => this.#sessions.set(connectionId, session),
       onDispose: (ended) => {
         if (this.#sessions.get(connectionId) === ended) {
@@ -343,6 +347,24 @@ export class WebSockets extends LifecycleCapability {
   }
 
   // ── Callables ──────────────────────────────────────────────────────────
+
+  /**
+   * The `callables` target as native Cap'n Web methods for one session:
+   * every method dispatches through the host boundary with this
+   * connection in scope and emits `rpc`/`rpc:error` events. Return values
+   * keep Cap'n Web semantics — an `RpcTarget` comes back as a live stub.
+   */
+  #nativeCallables(
+    connection: Connection
+  ): ReadonlyMap<string, CallableInvoker> {
+    const methods = new Map<string, CallableInvoker>();
+    for (const [name, invoke] of this.#callables) {
+      methods.set(name, (...args) =>
+        this.#dispatchCallable(name, () => invoke(...args), connection)
+      );
+    }
+    return methods;
+  }
 
   /**
    * Answer one `rpc` frame against `callables`. A `ReadableStream`
@@ -382,6 +404,13 @@ export class WebSockets extends LifecycleCapability {
         () => invoke(...args),
         connection
       );
+      if (result instanceof RpcTarget) {
+        // By-reference results only exist on the Cap'n Web wire; a JSON
+        // frame would silently flatten the target to `{}`.
+        throw new Error(
+          `Method ${method} returns an RpcTarget, which only the capnweb transport can carry`
+        );
+      }
       if (result instanceof ReadableStream) {
         for await (const chunk of result) {
           this.#reply(connection, {

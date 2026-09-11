@@ -1,4 +1,3 @@
-import { RpcTarget } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type {
   Connection,
@@ -6,6 +5,7 @@ import type {
   ConnectionSetStateFn,
   ConnectionState
 } from "../lifecycle";
+import { buildRoot, type CallableInvoker } from "./callables-target";
 import {
   CAPNWEB_TRANSPORT_SEND,
   type TransportClientEvents,
@@ -62,19 +62,6 @@ class CapnWebConnection extends EventTarget {
   }
 }
 
-/** The host's session root: exactly one method, the frame pipe. */
-class Pipe extends RpcTarget {
-  constructor(
-    private readonly deliver: (message: TransportMessage) => Promise<void>
-  ) {
-    super();
-  }
-
-  [CAPNWEB_TRANSPORT_SEND](message: TransportMessage): Promise<void> {
-    return this.deliver(message);
-  }
-}
-
 /** One live transport session. */
 export type CapnWebSession = {
   readonly connection: Connection;
@@ -106,6 +93,15 @@ export type CapnWebSessionOptions = {
   ) => Promise<void>;
   readonly onError: (connection: Connection, error: unknown) => Promise<void>;
   /**
+   * Native methods served on the session root beside the frame pipe. Each
+   * invoker already runs inside the host boundary for this connection.
+   * Results pass by Cap'n Web semantics: an `RpcTarget` becomes a live
+   * stub, a `ReadableStream` streams, and calls pipeline.
+   */
+  readonly callables: (
+    connection: Connection
+  ) => ReadonlyMap<string, CallableInvoker>;
+  /**
    * Called once the connection exists, before `onConnect`, so it is already
    * visible in `getConnections()` while the connect handler runs — the same
    * ordering as a hibernating socket, which is accepted before `onConnect`.
@@ -118,9 +114,10 @@ export type CapnWebSessionOptions = {
 /**
  * Accept a Cap'n Web transport upgrade.
  *
- * The client's frames arrive through the pipe method and are handed to
- * `onMessage`; the host's frames go out through the client's `message`
- * callback. The socket is a plain in-memory `WebSocketPair`, so it pins
+ * The session root carries the frame pipe plus the host's native
+ * callables. The client's protocol frames arrive through the pipe and are
+ * handed to `onMessage`; the host's frames go out through the client's
+ * `message` callback; `useAgent().stub` calls hit the callables directly. The socket is a plain in-memory `WebSocketPair`, so it pins
  * the Durable Object and does not survive hibernation.
  */
 export async function openCapnWebSession(
@@ -170,9 +167,15 @@ export async function openCapnWebSession(
     await options.onClose(connection, close.code, close.reason, close.wasClean);
   };
 
+  const rootMethods = new Map<string, CallableInvoker>(
+    options.callables(connection)
+  );
+  rootMethods.set(CAPNWEB_TRANSPORT_SEND, (message) =>
+    options.onMessage(connection, message as TransportMessage)
+  );
   client = newWebSocketRpcSession<TransportClientEvents>(
     server,
-    new Pipe((message) => options.onMessage(connection, message))
+    buildRoot(rootMethods)
   );
 
   server.addEventListener(

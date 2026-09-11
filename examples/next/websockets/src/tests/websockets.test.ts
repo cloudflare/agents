@@ -220,6 +220,10 @@ describe("WebSockets capability on a plain Durable Object", () => {
     // Bounds apply to callables too.
     grace.rpc("4", "say", "grace", "");
     expect(await grace.until("rpc")).toMatchObject({ id: "4", success: false });
+
+    // An RpcTarget result has no JSON form: the frame path reports an error.
+    grace.rpc("5", "member", "grace");
+    expect(await grace.until("rpc")).toMatchObject({ id: "5", success: false });
     await grace.close();
   });
 
@@ -285,6 +289,29 @@ describe("WebSockets capability on a plain Durable Object", () => {
 
       await pipe.__cf_agent_send(JSON.stringify({ type: "whoami" }));
       expect(await until("whoami")).toMatchObject({ state: { nick: "ivan" } });
+
+      // Native callables on the same session root: stubs pass by reference.
+      const root = pipe as unknown as {
+        say(nick: string, text: string): Promise<{ text: string }>;
+        member(nick: string): Promise<{
+          whisper(from: string, text: string): Promise<boolean>;
+        }>;
+        countdown(from: number): Promise<ReadableStream<number>>;
+      };
+      expect(await root.say("ivan", "native call")).toMatchObject({
+        text: "native call"
+      });
+      expect(await heidi.until("message")).toMatchObject({
+        message: { nick: "ivan", text: "native call" }
+      });
+      const heidiHandle = await root.member("heidi");
+      expect(await heidiHandle.whisper("ivan", "psst")).toBe(true);
+      expect(await heidi.until("message")).toMatchObject({
+        message: { nick: "ivan (whisper)", text: "psst" }
+      });
+      const chunks: number[] = [];
+      for await (const n of await root.countdown(2)) chunks.push(n);
+      expect(chunks).toEqual([2, 1, 0]);
     } finally {
       pipe[Symbol.dispose]();
       await heidi.close();

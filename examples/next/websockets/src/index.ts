@@ -82,9 +82,43 @@ function parseClientFrame(raw: unknown): ClientFrame | null {
 }
 
 /**
+ * A handle to one member, returned by reference. On the Cap'n Web transport
+ * the caller receives a live stub and can keep calling it; on the WebSocket
+ * wire an RpcTarget cannot be serialized into a JSON frame, so `member()`
+ * reports an error there.
+ */
+class MemberHandle extends RpcTarget {
+  readonly #room: RoomObject;
+  readonly #id: string;
+
+  constructor(room: RoomObject, id: string) {
+    super();
+    this.#room = room;
+    this.#id = id;
+  }
+
+  /** Send a frame to this member only. */
+  whisper(from: string, text: string): boolean {
+    const connection = this.#room.webSockets.getConnection(this.#id);
+    if (!connection) return false;
+    this.#room.send(connection, {
+      type: "message",
+      message: {
+        id: 0,
+        nick: `${cleanNick(from) ?? "anonymous"} (whisper)`,
+        text: cleanText(text) ?? "",
+        at: Date.now()
+      }
+    });
+    return true;
+  }
+}
+
+/**
  * The room's remote interface. Prototype methods are the complete surface.
- * The capability answers the `rpc` frames `useAgent().stub` sends on either
- * transport against it. Each call runs through the host invocation
+ * On the WebSocket wire the capability answers the JSON `rpc` frames
+ * `useAgent().stub` sends against it; on the Cap'n Web wire these are
+ * native methods on the session root. Each call runs through the host invocation
  * boundary with the calling connection in scope, so a method may broadcast
  * to the hibernating members like a handler does.
  */
@@ -108,6 +142,13 @@ class RoomCallables extends RpcTarget {
 
   members(): Member[] {
     return this.#room.members();
+  }
+
+  /** Look a member up by nick; the result is passed by reference. */
+  member(nick: string): MemberHandle {
+    const [id] = this.#room.membersNamed(cleanNick(nick) ?? "");
+    if (!id) throw new Error(`No member named ${String(nick)}`);
+    return new MemberHandle(this.#room, id);
   }
 
   /** Streams to the caller; `useAgent().call` surfaces it via stream callbacks. */

@@ -340,14 +340,19 @@ Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
   `ready` and `identified`. Pass `identity: false` to opt out; `Agent` does,
   because it sends its own under `sendIdentityOnConnect`.
 - `callables` is an `RpcTarget` whose prototype methods are the host's
-  complete remote interface. The capability answers the `rpc` frames that
-  `call()` and `stub` send, on either wire. Methods run through the host
-  invocation boundary with the calling connection in scope; a returned
-  `ReadableStream` streams to the caller.
+  complete remote interface, reached through `call()` and `stub`. On the
+  `cf-websocket` wire the capability answers them as JSON `rpc` frames. On
+  the `capnweb` wire they are native Cap'n Web methods on the session root:
+  a returned `RpcTarget` arrives as a live stub the client can keep
+  calling, a `ReadableStream` streams, and chained calls pipeline. Methods
+  run through the host invocation boundary with the calling connection in
+  scope.
 - Any other frame goes to `handlers.onMessage`.
 
 An `Agent` adds no new surface for this: its `@callable()`-decorated methods
-are its interface, answered by its own message handler.
+are its JSON-wire interface, answered by its own message handler. They are
+not mirrored onto the Cap'n Web root; an Agent that wants native calls on
+`capnweb` passes a `callables` target like any other host.
 
 ### Two wires
 
@@ -359,10 +364,11 @@ The client chooses how frames travel:
   before `onMessage`. State needed after a wake belongs in storage or
   `connection.setState()`.
 - **Cap'n Web** (`?__agents_transport=capnweb`, or
-  `useAgent({ transport: "capnweb" })`) — the same frames over one Cap'n Web
-  RPC session. The connection is an in-memory socket and does not hibernate:
-  the object stays pinned while it is open, and clients reconnect after an
-  eviction.
+  `useAgent({ transport: "capnweb" })`) — protocol frames travel through one
+  pipe method on a Cap'n Web session whose root also carries the host's
+  `callables` natively. The connection is an in-memory socket and does not
+  hibernate: the object stays pinned while it is open, and clients reconnect
+  after an eviction.
 
 Handlers are wire-agnostic. Both kinds of connection dispatch the same
 `onConnect`/`onMessage`/`onClose`/`onError`, appear in `getConnections()`,

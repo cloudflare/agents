@@ -135,12 +135,18 @@ useAgent({
 });
 ```
 
-Everything else is identical on both wires — identity, state sync,
-`call`/`stub`, reconnection with backoff, and terminal close codes.
-PartySocket still owns the connection; the transport only swaps the socket
-class it instantiates. The trade-off is that a Cap'n Web connection does not
-hibernate: the Durable Object stays in memory while one is open.
-`AgentClient` accepts the same `transport` option.
+Identity, state sync, reconnection with backoff, and terminal close codes are
+identical on both wires; PartySocket still owns the connection and the
+transport only swaps the socket class it instantiates. `call()` and `stub`
+differ by design. On `cf-websocket` they send JSON `rpc` frames. On `capnweb`
+they invoke the host's `callables` natively on the Cap'n Web session root: a
+method that returns an `RpcTarget` hands you a live stub you can keep
+calling, a `ReadableStream` result streams, and chained calls pipeline.
+`@callable()` decorators on an `Agent` are a JSON-wire feature and are not
+available on `capnweb` unless the Agent also passes a `callables` target.
+The trade-off is that a Cap'n Web connection does not hibernate: the Durable
+Object stays in memory while one is open. `AgentClient` accepts the same
+`transport` option.
 
 ### Async Query Parameters
 

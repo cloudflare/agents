@@ -2,9 +2,9 @@
  * Integration tests for useAgent's Cap'n Web transport
  * (`transport: "capnweb"`) against a real miniflare worker.
  *
- * The transport must be behaviorally identical to the default
- * hibernating WebSocket transport: identity, state sync, and RPC calls
- * all run over the single Cap'n Web socket.
+ * Identity and state sync are identical to the default cf-websocket
+ * transport. Calls differ by design: on capnweb they are native Cap'n Web
+ * methods served from a `callables` RpcTarget, not JSON rpc frames.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render as _render, cleanup } from "vitest-browser-react";
@@ -131,7 +131,7 @@ describe("useAgent with transport: capnweb", () => {
     });
   });
 
-  it("performs RPC calls through call() and stub", async () => {
+  it("invokes callables natively: an Agent without a callables target has none", async () => {
     const { host, protocol } = getTestWorkerHost();
     let capturedAgent: TestAgent | null = null;
 
@@ -154,10 +154,11 @@ describe("useAgent with transport: capnweb", () => {
 
     await waitForConnected(container);
 
-    await expect(capturedAgent!.call("add", [2, 3])).resolves.toBe(5);
-    await expect(capturedAgent!.stub.add(4, 5)).resolves.toBe(9);
-    await expect(capturedAgent!.call("throwError", ["boom"])).rejects.toThrow(
-      "boom"
+    // On capnweb, call()/stub are native Cap'n Web methods on the session
+    // root, served from `callables: RpcTarget`. @callable() decorators
+    // belong to the JSON protocol on cf-websocket and are not mirrored.
+    await expect(capturedAgent!.call("add", [2, 3])).rejects.toThrow(
+      /not a function|does not exist/
     );
   });
 });
