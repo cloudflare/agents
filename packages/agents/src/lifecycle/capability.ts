@@ -88,12 +88,6 @@ export type LifecycleServices = {
    */
   readonly trackAlarmWork: (work: Promise<unknown>) => boolean;
   /**
-   * Keep the Durable Object alive until `work` settles, past the end of
-   * the current invocation. For side effects a capability starts but does
-   * not await, such as an async change hook.
-   */
-  readonly waitUntil: (work: Promise<unknown>) => void;
-  /**
    * Run a capability-held user callback inside the host invocation context.
    * Capability hooks run outside host context; this is the one boundary for
    * entering it, and a host composition root may substitute its own wrapper

@@ -348,7 +348,6 @@ export class Lifecycle<
       jobs: this.#jobsForOwner(capabilityId),
       trackAlarmWork: (work: Promise<unknown>) =>
         this.#jobDriver.trackAlarmWork(work),
-      waitUntil: (work: Promise<unknown>) => this.#ctx.waitUntil(work),
       runInHostContext: async (
         fn: () => unknown,
         scope?: LifecycleHostContextScope
