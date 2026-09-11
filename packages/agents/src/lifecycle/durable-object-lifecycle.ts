@@ -165,7 +165,7 @@ const CATCH_ALL_HOOKS = ["onRequest", "onWebSocketUpgrade"] as const;
 
 export class Lifecycle<
   Env extends object = Cloudflare.Env,
-  Props extends object = Record<string, unknown>
+  Props extends object = object
 > {
   readonly #host: LifecycleHost<Env, Props>;
   readonly #ctx: DurableObjectState;
@@ -191,10 +191,7 @@ export class Lifecycle<
    * @param host - The Durable Object whose runtime handlers the lifecycle owns.
    * @returns The installed lifecycle.
    */
-  static install<
-    Env extends object,
-    Props extends object = Record<string, unknown>
-  >(
+  static install<Env extends object, Props extends object = object>(
     host: DurableObject<Env>,
     options?: LifecycleOptions
   ): Lifecycle<Env, Props> {

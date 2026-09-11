@@ -1070,7 +1070,7 @@ type WorkflowName<E> = WorkflowBinding<E> | (string & {});
 export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   TState = unknown,
-  Props extends object = Record<string, unknown>
+  Props extends object = object
 > extends DurableObject<Env> {
   /**
    * Runtime lifecycle and reusable durable capabilities for this Agent.

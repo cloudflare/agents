@@ -16,7 +16,7 @@ import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
  */
 export interface LifecycleObject<
   Env extends object = Cloudflare.Env,
-  Props extends object = Record<string, unknown>
+  Props extends object = object
 > extends DurableObject<Env> {
   readonly lifecycle: Lifecycle<Env, Props>;
   onStart?(props?: Props): void | Promise<void>;
