@@ -6,6 +6,7 @@ import type {
   ConnectionState
 } from "../lifecycle";
 import { buildRoot, type CallableInvoker } from "./callables-target";
+import { prepareTags } from "./connection";
 import {
   CAPNWEB_TRANSPORT_SEND,
   type TransportClientEvents,
@@ -46,8 +47,8 @@ class CapnWebConnection extends EventTarget {
 
   close(code?: number, reason?: string): void {
     if (this.readyState >= WebSocket.CLOSING) return;
-    this.readyState = WebSocket.CLOSING;
     this.pipe.close(code, reason);
+    this.readyState = WebSocket.CLOSING;
   }
 
   setState<T = unknown>(
@@ -140,12 +141,11 @@ export async function openCapnWebSession(
       });
     },
     close: (code = 1000, reason = "") => {
+      // Same contract as WebSocket.close(): a reserved code or an oversize
+      // reason throws before anything changes, and the socket stays open
+      // and tracked. Only a started handshake finishes the session.
+      server.close(code, reason);
       close = { code, reason, wasClean: true };
-      try {
-        server.close(code, reason);
-      } catch {
-        // Already closing; finish() below still runs the close handler.
-      }
       void finish();
     }
   }) as unknown as Connection & CapnWebConnection;
@@ -211,10 +211,12 @@ export async function openCapnWebSession(
   );
 
   const ctx = { request };
-  connection.tags = [
+  // Same limits as the hibernating wire (count, emptiness, length), so a
+  // handler sees one tag policy whichever transport the client chose.
+  connection.tags = prepareTags(
     connectionId,
-    ...(await options.tags(connection, ctx)).filter((t) => t !== connectionId)
-  ];
+    await options.tags(connection, ctx)
+  );
   options.onOpen(session);
   try {
     await options.onConnect(connection, ctx);

@@ -450,8 +450,23 @@ export class WebSockets extends LifecycleCapability {
   }
 
   #reply(connection: Connection, response: RpcResponse): void {
+    let text: string;
     try {
-      connection.send(JSON.stringify(response));
+      text = JSON.stringify(response);
+    } catch (error) {
+      // A result that JSON cannot carry (a BigInt, a cycle) must still
+      // settle the caller: answer with an error instead of silence.
+      text = JSON.stringify({
+        type: "rpc",
+        id: response.id,
+        success: false,
+        error: `Result is not JSON-serializable: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      } satisfies RpcResponse);
+    }
+    try {
+      connection.send(text);
     } catch {
       // The peer disconnected while the callable was running.
     }
