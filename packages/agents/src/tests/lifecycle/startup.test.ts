@@ -27,6 +27,10 @@ class OrderedStartCapability extends LifecycleCapability {
   }
 }
 
+class CatchAllStartCapability extends OrderedStartCapability {
+  override readonly claims = "catch-all";
+}
+
 describe("Lifecycle startup", () => {
   it("starts capabilities and the host from RPC entry points", async () => {
     const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
@@ -65,16 +69,28 @@ describe("Lifecycle startup", () => {
     });
   });
 
-  it("dispatches fallback capabilities after later-installed ones", async () => {
+  it("dispatches a catch-all capability after later-installed ones", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const order: string[] = [];
       const { lifecycle } = install(new OrderedStartCapability("first", order));
       lifecycle
-        .use(new OrderedStartCapability("fallback", order), { fallback: true })
+        .use(new CatchAllStartCapability("catch-all", order))
         .use(new OrderedStartCapability("second", order));
 
       await lifecycle.start();
-      expect(order).toEqual(["first", "second", "fallback"]);
+      expect(order).toEqual(["first", "second", "catch-all"]);
+    });
+  });
+
+  it("rejects installing a second catch-all capability", async () => {
+    await withCapabilityHarness(({ install }) => {
+      const order: string[] = [];
+      const { lifecycle } = install(new CatchAllStartCapability("one", order));
+      expect(() =>
+        lifecycle.use(new CatchAllStartCapability("two", order))
+      ).toThrow(
+        'Lifecycle already has a catch-all capability ("one"); a second one could never be reached'
+      );
     });
   });
 

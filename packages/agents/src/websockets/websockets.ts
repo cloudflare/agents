@@ -91,6 +91,9 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
  * @experimental The API surface may change before stabilizing.
  */
 export class WebSockets extends LifecycleCapability {
+  /** Claims every upgrade, so Lifecycle dispatches it after all others. */
+  override readonly claims = "catch-all";
+
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #callablesTarget: RpcTarget | undefined;

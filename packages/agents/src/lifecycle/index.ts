@@ -21,7 +21,6 @@ export {
 export {
   Lifecycle,
   type LifecycleOptions,
-  type LifecycleUseOptions,
   type MemoryLimitContext,
   type LifecycleJobContext,
   type LifecycleJobs,
