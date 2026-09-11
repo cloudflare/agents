@@ -305,4 +305,51 @@ describe("a plain Durable Object hub routing to one Agent per chat", () => {
       pipe[Symbol.dispose]();
     }
   });
+
+  it("validates browser-controlled arguments at runtime", async () => {
+    const userId = uniqueUser();
+    const user = env.UserHub.getByName(userId);
+    const chatId = await user.createChat();
+
+    for (const body of [
+      { role: "narrator", text: "x" },
+      { role: "user", text: "" },
+      { role: "user", text: "y".repeat(2_001) },
+      null
+    ]) {
+      const response = await exports.default.fetch(chatUrl(userId, chatId), {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(await user.listChats()).toMatchObject([
+      { id: chatId, metadata: { title: null } }
+    ]);
+
+    // Hub callables reject bad arguments as rpc errors, not crashes.
+    const response = await exports.default.fetch(
+      `http://example.com/agents/user-hub/${userId}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const socket = response.webSocket;
+    if (!socket) throw new Error("Expected a WebSocket upgrade response");
+    socket.accept();
+    const reply = new Promise<Record<string, unknown>>((resolve) => {
+      socket.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
+        if (frame.type === "rpc") resolve(frame);
+      });
+    });
+    socket.send(
+      JSON.stringify({
+        type: "rpc",
+        id: "1",
+        method: "searchChats",
+        args: ["q".repeat(201)]
+      })
+    );
+    expect(await reply).toMatchObject({ id: "1", success: false });
+    socket.close(1000, "done");
+  });
 });

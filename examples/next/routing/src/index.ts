@@ -55,6 +55,29 @@ type ChatOwner = {
   chatId: string;
 };
 
+const MAX_TEXT = 2_000;
+const MAX_QUERY = 200;
+
+/** Runtime guards: every method here is reachable from a browser. */
+function assertRole(value: unknown): "user" | "assistant" {
+  if (value === "user" || value === "assistant") return value;
+  throw new Error('role must be "user" or "assistant"');
+}
+function assertText(value: unknown, max: number, what: string): string {
+  if (typeof value !== "string" || !value.trim() || value.length > max) {
+    throw new Error(
+      `${what} must be a non-empty string of at most ${max} characters`
+    );
+  }
+  return value;
+}
+function assertChatId(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f-]{36}$/i.test(value)) {
+    throw new Error("chatId must be an entry id");
+  }
+  return value;
+}
+
 /** One Durable Object per conversation, reached only through its owner. */
 export class ChatAgent extends Agent<Env> {
   onStart(): void {
@@ -74,6 +97,8 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async addMessage(role: "user" | "assistant", text: string): Promise<number> {
+    assertRole(role);
+    assertText(text, MAX_TEXT, "text");
     const [{ id: seq }] = this.sql<{ id: number }>`
       INSERT INTO messages (role, text, at) VALUES (${role}, ${text}, ${Date.now()})
       RETURNING id
@@ -126,18 +151,18 @@ export class ChatAgent extends Agent<Env> {
       } catch {
         return new Response("Invalid JSON body", { status: 400 });
       }
-      const { role, text } = body as Partial<ChatMessage>;
-      if (
-        (role !== "user" && role !== "assistant") ||
-        typeof text !== "string" ||
-        text === ""
-      ) {
+      const { role, text } = (body ?? {}) as Partial<ChatMessage>;
+      try {
+        await this.addMessage(
+          assertRole(role),
+          assertText(text, MAX_TEXT, "text")
+        );
+      } catch (error) {
         return new Response(
-          'Body must be { "role": "user" | "assistant", "text": string }',
+          error instanceof Error ? error.message : "Invalid message",
           { status: 400 }
         );
       }
-      await this.addMessage(role, text);
     }
     return Response.json(this.getMessages());
   }
@@ -173,11 +198,11 @@ class HubCallables extends RpcTarget {
   }
 
   searchChats(query: string) {
-    return this.#hub.searchChats(query);
+    return this.#hub.searchChats(assertText(query, MAX_QUERY, "query"));
   }
 
   deleteChat(chatId: string): Promise<boolean> {
-    return this.#hub.deleteChat(chatId);
+    return this.#hub.deleteChat(assertChatId(chatId));
   }
 }
 
