@@ -174,6 +174,10 @@ export class Queue<
    * Move every `cf_agents_queues` row into the job queue and drop the
    * table. Idempotent: a missing table means a fresh object or a completed
    * migration. Rows keep their insertion order.
+   *
+   * TEMPORARY: one-shot upgrade path for objects that had queued items when
+   * this release landed. Remove in the next minor release (with the schema
+   * version bump that gates it), once every deployed object has migrated.
    */
   async #migrateLegacyQueueTable(storage: DurableObjectStorage): Promise<void> {
     const tables = storage.sql

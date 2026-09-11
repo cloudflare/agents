@@ -10554,6 +10554,10 @@ export class Think<
    * Move undelivered rows of the retired `cf_think_workflow_notifications`
    * outbox into the queue and drop the table. Idempotent: a missing table
    * means a fresh object or a completed migration.
+   *
+   * TEMPORARY: one-shot upgrade path for objects that were mid-delivery when
+   * this release landed. Remove in the next minor release, once every
+   * deployed object has started on this version and migrated.
    */
   private async _migrateLegacyWorkflowNotifications(): Promise<void> {
     const tables = this.ctx.storage.sql

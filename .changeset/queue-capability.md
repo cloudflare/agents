@@ -7,4 +7,6 @@ Add the `Queue` Lifecycle capability (`agents/queue`) for durable background wor
 
 `Agent.queue()` and friends now delegate to the capability. The `cf_agents_queues` table and the in-isolate drain are gone; legacy rows migrate into the job queue on the next start. `queue()` accepts `options.id`; `dequeue`, `dequeueAll`, `dequeueAllByCallback`, `getQueue`, and `getQueues` are now asynchronous; and `QueueItem.created_at` is renamed `createdAt`. `LifecycleServices.starting()` is replaced by `status()`, which returns `"zero" | "starting" | "started"`.
 
-Think's workflow-notification outbox and submission drain now run as queue items; the `cf_think_workflow_notifications` table migrates and is dropped on start. Workflow-notification delivery is retried 5 times in-process, then dropped with a `queue:error` event, instead of retrying indefinitely with backoff.
+Think's workflow-notification outbox and submission drain now run as queue items; the `cf_think_workflow_notifications` table migrates and is dropped on start.
+
+Both one-shot migrations (`cf_agents_queues` in Queue, `cf_think_workflow_notifications` in Think) are temporary upgrade paths and will be removed in the next minor release, by which point every started object has migrated. Deployments skipping this release should upgrade through it. Workflow-notification delivery is retried 5 times in-process, then dropped with a `queue:error` event, instead of retrying indefinitely with backoff.
