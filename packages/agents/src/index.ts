@@ -4657,17 +4657,24 @@ export class Agent<
       }
     } finally {
       this._runFiberActiveFibers.delete(id);
-      this._withAgentSpan(
-        "finalize_fiber",
-        "fiber",
-        {
-          "cloudflare.agents.fiber.id": id,
-          "cloudflare.agents.fiber.name": name
-        },
-        () => {
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
-        }
-      );
+      try {
+        this._withAgentSpan(
+          "finalize_fiber",
+          "fiber",
+          {
+            "cloudflare.agents.fiber.id": id,
+            "cloudflare.agents.fiber.name": name
+          },
+          () => {
+            this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
+          }
+        );
+      } catch (error) {
+        console.error(
+          `[Agent] Failed to finalize fiber "${name}" (${id}); leaving run row for recovery:`,
+          error
+        );
+      }
       dispose();
       if (root && registeredFacetRun) {
         try {
