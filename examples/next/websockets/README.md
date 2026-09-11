@@ -44,16 +44,19 @@ await agent.call("countdown", [3], {
 });
 ```
 
-| Transport        | Wire                                                   | Hibernates | What `stub` / `call()` do                             |
-| ---------------- | ------------------------------------------------------ | ---------- | ----------------------------------------------------- |
-| `"cf-websocket"` | Hibernating WebSocket, managed by PartySocket          | Yes        | Send `rpc` frames; the capability answers them        |
-| `"capnweb"`      | The same frames through one Cap'n Web session (a pipe) | No         | Identical frames, identical answers, through the pipe |
+| Transport        | Wire                                                                    | Hibernates | What `stub` / `call()` do                                                                                      |
+| ---------------- | ----------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------- |
+| `"cf-websocket"` | Hibernating WebSocket, managed by PartySocket                           | Yes        | Send JSON `rpc` frames; the capability answers them. Results must be JSON.                                     |
+| `"capnweb"`      | One Cap'n Web session: a frame pipe plus the host's callables, natively | No         | Invoke the methods directly. An `RpcTarget` result is a live stub, a `ReadableStream` streams, calls pipeline. |
 
 Everything else about the hook is the same on both: `identified` flips when
 the capability sends the identity frame, `onMessage` receives the room's own
 frames (`history`, `join`, `message`, `leave`), reconnection and backoff are
 PartySocket's. The demo page opens both transports side by side into the
-same room so you can watch one broadcast reach both.
+same room so you can watch one broadcast reach both, and press
+`stub.member().whisper()` on each: over capnweb the returned `MemberHandle`
+is a live stub and the whisper lands; over cf-websocket the same call
+reports that an `RpcTarget` cannot be put in a JSON frame.
 
 ## What else the room shows
 

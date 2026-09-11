@@ -1,4 +1,5 @@
 import { RpcTarget } from "cloudflare:workers";
+import { CAPNWEB_TRANSPORT_SEND } from "./transport-protocol";
 
 /** A named remote method ready to be exposed on a callables root. */
 export type CallableInvoker = (...args: unknown[]) => unknown;
@@ -13,6 +14,11 @@ function assertExposable(name: string): boolean {
   if (name === "then") {
     throw new Error(
       'A callables target cannot expose a method named "then" — it would make the remote stub thenable'
+    );
+  }
+  if (name === CAPNWEB_TRANSPORT_SEND) {
+    throw new Error(
+      `A callables target cannot expose "${CAPNWEB_TRANSPORT_SEND}"; it is the transport's frame pipe`
     );
   }
   return !(
@@ -58,4 +64,27 @@ export function exposableMethods(
     prototype = Object.getPrototypeOf(prototype);
   }
   return methods;
+}
+
+/**
+ * Build a Cap'n Web session root exposing exactly the given methods.
+ *
+ * Cap'n Web resolves methods on the prototype chain, rejects own
+ * instance properties, and breaks on Proxy-wrapped roots — so the root
+ * is a private `RpcTarget` subclass whose prototype carries the methods
+ * and nothing else.
+ */
+export function buildRoot(
+  methods: ReadonlyMap<string, CallableInvoker>
+): RpcTarget {
+  class Root extends RpcTarget {}
+  for (const [name, invoke] of methods) {
+    Object.defineProperty(Root.prototype, name, {
+      value: invoke,
+      writable: true,
+      configurable: true,
+      enumerable: false
+    });
+  }
+  return new Root();
 }

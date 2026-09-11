@@ -13,9 +13,13 @@ The experimental `?__agents_rpc=capnweb` callables endpoint from 0.23.0 is
 removed: the same target is reached through `useAgent` on either transport.
 
 Clients can pick the wire with `useAgent({ transport: "capnweb" })` (also on
-`AgentClient`). The default `"cf-websocket"` is the hibernating socket;
-`"capnweb"` carries the same frames over one Cap'n Web RPC session, and the
-Durable Object stays in memory while such a connection is open. PartySocket
-keeps owning reconnection and buffering on both — the transport only swaps
-the socket class it instantiates. Handlers are wire-agnostic, and both kinds
-of connection appear in `getConnections()`.
+`AgentClient`). The default `"cf-websocket"` is the hibernating socket and
+answers `call()`/`stub` as JSON `rpc` frames. `"capnweb"` carries protocol
+frames through one Cap'n Web session whose root also serves `callables`
+natively: `call()`/`stub` invoke them directly, an `RpcTarget` result comes
+back as a live stub, a `ReadableStream` streams, and calls pipeline. The
+Durable Object stays in memory while a capnweb connection is open.
+PartySocket keeps owning reconnection and buffering on both — the transport
+only swaps the socket class it instantiates. Handlers are wire-agnostic, and
+both kinds of connection appear in `getConnections()`. `@callable()`
+decorators stay a JSON-wire feature of `Agent`.

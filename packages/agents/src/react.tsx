@@ -19,7 +19,11 @@ import {
   AgentConnectionError as AgentConnectionErrorCtor,
   isTerminalCloseEvent
 } from "./client";
-import { CapnWebSocket } from "./websockets/capnweb-socket";
+import {
+  boundCapnWebSocket,
+  nativeCall,
+  type CapnWebSocket
+} from "./websockets/capnweb-socket";
 import {
   CAPNWEB_TRANSPORT_QUERY,
   CAPNWEB_TRANSPORT_VALUE,
@@ -357,9 +361,20 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     ...restOptions
   } = options;
   // PartySocket keeps reconnection, buffering, and backoff; the transport
-  // only swaps the socket class it instantiates.
-  const socketClass =
-    transport === "capnweb" ? { WebSocket: CapnWebSocket } : {};
+  // only swaps the socket class it instantiates. The bound subclass hands
+  // the hook each live Cap'n Web socket so `call()` can invoke natively.
+  const capnWebRef = useRef<CapnWebSocket | null>(null);
+  const socketClass = useMemo(
+    () =>
+      transport === "capnweb"
+        ? {
+            WebSocket: boundCapnWebSocket((socket) => {
+              capnWebRef.current = socket;
+            })
+          }
+        : {},
+    [transport]
+  );
 
   const subChain = useMemo(
     () => (subOption ?? []).map((s) => ({ agent: s.agent, name: s.name })),
@@ -944,6 +959,25 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       args: unknown[] = [],
       options?: CallOptions | StreamOptions
     ): Promise<T> => {
+      // On the Cap'n Web transport, callables are native methods on the
+      // session root: invoke them directly so an RpcTarget result arrives
+      // as a live stub and chained calls pipeline. The JSON `rpc` frame
+      // below is the WebSocket wire's protocol.
+      const native = capnWebRef.current;
+      if (native && socketRef.current?.readyState === WebSocket.OPEN) {
+        const legacy =
+          options !== undefined &&
+          ("onChunk" in options || "onDone" in options || "onError" in options);
+        return nativeCall<T>(
+          native,
+          method,
+          args,
+          legacy
+            ? { stream: options as StreamOptions }
+            : ((options as CallOptions | undefined) ?? {}),
+          defaultCallTimeoutRef.current
+        );
+      }
       return new Promise((resolve, reject) => {
         const socket = socketRef.current;
         if (

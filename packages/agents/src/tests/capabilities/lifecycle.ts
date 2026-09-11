@@ -242,6 +242,11 @@ class PlainHostCallables extends RpcTarget {
     return this.#greeting;
   }
 
+  /** An RpcTarget result: a live stub on Cap'n Web, unserializable as JSON. */
+  counter(): Counter {
+    return new Counter();
+  }
+
   streamNumbers(): ReadableStream<number> {
     return new ReadableStream<number>({
       start(controller) {
@@ -251,6 +256,20 @@ class PlainHostCallables extends RpcTarget {
         controller.close();
       }
     });
+  }
+}
+
+/** Returned by reference over Cap'n Web: the caller gets a live stub. */
+class Counter extends RpcTarget {
+  #value = 0;
+
+  increment(by = 1): number {
+    this.#value += by;
+    return this.#value;
+  }
+
+  value(): number {
+    return this.#value;
   }
 }
 
