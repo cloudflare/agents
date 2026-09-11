@@ -104,6 +104,10 @@ Two sharp edges to design around:
   capability runs. Reach a chat's dynamic agents through a direct
   connection to that chat.
 
+This is a demo: anyone who knows a user ID can list, route into, and delete
+that user's chats. Put authentication in front of `routeAgentRequest` and
+derive the hub name from the session before deploying something like it.
+
 ## Run
 
 ```sh
