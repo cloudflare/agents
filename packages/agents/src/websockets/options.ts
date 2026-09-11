@@ -47,13 +47,23 @@ export interface WebSocketsOptions {
   readonly handlers?: WebSocketHandlers;
 
   /**
-   * An `RpcTarget` whose methods are exposed to remote callers over a
-   * Cap'n Web session (`?__agents_rpc=capnweb`). The target's prototype
-   * methods are the complete remote interface. Methods run through the
-   * host invocation boundary and may return a `ReadableStream` to
-   * stream results.
+   * An `RpcTarget` whose prototype methods are the host's complete remote
+   * interface, reached through `useAgent().call` and `.stub`. On the
+   * `cf-websocket` wire they are answered as JSON `rpc` frames. On the
+   * `capnweb` wire they are native Cap'n Web methods on the session root:
+   * an `RpcTarget` result becomes a live stub, a `ReadableStream` streams,
+   * and calls pipeline. Methods run through the host invocation boundary
+   * with the calling connection in scope. `Agent` answers its own
+   * decorated methods on the JSON wire and does not set this.
    */
   readonly callables?: RpcTarget;
+
+  /**
+   * Send the identity frame (`cf_agent_identity`) to each new connection,
+   * so `useAgent` and `AgentClient` resolve `ready` against this host.
+   * Defaults to `true`. `Agent` sends its own identity and passes `false`.
+   */
+  readonly identity?: boolean;
 
   /**
    * Tags attached to each accepted connection, queryable through

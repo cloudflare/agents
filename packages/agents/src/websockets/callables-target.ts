@@ -1,5 +1,5 @@
 import { RpcTarget } from "cloudflare:workers";
-import { decoratedMethods } from "../callable-decorator";
+import { CAPNWEB_TRANSPORT_SEND } from "./transport-protocol";
 
 /** A named remote method ready to be exposed on a callables root. */
 export type CallableInvoker = (...args: unknown[]) => unknown;
@@ -14,6 +14,11 @@ function assertExposable(name: string): boolean {
   if (name === "then") {
     throw new Error(
       'A callables target cannot expose a method named "then" — it would make the remote stub thenable'
+    );
+  }
+  if (name === CAPNWEB_TRANSPORT_SEND) {
+    throw new Error(
+      `A callables target cannot expose "${CAPNWEB_TRANSPORT_SEND}"; it is the transport's frame pipe`
     );
   }
   return !(
@@ -66,54 +71,20 @@ export function exposableMethods(
  *
  * Cap'n Web resolves methods on the prototype chain, rejects own
  * instance properties, and breaks on Proxy-wrapped roots — so the root
- * is a private `RpcTarget` subclass whose prototype carries the
- * methods and nothing else.
- *
- * @param methods - Method names mapped to their invokers.
- * @returns A root suitable as a Cap'n Web session's local main.
+ * is a private `RpcTarget` subclass whose prototype carries the methods
+ * and nothing else.
  */
-export function buildCallablesRoot(
+export function buildRoot(
   methods: ReadonlyMap<string, CallableInvoker>
 ): RpcTarget {
-  class CallablesRoot extends RpcTarget {}
+  class Root extends RpcTarget {}
   for (const [name, invoke] of methods) {
-    Object.defineProperty(CallablesRoot.prototype, name, {
+    Object.defineProperty(Root.prototype, name, {
       value: invoke,
       writable: true,
       configurable: true,
       enumerable: false
     });
   }
-  return new CallablesRoot();
-}
-
-/**
- * Build a callables target from a host's `@callable()`-decorated
- * methods — the fallback interface source when no `RpcTarget` is
- * configured (an explicit target is preferred and wins).
- *
- * Methods are resolved on the host at call time, so framework wrapping
- * applied after construction (e.g. Agent's context auto-wrapping) is
- * honored. Methods registered with `streaming: true` expect the legacy
- * Agent RPC protocol's injected `StreamingResponse` and are not exposed
- * here — return a `ReadableStream` from an `RpcTarget` method instead.
- *
- * @param host - The object whose decorated methods form the interface.
- * @returns A target exposing the decorated methods, or `undefined`
- * when the host has none.
- */
-export function callablesFromDecorated(host: object): RpcTarget | undefined {
-  const methods = new Map<string, CallableInvoker>();
-  for (const [name, metadata] of decoratedMethods(host)) {
-    if (metadata.streaming || !assertExposable(name)) continue;
-    methods.set(name, (...args) => {
-      const method = Reflect.get(host, name) as unknown;
-      if (typeof method !== "function") {
-        throw new Error(`Method ${name} is not callable`);
-      }
-      return Reflect.apply(method, host, args);
-    });
-  }
-  if (methods.size === 0) return undefined;
-  return buildCallablesRoot(methods);
+  return new Root();
 }

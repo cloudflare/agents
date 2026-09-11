@@ -70,6 +70,10 @@ export type LifecycleSockets = {
  * @experimental The API surface may change before stabilizing.
  */
 export type LifecycleServices = {
+  /** The host's Durable Object name; see `Lifecycle.name`. */
+  readonly name: string;
+  /** The host class name, as exported from the Worker. */
+  readonly className: string;
   readonly storage: DurableObjectStorage;
   readonly sockets: LifecycleSockets;
   readonly ready: () => Promise<void>;

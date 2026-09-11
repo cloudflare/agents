@@ -140,11 +140,14 @@ failure propagates, and failed startup can be retried.
 
 A capability declares how it claims traffic with `claims`, which defaults to
 `"selective"`. A `"catch-all"` capability dispatches after every other
-capability, whenever it was installed, and Lifecycle refuses to install a
-second one. The `WebSockets` capability is a catch-all, since it claims every
-upgrade: a subclass that installs request or upgrade middleware from
-its own constructor still runs first, even though `Agent`'s constructor ran
-earlier.
+capability, whenever it was installed. Catch-alls are unique per dispatch
+hook: Lifecycle refuses a second catch-all for `onRequest` or for
+`onWebSocketUpgrade`, since it could never be reached, but one of each
+coexists. The `WebSockets` capability is a catch-all for upgrades only, so
+an HTTP catch-all installs beside it, and selective HTTP capabilities that
+target their own routes run before both. A subclass that installs request or
+upgrade middleware from its own constructor still runs first, even though
+`Agent`'s constructor ran earlier.
 
 Capabilities extending `LifecycleCapability` receive one standard service
 surface: storage, readiness, startup state, the job queue, a host
@@ -308,8 +311,8 @@ to export `getCurrentAgent()` for the `Agent` class as a compatibility alias.
 
 Lifecycle itself does not model WebSockets. Hosts that want connections
 install the `WebSockets` capability, which owns the subsystem end to end —
-it claims upgrades, accepts hibernating sockets, dispatches handlers inside
-the host invocation boundary, and answers `getConnections()`:
+it claims upgrades, dispatches handlers inside the host invocation boundary,
+and answers `getConnections()`:
 
 ```ts
 import { WebSockets } from "agents/websockets";
@@ -323,7 +326,8 @@ export class MyObject extends DurableObject<Env> {
       onMessage: (connection, message) => {
         connection.send(`echo:${message}`);
       }
-    }
+    },
+    callables: new MyCallables(this)
   });
   readonly lifecycle = Lifecycle.install(this).use(this.webSockets);
 }
@@ -331,18 +335,49 @@ export class MyObject extends DurableObject<Env> {
 
 Without the capability installed, WebSocket upgrades are declined.
 
-The capability can also serve remote methods: pass an `RpcTarget` as
-`callables` and its prototype methods become the complete remote interface,
-served over a Cap'n Web session (`?__agents_rpc=capnweb`). An `Agent` adds
-no new surface for this — its `@callable()`-decorated methods are its
-interface, served on every wire: natively over the legacy JSON RPC protocol
-and, through the decorator-derived target, over the Cap'n Web endpoint.
+### A plain host works with `useAgent`
 
-Connections use Cloudflare's WebSocket Hibernation API. Idle clients remain
-connected while the Durable Object can leave memory; when a message wakes the
-object, its constructor and lifecycle startup run again before `onMessage`.
-State needed after a wake must be stored durably or through
-`connection.setState()`. There is no non-hibernating mode.
+The capability speaks the Agent protocol on every connection, so a plain
+Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
+`Agent`:
+
+- On connect it sends the identity frame, which resolves the client's
+  `ready` and `identified`. Pass `identity: false` to opt out; `Agent` does,
+  because it sends its own under `sendIdentityOnConnect`.
+- `callables` is an `RpcTarget` whose prototype methods are the host's
+  complete remote interface, reached through `call()` and `stub`. On the
+  `cf-websocket` wire the capability answers them as JSON `rpc` frames. On
+  the `capnweb` wire they are native Cap'n Web methods on the session root:
+  a returned `RpcTarget` arrives as a live stub the client can keep
+  calling, a `ReadableStream` streams, and chained calls pipeline. Methods
+  run through the host invocation boundary with the calling connection in
+  scope.
+- Any other frame goes to `handlers.onMessage`.
+
+An `Agent` adds no new surface for this: its `@callable()`-decorated methods
+are its JSON-wire interface, answered by its own message handler. They are
+not mirrored onto the Cap'n Web root; an Agent that wants native calls on
+`capnweb` passes a `callables` target like any other host.
+
+### Two wires
+
+The client chooses how frames travel:
+
+- **`cf-websocket`** (default) — accepted with Cloudflare's WebSocket Hibernation
+  API. Idle clients remain connected while the Durable Object leaves memory;
+  when a message wakes it, the constructor and lifecycle startup run again
+  before `onMessage`. State needed after a wake belongs in storage or
+  `connection.setState()`.
+- **Cap'n Web** (`?__agents_transport=capnweb`, or
+  `useAgent({ transport: "capnweb" })`) — protocol frames travel through one
+  pipe method on a Cap'n Web session whose root also carries the host's
+  `callables` natively. The connection is an in-memory socket and does not
+  hibernate: the object stays pinned while it is open, and clients reconnect
+  after an eviction.
+
+Handlers are wire-agnostic. Both kinds of connection dispatch the same
+`onConnect`/`onMessage`/`onClose`/`onError`, appear in `getConnections()`,
+and honour `connection.close(code, reason)`.
 
 ## Native RPC
 

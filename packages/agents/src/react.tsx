@@ -17,11 +17,25 @@ import {
   createStubProxy,
   DEFAULT_CALL_TIMEOUT_MS,
   AgentConnectionError as AgentConnectionErrorCtor,
-  isTerminalCloseEvent
+  isTerminalCloseEvent,
+  nativeCall,
+  NativeCallQueue,
+  splitCallOptions
 } from "./client";
+import {
+  boundCapnWebSocket,
+  type CapnWebSocket
+} from "./websockets/capnweb-socket";
+import {
+  CAPNWEB_TRANSPORT_QUERY,
+  CAPNWEB_TRANSPORT_VALUE,
+  type AgentTransport
+} from "./websockets/transport-protocol";
 import { buildSubAgentPathUnchecked } from "./sub-routing";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
+
+export type { AgentTransport } from "./websockets/transport-protocol";
 import {
   applyAgentToolEvent,
   createAgentToolEventState,
@@ -153,6 +167,17 @@ export type UseAgentOptions<State = unknown> = Omit<
      * useAgent({ agent: "UserAgent", basePath: "user" })
      */
     basePath?: string;
+    /**
+     * Wire the connection travels on. `"cf-websocket"` (default) is a
+     * hibernating WebSocket where `call()` sends JSON `rpc` frames.
+     * `"capnweb"` carries protocol frames over a Cap'n Web session whose
+     * root also serves the host's `callables` natively, so `call()` and
+     * `stub` invoke them directly and an `RpcTarget` result is a live stub.
+     * The Durable Object stays in memory while a capnweb connection is open.
+     * Identity, state, and reconnection behave the same on both.
+     * @experimental The `"capnweb"` transport is experimental.
+     */
+    transport?: AgentTransport;
     /** Query parameters - can be static object or async function */
     query?: QueryObject | (() => Promise<QueryObject>);
     /** Dependencies for async query caching */
@@ -337,8 +362,30 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     defaultCallTimeout,
     onConnectionError,
     shouldReconnectOnClose,
+    transport = "cf-websocket",
     ...restOptions
   } = options;
+  // PartySocket keeps reconnection, buffering, and backoff; the transport
+  // only swaps the socket class it instantiates. The bound subclass hands
+  // the hook each live Cap'n Web socket so `call()` can invoke natively.
+  const capnWebRef = useRef<CapnWebSocket | null>(null);
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
+  // Native calls issued before the Cap'n Web socket is open wait here
+  // instead of degrading to JSON frames; flushed on open, rejected on a
+  // permanent close.
+  const nativeQueueRef = useRef(new NativeCallQueue());
+  const socketClass = useMemo(
+    () =>
+      transport === "capnweb"
+        ? {
+            WebSocket: boundCapnWebSocket((socket) => {
+              capnWebRef.current = socket;
+            })
+          }
+        : {},
+    [transport]
+  );
 
   const subChain = useMemo(
     () => (subOption ?? []).map((s) => ({ agent: s.agent, name: s.name })),
@@ -434,10 +481,14 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         pending.sentOn = socket;
       }
     }
+    const native =
+      transportRef.current === "capnweb" ? capnWebRef.current : null;
+    if (native) nativeQueueRef.current.flush(native);
   };
 
   /** Reject (and remove) every still-queued (never transmitted) call. */
   const rejectQueuedCalls = (reason: string) => {
+    nativeQueueRef.current.rejectAll(reason);
     const error = new Error(reason);
     for (const [id, pending] of pendingCallsRef.current) {
       if (pending.sentOn === null) {
@@ -624,12 +675,20 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   );
 
   // If basePath is provided, use it directly; otherwise construct from agent/name
+  // The transport rides in the query too, so it is part of PartySocket's
+  // socket key: changing `transport` reconnects on the new wire.
+  const socketQuery =
+    transport === "capnweb"
+      ? { ...resolvedQuery, [CAPNWEB_TRANSPORT_QUERY]: CAPNWEB_TRANSPORT_VALUE }
+      : resolvedQuery;
+
   const socketOptions = options.basePath
     ? {
         basePath: options.basePath,
         path: combinedPath || undefined,
-        query: resolvedQuery,
+        query: socketQuery,
         ...restOptions,
+        ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       }
     : {
@@ -637,8 +696,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         prefix: "agents",
         room: options.name || "default",
         path: combinedPath || undefined,
-        query: resolvedQuery,
+        query: socketQuery,
         ...restOptions,
+        ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       };
 
@@ -651,12 +711,16 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // `name` prop changed while the call was waiting for a connection.
   // Credentials (query params) are deliberately excluded: a token
   // refresh doesn't change where calls go.
+  // The wire is part of the address: queued calls belong to a transport as
+  // much as to an instance, so switching `transport` rejects them rather
+  // than flushing a native call onto a JSON socket or vice versa.
   const addressKey = JSON.stringify([
     options.host ?? null,
     options.basePath ?? null,
     agentNamespace,
     options.name || "default",
-    combinedPath || null
+    combinedPath || null,
+    transport
   ]);
   const visibleConnectionError =
     connectionErrorAddressKeyRef.current === addressKey
@@ -914,6 +978,38 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       args: unknown[] = [],
       options?: CallOptions | StreamOptions
     ): Promise<T> => {
+      // On the Cap'n Web transport, callables are native methods on the
+      // session root: invoke them directly so an RpcTarget result arrives
+      // as a live stub and chained calls pipeline. The JSON `rpc` frame
+      // below is the WebSocket wire's protocol.
+      if (transportRef.current === "capnweb") {
+        const native = capnWebRef.current;
+        const socket = socketRef.current;
+        if (native && socket?.readyState === WebSocket.OPEN) {
+          return nativeCall<T>(
+            native,
+            method,
+            args,
+            options,
+            defaultCallTimeoutRef.current
+          );
+        }
+        if (
+          socket &&
+          connectionErrorRef.current &&
+          socket.readyState === socket.CLOSED
+        ) {
+          return Promise.reject(new Error("Connection closed"));
+        }
+        // Connecting or between reconnects: hold the call as a native call
+        // rather than queueing a JSON frame that would change its meaning.
+        return nativeQueueRef.current.enqueue<T>(
+          method,
+          args,
+          options,
+          defaultCallTimeoutRef.current
+        );
+      }
       return new Promise((resolve, reject) => {
         const socket = socketRef.current;
         if (
@@ -928,16 +1024,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         const id = crypto.randomUUID();
         let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-        // Detect legacy format: { onChunk?, onDone?, onError? } vs new format: { timeout?, stream? }
-        const isLegacyFormat =
-          options &&
-          ("onChunk" in options || "onDone" in options || "onError" in options);
-        const streamOptions = isLegacyFormat
-          ? (options as StreamOptions)
-          : (options as CallOptions | undefined)?.stream;
-        const timeout = isLegacyFormat
-          ? undefined
-          : (options as CallOptions | undefined)?.timeout;
+        const { stream: streamOptions, timeout } = splitCallOptions(options);
 
         // Apply the default timeout as a backstop for non-streaming
         // calls so a lost response rejects instead of hanging forever.

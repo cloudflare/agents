@@ -97,7 +97,7 @@ import {
   type CurrentAgentContext
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
-import { callablesFromDecorated, WebSockets } from "./websockets";
+import { WebSockets } from "./websockets";
 export {
   getAgentByName,
   routeAgentRequest,
@@ -1179,12 +1179,10 @@ export class Agent<
         this.onClose(connection, code, reason, wasClean),
       onError: (connection, error) => this.onError(connection, error)
     },
-    // Agent's callable interface comes from its existing public
-    // surface — @callable()-decorated methods — served here over the
-    // Cap'n Web endpoint and, natively, over the legacy JSON RPC
-    // protocol: one interface on every wire, no new Agent members.
-    // Capability hosts pass an RpcTarget directly instead.
-    callables: callablesFromDecorated(this),
+    // Agent answers its own rpc frames in onMessage (facet bridging,
+    // StreamingResponse) and sends identity itself under its
+    // sendIdentityOnConnect policy, so it configures neither here.
+    identity: false,
     getConnectionTags: (connection, ctx) =>
       this.getConnectionTags(connection, ctx)
   });

@@ -242,6 +242,16 @@ class PlainHostCallables extends RpcTarget {
     return this.#greeting;
   }
 
+  /** An RpcTarget result: a live stub on Cap'n Web, unserializable as JSON. */
+  counter(): Counter {
+    return new Counter();
+  }
+
+  /** A value JSON cannot carry; the JSON wire must still settle the call. */
+  bigint(): { value: bigint } {
+    return { value: 1n };
+  }
+
   streamNumbers(): ReadableStream<number> {
     return new ReadableStream<number>({
       start(controller) {
@@ -251,6 +261,20 @@ class PlainHostCallables extends RpcTarget {
         controller.close();
       }
     });
+  }
+}
+
+/** Returned by reference over Cap'n Web: the caller gets a live stub. */
+class Counter extends RpcTarget {
+  #value = 0;
+
+  increment(by = 1): number {
+    this.#value += by;
+    return this.#value;
+  }
+
+  value(): number {
+    return this.#value;
   }
 }
 
@@ -280,6 +304,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       onClose: () => {
         this.#webSocketContexts.push(currentWebSocketContext("close"));
       }
+    },
+    // `?tags=N` asks for N user tags, to probe the shared tag policy.
+    getConnectionTags: (_connection, { request }) => {
+      const count = Number(new URL(request.url).searchParams.get("tags") ?? 0);
+      return Array.from({ length: count }, (_, i) => `t${i}`);
     },
     callables: new PlainHostCallables()
   });
@@ -319,6 +348,31 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
         this.#events.push("dispose:second");
       }
     });
+
+  /** Open connections on either wire, for transport tests. */
+  connectionCount(): number {
+    return [...this.#webSockets.getConnections()].length;
+  }
+
+  /** Tags of one connection, for transport tests. */
+  connectionTags(id: string): readonly string[] | undefined {
+    return this.#webSockets.getConnection(id)?.tags;
+  }
+
+  /**
+   * Close one connection from the host side. Returns the error message when
+   * `close()` throws (reserved code, oversize reason), else null.
+   */
+  closeConnection(id: string, code: number, reason: string): string | null {
+    const connection = this.#webSockets.getConnection(id);
+    if (!connection) return "no such connection";
+    try {
+      connection.close(code, reason);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
 
   onStart(props?: StartupProps): void {
     this.#hostContexts.push(currentLifecycleContext("start"));
