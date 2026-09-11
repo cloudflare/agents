@@ -32,6 +32,28 @@ class CatchAllStartCapability extends OrderedStartCapability {
   override readonly claims = "catch-all";
 }
 
+/** An HTTP catch-all: answers every request, claims no upgrades. */
+class HttpCatchAll extends LifecycleCapability {
+  override readonly claims = "catch-all";
+  constructor(id = "http-catch-all") {
+    super(id);
+  }
+  override onRequest(): Response {
+    return new Response("caught", { status: 404 });
+  }
+}
+
+/** An upgrade catch-all, like WebSockets: claims no requests. */
+class UpgradeCatchAll extends LifecycleCapability {
+  override readonly claims = "catch-all";
+  constructor(id = "upgrade-catch-all") {
+    super(id);
+  }
+  override onWebSocketUpgrade(): Response {
+    return new Response(null, { status: 426 });
+  }
+}
+
 describe("Lifecycle startup", () => {
   it("starts capabilities and the host from RPC entry points", async () => {
     const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
@@ -88,15 +110,33 @@ describe("Lifecycle startup", () => {
     expect(new WebSockets({ handlers: {} }).claims).toBe("catch-all");
   });
 
-  it("rejects installing a second catch-all capability", async () => {
+  it("rejects a second catch-all for the same dispatch hook", async () => {
+    await withCapabilityHarness(({ install }) => {
+      const { lifecycle } = install(new HttpCatchAll("one"));
+      expect(() => lifecycle.use(new HttpCatchAll("two"))).toThrow(
+        'Lifecycle already has a catch-all for onRequest ("one"); a second one could never be reached'
+      );
+    });
+  });
+
+  it("lets catch-alls for disjoint hooks coexist", async () => {
+    await withCapabilityHarness(({ install }) => {
+      const { lifecycle } = install(new UpgradeCatchAll());
+      expect(() => lifecycle.use(new HttpCatchAll())).not.toThrow();
+      // WebSockets claims upgrades only, so an HTTP catch-all sits beside it.
+      expect(() => lifecycle.use(new WebSockets())).toThrow(
+        /catch-all for onWebSocketUpgrade/
+      );
+    });
+  });
+
+  it("a catch-all that implements no dispatch hook never conflicts", async () => {
     await withCapabilityHarness(({ install }) => {
       const order: string[] = [];
       const { lifecycle } = install(new CatchAllStartCapability("one", order));
       expect(() =>
         lifecycle.use(new CatchAllStartCapability("two", order))
-      ).toThrow(
-        'Lifecycle already has a catch-all capability ("one"); a second one could never be reached'
-      );
+      ).not.toThrow();
     });
   });
 

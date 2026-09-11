@@ -110,10 +110,12 @@ export interface DurableObjectCapability<Props extends object = object> {
    *
    * A `"selective"` capability answers only requests and upgrades it
    * recognizes and declines the rest. A `"catch-all"` claims everything
-   * offered to it, so Lifecycle always places it last, whenever it was
-   * installed, and refuses to install a second one. `WebSockets` is a
-   * catch-all: it claims every upgrade, so middleware an `Agent` subclass
-   * installs from its own constructor still runs first.
+   * offered to the hooks it implements, so Lifecycle always places it
+   * last, whenever it was installed, and refuses a second catch-all for
+   * the same hook. Catch-alls for disjoint hooks coexist: `WebSockets`
+   * claims every upgrade and implements no `onRequest`, so an HTTP
+   * catch-all installs beside it. Selective HTTP capabilities target
+   * their own routes and run before either.
    */
   readonly claims?: "selective" | "catch-all";
 
