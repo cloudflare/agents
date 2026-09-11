@@ -159,6 +159,9 @@ export type LifecycleOptions = {
  *
  * @experimental The API surface may change before stabilizing.
  */
+/** The dispatch hooks a catch-all can monopolize; uniqueness is per hook. */
+const CATCH_ALL_HOOKS = ["onRequest", "onWebSocketUpgrade"] as const;
+
 export class Lifecycle<
   Env extends object = Cloudflare.Env,
   Props extends Record<string, unknown> = Record<string, unknown>
@@ -275,8 +278,10 @@ export class Lifecycle<
    *
    * Capabilities dispatch in registration order, except that a capability
    * declaring `claims: "catch-all"` always comes last, whenever it was
-   * installed. At most one catch-all may be installed, since a second one
-   * could never be reached.
+   * installed. Catch-alls are unique per dispatch hook: two may coexist
+   * when they claim disjoint traffic (one `onRequest`, one
+   * `onWebSocketUpgrade`), but a second catch-all for the same hook could
+   * never be reached and is refused.
    *
    * @param capability - The capability to add.
    * @returns This lifecycle.
@@ -301,12 +306,15 @@ export class Lifecycle<
       (candidate) => candidate.claims === "catch-all"
     );
     if (capability.claims === "catch-all") {
-      if (catchAllIndex !== -1) {
-        const installed = lifecycleCapabilityId(
-          this.#capabilities[catchAllIndex]
+      for (const hook of CATCH_ALL_HOOKS) {
+        if (!capability[hook]) continue;
+        const rival = this.#capabilities.find(
+          (candidate) => candidate.claims === "catch-all" && candidate[hook]
         );
+        if (!rival) continue;
+        const installed = lifecycleCapabilityId(rival);
         throw new Error(
-          `Lifecycle already has a catch-all capability${
+          `Lifecycle already has a catch-all for ${hook}${
             installed ? ` (${JSON.stringify(installed)})` : ""
           }; a second one could never be reached`
         );

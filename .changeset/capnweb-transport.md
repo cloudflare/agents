@@ -2,24 +2,10 @@
 "agents": minor
 ---
 
-The `WebSockets` capability speaks the Agent protocol for plain hosts, and
-gains a Cap'n Web connection transport.
+`WebSockets` speaks the Agent protocol for plain hosts, and gains a Cap'n Web transport.
 
-A plain Durable Object composed with `WebSockets` now works with `useAgent`
-and `AgentClient` like an `Agent` does: the capability sends the identity
-frame on connect (`identity: false` opts out) and answers `rpc` frames
-against `callables`, so `call()` and `stub` reach the host's `RpcTarget`.
-The experimental `?__agents_rpc=capnweb` callables endpoint from 0.23.0 is
-removed: the same target is reached through `useAgent` on either transport.
-
-Clients can pick the wire with `useAgent({ transport: "capnweb" })` (also on
-`AgentClient`). The default `"cf-websocket"` is the hibernating socket and
-answers `call()`/`stub` as JSON `rpc` frames. `"capnweb"` carries protocol
-frames through one Cap'n Web session whose root also serves `callables`
-natively: `call()`/`stub` invoke them directly, an `RpcTarget` result comes
-back as a live stub, a `ReadableStream` streams, and calls pipeline. The
-Durable Object stays in memory while a capnweb connection is open.
-PartySocket keeps owning reconnection and buffering on both — the transport
-only swaps the socket class it instantiates. Handlers are wire-agnostic, and
-both kinds of connection appear in `getConnections()`. `@callable()`
-decorators stay a JSON-wire feature of `Agent`.
+- A plain Durable Object composed with `WebSockets` now works with `useAgent` and `AgentClient`: the capability sends the identity frame on connect (`identity: false` opts out) and serves `callables` — an `RpcTarget` whose prototype methods are the host's remote interface.
+- `useAgent({ transport })` and `AgentClient({ transport })` pick the wire. `"cf-websocket"` (default) is the hibernating socket; `call()`/`stub` send JSON `rpc` frames. `"capnweb"` runs one Cap'n Web session that carries protocol frames and serves `callables` natively: `call()`/`stub` invoke them directly, an `RpcTarget` result is a live stub, a `ReadableStream` streams, calls pipeline. The Durable Object stays in memory while a capnweb connection is open. PartySocket still owns reconnection on both.
+- `@callable()` decorators remain the JSON-wire interface of `Agent`; an Agent wanting native calls passes `callables`.
+- The experimental `?__agents_rpc=capnweb` endpoint from 0.23.0 is removed.
+- `LifecycleServices` exposes `name` and `className`.

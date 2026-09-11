@@ -14,7 +14,6 @@ lands.
 | [`sessions`](./sessions)                                 | This PR   | Durable message trees, streamed reads, and Sessions-owned attachments                                                                          |
 | [`websockets`](./websockets)                             | This PR   | One plain `DurableObject`, `useAgent` over the WebSocket or Cap'n Web transport, callables on every wire, hibernating connections and tags     |
 | [`mcp-client`](./mcp-client)                             | Available | `MCPClientManager` installed as a reusable lifecycle capability                                                                                |
-| [`chats`](./chats)                                       | This PR   | One DO per chat plus a per-user push-based index, the recommended many-chats pattern                                                           |
 | [`dynamic-agents`](./dynamic-agents)                     | This PR   | A supervisor runs user-submitted code as facets: isolated storage, supervised abort, code upgrades over stable state                           |
 | [`harnesses/codex`](./harnesses/codex)                   | This PR   | A static Codex Rust/Wasm loop composed as a Lifecycle capability, using LanguageModelV4 and Shell Workspace                                    |
 | [`harnesses/pi`](./harnesses/pi)                         | This PR   | Experimental: pi `AgentHarness` on a pinned pi dev build, composed as an example-local Lifecycle capability                                    |

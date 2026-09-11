@@ -140,11 +140,14 @@ failure propagates, and failed startup can be retried.
 
 A capability declares how it claims traffic with `claims`, which defaults to
 `"selective"`. A `"catch-all"` capability dispatches after every other
-capability, whenever it was installed, and Lifecycle refuses to install a
-second one. The `WebSockets` capability is a catch-all, since it claims every
-upgrade: a subclass that installs request or upgrade middleware from
-its own constructor still runs first, even though `Agent`'s constructor ran
-earlier.
+capability, whenever it was installed. Catch-alls are unique per dispatch
+hook: Lifecycle refuses a second catch-all for `onRequest` or for
+`onWebSocketUpgrade`, since it could never be reached, but one of each
+coexists. The `WebSockets` capability is a catch-all for upgrades only, so
+an HTTP catch-all installs beside it, and selective HTTP capabilities that
+target their own routes run before both. A subclass that installs request or
+upgrade middleware from its own constructor still runs first, even though
+`Agent`'s constructor ran earlier.
 
 Capabilities extending `LifecycleCapability` receive one standard service
 surface: storage, readiness, startup state, the job queue, a host

@@ -711,12 +711,16 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // `name` prop changed while the call was waiting for a connection.
   // Credentials (query params) are deliberately excluded: a token
   // refresh doesn't change where calls go.
+  // The wire is part of the address: queued calls belong to a transport as
+  // much as to an instance, so switching `transport` rejects them rather
+  // than flushing a native call onto a JSON socket or vice versa.
   const addressKey = JSON.stringify([
     options.host ?? null,
     options.basePath ?? null,
     agentNamespace,
     options.name || "default",
-    combinedPath || null
+    combinedPath || null,
+    transport
   ]);
   const visibleConnectionError =
     connectionErrorAddressKeyRef.current === addressKey
