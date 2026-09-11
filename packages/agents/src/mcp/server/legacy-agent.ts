@@ -45,7 +45,7 @@ import {
 export abstract class McpAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = Record<string, unknown>
 > extends Agent<Env, State, Props> {
   private _transport?: Transport;
   private _pendingElicitations = new Map<
