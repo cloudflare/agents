@@ -1,7 +1,8 @@
-import { env } from "cloudflare:workers";
+import { env, RpcTarget } from "cloudflare:workers";
 
 import { describe, expect, it } from "vitest";
 import { LifecycleCapability, type LifecycleServices } from "../../lifecycle";
+import { WebSockets } from "../../websockets";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 class ServiceProbeCapability extends LifecycleCapability {
@@ -80,6 +81,14 @@ describe("Lifecycle startup", () => {
       await lifecycle.start();
       expect(order).toEqual(["first", "second", "catch-all"]);
     });
+  });
+
+  it("WebSockets is a catch-all only when handlers claim plain upgrades", () => {
+    expect(new WebSockets().claims).toBe("selective");
+    expect(
+      new WebSockets({ callables: new (class extends RpcTarget {})() }).claims
+    ).toBe("selective");
+    expect(new WebSockets({ handlers: {} }).claims).toBe("catch-all");
   });
 
   it("rejects installing a second catch-all capability", async () => {

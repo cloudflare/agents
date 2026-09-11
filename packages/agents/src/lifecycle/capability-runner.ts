@@ -111,9 +111,9 @@ export interface DurableObjectCapability<Props extends object = object> {
    * A `"selective"` capability answers only requests and upgrades it
    * recognizes and declines the rest. A `"catch-all"` claims everything
    * offered to it, so Lifecycle always places it last, whenever it was
-   * installed, and refuses to install a second one. `Agent`'s WebSockets
-   * capability is a catch-all: it claims every upgrade, so middleware a
-   * subclass installs from its own constructor still runs first.
+   * installed, and refuses to install a second one. A `WebSockets` with
+   * handlers is a catch-all: it claims every plain upgrade, so middleware
+   * an `Agent` subclass installs from its own constructor still runs first.
    */
   readonly claims?: "selective" | "catch-all";
 
