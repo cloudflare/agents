@@ -2,21 +2,19 @@
 "agents": minor
 ---
 
-Add a Cap'n Web connection transport to the WebSockets capability.
+The `WebSockets` capability speaks the Agent protocol for plain hosts, and
+gains a Cap'n Web connection transport.
 
-A connection can opt into a second wire (`?__agents_transport=capnweb`):
-the same frames travel over a single Cap'n Web RPC session whose root
-carries exactly one method — the message pipe. The capability's
-handlers are transport-agnostic: both kinds of connection dispatch the
-same `onConnect`/`onMessage`/`onClose`, appear in `getConnections()`,
-and propagate `connection.close(code, reason)` to the client.
+A plain Durable Object composed with `WebSockets` now works with `useAgent`
+and `AgentClient` like an `Agent` does: the capability sends the identity
+frame on connect (`identity: false` opts out) and answers `rpc` frames
+against `callables`, so `call()` and `stub` reach the host's `RpcTarget`.
+The same target is still served natively at `?__agents_rpc=capnweb`.
 
-Because `Agent` rides the capability, `useAgent({ transport: "capnweb" })`
-works against any Agent with the hook surface unchanged — identity,
-state sync, `call`/`stub` RPC frames, and chat all flow over the pipe,
-with reconnection and terminal-close semantics matching the default
-hibernating WebSocket path. The pipe client is internal to the hook — there
-is no new public client surface.
-
-Cap'n Web transport connections are non-hibernating: the Durable Object
-stays pinned in memory while one is open.
+Clients can pick the wire with `useAgent({ transport: "capnweb" })` (also on
+`AgentClient`). The default `"websocket"` is the hibernating socket;
+`"capnweb"` carries the same frames over one Cap'n Web RPC session, and the
+Durable Object stays in memory while such a connection is open. PartySocket
+keeps owning reconnection and buffering on both — the transport only swaps
+the socket class it instantiates. Handlers are wire-agnostic, and both kinds
+of connection appear in `getConnections()`.

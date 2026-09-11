@@ -306,8 +306,8 @@ to export `getCurrentAgent()` for the `Agent` class as a compatibility alias.
 
 Lifecycle itself does not model WebSockets. Hosts that want connections
 install the `WebSockets` capability, which owns the subsystem end to end —
-it claims upgrades, accepts hibernating sockets, dispatches handlers inside
-the host invocation boundary, and answers `getConnections()`:
+it claims upgrades, dispatches handlers inside the host invocation boundary,
+and answers `getConnections()`:
 
 ```ts
 import { WebSockets } from "agents/websockets";
@@ -321,7 +321,8 @@ export class MyObject extends DurableObject<Env> {
       onMessage: (connection, message) => {
         connection.send(`echo:${message}`);
       }
-    }
+    },
+    callables: new MyCallables(this)
   });
   readonly lifecycle = Lifecycle.install(this).use(this.webSockets);
 }
@@ -329,31 +330,45 @@ export class MyObject extends DurableObject<Env> {
 
 Without the capability installed, WebSocket upgrades are declined.
 
-The capability can also serve remote methods: pass an `RpcTarget` as
-`callables` and its prototype methods become the complete remote interface,
-served over a Cap'n Web session (`?__agents_rpc=capnweb`). An `Agent` adds
-no new surface for this — its `@callable()`-decorated methods are its
-interface, served on every wire: natively over the legacy JSON RPC protocol
-and, through the decorator-derived target, over the Cap'n Web endpoint.
+### A plain host works with `useAgent`
 
-Connections speak one of two wire transports, chosen by the client:
+The capability speaks the Agent protocol on every connection, so a plain
+Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
+`Agent`:
 
-- **Hibernating WebSocket** (default, selected in `useAgent` as
-  `"hibernating-websocket"`) carries Agent frames directly over a WebSocket
-  accepted with Cloudflare's WebSocket Hibernation API. PartySocket manages the
-  browser connection. Idle clients remain connected while the Durable Object
-  can leave memory; when a message wakes the object, its constructor and
-  lifecycle startup run again before `onMessage`. State needed after a wake
-  must be stored durably or through `connection.setState()`.
-- **Cap'n Web** (`?__agents_transport=capnweb`, or `useAgent({ transport:
-"capnweb" })`) carries the same frames over a single Cap'n Web RPC session.
-  The connection is an in-memory socket and does not hibernate: the Durable
-  Object stays pinned while it is open, and the connection is gone after an
-  eviction, so clients reconnect.
+- On connect it sends the identity frame, which resolves the client's
+  `ready` and `identified`. Pass `identity: false` to opt out; `Agent` does,
+  because it sends its own under `sendIdentityOnConnect`.
+- `callables` is an `RpcTarget` whose prototype methods are the host's
+  complete remote interface. The capability answers the `rpc` frames that
+  `call()` and `stub` send, on either wire, and also serves the same target
+  as a native Cap'n Web session at `?__agents_rpc=capnweb`. Methods run
+  through the host invocation boundary with the calling connection in scope;
+  a returned `ReadableStream` streams to the caller.
+- Any other frame goes to `handlers.onMessage`.
 
-The handlers are transport-agnostic. Both kinds of connection dispatch the
-same `onConnect`/`onMessage`/`onClose`/`onError`, appear in
-`getConnections()`, and honour `connection.close(code, reason)`.
+An `Agent` adds no new surface for this: its `@callable()`-decorated methods
+are its interface, answered by its own message handler and mirrored onto the
+Cap'n Web endpoint.
+
+### Two wires
+
+The client chooses how frames travel:
+
+- **WebSocket** (default) — accepted with Cloudflare's WebSocket Hibernation
+  API. Idle clients remain connected while the Durable Object leaves memory;
+  when a message wakes it, the constructor and lifecycle startup run again
+  before `onMessage`. State needed after a wake belongs in storage or
+  `connection.setState()`.
+- **Cap'n Web** (`?__agents_transport=capnweb`, or
+  `useAgent({ transport: "capnweb" })`) — the same frames over one Cap'n Web
+  RPC session. The connection is an in-memory socket and does not hibernate:
+  the object stays pinned while it is open, and clients reconnect after an
+  eviction.
+
+Handlers are wire-agnostic. Both kinds of connection dispatch the same
+`onConnect`/`onMessage`/`onClose`/`onError`, appear in `getConnections()`,
+and honour `connection.close(code, reason)`.
 
 ## Native RPC
 

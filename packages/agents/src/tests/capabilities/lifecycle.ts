@@ -320,6 +320,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       }
     });
 
+  /** Open connections on either wire, for transport tests. */
+  connectionCount(): number {
+    return [...this.#webSockets.getConnections()].length;
+  }
+
   onStart(props?: StartupProps): void {
     this.#hostContexts.push(currentLifecycleContext("start"));
     this.#events.push(`host:start:${props?.label ?? "none"}`);

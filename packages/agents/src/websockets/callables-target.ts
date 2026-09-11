@@ -1,35 +1,31 @@
 import { RpcTarget } from "cloudflare:workers";
 import { decoratedMethods } from "../callable-decorator";
-import {
-  CAPNWEB_STREAMING_RESULT,
-  CAPNWEB_TRANSPORT_SEND,
-  type CapnWebStreamingEvent,
-  type CapnWebStreamingResult
-} from "./transport-protocol";
 
-/** A callable method ready to be exposed on a connection. */
-export type CallableMethod = {
-  readonly invoke: (...args: unknown[]) => unknown;
-  readonly streaming: boolean;
-};
+/**
+ * Targets whose `rpc` frames the host already answers in its own
+ * `onMessage` (Agent), so the capability must not answer them a second
+ * time. Everything else is served by the capability on every wire.
+ */
+const hostServed = new WeakSet<RpcTarget>();
 
-const methodMetadata = new WeakMap<Function, Pick<CallableMethod, "streaming">>();
-const handlerDispatchedTargets = new WeakSet<RpcTarget>();
+/** Whether the host's own message handler answers `rpc` frames for this target. */
+export function isHostServed(target: RpcTarget): boolean {
+  return hostServed.has(target);
+}
+
+/** A named remote method ready to be exposed on a callables root. */
+export type CallableInvoker = (...args: unknown[]) => unknown;
 
 /**
  * The single exposure policy for callable names. `Object.prototype` and
- * `RpcTarget.prototype` members are unreachable over Cap'n Web and are
- * silently excluded. Reserved framework names and `then` are rejected.
+ * `RpcTarget.prototype` members are unreachable over Cap'n Web anyway
+ * and are silently excluded; `then` is rejected loudly because exposing
+ * it would make the remote stub thenable.
  */
 function assertExposable(name: string): boolean {
   if (name === "then") {
     throw new Error(
-      'A callables target cannot expose a method named "then" because it would make the remote stub thenable'
-    );
-  }
-  if (name === CAPNWEB_TRANSPORT_SEND) {
-    throw new Error(
-      `A callables target cannot expose the reserved framework method "${CAPNWEB_TRANSPORT_SEND}"`
+      'A callables target cannot expose a method named "then" — it would make the remote stub thenable'
     );
   }
   return !(
@@ -41,19 +37,19 @@ function assertExposable(name: string): boolean {
 
 /**
  * The exposable prototype methods of a callables target, each bound to
- * invoke on the real instance so private fields and `this` behave.
+ * invoke on the real instance (so private fields and `this` behave).
  *
  * Cap'n Web resolves methods on the prototype chain and rejects own
  * instance properties, so only prototype methods participate. The
  * nearest declaration wins for overridden names.
  *
  * @param target - The callables target to enumerate.
- * @returns Method names mapped to bound invokers and streaming metadata.
+ * @returns Method names mapped to invokers on the target.
  */
 export function exposableMethods(
   target: RpcTarget
-): ReadonlyMap<string, CallableMethod> {
-  const methods = new Map<string, CallableMethod>();
+): ReadonlyMap<string, CallableInvoker> {
+  const methods = new Map<string, CallableInvoker>();
   const seen = new Set<string>();
   let prototype: object | null = Object.getPrototypeOf(target);
   while (
@@ -67,12 +63,10 @@ export function exposableMethods(
       if (!assertExposable(name)) continue;
       const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
       if (!descriptor || typeof descriptor.value !== "function") continue;
-      // SAFETY: `typeof descriptor.value === "function"` was checked above.
-      const method = descriptor.value as (...args: unknown[]) => unknown;
-      methods.set(name, {
-        invoke: (...args) => Reflect.apply(method, target, args),
-        streaming: methodMetadata.get(method)?.streaming ?? false
-      });
+      // SAFETY: `typeof descriptor.value === "function"` was checked
+      // above; TypeScript cannot narrow a descriptor's `value` field.
+      const method = descriptor.value as CallableInvoker;
+      methods.set(name, (...args) => Reflect.apply(method, target, args));
     }
     prototype = Object.getPrototypeOf(prototype);
   }
@@ -82,31 +76,21 @@ export function exposableMethods(
 /**
  * Build a Cap'n Web session root exposing exactly the given methods.
  *
- * Cap'n Web resolves methods on the prototype chain, rejects own instance
- * properties, and breaks on Proxy-wrapped roots. The generated root is an
- * `RpcTarget` subclass whose prototype carries only the supplied methods.
+ * Cap'n Web resolves methods on the prototype chain, rejects own
+ * instance properties, and breaks on Proxy-wrapped roots — so the root
+ * is a private `RpcTarget` subclass whose prototype carries the
+ * methods and nothing else.
  *
- * @param methods - Method names mapped to their invocation behavior.
- * @param dispose - Optional cleanup called when the remote root is released.
+ * @param methods - Method names mapped to their invokers.
  * @returns A root suitable as a Cap'n Web session's local main.
  */
 export function buildCallablesRoot(
-  methods: ReadonlyMap<string, CallableMethod>,
-  dispose?: () => void
+  methods: ReadonlyMap<string, CallableInvoker>
 ): RpcTarget {
   class CallablesRoot extends RpcTarget {}
-  for (const [name, method] of methods) {
-    methodMetadata.set(method.invoke, { streaming: method.streaming });
+  for (const [name, invoke] of methods) {
     Object.defineProperty(CallablesRoot.prototype, name, {
-      value: method.invoke,
-      writable: true,
-      configurable: true,
-      enumerable: false
-    });
-  }
-  if (dispose) {
-    Object.defineProperty(CallablesRoot.prototype, Symbol.dispose, {
-      value: dispose,
+      value: invoke,
       writable: true,
       configurable: true,
       enumerable: false
@@ -116,111 +100,34 @@ export function buildCallablesRoot(
 }
 
 /**
- * Whether hibernating JSON RPC frames must remain with the host handler.
- * Agent uses this for facet routing and its legacy streaming protocol.
- * Native Cap'n Web calls can still use the target directly.
- *
- * @param target - The configured callables target.
- * @returns True when the host handler owns hibernating RPC dispatch.
- */
-export function callablesUseHostMessageHandler(target: RpcTarget): boolean {
-  return handlerDispatchedTargets.has(target);
-}
-
-/**
- * Build a callables target from a host's `@callable()`-decorated methods.
+ * Build a callables target from a host's `@callable()`-decorated
+ * methods — the fallback interface source when no `RpcTarget` is
+ * configured (an explicit target is preferred and wins).
  *
  * Methods are resolved on the host at call time, so framework wrapping
- * applied after construction is honored. Legacy streaming methods are
- * projected as an internal streamed result which `useAgent` turns back into
- * its existing callback and final-result behavior.
- *
- * The returned target leaves hibernating JSON RPC frames with Agent's
- * message handler because that handler also owns facet forwarding.
+ * applied after construction (e.g. Agent's context auto-wrapping) is
+ * honored. Methods registered with `streaming: true` expect the legacy
+ * Agent RPC protocol's injected `StreamingResponse` and are not exposed
+ * here — return a `ReadableStream` from an `RpcTarget` method instead.
  *
  * @param host - The object whose decorated methods form the interface.
- * @returns A target exposing the decorated methods, or `undefined` when the
- * host has none.
+ * @returns A target exposing the decorated methods, or `undefined`
+ * when the host has none.
  */
 export function callablesFromDecorated(host: object): RpcTarget | undefined {
-  const methods = new Map<string, CallableMethod>();
+  const methods = new Map<string, CallableInvoker>();
   for (const [name, metadata] of decoratedMethods(host)) {
-    if (!assertExposable(name)) continue;
-    methods.set(name, {
-      streaming: metadata.streaming === true,
-      invoke: (...args) => {
-        const method = Reflect.get(host, name) as unknown;
-        if (typeof method !== "function") {
-          throw new Error(`Method ${name} is not callable`);
-        }
-        // SAFETY: the runtime check above narrowed this dynamic property to a
-        // callable; TypeScript narrows it only to the wider `Function` type.
-        const callable = method as (...args: unknown[]) => unknown;
-        if (!metadata.streaming) return Reflect.apply(callable, host, args);
-        return invokeStreamingMethod(callable, host, args);
+    if (metadata.streaming || !assertExposable(name)) continue;
+    methods.set(name, (...args) => {
+      const method = Reflect.get(host, name) as unknown;
+      if (typeof method !== "function") {
+        throw new Error(`Method ${name} is not callable`);
       }
+      return Reflect.apply(method, host, args);
     });
   }
   if (methods.size === 0) return undefined;
   const target = buildCallablesRoot(methods);
-  handlerDispatchedTargets.add(target);
+  hostServed.add(target);
   return target;
-}
-
-function invokeStreamingMethod(
-  method: (...args: unknown[]) => unknown,
-  host: object,
-  args: unknown[]
-): CapnWebStreamingResult {
-  let closed = false;
-  let controller: ReadableStreamDefaultController<CapnWebStreamingEvent>;
-  const stream = new ReadableStream<CapnWebStreamingEvent>({
-    start(nextController) {
-      controller = nextController;
-      const response = {
-        get isClosed() {
-          return closed;
-        },
-        send(chunk: unknown): boolean {
-          if (closed) return false;
-          controller.enqueue({ type: "chunk", value: chunk });
-          return true;
-        },
-        end(finalValue?: unknown): boolean {
-          if (closed) return false;
-          closed = true;
-          controller.enqueue({ type: "done", value: finalValue });
-          controller.close();
-          return true;
-        },
-        error(message: string): boolean {
-          if (closed) return false;
-          closed = true;
-          controller.error(new Error(message));
-          return true;
-        }
-      };
-
-      try {
-        void Promise.resolve(
-          Reflect.apply(method, host, [response, ...args])
-        ).catch((error: unknown) => {
-          if (closed) return;
-          closed = true;
-          controller.error(error);
-        });
-      } catch (error) {
-        closed = true;
-        controller.error(error);
-      }
-    },
-    cancel() {
-      closed = true;
-    }
-  });
-
-  return {
-    [CAPNWEB_STREAMING_RESULT]: true,
-    stream
-  };
 }

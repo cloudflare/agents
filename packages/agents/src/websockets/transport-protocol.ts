@@ -1,51 +1,43 @@
 /**
- * Isomorphic pieces of the Cap'n Web connection-transport wire contract.
+ * Isomorphic wire contract for the Cap'n Web connection transport.
  *
- * Imported from browser bundles (via the client) and from the Worker
- * runtime, so it must not import `cloudflare:workers`.
+ * Imported by browser bundles and by the Worker runtime, so it must not
+ * import `cloudflare:workers`.
  */
 
-/** Query value selecting the Cap'n Web connection transport. */
+/** Wire a `useAgent` / `AgentClient` connection travels on. */
+export type AgentTransport = "websocket" | "capnweb";
+
+/** Query parameter selecting the Cap'n Web connection transport. */
 export const CAPNWEB_TRANSPORT_QUERY = "__agents_transport";
 export const CAPNWEB_TRANSPORT_VALUE = "capnweb";
 
-/** Framework method reserved on the Cap'n Web transport session root. */
+/**
+ * The single method on the host's session root: the frame pipe from the
+ * client to the host. Every Agent protocol frame travels through it.
+ */
 export const CAPNWEB_TRANSPORT_SEND = "__cf_agent_send";
-
-/** Marker on a native result adapting a legacy callback-style stream. */
-export const CAPNWEB_STREAMING_RESULT = "__cf_agent_streaming_result";
 
 export type TransportMessage = string | ArrayBuffer | ArrayBufferView;
 
-/** One event from a legacy `StreamingResponse` projected as a native stream. */
-export type CapnWebStreamingEvent =
-  | { readonly type: "chunk"; readonly value: unknown }
-  | { readonly type: "done"; readonly value: unknown };
-
-/** Native result returned for a legacy callback-style streaming callable. */
-export type CapnWebStreamingResult = {
-  readonly [CAPNWEB_STREAMING_RESULT]: true;
-  readonly stream: ReadableStream<CapnWebStreamingEvent>;
-};
-
-/** Whether a native result wraps a legacy callback-style stream. */
-export function isCapnWebStreamingResult(
-  value: unknown
-): value is CapnWebStreamingResult {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    CAPNWEB_STREAMING_RESULT in value &&
-    value[CAPNWEB_STREAMING_RESULT] === true &&
-    "stream" in value &&
-    value.stream instanceof ReadableStream
-  );
-}
-
-/** Browser callback target used by the server to deliver frames. */
+/** Root the client exposes; the host delivers frames through it. */
 export type TransportClientEvents = {
   message(value: TransportMessage): void | Promise<void>;
 };
+
+/** Root the host exposes; the client sends frames through it. */
+export type TransportHostPipe = {
+  [CAPNWEB_TRANSPORT_SEND](message: TransportMessage): Promise<void>;
+};
+
+/** Rewrite a host URL to select the Cap'n Web transport over `ws(s)`. */
+export function capnWebTransportUrl(url: string | URL): string {
+  const resolved = new URL(url);
+  if (resolved.protocol === "http:") resolved.protocol = "ws:";
+  if (resolved.protocol === "https:") resolved.protocol = "wss:";
+  resolved.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+  return resolved.toString();
+}
 
 /** Whether a request is a WebSocket upgrade selecting the transport. */
 export function isCapnWebTransportUpgrade(request: Request): boolean {

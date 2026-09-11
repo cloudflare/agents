@@ -1185,6 +1185,8 @@ export class Agent<
     // protocol: one interface on every wire, no new Agent members.
     // Capability hosts pass an RpcTarget directly instead.
     callables: callablesFromDecorated(this),
+    // Agent sends identity itself, under its sendIdentityOnConnect policy.
+    identity: false,
     getConnectionTags: (connection, ctx) =>
       this.getConnectionTags(connection, ctx)
   });

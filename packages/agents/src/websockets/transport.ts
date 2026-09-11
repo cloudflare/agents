@@ -1,302 +1,219 @@
+import { RpcTarget } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type {
   Connection,
   ConnectionContext,
   ConnectionSetStateFn,
-  ConnectionState,
-  LifecycleHostContextScope
+  ConnectionState
 } from "../lifecycle";
-import {
-  buildCallablesRoot,
-  type CallableMethod
-} from "./callables-target";
-import type { WebSocketHandlers } from "./options";
 import {
   CAPNWEB_TRANSPORT_SEND,
   type TransportClientEvents,
   type TransportMessage
 } from "./transport-protocol";
 
-export type CapnWebConnectionOptions = {
-  id: string;
-  uri: string;
-  tags: string[];
-  send(message: TransportMessage): void;
-  close(code?: number, reason?: string): void;
-};
-
+/**
+ * A non-hibernating connection with the public `Connection` contract,
+ * backed by a Cap'n Web session instead of a hibernating socket. It lives
+ * only in memory and disappears with the isolate.
+ */
 class CapnWebConnection extends EventTarget {
   readonly CONNECTING = WebSocket.CONNECTING;
   readonly OPEN = WebSocket.OPEN;
   readonly CLOSING = WebSocket.CLOSING;
   readonly CLOSED = WebSocket.CLOSED;
-  readonly id: string;
-  readonly uri: string;
-  tags: readonly string[];
-  state: ConnectionState<unknown> = null;
   readyState: number = WebSocket.OPEN;
-  binaryType: BinaryType = "arraybuffer";
-  bufferedAmount = 0;
-  extensions = "";
-  protocol = "";
-  url: string;
-  onclose: ((event: CloseEvent) => void) | null = null;
-  onerror: ((event: Event) => void) | null = null;
-  onmessage: ((event: MessageEvent) => void) | null = null;
-  onopen: ((event: Event) => void) | null = null;
-  readonly #send: CapnWebConnectionOptions["send"];
-  readonly #close: CapnWebConnectionOptions["close"];
+  state: ConnectionState<unknown> = null;
+  tags: readonly string[] = [];
 
-  constructor(options: CapnWebConnectionOptions) {
+  constructor(
+    readonly id: string,
+    readonly uri: string,
+    private readonly pipe: {
+      send(message: TransportMessage): void;
+      close(code?: number, reason?: string): void;
+    }
+  ) {
     super();
-    this.id = options.id;
-    this.uri = options.uri;
-    this.url = options.uri;
-    this.tags = options.tags;
-    this.#send = options.send;
-    this.#close = options.close;
   }
 
   send(message: TransportMessage): void {
     if (this.readyState !== WebSocket.OPEN) {
       throw new TypeError("WebSocket send() after close");
     }
-    this.#send(message);
+    this.pipe.send(message);
   }
 
   close(code?: number, reason?: string): void {
-    if (
-      this.readyState === WebSocket.CLOSING ||
-      this.readyState === WebSocket.CLOSED
-    ) {
-      return;
-    }
+    if (this.readyState >= WebSocket.CLOSING) return;
     this.readyState = WebSocket.CLOSING;
-    this.#close(code, reason);
+    this.pipe.close(code, reason);
   }
 
   setState<T = unknown>(
-    stateOrFn: T | ConnectionSetStateFn<T> | null
+    next: T | ConnectionSetStateFn<T> | null
   ): ConnectionState<T> {
-    const next =
-      typeof stateOrFn === "function"
-        ? (stateOrFn as ConnectionSetStateFn<T>)(
-            this.state as ConnectionState<T>
-          )
-        : stateOrFn;
-    this.state = next as ConnectionState<unknown>;
-    return next as ConnectionState<T>;
-  }
-
-  markClosed(): void {
-    this.readyState = WebSocket.CLOSED;
-  }
-
-  setTags(tags: string[]): void {
-    this.tags = tags;
+    const state =
+      typeof next === "function"
+        ? (next as ConnectionSetStateFn<T>)(this.state as ConnectionState<T>)
+        : next;
+    this.state = state as ConnectionState<unknown>;
+    return state as ConnectionState<T>;
   }
 }
 
-export type ManagedCapnWebConnection = {
-  readonly connection: Connection;
-  markClosed(): void;
-  setTags(tags: string[]): void;
-};
+/** The host's session root: exactly one method, the frame pipe. */
+class Pipe extends RpcTarget {
+  constructor(
+    private readonly deliver: (message: TransportMessage) => Promise<void>
+  ) {
+    super();
+  }
 
-/**
- * Create a non-hibernating connection with the public Connection contract.
- * Unlike the capability's hibernating connections it exists only in memory
- * and disappears with the isolate.
- */
-export function createCapnWebConnection(
-  options: CapnWebConnectionOptions
-): ManagedCapnWebConnection {
-  const connection = new CapnWebConnection(options);
-  return {
-    connection: connection as unknown as Connection,
-    markClosed: () => connection.markClosed(),
-    setTags: (tags) => connection.setTags(tags)
-  };
+  [CAPNWEB_TRANSPORT_SEND](message: TransportMessage): Promise<void> {
+    return this.deliver(message);
+  }
 }
 
-/** One live Cap'n Web transport session and its connection facade. */
+/** One live transport session. */
 export type CapnWebSession = {
-  readonly managed: ManagedCapnWebConnection;
-  readonly session: Disposable;
+  readonly connection: Connection;
+  /** Tear the session down; runs the close handler once. */
+  dispose(): void;
 };
 
-/** Everything the capability supplies to open one transport session. */
-export type OpenCapnWebSessionOptions = {
-  /** The claimed upgrade request. */
+/** What the capability supplies to run one session. */
+export type CapnWebSessionOptions = {
   readonly request: Request;
-  /** Connection id (`_pk` or generated); the caller replaced any prior session. */
   readonly connectionId: string;
-  /** Connection handlers, dispatched per event. */
-  readonly handlers: WebSocketHandlers;
-  /** Native methods exposed beside the framework message pipe. */
-  readonly callables: ReadonlyMap<string, CallableMethod>;
-  /** Invoke one native method inside capability policy and host context. */
-  readonly invokeCallable: (
-    name: string,
-    method: CallableMethod,
-    args: unknown[],
-    connection: Connection
-  ) => Promise<unknown>;
-  /** Tags attached to the connection, when configured. */
-  readonly getTags:
-    | ((
-        connection: Connection,
-        ctx: ConnectionContext
-      ) => string[] | Promise<string[]>)
-    | undefined;
-  /** Enter the host invocation boundary for one handler callback. */
-  readonly dispatch: (
-    fn: () => unknown,
-    scope: LifecycleHostContextScope
-  ) => Promise<unknown>;
-  /** Record the live session under its connection id. */
-  readonly register: (session: CapnWebSession) => void;
-  /** Drop the session if it is still the registered one. */
-  readonly unregister: (session: CapnWebSession) => void;
+  readonly tags: (
+    connection: Connection,
+    ctx: ConnectionContext
+  ) => string[] | Promise<string[]>;
+  readonly onConnect: (
+    connection: Connection,
+    ctx: ConnectionContext
+  ) => Promise<void>;
+  readonly onMessage: (
+    connection: Connection,
+    message: TransportMessage
+  ) => Promise<void>;
+  readonly onClose: (
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ) => Promise<void>;
+  readonly onError: (connection: Connection, error: unknown) => Promise<void>;
+  /** Called exactly once when the session ends, before `onClose`. */
+  readonly onDispose: (session: CapnWebSession) => void;
 };
 
 /**
- * Accept a unified Cap'n Web Agent session.
+ * Accept a Cap'n Web transport upgrade.
  *
- * One root exposes the reserved framework message pipe and every configured
- * native callable. State, identity, chat, and arbitrary messages use the
- * pipe. `useAgent().call` and `.stub` invoke the native methods directly on
- * this same session.
- *
- * The session uses a plain in-memory `WebSocketPair`, so it keeps the Durable
- * Object pinned and does not survive hibernation.
- *
- * @param options - Handlers, callables, dispatch, and registry supplied by
- * the capability.
- * @returns The 101 upgrade response carrying the client socket.
+ * The client's frames arrive through the pipe method and are handed to
+ * `onMessage`; the host's frames go out through the client's `message`
+ * callback. The socket is a plain in-memory `WebSocketPair`, so it pins
+ * the Durable Object and does not survive hibernation.
  */
 export async function openCapnWebSession(
-  options: OpenCapnWebSessionOptions
-): Promise<Response> {
-  const { request, connectionId, handlers, dispatch } = options;
+  options: CapnWebSessionOptions
+): Promise<{ response: Response; session: CapnWebSession }> {
+  const { request, connectionId } = options;
   const pair = new WebSocketPair();
   const server = pair[0];
   server.accept();
 
-  let session: RpcStub<TransportClientEvents> | undefined;
-  let registered: CapnWebSession | undefined;
-  let closeCode = 1000;
-  let closeReason = "Cap'n Web session closed";
-  let wasClean = true;
-  let disposed = false;
+  let client: RpcStub<TransportClientEvents> | undefined;
+  let closed = false;
+  let close = { code: 1000, reason: "", wasClean: true };
 
-  const managed = createCapnWebConnection({
-    id: connectionId,
-    uri: request.url,
-    tags: [],
+  const connection = new CapnWebConnection(connectionId, request.url, {
     send: (message) => {
-      if (!session) throw new Error("Transport session is not initialized");
-      void session.message(message).catch((error: unknown) => {
-        if (!disposed) {
-          console.error("Failed to deliver Cap'n Web frame:", error);
-        }
+      void client?.message(message).catch((error: unknown) => {
+        if (!closed) console.error("Cap'n Web frame delivery failed:", error);
       });
     },
-    close: (code, reason) => {
-      closeCode = code ?? 1000;
-      closeReason = reason ?? "Connection closed";
+    close: (code = 1000, reason = "") => {
+      close = { code, reason, wasClean: true };
       try {
-        server.close(closeCode, closeReason);
+        server.close(code, reason);
       } catch {
-        session?.[Symbol.dispose]();
+        // Already closing; finish() below still runs the close handler.
       }
-      void dispose();
+      void finish();
     }
-  });
-  const connection = managed.connection;
-  const ctx = { request };
-  const userTags = options.getTags
-    ? await options.getTags(connection, ctx)
-    : [];
-  managed.setTags([
-    connectionId,
-    ...userTags.filter((tag) => tag !== connectionId)
-  ]);
+  }) as unknown as Connection & CapnWebConnection;
 
-  const dispose = async () => {
-    if (disposed) return;
-    disposed = true;
-    if (registered) options.unregister(registered);
-    managed.markClosed();
-    await dispatch(
-      () => handlers.onClose?.(connection, closeCode, closeReason, wasClean),
-      { connection }
-    );
+  const session: CapnWebSession = {
+    connection,
+    dispose: () => connection.close(1001, "Session replaced")
   };
 
-  const rootMethods = new Map<string, CallableMethod>();
-  rootMethods.set(CAPNWEB_TRANSPORT_SEND, {
-    streaming: false,
-    invoke: async (message: unknown) => {
-      await dispatch(
-        () => handlers.onMessage?.(connection, message as TransportMessage),
-        { connection }
-      );
+  const finish = async () => {
+    if (closed) return;
+    closed = true;
+    connection.readyState = WebSocket.CLOSED;
+    try {
+      client?.[Symbol.dispose]();
+    } catch {
+      // The session already ended with the socket.
     }
-  });
-  for (const [name, method] of options.callables) {
-    rootMethods.set(name, {
-      streaming: method.streaming,
-      invoke: (...args) =>
-        options.invokeCallable(name, method, args, connection)
-    });
-  }
-  const root = buildCallablesRoot(rootMethods, () => void dispose());
+    options.onDispose(session);
+    await options.onClose(connection, close.code, close.reason, close.wasClean);
+  };
 
-  session = newWebSocketRpcSession<TransportClientEvents>(server, root);
-  registered = { managed, session };
-  options.register(registered);
+  client = newWebSocketRpcSession<TransportClientEvents>(
+    server,
+    new Pipe((message) => options.onMessage(connection, message))
+  );
 
   server.addEventListener(
     "close",
     (event) => {
-      closeCode = event.code;
-      closeReason = event.reason;
-      wasClean = event.wasClean;
-      void dispose();
+      close = {
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean
+      };
+      void finish();
     },
     { once: true }
   );
   server.addEventListener(
     "error",
     (event) => {
-      if (disposed) return;
-      wasClean = false;
+      if (closed) return;
+      close = { ...close, wasClean: false };
       const error =
         event instanceof ErrorEvent
           ? (event.error ?? new Error(event.message))
           : new Error("Cap'n Web transport socket error");
-      void dispatch(() => handlers.onError?.(connection, error), {
-        connection
-      })
+      void options
+        .onError(connection, error)
         .catch((handlerError: unknown) => {
           console.error("Cap'n Web onError handler failed:", handlerError);
         })
-        .finally(() => dispose());
+        .finally(finish);
     },
     { once: true }
   );
 
+  const ctx = { request };
+  connection.tags = [
+    connectionId,
+    ...(await options.tags(connection, ctx)).filter((t) => t !== connectionId)
+  ];
   try {
-    await dispatch(() => handlers.onConnect?.(connection, ctx), {
-      connection,
-      request
-    });
+    await options.onConnect(connection, ctx);
   } catch (error) {
-    session[Symbol.dispose]();
-    await dispose();
+    connection.close(1011, "onConnect failed");
     throw error;
   }
 
-  return new Response(null, { status: 101, webSocket: pair[1] });
+  return {
+    response: new Response(null, { status: 101, webSocket: pair[1] }),
+    session
+  };
 }
