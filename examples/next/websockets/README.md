@@ -35,7 +35,7 @@ export class RoomObject extends DurableObject<Env> {
 const agent = useAgent({
   agent: "room-object",
   name: "lobby",
-  transport: "websocket" // or "capnweb"
+  transport: "cf-websocket" // or "capnweb"
 });
 const room = agent.stub as RoomApi;
 await room.say("alice", "hello"); // an rpc frame answered by RoomCallables
@@ -45,10 +45,10 @@ await agent.call("countdown", [3], {
 });
 ```
 
-| Transport     | Wire                                                   | Hibernates | What `stub` / `call()` do                             |
-| ------------- | ------------------------------------------------------ | ---------- | ----------------------------------------------------- |
-| `"websocket"` | Hibernating WebSocket, managed by PartySocket          | Yes        | Send `rpc` frames; the capability answers them        |
-| `"capnweb"`   | The same frames through one Cap'n Web session (a pipe) | No         | Identical frames, identical answers, through the pipe |
+| Transport        | Wire                                                   | Hibernates | What `stub` / `call()` do                             |
+| ---------------- | ------------------------------------------------------ | ---------- | ----------------------------------------------------- |
+| `"cf-websocket"` | Hibernating WebSocket, managed by PartySocket          | Yes        | Send `rpc` frames; the capability answers them        |
+| `"capnweb"`      | The same frames through one Cap'n Web session (a pipe) | No         | Identical frames, identical answers, through the pipe |
 
 Everything else about the hook is the same on both: `identified` flips when
 the capability sends the identity frame, `onMessage` receives the room's own

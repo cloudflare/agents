@@ -355,7 +355,7 @@ Cap'n Web endpoint.
 
 The client chooses how frames travel:
 
-- **WebSocket** (default) — accepted with Cloudflare's WebSocket Hibernation
+- **`cf-websocket`** (default) — accepted with Cloudflare's WebSocket Hibernation
   API. Idle clients remain connected while the Durable Object leaves memory;
   when a message wakes it, the constructor and lifecycle startup run again
   before `onMessage`. State needed after a wake belongs in storage or

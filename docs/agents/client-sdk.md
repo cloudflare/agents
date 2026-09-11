@@ -123,7 +123,7 @@ useAgent({
 ### Transport
 
 `useAgent` speaks the Agent protocol over one of two wires. The default,
-`"websocket"`, is a hibernating WebSocket managed by PartySocket. The
+`"cf-websocket"`, is a hibernating WebSocket managed by PartySocket. The
 experimental `"capnweb"` transport carries the same frames over a single
 [Cap'n Web](https://github.com/cloudflare/capnweb) RPC session:
 
@@ -131,7 +131,7 @@ experimental `"capnweb"` transport carries the same frames over a single
 useAgent({
   agent: "ChatAgent",
   name: "room-123",
-  transport: "capnweb" // default: "websocket"
+  transport: "capnweb" // default: "cf-websocket"
 });
 ```
 
@@ -373,7 +373,7 @@ type UseAgentOptions<State> = {
   name?: string; // Instance name (default: "default")
   host?: string; // Custom host
   path?: string; // Custom path prefix
-  transport?: "websocket" | "capnweb"; // Wire (default: "websocket")
+  transport?: "cf-websocket" | "capnweb"; // Wire (default: "cf-websocket")
 
   // Query parameters
   query?:

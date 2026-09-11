@@ -12,7 +12,7 @@ against `callables`, so `call()` and `stub` reach the host's `RpcTarget`.
 The same target is still served natively at `?__agents_rpc=capnweb`.
 
 Clients can pick the wire with `useAgent({ transport: "capnweb" })` (also on
-`AgentClient`). The default `"websocket"` is the hibernating socket;
+`AgentClient`). The default `"cf-websocket"` is the hibernating socket;
 `"capnweb"` carries the same frames over one Cap'n Web RPC session, and the
 Durable Object stays in memory while such a connection is open. PartySocket
 keeps owning reconnection and buffering on both — the transport only swaps

@@ -103,7 +103,7 @@ function RoomPane({ transport }: { transport: AgentTransport }) {
   const stub = agent.stub as RoomApi;
 
   // The same interface on every wire: `stub.members()` is an rpc frame on
-  // "websocket" and the identical frame through the pipe on "capnweb".
+  // "cf-websocket" and the identical frame through the pipe on "capnweb".
   const refreshMembers = useCallback(async () => {
     setMembers(await stub.members());
   }, [stub]);
@@ -273,7 +273,7 @@ function App() {
         <ModeToggle />
       </header>
       <div className="flex min-h-0 flex-1 gap-3">
-        <RoomPane transport="websocket" />
+        <RoomPane transport="cf-websocket" />
         <RoomPane transport="capnweb" />
       </div>
       <RawCallablesPane />
