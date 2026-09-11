@@ -217,10 +217,11 @@ export class State<T = unknown> extends LifecycleCapability {
       return;
     }
 
-    if (pending instanceof Promise) {
+    if (pending) {
       // Durable Objects remain active for pending I/O without waitUntil. Keep
       // set() synchronous while ensuring asynchronous failures are observed.
-      void pending.catch((error) => {
+      // Promise.resolve normalizes thenables from other realms or libraries.
+      void Promise.resolve(pending).catch((error) => {
         console.error("State onChanged hook failed:", error);
       });
     }
