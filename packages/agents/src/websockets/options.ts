@@ -40,9 +40,9 @@ export type WebSocketHandlers = {
  */
 export interface WebSocketsOptions {
   /**
-   * Connection handlers for WebSocket clients. When present, the
-   * capability claims WebSocket upgrades and owns those connections end
-   * to end. When absent, upgrades are declined.
+   * Connection handlers for WebSocket clients. The capability accepts and
+   * tracks every WebSocket upgrade either way; handlers add behavior on
+   * connect, message, close and error.
    */
   readonly handlers?: WebSocketHandlers;
 
