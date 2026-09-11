@@ -1,4 +1,4 @@
-import { env, RpcTarget } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 
 import { describe, expect, it } from "vitest";
 import { LifecycleCapability, type LifecycleServices } from "../../lifecycle";
@@ -83,11 +83,8 @@ describe("Lifecycle startup", () => {
     });
   });
 
-  it("WebSockets is a catch-all only when handlers claim plain upgrades", () => {
-    expect(new WebSockets().claims).toBe("selective");
-    expect(
-      new WebSockets({ callables: new (class extends RpcTarget {})() }).claims
-    ).toBe("selective");
+  it("WebSockets is a catch-all with or without handlers", () => {
+    expect(new WebSockets().claims).toBe("catch-all");
     expect(new WebSockets({ handlers: {} }).claims).toBe("catch-all");
   });
 

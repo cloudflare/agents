@@ -141,8 +141,8 @@ failure propagates, and failed startup can be retried.
 A capability declares how it claims traffic with `claims`, which defaults to
 `"selective"`. A `"catch-all"` capability dispatches after every other
 capability, whenever it was installed, and Lifecycle refuses to install a
-second one. A `WebSockets` capability configured with `handlers` is a catch-all,
-since it claims every plain upgrade: a subclass that installs request or upgrade middleware from
+second one. The `WebSockets` capability is a catch-all, since it claims every
+upgrade: a subclass that installs request or upgrade middleware from
 its own constructor still runs first, even though `Agent`'s constructor ran
 earlier.
 

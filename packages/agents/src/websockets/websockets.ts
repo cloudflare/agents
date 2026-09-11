@@ -91,12 +91,8 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
  * @experimental The API surface may change before stabilizing.
  */
 export class WebSockets extends LifecycleCapability {
-  /**
-   * With `handlers`, every plain upgrade is claimed, so Lifecycle must
-   * dispatch this capability after all others. Without them only callables
-   * RPC upgrades are claimed, which is selective.
-   */
-  override readonly claims: "selective" | "catch-all";
+  /** Claims every upgrade, so Lifecycle dispatches it after all others. */
+  override readonly claims = "catch-all";
 
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
@@ -105,7 +101,6 @@ export class WebSockets extends LifecycleCapability {
 
   constructor(options: WebSocketsOptions = {}) {
     super("websockets");
-    this.claims = options.handlers ? "catch-all" : "selective";
     this.#handlers = options.handlers;
     this.#getConnectionTags = options.getConnectionTags;
     this.#callablesTarget = options.callables
@@ -115,7 +110,11 @@ export class WebSockets extends LifecycleCapability {
 
   // ── Lifecycle capability hooks ─────────────────────────────────────────
 
-  /** Claim callables RPC upgrades and, with handlers, plain upgrades. */
+  /**
+   * Claim every upgrade: callables RPC upgrades go to the callables target
+   * when one is configured, and every other upgrade becomes a tracked
+   * connection whether or not handlers are configured.
+   */
   onWebSocketUpgrade({
     request
   }: CapabilityWebSocketUpgradeContext):
@@ -126,7 +125,6 @@ export class WebSockets extends LifecycleCapability {
       if (!this.#callablesTarget) return undefined;
       return newWorkersWebSocketRpcResponse(request, this.#callablesTarget);
     }
-    if (!this.#handlers) return undefined;
     return this.#acceptConnection(request);
   }
 
