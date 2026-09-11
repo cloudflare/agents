@@ -45,6 +45,11 @@ The room shows four things:
 - **Pushing from outside a handler.** `POST /say` broadcasts from an HTTP
   request, which is the shape a webhook, alarm, or scheduled job takes to
   reach connected clients.
+- **`useAgent` against a plain host.** The capability speaks the Agent
+  protocol for the room: it sends the identity frame on connect and answers
+  the `rpc` frames `useAgent().stub` sends against `callables`, on the
+  default WebSocket wire or with `transport: "capnweb"`. Pass
+  `identity: false` to turn the identity frame off.
 - **Callables.** The same room is served as remote methods over a Cap'n Web
   session: pass an `RpcTarget` as `callables` and its prototype methods become
   the complete remote interface at `?__agents_rpc=capnweb`. Methods run

@@ -15,12 +15,11 @@ import {
   SunIcon,
   TrashIcon
 } from "@phosphor-icons/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import type { RoutedAgentEntry } from "agents/routing";
-import { newWebSocketRpcSession } from "capnweb";
 import "./styles.css";
 
 const USER_KEY = "next-routing-user";
@@ -49,23 +48,14 @@ type HubApi = {
 };
 
 /**
- * One Cap'n Web session to the per-user hub. The hub is a plain Durable
- * Object, so its methods are reached through the WebSockets capability's
- * callables endpoint (`?__agents_rpc=capnweb`) rather than the Agent
- * protocol. The URL is built by hand: `callablesRpcUrl` from
- * `agents/websockets` is server-side and must not enter a browser bundle.
+ * Wire for the hub connection. The WebSockets capability speaks the Agent
+ * protocol on both, so the hook is identical; "capnweb" carries the same
+ * frames over one Cap'n Web session and keeps the hub pinned in memory.
  */
-function useHub(): HubApi {
-  return useMemo(() => {
-    const url = new URL(
-      `/agents/user-hub/${encodeURIComponent(userId)}`,
-      location.origin
-    );
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    url.searchParams.set("__agents_rpc", "capnweb");
-    return newWebSocketRpcSession<HubApi>(url.toString());
-  }, []);
-}
+const HUB_TRANSPORT =
+  new URLSearchParams(location.search).get("transport") === "capnweb"
+    ? "capnweb"
+    : "websocket";
 
 function ModeToggle() {
   const [mode, setMode] = useState(
@@ -189,9 +179,16 @@ function ChatPane({
 }
 
 function App() {
-  // One connection to the per-user hub. Listing and search read only
-  // this object — no chat DO wakes up for the sidebar.
-  const user = useHub();
+  // One connection to the per-user hub, a plain Durable Object. The
+  // WebSockets capability identifies it and answers `stub` calls against
+  // its RpcTarget, so useAgent needs nothing from Agent. Listing and
+  // search read only this object — no chat DO wakes up for the sidebar.
+  const hub = useAgent({
+    agent: "user-hub",
+    name: userId,
+    transport: HUB_TRANSPORT
+  });
+  const user = hub.stub as HubApi;
   const [chats, setChats] = useState<ChatEntry[]>([]);
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -204,8 +201,9 @@ function App() {
   }, [query, user]);
 
   useEffect(() => {
+    if (!hub.identified) return;
     void refreshChats();
-  }, [refreshChats]);
+  }, [hub.identified, refreshChats]);
 
   const createChat = useCallback(async () => {
     const chatId = await user.createChat();
@@ -229,6 +227,7 @@ function App() {
           <Text bold>Routing</Text>
           <Badge variant="secondary">one DO per chat</Badge>
           <Badge variant="secondary">user {userId}</Badge>
+          <Badge variant="secondary">hub over {HUB_TRANSPORT}</Badge>
         </div>
         <ModeToggle />
       </header>

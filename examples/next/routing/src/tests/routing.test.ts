@@ -1,7 +1,13 @@
 import { env, exports } from "cloudflare:workers";
 import { newWebSocketRpcSession } from "capnweb";
 import { describe, expect, it } from "vitest";
-import { CALLABLES_RPC_QUERY, CALLABLES_RPC_VALUE } from "agents/websockets";
+import {
+  CALLABLES_RPC_QUERY,
+  CALLABLES_RPC_VALUE,
+  CAPNWEB_TRANSPORT_QUERY,
+  CAPNWEB_TRANSPORT_VALUE
+} from "agents/websockets";
+import { RpcTarget } from "cloudflare:workers";
 
 function uniqueUser() {
   return `user-${Math.random().toString(36).slice(2)}`;
@@ -234,6 +240,98 @@ describe("a plain Durable Object hub routing to one Agent per chat", () => {
       expect(await hub.listChats()).toEqual([]);
     } finally {
       (hub as Partial<Disposable>)[Symbol.dispose]?.();
+    }
+  });
+
+  it("speaks the Agent protocol to useAgent over a plain socket", async () => {
+    const userId = uniqueUser();
+    const response = await exports.default.fetch(
+      `http://example.com/agents/user-hub/${userId}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (!socket) throw new Error("Expected a WebSocket upgrade response");
+    socket.accept();
+    const frames: Record<string, unknown>[] = [];
+    const waiters: ((f: Record<string, unknown>) => void)[] = [];
+    socket.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
+      const waiter = waiters.shift();
+      if (waiter) waiter(frame);
+      else frames.push(frame);
+    });
+    const next = () =>
+      frames.length
+        ? Promise.resolve(frames.shift()!)
+        : new Promise<Record<string, unknown>>((r) => waiters.push(r));
+
+    // Identity first: this is what resolves useAgent's `ready`.
+    expect(await next()).toEqual({
+      type: "cf_agent_identity",
+      name: userId,
+      agent: "user-hub"
+    });
+    // Then rpc frames, exactly what `stub.createChat()` sends.
+    socket.send(
+      JSON.stringify({ type: "rpc", id: "1", method: "createChat", args: [] })
+    );
+    const created = await next();
+    expect(created).toMatchObject({ id: "1", success: true, done: true });
+    socket.send(
+      JSON.stringify({ type: "rpc", id: "2", method: "listChats", args: [] })
+    );
+    expect(await next()).toMatchObject({
+      id: "2",
+      result: [{ id: created.result }]
+    });
+    socket.close(1000, "done");
+  });
+
+  it("speaks the same protocol over the Cap'n Web transport", async () => {
+    const userId = uniqueUser();
+    const url = new URL(`http://example.com/agents/user-hub/${userId}`);
+    url.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+    const response = await exports.default.fetch(url, {
+      headers: { Upgrade: "websocket" }
+    });
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (!socket) throw new Error("Expected a WebSocket upgrade response");
+    socket.accept();
+
+    const frames: Record<string, unknown>[] = [];
+    const waiters: ((f: Record<string, unknown>) => void)[] = [];
+    class Inbox extends RpcTarget {
+      message(value: string) {
+        const frame = JSON.parse(value) as Record<string, unknown>;
+        const waiter = waiters.shift();
+        if (waiter) waiter(frame);
+        else frames.push(frame);
+      }
+    }
+    const next = () =>
+      frames.length
+        ? Promise.resolve(frames.shift()!)
+        : new Promise<Record<string, unknown>>((r) => waiters.push(r));
+    const pipe = newWebSocketRpcSession<{
+      __cf_agent_send(message: string): Promise<void>;
+    }>(socket, new Inbox());
+    try {
+      expect(await next()).toMatchObject({
+        type: "cf_agent_identity",
+        name: userId
+      });
+      await pipe.__cf_agent_send(
+        JSON.stringify({ type: "rpc", id: "1", method: "listChats", args: [] })
+      );
+      expect(await next()).toMatchObject({
+        id: "1",
+        success: true,
+        result: []
+      });
+    } finally {
+      pipe[Symbol.dispose]();
     }
   });
 });

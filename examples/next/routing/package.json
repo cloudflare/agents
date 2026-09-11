@@ -15,13 +15,13 @@
     "@cloudflare/kumo": "^2.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "capnweb": "^0.12.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.48.0",
     "@cloudflare/vitest-pool-workers": "^0.19.1",
+    "capnweb": "^0.12.0",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@tailwindcss/vite": "^4",
     "@types/react": "^19.2.17",

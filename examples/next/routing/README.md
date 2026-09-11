@@ -80,17 +80,18 @@ Idempotency and repair belong to the production design in
 
 ## The hub is a plain Durable Object
 
-The hub has no `@callable()` methods and no Agent protocol. Its browser
-interface is an `RpcTarget` served by the `WebSockets` capability as
-Cap'n Web callables: the client opens one session with
-`newWebSocketRpcSession(callablesRpcUrl(hubUrl))` and calls `createChat()`,
-`listChats()`, `searchChats()`, and `deleteChat()` as ordinary methods.
-Each chat still reaches its owner with a plain Durable Object stub,
-`env.UserHub.getByName(userId)`.
+The hub has no `@callable()` methods and no `Agent` base class, yet the
+browser reaches it with `useAgent` like any Agent. The `WebSockets`
+capability speaks the Agent protocol for it: on connect it sends the
+identity frame that resolves `ready`, and it answers the `rpc` frames that
+`stub` and `call()` send against the hub's `RpcTarget`. The client picks the
+wire with `transport: "websocket" | "capnweb"` (add `?transport=capnweb` to
+the page URL to try the second). Each chat still reaches its owner with a
+plain Durable Object stub, `env.UserHub.getByName(userId)`.
 
 Install order matters: `RoutedAgents` goes first so a forwarded upgrade
 under `/chats/{id}` reaches the chat, and only the hub's own upgrades fall
-through to the callables endpoint.
+through to the WebSockets capability.
 
 Two sharp edges to design around:
 
@@ -111,8 +112,8 @@ pnpm run start
 ```
 
 The React UI (Vite + Kumo) shows the whole pattern: the sidebar and
-search use one Cap'n Web session to the hub, and each open chat gets
-its own `useAgent` WebSocket through the hub's route via `basePath`.
+search use one `useAgent` connection to the plain hub, and each open chat
+gets its own `useAgent` connection through the hub's route via `basePath`.
 No model is wired in; the "assistant" reply is an echo that proves both
 roles land in the chat's own SQLite.
 
