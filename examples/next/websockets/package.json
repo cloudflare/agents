@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-next-websockets-example",
-  "description": "Next: the WebSockets capability on a plain Durable Object \u2014 useAgent over the WebSocket or Cap'n Web transport, callables on both, hibernating connections, tags",
+  "description": "Next: the WebSockets capability on a plain Durable Object — useAgent over the WebSocket or Cap'n Web transport, callables on both, hibernating connections, tags",
   "private": true,
   "type": "module",
   "version": "0.0.0",
