@@ -217,7 +217,7 @@ export class State<T = unknown> extends LifecycleCapability {
       return;
     }
 
-    if (pending) {
+    if (pending instanceof Promise) {
       // Durable Objects remain active for pending I/O without waitUntil. Keep
       // set() synchronous while ensuring asynchronous failures are observed.
       void pending.catch((error) => {

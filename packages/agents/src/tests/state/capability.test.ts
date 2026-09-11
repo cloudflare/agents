@@ -119,6 +119,28 @@ describe("State capability", () => {
     });
   });
 
+  it("does not cache a value whose write fails", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const events: unknown[] = [];
+      const { capability, lifecycle } = install(
+        new State<unknown>({
+          onChanged: (state) => {
+            events.push(state);
+          }
+        })
+      );
+      await lifecycle.start();
+      capability.set({ ok: true });
+
+      // BigInt is not JSON-serializable, so persistence throws before the
+      // cache is updated.
+      expect(() => capability.set({ n: 1n })).toThrow();
+
+      expect(capability.get()).toEqual({ ok: true });
+      expect(events).toEqual([{ ok: true }]);
+    });
+  });
+
   it("calls onChanged with the server source", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const events: Array<[number, StateChangeSource]> = [];
