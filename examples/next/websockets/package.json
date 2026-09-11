@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-next-websockets-example",
-  "description": "Next: the WebSockets capability on a plain Durable Object — useAgent over the WebSocket or Cap'n Web transport, callables on both, hibernating connections, tags",
+  "description": "Next: the WebSockets capability on a plain Durable Object \u2014 useAgent over the WebSocket or Cap'n Web transport, callables on both, hibernating connections, tags",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -21,12 +21,12 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.48.0",
     "@cloudflare/vitest-pool-workers": "^0.19.1",
-    "capnweb": "^0.12.0",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@tailwindcss/vite": "^4",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "capnweb": "^0.12.0",
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
