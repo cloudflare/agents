@@ -5,10 +5,11 @@ import { WebSockets } from "agents/websockets";
 
 /**
  * A chat room on a plain Durable Object. The `WebSockets` capability owns
- * the whole connection subsystem: it claims upgrades, accepts hibernating
- * sockets, dispatches the handlers below inside the host invocation
- * boundary, and answers `getConnections()`. The room itself only keeps a
- * message table and decides what to broadcast.
+ * the whole connection subsystem: it claims upgrades on either wire,
+ * dispatches the handlers below inside the host invocation boundary,
+ * speaks the Agent protocol so `useAgent` works against this object, and
+ * answers `getConnections()`. The room itself only keeps a message table
+ * and decides what to broadcast.
  */
 
 /** Per-connection state. Persisted on the socket, so it survives hibernation. */
@@ -17,15 +18,17 @@ type MemberState = {
   joinedAt: number;
 };
 
-type RoomMessage = {
+export type RoomMessage = {
   id: number;
   nick: string;
   text: string;
   at: number;
 };
 
+export type Member = { id: string; nick: string; joinedAt: number };
+
 /** Frames the room sends to every member. */
-type ServerFrame =
+export type ServerFrame =
   | { type: "history"; messages: RoomMessage[] }
   | { type: "join"; nick: string; members: number }
   | { type: "leave"; nick: string; members: number }
@@ -33,14 +36,31 @@ type ServerFrame =
   | { type: "whoami"; id: string; state: MemberState | null }
   | { type: "error"; error: string };
 
-/** Frames a member may send. */
+/** Frames a member may send, besides the Agent protocol's own. */
 type ClientFrame = { type: "say"; text: string } | { type: "whoami" };
 
 const MAX_TEXT = 1_000;
+const MAX_NICK = 32;
 
-function nickFrom(request: Request, fallback: string): string {
-  const nick = new URL(request.url).searchParams.get("nick")?.trim();
-  return nick && nick.length <= 32 ? nick : fallback;
+/** Trim and bound a nickname; `null` when unusable. */
+function cleanNick(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const nick = value.trim();
+  return nick && nick.length <= MAX_NICK ? nick : null;
+}
+
+/** Trim and bound a message; `null` when unusable. */
+function cleanText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text && text.length <= MAX_TEXT ? text : null;
+}
+
+function nickFrom(connection: Connection, request: Request): string {
+  return (
+    cleanNick(new URL(request.url).searchParams.get("nick")) ??
+    `guest-${connection.id.slice(0, 6)}`
+  );
 }
 
 function parseClientFrame(raw: unknown): ClientFrame | null {
@@ -54,18 +74,20 @@ function parseClientFrame(raw: unknown): ClientFrame | null {
   if (frame === null || typeof frame !== "object") return null;
   const { type, text } = frame as Partial<Record<string, unknown>>;
   if (type === "whoami") return { type };
-  if (type === "say" && typeof text === "string") {
-    const trimmed = text.trim();
-    if (trimmed && trimmed.length <= MAX_TEXT) return { type, text: trimmed };
+  if (type === "say") {
+    const clean = cleanText(text);
+    if (clean) return { type, text: clean };
   }
   return null;
 }
 
 /**
- * The same room, served as remote methods over a Cap'n Web session
- * (`?__agents_rpc=capnweb`). Prototype methods are the complete remote
- * interface. Each call runs through the host invocation boundary, so a
- * method may broadcast to the hibernating members like a handler does.
+ * The room's remote interface. Prototype methods are the complete surface.
+ * The capability serves it three ways: as the `rpc` frames `useAgent().stub`
+ * sends on either transport, and as a native Cap'n Web session at
+ * `?__agents_rpc=capnweb`. Each call runs through the host invocation
+ * boundary with the calling connection in scope, so a method may broadcast
+ * to the hibernating members like a handler does.
  */
 class RoomCallables extends RpcTarget {
   readonly #room: RoomObject;
@@ -85,8 +107,19 @@ class RoomCallables extends RpcTarget {
     return this.#room.history();
   }
 
-  members(): { id: string; nick: string; joinedAt: number }[] {
+  members(): Member[] {
     return this.#room.members();
+  }
+
+  /** Streams to the caller; `useAgent().call` surfaces it via stream callbacks. */
+  countdown(from: number): ReadableStream<number> {
+    const start = Math.min(Math.max(Math.trunc(from), 1), 10);
+    return new ReadableStream<number>({
+      start(controller) {
+        for (let n = start; n >= 0; n--) controller.enqueue(n);
+        controller.close();
+      }
+    });
   }
 }
 
@@ -97,7 +130,7 @@ export class RoomObject extends DurableObject<Env> {
         // Only durable state survives hibernation: anything a later wake
         // needs about this connection goes through setState.
         const state: MemberState = {
-          nick: nickFrom(request, `guest-${connection.id.slice(0, 6)}`),
+          nick: nickFrom(connection, request),
           joinedAt: Date.now()
         };
         connection.setState(state);
@@ -108,6 +141,8 @@ export class RoomObject extends DurableObject<Env> {
           members: this.members().length
         });
       },
+      // Agent protocol frames (identity, rpc) never reach here: the
+      // capability answers them first. Everything else is the room's own.
       onMessage: (connection, message) => {
         const frame = parseClientFrame(message);
         if (!frame) {
@@ -141,8 +176,8 @@ export class RoomObject extends DurableObject<Env> {
     },
     // Tags are set once at accept time and queryable through
     // getConnections(tag) after any wake. The connection id is always tag 0.
-    getConnectionTags: (_connection, { request }) => [
-      `nick:${nickFrom(request, "guest")}`
+    getConnectionTags: (connection, { request }) => [
+      `nick:${nickFrom(connection, request)}`
     ],
     callables: new RoomCallables(this)
   });
@@ -160,13 +195,21 @@ export class RoomObject extends DurableObject<Env> {
     `);
   }
 
-  /** Persist one message and return the stored row. */
-  post(nick: string, text: string): RoomMessage {
+  /**
+   * Persist one message and return the stored row. Every write path — a
+   * socket frame, a callable, an HTTP POST — comes through here, so the
+   * bounds apply to all of them.
+   */
+  post(nick: unknown, text: unknown): RoomMessage {
+    const cleanedText = cleanText(text);
+    if (!cleanedText) {
+      throw new Error(`text must be 1-${MAX_TEXT} characters`);
+    }
     const [row] = this.ctx.storage.sql
       .exec<RoomMessage>(
         "INSERT INTO room_messages (nick, text, at) VALUES (?, ?, ?) RETURNING id, nick, text, at",
-        nick,
-        text.slice(0, MAX_TEXT),
+        cleanNick(nick) ?? "anonymous",
+        cleanedText,
         Date.now()
       )
       .toArray();
@@ -182,8 +225,8 @@ export class RoomObject extends DurableObject<Env> {
       .toArray();
   }
 
-  /** Every open connection with its persisted state. */
-  members(): { id: string; nick: string; joinedAt: number }[] {
+  /** Every open connection on either wire, with its state. */
+  members(): Member[] {
     return [...this.webSockets.getConnections<MemberState>()].map(
       (connection) => ({
         id: connection.id,
@@ -209,9 +252,9 @@ export class RoomObject extends DurableObject<Env> {
     }
   }
 
-  broadcast(frame: ServerFrame, exceptId?: string): void {
+  broadcast(frame: ServerFrame): void {
     for (const connection of this.webSockets.getConnections()) {
-      if (connection.id !== exceptId) this.send(connection, frame);
+      this.send(connection, frame);
     }
   }
 
@@ -234,21 +277,20 @@ export class RoomObject extends DurableObject<Env> {
         if (request.method !== "POST") {
           return new Response("Method not allowed", { status: 405 });
         }
-        let body: Partial<{ nick: string; text: string }>;
+        let body: unknown;
         try {
           body = await request.json();
         } catch {
           return new Response("Invalid JSON body", { status: 400 });
         }
-        if (typeof body.text !== "string" || !body.text.trim()) {
-          return new Response(
-            'Body must be { "text": string, "nick"?: string }',
-            {
-              status: 400
-            }
-          );
+        if (body === null || typeof body !== "object") {
+          return badSay();
         }
-        const message = this.post(body.nick ?? "server", body.text.trim());
+        const { nick, text } = body as Partial<Record<string, unknown>>;
+        if (!cleanText(text) || (nick !== undefined && !cleanNick(nick))) {
+          return badSay();
+        }
+        const message = this.post(nick ?? "server", text);
         this.broadcast({ type: "message", message });
         return Response.json(message);
       }
@@ -261,6 +303,13 @@ export class RoomObject extends DurableObject<Env> {
         });
     }
   }
+}
+
+function badSay(): Response {
+  return new Response(
+    `Body must be { "text": string (1-${MAX_TEXT}), "nick"?: string (1-${MAX_NICK}) }`,
+    { status: 400 }
+  );
 }
 
 export default {

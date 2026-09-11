@@ -105,6 +105,12 @@ export type CapnWebSessionOptions = {
     wasClean: boolean
   ) => Promise<void>;
   readonly onError: (connection: Connection, error: unknown) => Promise<void>;
+  /**
+   * Called once the connection exists, before `onConnect`, so it is already
+   * visible in `getConnections()` while the connect handler runs — the same
+   * ordering as a hibernating socket, which is accepted before `onConnect`.
+   */
+  readonly onOpen: (session: CapnWebSession) => void;
   /** Called exactly once when the session ends, before `onClose`. */
   readonly onDispose: (session: CapnWebSession) => void;
 };
@@ -205,6 +211,7 @@ export async function openCapnWebSession(
     connectionId,
     ...(await options.tags(connection, ctx)).filter((t) => t !== connectionId)
   ];
+  options.onOpen(session);
   try {
     await options.onConnect(connection, ctx);
   } catch (error) {

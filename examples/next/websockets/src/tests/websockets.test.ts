@@ -1,7 +1,12 @@
-import { exports } from "cloudflare:workers";
+import { exports, RpcTarget } from "cloudflare:workers";
 import { newWebSocketRpcSession } from "capnweb";
 import { describe, expect, it } from "vitest";
-import { CALLABLES_RPC_QUERY, CALLABLES_RPC_VALUE } from "agents/websockets";
+import {
+  CALLABLES_RPC_QUERY,
+  CALLABLES_RPC_VALUE,
+  CAPNWEB_TRANSPORT_QUERY,
+  CAPNWEB_TRANSPORT_VALUE
+} from "agents/websockets";
 
 type Frame = { type: string } & Record<string, unknown>;
 
@@ -39,13 +44,25 @@ class Member {
     const socket = response.webSocket;
     if (!socket) throw new Error("Expected a WebSocket upgrade response");
     socket.accept();
-    return new Member(socket);
+    const member = new Member(socket);
+    // The capability identifies the plain host before onConnect runs.
+    expect(await member.next()).toEqual({
+      type: "cf_agent_identity",
+      name: room,
+      agent: "room-object"
+    });
+    return member;
   }
 
   next(): Promise<Frame> {
     const queued = this.#queue.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => this.#waiters.push(resolve));
+  }
+
+  /** Send an rpc frame, exactly what useAgent().stub sends. */
+  rpc(id: string, method: string, ...args: unknown[]) {
+    this.send({ type: "rpc", id, method, args });
   }
 
   /** Read frames until one of the given type arrives. */
@@ -196,6 +213,122 @@ describe("WebSockets capability on a plain Durable Object", () => {
     } finally {
       (rpc as Partial<Disposable>)[Symbol.dispose]?.();
       await frank.close();
+    }
+  });
+
+  it("answers useAgent's rpc frames against the callables target", async () => {
+    const room = crypto.randomUUID();
+    const grace = await Member.join(room, "grace");
+    await grace.until("join");
+
+    grace.rpc("1", "say", "grace", "via rpc frame");
+    // The callable broadcast lands as a room frame, then the rpc reply.
+    expect(await grace.until("message")).toMatchObject({
+      message: { nick: "grace", text: "via rpc frame" }
+    });
+    expect(await grace.until("rpc")).toMatchObject({
+      id: "1",
+      success: true,
+      done: true,
+      result: { text: "via rpc frame" }
+    });
+
+    grace.rpc("2", "members");
+    expect(await grace.until("rpc")).toMatchObject({
+      id: "2",
+      result: [{ nick: "grace" }]
+    });
+
+    // A ReadableStream result streams as chunks then a final done frame.
+    grace.rpc("3", "countdown", 2);
+    expect(await grace.until("rpc")).toMatchObject({
+      id: "3",
+      done: false,
+      result: 2
+    });
+    expect(await grace.until("rpc")).toMatchObject({
+      id: "3",
+      done: false,
+      result: 1
+    });
+    expect(await grace.until("rpc")).toMatchObject({
+      id: "3",
+      done: false,
+      result: 0
+    });
+    expect(await grace.until("rpc")).toMatchObject({ id: "3", done: true });
+
+    // Bounds apply to callables too.
+    grace.rpc("4", "say", "grace", "");
+    expect(await grace.until("rpc")).toMatchObject({ id: "4", success: false });
+    await grace.close();
+  });
+
+  it("speaks the same protocol over the Cap'n Web transport", async () => {
+    const room = crypto.randomUUID();
+    const heidi = await Member.join(room, "heidi");
+    await heidi.until("join");
+
+    const url = roomUrl(room, "", "ivan");
+    url.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+    const response = await exports.default.fetch(url, {
+      headers: { Upgrade: "websocket" }
+    });
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (!socket) throw new Error("Expected a WebSocket upgrade response");
+    socket.accept();
+
+    const frames: Frame[] = [];
+    const waiters: ((frame: Frame) => void)[] = [];
+    class Inbox extends RpcTarget {
+      message(value: string) {
+        const frame = JSON.parse(value) as Frame;
+        const waiter = waiters.shift();
+        if (waiter) waiter(frame);
+        else frames.push(frame);
+      }
+    }
+    const next = () =>
+      frames.length
+        ? Promise.resolve(frames.shift() as Frame)
+        : new Promise<Frame>((resolve) => waiters.push(resolve));
+    const until = async (type: string) => {
+      for (;;) {
+        const frame = await next();
+        if (frame.type === type) return frame;
+      }
+    };
+    const pipe = newWebSocketRpcSession<{
+      __cf_agent_send(message: string): Promise<void>;
+    }>(socket, new Inbox());
+    try {
+      expect(await next()).toMatchObject({
+        type: "cf_agent_identity",
+        name: room
+      });
+      expect(await until("join")).toMatchObject({ nick: "ivan", members: 2 });
+      // Both wires show up in getConnections(), so both see broadcasts.
+      expect(await heidi.until("join")).toMatchObject({ nick: "ivan" });
+
+      await pipe.__cf_agent_send(
+        JSON.stringify({
+          type: "rpc",
+          id: "1",
+          method: "say",
+          args: ["ivan", "over the pipe"]
+        })
+      );
+      expect(await until("rpc")).toMatchObject({ id: "1", success: true });
+      expect(await heidi.until("message")).toMatchObject({
+        message: { nick: "ivan", text: "over the pipe" }
+      });
+
+      await pipe.__cf_agent_send(JSON.stringify({ type: "whoami" }));
+      expect(await until("whoami")).toMatchObject({ state: { nick: "ivan" } });
+    } finally {
+      pipe[Symbol.dispose]();
+      await heidi.close();
     }
   });
 });
