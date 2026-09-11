@@ -5,14 +5,15 @@ import { CapnWebAgentClient } from "./capnweb-client";
 /**
  * WebSocket transport carrying all Agent traffic for `useAgent`.
  *
- * - `"partykit"` (default): the existing PartySocket protocol socket.
- *   Server-side connections use the Hibernation API, so idle Agents can
- *   be evicted from memory without dropping clients.
+ * - `"hibernating-websocket"` (default): Agent protocol frames travel
+ *   directly over a WebSocket accepted with the Hibernation API, so idle
+ *   Agents can be evicted from memory without dropping clients. The
+ *   browser connection is managed by PartySocket.
  * - `"capnweb"`: the same Agent protocol frames travel over a single
  *   Cap'n Web RPC socket. The server connection is non-hibernating: the
  *   Agent stays pinned in memory while clients are connected.
  */
-export type AgentTransport = "partykit" | "capnweb";
+export type AgentTransport = "hibernating-websocket" | "capnweb";
 
 type SocketProtocols = Parameters<typeof usePartySocket>[0]["protocols"];
 

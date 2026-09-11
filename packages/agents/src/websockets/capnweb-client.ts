@@ -46,13 +46,11 @@ class ClientEvents extends RpcTarget implements TransportClientEvents {
 }
 
 /**
- * Single-socket Cap'n Web message pipe with a WebSocket-shaped surface.
+ * Single-socket Cap'n Web Agent connection with a WebSocket-shaped surface.
  *
- * This is deliberately *only* a transport: `send()` forwards Agent
- * protocol frames to the server and incoming frames surface as
- * `message` events, so every existing consumer of the socket — state
- * sync, identity, RPC frames, chat — works unchanged. The server-side
- * connection is non-hibernating.
+ * `send()` forwards framework protocol frames and incoming frames surface as
+ * `message` events. `invoke()` calls a native capability method on the same
+ * Cap'n Web session. The server-side connection is non-hibernating.
  */
 export class CapnWebAgentClient extends EventTarget {
   readonly CONNECTING = WebSocket.CONNECTING;
@@ -131,6 +129,16 @@ export class CapnWebAgentClient extends EventTarget {
       this.#emitError(error);
     });
     return transmitted;
+  }
+
+  /** Invoke one native callable on the current or next Cap'n Web session. */
+  async invoke(method: string, args: unknown[]): Promise<unknown> {
+    const session = await this.#getSession();
+    const remoteMethod = Reflect.get(session.root, method) as unknown;
+    if (typeof remoteMethod !== "function") {
+      throw new Error(`Method ${method} does not exist`);
+    }
+    return Reflect.apply(remoteMethod, session.root, args);
   }
 
   /** Dispatch one server-delivered frame as a `message` event. */

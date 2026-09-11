@@ -1,5 +1,4 @@
 import { RpcTarget } from "cloudflare:workers";
-import { newWorkersWebSocketRpcResponse } from "capnweb";
 import { nanoid } from "nanoid";
 import {
   LifecycleCapability,
@@ -14,18 +13,20 @@ import {
   isManagedWebSocket
 } from "./connection";
 import {
-  buildCallablesRoot,
+  callablesUseHostMessageHandler,
   exposableMethods,
-  type CallableInvoker
+  type CallableMethod
 } from "./callables-target";
 import type {
   WebSocketHandlers,
   WebSocketMessage,
   WebSocketsOptions
 } from "./options";
-import { isCallablesRpcUpgrade } from "./protocol";
 import { openCapnWebSession, type CapnWebSession } from "./transport";
-import { isCapnWebTransportUpgrade } from "./transport-protocol";
+import {
+  isCapnWebStreamingResult,
+  isCapnWebTransportUpgrade
+} from "./transport-protocol";
 
 /**
  * Reserved close codes the runtime synthesizes when there was no real
@@ -79,8 +80,9 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
  *
  * Connections speak one of two wire transports, chosen by the client:
  *
- * - **PartyKit** (default): a plain hibernating WebSocket; idle clients
- *   survive Durable Object eviction.
+ * - **Hibernating WebSocket** (default): Agent protocol frames travel
+ *   directly over a WebSocket; idle clients survive Durable Object
+ *   eviction.
  * - **Cap'n Web** (`?__agents_transport=capnweb`): the same frames
  *   travel over a single Cap'n Web RPC session. The connection is
  *   non-hibernating — the Durable Object stays pinned while it is open.
@@ -89,25 +91,22 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
  * dispatch the same `onConnect`/`onMessage`/`onClose` and appear in
  * `getConnections()`.
  *
- * `callables` exposes an `RpcTarget`'s prototype methods to remote
- * callers over a Cap'n Web session claimed from `?__agents_rpc=capnweb`
- * upgrades. Methods run through the host invocation boundary, may
- * return a `ReadableStream` to stream results, and emit
- * `rpc`/`rpc:error` capability events. Callable sessions are
- * non-hibernating: while a client holds one open, the Durable Object
- * stays pinned in memory.
- *
- * There is no separate browser client: against an `Agent`, the
- * `useAgent` hook's `stub`/`call` reach the same interface over the
- * protocol socket. A plain host's endpoint is reached with capnweb
- * directly — `newWebSocketRpcSession(new WebSocket(callablesRpcUrl(url)))`.
+ * `callables` exposes an `RpcTarget`'s prototype methods through
+ * `useAgent().call` and `useAgent().stub`. On the hibernating transport,
+ * calls use the Agent JSON envelope. On the Cap'n Web transport they are
+ * native methods on the same session root as the framework message pipe.
+ * Methods run through the host invocation boundary with the calling
+ * connection in scope, may return a `ReadableStream`, and emit
+ * `rpc`/`rpc:error` capability events. There is no separate callables
+ * endpoint or client.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export class WebSockets extends LifecycleCapability {
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
-  readonly #callablesTarget: RpcTarget | undefined;
+  readonly #callables: ReadonlyMap<string, CallableMethod>;
+  readonly #callablesUseHostMessageHandler: boolean;
   readonly #capnWebSessions = new Map<string, CapnWebSession>();
   #manager: ConnectionManager | undefined;
 
@@ -115,25 +114,21 @@ export class WebSockets extends LifecycleCapability {
     super("websockets");
     this.#handlers = options.handlers;
     this.#getConnectionTags = options.getConnectionTags;
-    this.#callablesTarget = options.callables
-      ? this.#buildCallablesTarget(options.callables)
-      : undefined;
+    this.#callables = options.callables
+      ? exposableMethods(options.callables)
+      : new Map();
+    this.#callablesUseHostMessageHandler = options.callables
+      ? callablesUseHostMessageHandler(options.callables)
+      : false;
   }
 
   // ── Lifecycle capability hooks ─────────────────────────────────────────
 
-  /** Claim callables RPC upgrades and, with handlers, connection upgrades. */
+  /** Claim connection upgrades whenever handlers or callables are configured. */
   onWebSocketUpgrade({
     request
-  }: CapabilityWebSocketUpgradeContext):
-    | Promise<Response>
-    | Response
-    | undefined {
-    if (isCallablesRpcUpgrade(request)) {
-      if (!this.#callablesTarget) return undefined;
-      return newWorkersWebSocketRpcResponse(request, this.#callablesTarget);
-    }
-    if (!this.#handlers) return undefined;
+  }: CapabilityWebSocketUpgradeContext): Promise<Response> | undefined {
+    if (!this.#handlers && this.#callables.size === 0) return undefined;
     if (isCapnWebTransportUpgrade(request)) {
       return this.#acceptCapnWebSession(request);
     }
@@ -147,6 +142,12 @@ export class WebSockets extends LifecycleCapability {
   ): Promise<boolean> {
     if (!isManagedWebSocket(ws)) return false;
     const connection = createConnection(ws);
+    if (
+      !this.#callablesUseHostMessageHandler &&
+      (await this.#dispatchHibernatingCallable(connection, message))
+    ) {
+      return true;
+    }
     await this.lifecycle.runInHostContext(
       () => this.#handlers?.onMessage?.(connection, message),
       { connection }
@@ -289,6 +290,9 @@ export class WebSockets extends LifecycleCapability {
       request,
       connectionId,
       handlers: this.#handlers ?? {},
+      callables: this.#callables,
+      invokeCallable: (name, method, args, connection) =>
+        this.#invokeCallable(name, method, args, connection),
       getTags: this.#getConnectionTags,
       dispatch: (fn, scope) => this.lifecycle.runInHostContext(fn, scope),
       register: (session) => this.#capnWebSessions.set(connectionId, session),
@@ -302,33 +306,92 @@ export class WebSockets extends LifecycleCapability {
 
   // ── Callables ──────────────────────────────────────────────────────────
 
-  /**
-   * Wrap a callables target for serving: every exposable method
-   * dispatches through the host invocation boundary and emits
-   * `rpc`/`rpc:error` events.
-   */
-  #buildCallablesTarget(target: RpcTarget): RpcTarget {
-    const dispatching = new Map<string, CallableInvoker>();
-    for (const [name, invoke] of exposableMethods(target)) {
-      dispatching.set(name, (...args) =>
-        this.#dispatchCallable(name, () => invoke(...args))
-      );
+  async #dispatchHibernatingCallable(
+    connection: Connection,
+    raw: WebSocketMessage
+  ): Promise<boolean> {
+    if (this.#callables.size === 0 || typeof raw !== "string") return false;
+    let request: unknown;
+    try {
+      request = JSON.parse(raw);
+    } catch {
+      return false;
     }
-    return buildCallablesRoot(dispatching);
+    if (!isCallableRequest(request)) return false;
+
+    const method = this.#callables.get(request.method);
+    if (!method) {
+      this.#sendCallableResponse(connection, {
+        type: "rpc",
+        id: request.id,
+        success: false,
+        error: `Method ${request.method} does not exist`
+      });
+      return true;
+    }
+
+    try {
+      const result = await this.#invokeCallable(
+        request.method,
+        method,
+        request.args,
+        connection
+      );
+      if (result instanceof ReadableStream) {
+        for await (const chunk of result) {
+          this.#sendCallableResponse(connection, {
+            type: "rpc",
+            id: request.id,
+            success: true,
+            done: false,
+            result: chunk
+          });
+        }
+        this.#sendCallableResponse(connection, {
+          type: "rpc",
+          id: request.id,
+          success: true,
+          done: true,
+          result: undefined
+        });
+      } else {
+        this.#sendCallableResponse(connection, {
+          type: "rpc",
+          id: request.id,
+          success: true,
+          done: true,
+          result
+        });
+      }
+    } catch (error) {
+      this.#sendCallableResponse(connection, {
+        type: "rpc",
+        id: request.id,
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    return true;
   }
 
-  async #dispatchCallable(
+  async #invokeCallable(
     name: string,
-    invoke: () => unknown
+    method: CallableMethod,
+    args: unknown[],
+    connection: Connection
   ): Promise<unknown> {
-    // Throws with installation guidance when the capability was never
-    // installed with Lifecycle.use().
     const services = this.lifecycle;
     try {
-      const result = await services.runInHostContext(invoke);
+      const result = await services.runInHostContext(
+        () => method.invoke(...args),
+        { connection }
+      );
       services.events.emit("rpc", {
         method: name,
-        streaming: result instanceof ReadableStream
+        streaming:
+          method.streaming ||
+          result instanceof ReadableStream ||
+          isCapnWebStreamingResult(result)
       });
       return result;
     } catch (error) {
@@ -339,4 +402,52 @@ export class WebSockets extends LifecycleCapability {
       throw error;
     }
   }
+
+  #sendCallableResponse(
+    connection: Connection,
+    response: CallableResponse
+  ): void {
+    try {
+      connection.send(JSON.stringify(response));
+    } catch {
+      // The peer disconnected while the callable was running.
+    }
+  }
+}
+
+type CallableRequest = {
+  readonly type: "rpc";
+  readonly id: string;
+  readonly method: string;
+  readonly args: unknown[];
+};
+
+type CallableResponse =
+  | {
+      readonly type: "rpc";
+      readonly id: string;
+      readonly success: true;
+      readonly done: boolean;
+      readonly result: unknown;
+    }
+  | {
+      readonly type: "rpc";
+      readonly id: string;
+      readonly success: false;
+      readonly error: string;
+    };
+
+function isCallableRequest(value: unknown): value is CallableRequest {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    value.type === "rpc" &&
+    "id" in value &&
+    typeof value.id === "string" &&
+    "method" in value &&
+    typeof value.method === "string" &&
+    "args" in value &&
+    Array.isArray(value.args)
+  );
 }

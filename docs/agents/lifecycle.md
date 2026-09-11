@@ -338,11 +338,13 @@ and, through the decorator-derived target, over the Cap'n Web endpoint.
 
 Connections speak one of two wire transports, chosen by the client:
 
-- **PartyKit** (default) is a plain WebSocket using Cloudflare's WebSocket Hibernation
-  API. Idle clients remain connected while the Durable Object can leave
-  memory; when a message wakes the object, its constructor and lifecycle
-  startup run again before `onMessage`. State needed after a wake must be
-  stored durably or through `connection.setState()`.
+- **Hibernating WebSocket** (default, selected in `useAgent` as
+  `"hibernating-websocket"`) carries Agent frames directly over a WebSocket
+  accepted with Cloudflare's WebSocket Hibernation API. PartySocket manages the
+  browser connection. Idle clients remain connected while the Durable Object
+  can leave memory; when a message wakes the object, its constructor and
+  lifecycle startup run again before `onMessage`. State needed after a wake
+  must be stored durably or through `connection.setState()`.
 - **Cap'n Web** (`?__agents_transport=capnweb`, or `useAgent({ transport:
 "capnweb" })`) carries the same frames over a single Cap'n Web RPC session.
   The connection is an in-memory socket and does not hibernate: the Durable

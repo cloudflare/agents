@@ -123,16 +123,16 @@ useAgent({
 ### Transport
 
 `useAgent` speaks the Agent protocol over one of two wires. The default,
-`"partykit"`, is a plain WebSocket served by the Durable Object's
-hibernation API. The experimental `"capnweb"` transport carries the same
-frames over a single [Cap'n Web](https://github.com/cloudflare/capnweb) RPC
-session:
+`"hibernating-websocket"`, sends frames directly over a WebSocket served by
+the Durable Object's hibernation API. The browser connection is managed by
+PartySocket. The experimental `"capnweb"` transport carries the same frames
+over a single [Cap'n Web](https://github.com/cloudflare/capnweb) RPC session:
 
 ```typescript
 useAgent({
   agent: "ChatAgent",
   name: "room-123",
-  transport: "capnweb" // default: "partykit"
+  transport: "capnweb" // default: "hibernating-websocket"
 });
 ```
 
@@ -375,7 +375,7 @@ type UseAgentOptions<State> = {
   name?: string; // Instance name (default: "default")
   host?: string; // Custom host
   path?: string; // Custom path prefix
-  transport?: "partykit" | "capnweb"; // Wire (default: "partykit")
+  transport?: "hibernating-websocket" | "capnweb"; // Wire (default: "hibernating-websocket")
 
   // Query parameters
   query?:

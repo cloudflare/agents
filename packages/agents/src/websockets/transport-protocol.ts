@@ -12,7 +12,35 @@ export const CAPNWEB_TRANSPORT_VALUE = "capnweb";
 /** Framework method reserved on the Cap'n Web transport session root. */
 export const CAPNWEB_TRANSPORT_SEND = "__cf_agent_send";
 
+/** Marker on a native result adapting a legacy callback-style stream. */
+export const CAPNWEB_STREAMING_RESULT = "__cf_agent_streaming_result";
+
 export type TransportMessage = string | ArrayBuffer | ArrayBufferView;
+
+/** One event from a legacy `StreamingResponse` projected as a native stream. */
+export type CapnWebStreamingEvent =
+  | { readonly type: "chunk"; readonly value: unknown }
+  | { readonly type: "done"; readonly value: unknown };
+
+/** Native result returned for a legacy callback-style streaming callable. */
+export type CapnWebStreamingResult = {
+  readonly [CAPNWEB_STREAMING_RESULT]: true;
+  readonly stream: ReadableStream<CapnWebStreamingEvent>;
+};
+
+/** Whether a native result wraps a legacy callback-style stream. */
+export function isCapnWebStreamingResult(
+  value: unknown
+): value is CapnWebStreamingResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    CAPNWEB_STREAMING_RESULT in value &&
+    value[CAPNWEB_STREAMING_RESULT] === true &&
+    "stream" in value &&
+    value.stream instanceof ReadableStream
+  );
+}
 
 /** Browser callback target used by the server to deliver frames. */
 export type TransportClientEvents = {

@@ -1,4 +1,3 @@
-import { RpcTarget } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type {
   Connection,
@@ -7,49 +6,16 @@ import type {
   ConnectionState,
   LifecycleHostContextScope
 } from "../lifecycle";
+import {
+  buildCallablesRoot,
+  type CallableMethod
+} from "./callables-target";
 import type { WebSocketHandlers } from "./options";
-import type {
-  TransportClientEvents,
-  TransportMessage
+import {
+  CAPNWEB_TRANSPORT_SEND,
+  type TransportClientEvents,
+  type TransportMessage
 } from "./transport-protocol";
-
-export type CapnWebSessionHandlers = {
-  send(message: TransportMessage): Promise<void>;
-  dispose(): void | Promise<void>;
-};
-
-/**
- * Framework-owned session root exposed to the browser over a Cap'n Web
- * transport session. It carries exactly one method — the message pipe —
- * so the transport stays a drop-in replacement for a plain WebSocket:
- * every frame travels through it unchanged.
- *
- * Cap'n Web invokes methods directly on this instance, so it must never
- * be wrapped in a Proxy — private-field access would throw with a Proxy
- * receiver as `this`.
- */
-export class CapnWebSessionRoot extends RpcTarget {
-  readonly #handlers: CapnWebSessionHandlers;
-  #disposed = false;
-
-  constructor(handlers: CapnWebSessionHandlers) {
-    super();
-    this.#handlers = handlers;
-  }
-
-  async __cf_agent_send(message: TransportMessage): Promise<void> {
-    if (this.#disposed) {
-      throw new Error("Transport session is closed");
-    }
-    await this.#handlers.send(message);
-  }
-
-  [Symbol.dispose](): void {
-    if (this.#disposed) return;
-    this.#disposed = true;
-    void this.#handlers.dispose();
-  }
-}
 
 export type CapnWebConnectionOptions = {
   id: string;
@@ -138,9 +104,9 @@ export type ManagedCapnWebConnection = {
 };
 
 /**
- * Create a non-hibernating connection with the public Connection
- * contract. Unlike the capability's hibernating connections it exists
- * only in memory and disappears with the isolate.
+ * Create a non-hibernating connection with the public Connection contract.
+ * Unlike the capability's hibernating connections it exists only in memory
+ * and disappears with the isolate.
  */
 export function createCapnWebConnection(
   options: CapnWebConnectionOptions
@@ -153,7 +119,7 @@ export function createCapnWebConnection(
   };
 }
 
-/** One live Cap'n Web transport session and its connection façade. */
+/** One live Cap'n Web transport session and its connection facade. */
 export type CapnWebSession = {
   readonly managed: ManagedCapnWebConnection;
   readonly session: Disposable;
@@ -167,6 +133,15 @@ export type OpenCapnWebSessionOptions = {
   readonly connectionId: string;
   /** Connection handlers, dispatched per event. */
   readonly handlers: WebSocketHandlers;
+  /** Native methods exposed beside the framework message pipe. */
+  readonly callables: ReadonlyMap<string, CallableMethod>;
+  /** Invoke one native method inside capability policy and host context. */
+  readonly invokeCallable: (
+    name: string,
+    method: CallableMethod,
+    args: unknown[],
+    connection: Connection
+  ) => Promise<unknown>;
   /** Tags attached to the connection, when configured. */
   readonly getTags:
     | ((
@@ -186,15 +161,18 @@ export type OpenCapnWebSessionOptions = {
 };
 
 /**
- * Accept a Cap'n Web transport upgrade and run its session.
+ * Accept a unified Cap'n Web Agent session.
  *
- * The session root carries exactly one method — the message pipe — so
- * the capability's handlers are transport-agnostic; only the wire and
- * the connection's lifetime differ (the session is a plain in-memory
- * WebSocketPair, so it keeps the Durable Object pinned and does not
- * survive hibernation).
+ * One root exposes the reserved framework message pipe and every configured
+ * native callable. State, identity, chat, and arbitrary messages use the
+ * pipe. `useAgent().call` and `.stub` invoke the native methods directly on
+ * this same session.
  *
- * @param options - Handlers, dispatch, and registry supplied by the capability.
+ * The session uses a plain in-memory `WebSocketPair`, so it keeps the Durable
+ * Object pinned and does not survive hibernation.
+ *
+ * @param options - Handlers, callables, dispatch, and registry supplied by
+ * the capability.
  * @returns The 101 upgrade response carrying the client socket.
  */
 export async function openCapnWebSession(
@@ -227,9 +205,6 @@ export async function openCapnWebSession(
     close: (code, reason) => {
       closeCode = code ?? 1000;
       closeReason = reason ?? "Connection closed";
-      // Close the raw socket so the client observes the requested
-      // code/reason; fall back to disposing the RPC session when the
-      // code is outside the range WebSocket.close accepts.
       try {
         server.close(closeCode, closeReason);
       } catch {
@@ -259,14 +234,24 @@ export async function openCapnWebSession(
     );
   };
 
-  const root = new CapnWebSessionRoot({
-    send: async (message) => {
-      await dispatch(() => handlers.onMessage?.(connection, message), {
-        connection
-      });
-    },
-    dispose
+  const rootMethods = new Map<string, CallableMethod>();
+  rootMethods.set(CAPNWEB_TRANSPORT_SEND, {
+    streaming: false,
+    invoke: async (message: unknown) => {
+      await dispatch(
+        () => handlers.onMessage?.(connection, message as TransportMessage),
+        { connection }
+      );
+    }
   });
+  for (const [name, method] of options.callables) {
+    rootMethods.set(name, {
+      streaming: method.streaming,
+      invoke: (...args) =>
+        options.invokeCallable(name, method, args, connection)
+    });
+  }
+  const root = buildCallablesRoot(rootMethods, () => void dispose());
 
   session = newWebSocketRpcSession<TransportClientEvents>(server, root);
   registered = { managed, session };
@@ -285,12 +270,8 @@ export async function openCapnWebSession(
   server.addEventListener(
     "error",
     (event) => {
-      // An error that follows the close event has nothing left to
-      // report against — the session is already torn down.
       if (disposed) return;
       wasClean = false;
-      // Mirror the hibernating path: the handler sees the error before
-      // the connection is torn down.
       const error =
         event instanceof ErrorEvent
           ? (event.error ?? new Error(event.message))

@@ -24,6 +24,7 @@ import {
   useCapnWebAgentSocket,
   type AgentTransport
 } from "./websockets/use-capnweb-socket";
+import { isCapnWebStreamingResult } from "./websockets/transport-protocol";
 
 export type { AgentTransport } from "./websockets/use-capnweb-socket";
 import { buildSubAgentPathUnchecked } from "./sub-routing";
@@ -45,11 +46,108 @@ type TerminalReconnectOptions = {
 
 /**
  * The socket implementation behind `useAgent` — a PartySocket for the
- * PartyKit transport or a CapnWebAgentClient for the Cap'n Web one.
- * Both expose the WebSocket-shaped surface the hook relies on
+ * hibernating WebSocket transport or a CapnWebAgentClient for the Cap'n
+ * Web one. Both expose the WebSocket-shaped surface the hook relies on
  * (send/close/readyState/shouldReconnect/events).
  */
 type AgentSocket = PartySocket | CapnWebAgentClient;
+
+type SplitCallOptions = {
+  readonly stream: StreamOptions | undefined;
+  readonly timeout: number | undefined;
+};
+
+function splitCallOptions(
+  options: CallOptions | StreamOptions | undefined
+): SplitCallOptions {
+  const legacy =
+    options !== undefined &&
+    ("onChunk" in options || "onDone" in options || "onError" in options);
+  return legacy
+    ? { stream: options as StreamOptions, timeout: undefined }
+    : {
+        stream: (options as CallOptions | undefined)?.stream,
+        timeout: (options as CallOptions | undefined)?.timeout
+      };
+}
+
+async function resolveCapnWebCallResult(
+  result: unknown,
+  streamOptions: StreamOptions | undefined
+): Promise<unknown> {
+  if (isCapnWebStreamingResult(result)) {
+    let finalValue: unknown;
+    for await (const event of result.stream) {
+      if (event.type === "chunk") {
+        streamOptions?.onChunk?.(event.value);
+      } else {
+        finalValue = event.value;
+      }
+    }
+    streamOptions?.onDone?.(finalValue);
+    return finalValue;
+  }
+
+  if (result instanceof ReadableStream && streamOptions) {
+    for await (const chunk of result) streamOptions.onChunk?.(chunk);
+    streamOptions.onDone?.(undefined);
+    return undefined;
+  }
+
+  return result;
+}
+
+function callNativeCapnWeb<T>(
+  socket: CapnWebAgentClient,
+  method: string,
+  args: unknown[],
+  options: CallOptions | StreamOptions | undefined,
+  settings: { readonly defaultTimeout: number }
+): Promise<T> {
+  const { stream, timeout } = splitCallOptions(options);
+  const effectiveTimeout =
+    timeout !== undefined ? timeout : stream ? undefined : settings.defaultTimeout;
+  const invocation = socket
+    .invoke(method, args)
+    .then((result) => resolveCapnWebCallResult(result, stream));
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const settle = (outcome: { value: unknown } | { error: unknown }) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      if ("error" in outcome) {
+        const error =
+          outcome.error instanceof Error
+            ? outcome.error
+            : new Error(String(outcome.error));
+        stream?.onError?.(error.message);
+        reject(error);
+      } else {
+        resolve(outcome.value as T);
+      }
+    };
+
+    void invocation.then(
+      (value) => settle({ value }),
+      (error: unknown) => settle({ error })
+    );
+
+    if (effectiveTimeout) {
+      timeoutId = setTimeout(
+        () =>
+          settle({
+            error: new Error(
+              `RPC call to ${method} timed out after ${effectiveTimeout}ms`
+            )
+          }),
+        effectiveTimeout
+      );
+    }
+  });
+}
 
 interface CacheEntry {
   promise: Promise<QueryObject>;
@@ -170,9 +268,9 @@ export type UseAgentOptions<State = unknown> = Omit<
     basePath?: string;
     /**
      * WebSocket transport for all Agent traffic. Defaults to
-     * `"partykit"`. Switching to `"capnweb"` changes only the wire
-     * and the server-side connection lifecycle — the hook's surface
-     * (`call`, `stub`, `setState`, handlers, ...) is identical.
+     * `"hibernating-websocket"`. Switching to `"capnweb"` changes only
+     * the wire and the server-side connection lifecycle — the hook's
+     * surface (`call`, `stub`, `setState`, handlers, ...) is identical.
      * @experimental The `"capnweb"` transport is experimental.
      */
     transport?: AgentTransport;
@@ -360,7 +458,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     defaultCallTimeout,
     onConnectionError,
     shouldReconnectOnClose,
-    transport = "partykit",
+    transport = "hibernating-websocket",
     ...restOptions
   } = options;
   const isCapnWeb = transport === "capnweb";
@@ -971,38 +1069,33 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       args: unknown[] = [],
       options?: CallOptions | StreamOptions
     ): Promise<T> => {
-      return new Promise((resolve, reject) => {
-        const socket = socketRef.current;
-        if (
-          socket &&
-          connectionErrorRef.current &&
-          socket.readyState === socket.CLOSED
-        ) {
-          reject(new Error("Connection closed"));
-          return;
-        }
+      const socket = socketRef.current;
+      if (
+        socket &&
+        connectionErrorRef.current &&
+        socket.readyState === socket.CLOSED
+      ) {
+        return Promise.reject(new Error("Connection closed"));
+      }
 
+      // A routed facet is owned by the root Agent's physical connection,
+      // so its calls must stay in the message pipe for the root to forward.
+      // A top-level Cap'n Web connection invokes the native callable on the
+      // same session instead of wrapping another RPC protocol inside it.
+      if (socket instanceof CapnWebAgentClient && subChain.length === 0) {
+        return callNativeCapnWeb<T>(socket, method, args, options, {
+          defaultTimeout: defaultCallTimeoutRef.current
+        });
+      }
+
+      return new Promise((resolve, reject) => {
         const id = crypto.randomUUID();
         let timeoutId: ReturnType<typeof setTimeout> | undefined;
-
-        // Detect legacy format: { onChunk?, onDone?, onError? } vs new format: { timeout?, stream? }
-        const isLegacyFormat =
-          options &&
-          ("onChunk" in options || "onDone" in options || "onError" in options);
-        const streamOptions = isLegacyFormat
-          ? (options as StreamOptions)
-          : (options as CallOptions | undefined)?.stream;
-        const timeout = isLegacyFormat
-          ? undefined
-          : (options as CallOptions | undefined)?.timeout;
-
-        // Apply the default timeout as a backstop for non-streaming
-        // calls so a lost response rejects instead of hanging forever.
-        // An explicit `timeout` (including 0 = disabled) always wins.
+        const { stream, timeout } = splitCallOptions(options);
         const effectiveTimeout =
           timeout !== undefined
             ? timeout
-            : streamOptions
+            : stream
               ? undefined
               : defaultCallTimeoutRef.current;
 
@@ -1027,16 +1120,12 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         pendingCallsRef.current.set(id, {
           reject,
           resolve: resolve as (value: unknown) => void,
-          stream: streamOptions,
+          stream,
           timeoutId,
           request,
           sentOn: null
         });
 
-        // Transmit immediately if the live socket is open; otherwise the
-        // request stays queued and is flushed on the next open event.
-        // We never hand requests to a non-open socket: its internal
-        // buffer is lost forever if the socket gets replaced.
         if (socket && socket.readyState === socket.OPEN) {
           socket.send(request);
           const pending = pendingCallsRef.current.get(id);
@@ -1044,8 +1133,10 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         }
       });
     },
+    // `subChain` decides whether a Cap'n Web call targets this top-level
+    // object natively or must travel through the root's facet message pipe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
+    [subChain.length]
   );
 
   agent.setState = (newState: State) => {
@@ -1083,7 +1174,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     if (isCapnWeb) {
       // The Cap'n Web client's URL is fully resolved at construction
       // (query params and `_pk` included), matching what `_pkurl`
-      // exposes on the PartyKit transport.
+      // exposes on the hibernating WebSocket transport.
       return capnWebAgent.url
         .replace("ws://", "http://")
         .replace("wss://", "https://");

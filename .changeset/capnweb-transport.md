@@ -14,9 +14,9 @@ and propagate `connection.close(code, reason)` to the client.
 Because `Agent` rides the capability, `useAgent({ transport: "capnweb" })`
 works against any Agent with the hook surface unchanged — identity,
 state sync, `call`/`stub` RPC frames, and chat all flow over the pipe,
-with reconnection and terminal-close semantics matching the PartySocket
-path. The pipe client is internal to the hook — there is no new public
-client surface.
+with reconnection and terminal-close semantics matching the default
+hibernating WebSocket path. The pipe client is internal to the hook — there
+is no new public client surface.
 
 Cap'n Web transport connections are non-hibernating: the Durable Object
 stays pinned in memory while one is open.
