@@ -1,0 +1,9 @@
+---
+"agents": minor
+---
+
+Dynamic agents are now a real Lifecycle capability. `DynamicAgents` from `agents/dynamic-agents` installs on any plain Durable Object with `Lifecycle.install(this).use(new DynamicAgents())` plus a one-line `_cf_lifecycle(envelope) { return this.lifecycle.route(envelope); }` routing aperture, and spawns, supervises, and addresses child Durable Objects (facets) with `get`/`abort`/`delete`/`has`/`list`, `keepAlive`, `holdLease`/`releaseLease`, and `broadcast`. It forwards `/sub/{class}/{name}/...` HTTP requests and WebSocket upgrades to the child after an `onBeforeChild` gate; a child's sockets stay on the parent and are bridged into the child's `WebSockets` capability, whose handlers and `getConnections()` see them like any other connection.
+
+`Agent` installs the capability itself (`this.dynamicAgents`), so existing `subAgent()`-family calls, `/sub/` URLs, `useAgent({ sub })`, `onBeforeSubAgent`, and `parentAgent()` keep working, and sockets accepted by the previous release keep reaching their child. The internal `_cf_*` facet RPC methods on `Agent` (`_cf_initAsFacet`, `_cf_invokeAgentPath`, `_cf_invokeSubAgent`, the facet keep-alive, lease, connection, and WebSocket forwarding entry points) are removed; `_cf_lifecycle` is the only routing aperture. `onBeforeSubAgent` now runs after Lifecycle startup, inside host context.
+
+Lifecycle gains the primitives this needed: `bootstrap` envelopes delivered before startup, a capability-provided route transport (`provideRouteTransport`) with local inbound delivery queued during startup, `routes.retire()` fanning out to an `onRouteRetired` hook (Scheduler and Tasks implement it), and narrow `facets`, `exports`, `object`, and `waitUntil` services. `WebSockets` accepts `bridged:*` route messages for connections another object owns.

@@ -21,6 +21,9 @@ import {
   LifecycleCapability,
   type LifecycleHostContextScope,
   type LifecycleRouteAddress,
+  type LifecycleRouteEnvelope,
+  type LifecycleRouteRetirement,
+  type LifecycleRouteTransport,
   type LifecycleServices
 } from "./capability";
 import {
@@ -75,21 +78,21 @@ function decodeProps(header: string): unknown {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-/** Internal envelope transported between routed Lifecycle instances. */
-export type LifecycleRouteEnvelope = {
-  readonly capability: string;
-  readonly source: LifecycleRouteAddress | undefined;
-  readonly payload: unknown;
-};
+export type {
+  LifecycleRouteEnvelope,
+  LifecycleRouteInbound,
+  LifecycleRouteRetirement,
+  LifecycleRouteTransport
+} from "./capability";
 
-/** Internal transport supplied by a host with routed child Lifecycles. */
-export type LifecycleRouteTransport = {
-  readonly source: LifecycleRouteAddress | undefined;
-  readonly toRoot: (envelope: LifecycleRouteEnvelope) => Promise<unknown>;
-  readonly to: (
-    target: LifecycleRouteAddress,
-    envelope: LifecycleRouteEnvelope
-  ) => Promise<unknown>;
+/**
+ * The parts of `DurableObjectState` newer runtimes expose for colocated
+ * child objects. Typed loosely because `ctx.exports` in the real types is
+ * keyed by the consumer's worker module, invisible from inside this library.
+ */
+type FacetCapableState = {
+  facets?: DurableObjectFacets;
+  exports?: Record<string, unknown>;
 };
 
 type LifecycleHost<
@@ -122,14 +125,6 @@ export function setLifecycleHostInvoker<
   Props extends Record<string, unknown>
 >(lifecycle: Lifecycle<Env, Props>, invoker: LifecycleHostInvoker): void {
   lifecycleHostInvokers.set(lifecycle, invoker);
-}
-
-/** @internal Supply a host's routed Lifecycle transport. */
-export function setLifecycleRouteTransport<
-  Env extends object,
-  Props extends Record<string, unknown>
->(lifecycle: Lifecycle<Env, Props>, transport: LifecycleRouteTransport): void {
-  lifecycleRouteTransports.set(lifecycle, transport);
 }
 
 /** @internal Adapt Lifecycle's default diagnostics sink at a composition root. */
@@ -188,6 +183,11 @@ export class Lifecycle<
   #alarmRearmQueue: Promise<void> = Promise.resolve();
   #rearmRequestedDuringStart = false;
   #pendingEvents: LifecycleEvent[] = [];
+  #pendingLocalRoutes: Array<{
+    readonly envelope: LifecycleRouteEnvelope;
+    readonly resolve: (value: unknown) => void;
+    readonly reject: (error: unknown) => void;
+  }> = [];
   #alarmsDisabled = false;
   #capabilitiesLocked = false;
   readonly #fallbacks = new Set<DurableObjectCapability<Props>>();
@@ -329,16 +329,39 @@ export class Lifecycle<
         this.#servicesForCapability(capability.capabilityId)
       );
     }
+    if (capability.provideRouteTransport) {
+      if (lifecycleRouteTransports.has(this)) {
+        throw new Error("Lifecycle already has a route transport");
+      }
+      lifecycleRouteTransports.set(
+        this,
+        capability.provideRouteTransport({
+          deliver: (envelope) => this.#deliverLocal(envelope)
+        })
+      );
+    }
     return this;
   }
 
   #servicesForCapability(capabilityId: string): LifecycleServices {
     const lifecycle = this;
+    const state = this.#ctx as DurableObjectState & FacetCapableState;
     const envelope = (payload: unknown): LifecycleRouteEnvelope => ({
       capability: capabilityId,
       source: lifecycleRouteTransports.get(lifecycle)?.source,
       payload
     });
+    const facets = () => {
+      if (!state.facets) {
+        throw new Error(
+          "Colocated child Durable Objects are not supported in this runtime — " +
+            "`ctx.facets` / `ctx.exports` are unavailable. " +
+            "Update to the latest `compatibility_date` in your wrangler.jsonc."
+        );
+      }
+      return state.facets;
+    };
+    const exportNamed = (name: string): unknown => state.exports?.[name];
     return Object.freeze({
       storage: this.#ctx.storage,
       sockets: Object.freeze({
@@ -365,7 +388,8 @@ export class Lifecycle<
         },
         toRoot: (payload: unknown) => {
           const transport = lifecycleRouteTransports.get(lifecycle);
-          return transport
+          // A transport at the route root delivers locally.
+          return transport?.source
             ? transport.toRoot(envelope(payload))
             : this.#dispatchRoute(envelope(payload));
         },
@@ -377,8 +401,49 @@ export class Lifecycle<
             );
           }
           return transport.to(target, envelope(payload));
+        },
+        retire: (retirement: LifecycleRouteRetirement) =>
+          runWithoutCurrentAgent(() =>
+            this.#capabilityRunner.retire(retirement)
+          )
+      }),
+      facets: Object.freeze({
+        get supported() {
+          return state.facets !== undefined && state.exports !== undefined;
+        },
+        get: (
+          key: string,
+          startup: () => { class: DurableObjectClass; id: DurableObjectId }
+        ) => facets().get(key, startup),
+        abort: (key: string, reason?: unknown) => facets().abort(key, reason),
+        delete: (key: string) => facets().delete(key)
+      }),
+      exports: Object.freeze({
+        get supported() {
+          return state.exports !== undefined;
+        },
+        names: () => (state.exports ? Object.keys(state.exports) : []),
+        durableObjectClass: (name: string) => {
+          const value = exportNamed(name);
+          return typeof value === "function"
+            ? (value as unknown as DurableObjectClass)
+            : undefined;
+        },
+        namespace: (name: string) => {
+          const value = exportNamed(name) as
+            | Partial<DurableObjectNamespace>
+            | undefined;
+          return value && typeof value.idFromName === "function"
+            ? (value as DurableObjectNamespace)
+            : undefined;
         }
-      })
+      }),
+      object: Object.freeze({
+        name: () => this.name,
+        className: this.#parentClassName,
+        isSelf: (id: DurableObjectId) => id.equals(this.#ctx.id)
+      }),
+      waitUntil: (work: Promise<unknown>) => this.#ctx.waitUntil(work)
     });
   }
 
@@ -412,16 +477,53 @@ export class Lifecycle<
   }
 
   async #dispatchRoute(envelope: LifecycleRouteEnvelope): Promise<unknown> {
-    await this.#ensureInitialized();
+    const beforeStart = envelope.bootstrap === true && this.#status === "zero";
+    if (beforeStart) {
+      // Startup depends on what this message establishes; the receiving
+      // capability starts the Lifecycle once it has written it.
+      this.#capabilitiesLocked = true;
+    } else {
+      await this.#ensureInitialized();
+    }
     return runWithoutCurrentAgent(() =>
       this.#capabilityRunner.route(envelope.capability, {
         source: envelope.source,
-        payload: envelope.payload
+        payload: envelope.payload,
+        started: !beforeStart
       })
     );
   }
 
-  /** @internal Deliver a generic capability envelope to this Lifecycle. */
+  /**
+   * Local inbound delivery for the route transport. Envelopes handed over
+   * while startup runs wait, in order, until it completes — a capability
+   * that starts early can address one that starts later.
+   */
+  #deliverLocal(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    if (this.#status === "starting") {
+      return new Promise((resolve, reject) => {
+        this.#pendingLocalRoutes.push({ envelope, resolve, reject });
+      });
+    }
+    return this.#dispatchRoute(envelope);
+  }
+
+  async #flushPendingLocalRoutes(): Promise<void> {
+    for (const pending of this.#pendingLocalRoutes.splice(0)) {
+      try {
+        pending.resolve(await this.#dispatchRoute(pending.envelope));
+      } catch (error) {
+        pending.reject(error);
+      }
+    }
+  }
+
+  /**
+   * Deliver a capability envelope to this Lifecycle. Hosts with routed
+   * children expose this on their prototype as
+   * `_cf_lifecycle(envelope) { return this.lifecycle.route(envelope); }`
+   * — the one native-RPC aperture routed capabilities need.
+   */
   route(envelope: LifecycleRouteEnvelope): Promise<unknown> {
     return this.#dispatchRoute(envelope);
   }
@@ -671,6 +773,9 @@ export class Lifecycle<
           this.#host.onStart?.(this.#props)
         );
         this.#status = "started";
+        // Still inside the input gate: local routes queued during startup
+        // land before any invocation that waited on it.
+        await this.#flushPendingLocalRoutes();
       } catch (cause) {
         this.#status = "zero";
         error = cause;
@@ -681,6 +786,9 @@ export class Lifecycle<
     if (error) {
       this.#rearmRequestedDuringStart = false;
       this.#pendingEvents.length = 0;
+      for (const pending of this.#pendingLocalRoutes.splice(0)) {
+        pending.reject(error);
+      }
       throw error;
     }
     this.#deliverPendingEvents();

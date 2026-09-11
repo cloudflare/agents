@@ -80,6 +80,20 @@
         "class_name": "PlainMcpClientObject",
         "name": "PlainMcpClientObject"
       },
+      // Dynamic agents on plain Durable Objects: the parent needs storage;
+      // the child classes are facet-only (bindings are a harness requirement).
+      {
+        "class_name": "DynamicParentObject",
+        "name": "DynamicParentObject"
+      },
+      {
+        "class_name": "DynamicChildObject",
+        "name": "DynamicChildObject"
+      },
+      {
+        "class_name": "DynamicGrandchildObject",
+        "name": "DynamicGrandchildObject"
+      },
       {
         "class_name": "TestMcpAgent",
         "name": "MCP_OBJECT"
@@ -420,6 +434,7 @@
         "SessionSearchHarnessObject",
         "SessionBenchObject",
         "PlainMcpClientObject",
+        "DynamicParentObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
         "TestEmailAgent",

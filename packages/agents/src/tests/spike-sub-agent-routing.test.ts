@@ -408,7 +408,7 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
   // The spike previously explored three candidate designs for the
   // outside-RPC path (direct stub return, RpcTarget wrapper, per-call
   // bridge) and confirmed only the third works. Phase 2 landed the
-  // per-call bridge as `_cf_invokeSubAgent` on the `Agent` base plus
+  // per-call bridge as an `invoke:child` message on the `Agent` base plus
   // `getSubAgentByName` as a JS Proxy on top. These tests exercise
   // the real primitive end-to-end.
   describe("getSubAgentByName — per-call bridge via Agent base", () => {

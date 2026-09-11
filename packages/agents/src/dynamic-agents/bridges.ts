@@ -1,11 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { RpcTarget } from "cloudflare:workers";
-import type { Connection } from "../lifecycle/durable-object-lifecycle";
 import type { RPCResponse, StreamingResponse } from "../index";
-import type {
-  RootFacetRpcSurface,
-  DynamicAgentConnectionBridgeLike
-} from "./types";
+import type { WSMessage } from "../lifecycle";
+import type { AgentPathStep } from "../sub-routing";
+import type { DynamicAgentRouteMessage } from "./protocol";
+import type { DynamicAgentConnectionBridgeLike } from "./types";
 
 // ── Facet RPC reply bridging ─────────────────────────────────────────
 //
@@ -118,50 +117,63 @@ export async function waitForFacetStreamingResponseDeliveries(
   }
 }
 
+/** The operations a live-frame bridge performs on the parent's side. */
+export type DynamicAgentConnectionOps = {
+  send(message: WSMessage): void | Promise<void>;
+  close(code?: number, reason?: string): void | Promise<void>;
+  setState(state: unknown): unknown | Promise<unknown>;
+  setTags(tags: readonly string[]): void | Promise<void>;
+};
+
 /**
- * Parent-side bridge handed to a facet over RPC: wraps a live root-owned
- * `Connection` so the facet can send/close/setState on it, and carries
- * the root's broadcast entry point for facet-scoped broadcasts.
+ * Parent-side bridge handed to a child over RPC for the duration of one
+ * forwarded frame: wraps the parent's view of the connection (a root-owned
+ * socket, or the parent's own bridged connection when the parent is
+ * itself a child) and carries the parent's broadcast entry point.
  */
 export class DynamicAgentConnectionBridge
   extends RpcTarget
   implements DynamicAgentConnectionBridgeLike
 {
-  #connection: Connection;
+  #ops: DynamicAgentConnectionOps;
   #broadcast?: (
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: WSMessage,
     without?: string[]
   ) => void | Promise<void>;
 
   constructor(
-    connection: Connection,
+    ops: DynamicAgentConnectionOps,
     broadcast?: (
-      ownerPath: ReadonlyArray<{ className: string; name: string }>,
-      message: string | ArrayBuffer | ArrayBufferView,
+      ownerPath: ReadonlyArray<AgentPathStep>,
+      message: WSMessage,
       without?: string[]
     ) => void | Promise<void>
   ) {
     super();
-    this.#connection = connection;
+    this.#ops = ops;
     this.#broadcast = broadcast;
   }
 
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
-    this.#connection.send(message);
+  send(message: WSMessage): void | Promise<void> {
+    return this.#ops.send(message);
   }
 
-  close(code?: number, reason?: string): void {
-    this.#connection.close(code, reason);
+  close(code?: number, reason?: string): void | Promise<void> {
+    return this.#ops.close(code, reason);
   }
 
-  setState(state: unknown): unknown {
-    return this.#connection.setState(state);
+  setState(state: unknown): unknown | Promise<unknown> {
+    return this.#ops.setState(state);
+  }
+
+  setTags(tags: readonly string[]): void | Promise<void> {
+    return this.#ops.setTags([...tags]);
   }
 
   broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: WSMessage,
     without?: string[]
   ): void | Promise<void> {
     return this.#broadcast?.(ownerPath, message, without);
@@ -169,39 +181,65 @@ export class DynamicAgentConnectionBridge
 }
 
 /**
- * Facet-side bridge used after the originating RPC frame has completed:
- * routes connection operations back to the root over a fresh RPC call.
+ * Child-side bridge used after the originating frame has completed:
+ * routes connection operations to the root as fresh `connection:*`
+ * messages.
  */
 export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionBridgeLike {
-  #root: RootFacetRpcSurface;
+  #send: (message: DynamicAgentRouteMessage) => Promise<unknown>;
   #connectionId: string;
 
-  constructor(root: RootFacetRpcSurface, connectionId: string) {
-    this.#root = root;
+  constructor(
+    send: (message: DynamicAgentRouteMessage) => Promise<unknown>,
+    connectionId: string
+  ) {
+    this.#send = send;
     this.#connectionId = connectionId;
   }
 
-  send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
-    return this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+  async send(message: WSMessage): Promise<void> {
+    await this.#send({
+      type: "connection:send",
+      id: this.#connectionId,
+      message
+    });
   }
 
-  close(code?: number, reason?: string): Promise<void> {
-    return this.#root._cf_closeSubAgentConnection(
-      this.#connectionId,
+  async close(code?: number, reason?: string): Promise<void> {
+    await this.#send({
+      type: "connection:close",
+      id: this.#connectionId,
       code,
       reason
-    );
+    });
   }
 
   setState(state: unknown): Promise<unknown> {
-    return this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
+    return this.#send({
+      type: "connection:setState",
+      id: this.#connectionId,
+      state
+    });
   }
 
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
+  async setTags(tags: readonly string[]): Promise<void> {
+    await this.#send({
+      type: "connection:setTags",
+      id: this.#connectionId,
+      tags: [...tags]
+    });
+  }
+
+  async broadcast(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: WSMessage,
     without?: string[]
   ): Promise<void> {
-    return this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
+    await this.#send({
+      type: "connection:broadcast",
+      owner: ownerPath,
+      message,
+      without
+    });
   }
 }

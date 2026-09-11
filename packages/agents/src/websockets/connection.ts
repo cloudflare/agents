@@ -220,7 +220,10 @@ class ConnectionIterator<T> implements IterableIterator<Connection<T>> {
  * Deduplicate and validate connection tags.
  * Returns the final tag array (always includes the connection id as the first tag).
  */
-function prepareTags(connectionId: string, userTags: string[]): string[] {
+export function prepareTags(
+  connectionId: string,
+  userTags: readonly string[]
+): string[] {
   const tags = [connectionId, ...userTags.filter((t) => t !== connectionId)];
 
   // validate tags against documented restrictions

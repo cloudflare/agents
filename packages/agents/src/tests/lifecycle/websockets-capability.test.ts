@@ -223,3 +223,24 @@ describe("WebSockets capability callables", () => {
     socket.close();
   });
 });
+
+describe("WebSockets capability bridged connections", () => {
+  it("presents a socket another object owns as a local connection", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    const probe = await stub.bridgedConnectionProbe();
+
+    // Handlers ran for connect, message, and close, in host context.
+    expect(probe.phases).toEqual(["connect", "message", "close"]);
+    // Frames the handlers sent went back over the link.
+    expect(probe.sent.slice(0, 2)).toEqual([
+      expect.stringMatching(/^connected:/),
+      "echo:ping"
+    ]);
+    // Tags were computed here and pushed to the owner; state writes too.
+    expect(probe.tags).toEqual([["bridged-1"]]);
+    expect(probe.states).toEqual(['{"seen":true}']);
+    // The bridged connection is enumerable while open and gone after close.
+    expect(probe.idsDuringMessage).toEqual(["bridged-1"]);
+    expect(probe.idsAfterClose).toEqual([]);
+  });
+});

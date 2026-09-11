@@ -413,7 +413,7 @@ export async function routeSubAgentRequest(
   // new URL from scratch. `new URL("/path", baseWithQuery)` discards
   // the base's search; we want the caller's query params (e.g. auth
   // tokens, PartySocket's `_pk=...` handshake key) to survive.
-  // Mirrors how `_cf_forwardToFacet` rewrites only pathname when
+  // Mirrors how the parent's forwarding rewrites only pathname when
   // handing off to the child facet. If `fromPath` itself contains a
   // `?query` segment, that overrides the original.
   const forwardUrl =
@@ -426,7 +426,7 @@ export async function routeSubAgentRequest(
   };
   // Stream the body through rather than buffering it — see #2015. This
   // helper runs in the caller's isolate, but the same request then hits
-  // `_cf_forwardToFacet` on the parent, so buffering here would put a
+  // the parent's forwarding on the parent, so buffering here would put a
   // second unbounded copy in front of the child.
   if (req.body && req.method !== "GET" && req.method !== "HEAD") {
     forwardInit.body = req.body;
@@ -438,7 +438,7 @@ export async function routeSubAgentRequest(
 
 /**
  * Replace a URL's pathname (and optionally its search) while
- * preserving every other component. Matches how `_cf_forwardToFacet`
+ * preserving every other component. Matches how the parent's forwarding
  * forwards requests — pathname is the only thing that changes by
  * default; if the replacement path carries its own query string,
  * that wins.
@@ -460,17 +460,17 @@ function rewritePathname(url: string, fromPath: string): string {
 // ── getSubAgentByName ──────────────────────────────────────────────
 
 /**
- * Parent-side RPC bridge shape that `getSubAgentByName` relies on.
+ * Parent-side routing aperture that `getSubAgentByName` relies on: any
+ * Lifecycle host with the DynamicAgents capability exposes it.
  *
  * @internal
  */
 interface SubAgentInvokeEndpoint {
-  _cf_invokeSubAgent(
-    className: string,
-    name: string,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown>;
+  _cf_lifecycle(envelope: {
+    capability: string;
+    source: undefined;
+    payload: unknown;
+  }): Promise<unknown>;
 }
 
 /**
@@ -529,7 +529,7 @@ export async function getSubAgentByName<T extends Agent>(
         // the inner `createStubProxy` uses for `useAgent` stubs.
         // Without this guard, `JSON.stringify(stub)`, `console.log`,
         // Vitest matchers, and `await stub` would all trigger bogus
-        // `_cf_invokeSubAgent` calls that fail with "Method not found".
+        // routed invocations that fail with "Method not found".
         if (isInternalJsStubProp(prop)) return undefined;
         if (typeof prop !== "string") return undefined;
         // `.fetch` gets a dedicated error so users who try to use
@@ -545,7 +545,16 @@ export async function getSubAgentByName<T extends Agent>(
           };
         }
         return async (...args: unknown[]) =>
-          bridge._cf_invokeSubAgent(className, name, prop, args);
+          bridge._cf_lifecycle({
+            capability: "dynamic-agents",
+            source: undefined,
+            payload: {
+              type: "invoke:child",
+              child: { className, name },
+              method: prop,
+              args
+            }
+          });
       }
     }
   ) as SubAgentStub<T>;

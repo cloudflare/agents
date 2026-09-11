@@ -61,6 +61,16 @@ import type {
 } from "./capabilities/tasks.ts";
 export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
+export {
+  DynamicChildObject,
+  DynamicGrandchildObject,
+  DynamicParentObject
+} from "./capabilities/dynamic-agents.ts";
+import type {
+  DynamicChildObject,
+  DynamicGrandchildObject,
+  DynamicParentObject
+} from "./capabilities/dynamic-agents.ts";
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
@@ -226,6 +236,9 @@ export type Env = {
   SessionSearchHarnessObject: DurableObjectNamespace<SessionSearchHarnessObject>;
   SessionBenchObject: DurableObjectNamespace<SessionBenchObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
+  DynamicParentObject: DurableObjectNamespace<DynamicParentObject>;
+  DynamicChildObject: DurableObjectNamespace<DynamicChildObject>;
+  DynamicGrandchildObject: DurableObjectNamespace<DynamicGrandchildObject>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;

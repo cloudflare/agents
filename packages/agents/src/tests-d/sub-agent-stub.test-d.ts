@@ -106,8 +106,8 @@ null! as Stub["abortSubAgent"];
 // @ts-expect-error deleteSubAgent is excluded
 null! as Stub["deleteSubAgent"];
 
-// @ts-expect-error _cf_initAsFacet is excluded
-null! as Stub["_cf_initAsFacet"];
+// @ts-expect-error _cf_lifecycle is excluded
+null! as Stub["_cf_lifecycle"];
 
 // ── Agent subclass with extra base methods (AIChatAgent-like) ────────
 // SubAgentStub only excludes `keyof Agent`. Methods added by a middle

@@ -11,6 +11,12 @@ export type {
   WebSocketMessage,
   WebSocketsOptions
 } from "./options";
+export type {
+  BridgedConnectionEntry,
+  BridgedConnectionLink,
+  BridgedConnectionMeta,
+  WebSocketsRouteMessage
+} from "./bridged";
 export {
   CALLABLES_RPC_QUERY,
   CALLABLES_RPC_VALUE,

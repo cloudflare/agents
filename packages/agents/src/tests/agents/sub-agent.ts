@@ -1016,7 +1016,7 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
 
   /** Relays a child broadcast from a fresh RPC context with no frame bridge. */
   async relayBroadcastFromFreshContext(message: string): Promise<void> {
-    await this._cf_broadcastToSubAgent(this.selfPath, message);
+    await this.dynamicAgents.broadcastToPath(this.selfPath, message);
   }
 
   /**
@@ -1127,7 +1127,7 @@ export class TestSubAgentParent extends Agent {
     liveMessage: string,
     detachedMessage: string
   ): Promise<void> {
-    const [meta] = await this._cf_subAgentConnectionMetas([
+    const [meta] = await this.dynamicAgents.connectionMetas([
       ...this.selfPath,
       { className: SlowReplySubAgent.name, name: childName }
     ]);
@@ -1140,7 +1140,7 @@ export class TestSubAgentParent extends Agent {
     const sendToConnection = (
       connectionId: string,
       message: string | ArrayBuffer | ArrayBufferView
-    ) => this._cf_sendToSubAgentConnection(connectionId, message);
+    ) => this.dynamicAgents.sendToConnection(connectionId, message);
     const operationBridge = new DelayedForwardingSubAgentBridge(
       meta.id,
       liveMessage,
@@ -1152,59 +1152,71 @@ export class TestSubAgentParent extends Agent {
       sendToConnection
     );
     const child = await this.subAgent(SlowReplySubAgent, childName);
-    // SAFETY: SubAgentStub omits Agent's internal forwarding method, while this
-    // fixture supplies the same message, metadata, and RpcTarget bridge shape.
+    // Forward one frame the way the capability does, with this fixture's
+    // slow RpcTarget bridges in place of the live ones.
     await (
       child as unknown as {
-        _cf_handleSubAgentWebSocketMessage(
-          message: string,
-          bridge: DelayedForwardingSubAgentBridge,
-          connectionMeta: typeof meta,
-          reply: DelayedForwardingSubAgentBridge
-        ): Promise<void>;
+        _cf_lifecycle(envelope: unknown): Promise<unknown>;
       }
-    )._cf_handleSubAgentWebSocketMessage(
-      JSON.stringify({
-        args: [liveMessage, detachedMessage],
-        id: crypto.randomUUID(),
-        method: "sendLiveThenDetachedMessages",
-        type: MessageType.RPC
-      }),
-      operationBridge,
-      meta,
-      replyBridge
-    );
+    )._cf_lifecycle({
+      capability: "dynamic-agents",
+      source: undefined,
+      payload: {
+        type: "ws:message",
+        meta,
+        message: JSON.stringify({
+          args: [liveMessage, detachedMessage],
+          id: crypto.randomUUID(),
+          method: "sendLiveThenDetachedMessages",
+          type: MessageType.RPC
+        }),
+        bridge: operationBridge,
+        replyBridge
+      }
+    });
   }
 
   failNextSubAgentBroadcast(): void {
     this._subAgentBroadcastFailuresRemaining += 1;
   }
 
-  override async _cf_broadcastToSubAgent(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void> {
-    if (this._subAgentBroadcastFailuresRemaining > 0) {
-      this._subAgentBroadcastFailuresRemaining -= 1;
-      throw new Error("TestSubAgentParent broadcast forwarding failed");
-    }
-    await super._cf_broadcastToSubAgent(ownerPath, message, without);
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    // Fault injection on the root-side broadcast the capability performs
+    // for its children, whether reached over a live frame bridge or a
+    // routed `connection:broadcast` message.
+    const capability = this.dynamicAgents;
+    const broadcastToPath = capability.broadcastToPath.bind(capability);
+    capability.broadcastToPath = async (ownerPath, message, without) => {
+      if (this._subAgentBroadcastFailuresRemaining > 0) {
+        this._subAgentBroadcastFailuresRemaining -= 1;
+        throw new Error("TestSubAgentParent broadcast forwarding failed");
+      }
+      await broadcastToPath(ownerPath, message, without);
+    };
   }
 
-  override async __unsafe_ensureInitialized(
-    props?: Record<string, unknown>
-  ): Promise<void> {
-    if (this._rootResolutionFailuresRemaining > 0) {
-      this._rootResolutionFailuresRemaining -= 1;
-      throw new Error("TestSubAgentParent root resolution failed");
+  /**
+   * Fault injection on the root's routing aperture: a child's detached
+   * connection operations reach the root through it, so a failure or
+   * delay here stands in for a root that cannot be resolved in time.
+   */
+  override async _cf_lifecycle(
+    envelope: Parameters<Agent["_cf_lifecycle"]>[0]
+  ): Promise<unknown> {
+    const type = (envelope.payload as { type?: unknown } | undefined)?.type;
+    if (typeof type === "string" && type.startsWith("connection:")) {
+      if (this._rootResolutionFailuresRemaining > 0) {
+        this._rootResolutionFailuresRemaining -= 1;
+        throw new Error("TestSubAgentParent root resolution failed");
+      }
+      if (this._nextRootResolutionDelayMs > 0) {
+        const delayMs = this._nextRootResolutionDelayMs;
+        this._nextRootResolutionDelayMs = 0;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
-    if (this._nextRootResolutionDelayMs > 0) {
-      const delayMs = this._nextRootResolutionDelayMs;
-      this._nextRootResolutionDelayMs = 0;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-    await super.__unsafe_ensureInitialized(props);
+    return super._cf_lifecycle(envelope);
   }
 
   async delayedEchoFromParent(value: string): Promise<string> {
@@ -1771,7 +1783,7 @@ export class TestSubAgentParent extends Agent {
       name,
       snapshot
     );
-    await this._cf_registerFacetRun(innerSelfPath, id);
+    await this.registerFacetLease(innerSelfPath, id);
   }
 
   async nestedRecoveredFibers(
@@ -1821,7 +1833,7 @@ export class TestSubAgentParent extends Agent {
   }
 
   getRootKeepAliveRefCount(): number {
-    return this._keepAliveRefs;
+    return this.dynamicAgents.keepAliveHolds;
   }
 
   async subAgentHoldFiber(
@@ -1879,7 +1891,7 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedFiber(id, name, snapshot);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await this.registerFacetLease(await child.getSelfPath(), id);
   }
 
   async insertSubAgentInterruptedManagedFiber(
@@ -1890,7 +1902,7 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedManagedFiber(id, name, snapshot);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await this.registerFacetLease(await child.getSelfPath(), id);
   }
 
   async registerSubAgentFacetRunLeaseOnly(
@@ -1898,7 +1910,19 @@ export class TestSubAgentParent extends Agent {
     id: string
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await this.registerFacetLease(await child.getSelfPath(), id);
+  }
+
+  /** Register a descendant's lease on this root, as the descendant would. */
+  private registerFacetLease(
+    owner: ReadonlyArray<{ className: string; name: string }>,
+    id: string
+  ): Promise<void> {
+    return this.dynamicAgents.onRoute({
+      source: undefined,
+      started: true,
+      payload: { type: "lease:register", owner, id }
+    }) as Promise<void>;
   }
 
   facetRunRows(): Array<{
@@ -2659,7 +2683,7 @@ export { _a as TestMinifiedNameParentAgent };
 
 // ── Request-body forwarding probes (issue #2015) ─────────────────────
 //
-// `_cf_forwardToFacet` and `routeSubAgentRequest` used to materialise
+// The parent's forwarding and `routeSubAgentRequest` used to materialise
 // the whole forwarded body via `await req.arrayBuffer()` before
 // dispatching. These fixtures let a test observe *when* the child sees
 // the request relative to the client finishing its upload, which is

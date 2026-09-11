@@ -523,6 +523,81 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
     return this.#routedCapability.send(payload);
   }
 
+  /**
+   * Drive one bridged connection through the WebSockets capability's route
+   * (as a dynamic agent's parent would) and report what the handlers and
+   * `getConnections()` observed, plus everything sent back over the link.
+   */
+  async bridgedConnectionProbe(): Promise<{
+    readonly sent: string[];
+    readonly tags: string[][];
+    /** Every state written through the link, JSON-encoded. */
+    readonly states: string[];
+    readonly idsDuringMessage: string[];
+    readonly idsAfterClose: string[];
+    readonly phases: string[];
+  }> {
+    await this.lifecycle.start();
+    const sent: string[] = [];
+    const tags: string[][] = [];
+    const states: string[] = [];
+    const link = {
+      send: (message: unknown) => {
+        sent.push(String(message));
+      },
+      close: (code?: number) => {
+        sent.push(`close:${code}`);
+      },
+      setState: (state: unknown) => {
+        states.push(JSON.stringify(state));
+      },
+      setTags: (next: readonly string[]) => {
+        tags.push([...next]);
+      }
+    };
+    const meta = {
+      id: "bridged-1",
+      uri: "https://example.com/bridged",
+      tags: [],
+      state: null
+    };
+    const before = this.#webSocketContexts.length;
+    const route = (payload: unknown) =>
+      this.lifecycle.route({
+        capability: "websockets",
+        source: undefined,
+        payload
+      });
+    await route({
+      type: "bridged:connect",
+      meta,
+      link,
+      request: new Request(meta.uri)
+    });
+    await route({ type: "bridged:message", meta, link, message: "ping" });
+    const idsDuringMessage = [...this.#webSockets.getConnections()].map(
+      (connection) => connection.id
+    );
+    const bridged = this.#webSockets.getConnection("bridged-1");
+    bridged?.setState({ seen: true });
+    await route({
+      type: "bridged:close",
+      meta,
+      link,
+      code: 1000,
+      reason: "done",
+      wasClean: true
+    });
+    return {
+      sent,
+      tags,
+      states,
+      idsDuringMessage,
+      idsAfterClose: [...this.#webSockets.getConnections()].map((c) => c.id),
+      phases: this.#webSocketContexts.slice(before).map((c) => c.phase)
+    };
+  }
+
   async probeHostBoundary(): Promise<{
     outsideHostName: string | null;
     insideHostName: string | null;

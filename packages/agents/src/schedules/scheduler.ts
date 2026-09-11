@@ -10,7 +10,8 @@
 import {
   LifecycleCapability,
   type LifecycleRouteAddress,
-  type LifecycleRouteContext
+  type LifecycleRouteContext,
+  type LifecycleRouteRetirement
 } from "../lifecycle/capability";
 import type {
   LifecycleJob,
@@ -663,16 +664,14 @@ export class Scheduler<
     return this.#listForOwner(null, criteria);
   }
 
-  /** @internal Remove schedules owned by one routed Lifecycle subtree. */
-  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-    prefix: string
-  ): Promise<void> {
+  /** Remove schedules owned by a retired routed subtree. */
+  async onRouteRetired({ covers }: LifecycleRouteRetirement): Promise<void> {
     for (const { job, timing } of this.#ownedJobs()) {
       const ownerKey = timing.owner_path_key ?? timing.owner_path;
       if (!timing.owner_path || ownerKey === null || ownerKey === undefined) {
         continue;
       }
-      if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
+      if (!covers(ownerKey)) continue;
       this.#emit("schedule:cancel", { callback: job.fn, id: job.id });
       await this.lifecycle.jobs.cancel(job.id);
     }

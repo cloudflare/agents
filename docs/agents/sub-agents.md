@@ -1,6 +1,6 @@
 # Dynamic agents (facets)
 
-Dynamic agents are child Durable Objects **colocated under and supervised by** a parent agent, built on the runtime's facet primitive. Each child runs in its **own isolate** with its **own SQLite database**, but lives inside the parent's Durable Object: the parent spawns it, can abort or delete it, and is the only way to reach it. Inside an agent they are typed RPC stubs reached via `this.dynamicAgents`; clients reach one directly via a nested URL.
+Dynamic agents are child Durable Objects **colocated under and supervised by** a parent, built on the runtime's facet primitive. Each child runs in its **own isolate** with its **own SQLite database**, but lives inside the parent's Durable Object: the parent spawns it, can abort or delete it, and is the only way to reach it. The `DynamicAgents` capability from `agents/dynamic-agents` provides them to any Lifecycle Object; inside an `Agent` it is installed already and reached via `this.dynamicAgents`. Children are typed RPC stubs; clients reach one directly via a nested URL.
 
 Use dynamic agents for code whose **class or lifecycle the parent owns**: dynamically-loaded or AI-generated code that has no wrangler binding, per-run tool agents, sandboxed components that need isolated storage plus supervised abort/restart. That is what the runtime built facets for.
 
@@ -142,9 +142,70 @@ For child workflow origins, `AgentWorkflow.agent` is RPC-only. Use it to call Ag
 
 Dynamic agents know who their parent is via `this.parentPath` (root-first ancestor chain) and `this.parentAgent(ParentClass)` (typed stub). A child with no parent (top-level agent) has `parentPath === []`.
 
+## On a plain Durable Object
+
+`DynamicAgents` is a Lifecycle capability. Install it on any plain `DurableObject`, add the one-line routing aperture, and spawn children of any other Lifecycle Object class:
+
+```typescript
+import { DurableObject } from "cloudflare:workers";
+import { DynamicAgents } from "agents/dynamic-agents";
+import { Lifecycle, type LifecycleRouteEnvelope } from "agents/lifecycle";
+import { WebSockets } from "agents/websockets";
+
+export class Workspace extends DurableObject<Env> {
+  readonly children = new DynamicAgents({
+    // Gate every request bound for a child (like `onBeforeSubAgent`).
+    onBeforeChild: (request, child) =>
+      this.children.has(Notebook, child.name)
+        ? undefined
+        : new Response("No such notebook", { status: 404 })
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.children);
+
+  // The native-RPC aperture routed capabilities travel through.
+  _cf_lifecycle(envelope: LifecycleRouteEnvelope) {
+    return this.lifecycle.route(envelope);
+  }
+
+  async onRequest() {
+    const notebook = await this.children.get(Notebook, "todo");
+    return Response.json({ notes: await notebook.listNotes() });
+  }
+}
+
+export class Notebook extends DurableObject<Env> {
+  readonly children = new DynamicAgents();
+  readonly webSockets = new WebSockets({ handlers: { onMessage } });
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.children)
+    .use(this.webSockets, { fallback: true });
+
+  _cf_lifecycle(envelope: LifecycleRouteEnvelope) {
+    return this.lifecycle.route(envelope);
+  }
+
+  listNotes() {
+    /* the child's own SQLite */
+  }
+}
+```
+
+Install order is load-bearing: `DynamicAgents` first, before capabilities that route to children (`Scheduler`, `Tasks`) and before `WebSockets`. It provides the route transport those capabilities use to reach the root, restores the object's own child identity before anything else starts, and claims `/sub/` requests and upgrades ahead of the WebSockets fallback. Every host in the tree — parent and children — needs the `_cf_lifecycle` line; the capability throws at startup with that snippet when it is missing.
+
+The capability's surface on a plain host:
+
+- **Children**: `get(Cls, name)`, `abort(Cls, name, reason?)`, `delete(Cls, name)`, `has(Cls | className, name)`, `list(Cls?)`.
+- **Identity**: `isChild`, `name` (the name the parent gave a child, or the routed name), `parentPath`, `selfPath`.
+- **From inside a child**: `parent(Cls)` (a stub for the immediate parent, routed through the root), `deleteSelf()`, `broadcast(message, without?)` to the child's own connections, `keepAlive()` to hold the root's heartbeat (children have no alarm of their own), and `holdLease(id)` / `releaseLease(id)` for durable work the root should periodically ask the child to recover through the `checkLeases` option.
+- **Options** are policy only: `onBeforeChild`, `checkLeases`, `keepAliveIntervalMs`.
+
+HTTP requests and WebSocket upgrades to `/agents/{parent-class}/{name}/sub/{child-class}/{name}/...` are forwarded to the child after `onBeforeChild` allows them, with the `/sub/{class}/{name}` segment stripped. A child's sockets stay on the parent (a child owns no platform sockets) and are bridged into the child's own `WebSockets` capability, whose handlers, `getConnections()`, and `connection.setState()` see them like any other connection. Sockets accepted by a previous release through the parent's `WebSockets` capability keep reaching their child; an `Agent` skips them in its own `getConnections()`, and a plain host that wants the same filter uses `ownsConnection(connection)`.
+
+See [`examples/next/dynamic-agents-plain`](https://github.com/cloudflare/agents/tree/main/examples/next/dynamic-agents-plain) for the complete workspace-and-notebooks example with tests.
+
 ## Server API
 
-The capability lives at `this.dynamicAgents`. The legacy method names delegate to it and remain supported:
+Inside an `Agent`, the capability lives at `this.dynamicAgents` — the same `DynamicAgents` instance, installed and configured by `Agent` (its `onBeforeChild` calls `this.onBeforeSubAgent`). The legacy method names delegate to it and remain supported:
 
 | Legacy (deprecated)              | Capability                             |
 | -------------------------------- | -------------------------------------- |
@@ -165,7 +226,7 @@ await runner.ping();
 
 The child class must:
 
-- Extend `Agent`
+- Be a Lifecycle Object with the `DynamicAgents` capability installed and the `_cf_lifecycle` aperture — every `Agent` subclass qualifies
 - Be exported from the worker entry point (so `ctx.exports[Cls.name]` can find it)
 - Does NOT need to be registered under `new_sqlite_classes` unless the same class is also bound as a top-level Durable Object elsewhere. Facet storage is created through the top-level parent.
 - _Not_ share a name with the reserved token `"Sub"` (any class whose kebab-cased name equals `"sub"` is rejected; it would collide with the `/sub/` URL separator)
@@ -475,6 +536,7 @@ Each chat gets its own alarms, placement, and storage budget; deletion is one `c
 
 ## Examples
 
+- [`examples/next/dynamic-agents-plain`](https://github.com/cloudflare/agents/tree/main/examples/next/dynamic-agents-plain) — the capability on plain Durable Objects: a workspace spawns notebooks with isolated storage, forwards HTTP to them, and bridges their WebSockets.
 - [`examples/next/dynamic-agents`](https://github.com/cloudflare/agents/tree/main/examples/next/dynamic-agents) — the headline use case: a supervisor stores user-submitted Durable Object code, loads it via Worker Loader, and runs it as facets with isolated storage, supervised abort, and code upgrades over stable state.
 - [`examples/agents-as-tools`](https://github.com/cloudflare/agents/tree/main/examples/agents-as-tools) — per-run child agents as tools with inline streaming.
 - [`examples/multi-ai-chat`](https://github.com/cloudflare/agents/tree/main/examples/multi-ai-chat) — a multi-session chat app built on facet children under one `Inbox`. It works and demonstrates the routing surface, but for many long-lived chats per user prefer the top-level-DO-per-chat pattern in [`examples/next/chats`](https://github.com/cloudflare/agents/tree/main/examples/next/chats) — see [When to use dynamic agents](#when-to-use-dynamic-agents).

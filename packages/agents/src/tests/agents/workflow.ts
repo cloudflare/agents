@@ -533,14 +533,7 @@ export class TestWorkflowAgent extends Agent {
     args: unknown[]
   ): Promise<{ ok: boolean; message: string }> {
     try {
-      const self = this as unknown as {
-        _cf_invokeAgentPath(
-          p: Array<{ className: string; name: string }>,
-          m: string,
-          a: unknown[]
-        ): Promise<unknown>;
-      };
-      await self._cf_invokeAgentPath(path, method, args);
+      await this.dynamicAgents.invokeAt(path, method, args);
       return { ok: true, message: "" };
     } catch (e) {
       return { ok: false, message: e instanceof Error ? e.message : String(e) };
