@@ -1,6 +1,7 @@
 /**
- * Opt-in WebSocket support for Lifecycle Objects: connection handlers
- * and Cap'n Web callables, owned entirely by the capability.
+ * Opt-in WebSocket support for Lifecycle Objects: hibernating and Cap'n
+ * Web connections, the Agent identity and `rpc` frame protocol, and
+ * Cap'n Web callables, owned entirely by the capability.
  *
  * @experimental The WebSockets surface may change before stabilizing.
  */
@@ -17,3 +18,10 @@ export {
   callablesRpcUrl,
   isCallablesRpcUpgrade
 } from "./protocol";
+export {
+  CAPNWEB_TRANSPORT_QUERY,
+  CAPNWEB_TRANSPORT_VALUE,
+  capnWebTransportUrl,
+  isCapnWebTransportUpgrade,
+  type AgentTransport
+} from "./transport-protocol";

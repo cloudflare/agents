@@ -24,14 +24,24 @@ describe("Lifecycle hibernating WebSockets", () => {
     const socket = requireWebSocket(response as Response);
     socket.accept();
 
-    const connected = await new Promise<string>((resolve) => {
-      socket.addEventListener(
-        "message",
-        (event) => resolve(String(event.data)),
-        { once: true }
-      );
+    const frames: string[] = [];
+    const nextFrame = () =>
+      new Promise<string>((resolve) => {
+        const queued = frames.shift();
+        if (queued !== undefined) return resolve(queued);
+        socket.addEventListener(
+          "message",
+          (event) => resolve(String(event.data)),
+          { once: true }
+        );
+      });
+    // The capability identifies the plain host before onConnect runs.
+    expect(JSON.parse(await nextFrame())).toEqual({
+      type: "cf_agent_identity",
+      name,
+      agent: "plain-lifecycle-object"
     });
-    expect(connected).toBe(`connected:${name}`);
+    expect(await nextFrame()).toBe(`connected:${name}`);
 
     socket.send("hello");
     const echoed = await new Promise<string>((resolve) => {

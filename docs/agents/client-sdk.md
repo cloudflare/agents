@@ -120,6 +120,28 @@ useAgent({
 });
 ```
 
+### Transport
+
+`useAgent` speaks the Agent protocol over one of two wires. The default,
+`"websocket"`, is a hibernating WebSocket managed by PartySocket. The
+experimental `"capnweb"` transport carries the same frames over a single
+[Cap'n Web](https://github.com/cloudflare/capnweb) RPC session:
+
+```typescript
+useAgent({
+  agent: "ChatAgent",
+  name: "room-123",
+  transport: "capnweb" // default: "websocket"
+});
+```
+
+Everything else is identical on both wires — identity, state sync,
+`call`/`stub`, reconnection with backoff, and terminal close codes.
+PartySocket still owns the connection; the transport only swaps the socket
+class it instantiates. The trade-off is that a Cap'n Web connection does not
+hibernate: the Durable Object stays in memory while one is open.
+`AgentClient` accepts the same `transport` option.
+
 ### Async Query Parameters
 
 For authentication tokens or other async data, pass a function that returns a Promise:
@@ -351,6 +373,7 @@ type UseAgentOptions<State> = {
   name?: string; // Instance name (default: "default")
   host?: string; // Custom host
   path?: string; // Custom path prefix
+  transport?: "websocket" | "capnweb"; // Wire (default: "websocket")
 
   // Query parameters
   query?:

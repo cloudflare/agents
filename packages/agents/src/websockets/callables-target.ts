@@ -1,6 +1,18 @@
 import { RpcTarget } from "cloudflare:workers";
 import { decoratedMethods } from "../callable-decorator";
 
+/**
+ * Targets whose `rpc` frames the host already answers in its own
+ * `onMessage` (Agent), so the capability must not answer them a second
+ * time. Everything else is served by the capability on every wire.
+ */
+const hostServed = new WeakSet<RpcTarget>();
+
+/** Whether the host's own message handler answers `rpc` frames for this target. */
+export function isHostServed(target: RpcTarget): boolean {
+  return hostServed.has(target);
+}
+
 /** A named remote method ready to be exposed on a callables root. */
 export type CallableInvoker = (...args: unknown[]) => unknown;
 
@@ -115,5 +127,7 @@ export function callablesFromDecorated(host: object): RpcTarget | undefined {
     });
   }
   if (methods.size === 0) return undefined;
-  return buildCallablesRoot(methods);
+  const target = buildCallablesRoot(methods);
+  hostServed.add(target);
+  return target;
 }

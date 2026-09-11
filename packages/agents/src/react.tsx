@@ -19,7 +19,15 @@ import {
   AgentConnectionError as AgentConnectionErrorCtor,
   isTerminalCloseEvent
 } from "./client";
+import { CapnWebSocket } from "./websockets/capnweb-socket";
+import {
+  CAPNWEB_TRANSPORT_QUERY,
+  CAPNWEB_TRANSPORT_VALUE,
+  type AgentTransport
+} from "./websockets/transport-protocol";
 import { buildSubAgentPathUnchecked } from "./sub-routing";
+
+export type { AgentTransport } from "./websockets/transport-protocol";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
 import {
@@ -153,6 +161,14 @@ export type UseAgentOptions<State = unknown> = Omit<
      * useAgent({ agent: "UserAgent", basePath: "user" })
      */
     basePath?: string;
+    /**
+     * Wire the connection travels on. `"websocket"` (default) is a
+     * hibernating WebSocket; `"capnweb"` carries the same frames over a
+     * Cap'n Web session and keeps the Durable Object in memory while
+     * connected. Everything else about the hook is identical.
+     * @experimental The `"capnweb"` transport is experimental.
+     */
+    transport?: AgentTransport;
     /** Query parameters - can be static object or async function */
     query?: QueryObject | (() => Promise<QueryObject>);
     /** Dependencies for async query caching */
@@ -337,8 +353,13 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     defaultCallTimeout,
     onConnectionError,
     shouldReconnectOnClose,
+    transport = "websocket",
     ...restOptions
   } = options;
+  // PartySocket keeps reconnection, buffering, and backoff; the transport
+  // only swaps the socket class it instantiates.
+  const socketClass =
+    transport === "capnweb" ? { WebSocket: CapnWebSocket } : {};
 
   const subChain = useMemo(
     () => (subOption ?? []).map((s) => ({ agent: s.agent, name: s.name })),
@@ -624,12 +645,20 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   );
 
   // If basePath is provided, use it directly; otherwise construct from agent/name
+  // The transport rides in the query too, so it is part of PartySocket's
+  // socket key: changing `transport` reconnects on the new wire.
+  const socketQuery =
+    transport === "capnweb"
+      ? { ...resolvedQuery, [CAPNWEB_TRANSPORT_QUERY]: CAPNWEB_TRANSPORT_VALUE }
+      : resolvedQuery;
+
   const socketOptions = options.basePath
     ? {
         basePath: options.basePath,
         path: combinedPath || undefined,
-        query: resolvedQuery,
+        query: socketQuery,
         ...restOptions,
+        ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       }
     : {
@@ -637,8 +666,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         prefix: "agents",
         room: options.name || "default",
         path: combinedPath || undefined,
-        query: resolvedQuery,
+        query: socketQuery,
         ...restOptions,
+        ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       };
 

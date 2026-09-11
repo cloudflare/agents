@@ -13,6 +13,10 @@ import type {
 } from "./serializable";
 import { MessageType } from "./types";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
+import { CapnWebSocket } from "./websockets/capnweb-socket";
+import type { AgentTransport } from "./websockets/transport-protocol";
+
+export type { AgentTransport } from "./websockets/transport-protocol";
 
 export class AgentConnectionError extends Error {
   code: number;
@@ -45,6 +49,14 @@ export type AgentClientOptions<State = unknown> = Omit<
   "party" | "room"
 > &
   TerminalReconnectOptions & {
+    /**
+     * Wire the connection travels on. `"websocket"` (default) is a
+     * hibernating WebSocket; `"capnweb"` carries the same frames over a
+     * Cap'n Web session and keeps the Durable Object in memory while
+     * connected.
+     * @experimental The `"capnweb"` transport is experimental.
+     */
+    transport?: AgentTransport;
     /** Name of the agent to connect to (ignored if basePath is set) */
     agent: string;
     /** Name of the specific Agent instance (ignored if basePath is set) */
@@ -347,6 +359,9 @@ export class AgentClient<
           basePath: options.basePath,
           path: options.path,
           ...options,
+          ...(options.transport === "capnweb"
+            ? { WebSocket: CapnWebSocket }
+            : {}),
           shouldReconnectOnClose: classifyReconnect
         }
       : {
@@ -355,6 +370,9 @@ export class AgentClient<
           room: options.name || "default",
           path: options.path,
           ...options,
+          ...(options.transport === "capnweb"
+            ? { WebSocket: CapnWebSocket }
+            : {}),
           shouldReconnectOnClose: classifyReconnect
         };
 
