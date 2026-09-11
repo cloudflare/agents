@@ -116,6 +116,9 @@ const installedServices = new WeakMap<object, LifecycleServices>();
 export abstract class LifecycleCapability<Props extends object = object> {
   readonly capabilityId: string;
 
+  /** How this capability claims traffic; see {@link DurableObjectCapability.claims}. */
+  readonly claims: "selective" | "catch-all" = "selective";
+
   protected constructor(capabilityId: string) {
     if (capabilityId.trim() === "") {
       throw new Error("Lifecycle capability IDs must be non-empty");

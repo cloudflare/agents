@@ -116,6 +116,9 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  * @experimental The API surface may change before stabilizing.
  */
 export class WebSockets extends LifecycleCapability {
+  /** Claims every upgrade, so Lifecycle dispatches it after all others. */
+  override readonly claims = "catch-all";
+
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #identity: boolean;
@@ -135,11 +138,15 @@ export class WebSockets extends LifecycleCapability {
 
   // ── Lifecycle capability hooks ─────────────────────────────────────────
 
-  /** Claim connection upgrades when handlers or callables are configured. */
+  /**
+   * Claim every upgrade, never declining: a Cap'n Web transport upgrade
+   * becomes a session, everything else a tracked hibernating connection,
+   * whether or not handlers or callables are configured. Handlers only add
+   * behavior on connect, message, close, and error.
+   */
   onWebSocketUpgrade({
     request
-  }: CapabilityWebSocketUpgradeContext): Promise<Response> | undefined {
-    if (!this.#handlers && this.#callables.size === 0) return undefined;
+  }: CapabilityWebSocketUpgradeContext): Promise<Response> {
     return isCapnWebTransportUpgrade(request)
       ? this.#acceptCapnWebSession(request)
       : this.#acceptConnection(request);
