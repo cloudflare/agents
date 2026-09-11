@@ -7,7 +7,7 @@ Uses Deepgram's real-time WebSocket API with server-side VAD and endpointing to 
 ## Install
 
 ```bash
-npm install @cloudflare/voice-deepgram
+npm install agents @cloudflare/voice-deepgram
 ```
 
 ## Usage
@@ -16,11 +16,7 @@ Set `transcriber` on your voice agent:
 
 ```typescript
 import { Agent } from "agents";
-import {
-  withVoice,
-  WorkersAITTS,
-  type VoiceTurnContext
-} from "@cloudflare/voice";
+import { withVoice, WorkersAITTS, type VoiceTurnContext } from "agents/voice";
 import { DeepgramSTT } from "@cloudflare/voice-deepgram";
 
 const VoiceAgent = withVoice(Agent);
@@ -64,4 +60,4 @@ The client receives `transcript_interim` messages in real time, which can be dis
 
 ## Without a Deepgram key
 
-If you do not have a Deepgram API key, use `WorkersAIFluxSTT` or `WorkersAINova3STT` from `@cloudflare/voice` -- no external API key required.
+If you do not have a Deepgram API key, use `WorkersAIFluxSTT` or `WorkersAINova3STT` from `agents/voice` -- no external API key required.

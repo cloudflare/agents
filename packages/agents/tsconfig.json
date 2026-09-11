@@ -3,6 +3,11 @@
   "exclude": [
     "src/tests/**/*.ts",
     "src/react-tests/**/*.ts",
-    "src/react-tests/**/*.tsx"
+    "src/react-tests/**/*.tsx",
+    "src/voice/tests/**/*.ts",
+    "src/voice/react-tests/**/*.ts",
+    "src/voice/react-tests/**/*.tsx",
+    "src/channels/__tests__/**/*.ts",
+    "src/channels/live-tests/**/*.ts"
   ]
 }

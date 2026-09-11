@@ -1,5 +1,12 @@
 # @cloudflare/voice-assemblyai
 
+## 0.2.0
+
+### Minor Changes
+
+- [#2225](https://github.com/cloudflare/agents/pull/2225) [`8c8f86d`](https://github.com/cloudflare/agents/commit/8c8f86d84f99397fde06431d78ed1f9a82eda85d) Thanks [@cjol](https://github.com/cjol)! - Use the canonical Voice contracts and error helpers from `agents/voice`.
+  Provider package names and exports are unchanged.
+
 ## 0.1.0
 
 ### Minor Changes

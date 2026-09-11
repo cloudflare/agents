@@ -8473,6 +8473,112 @@ export class ThinkWindowedHydrationAgent extends Think {
     return (await this.syncMessagesFromStorage()).length;
   }
 
+  /**
+   * Growth the refresh never measured: a tool result that enlarges a cached
+   * message, and an append whose text is multibyte. Both must be charged in
+   * bytes against the 64 KB budget, so the cache stops claiming to cover the
+   * path even though nothing was re-read.
+   */
+  async growCachePastBudgetForTest(): Promise<{
+    coversAfterSync: boolean;
+    coversAfterUpdate: boolean;
+    coversAfterMultibyteAppend: boolean;
+  }> {
+    const internal = this as unknown as {
+      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _cacheCoversActivePath: boolean;
+    };
+    await this.session.appendMessage({
+      id: "grow-user",
+      role: "user",
+      parts: [{ type: "text", text: "run it" }]
+    });
+    await this.session.appendMessage({
+      id: "grow-assistant",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-grow",
+          toolName: "client_action",
+          state: "input-available",
+          input: {}
+        }
+      ]
+    } as unknown as UIMessage);
+    await this.syncMessagesFromStorage();
+    const coversAfterSync = internal._cacheCoversActivePath;
+
+    // A 70 KB result on a message the cache already holds: an update, not an
+    // append, and alone larger than the budget.
+    await internal._applyToolResult("tc-grow", "y".repeat(70_000));
+    const coversAfterUpdate = internal._cacheCoversActivePath;
+
+    // Reset by refreshing (the update re-windows), then grow by an append
+    // of 40 000 two-byte characters: 40 KB of string length, 80 KB stored.
+    await this.session.clearMessages();
+    await this.syncMessagesFromStorage();
+    await this.session.appendMessage({
+      id: "grow-multibyte",
+      role: "user",
+      parts: [{ type: "text", text: "é".repeat(40_000) }]
+    });
+    const coversAfterMultibyteAppend = internal._cacheCoversActivePath;
+
+    return { coversAfterSync, coversAfterUpdate, coversAfterMultibyteAppend };
+  }
+
+  /**
+   * A tool result whose owner has fallen outside the hydration window. The
+   * live cache cannot name the row, so the apply must fall back to storage —
+   * and still land: the row is updated even though `this.messages` never
+   * held it.
+   */
+  async applyToolResultOutsideWindowForTest(): Promise<{
+    inCache: boolean;
+    cacheCoversPath: boolean;
+    storedState: string | undefined;
+  }> {
+    await this.session.appendMessage({
+      id: "old-owner",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-old",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "late" }
+        }
+      ]
+    } as unknown as UIMessage);
+    // Four 30KB messages push the owner past the 64KB window.
+    for (let i = 0; i < 4; i++) {
+      await this.session.appendMessage({
+        id: `after-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `after ${i} ${"y".repeat(30_000)}` }]
+      });
+    }
+    await this.syncMessagesFromStorage();
+    const inCache = this.messages.some((m) => m.id === "old-owner");
+    const internal = this as unknown as {
+      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _cacheCoversActivePath: boolean;
+    };
+    await internal._applyToolResult("tc-old", "late result");
+    const stored = await this.session.getMessage("old-owner");
+    const part = stored?.parts.find(
+      (candidate) =>
+        (candidate as { toolCallId?: string }).toolCallId === "tc-old"
+    ) as { state?: string } | undefined;
+    return {
+      inCache,
+      cacheCoversPath: internal._cacheCoversActivePath,
+      storedState: part?.state
+    };
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
@@ -8572,6 +8678,46 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
+  /**
+   * An append that lands while a pass is running. The pass read its
+   * candidates before the append, so it cannot evict what the append aged;
+   * the request must survive the pass and run afterwards. Seeds two aged
+   * media rows, starts a pass, and while it runs appends a third media
+   * message plus the fillers that age it. Returns what the first pass
+   * evicted (the two it saw) and the id the follow-up pass must handle.
+   */
+  async appendDuringPassForTest(): Promise<{
+    firstPassMessages: number;
+    lateId: string;
+  }> {
+    await this.seedMediaHistoryForTest("m");
+    this.mediaEviction = { keepRecentMessages: 2, minPartBytes: 10_000 };
+    const pass = this._evictAgedMediaBestEffort();
+    // Let the pass read its row stats and enter its first eviction write.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await this.appendMessageToHistory({
+      id: "late-media",
+      role: "user",
+      parts: [
+        { type: "text", text: "one more" },
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"C".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `late-${i}`,
+        role: i % 2 === 0 ? "assistant" : "user",
+        parts: [{ type: "text", text: `late ${i}` }]
+      } as UIMessage);
+    }
+    const first = await pass;
+    return { firstPassMessages: first?.messages ?? 0, lateId: "late-media" };
+  }
+
   /** One bounded Think-owned eviction pass. */
   async runEvictionForTest(): Promise<{
     messages: number;
@@ -8640,6 +8786,110 @@ export class ThinkMediaEvictionAgent extends Think {
  */
 export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
   override hydrationByteBudget = 1024;
+
+  /**
+   * Media that a pass had to protect, then aged by appends alone. The first
+   * pass on the windowed cache finds nothing aged and records that; the
+   * appends that follow never refresh the hydration snapshot, so only the
+   * append count can re-arm the pass. Seeds two fillers and two media
+   * messages (the media newest, so protected), refreshes so the cache is
+   * windowed, then appends four fillers to age the media.
+   */
+  async ageProtectedMediaByAppendsForTest(): Promise<string[]> {
+    const media = `data:image/png;base64,${"A".repeat(16_000)}`;
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `pre-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `filler ${i}` }]
+      } as UIMessage);
+    }
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `media-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [
+          { type: "text", text: `shot ${i}` },
+          { type: "file", mediaType: "image/png", url: media }
+        ]
+      } as UIMessage);
+    }
+    await this.syncMessagesFromStorage();
+    // Let the refresh's pass run and record nothing aged.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `post-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `later ${i}` }]
+      } as UIMessage);
+    }
+    return ["media-0", "media-1"];
+  }
+
+  /**
+   * Appends that land while a FRUITLESS pass is running on the windowed
+   * cache. The pass records what it saw when it ends; the appends that
+   * arrived meanwhile must count toward re-arming it, or the request they
+   * left pending is suppressed until as many appends again. The pass is
+   * held open by slowing its row-stats read.
+   */
+  async appendDuringFruitlessPassForTest(): Promise<{
+    ids: string[];
+    runningAtAppend: boolean;
+    firstPassMessages: number;
+  }> {
+    const media = `data:image/png;base64,${"D".repeat(16_000)}`;
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `fpre-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `filler ${i}` }]
+      } as UIMessage);
+    }
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `fmedia-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [
+          { type: "text", text: `shot ${i}` },
+          { type: "file", mediaType: "image/png", url: media }
+        ]
+      } as UIMessage);
+    }
+    await this.syncMessagesFromStorage();
+    // The refresh's own pass runs and records nothing aged.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Hold the next pass open AFTER its row-stats read, so it finishes
+    // fruitless on stats that predate the appends below.
+    const session = this.session as unknown as {
+      getHistoryRowStats: (...args: unknown[]) => Promise<unknown>;
+    };
+    const stats = session.getHistoryRowStats.bind(session);
+    session.getHistoryRowStats = async (...args: unknown[]) => {
+      const rows = await stats(...args);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return rows;
+    };
+    const internal = this as unknown as { _mediaEvictionRunning: boolean };
+    const pass = this._evictAgedMediaBestEffort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const runningAtAppend = internal._mediaEvictionRunning;
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `fpost-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `later ${i}` }]
+      } as UIMessage);
+    }
+    const result = await pass;
+    return {
+      ids: ["fmedia-0", "fmedia-1"],
+      runningAtAppend,
+      firstPassMessages: result?.messages ?? 0
+    };
+  }
 }
 
 // ── Pointer-inflation hydration (#1710) ─────────────────────────

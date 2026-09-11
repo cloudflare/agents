@@ -125,6 +125,19 @@ for await (const message of session.history()) {
 
 The capability first reads a content-free path of IDs and row sizes. It then fetches content in queries bounded to 50 rows and 4 MiB. Earlier chunks are not retained by the iterator.
 
+Read from the leaf when you are looking for something recent. The newest content window is fetched first, so breaking out of the loop leaves every older row unread:
+
+```ts
+for await (const message of session.history({ newestFirst: true })) {
+  if (ownsToolCall(message, toolCallId)) {
+    await session.updateMessage(applyResult(message));
+    break;
+  }
+}
+```
+
+A newest-first read follows parent pointers from the leaf, one row per message the loop actually takes, so its cost has no transcript term. Compaction overlays are honored: the walk stays row-by-row until it reaches the end of a compacted span, and only then plans the overlays over the remaining prefix and streams it leaf-first in eight-row windows.
+
 Use `historyBatches()` when each downstream operation has a fixed cost:
 
 ```ts
@@ -320,11 +333,17 @@ const unsubscribe = sessions.subscribe(async (event) => {
     case "delete":
     case "clear":
     case "compact":
+    case "compaction":
       await refreshProjection();
+      break;
+    case "import":
+      markProjectionStale();
       break;
   }
 });
 ```
+
+`import` fires once per `importMessage()` and carries the row; it is deliberately not an `append`, so a projection does not patch itself per imported row during a migration — it marks itself stale and re-derives once. `compaction` fires when an overlay is stored directly through `addCompaction()`; `compact()` reports its own overlay as `compact`.
 
 This is a local cache-coherence feed, not a cross-object event log. Capability diagnostics are also emitted through Lifecycle observability.
 

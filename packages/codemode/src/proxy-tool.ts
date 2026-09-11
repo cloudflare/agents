@@ -21,6 +21,7 @@
 import { RpcTarget } from "cloudflare:workers";
 import type { Executor, ResolvedProvider, ConnectorBinding } from "./executor";
 import { runCode } from "./run-code";
+import { truncateResult } from "./truncate";
 import { normalizeCode } from "./normalize";
 import type { CodemodeConnector, ConnectorDescription } from "./connectors";
 import type {
@@ -752,7 +753,65 @@ export type CodemodeTool = {
     input: ProxyToolInput,
     options: unknown
   ) => Promise<ProxyToolOutput>;
+  /**
+   * The AI SDK model-facing projection of the output: everything but `calls`.
+   * The full output (with the durable call log) stays on the persisted tool
+   * part for UIs; the model sees the transformed `result`, `logs`, `pending`
+   * or `error`. Without this the raw call log — every connector call's args
+   * and result — would ride along uncapped and defeat `transformResult`.
+   */
+  toModelOutput: (options: { output: unknown }) => {
+    type: "json";
+    value: JSONValue;
+  };
 };
+
+/** Structural twin of the AI SDK's `JSONValue`; the root entry must not import `ai`. */
+type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JSONValue[]
+  | { [key: string]: JSONValue };
+
+/**
+ * Project a tool output for the model: drop the audit-only `calls` log and
+ * bound the sandbox `logs` the same way `truncateResult` bounds a result.
+ * Never throws — a completed run must not fail at model assembly because its
+ * value carried a BigInt or a cycle.
+ */
+function toModelOutput(output: unknown): {
+  type: "json";
+  value: JSONValue;
+} {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) {
+    return { type: "json", value: toJSONValue(output) };
+  }
+  const { calls: _calls, ...rest } = output as {
+    calls?: unknown;
+    logs?: unknown;
+  };
+  if (Array.isArray(rest.logs)) rest.logs = truncateResult(rest.logs);
+  return { type: "json", value: toJSONValue(rest) };
+}
+
+function toJSONValue(value: unknown): JSONValue {
+  try {
+    const serialized = JSON.stringify(value, (_key, v: unknown) =>
+      typeof v === "bigint" ? v.toString() : v
+    );
+    return serialized === undefined
+      ? null
+      : (JSON.parse(serialized) as JSONValue);
+  } catch (err) {
+    return {
+      error: `Result could not be serialized for the model: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    };
+  }
+}
 
 export function createProxyTool(options: CreateProxyToolOptions): CodemodeTool {
   const connectors = options.connectors;
@@ -801,7 +860,8 @@ export function createProxyTool(options: CreateProxyToolOptions): CodemodeTool {
         options.executor,
         options.transformResult
       );
-    }
+    },
+    toModelOutput: ({ output }) => toModelOutput(output)
   };
 }
 

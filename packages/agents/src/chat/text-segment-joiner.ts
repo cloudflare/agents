@@ -13,7 +13,7 @@ export type TextSegmentEvent =
 /**
  * @internal Converts structured stream chunks into text and boundary events
  * without gluing words across non-text chunks. Sibling-package support for
- * `@cloudflare/voice` and `@cloudflare/think`, not a public API.
+ * Voice and `@cloudflare/think`, not a public API.
  */
 export class TextSegmentJoiner {
   #hasText = false;

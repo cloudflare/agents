@@ -5794,14 +5794,21 @@ export class AIChatAgent<
       this.#pendingCutover = null;
       const sync = this.#session.__DO_NOT_USE_WILL_BREAK__sync();
       const afters: Array<() => Promise<void>> = [];
-      this._resumableStream.cutover(
-        cutover.streamId,
-        () => {
-          for (const message of toWrite)
-            afters.push(sync.upsert(message).after);
-        },
-        { discard: cutover.discard }
-      );
+      try {
+        this._resumableStream.cutover(
+          cutover.streamId,
+          () => {
+            for (const message of toWrite)
+              afters.push(sync.upsert(message).after);
+          },
+          { discard: cutover.discard }
+        );
+      } catch (error) {
+        // The settle transaction rolled back: no row landed, but the
+        // session's in-memory caches already counted the writes.
+        sync.abandon();
+        throw error;
+      }
       for (const after of afters) await after();
     } else {
       for (const message of toWrite) await this.#session.upsertMessage(message);

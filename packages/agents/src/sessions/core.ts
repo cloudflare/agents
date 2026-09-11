@@ -15,7 +15,7 @@ import { extractAttachments, resolveAttachments } from "./attachment-ingest";
 import { AttachmentStore } from "./attachment-store";
 import { splitContent } from "./chunking";
 import type { SessionsIo } from "./io";
-import { overlayMessage, planOverlays } from "./overlays";
+import { overlayMessage, planOverlays, type OverlaySpan } from "./overlays";
 import {
   estimateAttachmentTokens,
   estimatedDataUrlBytes,
@@ -42,6 +42,13 @@ import type {
  */
 const HISTORY_CONTENT_CHUNK_SIZE = 50;
 const HISTORY_CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
+/**
+ * Rows per content window on a newest-first read. Such a read walks the path
+ * by id alone — no per-row byte subqueries, so no byte-bounded chunking — and
+ * is typically stopped by its consumer within the first few messages, so a
+ * small fixed window keeps both the rows read and the memory held low.
+ */
+const NEWEST_FIRST_WINDOW_ROWS = 8;
 
 /**
  * Deepest path a history read follows: the root row is depth 0, so a read
@@ -50,8 +57,27 @@ const HISTORY_CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
  */
 const MAX_PATH_DEPTH = 10_000;
 
+/** What a hydration window needs from a path row: its id, and its stored size when the window is byte-bounded. */
+type PathRow = { id: string; bytes: number };
+
 /** The newest row of a session: what an append attaches to and numbers from. */
 type Tail = { leafId: string | null; nextSeq: number };
+
+/**
+ * The memoised context-size estimate for a session's active path: the leaf it
+ * was computed for, the ids on that path whose own estimate counts (rows under
+ * a compaction overlay are replaced by the summary and do not), and the total.
+ * A tail append and an update of a counted row adjust it in place; every other
+ * write (branch append, delete, clear, compaction, import) drops it, and the
+ * next `tokenEstimate` re-derives it from one path walk.
+ */
+type PathTokens = {
+  leafId: string | null;
+  counted: Set<string>;
+  total: number;
+  /** Rows the walk returned: the memo is only extended while under the path cap. */
+  depth: number;
+};
 
 export type UpdateOutcome = "missing" | "unchanged" | "updated";
 
@@ -60,6 +86,7 @@ export class SessionsCore {
   readonly #reservedMetadataKeys: readonly string[];
   readonly #listeners = new Set<SessionChangeListener>();
   readonly #tails = new Map<string, Tail>();
+  readonly #pathTokens = new Map<string, PathTokens>();
   readonly #attachments: AttachmentStore;
   #tablesEnsured = false;
   /** True once the FTS index exists; it is built on the first `search()`. */
@@ -188,6 +215,7 @@ export class SessionsCore {
    * belongs to Think, which lifts and drops it itself.
    */
   migrateLegacy(): boolean {
+    this.#pathTokens.clear();
     let complete = true;
     const drop = (name: string): void => {
       if (this.#tableExists(name)) this.io.sqlWrite(`DROP TABLE ${name}`, []);
@@ -375,6 +403,17 @@ export class SessionsCore {
     return tail;
   }
 
+  /**
+   * Drop the in-memory tail and token-total caches for a session. For a
+   * caller whose enclosing transaction rolled back after an append or update
+   * ran inside it: the rows are gone but the caches already moved. The next
+   * read re-derives both from storage.
+   */
+  forgetCaches(sessionId: string): void {
+    this.#tails.delete(sessionId);
+    this.#pathTokens.delete(sessionId);
+  }
+
   latestLeafId(sessionId: string): string | null {
     return this.#tail(sessionId).leafId;
   }
@@ -456,15 +495,45 @@ export class SessionsCore {
     );
   }
 
-  /** Split content-free path rows into bounded hydration queries. */
+  /**
+   * The active branch path as ids alone, root → leaf. The cheapest walk the
+   * tree allows — one row per step, following `parent_id` by primary key —
+   * for readers that will hydrate only a few rows and do not need the sizes
+   * `pathRowStats` charges per row.
+   */
+  #pathIds(sessionId: string, leafId?: string | null): string[] {
+    const leaf = this.#resolveLeafId(sessionId, leafId);
+    if (!leaf) return [];
+    return this.io
+      .sql<{ id: string }>(
+        `WITH RECURSIVE path(id, parent_id, depth) AS (
+          SELECT id, parent_id, 0 FROM cf_agents_session_messages
+          WHERE session_id = ? AND id = ?
+          UNION ALL
+          SELECT m.id, m.parent_id, p.depth + 1 FROM cf_agents_session_messages m
+          JOIN path p ON m.id = p.parent_id
+          WHERE m.session_id = ? AND p.depth < ${MAX_PATH_DEPTH}
+        )
+        SELECT id FROM path ORDER BY depth DESC`,
+        [sessionId, leaf, sessionId]
+      )
+      .map((row) => row.id);
+  }
+
+  /**
+   * Split path rows into bounded hydration queries: at most `maxRows` rows,
+   * and — when the rows carry sizes — at most `HISTORY_CONTENT_CHUNK_BYTES`
+   * of stored content, with a single oversized row always standing alone.
+   */
   *#boundedStatsChunks(
-    rows: readonly SessionRowStat[]
-  ): Generator<readonly SessionRowStat[], void, undefined> {
+    rows: readonly PathRow[],
+    maxRows = HISTORY_CONTENT_CHUNK_SIZE
+  ): Generator<readonly PathRow[], void, undefined> {
     let start = 0;
     while (start < rows.length) {
       let end = start;
       let bytes = 0;
-      while (end < rows.length && end - start < HISTORY_CONTENT_CHUNK_SIZE) {
+      while (end < rows.length && end - start < maxRows) {
         const nextBytes = rows[end].bytes;
         if (end > start && bytes + nextBytes > HISTORY_CONTENT_CHUNK_BYTES) {
           break;
@@ -484,7 +553,7 @@ export class SessionsCore {
    */
   #contentByStats(
     sessionId: string,
-    rows: readonly SessionRowStat[]
+    rows: readonly PathRow[]
   ): Map<string, SessionMessage> {
     const result = new Map<string, SessionMessage>();
     if (rows.length === 0) return result;
@@ -512,41 +581,65 @@ export class SessionsCore {
     return result;
   }
 
-  /** Stream a known path window without retaining earlier content chunks. */
+  /**
+   * Stream a known path window without retaining earlier content chunks.
+   *
+   * The path is first cut into segments — a compaction overlay, or a run of
+   * raw rows between overlays — in root → leaf order. `newestFirst` walks
+   * those segments, and the rows inside each, from the leaf instead, in
+   * small fixed windows, so the first content fetched is the newest and a
+   * consumer that stops early never touches older rows.
+   */
   async *#streamStats(
     sessionId: string,
-    stats: readonly SessionRowStat[],
-    signal?: AbortSignal
+    stats: readonly PathRow[],
+    signal?: AbortSignal,
+    newestFirst = false,
+    plannedSpans?: readonly OverlaySpan[]
   ): AsyncGenerator<SessionMessage, void, undefined> {
-    const spans = planOverlays(
-      stats.map((row) => row.id),
-      this.getCompactions(sessionId)
-    );
+    const spans =
+      plannedSpans ??
+      planOverlays(
+        stats.map((row) => row.id),
+        this.getCompactions(sessionId)
+      );
     const spanByStart = new Map(spans.map((span) => [span.startIndex, span]));
 
+    type Segment = { overlay: StoredCompaction } | { rows: readonly PathRow[] };
+    const segments: Segment[] = [];
     let index = 0;
     while (index < stats.length) {
-      if (signal?.aborted) {
-        throw signal.reason ?? new Error("History read aborted");
-      }
       const span = spanByStart.get(index);
       if (span) {
-        yield overlayMessage(span.compaction);
+        segments.push({ overlay: span.compaction });
         index = span.endIndex + 1;
         continue;
       }
-
       let runEnd = index + 1;
       while (runEnd < stats.length && !spanByStart.has(runEnd)) runEnd++;
-      for (const chunk of this.#boundedStatsChunks(
-        stats.slice(index, runEnd)
-      )) {
+      segments.push({ rows: stats.slice(index, runEnd) });
+      index = runEnd;
+    }
+    if (newestFirst) segments.reverse();
+
+    for (const segment of segments) {
+      if (signal?.aborted) {
+        throw signal.reason ?? new Error("History read aborted");
+      }
+      if ("overlay" in segment) {
+        yield overlayMessage(segment.overlay);
+        continue;
+      }
+      const rows = newestFirst ? [...segment.rows].reverse() : segment.rows;
+      const windowRows = newestFirst
+        ? NEWEST_FIRST_WINDOW_ROWS
+        : HISTORY_CONTENT_CHUNK_SIZE;
+      for (const chunk of this.#boundedStatsChunks(rows, windowRows)) {
         const content = this.#contentByStats(sessionId, chunk);
         for (const row of chunk) {
           const parsed = content.get(row.id);
           if (parsed) yield parsed;
         }
-        index += chunk.length;
         if (signal?.aborted) {
           throw signal.reason ?? new Error("History read aborted");
         }
@@ -555,17 +648,110 @@ export class SessionsCore {
   }
 
   /**
-   * Stream the path ending at `leafId` (default: active leaf), root → leaf,
-   * compaction overlays collapsed. Peak memory is one bounded content window
-   * — never the whole transcript.
+   * Stream the path ending at `leafId` (default: active leaf), root → leaf
+   * (or leaf → root with `newestFirst`), compaction overlays collapsed. Peak
+   * memory is one bounded content window — never the whole transcript.
    */
   async *streamHistory(
     sessionId: string,
     options: HistoryReadOptions
   ): AsyncGenerator<SessionMessage, void, undefined> {
+    if (options.newestFirst === true) {
+      yield* this.#walkFromLeaf(sessionId, options.leafId, options.signal);
+      return;
+    }
     const stats = this.pathRowStats(sessionId, options.leafId);
     if (stats.length === 0) return;
     yield* this.#streamStats(sessionId, stats, options.signal);
+  }
+
+  /**
+   * The path leaf → root as a chain of point reads: each row names its
+   * parent, so the next read is known before the current message is
+   * yielded, and a consumer that stops early has paid for exactly the rows it
+   * saw.
+   *
+   * Compaction overlays are honored without planning them up front. An
+   * overlay that applies to this branch ends at a row the walk reaches
+   * before any row it covers, so the raw walk is exact until it lands on
+   * some compaction's `toMessageId`. Only then is the remaining prefix read
+   * as ids and planned root → leaf — the order overlay selection is defined
+   * in — and streamed leaf-first with the overlays collapsed. A lookup that
+   * stops in the messages after the last compaction never pays for that.
+   */
+  async *#walkFromLeaf(
+    sessionId: string,
+    leafId: string | null | undefined,
+    signal?: AbortSignal
+  ): AsyncGenerator<SessionMessage, void, undefined> {
+    const compactions = this.getCompactions(sessionId);
+    const spanEnds = new Set(compactions.map((c) => c.toMessageId));
+    let next = this.#resolveLeafId(sessionId, leafId);
+    let depth = 0;
+    while (next !== null && depth <= MAX_PATH_DEPTH) {
+      if (signal?.aborted) {
+        throw signal.reason ?? new Error("History read aborted");
+      }
+      if (spanEnds.has(next)) {
+        yield* this.#streamOverlaidPrefix(
+          sessionId,
+          leafId,
+          next,
+          compactions,
+          signal
+        );
+        return;
+      }
+      const [row] = this.io.sql<{
+        parent_id: string | null;
+        content: string;
+        content_chunks: number;
+      }>(
+        `SELECT parent_id, content, content_chunks FROM cf_agents_session_messages
+         WHERE session_id = ? AND id = ?`,
+        [sessionId, next]
+      );
+      if (!row) return;
+      const json =
+        row.content_chunks === 0
+          ? row.content
+          : row.content +
+            (this.#continuations(sessionId, [next]).get(next) ?? "");
+      const parsed = this.#parse(json);
+      if (parsed) yield this.#inline(parsed);
+      next = row.parent_id;
+      depth++;
+    }
+  }
+
+  /**
+   * The path from `fromId` down to the root, leaf-first with overlays
+   * collapsed. Spans are planned over the WHOLE path (selection is
+   * root → leaf and a chosen span suppresses overlaps inside it), then only
+   * those ending at or before `fromId` apply: `fromId` is some compaction's
+   * end, and a chosen span reaching past it would have ended at a row the
+   * raw walk visited first.
+   */
+  async *#streamOverlaidPrefix(
+    sessionId: string,
+    leafId: string | null | undefined,
+    fromId: string,
+    compactions: readonly StoredCompaction[],
+    signal?: AbortSignal
+  ): AsyncGenerator<SessionMessage, void, undefined> {
+    const ids = this.#pathIds(sessionId, leafId);
+    const end = ids.indexOf(fromId);
+    if (end === -1) return;
+    const spans = planOverlays(ids, compactions).filter(
+      (span) => span.endIndex <= end
+    );
+    yield* this.#streamStats(
+      sessionId,
+      ids.slice(0, end + 1).map((id) => ({ id, bytes: 0 })),
+      signal,
+      true,
+      spans
+    );
   }
 
   async getHistory(
@@ -631,7 +817,13 @@ export class SessionsCore {
    * triggers only, and model-reported usage stays authoritative.
    */
   tokenEstimate(sessionId: string): number {
+    const leafId = this.latestLeafId(sessionId);
+    const memo = this.#pathTokens.get(sessionId);
+    if (memo && memo.leafId === leafId)
+      return Math.max(0, Math.ceil(memo.total));
+
     const stats = this.pathRowStats(sessionId);
+    const counted = new Set(stats.map((row) => row.id));
     let tokens = stats.reduce((sum, row) => sum + row.tokenEstimate, 0);
     for (const span of planOverlays(
       stats.map((row) => row.id),
@@ -639,9 +831,16 @@ export class SessionsCore {
     )) {
       for (let i = span.startIndex; i <= span.endIndex; i++) {
         tokens -= stats[i].tokenEstimate;
+        counted.delete(stats[i].id);
       }
       tokens += estimateStringTokens(span.compaction.summary);
     }
+    this.#pathTokens.set(sessionId, {
+      leafId,
+      counted,
+      total: tokens,
+      depth: stats.length
+    });
     return Math.max(0, Math.ceil(tokens));
   }
 
@@ -720,8 +919,12 @@ export class SessionsCore {
     parentId: string | null | undefined,
     tokenEstimate: number
   ): { inserted: boolean; message: SessionMessage } {
-    const existing = this.getMessage(sessionId, message.id);
-    if (existing) return { inserted: false, message: existing };
+    // A repeated append is answered from storage; the common path (a fresh
+    // id) costs a key-only probe rather than a content read.
+    if (this.exists(sessionId, message.id)) {
+      const existing = this.getMessage(sessionId, message.id);
+      if (existing) return { inserted: false, message: existing };
+    }
 
     // `undefined` attaches to the tail and needs no validation read. A
     // caller-supplied id is untrusted and falls back to a root append when
@@ -772,6 +975,20 @@ export class SessionsCore {
     // The freshly inserted row is the most recent childless node, so it is
     // now the latest leaf — true even for an explicit-parent branch append.
     this.#tails.set(sessionId, { leafId: message.id, nextSeq: seq + 1 });
+    const memo = this.#pathTokens.get(sessionId);
+    if (memo) {
+      if (memo.leafId === parent && memo.depth <= MAX_PATH_DEPTH) {
+        // The row extends the memoised path: count it, no re-walk.
+        memo.leafId = message.id;
+        memo.counted.add(message.id);
+        memo.total += tokenEstimate;
+        memo.depth += 1;
+      } else {
+        // A branch, or a path at the cap: the walk would drop its oldest
+        // row, which the memo cannot see. Re-derive on the next read.
+        this.#pathTokens.delete(sessionId);
+      }
+    }
     this.io.emit("session:message:appended", {
       sessionId,
       messageId: message.id,
@@ -790,8 +1007,12 @@ export class SessionsCore {
     message: SessionMessage,
     tokenEstimate: number
   ): UpdateOutcome {
-    const oldRows = this.io.sql<{ content: string; content_chunks: number }>(
-      "SELECT content, content_chunks FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+    const oldRows = this.io.sql<{
+      content: string;
+      content_chunks: number;
+      token_estimate: number;
+    }>(
+      "SELECT content, content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
       [sessionId, message.id]
     );
     if (oldRows.length === 0) return "missing";
@@ -844,6 +1065,10 @@ export class SessionsCore {
       );
       this.#indexFts(sessionId, staged, true);
     });
+    const memo = this.#pathTokens.get(sessionId);
+    if (memo?.counted.has(message.id)) {
+      memo.total += tokenEstimate - (old.token_estimate ?? 0);
+    }
     this.io.emit("session:message:updated", {
       sessionId,
       messageId: message.id
@@ -915,6 +1140,7 @@ export class SessionsCore {
     });
     // The leaf may be among the deleted rows; re-derive on the next append.
     this.#tails.delete(sessionId);
+    this.#pathTokens.delete(sessionId);
     this.io.emit("session:messages:deleted", {
       sessionId,
       count: uniqueIds.length
@@ -944,6 +1170,7 @@ export class SessionsCore {
       }
     });
     this.#tails.set(sessionId, { leafId: null, nextSeq: 1 });
+    this.#pathTokens.delete(sessionId);
     this.io.emit("session:cleared", { sessionId });
   }
 
@@ -968,6 +1195,8 @@ export class SessionsCore {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [sessionId, id, seq, summary, fromMessageId, toMessageId, now]
     );
+    // The new overlay changes which rows count; re-derive on the next read.
+    this.#pathTokens.delete(sessionId);
     this.io.emit("session:compacted", { sessionId, compactionId: id });
     return {
       id,
@@ -1058,11 +1287,12 @@ export class SessionsCore {
    * Import one historical message verbatim (migrations, cross-DO moves):
    * explicit parent and timestamp, stamped estimate, no change-feed events.
    */
+  /** Returns `false` when the id already exists and nothing was written. */
   importMessage(
     sessionId: string,
     message: SessionMessage,
     options: { parentId: string | null; createdAt: number }
-  ): void {
+  ): boolean {
     const { message: staged, attachments } = extractAttachments(message);
     const slices = splitContent(JSON.stringify(staged));
     const tail = this.#tail(sessionId);
@@ -1096,11 +1326,13 @@ export class SessionsCore {
       );
       this.#indexFts(sessionId, staged, false);
     });
-    if (inserted === 0) return;
+    if (inserted === 0) return false;
     this.#tails.set(sessionId, {
       leafId: message.id,
       nextSeq: tail.nextSeq + 1
     });
+    this.#pathTokens.delete(sessionId);
+    return true;
   }
 
   // ── Parsing ──────────────────────────────────────────────────────────────

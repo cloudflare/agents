@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-voice-input-example",
-  "description": "Voice-to-text input example using @cloudflare/voice useVoiceInput hook",
+  "description": "Voice-to-text input example using agents/voice useVoiceInput hook",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
-    "@cloudflare/voice": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "react": "^19.2.7",

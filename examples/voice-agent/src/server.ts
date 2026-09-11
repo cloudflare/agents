@@ -9,7 +9,7 @@ import {
   WorkersAITTS,
   type VoiceTurnContext,
   type Transcriber
-} from "@cloudflare/voice";
+} from "agents/voice";
 import { streamText, tool, isStepCount } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";

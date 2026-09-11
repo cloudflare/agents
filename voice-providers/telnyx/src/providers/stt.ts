@@ -1,16 +1,16 @@
 /**
  * Telnyx STT provider for the Cloudflare Agents SDK.
  *
- * Implements the Transcriber interface from @cloudflare/voice,
+ * Implements the Transcriber interface from agents/voice,
  * streaming audio to the Telnyx WebSocket STT API.
  */
 
-import type { Transcriber, TranscriberSession } from "@cloudflare/voice";
+import type { Transcriber, TranscriberSession } from "agents/voice";
 import {
   logVoiceError,
   toVoiceError,
   VoiceProviderError
-} from "@cloudflare/voice/errors";
+} from "agents/voice/errors";
 import { TelnyxClient, type TelnyxClientConfig } from "../client.js";
 
 const DEFAULT_STT_URL = "wss://api.telnyx.com/v2/speech-to-text/transcription";
