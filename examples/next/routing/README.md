@@ -85,7 +85,7 @@ browser reaches it with `useAgent` like any Agent. The `WebSockets`
 capability speaks the Agent protocol for it: on connect it sends the
 identity frame that resolves `ready`, and it answers the `rpc` frames that
 `stub` and `call()` send against the hub's `RpcTarget`. The client picks the
-wire with `transport: "websocket" | "capnweb"` (add `?transport=capnweb` to
+wire with `transport: "cf-websocket" | "capnweb"` (add `?transport=capnweb` to
 the page URL to try the second). Each chat still reaches its owner with a
 plain Durable Object stub, `env.UserHub.getByName(userId)`.
 

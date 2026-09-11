@@ -55,7 +55,7 @@ type HubApi = {
 const HUB_TRANSPORT =
   new URLSearchParams(location.search).get("transport") === "capnweb"
     ? "capnweb"
-    : "websocket";
+    : "cf-websocket";
 
 function ModeToggle() {
   const [mode, setMode] = useState(
