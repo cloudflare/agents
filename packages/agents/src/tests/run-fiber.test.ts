@@ -48,6 +48,21 @@ describe("runFiber", () => {
       expect(log).toContain("executed:hello");
     });
 
+    it("preserves a successful result when fiber cleanup fails", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "run-cleanup-failure"
+      );
+
+      await expect(agent.runWithFailingCleanup("completed")).resolves.toBe(
+        "completed"
+      );
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+
+      await agent.triggerRecoveryCheck();
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+    });
+
     it("should delete the fiber row on completion", async () => {
       const agent = await getAgentByName(env.TestRunFiberAgent, "run-cleanup");
 
