@@ -228,7 +228,8 @@ export class Session {
     const outcome = this.#core.update(
       this.sessionId,
       prepared.message,
-      prepared.tokenEstimate
+      prepared.tokenEstimate,
+      options.compare
     );
     if (outcome === "missing") return null;
     if (outcome === "updated") {
@@ -289,7 +290,8 @@ export class Session {
         const outcome = this.#core.update(
           this.sessionId,
           prepared.message,
-          prepared.tokenEstimate
+          prepared.tokenEstimate,
+          options.compare
         );
         return {
           result: { inserted: false, message: prepared.message },
@@ -315,7 +317,8 @@ export class Session {
       return this.appendMessage(message, options);
     }
     const stored = await this.updateMessage(message, {
-      source: options.source
+      source: options.source,
+      compare: options.compare
     });
     return { inserted: false, message: stored ?? message };
   }

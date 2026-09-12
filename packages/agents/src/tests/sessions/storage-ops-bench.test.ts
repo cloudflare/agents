@@ -47,6 +47,46 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
+  it("reads a chunked row back only when asked to compare against it", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      // A 3.2 MiB body spans the 1.5 MiB row budget three times: one message
+      // row plus two continuations.
+      const stored = await instance.benchChunkedUpdates(
+        3.2 * 1024 * 1024,
+        "stored"
+      );
+      expect(stored.chunks).toBe(2);
+
+      // The default guard reads the message row and both continuations (and
+      // the `json_each` id list the continuation query scans) to prove the
+      // body identical, then writes nothing.
+      expect(stored.noop).toEqual({ rowsRead: 5, rowsWritten: 0 });
+      // A changed body pays the same read-back before the rewrite of the
+      // row and its two continuations (the sixth read is the UPDATE locating
+      // its row).
+      expect(stored.changed).toEqual({ rowsRead: 6, rowsWritten: 3 });
+    });
+  });
+
+  it("skips the read-back for a change the caller already established", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      const known = await instance.benchChunkedUpdates(
+        3.2 * 1024 * 1024,
+        "none"
+      );
+      expect(known.chunks).toBe(2);
+      expect(known.noop).toEqual({ rowsRead: 5, rowsWritten: 0 });
+
+      // `compare: "none"`: one key-side probe of the message row (its
+      // continuation count and stamped estimate, no payload) and the UPDATE
+      // locating its row. The continuations are never read; the writes are
+      // unchanged.
+      expect(known.changed).toEqual({ rowsRead: 2, rowsWritten: 3 });
+    });
+  });
+
   it("adds an FTS delete and insert per changed row once the index exists", async () => {
     const stub = env.SessionSearchHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(

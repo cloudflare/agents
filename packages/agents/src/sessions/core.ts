@@ -81,6 +81,14 @@ type PathTokens = {
 
 export type UpdateOutcome = "missing" | "unchanged" | "updated";
 
+/**
+ * How `update` decides whether a row changed. `"stored"` reads the row and
+ * its continuations back and compares byte-for-byte. `"none"` trusts the
+ * caller, who has already compared against its own copy and knows the
+ * content differs: the row is rewritten without being read first.
+ */
+export type UpdateCompare = "stored" | "none";
+
 export class SessionsCore {
   readonly io: SessionsIo;
   readonly #reservedMetadataKeys: readonly string[];
@@ -1001,32 +1009,42 @@ export class SessionsCore {
    * Durable update of an existing row. An identical row writes nothing: no
    * row, no continuation, no FTS, no event. The no-op guard compares the
    * FULL reassembled content, not just the slice the message row holds.
+   * A caller that already knows the row changed passes `compare: "none"`
+   * and the payload is never read back: the row is probed for its key-side
+   * columns only (the continuation count the surplus delete needs and the
+   * estimate the path total was counting), then rewritten.
    */
   update(
     sessionId: string,
     message: SessionMessage,
-    tokenEstimate: number
+    tokenEstimate: number,
+    compare: UpdateCompare = "stored"
   ): UpdateOutcome {
     const oldRows = this.io.sql<{
-      content: string;
+      content?: string;
       content_chunks: number;
-      token_estimate: number;
+      token_estimate: number | null;
     }>(
-      "SELECT content, content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      compare === "stored"
+        ? "SELECT content, content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?"
+        : "SELECT content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
       [sessionId, message.id]
     );
     if (oldRows.length === 0) return "missing";
     const old = oldRows[0];
-    const oldContent =
-      old.content_chunks === 0
-        ? old.content
-        : old.content +
-          (this.#continuations(sessionId, [message.id]).get(message.id) ?? "");
     // Compare in stored form: a re-sent identical image extracts to the same
     // address, so an unchanged update still writes nothing.
     const { message: staged, attachments } = extractAttachments(message);
     const json = JSON.stringify(staged);
-    if (oldContent === json) return "unchanged";
+    if (compare === "stored") {
+      const oldContent =
+        old.content_chunks === 0
+          ? old.content
+          : old.content +
+            (this.#continuations(sessionId, [message.id]).get(message.id) ??
+              "");
+      if (oldContent === json) return "unchanged";
+    }
 
     const slices = splitContent(json);
     this.io.transaction(() => {

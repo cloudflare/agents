@@ -366,6 +366,53 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("writes a change the caller vouches for without reading the row back", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("k1", "first body"));
+      const events: SessionChangeEvent[] = [];
+      instance.sessions.subscribe((event) => {
+        events.push(event);
+      });
+
+      // A row that is not there is still reported missing, and nothing is
+      // written for it.
+      expect(
+        await session.updateMessage(text("absent", "body"), {
+          compare: "none"
+        })
+      ).toBeNull();
+      expect(events).toEqual([]);
+
+      const stored = await session.updateMessage(text("k1", "second body"), {
+        compare: "none"
+      });
+      expect(stored?.parts[0].text).toBe("second body");
+      expect((await session.getMessage("k1"))?.parts[0].text).toBe(
+        "second body"
+      );
+      // The caller took over the compare, so an identical re-send IS a
+      // write and is dispatched: the byte-exact guard is the default only.
+      await session.updateMessage(text("k1", "second body"), {
+        compare: "none"
+      });
+      expect(events.map((event) => event.type)).toEqual(["update", "update"]);
+    });
+  });
+
+  it("still drops surplus continuations when a vouched-for update shrinks", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("s1", "y".repeat(3 * 1024 * 1024)));
+      expect(instance.continuationRows("", "s1").length).toBeGreaterThan(0);
+      await session.updateMessage(text("s1", "short"), { compare: "none" });
+      expect(instance.continuationRows("", "s1")).toEqual([]);
+      expect((await session.getMessage("s1"))?.parts[0].text).toBe("short");
+    });
+  });
+
   it("re-derives the estimate once the path reaches the walk cap", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
