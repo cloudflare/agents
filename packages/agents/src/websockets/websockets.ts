@@ -8,7 +8,6 @@ import {
   type ConnectionSetStateFn,
   type ConnectionState
 } from "../lifecycle";
-import type { State } from "../state";
 import { MessageType } from "../types";
 import { camelCaseToKebabCase } from "../utils";
 import {
@@ -18,6 +17,7 @@ import {
 } from "./connection";
 import { exposableMethods, type CallableInvoker } from "./callables-target";
 import type {
+  SyncedState,
   WebSocketHandlers,
   WebSocketMessage,
   WebSocketsOptions
@@ -134,7 +134,7 @@ export class WebSockets extends LifecycleCapability {
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #identity: boolean;
-  readonly #state: State<unknown> | undefined;
+  readonly #state: SyncedState | undefined;
   readonly #callables: ReadonlyMap<string, CallableInvoker>;
   readonly #sessions = new Map<string, CapnWebSession>();
   #manager: ConnectionManager | undefined;
@@ -402,7 +402,9 @@ export class WebSockets extends LifecycleCapability {
       // `set()` runs the host's validation and persists; the source is this
       // connection, so the broadcast below excludes it — it already has
       // the value it sent.
-      this.#state?.set(frame.state, connection);
+      // `never` on the port keeps any `State<T>` assignable; the value
+      // came off the wire, so the host's validator is what checks it.
+      this.#state?.set(frame.state as never, connection);
     } catch (error) {
       this.#sendFrame(connection, {
         type: MessageType.CF_AGENT_STATE_ERROR,

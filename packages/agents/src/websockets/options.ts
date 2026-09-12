@@ -1,6 +1,17 @@
 import type { RpcTarget } from "cloudflare:workers";
-import type { State } from "../state";
 import type { Connection, ConnectionContext, WSMessage } from "../lifecycle";
+
+/**
+ * The part of a `State` capability the WebSockets capability uses. A
+ * structural port, so any `State<T>` fits without a cast and the
+ * capability never depends on the class itself.
+ */
+export type SyncedState = {
+  /** Current state, or `undefined` when nothing is stored. */
+  get(): unknown;
+  /** Validate and persist a change; throws when the host rejects it. */
+  set(nextState: never, source: Connection): void;
+};
 
 /** A frame delivered on a capability-owned WebSocket connection. */
 export type WebSocketMessage = WSMessage;
@@ -67,7 +78,8 @@ export interface WebSocketsOptions {
   readonly identity?: boolean;
 
   /**
-   * A {@link State} capability to sync over connections. The WebSockets
+   * A {@link SyncedState} — normally a `State` capability — to sync over
+   * connections. The WebSockets
    * capability then pushes the current state to each new connection,
    * applies `cf_agent_state` frames a client sends (answering
    * `cf_agent_state_error` when the host rejects one), and broadcasts
@@ -75,7 +87,7 @@ export interface WebSocketsOptions {
    * the lifecycle so it owns storage and validation; without this option
    * state is never sent or accepted over connections.
    */
-  readonly state?: State<unknown>;
+  readonly state?: SyncedState;
 
   /**
    * Tags attached to each accepted connection, queryable through

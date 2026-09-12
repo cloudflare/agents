@@ -7,6 +7,7 @@
  */
 export { WebSockets } from "./websockets";
 export type {
+  SyncedState,
   WebSocketHandlers,
   WebSocketMessage,
   WebSocketsOptions
