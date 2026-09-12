@@ -1,7 +1,7 @@
 /**
  * Tests for two storage optimizations:
  *
- * 1. Schema version gating (cf_schema_version row in cf_agents_state)
+ * 1. Schema version gating (cf_agents:schema_version KV key)
  *    - Constructor DDL is skipped on established DOs whose schema is current.
  *    - Fresh DOs (no version row) run all migrations and stamp the version.
  *
@@ -14,6 +14,7 @@
  */
 
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
 
@@ -240,13 +241,35 @@ describe("schema version gating", () => {
     const idsBefore = await agent.getStateRowIds();
     expect(idsBefore).toContain("cf_state_was_changed");
 
-    // Reset version so _ensureSchema() enters the migration block
-    await agent.resetSchemaVersion();
-    await agent.runSchemaMigration();
+    // Re-run the State capability's migration, which owns the table
+    await agent.runStateMigration();
 
     // wasChanged row should be cleaned up
     const idsAfter = await agent.getStateRowIds();
     expect(idsAfter).not.toContain("cf_state_was_changed");
+  });
+
+  it("should move a legacy schema-version row into the KV key", async () => {
+    const name = `legacy-version-row-${crypto.randomUUID()}`;
+    const agent = await getAgentByName(env.TestStateAgent, name);
+    await agent.updateState({ count: 7, items: [], lastUpdated: null });
+
+    // Simulate a DO whose version lives as a row in cf_agents_state
+    await agent.insertLegacySchemaVersionRow(3);
+    expect(await agent.getSchemaVersion()).toBe(0);
+    expect(await agent.getStateRowIds()).toContain("cf_schema_version");
+
+    await agent.runSchemaMigration();
+
+    // Version is read from the row, migrated forward, and stored in KV
+    expect(await agent.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
+    // The row is gone: the State capability is the table's only writer
+    expect(await agent.getStateRowIds()).toEqual(["cf_state_row_id"]);
+    expect(await agent.getState()).toEqual({
+      count: 7,
+      items: [],
+      lastUpdated: null
+    });
   });
 
   it("should be idempotent when schema version is already current", async () => {
@@ -458,7 +481,7 @@ describe("single-row state optimization", () => {
       await agent.insertCorruptedState();
 
       // Access state — should trigger parse error and recover
-      const state = await agent.getStateAfterCorruption();
+      const state = await agent.getState();
 
       expect(state).toEqual({
         count: 0,
@@ -477,7 +500,7 @@ describe("single-row state optimization", () => {
       await agent.insertCorruptedState();
 
       // Access state — should return undefined and clear the corrupted row
-      const state = await agent.getStateAfterCorruption();
+      const state = await agent.getState();
       expect(state).toBeUndefined();
 
       // Corrupted row should be cleaned up
@@ -490,9 +513,10 @@ describe("single-row state optimization", () => {
       const agent = await getAgentByName(env.TestStateAgent, name);
 
       await agent.insertCorruptedState();
-      await agent.getStateAfterCorruption();
+      await agent.getState();
+      await evictDurableObject(agent);
 
-      // Get new stub — should read the recovered state, not corrupted data
+      // A fresh instance should read the recovered state, not corrupted data.
       const agent2 = await getAgentByName(env.TestStateAgent, name);
       const state = await agent2.getState();
 
@@ -545,9 +569,8 @@ describe("single-row state optimization", () => {
       });
       await agent.insertLegacyWasChangedRow();
 
-      // Reset version so _ensureSchema() enters the migration block
-      await agent.resetSchemaVersion();
-      await agent.runSchemaMigration();
+      // Re-run the State capability's migration, which owns the table
+      await agent.runStateMigration();
 
       const ids = await agent.getStateRowIds();
       expect(ids).not.toContain("cf_state_was_changed");
@@ -608,9 +631,8 @@ describe("single-row state optimization", () => {
       expect(idsBefore).toContain("cf_state_was_changed");
       expect(idsBefore).not.toContain("cf_state_row_id");
 
-      // Migration cleans up the orphan
-      await agent.resetSchemaVersion();
-      await agent.runSchemaMigration();
+      // The State capability's migration cleans up the orphan
+      await agent.runStateMigration();
 
       const idsAfter = await agent.getStateRowIds();
       expect(idsAfter).not.toContain("cf_state_was_changed");

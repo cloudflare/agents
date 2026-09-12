@@ -29,6 +29,7 @@ const entries = [
   "src/streams/index.ts",
   "src/context/index.ts",
   "src/sessions/index.ts",
+  "src/state/index.ts",
   "src/websockets/index.ts",
   "src/codemode/ai.ts",
   "src/browser/index.ts",
