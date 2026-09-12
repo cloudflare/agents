@@ -403,7 +403,23 @@ export class ContextBlocks {
   async tools(): Promise<ToolSet> {
     if (!this.loaded) await this.load();
 
+    // The set depends only on which blocks exist and whether each is
+    // writable / searchable, so it is memoised on that shape.
     const blocks = Array.from(this.blocks.values());
+    const shape = blocks
+      .map(
+        (b) => `${b.label}\u0000${b.writable ? 1 : 0}${b.isSearchable ? 1 : 0}`
+      )
+      .join("\u0001");
+    if (this.toolsMemo?.shape === shape) return this.toolsMemo.tools;
+    const tools = this.buildTools(blocks);
+    this.toolsMemo = { shape, tools };
+    return tools;
+  }
+
+  private toolsMemo: { shape: string; tools: ToolSet } | null = null;
+
+  private buildTools(blocks: ContextBlock[]): ToolSet {
     const writable = blocks.filter((b) => b.writable);
     const searchLabels = blocks
       .filter((b) => b.isSearchable)

@@ -1512,6 +1512,13 @@ type CompiledActionMetadata = {
   kind: "approval-gated" | "durable-pause";
 };
 
+type CompiledActionEntry = {
+  toolName: string;
+  kind: ActionKind;
+  metadata: CompiledActionMetadata | undefined;
+  tool: ToolSet[string];
+};
+
 type NormalizedActionAuthorization = {
   allowed: boolean;
   reason?: string;
@@ -2848,7 +2855,49 @@ export class Think<
    */
   skillWorkspace: false | SkillWorkspaceSeedOptions = false;
 
+  /**
+   * When `getSkills()` sources are re-listed for catalog changes.
+   *
+   * - `{ intervalMs }` (default `{ intervalMs: 60_000 }`): refresh at most
+   *   once per interval, measured from the last refresh. Matches the default
+   *   `skills.r2` index TTL, so a bucket change is visible within a minute.
+   * - `"every-turn"`: refresh at the start of every new turn. Sources with
+   *   their own TTL still only hit the network when that TTL lapses.
+   * - `"on-start"`: load once in `onStart()` and never refresh again; a new
+   *   catalog needs a fresh object (deploy / eviction).
+   *
+   * Continuations of a turn already in flight (auto-continuation after a
+   * client tool result, an overflow retry) never refresh: the catalog the
+   * turn started with is the one it finishes with. A refresh that changes
+   * the catalog re-renders the system prompt once, for the next turn; rows
+   * already persisted are never rewritten.
+   */
+  skillsRefresh: "every-turn" | "on-start" | { intervalMs: number } = {
+    intervalMs: 60_000
+  };
+
   private _skillRegistry: SkillRegistry | null = null;
+  /** Wall clock of the last `_skillRegistry.refresh()` (for `intervalMs`). */
+  private _skillsRefreshedAt = 0;
+  /** Request id the catalog was last refreshed for; re-entries skip. */
+  private _skillsRefreshedForRequestId: string | null = null;
+  /**
+   * Workspace and fetch tools are pure functions of the fields they read, so
+   * they are built once and reused until one of those fields is reassigned.
+   */
+  private _staticToolsMemo: {
+    workspace: unknown;
+    workspaceBash: unknown;
+    fetchTools: unknown;
+    tools: ToolSet;
+  } | null = null;
+  /**
+   * Compiled action tools, keyed by the `Action` descriptor `getActions()`
+   * returned. `getActions()` is still consulted every turn (it is a user hook
+   * and may be dynamic); only the compile step is skipped for a descriptor
+   * that was already compiled under the same tool name and kind.
+   */
+  private _compiledActionsMemo = new WeakMap<Action, CompiledActionEntry>();
   private _loggedSkillWarnings = new Set<string>();
   private _loggedProtocolWarnings = new Set<string>();
 
@@ -5505,12 +5554,16 @@ export class Think<
    */
   private _skillsFingerprint: string | null | undefined;
 
-  private async _refreshSkillsIfChanged(): Promise<void> {
+  private async _refreshSkillsIfChanged(continuation: boolean): Promise<void> {
     if (!this._skillRegistry) return;
+    if (!this._shouldRefreshSkills(continuation)) return;
 
     // Refreshing pulls from live sources (e.g. R2); a transient failure must
     // not break the turn. Keep the last good catalog on error.
     try {
+      this._skillsRefreshedAt = Date.now();
+      this._skillsRefreshedForRequestId =
+        admittedTurnContext.getStore()?.requestId ?? null;
       await this._skillRegistry.refresh();
       this._logSkillWarnings(this._skillRegistry);
       await this._configureSkillWorkspace(this._skillRegistry);
@@ -5526,6 +5579,69 @@ export class Think<
         `[think] Failed to refresh skills; using last known catalog: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+  }
+
+  /**
+   * Apply `skillsRefresh`. A continuation, or a second inference attempt for
+   * the request that already refreshed (overflow retry), keeps the catalog
+   * the turn started with.
+   */
+  private _shouldRefreshSkills(continuation: boolean): boolean {
+    if (continuation) return false;
+    const requestId = admittedTurnContext.getStore()?.requestId;
+    if (
+      requestId !== undefined &&
+      requestId === this._skillsRefreshedForRequestId
+    ) {
+      return false;
+    }
+    const policy = this.skillsRefresh;
+    if (policy === "every-turn") return true;
+    if (policy === "on-start") return false;
+    return Date.now() - this._skillsRefreshedAt >= policy.intervalMs;
+  }
+
+  /**
+   * Workspace + fetch tools. Both read only instance fields that are set at
+   * construction (`workspace`, `workspaceBash`, `fetchTools`), so the set is
+   * rebuilt only when one of those identities changes. `fetchTools` users who
+   * need a per-turn allowlist call `createFetchTools()` from `getTools()`.
+   */
+  private _staticToolSet(): ToolSet {
+    const memo = this._staticToolsMemo;
+    if (
+      memo &&
+      memo.workspace === this.workspace &&
+      memo.workspaceBash === this.workspaceBash &&
+      memo.fetchTools === this.fetchTools
+    ) {
+      return memo.tools;
+    }
+    const workspaceTools = createWorkspaceTools(this.workspace, {
+      bash: this.workspaceBash
+    });
+    const fetchToolSet: ToolSet = this.fetchTools
+      ? createFetchTools({
+          ...this.fetchTools,
+          workspace: this.workspace,
+          onEvent: (event: FetchToolEvent) => {
+            (
+              this._emit as unknown as (
+                type: string,
+                payload: Record<string, unknown>
+              ) => void
+            ).call(this, "tool:fetch", { ...event });
+          }
+        })
+      : {};
+    const tools = { ...workspaceTools, ...fetchToolSet };
+    this._staticToolsMemo = {
+      workspace: this.workspace,
+      workspaceBash: this.workspaceBash,
+      fetchTools: this.fetchTools,
+      tools
+    };
+    return tools;
   }
 
   /**
@@ -6303,27 +6419,11 @@ export class Think<
       await this.mcp.waitForConnections({ timeout });
     }
 
-    const workspaceTools = createWorkspaceTools(this.workspace, {
-      bash: this.workspaceBash
-    });
-    const fetchToolSet: ToolSet = this.fetchTools
-      ? createFetchTools({
-          ...this.fetchTools,
-          workspace: this.workspace,
-          onEvent: (event: FetchToolEvent) => {
-            (
-              this._emit as unknown as (
-                type: string,
-                payload: Record<string, unknown>
-              ) => void
-            ).call(this, "tool:fetch", { ...event });
-          }
-        })
-      : {};
+    const staticTools = this._staticToolSet();
     const baseTools = this.getTools();
     const actionTools = await this._compileActionTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
-    await this._refreshSkillsIfChanged();
+    await this._refreshSkillsIfChanged(input.continuation);
     const contextTools = await this.context.tools();
     const skillTools = this._skillRegistry?.tools() ?? {};
     const clientToolSet = createToolsFromClientSchemas(
@@ -6333,8 +6433,7 @@ export class Think<
         : undefined
     );
     let tools: ToolSet = {
-      ...workspaceTools,
-      ...fetchToolSet,
+      ...staticTools,
       ...baseTools,
       ...actionTools,
       ...extensionTools,
@@ -6889,6 +6988,9 @@ export class Think<
   private async _compileActionTools(): Promise<ToolSet> {
     const actions = await this.getActions();
     const tools: ToolSet = {};
+    // Metadata is a pure derivation of the descriptors, so it is rebuilt from
+    // the memo each time; approval descriptors are populated while the turn
+    // runs (keyed by tool call id) and start empty for every inference attempt.
     this._activeTurnActionMetadata = new Map();
     this._activeTurnActionApprovalDescriptors = new Map();
     for (const [registrationName, descriptor] of Object.entries(actions)) {
@@ -6901,26 +7003,48 @@ export class Think<
       const kind =
         descriptor.config.kind ??
         (descriptor.config.approval ? "approval-gated" : "server");
-      if (kind === "approval-gated" || kind === "durable-pause") {
-        const staticPermissions = Array.isArray(descriptor.config.permissions)
-          ? [...descriptor.config.permissions]
-          : undefined;
-        this._activeTurnActionMetadata.set(toolName, {
-          actionName: toolName,
-          summary:
-            descriptor.config.approvalSummary ?? descriptor.config.description,
-          ...(staticPermissions !== undefined && {
-            permissions: staticPermissions
-          }),
-          ...(descriptor.config.approvalRisk !== undefined && {
-            risk: descriptor.config.approvalRisk
-          }),
-          kind
-        });
+      let entry = this._compiledActionsMemo.get(descriptor);
+      if (!entry || entry.toolName !== toolName || entry.kind !== kind) {
+        entry = this._compileAction(descriptor, toolName, kind);
+        this._compiledActionsMemo.set(descriptor, entry);
       }
-      tools[toolName] = this._actionToTool(descriptor, toolName, kind);
+      if (entry.metadata) {
+        this._activeTurnActionMetadata.set(toolName, entry.metadata);
+      }
+      tools[toolName] = entry.tool;
     }
     return tools;
+  }
+
+  private _compileAction(
+    descriptor: Action,
+    toolName: string,
+    kind: ActionKind
+  ): CompiledActionEntry {
+    let metadata: CompiledActionMetadata | undefined;
+    if (kind === "approval-gated" || kind === "durable-pause") {
+      const staticPermissions = Array.isArray(descriptor.config.permissions)
+        ? [...descriptor.config.permissions]
+        : undefined;
+      metadata = {
+        actionName: toolName,
+        summary:
+          descriptor.config.approvalSummary ?? descriptor.config.description,
+        ...(staticPermissions !== undefined && {
+          permissions: staticPermissions
+        }),
+        ...(descriptor.config.approvalRisk !== undefined && {
+          risk: descriptor.config.approvalRisk
+        }),
+        kind
+      };
+    }
+    return {
+      toolName,
+      kind,
+      metadata,
+      tool: this._actionToTool(descriptor, toolName, kind)
+    };
   }
 
   private _actionToTool(

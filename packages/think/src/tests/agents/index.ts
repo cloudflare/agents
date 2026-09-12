@@ -40,3 +40,4 @@ export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";
 export { ThinkMessengerRouteTestAgent } from "./messengers";
 export { ThinkMcpToolMaterializationAgent } from "./mcp-tool-materialization";
+export { ThinkToolMemoTestAgent, ThinkSkillChangeTestAgent } from "./tool-memo";

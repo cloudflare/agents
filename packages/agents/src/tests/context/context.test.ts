@@ -88,4 +88,30 @@ describe("Sessions context blocks", () => {
       "exceeds maxTokens"
     );
   });
+
+  it("memoises tools() until the block shape changes", async () => {
+    const blocks = new ContextBlocks([
+      { label: "soul", provider: new ReadonlyProvider("You are helpful.") },
+      { label: "memory", provider: new MemoryProvider("likes TypeScript") }
+    ]);
+    const first = await blocks.tools();
+    expect(Object.keys(first)).toEqual(["set_context"]);
+    expect(await blocks.tools()).toBe(first);
+
+    // Content changes and prompt refreshes do not change the tool set.
+    await blocks.setBlock("memory", "likes Workers");
+    await blocks.refreshSystemPrompt();
+    expect(await blocks.tools()).toBe(first);
+
+    await blocks.addBlock({
+      label: "scratch",
+      provider: new MemoryProvider("")
+    });
+    const second = await blocks.tools();
+    expect(second).not.toBe(first);
+
+    blocks.removeBlock("scratch");
+    blocks.removeBlock("memory");
+    expect(Object.keys(await blocks.tools())).toEqual([]);
+  });
 });

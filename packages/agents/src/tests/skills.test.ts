@@ -484,4 +484,40 @@ Review carefully.
     await registry.refresh();
     expect(registry.warnings.length).toBe(first);
   });
+
+  it("hands back the same tools() until the catalog changes", async () => {
+    let names = ["code-review"];
+    const source: SkillSource = {
+      id: "dynamic",
+      fingerprint: "v1",
+      list: async () =>
+        names.map((name) => ({
+          name,
+          description: `${name} skill`,
+          sourceId: "dynamic"
+        })),
+      load: async (name) => ({
+        name,
+        description: `${name} skill`,
+        body: "Body.",
+        sourceId: "dynamic"
+      })
+    };
+    const registry = new SkillRegistry([source]);
+    await registry.load();
+    const first = registry.tools();
+    expect(Object.keys(first)).toEqual([
+      "activate_skill",
+      "read_skill_resource"
+    ]);
+
+    await registry.refresh();
+    expect(registry.tools()).toBe(first);
+
+    names = ["code-review", "release-notes"];
+    await registry.refresh();
+    const second = registry.tools();
+    expect(second).not.toBe(first);
+    expect(registry.tools()).toBe(second);
+  });
 });
