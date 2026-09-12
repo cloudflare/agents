@@ -1664,7 +1664,8 @@ The chat protocol uses typed JSON messages over WebSocket:
 | -------------------------------- | --------------- | --------------------------- |
 | `CF_AGENT_USE_CHAT_REQUEST`      | Client → Server | Send a chat message         |
 | `CF_AGENT_USE_CHAT_RESPONSE`     | Server → Client | Stream response chunks      |
-| `CF_AGENT_CHAT_MESSAGES`         | Server → Client | Broadcast updated messages  |
+| `CF_AGENT_CHAT_MESSAGES`         | Server → Client | Full transcript snapshot    |
+| `CF_AGENT_CHAT_MESSAGES_DELTA`   | Server → Client | Changed messages only       |
 | `CF_AGENT_CHAT_CLEAR`            | Bidirectional   | Clear conversation          |
 | `CF_AGENT_CHAT_REQUEST_CANCEL`   | Client → Server | Cancel active stream        |
 | `CF_AGENT_TOOL_RESULT`           | Client → Server | Provide tool output         |
@@ -1672,6 +1673,8 @@ The chat protocol uses typed JSON messages over WebSocket:
 | `CF_AGENT_MESSAGE_UPDATED`       | Server → Client | Notify of message update    |
 | `CF_AGENT_STREAM_RESUMING`       | Server → Client | Notify of stream resumption |
 | `CF_AGENT_STREAM_RESUME_REQUEST` | Client → Server | Request stream resume check |
+
+`CF_AGENT_CHAT_MESSAGES` carries the whole transcript and an `epoch` naming that snapshot. `CF_AGENT_CHAT_MESSAGES_DELTA` carries only the messages a turn boundary persisted (upsert by id; unknown ids append) and the `epoch` it applies to — the client drops a delta whose epoch differs from the last snapshot it applied, so a delta can never land on the wrong base. `@cloudflare/think` sends deltas during normal turns and a snapshot on connect/resume, after a branch or regeneration, transcript repair, compaction, clear, and whenever a connection has not yet received a snapshot. `@cloudflare/ai-chat` currently sends snapshots only.
 
 ## Examples
 
