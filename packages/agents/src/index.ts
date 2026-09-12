@@ -2264,7 +2264,12 @@ export class Agent<
                   );
                 }
               }
-              this._webSockets.sendIdentity(connection);
+              // Agent's public identity: the logical name (a facet's routed
+              // name is an internal encoding of it) and the exported class.
+              this._webSockets.sendIdentity(connection, {
+                name: this.name,
+                agent: camelCaseToKebabCase(this._ParentClass.name)
+              });
             }
 
             const wasExcludedFromStateInitBroadcast =

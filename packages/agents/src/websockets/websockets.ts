@@ -311,10 +311,18 @@ export class WebSockets extends LifecycleCapability {
     if (
       this.#state &&
       this.#protocol !== false &&
-      typeof message === "string" &&
-      this.applyStateFrame(connection, parseJson(message))
+      typeof message === "string"
     ) {
-      return;
+      const frame = parseJson(message);
+      if (isStateFrame(frame)) {
+        // Inside the host boundary, so the host's validator and change
+        // hook see the sending connection through the ambient context.
+        await this.lifecycle.runInHostContext(
+          () => this.applyStateFrame(connection, frame),
+          { connection }
+        );
+        return;
+      }
     }
     if (
       this.#callables.size > 0 &&
@@ -423,13 +431,24 @@ export class WebSockets extends LifecycleCapability {
   // connect sequence and consumes state frames itself; with
   // `protocol: false` the host calls these at the moments it chooses.
 
-  /** Send the identity frame, unless the connection is no-protocol. */
-  sendIdentity(connection: Connection): void {
+  /**
+   * Send the identity frame, unless the connection is no-protocol. The
+   * defaults are the Durable Object's routed name and host class; a host
+   * whose public identity differs — an `Agent` facet, whose routed name
+   * is an internal encoding of its logical name — passes its own.
+   */
+  sendIdentity(
+    connection: Connection,
+    identity: { name: string; agent: string } = {
+      name: this.lifecycle.name,
+      agent: camelCaseToKebabCase(this.lifecycle.className)
+    }
+  ): void {
     if (!isConnectionProtocolEnabled(connection)) return;
     this.#sendFrame(connection, {
       type: MessageType.CF_AGENT_IDENTITY,
-      name: this.lifecycle.name,
-      agent: camelCaseToKebabCase(this.lifecycle.className)
+      name: identity.name,
+      agent: identity.agent
     });
   }
 
@@ -453,7 +472,9 @@ export class WebSockets extends LifecycleCapability {
    * connection is refused; a change the host's validator rejects is
    * logged in full server-side and answered with a generic
    * `cf_agent_state_error`. Broadcasting the accepted change is the state
-   * owner's call, through its `onChanged` hook.
+   * owner's call, through its `onChanged` hook. Callers that drive the
+   * protocol themselves call this inside their own invocation context;
+   * the capability's automatic path does so via `runInHostContext`.
    *
    * @returns Whether the frame was a state frame (handled either way).
    */

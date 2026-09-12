@@ -701,8 +701,16 @@ export class RetryableStartObject extends DurableObject<Cloudflare.Env> {
 export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
   readonly #state: State<{ count: number }> = new State<{ count: number }>({
     initialState: { count: 0 },
-    validateStateChange: (next) => {
+    validateStateChange: (next, source) => {
       if (next.count < 0) throw new Error("count must not be negative");
+      // The ambient context names the connection the change came from,
+      // exactly as an Agent's validateStateChange sees it.
+      const ambient = getCurrentAgent().connection;
+      if (source !== "server" && ambient?.id !== source.id) {
+        throw new Error(
+          "validator ran outside the sending connection's context"
+        );
+      }
     },
     // The state owner decides who hears about a change: everyone but the
     // connection it came from.
