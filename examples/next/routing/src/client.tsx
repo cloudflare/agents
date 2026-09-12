@@ -20,6 +20,7 @@ import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import type { RoutedAgentEntry } from "agents/routing";
+import { MAX_TEXT } from "./shared";
 import "./styles.css";
 
 const USER_KEY = "next-routing-user";
@@ -114,14 +115,22 @@ function ChatPane({
       setDraft("");
       try {
         await chat.call("addMessage", ["user", text]);
-        // No model is wired into this example — the "assistant" reply
-        // just proves both roles land in the chat's own SQLite.
-        await chat.call("addMessage", [
-          "assistant",
-          `Echo from ${chatId.slice(0, 8)}: ${text}`
-        ]);
-        await refresh();
-        onActivity();
+        try {
+          // No model is wired into this example — the "assistant" reply
+          // just proves both roles land in the chat's own SQLite. The
+          // prefix counts against the server's limit, so trim the echoed
+          // text to fit rather than losing the whole reply.
+          const prefix = `Echo from ${chatId.slice(0, 8)}: `;
+          await chat.call("addMessage", [
+            "assistant",
+            prefix + text.slice(0, MAX_TEXT - prefix.length)
+          ]);
+        } finally {
+          // The user's message is already stored; show it even if the
+          // demo reply failed.
+          await refresh();
+          onActivity();
+        }
       } finally {
         setBusy(false);
       }

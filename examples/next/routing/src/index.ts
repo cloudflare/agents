@@ -9,6 +9,7 @@ import {
 import { Lifecycle } from "agents/lifecycle";
 import { RoutedAgents } from "agents/routing";
 import { WebSockets } from "agents/websockets";
+import { MAX_QUERY, MAX_TEXT } from "./shared";
 
 /**
  * The recommended shape for "many chats per user": one top-level
@@ -18,7 +19,8 @@ import { WebSockets } from "agents/websockets";
  * `RoutedAgents` gives it a durable catalog of chat IDs mapped to opaque
  * physical names, and forwards `/chats/{id}/...` requests and WebSocket
  * upgrades to the right chat. `WebSockets` serves the hub's own methods
- * to the browser as Cap'n Web callables. Each chat pushes its metadata
+ * to the browser, so `useAgent().stub` reaches them on either transport.
+ * Each chat pushes its metadata
  * back into the hub so listing, search, and deletion never wake a chat.
  *
  * The targets must be `Agent`s: the capability relies on Agent's
@@ -55,9 +57,6 @@ type ChatOwner = {
   chatId: string;
 };
 
-const MAX_TEXT = 2_000;
-const MAX_QUERY = 200;
-
 /** Runtime guards: every method here is reachable from a browser. */
 function assertRole(value: unknown): "user" | "assistant" {
   if (value === "user" || value === "assistant") return value;
@@ -72,7 +71,9 @@ function assertText(value: unknown, max: number, what: string): string {
   return value;
 }
 function assertChatId(value: unknown): string {
-  if (typeof value !== "string" || !/^[0-9a-f-]{36}$/i.test(value)) {
+  const uuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (typeof value !== "string" || !uuid.test(value)) {
     throw new Error("chatId must be an entry id");
   }
   return value;
@@ -97,10 +98,12 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async addMessage(role: "user" | "assistant", text: string): Promise<number> {
-    assertRole(role);
-    assertText(text, MAX_TEXT, "text");
+    // Guard at the boundary and use what the guards return: this method
+    // is reachable from a browser, where the declared types mean nothing.
+    const validRole = assertRole(role);
+    const validText = assertText(text, MAX_TEXT, "text");
     const [{ id: seq }] = this.sql<{ id: number }>`
-      INSERT INTO messages (role, text, at) VALUES (${role}, ${text}, ${Date.now()})
+      INSERT INTO messages (role, text, at) VALUES (${validRole}, ${validText}, ${Date.now()})
       RETURNING id
     `;
 
@@ -226,8 +229,8 @@ export class UserHub extends DurableObject<Env> {
   });
 
   // RoutedAgents is installed first so a forwarded upgrade under
-  // `/chats/{id}` reaches the chat, and only the hub's own upgrades fall
-  // through to the callables endpoint.
+  // `/chats/{id}` reaches the chat; only the hub's own upgrades fall
+  // through to the WebSockets capability.
   readonly lifecycle = Lifecycle.install(this)
     .use(this.chats)
     .use(this.webSockets);
