@@ -12,7 +12,8 @@ import { Think } from "../../think";
 import type {
   ChatResponseResult,
   MessageConcurrency,
-  StreamCallback
+  StreamCallback,
+  TurnConfig
 } from "../../think";
 import { StreamAccumulator, type ClientToolSchema } from "agents/chat";
 
@@ -727,9 +728,42 @@ export class ThinkClientToolsAgent extends Think {
   private _slowChunkCount = 4;
   private _responseLog: ChatResponseResult[] = [];
   private _lastTurnToolNames: string[] = [];
+  private _stampMetadata = false;
 
-  override beforeTurn(ctx: { tools: ToolSet }): void {
+  override beforeTurn(ctx: { tools: ToolSet }): TurnConfig | void {
     this._lastTurnToolNames = Object.keys(ctx.tools);
+    if (this._stampMetadata) {
+      // Per-turn write path (`TurnConfig.messageMetadata`) for issue #1873.
+      // Stamp `createdAt` on `start` (so it survives a turn that stalls/errors
+      // before it finishes) and a separate key on `finish`, so a test can prove
+      // start+finish are shallow-merged rather than one clobbering the other.
+      // `scope: "turn"` lets the precedence test tell this apart from the
+      // instance-level writer below.
+      return {
+        messageMetadata: ({ part }) => {
+          if (part.type === "start")
+            return { createdAt: 1_700_000_000_000, scope: "turn" };
+          if (part.type === "finish") return { source: "server" };
+          return undefined;
+        }
+      };
+    }
+  }
+
+  async setMessageMetadataMode(value: boolean): Promise<void> {
+    this._stampMetadata = value;
+  }
+
+  // Instance-level default writer (`this.messageMetadata`), which applies to
+  // every turn without a `beforeTurn` override. `scope: "instance"` lets the
+  // precedence test confirm the per-turn config wins when both are set.
+  async setInstanceMessageMetadataMode(value: boolean): Promise<void> {
+    this.messageMetadata = value
+      ? ({ part }) =>
+          part.type === "start"
+            ? { createdAt: 1_600_000_000_000, scope: "instance" }
+            : undefined
+      : undefined;
   }
 
   async getLastTurnToolNames(): Promise<string[]> {
