@@ -1,4 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  ensureConnectionWrapped,
+  getConnectionRawState,
+  setConnectionProtocolEnabled
+} from "../websockets/connection-flags";
 import { nanoid } from "nanoid";
 import type {
   Connection,
@@ -948,7 +953,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     if (!connection || !this.connectionHasChildTarget(connection)) {
       return null;
     }
-    this.#host._ensureConnectionWrapped(connection);
+    ensureConnectionWrapped(connection);
     connection.setState(state);
     return this.getForwardedState(connection);
   }
@@ -957,7 +962,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     connection: Connection,
     ownerPath: ReadonlyArray<AgentPathStep>
   ): DynamicAgentConnectionMeta | null {
-    this.#host._ensureConnectionWrapped(connection);
+    ensureConnectionWrapped(connection);
     const outerUri = this.#host._unsafe_getConnectionFlag(
       connection,
       CF_SUB_AGENT_OUTER_URL_KEY
@@ -986,7 +991,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   connectionTargetPath(
     connection: Connection
   ): ReadonlyArray<AgentPathStep> | null {
-    this.#host._ensureConnectionWrapped(connection);
+    ensureConnectionWrapped(connection);
     const outerUri = this.#host._unsafe_getConnectionFlag(
       connection,
       CF_SUB_AGENT_OUTER_URL_KEY
@@ -1034,7 +1039,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   connectionHasChildTarget(connection: Connection): boolean {
-    this.#host._ensureConnectionWrapped(connection);
+    ensureConnectionWrapped(connection);
     return (
       typeof this.#host._unsafe_getConnectionFlag(
         connection,
@@ -1149,7 +1154,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     child: DynamicAgentWebSocketEndpoint;
     meta: DynamicAgentConnectionMeta;
   } | null> {
-    this.#host._ensureConnectionWrapped(connection);
+    ensureConnectionWrapped(connection);
     const outerUri = this.#host._unsafe_getConnectionFlag(
       connection,
       CF_SUB_AGENT_OUTER_URL_KEY
@@ -1236,7 +1241,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         this.#host.setConnectionReadonly(connection, true);
       }
       if (!this.#host.shouldSendProtocolMessages(connection, { request })) {
-        this.#host._setConnectionNoProtocol(connection);
+        setConnectionProtocolEnabled(connection, false);
       }
 
       const childTags = await this.#host.getConnectionTags(connection, {
@@ -1374,7 +1379,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     } as unknown as Connection;
 
     stored.connection = connection;
-    this.#host._ensureConnectionWrapped(connection);
+    ensureConnectionWrapped(connection);
     return connection;
   }
 
@@ -1446,8 +1451,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   getRawConnectionState(connection: Connection): unknown {
-    this.#host._ensureConnectionWrapped(connection);
-    return this.#host._rawStateAccessors.get(connection)?.getRaw() ?? null;
+    return getConnectionRawState(connection);
   }
 
   getForwardedState(connection: Connection): unknown {

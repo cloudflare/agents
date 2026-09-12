@@ -369,3 +369,228 @@ describe("plain host Agent protocol on the Cap'n Web wire", () => {
     }
   });
 });
+
+/**
+ * A plain host that composes `State` with `WebSockets` gets the hook's
+ * whole state surface: pushed on connect, updated from the client,
+ * broadcast to everyone else, and validated by the host.
+ */
+describe("state sync over connections on a plain host", () => {
+  const hostUrl = (name: string) =>
+    new URL(`/agents/stateful-plain-object/${name}`, "https://example.com");
+
+  it("pushes state on connect, after identity", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(hostUrl(name));
+    const next = frameReader(socket);
+    try {
+      expect(await next()).toMatchObject({ type: "cf_agent_identity", name });
+      expect(await next()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 0 }
+      });
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("applies a client update and broadcasts it to the others", async () => {
+    const name = crypto.randomUUID();
+    const alice = await upgrade(hostUrl(name));
+    const aliceNext = frameReader(alice);
+    await aliceNext();
+    await aliceNext();
+    const bob = await upgrade(hostUrl(name));
+    const bobNext = frameReader(bob);
+    await bobNext();
+    await bobNext();
+    try {
+      alice.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 7 } })
+      );
+      // Bob sees it; the sender is excluded since it already has the value.
+      expect(await bobNext()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 7 }
+      });
+      expect(await env.StatefulPlainObject.getByName(name).getCount()).toBe(7);
+    } finally {
+      alice.close(1000, "done");
+      bob.close(1000, "done");
+    }
+  });
+
+  it("answers a rejected update with cf_agent_state_error and changes nothing", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(hostUrl(name));
+    const next = frameReader(socket);
+    await next();
+    await next();
+    try {
+      socket.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: -1 } })
+      );
+      // The validator's reason stays server-side; the client gets the
+      // same generic answer an Agent gives.
+      expect(await next()).toEqual({
+        type: "cf_agent_state_error",
+        error: "State update rejected"
+      });
+      expect(await env.StatefulPlainObject.getByName(name).getCount()).toBe(0);
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("broadcasts a host-side change", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(hostUrl(name));
+    const next = frameReader(socket);
+    await next();
+    await next();
+    try {
+      await env.StatefulPlainObject.getByName(name).setCount(42);
+      expect(await next()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 42 }
+      });
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("broadcasts to a second socket that shares the sender's _pk", async () => {
+    // `_pk` is client-supplied, so two live sockets can carry one id.
+    // Excluding the sender by id would starve the other socket.
+    const name = crypto.randomUUID();
+    const shared = `shared-${name}`;
+    const url = hostUrl(name);
+    url.searchParams.set("_pk", shared);
+    const alice = await upgrade(url);
+    const aliceNext = frameReader(alice);
+    await aliceNext();
+    await aliceNext();
+    const bob = await upgrade(url);
+    const bobNext = frameReader(bob);
+    await bobNext();
+    await bobNext();
+    try {
+      alice.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 5 } })
+      );
+      expect(await bobNext()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 5 }
+      });
+    } finally {
+      alice.close(1000, "done");
+      bob.close(1000, "done");
+    }
+  });
+
+  it("syncs state over the Cap'n Web transport too", async () => {
+    const name = crypto.randomUUID();
+    const url = hostUrl(name);
+    url.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+    const socket = await upgrade(url);
+    const frames: Frame[] = [];
+    const waiters: Array<(frame: Frame) => void> = [];
+    class Inbox extends RpcTarget {
+      message(value: string) {
+        let frame: Frame;
+        try {
+          frame = JSON.parse(value) as Frame;
+        } catch {
+          return;
+        }
+        const waiter = waiters.shift();
+        if (waiter) waiter(frame);
+        else frames.push(frame);
+      }
+    }
+    const next = () =>
+      frames.length > 0
+        ? Promise.resolve(frames.shift() as Frame)
+        : new Promise<Frame>((resolve) => waiters.push(resolve));
+    const pipe = newWebSocketRpcSession<TransportHostPipe>(socket, new Inbox());
+    try {
+      expect(await next()).toMatchObject({ type: "cf_agent_identity" });
+      expect(await next()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 0 }
+      });
+      await pipe[CAPNWEB_TRANSPORT_SEND](
+        JSON.stringify({ type: "cf_agent_state", state: { count: 3 } })
+      );
+      expect(await env.StatefulPlainObject.getByName(name).getCount()).toBe(3);
+    } finally {
+      pipe[Symbol.dispose]();
+    }
+  });
+
+  it("refuses state writes from a readonly connection", async () => {
+    const name = crypto.randomUUID();
+    const url = hostUrl(name);
+    url.searchParams.set("readonly", "1");
+    url.searchParams.set("_pk", "ro-" + name);
+    const socket = await upgrade(url);
+    const next = frameReader(socket);
+    await next();
+    await next();
+    const host = env.StatefulPlainObject.getByName(name);
+    try {
+      socket.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 9 } })
+      );
+      expect(await next()).toEqual({
+        type: "cf_agent_state_error",
+        error: "Connection is readonly"
+      });
+      expect(await host.getCount()).toBe(0);
+      expect(await host.isReadonly("ro-" + name)).toBe(true);
+
+      // Flags never leak into the user-visible connection state, and
+      // flipping the flag later takes effect.
+      await host.setReadonly("ro-" + name, false);
+      socket.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 9 } })
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await host.getCount()).toBe(9);
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("sends no protocol frames to a no-protocol connection, on connect or broadcast", async () => {
+    const name = crypto.randomUUID();
+    const url = hostUrl(name);
+    url.searchParams.set("silent", "1");
+    const silent = await upgrade(url);
+    const silentFrames: string[] = [];
+    silent.addEventListener("message", (e) =>
+      silentFrames.push(String(e.data))
+    );
+    const loud = await upgrade(hostUrl(name));
+    const loudNext = frameReader(loud);
+    await loudNext();
+    await loudNext();
+    try {
+      // The silent socket still works for the host's own frames.
+      silent.send("hello");
+      await new Promise((r) => setTimeout(r, 50));
+      expect(silentFrames).toEqual(["echo:hello"]);
+
+      await env.StatefulPlainObject.getByName(name).setCount(4);
+      expect(await loudNext()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 4 }
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(silentFrames).toEqual(["echo:hello"]);
+    } finally {
+      silent.close(1000, "done");
+      loud.close(1000, "done");
+    }
+  });
+});

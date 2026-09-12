@@ -11,6 +11,7 @@ import {
   type LifecycleJobContext,
   type LifecycleJobPushOptions
 } from "../../lifecycle";
+import { State } from "../../state";
 import { WebSockets } from "../../websockets";
 
 type StartupProps = { label: string };
@@ -689,5 +690,74 @@ export class RetryableStartObject extends DurableObject<Cloudflare.Env> {
 
   getHostStarts(): number {
     return this.hostStarts;
+  }
+}
+
+/**
+ * A plain Durable Object composed with `State` and `WebSockets`, wired so
+ * the capability syncs state over connections. Used to prove `useAgent`'s
+ * state surface works against a non-Agent host.
+ */
+export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
+  readonly #state: State<{ count: number }> = new State<{ count: number }>({
+    initialState: { count: 0 },
+    validateStateChange: (next, source) => {
+      if (next.count < 0) throw new Error("count must not be negative");
+      // The ambient context names the connection the change came from,
+      // exactly as an Agent's validateStateChange sees it.
+      const ambient = getCurrentAgent().connection;
+      if (source !== "server" && ambient?.id !== source.id) {
+        throw new Error(
+          "validator ran outside the sending connection's context"
+        );
+      }
+    },
+    // The state owner decides who hears about a change: everyone but the
+    // connection it came from.
+    onChanged: (_next, source): void => {
+      this.#webSockets.broadcastState(source);
+    }
+  });
+
+  readonly #webSockets: WebSockets = new WebSockets({
+    state: this.#state,
+    // `?readonly=1` connections may not write; `?silent=1` connections get
+    // no protocol frames at all.
+    readonly: (_connection, { request }) =>
+      new URL(request.url).searchParams.has("readonly"),
+    protocol: (_connection, { request }) =>
+      !new URL(request.url).searchParams.has("silent"),
+    handlers: {
+      onMessage: (connection, message) => {
+        connection.send(`echo:${String(message)}`);
+      }
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.#state)
+    .use(this.#webSockets);
+
+  /** Host-side change; onChanged broadcasts it. */
+  async setCount(count: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#state.set({ count });
+  }
+
+  async isReadonly(id: string): Promise<boolean | undefined> {
+    await this.lifecycle.start();
+    const connection = this.#webSockets.getConnection(id);
+    return connection ? this.#webSockets.isReadonly(connection) : undefined;
+  }
+
+  async setReadonly(id: string, readonly: boolean): Promise<void> {
+    await this.lifecycle.start();
+    const connection = this.#webSockets.getConnection(id);
+    if (connection) this.#webSockets.setReadonly(connection, readonly);
+  }
+
+  async getCount(): Promise<number | undefined> {
+    await this.lifecycle.start();
+    return this.#state.get()?.count;
   }
 }

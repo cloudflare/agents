@@ -342,8 +342,20 @@ Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
 `Agent`:
 
 - On connect it sends the identity frame, which resolves the client's
-  `ready` and `identified`. Pass `identity: false` to opt out; `Agent` does,
-  because it sends its own under `sendIdentityOnConnect`.
+  `ready` and `identified`, then the current state when `state` is set.
+  `protocol` controls this: `true` (default) for every connection, a
+  function to decide per connection — `false` marks it no-protocol, so it
+  gets no protocol text frames on connect or by broadcast but still sends
+  and receives ordinary messages and callables — or `false` to have the
+  host drive the sequence itself with `sendIdentity()` and `sendState()`.
+  `Agent` passes `false`, because it must decide whether a connection
+  belongs to a facet before any frame is sent.
+- `readonly` decides per connection whether state writes over the wire are
+  refused; `setReadonly()` flips it later. Both flags are stored in the
+  connection's own state under `_cf_` keys, hidden from `connection.state`
+  and preserved across `setState`, so they survive hibernation. `Agent`'s
+  `isConnectionReadonly`, `setConnectionReadonly`, and
+  `isConnectionProtocolEnabled` delegate to the same storage.
 - `callables` is an `RpcTarget` whose prototype methods are the host's
   complete remote interface, reached through `call()` and `stub`. On the
   `cf-websocket` wire the capability answers them as JSON `rpc` frames. On
@@ -352,6 +364,32 @@ Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
   calling, a `ReadableStream` streams, and chained calls pipeline. Methods
   run through the host invocation boundary with the calling connection in
   scope.
+- `state` takes a `State` capability (from `agents/state`) and syncs it over
+  connections, so `useAgent().state` and `setState()` work against a plain
+  host:
+
+  ```ts
+  readonly state = new State({
+    initialState: { count: 0 },
+    // The state owner decides who hears about a change.
+    onChanged: (_state, source) => this.webSockets.broadcastState(source)
+  });
+  readonly webSockets = new WebSockets({ state: this.state });
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.state)
+    .use(this.webSockets);
+  ```
+
+  The current value is pushed to each new connection after identity. A
+  client's `cf_agent_state` frame goes through the `State` capability, so
+  the host's own `validateStateChange` decides; a readonly connection is
+  refused, and a rejected change is logged server-side and answered with a
+  generic `cf_agent_state_error`. `broadcastState(source)` pushes the
+  current value to every protocol-enabled connection except `source`. This
+  is distinct from `connection.setState()`, which is per-connection and
+  never leaves the host. Without the option, state is never sent or
+  accepted over connections.
+
 - Any other frame goes to `handlers.onMessage`.
 
 An `Agent` adds no new surface for this: its `@callable()`-decorated methods

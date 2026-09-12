@@ -113,6 +113,28 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     ws.close();
   });
 
+  it("a facet's identity frame carries its logical name, not the routed DO name", async () => {
+    // The identity frame is built by the WebSockets capability from what
+    // Agent hands it: `this.name` decodes a path-scoped facet's internal
+    // `cf-agents:v2:` routed name back to the child name the client used.
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+    const [identity] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.includes("cf_agent_identity")
+    );
+    expect(JSON.parse(identity)).toEqual({
+      type: "cf_agent_identity",
+      name: child,
+      agent: "spike-sub-child"
+    });
+
+    ws.close();
+  });
+
   it("establishes a WebSocket through the parent → facet chain", async () => {
     const parent = uniqueName();
     const child = uniqueName();

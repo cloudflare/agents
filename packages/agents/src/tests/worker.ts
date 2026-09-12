@@ -11,11 +11,13 @@ export { CapabilityHarnessObject } from "./capabilities/harness.ts";
 import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
 export {
   PlainLifecycleObject,
-  RetryableStartObject
+  RetryableStartObject,
+  StatefulPlainObject
 } from "./capabilities/lifecycle.ts";
 import type {
   PlainLifecycleObject,
-  RetryableStartObject
+  RetryableStartObject,
+  StatefulPlainObject
 } from "./capabilities/lifecycle.ts";
 export {
   ScheduledLifecycleObject,
@@ -213,6 +215,7 @@ export type Env = {
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
+  StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
   SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
