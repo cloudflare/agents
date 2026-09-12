@@ -187,6 +187,7 @@ sandbox: github.create_issue(args)
 - [Using Codemode with Agents and AI SDK tools](https://github.com/cloudflare/agents/blob/main/docs/agents/codemode.md) — turn tool sets into a single sandboxed code tool
 - [Connectors](./connectors.md) — write one class per service; MCP, OpenAPI, toolset, and custom bases
 - [Runtime](./runtime.md) — both API surfaces (handle + sandbox SDK), the durable log, abort-and-replay
+- [Validators](./validators.md) — reject semantically incorrect generated code and connector calls
 - [Approvals](./approvals.md) — annotations, pause/resume flow, wiring an approval UI
 - [Snippets](./snippets.md) — scripts the model saves and reuses
 - [Vite Plugin](./vite-plugin.md) — auto-export the `CodemodeRuntime` facet class
