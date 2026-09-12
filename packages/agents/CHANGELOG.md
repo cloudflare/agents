@@ -1,5 +1,77 @@
 # @cloudflare/agents
 
+## 0.24.0
+
+### Minor Changes
+
+- [#2249](https://github.com/cloudflare/agents/pull/2249) [`ebab868`](https://github.com/cloudflare/agents/commit/ebab8684d162c617f1f6d5253c152b498fbfcc18) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `WebSockets` speaks the Agent protocol for plain hosts, and gains a Cap'n Web transport.
+
+  - A plain Durable Object composed with `WebSockets` now works with `useAgent` and `AgentClient`: the capability sends the identity frame on connect (`protocol: false` leaves the connect sequence to the host) and serves `callables` — an `RpcTarget` whose prototype methods are the host's remote interface.
+  - `useAgent({ transport })` and `AgentClient({ transport })` pick the wire. `"cf-websocket"` (default) is the hibernating socket; `call()`/`stub` send JSON `rpc` frames. `"capnweb"` runs one Cap'n Web session that carries protocol frames and serves `callables` natively: `call()`/`stub` invoke them directly, an `RpcTarget` result is a live stub, a `ReadableStream` streams, calls pipeline. The Durable Object stays in memory while a capnweb connection is open. PartySocket still owns reconnection on both.
+  - `@callable()` decorators remain the JSON-wire interface of `Agent`; an Agent wanting native calls passes `callables`.
+  - The experimental `?__agents_rpc=capnweb` endpoint from 0.23.0 is removed.
+  - `LifecycleServices` exposes `name` and `className`.
+
+- [#2245](https://github.com/cloudflare/agents/pull/2245) [`beff78a`](https://github.com/cloudflare/agents/commit/beff78a8f7dbe6c6de303ed32b709876adba94f1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add the `Queue` Lifecycle capability (`agents/queue`) for durable background work. Each pushed item is a job in the Lifecycle job queue, due immediately, run from the alarm loop one at a time in push order with Lifecycle's retry, deadman, and memory-limit policy. Callbacks are registered in the constructor and typed at declaration and push; `push()` accepts a stable `id` (upsert) and per-item `retry`.
+
+  `Agent.queue()` and friends now delegate to the capability. Queued callbacks run from the alarm loop in a fresh invocation, so they no longer see the enqueuing request's `connection` or `request` through `getCurrentAgent()` (the agent itself is still available). The `cf_agents_queues` table and the in-isolate drain are gone; legacy rows migrate into the job queue on the next start. `queue()` accepts `options.id`; `dequeue`, `dequeueAll`, `dequeueAllByCallback`, `getQueue`, and `getQueues` are now asynchronous; and `QueueItem.created_at` is renamed `createdAt`. `LifecycleServices.starting()` is replaced by `status()`, which returns `"zero" | "starting" | "started"`.
+
+  Think's workflow-notification outbox and submission drain now run as queue items; the `cf_think_workflow_notifications` table migrates and is dropped on start.
+
+  Both one-shot migrations (`cf_agents_queues` in Queue, `cf_think_workflow_notifications` in Think) are temporary upgrade paths and will be removed in the next minor release, by which point every started object has migrated. Deployments skipping this release should upgrade through it. Workflow-notification delivery retries with backoff capped at ten minutes (previously five) and gives up after twelve hours of continuous failure (previously never), reporting the failure through `onError`.
+
+- [#2179](https://github.com/cloudflare/agents/pull/2179) [`43a58a1`](https://github.com/cloudflare/agents/commit/43a58a1014fbe6f1fe3a1fcc38ad08d53bb5b112) Thanks [@AntoniTok](https://github.com/AntoniTok)! - Move agent state into the opt-in `State` Lifecycle capability.
+
+  State was one method doing four jobs inside `Agent` — validate,
+  persist, broadcast, notify. It moves wholesale into a `State`
+  capability that owns storage and change ordering, so any Lifecycle
+  host gets durable, validated state without inheriting `Agent`:
+
+  ```ts
+  new State({
+    initialState: { count: 0 },
+    validateStateChange: (next, source) => validate(next, source),
+    onChanged: (state, source) => notify(state, source),
+  });
+  ```
+
+  The capability owns the `cf_agents_state` state row, lazy load with an
+  in-memory cache, initial-state seeding, and validated persistence. It
+  runs only the `onStart` hook (versioned schema init under its own
+  `cf_agents:state_schema_version` key) and reaches Lifecycle only for
+  `storage` — no alarm, no request path. It never touches connections.
+
+  Host-owned behavior is injected, not moved: `validateStateChange`
+  stays an overridable `Agent` method and the post-change `onChanged`
+  hook is passed into `State` as a plain option. Synchronous and
+  asynchronous notification hooks are both supported. `Agent` keeps its
+  `initialState` field and seeds it from the `state` getter (standalone
+  hosts pass `initialState` to `State` directly). Broadcast and the
+  notification hook stay on `Agent`, and the `onMessage` state branch
+  stays too; only its inner write delegates to the capability.
+
+  `State` is the only owner of `cf_agents_state`: it creates the table,
+  holds the state row, and runs the legacy `cf_state_was_changed`
+  cleanup in its own versioned migration. `Agent` used to keep its
+  global schema version as a row in that table; it now lives under the
+  `cf_agents:schema_version` KV key like every other capability's
+  version. A DO created under the old layout has the row read once,
+  moved to the key, and deleted on its next construction.
+
+  `Agent`'s public API and wire protocol are unchanged: `state`,
+  `setState()`, `onStateChanged`, and the `CF_AGENT_STATE` frames behave
+  identically.
+
+- [#2257](https://github.com/cloudflare/agents/pull/2257) [`46760e6`](https://github.com/cloudflare/agents/commit/46760e635ce9599add0abbfe6c1a34af0d5d44f1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - The `WebSockets` capability now owns the Agent protocol's state sync and per-connection flags, for `Agent` and plain hosts alike.
+
+  - `state` takes a `State` capability. The current value is pushed to each new connection after identity, a client's `cf_agent_state` frame goes through the host's `validateStateChange` (a readonly connection is refused, a rejected change gets a generic `cf_agent_state_error`), and `broadcastState(source)` pushes a change to every protocol-enabled connection but its source — wire it to the `State`'s `onChanged`. So `useAgent().state` and `setState()` work against a plain Durable Object.
+  - `protocol` and `readonly` are per-connection policies decided at accept time; `sendIdentity()`, `sendState()`, `applyStateFrame()`, `isReadonly()`/`setReadonly()`, and `isProtocolEnabled()`/`setProtocolEnabled()` are the capability's surface for hosts that drive the sequence themselves. The `identity` option from the previous changeset is replaced by `protocol`.
+  - The readonly and no-protocol flags, their `_cf_` storage in connection state, and the wrapper that hides them from `connection.state` move out of `Agent` into `agents/websockets` (`registerInternalConnectionKeys` for a host's own keys). `Agent`'s public methods and wire behaviour are unchanged; it passes `protocol: false` and drives its connect sequence through the capability after its facet routing decision.
+
+### Patch Changes
+
+- [#2248](https://github.com/cloudflare/agents/pull/2248) [`c96418d`](https://github.com/cloudflare/agents/commit/c96418d5334e1c0aa1fb1614de8ae0787753b3ff) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Lifecycle capabilities declare how they claim traffic with `claims: "selective" | "catch-all"` instead of hosts passing `{ fallback: true }` to `lifecycle.use()`. A catch-all always dispatches last, whenever it was installed. Catch-alls are unique per dispatch hook, so one for `onRequest` and one for `onWebSocketUpgrade` coexist while a second for the same hook is refused. `WebSockets` declares itself a catch-all for upgrades and never declines one: without `handlers` it still accepts and tracks connections; handlers only add behavior on connect, message, close and error. `LifecycleUseOptions` is removed.
+
 ## 0.23.0
 
 ### Minor Changes
