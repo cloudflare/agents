@@ -15181,10 +15181,16 @@ export class Think<
   }
 
   /**
-   * Classify a recovered turn as `retry` or `continue`. A pre-stream turn with no
-   * partial re-runs its user message (`retryTargetUserId`), unless the stream is
-   * already terminal — a terminal stream is never retried (it completed), only
-   * its submission is reconciled in dispatch.
+   * Classify a recovered turn as `retry` or `continue`. A turn that left no
+   * persisted partial re-runs its user message (`retryTargetUserId`), unless
+   * the stream is already terminal — a terminal stream is never retried (it
+   * completed), only its submission is reconciled in dispatch.
+   *
+   * The stream row is opened before inference, so an interrupted turn can
+   * have a stream id and still nothing to continue from; what decides retry is
+   * the absence of persisted content and a leaf that is still the turn's user
+   * message. Mirrors `AIChatAgent`'s empty-partial new-turn rule (#1691): a
+   * `continue` here would find no assistant message and skip the turn.
    */
   private async _classifyRecoveredThinkTurn(
     input: ClassifyRecoveredTurnInput
@@ -15196,7 +15202,6 @@ export class Think<
       input.streamStatus === "completed" || input.streamStatus === "error";
     const retryTargetUserId = await this._recoverablePreStreamUserId(
       input.snapshot,
-      input.streamId,
       input.partial
     );
     const shouldRetryBase = retryTargetUserId !== null && !streamIsTerminal;
@@ -15338,14 +15343,12 @@ export class Think<
 
   private async _recoverablePreStreamUserId(
     snapshot: ChatFiberSnapshot | null,
-    streamId: string,
     partial: { text: string; parts: unknown[] }
   ): Promise<string | null> {
     if (
       !snapshot ||
       snapshot.continuation ||
       !snapshot.latestUserMessageId ||
-      streamId ||
       partial.text ||
       partial.parts.length > 0
     ) {

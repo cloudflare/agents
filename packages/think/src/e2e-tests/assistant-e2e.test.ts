@@ -6,7 +6,8 @@
  * streaming chat, and workspace tool usage with a real LLM.
  */
 import { describe, it, expect, afterAll, beforeAll } from "vitest";
-import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { killProcess, killProcessOnPort } from "./wrangler-process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";
 import path from "node:path";
@@ -36,49 +37,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function killProcessOnPort(port: number): void {
-  try {
-    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
-      .toString()
-      .trim();
-    if (output) {
-      const pids = output.split("\n").filter(Boolean);
-      for (const pid of pids) {
-        try {
-          process.kill(Number(pid), "SIGKILL");
-          console.log(`[setup] Killed stale process ${pid} on port ${port}`);
-        } catch {
-          // Process may have already exited
-        }
-      }
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function killProcessTree(pid: number): void {
-  let children: number[] = [];
-  try {
-    children = execSync(`pgrep -P ${pid} 2>/dev/null || true`)
-      .toString()
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map(Number);
-  } catch {
-    // pgrep may be unavailable; killing the parent is still useful.
-  }
-  for (const childPid of children) {
-    killProcessTree(childPid);
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // Already dead
-  }
-}
-
 function startWrangler(): ChildProcess {
   const configPath = path.join(__dirname, "wrangler.jsonc");
   const child = spawn(
@@ -98,6 +56,9 @@ function startWrangler(): ChildProcess {
     {
       cwd: __dirname,
       stdio: ["pipe", "pipe", "pipe"],
+      // A process-group leader, so killProcess() can take down wrangler and
+      // every workerd it spawns in one signal.
+      detached: true,
       env: { ...process.env, NODE_ENV: "test" }
     }
   );
@@ -126,24 +87,6 @@ async function waitForReady(maxAttempts = 60, delayMs = 1000): Promise<void> {
     await sleep(delayMs);
   }
   throw new Error(`Wrangler did not start within ${maxAttempts * delayMs}ms`);
-}
-
-function killProcess(child: ChildProcess): Promise<void> {
-  return new Promise((resolve) => {
-    if (!child.pid) {
-      resolve();
-      return;
-    }
-    // Clear the fallback timer once the child exits — an uncleared timer keeps
-    // the vitest worker's event loop alive and can push teardown past the pool's
-    // termination window ("Timeout terminating forks worker").
-    const fallback = setTimeout(resolve, 3000);
-    child.on("exit", () => {
-      clearTimeout(fallback);
-      resolve();
-    });
-    killProcessTree(child.pid);
-  });
 }
 
 /**
