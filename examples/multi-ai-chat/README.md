@@ -4,7 +4,7 @@
 > full sub-agent routing surface, but for many long-lived chats per
 > user we now recommend one top-level Durable Object per chat plus a
 > per-user push-based index instead of facets — see
-> [`examples/next/chats`](../next/chats) and
+> [`examples/next/routing`](../next/routing) and
 > [When to use dynamic agents](../../docs/agents/sub-agents.md#when-to-use-dynamic-agents)
 > in the docs.
 

@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "next-chats",
+  "name": "next-routing",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
@@ -11,8 +11,8 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "UserAgent",
-        "class_name": "UserAgent"
+        "name": "UserHub",
+        "class_name": "UserHub"
       },
       {
         "name": "ChatAgent",
@@ -23,7 +23,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["UserAgent", "ChatAgent"]
+      "new_sqlite_classes": ["UserHub", "ChatAgent"]
     }
   ],
   "observability": {

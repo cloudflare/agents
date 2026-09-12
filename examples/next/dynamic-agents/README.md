@@ -35,7 +35,7 @@ Three things only facets can do here:
 For statically-known Agent child classes, the same supervision is
 available through `this.dynamicAgents` — see `examples/agents-as-tools`.
 For many independent peers (chats, sessions), do **not** use facets —
-see `examples/next/chats` and the decision rule in
+see `examples/next/routing` and the decision rule in
 `docs/agents/sub-agents.md`.
 
 ## Run

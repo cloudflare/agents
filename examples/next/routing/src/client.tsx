@@ -20,9 +20,10 @@ import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import type { RoutedAgentEntry } from "agents/routing";
+import { MAX_TEXT } from "./shared";
 import "./styles.css";
 
-const USER_KEY = "next-chats-user";
+const USER_KEY = "next-routing-user";
 const userId =
   localStorage.getItem(USER_KEY) ?? crypto.randomUUID().slice(0, 8);
 localStorage.setItem(USER_KEY, userId);
@@ -38,6 +39,24 @@ type ChatMessage = {
   text: string;
   at: number;
 };
+
+/** The hub's RpcTarget, as seen from the browser. */
+type HubApi = {
+  createChat(): Promise<string>;
+  listChats(): Promise<ChatEntry[]>;
+  searchChats(query: string): Promise<ChatEntry[]>;
+  deleteChat(chatId: string): Promise<boolean>;
+};
+
+/**
+ * Wire for the hub connection. The WebSockets capability speaks the Agent
+ * protocol on both, so the hook is identical; "capnweb" carries the same
+ * frames over one Cap'n Web session and keeps the hub pinned in memory.
+ */
+const HUB_TRANSPORT =
+  new URLSearchParams(location.search).get("transport") === "capnweb"
+    ? "capnweb"
+    : "cf-websocket";
 
 function ModeToggle() {
   const [mode, setMode] = useState(
@@ -73,7 +92,7 @@ function ChatPane({
   // so the hub is not on the message path.
   const chat = useAgent({
     agent: "chat-agent",
-    basePath: `agents/user-agent/${encodeURIComponent(userId)}/chats/${encodeURIComponent(chatId)}`
+    basePath: `agents/user-hub/${encodeURIComponent(userId)}/chats/${encodeURIComponent(chatId)}`
   });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
@@ -96,14 +115,22 @@ function ChatPane({
       setDraft("");
       try {
         await chat.call("addMessage", ["user", text]);
-        // No model is wired into this example — the "assistant" reply
-        // just proves both roles land in the chat's own SQLite.
-        await chat.call("addMessage", [
-          "assistant",
-          `Echo from ${chatId.slice(0, 8)}: ${text}`
-        ]);
-        await refresh();
-        onActivity();
+        try {
+          // No model is wired into this example — the "assistant" reply
+          // just proves both roles land in the chat's own SQLite. The
+          // prefix counts against the server's limit, so trim the echoed
+          // text to fit rather than losing the whole reply.
+          const prefix = `Echo from ${chatId.slice(0, 8)}: `;
+          await chat.call("addMessage", [
+            "assistant",
+            prefix + text.slice(0, MAX_TEXT - prefix.length)
+          ]);
+        } finally {
+          // The user's message is already stored; show it even if the
+          // demo reply failed.
+          await refresh();
+          onActivity();
+        }
       } finally {
         setBusy(false);
       }
@@ -161,32 +188,41 @@ function ChatPane({
 }
 
 function App() {
-  // One connection to the per-user index DO. Listing and search read
-  // only this object — no chat DO wakes up for the sidebar.
-  const user = useAgent({ agent: "user-agent", name: userId });
+  // One connection to the per-user hub, a plain Durable Object. The
+  // WebSockets capability identifies it and answers `stub` calls against
+  // its RpcTarget, so useAgent needs nothing from Agent. Listing and
+  // search read only this object — no chat DO wakes up for the sidebar.
+  const hub = useAgent({
+    agent: "user-hub",
+    name: userId,
+    transport: HUB_TRANSPORT
+  });
+  const user = hub.stub as HubApi;
   const [chats, setChats] = useState<ChatEntry[]>([]);
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
 
   const refreshChats = useCallback(async () => {
-    const method = query.trim() === "" ? "listChats" : "searchChats";
-    const args = query.trim() === "" ? [] : [query.trim()];
-    setChats((await user.call(method, args)) as ChatEntry[]);
+    const needle = query.trim();
+    setChats(
+      needle === "" ? await user.listChats() : await user.searchChats(needle)
+    );
   }, [query, user]);
 
   useEffect(() => {
+    if (!hub.identified) return;
     void refreshChats();
-  }, [refreshChats]);
+  }, [hub.identified, refreshChats]);
 
   const createChat = useCallback(async () => {
-    const chatId = (await user.call("createChat")) as string;
+    const chatId = await user.createChat();
     setActiveId(chatId);
     await refreshChats();
   }, [refreshChats, user]);
 
   const deleteChat = useCallback(
     async (chatId: string) => {
-      await user.call("deleteChat", [chatId]);
+      await user.deleteChat(chatId);
       if (activeId === chatId) setActiveId(null);
       await refreshChats();
     },
@@ -197,9 +233,10 @@ function App() {
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-kumo-line px-4 py-3">
         <div className="flex items-center gap-2">
-          <Text bold>Chats</Text>
+          <Text bold>Routing</Text>
           <Badge variant="secondary">one DO per chat</Badge>
           <Badge variant="secondary">user {userId}</Badge>
+          <Badge variant="secondary">hub over {HUB_TRANSPORT}</Badge>
         </div>
         <ModeToggle />
       </header>

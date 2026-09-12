@@ -1,14 +1,30 @@
-import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
+import {
+  Agent,
+  callable,
+  routeAgentRequest,
+  type Connection,
+  type WSMessage
+} from "agents";
+import { Lifecycle } from "agents/lifecycle";
 import { RoutedAgents } from "agents/routing";
+import { WebSockets } from "agents/websockets";
+import { MAX_QUERY, MAX_TEXT } from "./shared";
 
 /**
  * The recommended shape for "many chats per user": one top-level
  * Durable Object per chat, owned and routed to by a per-user hub.
  *
- * `RoutedAgents` gives the hub a durable catalog of chat IDs mapped to
- * opaque physical names, and forwards `/chats/{id}/...` requests and
- * WebSocket upgrades to the right chat. Each chat pushes its metadata
+ * The hub is a plain Durable Object composed with two capabilities.
+ * `RoutedAgents` gives it a durable catalog of chat IDs mapped to opaque
+ * physical names, and forwards `/chats/{id}/...` requests and WebSocket
+ * upgrades to the right chat. `WebSockets` serves the hub's own methods
+ * to the browser, so `useAgent().stub` reaches them on either transport.
+ * Each chat pushes its metadata
  * back into the hub so listing, search, and deletion never wake a chat.
+ *
+ * The targets must be `Agent`s: the capability relies on Agent's
+ * condemnation protocol to wipe a deleted chat's storage.
  *
  * Contrast with dynamic agents (facets): a chat needs no isolation
  * boundary from its parent, does need its own alarms and placement,
@@ -35,11 +51,33 @@ type ChatMessage = {
   at: number;
 };
 
-/** Recorded once by the owning UserAgent right after the entry is created. */
+/** Recorded once by the owning hub right after the entry is created. */
 type ChatOwner = {
   userId: string;
   chatId: string;
 };
+
+/** Runtime guards: every method here is reachable from a browser. */
+function assertRole(value: unknown): "user" | "assistant" {
+  if (value === "user" || value === "assistant") return value;
+  throw new Error('role must be "user" or "assistant"');
+}
+function assertText(value: unknown, max: number, what: string): string {
+  if (typeof value !== "string" || !value.trim() || value.length > max) {
+    throw new Error(
+      `${what} must be a non-empty string of at most ${max} characters`
+    );
+  }
+  return value;
+}
+function assertChatId(value: unknown): string {
+  const uuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (typeof value !== "string" || !uuid.test(value)) {
+    throw new Error("chatId must be an entry id");
+  }
+  return value;
+}
 
 /** One Durable Object per conversation, reached only through its owner. */
 export class ChatAgent extends Agent<Env> {
@@ -60,8 +98,12 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async addMessage(role: "user" | "assistant", text: string): Promise<number> {
+    // Guard at the boundary and use what the guards return: this method
+    // is reachable from a browser, where the declared types mean nothing.
+    const validRole = assertRole(role);
+    const validText = assertText(text, MAX_TEXT, "text");
     const [{ id: seq }] = this.sql<{ id: number }>`
-      INSERT INTO messages (role, text, at) VALUES (${role}, ${text}, ${Date.now()})
+      INSERT INTO messages (role, text, at) VALUES (${validRole}, ${validText}, ${Date.now()})
       RETURNING id
     `;
 
@@ -75,8 +117,8 @@ export class ChatAgent extends Agent<Env> {
     `;
     if (owner) {
       try {
-        const user = await getAgentByName(this.env.UserAgent, owner.userId);
-        await user.recordChatActivity(owner.chatId, {
+        const hub = this.env.UserHub.getByName(owner.userId);
+        await hub.recordChatActivity(owner.chatId, {
           title: first ? first.text.slice(0, 80) : null,
           lastMessage: text.slice(0, 120),
           seq
@@ -96,7 +138,11 @@ export class ChatAgent extends Agent<Env> {
     `;
   }
 
-  /** HTTP surface, reached as `/agents/user-agent/{user}/chats/{id}/messages`. */
+  /**
+   * HTTP surface. The path the chat sees is the forwarded suffix:
+   * `/agents/user-hub/{user}/chats/{id}/messages` arrives here as
+   * `/messages`.
+   */
   override async onRequest(request: Request): Promise<Response> {
     if (new URL(request.url).pathname !== "/messages") {
       return new Response("Not found", { status: 404 });
@@ -108,20 +154,61 @@ export class ChatAgent extends Agent<Env> {
       } catch {
         return new Response("Invalid JSON body", { status: 400 });
       }
-      const { role, text } = body as Partial<ChatMessage>;
-      if (
-        (role !== "user" && role !== "assistant") ||
-        typeof text !== "string" ||
-        text === ""
-      ) {
+      const { role, text } = (body ?? {}) as Partial<ChatMessage>;
+      // Only validation is a 400. A storage failure inside addMessage
+      // propagates and surfaces as a 500, as it should.
+      let validRole: "user" | "assistant";
+      let validText: string;
+      try {
+        validRole = assertRole(role);
+        validText = assertText(text, MAX_TEXT, "text");
+      } catch (error) {
         return new Response(
-          'Body must be { "role": "user" | "assistant", "text": string }',
+          error instanceof Error ? error.message : "Invalid message",
           { status: 400 }
         );
       }
-      await this.addMessage(role, text);
+      await this.addMessage(validRole, validText);
     }
     return Response.json(this.getMessages());
+  }
+
+  /**
+   * A WebSocket upgraded through the hub's route is answered by this
+   * Agent, which then owns the socket: frames never wake the hub.
+   */
+  override onMessage(connection: Connection, message: WSMessage): void {
+    connection.send(`echo:${String(message)}`);
+  }
+}
+
+/**
+ * The hub's remote interface. Prototype methods are the complete surface;
+ * the WebSockets capability answers `useAgent().stub` calls against it on
+ * either transport.
+ */
+class HubCallables extends RpcTarget {
+  readonly #hub: UserHub;
+
+  constructor(hub: UserHub) {
+    super();
+    this.#hub = hub;
+  }
+
+  createChat(): Promise<string> {
+    return this.#hub.createChat();
+  }
+
+  listChats() {
+    return this.#hub.listChats();
+  }
+
+  searchChats(query: string) {
+    return this.#hub.searchChats(assertText(query, MAX_QUERY, "query"));
+  }
+
+  deleteChat(chatId: string): Promise<boolean> {
+    return this.#hub.deleteChat(assertChatId(chatId));
   }
 }
 
@@ -129,26 +216,34 @@ export class ChatAgent extends Agent<Env> {
  * The per-user hub. It owns the set of chats, routes to them, and holds
  * the pushed metadata that the sidebar and search read.
  */
-export class UserAgent extends Agent<Env> {
+export class UserHub extends DurableObject<Env> {
   readonly chats = new RoutedAgents<ChatAgent, ChatMeta>({
     namespace: this.env.ChatAgent,
+    // Claims every `/chats/{id}/...` path under this hub before any
+    // other capability or onRequest sees it.
     route: "chats"
   });
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.lifecycle.use(this.chats);
-  }
+  readonly webSockets = new WebSockets({
+    callables: new HubCallables(this)
+  });
 
-  @callable()
+  // RoutedAgents is installed first so a forwarded upgrade under
+  // `/chats/{id}` reaches the chat; only the hub's own upgrades fall
+  // through to the WebSockets capability.
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.chats)
+    .use(this.webSockets);
+
   async createChat(): Promise<string> {
     const { id } = await this.chats.create({
       metadata: { title: null, lastMessage: null, seq: 0 }
     });
     try {
+      // get() resolves the entry to an initialized, typed stub for RPC.
       const chat = await this.chats.get(id);
       if (!chat) throw new Error(`Chat ${id} vanished during creation`);
-      await chat.init({ userId: this.name, chatId: id });
+      await chat.init({ userId: this.lifecycle.name, chatId: id });
     } catch (error) {
       // The catalog row is uninitialized ownership without a matching
       // one-time init call, so it would never learn the chat pushes its
@@ -186,13 +281,11 @@ export class UserAgent extends Agent<Env> {
   }
 
   /** Most recent activity first; reads only this DO. */
-  @callable()
   listChats() {
     return this.chats.list();
   }
 
   /** Cross-chat search over the pushed metadata; no chat wakes up. */
-  @callable()
   async searchChats(query: string) {
     const needle = query.toLowerCase();
     return (await this.chats.list()).filter(({ metadata }) =>
@@ -203,14 +296,24 @@ export class UserAgent extends Agent<Env> {
   }
 
   /** Destroys the chat's own storage and removes it from the catalog. */
-  @callable()
   deleteChat(chatId: string): Promise<boolean> {
     return this.chats.delete(chatId);
+  }
+
+  /** Plain HTTP view of the catalog, for curl. */
+  async onRequest(): Promise<Response> {
+    return Response.json({
+      user: this.lifecycle.name,
+      chats: await this.chats.list()
+    });
   }
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // Routes both /agents/user-hub/{user} and the forwarded
+    // /agents/user-hub/{user}/chats/{id}/... paths: RoutedAgents claims the
+    // latter from inside the hub once the request reaches it.
     return (
       (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })

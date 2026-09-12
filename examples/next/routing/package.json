@@ -1,6 +1,6 @@
 {
-  "name": "@cloudflare/agents-next-chats-example",
-  "description": "Next: one Durable Object per chat plus a per-user push-based index — the recommended many-chats pattern",
+  "name": "@cloudflare/agents-next-routing-example",
+  "description": "Next: RoutedAgents on a plain Durable Object hub — one Agent per chat, a per-user catalog, forwarded requests and sockets, and Cap'n Web callables",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -26,6 +26,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "capnweb": "^0.12.0",
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",

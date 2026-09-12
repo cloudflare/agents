@@ -17,7 +17,7 @@ export default defineConfig({
     })
   ],
   test: {
-    name: "next-chats-example",
+    name: "next-routing-example",
     retry: 3,
     include: [path.join(testsDir, "**/*.test.ts")],
     setupFiles: [path.join(testsDir, "setup.ts")],
