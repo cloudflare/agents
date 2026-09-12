@@ -526,6 +526,39 @@ exit 9`)) as {
     expect(read.content).toContain("keep me");
   });
 
+  it("leaves workspace content under sandbox roots alone", async () => {
+    const agent = await freshAgent("bash-sandbox-root-content");
+    await agent.seed([
+      { path: "/tmp/cache/data.txt", content: "cached\n" },
+      { path: "/usr/notes.txt", content: "notes\n" }
+    ]);
+
+    // A script that never touches /tmp or /usr must not disturb them: the
+    // sync used to treat every pre-existing directory under a sandbox root
+    // as deleted and rm -rf it after writing its files back.
+    await agent.toolBash("echo hi > /hi.txt");
+
+    const cached = (await agent.toolRead("/tmp/cache/data.txt")) as {
+      content: string;
+    };
+    expect(cached.content).toContain("cached");
+    const notes = (await agent.toolRead("/usr/notes.txt")) as {
+      content: string;
+    };
+    expect(notes.content).toContain("notes");
+
+    // A script that does delete such a directory is still honoured.
+    const result = (await agent.toolBash("rm -rf /tmp/cache")) as {
+      changedFiles: { deleted: string[]; directoriesDeleted: string[] };
+    };
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+    expect(result.changedFiles.directoriesDeleted).toContain("/tmp/cache");
+    const removed = (await agent.toolRead("/tmp/cache/data.txt")) as {
+      error: string;
+    };
+    expect(removed.error).toContain("File not found");
+  });
+
   it("persists empty directory creates and deletes", async () => {
     const agent = await freshAgent("bash-empty-dirs");
     await agent.seedDir("/remove-empty");
