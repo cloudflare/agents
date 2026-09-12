@@ -9,6 +9,7 @@ lands.
 | -------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`lifecycle`](./lifecycle)                               | Available | A plain `DurableObject` composed with `Lifecycle` and a reusable capability                                                                |
 | [`schedules`](./schedules)                               | Available | `Scheduler` installed as a reusable lifecycle capability                                                                                   |
+| [`queue`](./queue)                                       | This PR   | Durable background work: `Queue` installed as a reusable lifecycle capability                                                              |
 | [`tasks`](./tasks)                                       | This PR   | Durable replayable `Tasks` installed as a reusable lifecycle capability                                                                    |
 | [`streams`](./streams)                                   | This PR   | Durable `Streams` composed with `Tasks`, served over SSE                                                                                   |
 | [`sessions`](./sessions)                                 | This PR   | Durable message trees, streamed reads, and Sessions-owned attachments                                                                      |

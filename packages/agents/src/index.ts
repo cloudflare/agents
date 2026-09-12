@@ -157,6 +157,9 @@ import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
+import { Queue, setQueueCallbackResolver } from "./queue/queue";
+import type { QueueItem } from "./queue/types";
+export type { QueueItem } from "./queue/types";
 import {
   Tasks,
   setTaskDefinitionResolver,
@@ -348,14 +351,6 @@ import {
 } from "./callable-decorator";
 
 export { SqlError } from "./sql-error";
-
-export type QueueItem<T = string> = {
-  id: string;
-  payload: T;
-  callback: keyof Agent<Cloudflare.Env>;
-  created_at: number;
-  retry?: RetryOptions;
-};
 
 type AgentToolRunStorageRow = {
   run_id: string;
@@ -1054,34 +1049,6 @@ export interface AgentStaticOptions {
   maxAlarmMemoryLimitStrikes?: number;
 }
 
-/**
- * Parse the raw `retry_options` TEXT column from a SQLite row into a
- * typed `RetryOptions` object, or `undefined` if not set.
- */
-function parseRetryOptions(
-  row: Record<string, unknown>
-): RetryOptions | undefined {
-  const raw = row.retry_options;
-  if (typeof raw !== "string") return undefined;
-  return JSON.parse(raw) as RetryOptions;
-}
-
-/**
- * Resolve per-task retry options against class-level defaults and call
- * `tryN`. This is the retry-execution path for queue flush; Scheduler owns
- * its own copy for schedule callbacks.
- */
-function resolveRetryConfig(
-  taskRetry: RetryOptions | undefined,
-  defaults: Required<RetryOptions>
-): { maxAttempts: number; baseDelayMs: number; maxDelayMs: number } {
-  return {
-    maxAttempts: taskRetry?.maxAttempts ?? defaults.maxAttempts,
-    baseDelayMs: taskRetry?.baseDelayMs ?? defaults.baseDelayMs,
-    maxDelayMs: taskRetry?.maxDelayMs ?? defaults.maxDelayMs
-  };
-}
-
 // `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` live in
 // ./retries and remain re-exported from the package root so higher layers
 // classify platform failures with the same matcher instead of drifting copies.
@@ -1359,6 +1326,13 @@ export class Agent<
    * cancelSchedule() methods are the stable surface.
    */
   readonly scheduler: Scheduler;
+
+  /**
+   * Durable background-work capability installed into this Agent's
+   * Lifecycle. Agent's queue()/dequeue()/dequeueAll()/dequeueAllByCallback()/
+   * getQueue()/getQueues() methods are its surface.
+   */
+  private readonly _queue: Queue;
 
   /**
    * Durable replayable execution capability installed into this Agent's
@@ -1671,17 +1645,8 @@ export class Agent<
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
       ensureMcpServerTable(this.ctx.storage);
 
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_queues (
-          id TEXT PRIMARY KEY NOT NULL,
-          payload TEXT,
-          callback TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        )
-      `;
-
-      // Migration: add queue retry options for existing agents.
-      // Schedule schema and migrations are owned by Scheduler.
+      // Queue and schedule schema and migrations are owned by the Queue and
+      // Scheduler capabilities.
       const addColumnIfNotExists = (sql: string) => {
         try {
           this.ctx.storage.sql.exec(sql);
@@ -1693,10 +1658,6 @@ export class Agent<
           }
         }
       };
-
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
-      );
 
       // Workflow tracking table for Agent-Workflow integration
       this.sql`
@@ -1971,6 +1932,31 @@ export class Agent<
         ).call(this, payload, schedule);
     });
 
+    this._queue = new Queue({
+      retry: this._resolvedOptions.retry,
+      onError: (error: unknown) =>
+        runInInvocation(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          () => this.onError(error)
+        )
+    });
+
+    // Agent's historical name-based queue API: names resolve to methods on
+    // this Agent, run inside the Lifecycle host boundary.
+    setQueueCallbackResolver(this._queue, (name) => {
+      const method = this[name as keyof this];
+      if (typeof method !== "function") return undefined;
+      return (payload, item) =>
+        (
+          method as (payload: unknown, item: QueueItem<unknown>) => unknown
+        ).call(this, payload, item);
+    });
+
     this.tasks = new Tasks({
       onError: (error) => this.onError(error)
     });
@@ -2047,6 +2033,7 @@ export class Agent<
     // through `this.*` so they always hit the framework-wrapped hooks.
     this.lifecycle
       .use(this.scheduler)
+      .use(this._queue)
       .use(this.mcp)
       .use(this._webSockets)
       .use(this.tasks)
@@ -3294,160 +3281,54 @@ export class Agent<
   }
 
   /**
-   * Queue a task to be executed in the future
+   * Queue a task to run in the background.
+   *
+   * The item is durable: it runs from the Lifecycle alarm event loop after
+   * this call returns, in push order, one at a time, with retries per
+   * `options.retry`, and survives the Durable Object leaving memory.
    * @param callback Name of the method to call
    * @param payload Payload to pass to the callback
    * @param options Options for the queued task
    * @param options.retry Retry options for the callback execution
+   * @param options.id Stable id; a push with an existing id replaces that item
    * @returns The ID of the queued task
    */
   async queue<T = unknown>(
     callback: keyof this,
     payload: T,
-    options?: { retry?: RetryOptions }
+    options?: { retry?: RetryOptions; id?: string }
   ): Promise<string> {
-    const id = nanoid(9);
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
     }
-
     if (typeof this[callback] !== "function") {
       throw new Error(`this.${callback} is not a function`);
     }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback, retry_options)
-      VALUES (${id}, ${JSON.stringify(payload)}, ${callback}, ${retryJson})
-    `;
-
-    this._emit("queue:create", { callback: callback as string, id });
-
-    void this._flushQueue().catch((e) => {
-      console.error("Error flushing queue:", e);
-    });
-
-    return id;
-  }
-
-  private _flushingQueue = false;
-
-  private async _flushQueue() {
-    if (this._flushingQueue) {
-      return;
-    }
-    this._flushingQueue = true;
-    try {
-      while (true) {
-        const result = this.sql<QueueItem<string>>`
-        SELECT * FROM cf_agents_queues
-        ORDER BY created_at ASC
-      `;
-
-        if (!result || result.length === 0) {
-          break;
-        }
-
-        for (const row of result || []) {
-          const callback = this[row.callback as keyof Agent<Env>];
-          if (!callback) {
-            console.error(`callback ${row.callback} not found`);
-            await this.dequeue(row.id);
-            continue;
-          }
-          const { connection, request, email } = agentContext.getStore() || {};
-          await runInInvocation(
-            {
-              agent: this,
-              connection,
-              request,
-              email
-            },
-            async () => {
-              const retryOpts = parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              );
-              const { maxAttempts, baseDelayMs, maxDelayMs } =
-                resolveRetryConfig(retryOpts, this._resolvedOptions.retry);
-              const parsedPayload = JSON.parse(row.payload as string);
-              try {
-                await tryN(
-                  maxAttempts,
-                  async (attempt) => {
-                    if (attempt > 1) {
-                      this._emit("queue:retry", {
-                        callback: row.callback,
-                        id: row.id,
-                        attempt,
-                        maxAttempts
-                      });
-                    }
-                    await (
-                      callback as (
-                        payload: unknown,
-                        queueItem: QueueItem<string>
-                      ) => Promise<void>
-                    ).bind(this)(parsedPayload, row);
-                  },
-                  { baseDelayMs, maxDelayMs }
-                );
-              } catch (e) {
-                console.error(
-                  `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
-                  e
-                );
-                this._emit("queue:error", {
-                  callback: row.callback,
-                  id: row.id,
-                  error: e instanceof Error ? e.message : String(e),
-                  attempts: maxAttempts
-                });
-                try {
-                  await this.onError(e);
-                } catch {
-                  // swallow onError errors
-                }
-              } finally {
-                this.dequeue(row.id);
-              }
-            },
-            // The drain loop is started with `void` and routinely outlives the
-            // handler that enqueued the item.
-            { detached: true }
-          );
-        }
-      }
-    } finally {
-      this._flushingQueue = false;
-    }
+    const item = await this._queue.push(callback, payload, options);
+    return item.id;
   }
 
   /**
    * Dequeue a task by ID
    * @param id ID of the task to dequeue
    */
-  dequeue(id: string) {
-    this.sql`DELETE FROM cf_agents_queues WHERE id = ${id}`;
+  dequeue(id: string): Promise<boolean> {
+    return this._queue.cancel(id);
   }
 
   /**
    * Dequeue all tasks
    */
-  dequeueAll() {
-    this.sql`DELETE FROM cf_agents_queues`;
+  dequeueAll(): Promise<number> {
+    return this._queue.cancelAll();
   }
 
   /**
    * Dequeue all tasks by callback
    * @param callback Name of the callback to dequeue
    */
-  dequeueAllByCallback(callback: string) {
-    this.sql`DELETE FROM cf_agents_queues WHERE callback = ${callback}`;
+  dequeueAllByCallback(callback: string): Promise<number> {
+    return this._queue.cancelAll(callback);
   }
 
   /**
@@ -3455,38 +3336,27 @@ export class Agent<
    * @param id ID of the task to get
    * @returns The task or undefined if not found
    */
-  getQueue(id: string): QueueItem<string> | undefined {
-    const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues WHERE id = ${id}
-    `;
-    if (!result || result.length === 0) return undefined;
-    const row = result[0];
-    return {
-      ...row,
-      payload: JSON.parse(row.payload as unknown as string),
-      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    };
+  getQueue<T = unknown>(id: string): Promise<QueueItem<T> | undefined> {
+    return this._queue.get<T>(id);
   }
 
   /**
-   * Get all queues by key and value
+   * Get all queued tasks whose payload has `key` equal to `value`
    * @param key Key to filter by
    * @param value Value to filter by
    * @returns Array of matching QueueItem objects
    */
-  getQueues(key: string, value: string): QueueItem<string>[] {
-    const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues
-    `;
-    return result
-      .filter(
-        (row) => JSON.parse(row.payload as unknown as string)[key] === value
-      )
-      .map((row) => ({
-        ...row,
-        payload: JSON.parse(row.payload as unknown as string),
-        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-      }));
+  async getQueues<T = unknown>(
+    key: string,
+    value: string
+  ): Promise<QueueItem<T>[]> {
+    const items = await this._queue.list<T>();
+    return items.filter(
+      (item) =>
+        typeof item.payload === "object" &&
+        item.payload !== null &&
+        (item.payload as Record<string, unknown>)[key] === value
+    );
   }
 
   private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {

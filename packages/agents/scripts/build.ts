@@ -22,6 +22,7 @@ const entries = [
   "src/mcp/client/x402.ts",
   "src/observability/index.ts",
   "src/observability/ai/index.ts",
+  "src/queue/index.ts",
   "src/schedules/index.ts",
   "src/schedules/parser.ts",
   "src/tasks/index.ts",

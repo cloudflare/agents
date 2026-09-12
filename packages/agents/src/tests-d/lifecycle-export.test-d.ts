@@ -104,7 +104,9 @@ class ServiceCapability extends LifecycleCapability {
   probe(): void {
     expectTypeOf(this.lifecycle).toEqualTypeOf<LifecycleServices>();
     expectTypeOf(this.lifecycle.storage).toEqualTypeOf<DurableObjectStorage>();
-    expectTypeOf(this.lifecycle.starting()).toEqualTypeOf<boolean>();
+    expectTypeOf(this.lifecycle.status()).toEqualTypeOf<
+      "zero" | "starting" | "started"
+    >();
     expectTypeOf(this.lifecycle.jobs).toEqualTypeOf<LifecycleJobs>();
     expectTypeOf(
       this.lifecycle.jobs.push({ fn: "tick", time: Date.now() })

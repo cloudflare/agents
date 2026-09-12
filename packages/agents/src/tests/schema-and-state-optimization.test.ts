@@ -71,12 +71,6 @@ const EXPECTED_SCHEMA_DDL = [
       auth_url TEXT,
       server_options TEXT
     )`,
-  `CREATE TABLE cf_agents_queues (
-          id TEXT PRIMARY KEY NOT NULL,
-          payload TEXT,
-          callback TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        , retry_options TEXT)`,
   `CREATE TABLE cf_agents_runs (
           id TEXT PRIMARY KEY NOT NULL,
           name TEXT NOT NULL,
@@ -185,7 +179,6 @@ describe("schema version gating", () => {
     );
 
     expect(await agent.tableExists("cf_agents_state")).toBe(true);
-    expect(await agent.tableExists("cf_agents_queues")).toBe(true);
     expect(await agent.tableExists("cf_agents_jobs")).toBe(true);
     expect(await agent.tableExists("cf_agents_workflows")).toBe(true);
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);

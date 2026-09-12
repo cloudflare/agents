@@ -1074,7 +1074,7 @@ export class Tasks<
 
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
-    if (startMode === "warm" && !this.lifecycle.starting()) {
+    if (startMode === "warm" && this.lifecycle.status() !== "starting") {
       void this.#executeRun(runId).catch(() => {});
     }
 

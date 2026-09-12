@@ -112,6 +112,18 @@ export class CounterSubAgent extends Agent {
     `;
   }
 
+  /** Queue callback: logs like scheduledCallback so the same reader works. */
+  queuedCallback(
+    payload: { value: string },
+    item: { id: string; callback: string }
+  ): void {
+    this.scheduledCallback(payload, item);
+  }
+
+  async queueCallback(value: string): Promise<string> {
+    return this.queue("queuedCallback", { value });
+  }
+
   async scheduleDelayedCallback(
     delaySeconds: number,
     value: string,
@@ -1348,6 +1360,50 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.scheduleDelayedCallback(delaySeconds, value, options);
+  }
+
+  async subAgentQueue(subAgentName: string, value: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.queueCallback(value);
+  }
+
+  /**
+   * Queue from a facet, park the item in the far future so the alarm cannot
+   * run it, then delete the facet. Returns the root queue rows after each
+   * step so a test can assert the deletion cleaned the routed item up.
+   */
+  async subAgentQueueThenDelete(subAgentName: string): Promise<{
+    beforeDelete: string[];
+    afterDelete: string[];
+  }> {
+    const itemId = await this.subAgentQueue(subAgentName, "orphan");
+    this
+      .sql`UPDATE cf_agents_jobs SET time = ${Date.now() + 86_400_000} WHERE id = ${itemId}`;
+    const beforeDelete = (await this.rootQueueRows()).map((row) => row.id);
+    await this.deleteSubAgent(CounterSubAgent, subAgentName);
+    const afterDelete = (await this.rootQueueRows()).map((row) => row.id);
+    return { beforeDelete, afterDelete };
+  }
+
+  async rootQueueRows(): Promise<
+    Array<{ id: string; callback: string; ownerPath: string | null }>
+  > {
+    return this.sql<{
+      id: string;
+      callback: string;
+      owner_path: string | null;
+    }>`
+      SELECT id,
+             fn AS callback,
+             json_extract(payload, '$.owner_path') AS owner_path
+      FROM cf_agents_jobs
+      WHERE capability = 'queue'
+      ORDER BY time
+    `.map((row) => ({
+      id: row.id,
+      callback: row.callback,
+      ownerPath: row.owner_path
+    }));
   }
 
   async subAgentScheduleInterval(
