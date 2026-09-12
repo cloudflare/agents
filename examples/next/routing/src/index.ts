@@ -152,17 +152,20 @@ export class ChatAgent extends Agent<Env> {
         return new Response("Invalid JSON body", { status: 400 });
       }
       const { role, text } = (body ?? {}) as Partial<ChatMessage>;
+      // Only validation is a 400. A storage failure inside addMessage
+      // propagates and surfaces as a 500, as it should.
+      let validRole: "user" | "assistant";
+      let validText: string;
       try {
-        await this.addMessage(
-          assertRole(role),
-          assertText(text, MAX_TEXT, "text")
-        );
+        validRole = assertRole(role);
+        validText = assertText(text, MAX_TEXT, "text");
       } catch (error) {
         return new Response(
           error instanceof Error ? error.message : "Invalid message",
           { status: 400 }
         );
       }
+      await this.addMessage(validRole, validText);
     }
     return Response.json(this.getMessages());
   }
