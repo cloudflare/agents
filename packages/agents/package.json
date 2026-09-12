@@ -200,10 +200,20 @@
       "import": "./dist/websockets/index.js",
       "require": "./dist/websockets/index.js"
     },
+    "./state": {
+      "types": "./dist/state/index.d.ts",
+      "import": "./dist/state/index.js",
+      "require": "./dist/state/index.js"
+    },
     "./schedule": {
       "types": "./dist/schedule.d.ts",
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
+    },
+    "./queue": {
+      "types": "./dist/queue/index.d.ts",
+      "import": "./dist/queue/index.js",
+      "require": "./dist/queue/index.js"
     },
     "./schedules": {
       "types": "./dist/schedules/index.d.ts",

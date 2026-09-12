@@ -21,7 +21,8 @@ import {
   LifecycleCapability,
   type LifecycleHostContextScope,
   type LifecycleRouteAddress,
-  type LifecycleServices
+  type LifecycleServices,
+  type LifecycleStatus
 } from "./capability";
 import {
   runInLifecycleHostContext,
@@ -176,7 +177,7 @@ export class Lifecycle<
   readonly #jobQueue: JobQueue;
   readonly #jobDriver: JobDriver;
 
-  #status: "zero" | "starting" | "started" = "zero";
+  #status: LifecycleStatus = "zero";
   #alarmRearmQueue: Promise<void> = Promise.resolve();
   #rearmRequestedDuringStart = false;
   #pendingEvents: LifecycleEvent[] = [];
@@ -356,7 +357,7 @@ export class Lifecycle<
         get: (tag?: string) => this.#ctx.getWebSockets(tag)
       }),
       ready: () => this.#readyForCapabilityOperation(),
-      starting: () => this.#status === "starting",
+      status: () => this.#status,
       jobs: this.#jobsForOwner(capabilityId),
       trackAlarmWork: (work: Promise<unknown>) =>
         this.#jobDriver.trackAlarmWork(work),

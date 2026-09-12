@@ -2056,20 +2056,28 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
     };
   }
 
+  override async sendWorkflowEvent(
+    workflowName: string & {},
+    workflowId: string,
+    event: { type: string; payload: unknown }
+  ): Promise<void> {
+    await super.sendWorkflowEvent(workflowName, workflowId, event);
+    const delivered =
+      (await this.ctx.storage.get<number>("e2e:delivered_notifications")) ?? 0;
+    await this.ctx.storage.put("e2e:delivered_notifications", delivered + 1);
+  }
+
+  /** Delivered workflow events plus notifications still queued. */
   @callable()
   async getNotificationStats(): Promise<{ total: number; delivered: number }> {
-    this
-      .sql`CREATE TABLE IF NOT EXISTS cf_think_workflow_notifications (notification_id TEXT PRIMARY KEY, submission_id TEXT, workflow_name TEXT, workflow_id TEXT, event_type TEXT, payload_json TEXT, attempts INTEGER, last_error TEXT, created_at INTEGER, updated_at INTEGER, delivered_at INTEGER)`;
-    const total =
-      this.sql<{ c: number }>`
-        SELECT COUNT(*) as c FROM cf_think_workflow_notifications
-      `[0]?.c ?? 0;
     const delivered =
+      (await this.ctx.storage.get<number>("e2e:delivered_notifications")) ?? 0;
+    const pending =
       this.sql<{ c: number }>`
-        SELECT COUNT(*) as c FROM cf_think_workflow_notifications
-        WHERE delivered_at IS NOT NULL
+        SELECT COUNT(*) as c FROM cf_agents_jobs
+        WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
       `[0]?.c ?? 0;
-    return { total, delivered };
+    return { total: delivered + pending, delivered };
   }
 
   @callable()

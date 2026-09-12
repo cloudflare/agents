@@ -63,7 +63,7 @@ The differentiator is not "we have durable state" — it is what happens when a 
 
 ## Background Processing
 
-- [Queue](./queue.md) - Immediate background task execution
+- [Queue](./queue.md) - Durable background task execution
 - [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
 - [Retries](./retries.md) - Automatic retries with exponential backoff and jitter
 - [Durable Execution](./durable-execution.md) - `runFiber()`, `startFiber()`, `stash()`, and crash recovery for long tasks

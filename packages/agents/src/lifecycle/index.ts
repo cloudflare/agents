@@ -11,6 +11,7 @@ export {
   type LifecycleHostContextScope,
   type LifecycleRoutes,
   type LifecycleServices,
+  type LifecycleStatus,
   type LifecycleSockets
 } from "./capability";
 export {

@@ -158,8 +158,8 @@ host implicitly.
 
 Capability hooks run outside host context, but user callbacks run through
 `this.lifecycle.runInHostContext(fn)` inside the host invocation context.
-Scheduler dispatches its registered callbacks through this boundary, and a
-future capability that calls user code should do the same.
+Scheduler and Queue dispatch their registered callbacks through this
+boundary, and a future capability that calls user code should do the same.
 
 ## The job queue
 

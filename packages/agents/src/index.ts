@@ -157,6 +157,9 @@ import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
+import { Queue, setQueueCallbackResolver } from "./queue/queue";
+import type { QueueItem } from "./queue/types";
+export type { QueueItem } from "./queue/types";
 import {
   Tasks,
   setTaskDefinitionResolver,
@@ -173,6 +176,7 @@ export type {
   ScheduleCriteria,
   ScheduleOptions
 } from "./schedules/types";
+import { State } from "./state";
 export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
@@ -348,14 +352,6 @@ import {
 } from "./callable-decorator";
 
 export { SqlError } from "./sql-error";
-
-export type QueueItem<T = string> = {
-  id: string;
-  payload: T;
-  callback: keyof Agent<Cloudflare.Env>;
-  created_at: number;
-  retry?: RetryOptions;
-};
 
 type AgentToolRunStorageRow = {
   run_id: string;
@@ -751,17 +747,21 @@ type AgentToolRecoveryInspection =
 /**
  * Schema version for the Agent's internal SQLite tables.
  * Bump this when adding new tables, columns, or migrations.
- * The constructor stores this as a row in cf_agents_state and checks it
- * on wake to skip DDL on established DOs.
+ * The constructor stores this under a namespaced KV key (the same convention
+ * every capability uses for its own schema version) and checks it on wake to
+ * skip DDL on established DOs.
  */
 const CURRENT_SCHEMA_VERSION = 11;
+const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
-const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
-const STATE_ROW_ID = "cf_state_row_id";
-// Legacy key — no longer written, but read for backward compatibility with
-// DOs that were created before the single-row state optimization.
-const STATE_WAS_CHANGED = "cf_state_was_changed";
+// Before the State capability owned `cf_agents_state`, Agent kept its schema
+// version as a row in that table. Read once for DOs created under that layout,
+// then moved to the KV key so the table has a single owner.
+const LEGACY_SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 
+// Sentinel for "no initial state provided" on the Agent's overridable
+// `initialState` field. The State capability owns state storage; this only
+// distinguishes an unset initialState when the `state` getter seeds it.
 const DEFAULT_STATE = {} as unknown;
 
 /**
@@ -1054,34 +1054,6 @@ export interface AgentStaticOptions {
   maxAlarmMemoryLimitStrikes?: number;
 }
 
-/**
- * Parse the raw `retry_options` TEXT column from a SQLite row into a
- * typed `RetryOptions` object, or `undefined` if not set.
- */
-function parseRetryOptions(
-  row: Record<string, unknown>
-): RetryOptions | undefined {
-  const raw = row.retry_options;
-  if (typeof raw !== "string") return undefined;
-  return JSON.parse(raw) as RetryOptions;
-}
-
-/**
- * Resolve per-task retry options against class-level defaults and call
- * `tryN`. This is the retry-execution path for queue flush; Scheduler owns
- * its own copy for schedule callbacks.
- */
-function resolveRetryConfig(
-  taskRetry: RetryOptions | undefined,
-  defaults: Required<RetryOptions>
-): { maxAttempts: number; baseDelayMs: number; maxDelayMs: number } {
-  return {
-    maxAttempts: taskRetry?.maxAttempts ?? defaults.maxAttempts,
-    baseDelayMs: taskRetry?.baseDelayMs ?? defaults.baseDelayMs,
-    maxDelayMs: taskRetry?.maxDelayMs ?? defaults.maxDelayMs
-  };
-}
-
 // `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` live in
 // ./retries and remain re-exported from the package root so higher layers
 // classify platform failures with the same matcher instead of drifting copies.
@@ -1145,11 +1117,11 @@ type WorkflowName<E> = WorkflowBinding<E> | (string & {});
 /**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
- * @template State State type to store within the Agent
+ * @template TState State type to store within the Agent
  */
 export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  State = unknown,
+  TState = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
   /**
@@ -1185,6 +1157,22 @@ export class Agent<
     identity: false,
     getConnectionTags: (connection, ctx) =>
       this.getConnectionTags(connection, ctx)
+  });
+
+  /**
+   * Durable state: the `cf_agents_state` row, lazy load, validated persistence.
+   * `initialState` stays on Agent (a subclass field, initialized after this
+   * one) and is seeded by the `state` getter. Typed `<unknown>` rather than
+   * `<TState>` because `TState` appears in both `get()` and `set()` positions,
+   * which would make `Agent`'s own `TState` parameter invariant and break
+   * `Subclass -> Agent<Env, unknown>` assignability; the typed boundary is
+   * re-established in `state` / `setState`.
+   */
+  readonly _state: State<unknown> = new State<unknown>({
+    validateStateChange: (nextState, source) =>
+      this.validateStateChange(nextState as TState, source),
+    onChanged: (nextState, source) =>
+      this._handleStateChanged(nextState as TState, source)
   });
 
   /** Run user initialization after lifecycle components have started. */
@@ -1228,7 +1216,6 @@ export class Agent<
     await this.lifecycle.start(props);
   }
 
-  private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
 
@@ -1348,7 +1335,7 @@ export class Agent<
   /** @internal Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
 
-  private _ParentClass: typeof Agent<Env, State> =
+  private _ParentClass: typeof Agent<Env, TState> =
     Object.getPrototypeOf(this).constructor;
 
   /**
@@ -1359,6 +1346,13 @@ export class Agent<
    * cancelSchedule() methods are the stable surface.
    */
   readonly scheduler: Scheduler;
+
+  /**
+   * Durable background-work capability installed into this Agent's
+   * Lifecycle. Agent's queue()/dequeue()/dequeueAll()/dequeueAllByCallback()/
+   * getQueue()/getQueues() methods are its surface.
+   */
+  private readonly _queue: Queue;
 
   /**
    * Durable replayable execution capability installed into this Agent's
@@ -1394,7 +1388,7 @@ export class Agent<
    * Initial state for the Agent
    * Override to provide default state values
    */
-  initialState: State = DEFAULT_STATE as State;
+  initialState: TState = DEFAULT_STATE as TState;
 
   /**
    * Stable key for Workers AI session affinity (prefix-cache optimization).
@@ -1418,54 +1412,20 @@ export class Agent<
   }
 
   /**
-   * Current state of the Agent
+   * Current state of the Agent.
+   *
+   * Delegates to the State capability, which owns lazy load and the
+   * in-memory cache; Agent seeds `initialState` on first access.
    */
-  get state(): State {
-    if (this._state !== DEFAULT_STATE) {
-      // state was previously set, and populated internal state
-      return this._state;
-    }
-    // looks like this is the first time the state is being accessed
-    // check if the state was set in a previous life
-    const result = this.sql<{ state: State | undefined }>`
-      SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
-    `;
-
-    // Row existence is the signal that state was previously set.
-    // This handles all values including falsy ones (null, 0, false, "").
-    if (result.length > 0) {
-      const state = result[0].state as string;
-
-      try {
-        this._state = JSON.parse(state);
-      } catch (e) {
-        console.error(
-          "Failed to parse stored state, falling back to initialState:",
-          e
-        );
-        if (this.initialState !== DEFAULT_STATE) {
-          this._state = this.initialState;
-          // Persist the fixed state to prevent future parse errors
-          this._setStateInternal(this.initialState);
-        } else {
-          // No initialState defined - clear corrupted data to prevent infinite retry loop
-          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
-          return undefined as State;
-        }
-      }
-      return this._state;
-    }
-
-    // ok, this is the first time the state is being accessed
-    // and the state was not set in a previous life
-    // so we need to set the initial state (if provided)
-    if (this.initialState === DEFAULT_STATE) {
-      // no initial state provided, so we return undefined
-      return undefined as State;
-    }
-    // initial state provided, so we set the state,
-    // update db and return the initial state
-    this._setStateInternal(this.initialState);
+  get state(): TState {
+    const stored = this._state.get();
+    // `undefined` is not JSON-representable, so it uniquely means "no row":
+    // nothing stored yet, or a corrupt row the capability just cleared.
+    if (stored !== undefined) return stored as TState;
+    if (this.initialState === DEFAULT_STATE) return undefined as TState;
+    // First access with nothing stored: seed the initial state. Goes through
+    // set() so it persists, broadcasts, and runs the notification hook.
+    this._state.set(this.initialState, "server");
     return this.initialState;
   }
 
@@ -1653,35 +1613,15 @@ export class Agent<
    */
   protected _ensureSchema(): void {
     // Schema version gating: skip all DDL on established DOs whose schema
-    // is already up-to-date. We always create cf_agents_state first (cheap
-    // idempotent DDL) and store the version as a row inside it.
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_state (
-        id TEXT PRIMARY KEY NOT NULL,
-        state TEXT
-      )
-    `;
-
-    const versionRow = this.sql<{ state: string | null }>`
-      SELECT state FROM cf_agents_state WHERE id = ${SCHEMA_VERSION_ROW_ID}
-    `;
-    const schemaVersion =
-      versionRow.length > 0 ? Number(versionRow[0].state) : 0;
+    // is already up-to-date. `cf_agents_state` belongs to the State
+    // capability (state/index.ts), which creates and migrates it itself.
+    const schemaVersion = this._readSchemaVersion();
 
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
       ensureMcpServerTable(this.ctx.storage);
 
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_queues (
-          id TEXT PRIMARY KEY NOT NULL,
-          payload TEXT,
-          callback TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        )
-      `;
-
-      // Migration: add queue retry options for existing agents.
-      // Schedule schema and migrations are owned by Scheduler.
+      // Queue and schedule schema and migrations are owned by the Queue and
+      // Scheduler capabilities.
       const addColumnIfNotExists = (sql: string) => {
         try {
           this.ctx.storage.sql.exec(sql);
@@ -1693,10 +1633,6 @@ export class Agent<
           }
         }
       };
-
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
-      );
 
       // Workflow tracking table for Agent-Workflow integration
       this.sql`
@@ -1725,12 +1661,6 @@ export class Agent<
       this.sql`
         CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
       `;
-
-      // Clean up legacy STATE_WAS_CHANGED rows from the single-row state optimization
-      this.ctx.storage.sql.exec(
-        "DELETE FROM cf_agents_state WHERE id = ?",
-        STATE_WAS_CHANGED
-      );
 
       // v3: durable fibers table for runFiber
       this.sql`
@@ -1888,10 +1818,7 @@ export class Agent<
       );
 
       // Mark schema as up-to-date
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_state (id, state)
-        VALUES (${SCHEMA_VERSION_ROW_ID}, ${String(CURRENT_SCHEMA_VERSION)})
-      `;
+      this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
     }
 
     this._schemaInitialization = {
@@ -1899,6 +1826,42 @@ export class Agent<
       currentVersion: CURRENT_SCHEMA_VERSION,
       migrated: schemaVersion < CURRENT_SCHEMA_VERSION
     };
+  }
+
+  /**
+   * Read the Agent's schema version from its KV key. A DO created before the
+   * State capability owned `cf_agents_state` has the version as a row in that
+   * table instead: read it once, move it to the key, and delete the row so the
+   * table is left with a single owner. Synchronous (`storage.kv`) because the
+   * constructor gates DDL on it.
+   */
+  private _readSchemaVersion(): number {
+    const stored = this.ctx.storage.kv.get<number>(SCHEMA_VERSION_KEY);
+    if (stored !== undefined) return stored;
+
+    const hasStateTable =
+      this.ctx.storage.sql
+        .exec(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_state'"
+        )
+        .toArray().length > 0;
+    if (!hasStateTable) return 0;
+
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT state FROM cf_agents_state WHERE id = ?",
+        LEGACY_SCHEMA_VERSION_ROW_ID
+      )
+      .toArray() as { state: string | null }[];
+    if (rows.length === 0) return 0;
+
+    const version = Number(rows[0].state) || 0;
+    this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, version);
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = ?",
+      LEGACY_SCHEMA_VERSION_ROW_ID
+    );
+    return version;
   }
 
   constructor(ctx: AgentContext, env: Env) {
@@ -1969,6 +1932,31 @@ export class Agent<
         (
           method as (payload: unknown, schedule: Schedule<unknown>) => unknown
         ).call(this, payload, schedule);
+    });
+
+    this._queue = new Queue({
+      retry: this._resolvedOptions.retry,
+      onError: (error: unknown) =>
+        runInInvocation(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          () => this.onError(error)
+        )
+    });
+
+    // Agent's historical name-based queue API: names resolve to methods on
+    // this Agent, run inside the Lifecycle host boundary.
+    setQueueCallbackResolver(this._queue, (name) => {
+      const method = this[name as keyof this];
+      if (typeof method !== "function") return undefined;
+      return (payload, item) =>
+        (
+          method as (payload: unknown, item: QueueItem<unknown>) => unknown
+        ).call(this, payload, item);
     });
 
     this.tasks = new Tasks({
@@ -2047,7 +2035,9 @@ export class Agent<
     // through `this.*` so they always hit the framework-wrapped hooks.
     this.lifecycle
       .use(this.scheduler)
+      .use(this._queue)
       .use(this.mcp)
+      .use(this._state)
       .use(this._webSockets)
       .use(this.tasks)
       // Registered for capability identity/services; its hot paths are
@@ -2177,7 +2167,7 @@ export class Agent<
               return;
             }
             try {
-              this._setStateInternal(parsed.state as State, connection);
+              this._state.set(parsed.state as TState, connection);
             } catch (e) {
               // validateStateChange (or another sync error) rejected the update.
               // Log the full error server-side, send a generic message to the client.
@@ -2363,7 +2353,7 @@ export class Agent<
 
             const wasExcludedFromStateInitBroadcast =
               this._protocolBroadcastExcludeIds.has(connection.id);
-            let currentState: State | undefined;
+            let currentState: TState | undefined;
             this._protocolBroadcastExcludeIds.add(connection.id);
             try {
               currentState = this.state;
@@ -2605,21 +2595,17 @@ export class Agent<
     this.broadcast(msg, exclude);
   }
 
-  private _setStateInternal(
-    nextState: State,
-    source: Connection | "server" = "server"
+  /**
+   * React to a persisted state change from the State capability.
+   *
+   * Reproduces the pre-migration steps 3-4: broadcast the new state to
+   * protocol-enabled connections (excluding the originating connection) and
+   * run the notification hook off the invocation tail.
+   */
+  private _handleStateChanged(
+    nextState: TState,
+    source: Connection | "server"
   ): void {
-    // Validation/gating hook (sync only)
-    this.validateStateChange(nextState, source);
-
-    // Persist state — row existence in cf_agents_state is the signal that
-    // state was set (no separate wasChanged flag needed).
-    this._state = nextState;
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_state (id, state)
-      VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
-    `;
-
     // Broadcast state to protocol-enabled connections, excluding the source
     this._broadcastProtocol(
       JSON.stringify({
@@ -2662,13 +2648,13 @@ export class Agent<
    * @param state New state to set
    * @throws Error if called from a readonly connection context
    */
-  setState(state: State): void {
+  setState(state: TState): void {
     // Check if the current context has a readonly connection
     const store = agentContext.getStore();
     if (store?.connection && this.isConnectionReadonly(store.connection)) {
       throw new Error("Connection is readonly");
     }
-    this._setStateInternal(state, "server");
+    this._state.set(state, "server");
   }
 
   /**
@@ -2928,7 +2914,7 @@ export class Agent<
    * IMPORTANT: This hook must be synchronous.
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  validateStateChange(_nextState: State, _source: Connection | "server") {
+  validateStateChange(_nextState: TState, _source: Connection | "server") {
     // override this to validate state updates
   }
 
@@ -2941,7 +2927,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateChanged(_state: State | undefined, _source: Connection | "server") {
+  onStateChanged(_state: TState | undefined, _source: Connection | "server") {
     // override this to handle state updates after persist + broadcast
   }
 
@@ -2957,7 +2943,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
+  onStateUpdate(_state: TState | undefined, _source: Connection | "server") {
     // override this to handle state updates (deprecated — use onStateChanged)
   }
 
@@ -2966,7 +2952,7 @@ export class Agent<
    * cached in the constructor. No prototype walks at call time.
    */
   private async _callStatePersistenceHook(
-    state: State | undefined,
+    state: TState | undefined,
     source: Connection | "server"
   ): Promise<void> {
     switch (this._persistenceHookMode) {
@@ -3294,160 +3280,54 @@ export class Agent<
   }
 
   /**
-   * Queue a task to be executed in the future
+   * Queue a task to run in the background.
+   *
+   * The item is durable: it runs from the Lifecycle alarm event loop after
+   * this call returns, in push order, one at a time, with retries per
+   * `options.retry`, and survives the Durable Object leaving memory.
    * @param callback Name of the method to call
    * @param payload Payload to pass to the callback
    * @param options Options for the queued task
    * @param options.retry Retry options for the callback execution
+   * @param options.id Stable id; a push with an existing id replaces that item
    * @returns The ID of the queued task
    */
   async queue<T = unknown>(
     callback: keyof this,
     payload: T,
-    options?: { retry?: RetryOptions }
+    options?: { retry?: RetryOptions; id?: string }
   ): Promise<string> {
-    const id = nanoid(9);
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
     }
-
     if (typeof this[callback] !== "function") {
       throw new Error(`this.${callback} is not a function`);
     }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback, retry_options)
-      VALUES (${id}, ${JSON.stringify(payload)}, ${callback}, ${retryJson})
-    `;
-
-    this._emit("queue:create", { callback: callback as string, id });
-
-    void this._flushQueue().catch((e) => {
-      console.error("Error flushing queue:", e);
-    });
-
-    return id;
-  }
-
-  private _flushingQueue = false;
-
-  private async _flushQueue() {
-    if (this._flushingQueue) {
-      return;
-    }
-    this._flushingQueue = true;
-    try {
-      while (true) {
-        const result = this.sql<QueueItem<string>>`
-        SELECT * FROM cf_agents_queues
-        ORDER BY created_at ASC
-      `;
-
-        if (!result || result.length === 0) {
-          break;
-        }
-
-        for (const row of result || []) {
-          const callback = this[row.callback as keyof Agent<Env>];
-          if (!callback) {
-            console.error(`callback ${row.callback} not found`);
-            await this.dequeue(row.id);
-            continue;
-          }
-          const { connection, request, email } = agentContext.getStore() || {};
-          await runInInvocation(
-            {
-              agent: this,
-              connection,
-              request,
-              email
-            },
-            async () => {
-              const retryOpts = parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              );
-              const { maxAttempts, baseDelayMs, maxDelayMs } =
-                resolveRetryConfig(retryOpts, this._resolvedOptions.retry);
-              const parsedPayload = JSON.parse(row.payload as string);
-              try {
-                await tryN(
-                  maxAttempts,
-                  async (attempt) => {
-                    if (attempt > 1) {
-                      this._emit("queue:retry", {
-                        callback: row.callback,
-                        id: row.id,
-                        attempt,
-                        maxAttempts
-                      });
-                    }
-                    await (
-                      callback as (
-                        payload: unknown,
-                        queueItem: QueueItem<string>
-                      ) => Promise<void>
-                    ).bind(this)(parsedPayload, row);
-                  },
-                  { baseDelayMs, maxDelayMs }
-                );
-              } catch (e) {
-                console.error(
-                  `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
-                  e
-                );
-                this._emit("queue:error", {
-                  callback: row.callback,
-                  id: row.id,
-                  error: e instanceof Error ? e.message : String(e),
-                  attempts: maxAttempts
-                });
-                try {
-                  await this.onError(e);
-                } catch {
-                  // swallow onError errors
-                }
-              } finally {
-                this.dequeue(row.id);
-              }
-            },
-            // The drain loop is started with `void` and routinely outlives the
-            // handler that enqueued the item.
-            { detached: true }
-          );
-        }
-      }
-    } finally {
-      this._flushingQueue = false;
-    }
+    const item = await this._queue.push(callback, payload, options);
+    return item.id;
   }
 
   /**
    * Dequeue a task by ID
    * @param id ID of the task to dequeue
    */
-  dequeue(id: string) {
-    this.sql`DELETE FROM cf_agents_queues WHERE id = ${id}`;
+  dequeue(id: string): Promise<boolean> {
+    return this._queue.cancel(id);
   }
 
   /**
    * Dequeue all tasks
    */
-  dequeueAll() {
-    this.sql`DELETE FROM cf_agents_queues`;
+  dequeueAll(): Promise<number> {
+    return this._queue.cancelAll();
   }
 
   /**
    * Dequeue all tasks by callback
    * @param callback Name of the callback to dequeue
    */
-  dequeueAllByCallback(callback: string) {
-    this.sql`DELETE FROM cf_agents_queues WHERE callback = ${callback}`;
+  dequeueAllByCallback(callback: string): Promise<number> {
+    return this._queue.cancelAll(callback);
   }
 
   /**
@@ -3455,38 +3335,27 @@ export class Agent<
    * @param id ID of the task to get
    * @returns The task or undefined if not found
    */
-  getQueue(id: string): QueueItem<string> | undefined {
-    const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues WHERE id = ${id}
-    `;
-    if (!result || result.length === 0) return undefined;
-    const row = result[0];
-    return {
-      ...row,
-      payload: JSON.parse(row.payload as unknown as string),
-      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    };
+  getQueue<T = unknown>(id: string): Promise<QueueItem<T> | undefined> {
+    return this._queue.get<T>(id);
   }
 
   /**
-   * Get all queues by key and value
+   * Get all queued tasks whose payload has `key` equal to `value`
    * @param key Key to filter by
    * @param value Value to filter by
    * @returns Array of matching QueueItem objects
    */
-  getQueues(key: string, value: string): QueueItem<string>[] {
-    const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues
-    `;
-    return result
-      .filter(
-        (row) => JSON.parse(row.payload as unknown as string)[key] === value
-      )
-      .map((row) => ({
-        ...row,
-        payload: JSON.parse(row.payload as unknown as string),
-        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-      }));
+  async getQueues<T = unknown>(
+    key: string,
+    value: string
+  ): Promise<QueueItem<T>[]> {
+    const items = await this._queue.list<T>();
+    return items.filter(
+      (item) =>
+        typeof item.payload === "object" &&
+        item.payload !== null &&
+        (item.payload as Record<string, unknown>)[key] === value
+    );
   }
 
   private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
@@ -9678,13 +9547,13 @@ export class Agent<
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
     if (action === "set") {
-      this.setState(state as State);
+      this.setState(state as TState);
     } else if (action === "merge") {
-      const currentState = this.state ?? ({} as State);
+      const currentState = this.state ?? ({} as TState);
       this.setState({
         ...currentState,
         ...(state as Record<string, unknown>)
-      } as State);
+      } as TState);
     } else if (action === "reset") {
       this.setState(this.initialState);
     }
