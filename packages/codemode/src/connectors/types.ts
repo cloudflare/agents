@@ -8,6 +8,15 @@ export type ToolAnnotations = {
   /** Requires user approval before executing. Unannotated methods execute immediately. */
   requiresApproval?: boolean;
   /**
+   * How a paused call is satisfied. Both values imply the run pauses at the
+   * call. `"approval"` (the default when `requiresApproval` is set) means the
+   * host executes the tool server-side once approved. `"client"` means the
+   * tool never executes server-side: the run stays paused until the host
+   * supplies the tool's result via `resolve()` (e.g. a client-side tool whose
+   * result comes from the browser).
+   */
+  resolution?: "approval" | "client";
+  /**
    * Replay policy for the durable log. `"reexecute"` marks the call ephemeral:
    * its result is never stored, and a replay re-executes the call instead of
    * replaying a recorded result. Only valid for idempotent reads — the call

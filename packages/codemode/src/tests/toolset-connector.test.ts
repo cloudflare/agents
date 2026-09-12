@@ -105,6 +105,49 @@ describe("ToolSetConnector", () => {
     expect(warn.mock.calls[0][0]).toContain("clientSide");
   });
 
+  it("includes execute-less tools as client-resolved with clientTools: 'pause'", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const connector = new ToolSetConnector(ctx, {
+      clientTools: "pause",
+      tools: {
+        serverSide: tool({
+          description: "Runs on the server",
+          inputSchema: z.object({}),
+          execute: async () => "ran"
+        }),
+        clientSide: tool({
+          description: "Forwarded to the client",
+          inputSchema: z.object({ prompt: z.string() })
+          // no execute — client-side tool
+        })
+      }
+    });
+
+    const desc = await connector.describe();
+    expect(Object.keys(desc.descriptors).sort()).toEqual([
+      "clientSide",
+      "serverSide"
+    ]);
+    expect(desc.annotations?.serverSide).toBeUndefined();
+    expect(desc.annotations?.clientSide).toEqual({
+      requiresApproval: true,
+      resolution: "client"
+    });
+
+    // The client tool IS advertised in the sandbox types.
+    const types = await connector.getTypeScriptTypes();
+    expect(types).toContain("serverSide");
+    expect(types).toContain("clientSide");
+
+    // Its server-side execute is a safety net that must never succeed.
+    await expect(
+      connector.executeTool("clientSide", { prompt: "hi" })
+    ).rejects.toThrow(/client-resolved.*cannot execute server-side/);
+
+    // No "skipped" warning — the tool wasn't skipped.
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("rejects tools whose sanitized names collide", async () => {
     const connector = new ToolSetConnector(ctx, {
       tools: {
