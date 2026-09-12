@@ -457,6 +457,35 @@ describe("state sync over connections on a plain host", () => {
     }
   });
 
+  it("broadcasts to a second socket that shares the sender's _pk", async () => {
+    // `_pk` is client-supplied, so two live sockets can carry one id.
+    // Excluding the sender by id would starve the other socket.
+    const name = crypto.randomUUID();
+    const shared = `shared-${name}`;
+    const url = hostUrl(name);
+    url.searchParams.set("_pk", shared);
+    const alice = await upgrade(url);
+    const aliceNext = frameReader(alice);
+    await aliceNext();
+    await aliceNext();
+    const bob = await upgrade(url);
+    const bobNext = frameReader(bob);
+    await bobNext();
+    await bobNext();
+    try {
+      alice.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 5 } })
+      );
+      expect(await bobNext()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 5 }
+      });
+    } finally {
+      alice.close(1000, "done");
+      bob.close(1000, "done");
+    }
+  });
+
   it("syncs state over the Cap'n Web transport too", async () => {
     const name = crypto.randomUUID();
     const url = hostUrl(name);

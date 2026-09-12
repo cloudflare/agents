@@ -707,7 +707,7 @@ export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
   });
 
   readonly #webSockets = new WebSockets({
-    state: this.#state as unknown as State<unknown>,
+    state: this.#state,
     handlers: {
       onMessage: (connection, message) => {
         connection.send(`echo:${String(message)}`);

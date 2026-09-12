@@ -426,15 +426,28 @@ export class WebSockets extends LifecycleCapability {
     if (current === undefined) return;
     const frame = { type: MessageType.CF_AGENT_STATE, state: current };
     for (const connection of this.getConnections()) {
-      if (connection.id === except?.id) continue;
+      // Object identity, not id: `_pk` is client-supplied, so two live
+      // sockets can share an id and excluding by id would starve the
+      // other one. `createConnection` returns the same wrapper for a
+      // socket, so the sender compares equal here.
+      if (connection === except) continue;
       this.#sendFrame(connection, frame);
     }
   }
 
-  /** Send one protocol frame, tolerating a peer that just disconnected. */
+  /**
+   * Send one protocol frame. Serialization is the caller's contract — every
+   * frame built here is plain JSON — while a send failure is tolerated: the
+   * peer may have disconnected between the wake and the send.
+   */
   #sendFrame(connection: Connection, frame: Record<string, unknown>): void {
+    this.#send(connection, JSON.stringify(frame));
+  }
+
+  /** Write one already-serialized frame, tolerating a closed peer. */
+  #send(connection: Connection, text: string): void {
     try {
-      connection.send(JSON.stringify(frame));
+      connection.send(text);
     } catch {
       // The socket closed between the wake and the send.
     }
@@ -558,11 +571,7 @@ export class WebSockets extends LifecycleCapability {
         }`
       } satisfies RpcResponse);
     }
-    try {
-      connection.send(text);
-    } catch {
-      // The peer disconnected while the callable was running.
-    }
+    this.#send(connection, text);
   }
 
   async #dispatchCallable(
