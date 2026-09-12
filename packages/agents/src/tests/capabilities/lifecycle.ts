@@ -11,6 +11,7 @@ import {
   type LifecycleJobContext,
   type LifecycleJobPushOptions
 } from "../../lifecycle";
+import { State } from "../../state";
 import { WebSockets } from "../../websockets";
 
 type StartupProps = { label: string };
@@ -689,5 +690,44 @@ export class RetryableStartObject extends DurableObject<Cloudflare.Env> {
 
   getHostStarts(): number {
     return this.hostStarts;
+  }
+}
+
+/**
+ * A plain Durable Object composed with `State` and `WebSockets`, wired so
+ * the capability syncs state over connections. Used to prove `useAgent`'s
+ * state surface works against a non-Agent host.
+ */
+export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
+  readonly #state = new State<{ count: number }>({
+    initialState: { count: 0 },
+    validateStateChange: (next) => {
+      if (next.count < 0) throw new Error("count must not be negative");
+    }
+  });
+
+  readonly #webSockets = new WebSockets({
+    state: this.#state as unknown as State<unknown>,
+    handlers: {
+      onMessage: (connection, message) => {
+        connection.send(`echo:${String(message)}`);
+      }
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.#state)
+    .use(this.#webSockets);
+
+  /** Host-side change, then push it to connections. */
+  async setCount(count: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#state.set({ count });
+    this.#webSockets.broadcastState();
+  }
+
+  async getCount(): Promise<number | undefined> {
+    await this.lifecycle.start();
+    return this.#state.get()?.count;
   }
 }

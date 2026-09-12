@@ -8,6 +8,7 @@ import {
   type ConnectionSetStateFn,
   type ConnectionState
 } from "../lifecycle";
+import type { State } from "../state";
 import { MessageType } from "../types";
 import { camelCaseToKebabCase } from "../utils";
 import {
@@ -62,6 +63,15 @@ type RpcResponse =
   | { type: "rpc"; id: string; success: true; done: boolean; result: unknown }
   | { type: "rpc"; id: string; success: false; error: string };
 
+/** The `cf_agent_state` frame a client sends to update host state. */
+type StateFrame = { readonly type: "cf_agent_state"; readonly state: unknown };
+
+function isStateFrame(value: unknown): value is StateFrame {
+  if (typeof value !== "object" || value === null) return false;
+  const frame = value as Record<string, unknown>;
+  return frame.type === MessageType.CF_AGENT_STATE && "state" in frame;
+}
+
 function isRpcRequest(value: unknown): value is RpcRequest {
   if (typeof value !== "object" || value === null) return false;
   const frame = value as Record<string, unknown>;
@@ -111,7 +121,9 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  * WebSocket wire, and natively on the Cap'n Web session root, where an
  * `RpcTarget` result becomes a live stub and calls pipeline. `call()`
  * and `stub` work against a plain Durable Object exactly as against an
- * `Agent`.
+ * `Agent`. Pass a `State` capability as `state` and the hook's
+ * `state`/`setState` work too: the current value is pushed on connect,
+ * client updates are validated and applied, and changes broadcast.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -122,6 +134,7 @@ export class WebSockets extends LifecycleCapability {
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #identity: boolean;
+  readonly #state: State<unknown> | undefined;
   readonly #callables: ReadonlyMap<string, CallableInvoker>;
   readonly #sessions = new Map<string, CapnWebSession>();
   #manager: ConnectionManager | undefined;
@@ -131,6 +144,7 @@ export class WebSockets extends LifecycleCapability {
     this.#handlers = options.handlers;
     this.#getConnectionTags = options.getConnectionTags;
     this.#identity = options.identity ?? true;
+    this.#state = options.state;
     this.#callables = options.callables
       ? exposableMethods(options.callables)
       : new Map();
@@ -236,13 +250,23 @@ export class WebSockets extends LifecycleCapability {
     ctx: ConnectionContext
   ): Promise<void> {
     if (this.#identity) {
-      connection.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_IDENTITY,
-          name: this.lifecycle.name,
-          agent: camelCaseToKebabCase(this.lifecycle.className)
-        })
-      );
+      this.#sendFrame(connection, {
+        type: MessageType.CF_AGENT_IDENTITY,
+        name: this.lifecycle.name,
+        agent: camelCaseToKebabCase(this.lifecycle.className)
+      });
+    }
+    if (this.#state) {
+      // After identity, so a client that resolves `ready` on identity has
+      // the state by the time it renders. Absent state sends nothing; the
+      // client keeps whatever default it started with.
+      const current = this.#state.get();
+      if (current !== undefined) {
+        this.#sendFrame(connection, {
+          type: MessageType.CF_AGENT_STATE,
+          state: current
+        });
+      }
     }
     await this.lifecycle.runInHostContext(
       () => this.#handlers?.onConnect?.(connection, ctx),
@@ -254,6 +278,7 @@ export class WebSockets extends LifecycleCapability {
     connection: Connection,
     message: WebSocketMessage
   ): Promise<void> {
+    if (this.#state && this.#applyStateFrame(connection, message)) return;
     if (
       this.#callables.size > 0 &&
       (await this.#answerRpc(connection, message))
@@ -352,6 +377,67 @@ export class WebSockets extends LifecycleCapability {
       }
     });
     return response;
+  }
+
+  // ── State ──────────────────────────────────────────────────────────────
+
+  /**
+   * Apply a client's `cf_agent_state` frame to the State capability and
+   * broadcast the result to the other connections. The host's own
+   * `validateStateChange` decides whether the change is allowed; a throw
+   * answers the sender with `cf_agent_state_error` and changes nothing.
+   *
+   * @returns Whether the message was a state frame.
+   */
+  #applyStateFrame(connection: Connection, raw: WebSocketMessage): boolean {
+    if (typeof raw !== "string") return false;
+    let frame: unknown;
+    try {
+      frame = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    if (!isStateFrame(frame)) return false;
+    try {
+      // `set()` runs the host's validation and persists; the source is this
+      // connection, so the broadcast below excludes it — it already has
+      // the value it sent.
+      this.#state?.set(frame.state, connection);
+    } catch (error) {
+      this.#sendFrame(connection, {
+        type: MessageType.CF_AGENT_STATE_ERROR,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return true;
+    }
+    this.broadcastState(connection);
+    return true;
+  }
+
+  /**
+   * Push the current state to every connection, optionally excluding the
+   * one a change came from. Hosts call this after their own `setState`
+   * when they want connections to see it; a change arriving from a client
+   * is broadcast automatically.
+   */
+  broadcastState(except?: Connection): void {
+    if (!this.#state) return;
+    const current = this.#state.get();
+    if (current === undefined) return;
+    const frame = { type: MessageType.CF_AGENT_STATE, state: current };
+    for (const connection of this.getConnections()) {
+      if (connection.id === except?.id) continue;
+      this.#sendFrame(connection, frame);
+    }
+  }
+
+  /** Send one protocol frame, tolerating a peer that just disconnected. */
+  #sendFrame(connection: Connection, frame: Record<string, unknown>): void {
+    try {
+      connection.send(JSON.stringify(frame));
+    } catch {
+      // The socket closed between the wake and the send.
+    }
   }
 
   // ── Callables ──────────────────────────────────────────────────────────

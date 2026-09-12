@@ -1,4 +1,5 @@
 import type { RpcTarget } from "cloudflare:workers";
+import type { State } from "../state";
 import type { Connection, ConnectionContext, WSMessage } from "../lifecycle";
 
 /** A frame delivered on a capability-owned WebSocket connection. */
@@ -64,6 +65,17 @@ export interface WebSocketsOptions {
    * Defaults to `true`. `Agent` sends its own identity and passes `false`.
    */
   readonly identity?: boolean;
+
+  /**
+   * A {@link State} capability to sync over connections. The WebSockets
+   * capability then pushes the current state to each new connection,
+   * applies `cf_agent_state` frames a client sends (answering
+   * `cf_agent_state_error` when the host rejects one), and broadcasts
+   * every change to the other connections. Install the same instance on
+   * the lifecycle so it owns storage and validation; without this option
+   * state is never sent or accepted over connections.
+   */
+  readonly state?: State<unknown>;
 
   /**
    * Tags attached to each accepted connection, queryable through

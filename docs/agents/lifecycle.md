@@ -315,10 +315,13 @@ it claims upgrades, dispatches handlers inside the host invocation boundary,
 and answers `getConnections()`:
 
 ```ts
+import { State } from "agents/state";
 import { WebSockets } from "agents/websockets";
 
 export class MyObject extends DurableObject<Env> {
+  readonly state = new State({ initialState: { count: 0 } });
   readonly webSockets = new WebSockets({
+    state: this.state,
     handlers: {
       onConnect: (connection) => {
         connection.setState({ authenticated: true });
@@ -329,7 +332,9 @@ export class MyObject extends DurableObject<Env> {
     },
     callables: new MyCallables(this)
   });
-  readonly lifecycle = Lifecycle.install(this).use(this.webSockets);
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.state)
+    .use(this.webSockets);
 }
 ```
 
@@ -352,6 +357,15 @@ Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
   calling, a `ReadableStream` streams, and chained calls pipeline. Methods
   run through the host invocation boundary with the calling connection in
   scope.
+- `state` takes a `State` capability (from `agents/state`) and syncs it
+  over connections: the current value is pushed to each new connection
+  after identity, a client's `cf_agent_state` frame is validated by the
+  host and applied, a rejected one is answered with
+  `cf_agent_state_error`, and every change is broadcast to the other
+  connections. Call `webSockets.broadcastState()` after a host-side
+  `set()` to push it. Without this option state is never sent or accepted
+  over connections. So `useAgent().state` and `setState()` work against a
+  plain Durable Object.
 - Any other frame goes to `handlers.onMessage`.
 
 An `Agent` adds no new surface for this: its `@callable()`-decorated methods

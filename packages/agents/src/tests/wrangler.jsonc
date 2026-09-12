@@ -21,6 +21,10 @@
         "name": "PlainLifecycleObject"
       },
       {
+        "class_name": "StatefulPlainObject",
+        "name": "StatefulPlainObject"
+      },
+      {
         "class_name": "RetryableStartObject",
         "name": "RetryableStartObject"
       },
@@ -409,6 +413,7 @@
       "new_sqlite_classes": [
         "CapabilityHarnessObject",
         "PlainLifecycleObject",
+        "StatefulPlainObject",
         "RetryableStartObject",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
