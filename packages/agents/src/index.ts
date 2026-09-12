@@ -98,6 +98,15 @@ import {
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
 import { WebSockets } from "./websockets";
+import {
+  ensureConnectionWrapped,
+  getConnectionFlag,
+  isConnectionProtocolEnabled as connectionProtocolEnabled,
+  isConnectionReadonly as connectionReadonly,
+  registerInternalConnectionKeys,
+  setConnectionFlag,
+  setConnectionReadonly as markConnectionReadonly
+} from "./websockets/connection-flags";
 export {
   getAgentByName,
   routeAgentRequest,
@@ -328,16 +337,6 @@ function isRPCRequest(msg: unknown): msg is RPCRequest {
 /**
  * Type guard for state update messages
  */
-function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === MessageType.CF_AGENT_STATE &&
-    "state" in msg
-  );
-}
-
 export {
   callable,
   unstable_callable,
@@ -765,71 +764,19 @@ const LEGACY_SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const DEFAULT_STATE = {} as unknown;
 
 /**
- * Internal key used to store the readonly flag in connection state.
- * Prefixed with _cf_ to avoid collision with user state keys.
- */
-const CF_READONLY_KEY = "_cf_readonly";
-
-/**
- * Internal key used to store the no-protocol flag in connection state.
- * When set, protocol messages (identity, state sync, MCP servers) are not
- * sent to this connection — neither on connect nor via broadcasts.
- */
-const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
-
-/**
  * Internal key used to store voice call state in connection state.
  * Used by the voice mixin to track whether a connection is in an active call.
  */
 const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
 
-/**
- * The set of all internal keys stored in connection state that must be
- * hidden from user code and preserved across setState calls.
- */
-const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
-  CF_READONLY_KEY,
-  CF_NO_PROTOCOL_KEY,
+// Agent's own per-connection flags ride the WebSockets capability's
+// connection-state namespace: hidden from `connection.state`, preserved
+// across user `setState`, and carried through hibernation.
+registerInternalConnectionKeys(
   CF_VOICE_IN_CALL_KEY,
   CF_SUB_AGENT_OUTER_URL_KEY,
   CF_SUB_AGENT_TAGS_KEY
-]);
-
-/** Check if a raw connection state object contains any internal keys. */
-function rawHasInternalKeys(raw: Record<string, unknown>): boolean {
-  for (const key of Object.keys(raw)) {
-    if (CF_INTERNAL_KEYS.has(key)) return true;
-  }
-  return false;
-}
-
-/** Return a copy of `raw` with all internal keys removed, or null if no user keys remain. */
-function stripInternalKeys(
-  raw: Record<string, unknown>
-): Record<string, unknown> | null {
-  const result: Record<string, unknown> = {};
-  let hasUserKeys = false;
-  for (const key of Object.keys(raw)) {
-    if (!CF_INTERNAL_KEYS.has(key)) {
-      result[key] = raw[key];
-      hasUserKeys = true;
-    }
-  }
-  return hasUserKeys ? result : null;
-}
-
-/** Return a copy containing only the internal keys present in `raw`. */
-function extractInternalFlags(
-  raw: Record<string, unknown>
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(raw)) {
-    if (CF_INTERNAL_KEYS.has(key)) {
-      result[key] = raw[key];
-    }
-  }
-  return result;
-}
+);
 
 /** Max length for error strings broadcast to clients. */
 const MAX_ERROR_STRING_LENGTH = 500;
@@ -1143,22 +1090,6 @@ export class Agent<
    * from paths that do not pass through the capability (facet bridging,
    * direct calls).
    */
-  private readonly _webSockets = new WebSockets({
-    handlers: {
-      onConnect: (connection, ctx) => this.onConnect(connection, ctx),
-      onMessage: (connection, message) => this.onMessage(connection, message),
-      onClose: (connection, code, reason, wasClean) =>
-        this.onClose(connection, code, reason, wasClean),
-      onError: (connection, error) => this.onError(connection, error)
-    },
-    // Agent answers its own rpc frames in onMessage (facet bridging,
-    // StreamingResponse) and sends identity itself under its
-    // sendIdentityOnConnect policy, so it configures neither here.
-    identity: false,
-    getConnectionTags: (connection, ctx) =>
-      this.getConnectionTags(connection, ctx)
-  });
-
   /**
    * Durable state: the `cf_agents_state` row, lazy load, validated persistence.
    * `initialState` stays on Agent (a subclass field, initialized after this
@@ -1173,6 +1104,25 @@ export class Agent<
       this.validateStateChange(nextState as TState, source),
     onChanged: (nextState, source) =>
       this._handleStateChanged(nextState as TState, source)
+  });
+
+  private readonly _webSockets = new WebSockets({
+    handlers: {
+      onConnect: (connection, ctx) => this.onConnect(connection, ctx),
+      onMessage: (connection, message) => this.onMessage(connection, message),
+      onClose: (connection, code, reason, wasClean) =>
+        this.onClose(connection, code, reason, wasClean),
+      onError: (connection, error) => this.onError(connection, error)
+    },
+    // Agent answers its own rpc frames in onMessage (facet bridging,
+    // StreamingResponse). It also drives the connect sequence itself —
+    // `sendIdentity`/`sendState` after deciding whether the connection
+    // belongs to a facet — so the capability provides the protocol but
+    // does not run it: `protocol: false`.
+    protocol: false,
+    state: this._state,
+    getConnectionTags: (connection, ctx) =>
+      this.getConnectionTags(connection, ctx)
   });
 
   /** Run user initialization after lifecycle components have started. */
@@ -1224,13 +1174,6 @@ export class Agent<
    * Used by internal flag methods (readonly, no-protocol) to read/write
    * _cf_-prefixed keys without going through the user-facing state/setState.
    */
-  private _rawStateAccessors = new WeakMap<
-    Connection,
-    {
-      getRaw: () => Record<string, unknown> | null;
-      setRaw: (state: unknown) => unknown;
-    }
-  >();
 
   /**
    * Cached persistence-hook dispatch mode, computed once in the constructor.
@@ -2138,7 +2081,7 @@ export class Agent<
       ) {
         return;
       }
-      this._ensureConnectionWrapped(connection);
+      ensureConnectionWrapped(connection);
       return runInInvocation(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
@@ -2154,31 +2097,10 @@ export class Agent<
             return this._tryCatch(() => _onMessage(connection, message));
           }
 
-          if (isStateUpdateMessage(parsed)) {
-            // Check if connection is readonly
-            if (this.isConnectionReadonly(connection)) {
-              // Send error response back to the connection
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "Connection is readonly"
-                })
-              );
-              return;
-            }
-            try {
-              this._state.set(parsed.state as TState, connection);
-            } catch (e) {
-              // validateStateChange (or another sync error) rejected the update.
-              // Log the full error server-side, send a generic message to the client.
-              console.error("[Agent] State update rejected:", e);
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "State update rejected"
-                })
-              );
-            }
+          // State frames: readonly check, validation, error replies — all
+          // the capability's. Root sockets never reach here with one (the
+          // capability consumed it); bridged facet connections do.
+          if (this._webSockets.applyStateFrame(connection, parsed)) {
             return;
           }
 
@@ -2275,7 +2197,7 @@ export class Agent<
 
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
-      this._ensureConnectionWrapped(connection);
+      ensureConnectionWrapped(connection);
       const subAgentOuterUrl = ctx.request.headers.get(
         SUB_AGENT_OUTER_URL_HEADER
       );
@@ -2342,13 +2264,7 @@ export class Agent<
                   );
                 }
               }
-              connection.send(
-                JSON.stringify({
-                  name: this.name,
-                  agent: camelCaseToKebabCase(this._ParentClass.name),
-                  type: MessageType.CF_AGENT_IDENTITY
-                })
-              );
+              this._webSockets.sendIdentity(connection);
             }
 
             const wasExcludedFromStateInitBroadcast =
@@ -2364,12 +2280,7 @@ export class Agent<
             }
 
             if (currentState !== undefined) {
-              connection.send(
-                JSON.stringify({
-                  state: currentState,
-                  type: MessageType.CF_AGENT_STATE
-                })
-              );
+              this._webSockets.sendState(connection);
             }
 
             connection.send(
@@ -2379,7 +2290,7 @@ export class Agent<
               })
             );
           } else {
-            this._setConnectionNoProtocol(connection);
+            this._webSockets.setProtocolEnabled(connection, false);
           }
 
           this._emit("connect", { connectionId: connection.id });
@@ -2658,123 +2569,12 @@ export class Agent<
   }
 
   /**
-   * Wraps connection.state and connection.setState so that internal
-   * _cf_-prefixed flags (readonly, no-protocol) are hidden from user code
-   * and cannot be accidentally overwritten.
-   *
-   * Idempotent — safe to call multiple times on the same connection.
-   * After hibernation, the _rawStateAccessors WeakMap is empty but the
-   * connection's state getter still reads from the persisted WebSocket
-   * attachment. Calling this method re-captures the raw getter so that
-   * predicate methods (isConnectionReadonly, isConnectionProtocolEnabled)
-   * work correctly post-hibernation.
-   */
-  private _ensureConnectionWrapped(connection: Connection) {
-    if (this._rawStateAccessors.has(connection)) return;
-
-    // Hibernating lifecycle connections expose attachment-backed state as a
-    // configurable accessor. Virtual facet connections use a data property,
-    // so retain both projections below.
-    const descriptor = Object.getOwnPropertyDescriptor(connection, "state");
-
-    let getRaw: () => Record<string, unknown> | null;
-    let setRaw: (state: unknown) => unknown;
-
-    if (descriptor?.get) {
-      // Accessor property — bind the original getter directly.
-      // The getter reads from the serialized WebSocket attachment, so it
-      // always returns the latest value even after setState updates it.
-      getRaw = descriptor.get.bind(connection) as () => Record<
-        string,
-        unknown
-      > | null;
-      setRaw = connection.setState.bind(connection);
-    } else {
-      // Data property — track raw state in a closure variable.
-      // Reading `connection.state` after our override would call our filtered
-      // getter (circular), so we snapshot the value here and keep it in sync.
-      let rawState = (connection.state ?? null) as Record<
-        string,
-        unknown
-      > | null;
-      getRaw = () => rawState;
-      setRaw = (state: unknown) => {
-        rawState = state as Record<string, unknown> | null;
-        return rawState;
-      };
-    }
-
-    this._rawStateAccessors.set(connection, { getRaw, setRaw });
-
-    // Override state getter to hide all internal _cf_ flags from user code
-    Object.defineProperty(connection, "state", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        const raw = getRaw();
-        if (raw != null && typeof raw === "object" && rawHasInternalKeys(raw)) {
-          return stripInternalKeys(raw);
-        }
-        return raw;
-      }
-    });
-
-    // Override setState to preserve internal flags when user sets state
-    Object.defineProperty(connection, "setState", {
-      configurable: true,
-      writable: true,
-      value(stateOrFn: unknown | ((prev: unknown) => unknown)) {
-        const raw = getRaw();
-        const flags =
-          raw != null && typeof raw === "object"
-            ? extractInternalFlags(raw as Record<string, unknown>)
-            : {};
-        const hasFlags = Object.keys(flags).length > 0;
-
-        let newUserState: unknown;
-        if (typeof stateOrFn === "function") {
-          // Pass only the user-visible state (without internal flags) to the callback
-          const userVisible = hasFlags
-            ? stripInternalKeys(raw as Record<string, unknown>)
-            : raw;
-          newUserState = (stateOrFn as (prev: unknown) => unknown)(userVisible);
-        } else {
-          newUserState = stateOrFn;
-        }
-
-        // Merge back internal flags if any were set
-        if (hasFlags) {
-          if (newUserState != null && typeof newUserState === "object") {
-            return setRaw({
-              ...(newUserState as Record<string, unknown>),
-              ...flags
-            });
-          }
-          // User set null — store just the flags
-          return setRaw(flags);
-        }
-        return setRaw(newUserState);
-      }
-    });
-  }
-
-  /**
    * Mark a connection as readonly or readwrite
    * @param connection The connection to mark
    * @param readonly Whether the connection should be readonly (default: true)
    */
   setConnectionReadonly(connection: Connection, readonly = true) {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    if (readonly) {
-      accessors.setRaw({ ...raw, [CF_READONLY_KEY]: true });
-    } else {
-      // Remove the key entirely instead of storing false — avoids dead keys
-      // accumulating in the connection attachment.
-      const { [CF_READONLY_KEY]: _, ...rest } = raw;
-      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-    }
+    markConnectionReadonly(connection, readonly);
   }
 
   /**
@@ -2786,12 +2586,7 @@ export class Agent<
    * @returns True if the connection is readonly
    */
   isConnectionReadonly(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return !!raw?.[CF_READONLY_KEY];
+    return connectionReadonly(connection);
   }
 
   /**
@@ -2807,12 +2602,7 @@ export class Agent<
    * @internal
    */
   _unsafe_getConnectionFlag(connection: Connection, key: string): unknown {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return raw?.[key];
+    return getConnectionFlag(connection, key);
   }
 
   /**
@@ -2820,8 +2610,8 @@ export class Agent<
    *
    * Write an internal `_cf_`-prefixed flag to the raw connection state,
    * bypassing the user-facing state wrapper. The key must be registered
-   * in `CF_INTERNAL_KEYS` so it is preserved across user `setState` calls
-   * and hidden from `connection.state`.
+   * with `registerInternalConnectionKeys` so it is preserved across user
+   * `setState` calls and hidden from `connection.state`.
    *
    * @internal
    */
@@ -2830,15 +2620,7 @@ export class Agent<
     key: string,
     value: unknown
   ): void {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    if (value === undefined) {
-      const { [key]: _, ...rest } = raw;
-      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-    } else {
-      accessors.setRaw({ ...raw, [key]: value });
-    }
+    setConnectionFlag(connection, key, value);
   }
 
   /**
@@ -2888,23 +2670,7 @@ export class Agent<
    * @returns True if the connection receives protocol messages
    */
   isConnectionProtocolEnabled(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return !raw?.[CF_NO_PROTOCOL_KEY];
-  }
-
-  /**
-   * Mark a connection as having protocol messages disabled.
-   * Called internally when shouldSendProtocolMessages returns false.
-   */
-  private _setConnectionNoProtocol(connection: Connection) {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    accessors.setRaw({ ...raw, [CF_NO_PROTOCOL_KEY]: true });
+    return connectionProtocolEnabled(connection);
   }
 
   /**

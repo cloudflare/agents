@@ -87,16 +87,12 @@ export interface DynamicAgentHostPort {
       tag?: string
     ): Iterable<Connection<TState>>;
   };
-  _ensureConnectionWrapped(connection: Connection): void;
   _unsafe_getConnectionFlag(connection: Connection, key: string): unknown;
   _unsafe_setConnectionFlag(
     connection: Connection,
     key: string,
     value: unknown
   ): void;
-  readonly _rawStateAccessors: {
-    get(connection: Connection): { getRaw(): unknown } | undefined;
-  };
   shouldConnectionBeReadonly(
     connection: Connection,
     context: { request: Request }
@@ -106,7 +102,6 @@ export interface DynamicAgentHostPort {
     connection: Connection,
     context: { request: Request }
   ): boolean;
-  _setConnectionNoProtocol(connection: Connection): void;
   getConnectionTags(
     connection: Connection,
     context: { request: Request }

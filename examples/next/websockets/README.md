@@ -70,8 +70,8 @@ reports that an `RpcTarget` cannot be put in a JSON frame.
   request, the shape a webhook or scheduled job takes to reach clients.
 - **One validation path.** Every write — socket frame, callable, HTTP —
   goes through `post()`, so nickname and message bounds apply everywhere.
-- **`identity: false`** turns the identity frame off for hosts that speak
-  their own protocol. `Agent` passes it.
+- **`protocol`** decides which connections get the identity and state
+  frames; `false` leaves the connect sequence to the host, as `Agent` does.
 
 This is a demo: anyone who knows a room name can join it. Put
 authentication in front of `routeAgentRequest` before deploying something

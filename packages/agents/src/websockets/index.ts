@@ -6,6 +6,11 @@
  * @experimental The WebSockets surface may change before stabilizing.
  */
 export { WebSockets } from "./websockets";
+export {
+  CF_NO_PROTOCOL_KEY,
+  CF_READONLY_KEY,
+  registerInternalConnectionKeys
+} from "./connection-flags";
 export type {
   SyncedState,
   WebSocketHandlers,

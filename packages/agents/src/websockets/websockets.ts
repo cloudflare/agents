@@ -15,6 +15,13 @@ import {
   createConnection,
   isManagedWebSocket
 } from "./connection";
+import {
+  ensureConnectionWrapped,
+  isConnectionProtocolEnabled,
+  isConnectionReadonly,
+  setConnectionProtocolEnabled,
+  setConnectionReadonly
+} from "./connection-flags";
 import { exposableMethods, type CallableInvoker } from "./callables-target";
 import type {
   SyncedState,
@@ -72,6 +79,15 @@ function isStateFrame(value: unknown): value is StateFrame {
   return frame.type === MessageType.CF_AGENT_STATE && "state" in frame;
 }
 
+/** Parse a text frame; anything that is not JSON is `undefined`. */
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 function isRpcRequest(value: unknown): value is RpcRequest {
   if (typeof value !== "object" || value === null) return false;
   const frame = value as Record<string, unknown>;
@@ -122,8 +138,10 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  * `RpcTarget` result becomes a live stub and calls pipeline. `call()`
  * and `stub` work against a plain Durable Object exactly as against an
  * `Agent`. Pass a `State` capability as `state` and the hook's
- * `state`/`setState` work too: the current value is pushed on connect,
- * client updates are validated and applied, and changes broadcast.
+ * `state`/`setState` work too: the current value is pushed on connect
+ * and client updates are validated and applied; the state owner
+ * broadcasts changes with `broadcastState()`. Per-connection readonly
+ * and no-protocol flags live here as well, for every host.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -133,8 +151,16 @@ export class WebSockets extends LifecycleCapability {
 
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
-  readonly #identity: boolean;
+  readonly #protocol: WebSocketsOptions["protocol"];
+  readonly #readonly: WebSocketsOptions["readonly"];
   readonly #state: SyncedState | undefined;
+  /**
+   * Connections inside their connect sequence, before the state push.
+   * `broadcastState()` skips them: reading state for the push can seed the
+   * initial value, whose change broadcast would otherwise reach a
+   * connection that is about to receive the same value directly.
+   */
+  readonly #connecting = new Set<Connection>();
   readonly #callables: ReadonlyMap<string, CallableInvoker>;
   readonly #sessions = new Map<string, CapnWebSession>();
   #manager: ConnectionManager | undefined;
@@ -143,7 +169,8 @@ export class WebSockets extends LifecycleCapability {
     super("websockets");
     this.#handlers = options.handlers;
     this.#getConnectionTags = options.getConnectionTags;
-    this.#identity = options.identity ?? true;
+    this.#protocol = options.protocol ?? true;
+    this.#readonly = options.readonly;
     this.#state = options.state;
     this.#callables = options.callables
       ? exposableMethods(options.callables)
@@ -249,23 +276,26 @@ export class WebSockets extends LifecycleCapability {
     connection: Connection,
     ctx: ConnectionContext
   ): Promise<void> {
-    if (this.#identity) {
-      this.#sendFrame(connection, {
-        type: MessageType.CF_AGENT_IDENTITY,
-        name: this.lifecycle.name,
-        agent: camelCaseToKebabCase(this.lifecycle.className)
-      });
+    ensureConnectionWrapped(connection);
+    // Flags first, so they are set before the client can respond.
+    if (this.#readonly?.(connection, ctx)) {
+      setConnectionReadonly(connection, true);
     }
-    if (this.#state) {
-      // After identity, so a client that resolves `ready` on identity has
-      // the state by the time it renders. Absent state sends nothing; the
-      // client keeps whatever default it started with.
-      const current = this.#state.get();
-      if (current !== undefined) {
-        this.#sendFrame(connection, {
-          type: MessageType.CF_AGENT_STATE,
-          state: current
-        });
+    if (this.#protocol !== false) {
+      const enabled =
+        typeof this.#protocol === "function"
+          ? this.#protocol(connection, ctx)
+          : true;
+      if (enabled) {
+        this.#connecting.add(connection);
+        try {
+          this.sendIdentity(connection);
+          this.sendState(connection);
+        } finally {
+          this.#connecting.delete(connection);
+        }
+      } else {
+        setConnectionProtocolEnabled(connection, false);
       }
     }
     await this.lifecycle.runInHostContext(
@@ -278,7 +308,14 @@ export class WebSockets extends LifecycleCapability {
     connection: Connection,
     message: WebSocketMessage
   ): Promise<void> {
-    if (this.#state && this.#applyStateFrame(connection, message)) return;
+    if (
+      this.#state &&
+      this.#protocol !== false &&
+      typeof message === "string" &&
+      this.applyStateFrame(connection, parseJson(message))
+    ) {
+      return;
+    }
     if (
       this.#callables.size > 0 &&
       (await this.#answerRpc(connection, message))
@@ -379,62 +416,111 @@ export class WebSockets extends LifecycleCapability {
     return response;
   }
 
-  // ── State ──────────────────────────────────────────────────────────────
+  // ── Protocol frames ────────────────────────────────────────────────────
+  //
+  // The Agent protocol a client (`useAgent`, `AgentClient`) speaks, owned
+  // here for every host. With `protocol: true` the capability drives the
+  // connect sequence and consumes state frames itself; with
+  // `protocol: false` the host calls these at the moments it chooses.
+
+  /** Send the identity frame, unless the connection is no-protocol. */
+  sendIdentity(connection: Connection): void {
+    if (!isConnectionProtocolEnabled(connection)) return;
+    this.#sendFrame(connection, {
+      type: MessageType.CF_AGENT_IDENTITY,
+      name: this.lifecycle.name,
+      agent: camelCaseToKebabCase(this.lifecycle.className)
+    });
+  }
 
   /**
-   * Apply a client's `cf_agent_state` frame to the State capability and
-   * broadcast the result to the other connections. The host's own
-   * `validateStateChange` decides whether the change is allowed; a throw
-   * answers the sender with `cf_agent_state_error` and changes nothing.
-   *
-   * @returns Whether the message was a state frame.
+   * Send the current state to one connection, unless nothing is stored
+   * or the connection is no-protocol. Reading the state may seed the
+   * initial value; see `#connecting`.
    */
-  #applyStateFrame(connection: Connection, raw: WebSocketMessage): boolean {
-    if (typeof raw !== "string") return false;
-    let frame: unknown;
-    try {
-      frame = JSON.parse(raw);
-    } catch {
-      return false;
-    }
-    if (!isStateFrame(frame)) return false;
-    try {
-      // `set()` runs the host's validation and persists; the source is this
-      // connection, so the broadcast below excludes it — it already has
-      // the value it sent.
-      // `never` on the port keeps any `State<T>` assignable; the value
-      // came off the wire, so the host's validator is what checks it.
-      this.#state?.set(frame.state as never, connection);
-    } catch (error) {
+  sendState(connection: Connection): void {
+    if (!this.#state || !isConnectionProtocolEnabled(connection)) return;
+    const current = this.#state.get();
+    if (current === undefined) return;
+    this.#sendFrame(connection, {
+      type: MessageType.CF_AGENT_STATE,
+      state: current
+    });
+  }
+
+  /**
+   * Apply a parsed `cf_agent_state` frame from a client. A readonly
+   * connection is refused; a change the host's validator rejects is
+   * logged in full server-side and answered with a generic
+   * `cf_agent_state_error`. Broadcasting the accepted change is the state
+   * owner's call, through its `onChanged` hook.
+   *
+   * @returns Whether the frame was a state frame (handled either way).
+   */
+  applyStateFrame(connection: Connection, frame: unknown): boolean {
+    if (!this.#state || !isStateFrame(frame)) return false;
+    if (isConnectionReadonly(connection)) {
       this.#sendFrame(connection, {
         type: MessageType.CF_AGENT_STATE_ERROR,
-        error: error instanceof Error ? error.message : String(error)
+        error: "Connection is readonly"
       });
       return true;
     }
-    this.broadcastState(connection);
+    try {
+      // `never` on the port keeps any `State<T>` assignable; the value
+      // came off the wire, so the host's validator is what checks it.
+      this.#state.set(frame.state as never, connection);
+    } catch (error) {
+      console.error("[WebSockets] State update rejected:", error);
+      this.#sendFrame(connection, {
+        type: MessageType.CF_AGENT_STATE_ERROR,
+        error: "State update rejected"
+      });
+    }
     return true;
   }
 
   /**
-   * Push the current state to every connection, optionally excluding the
-   * one a change came from. Hosts call this after their own `setState`
-   * when they want connections to see it; a change arriving from a client
-   * is broadcast automatically.
+   * Push the current state to every protocol-enabled connection except
+   * the one a change came from, which already has the value it sent.
+   * Wire a `State`'s `onChanged` to this.
    */
-  broadcastState(except?: Connection): void {
+  broadcastState(except?: Connection | "server"): void {
     if (!this.#state) return;
     const current = this.#state.get();
     if (current === undefined) return;
     const frame = { type: MessageType.CF_AGENT_STATE, state: current };
     for (const connection of this.getConnections()) {
       // Object identity, not id: `_pk` is client-supplied, so two live
-      // sockets can share an id and excluding by id would starve the
-      // other one. `createConnection` returns the same wrapper for a
-      // socket, so the sender compares equal here.
+      // sockets can share an id, and excluding by id would starve the
+      // other one. `createConnection` returns one wrapper per socket.
       if (connection === except) continue;
+      if (this.#connecting.has(connection)) continue;
+      if (!isConnectionProtocolEnabled(connection)) continue;
       this.#sendFrame(connection, frame);
     }
+  }
+
+  // ── Connection flags ───────────────────────────────────────────────────
+
+  /** Whether the connection may update host state over the wire. */
+  isReadonly(connection: Connection): boolean {
+    return isConnectionReadonly(connection);
+  }
+
+  /** Mark a connection readonly, or writable again. */
+  setReadonly(connection: Connection, readonly = true): void {
+    setConnectionReadonly(connection, readonly);
+  }
+
+  /** Whether protocol text frames reach the connection. */
+  isProtocolEnabled(connection: Connection): boolean {
+    return isConnectionProtocolEnabled(connection);
+  }
+
+  /** Enable or suppress protocol text frames for a connection. */
+  setProtocolEnabled(connection: Connection, enabled: boolean): void {
+    setConnectionProtocolEnabled(connection, enabled);
   }
 
   /**
