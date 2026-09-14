@@ -27,6 +27,19 @@ const ATTACHMENT_URL_PREFIX = "attachment:sha256:";
 /** Hostile or deeply nested tool output stops here rather than recursing forever. */
 const MAX_WALK_DEPTH = 8;
 
+/**
+ * Reference collection keeps going past the rewrite cap, to its own far looser
+ * limit.
+ *
+ * The two caps answer different questions. Whether to REWRITE a node is a
+ * judgement call, and stopping early only means a payload stays inline. Whether
+ * a node holds a POINTER is not: missing one collects bytes the stored row
+ * still names, which is unrecoverable. So extraction stops rewriting at
+ * `MAX_WALK_DEPTH` but keeps looking for pointers, and this cap exists only so
+ * that a cyclic input cannot spin forever.
+ */
+const MAX_REFERENCE_DEPTH = 64;
+
 /** Build the pointer for a content address. */
 function attachmentUrl(hash: string): string {
   return `${ATTACHMENT_URL_PREFIX}${hash}`;
@@ -143,6 +156,15 @@ export interface ExtractionResult {
   message: SessionMessage;
   /** Payloads to write, deduplicated by address, in encounter order. */
   attachments: PendingAttachment[];
+  /**
+   * Every address the stored message points at: the payloads extracted on
+   * this pass plus pointers it already carried, at any depth. A message can be
+   * written back with its pointers in place — a read that left one unresolved,
+   * or a host that patches a stored form — and the references that give those
+   * payloads their lifetime must follow what the row SAYS, not what this pass
+   * happened to extract.
+   */
+  references: string[];
 }
 
 /**
@@ -154,9 +176,39 @@ export interface ExtractionResult {
 export function extractAttachments(message: SessionMessage): ExtractionResult {
   const attachments: PendingAttachment[] = [];
   const seen = new Set<string>();
+  const references = new Set<string>();
+
+  /**
+   * Record every pointer under a subtree the rewrite walk will not enter.
+   * Purely additive: nothing here changes the message.
+   */
+  const collectReferences = (value: unknown, depth: number): void => {
+    if (
+      depth > MAX_REFERENCE_DEPTH ||
+      value === null ||
+      typeof value !== "object"
+    ) {
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) collectReferences(entry, depth + 1);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    for (const field of [record.url, record.data]) {
+      const pointed = parseAttachmentUrl(field);
+      if (pointed) references.add(pointed);
+    }
+    for (const entry of Object.values(record)) {
+      collectReferences(entry, depth + 1);
+    }
+  };
 
   const walk = (value: unknown, depth: number): unknown => {
-    if (depth > MAX_WALK_DEPTH || value === null || typeof value !== "object") {
+    if (value === null || typeof value !== "object") return value;
+    if (depth > MAX_WALK_DEPTH) {
+      // Too deep to rewrite, never too deep to reference.
+      collectReferences(value, depth);
       return value;
     }
 
@@ -172,10 +224,24 @@ export function extractAttachments(message: SessionMessage): ExtractionResult {
 
     const record = value as Record<string, unknown>;
     const media = inlineMediaOf(record);
+
+    // Whatever this record is itself, its other fields can hold media of their
+    // own — a thumbnail beside the image it previews. Neither replacing a
+    // payload nor recording a pointer ends the walk, or that sibling media
+    // would stay in the row the offload policy exists to keep it out of.
+    let changed = false;
+    const next: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(record)) {
+      const walked = walk(entry, depth + 1);
+      if (walked !== entry) changed = true;
+      next[key] = walked;
+    }
+
     if (media) {
       // Hashing is pure CPU, so the address is known here and the write
       // transaction never has to hash anything.
       const hash = hashPayload(media.bytes);
+      references.add(hash);
       if (!seen.has(hash)) {
         seen.add(hash);
         attachments.push({
@@ -186,27 +252,27 @@ export function extractAttachments(message: SessionMessage): ExtractionResult {
       // The pointer replaces the payload IN PLACE, in whichever field held it.
       // Keeping the field means a resolve restores the original shape exactly,
       // rather than rewriting a `data` entry into a `url` one.
-      return {
-        ...record,
-        mediaType: media.mediaType,
-        [media.field]: attachmentUrl(hash)
-      };
+      next.mediaType = media.mediaType;
+      next[media.field] = attachmentUrl(hash);
+      return next;
     }
 
-    let changed = false;
-    const next: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(record)) {
-      const walked = walk(entry, depth + 1);
-      if (walked !== entry) changed = true;
-      next[key] = walked;
+    // A pointer left by an earlier extraction is not media to store, but it
+    // is a reference to keep.
+    for (const field of [record.url, record.data]) {
+      const pointed = parseAttachmentUrl(field);
+      if (pointed) references.add(pointed);
     }
     return changed ? next : value;
   };
 
-  if (message.parts.length === 0) return { message, attachments };
+  if (message.parts.length === 0) {
+    return { message, attachments, references: [] };
+  }
   const parts = walk(message.parts, 0) as SessionMessagePart[];
-  if (parts === message.parts) return { message, attachments };
-  return { message: { ...message, parts }, attachments };
+  const result = { attachments, references: [...references] };
+  if (parts === message.parts) return { message, ...result };
+  return { message: { ...message, parts }, ...result };
 }
 
 /**
@@ -234,27 +300,34 @@ export function resolveAttachments(
       return changed ? next : value;
     }
 
+    // A pointer restores in place, and the record's other fields are still
+    // walked: extraction offloads media nested beside a pointer, so a read that
+    // stopped at the pointer would leave that sibling unresolved forever.
     const record = value as Record<string, unknown>;
-    const urlHash = parseAttachmentUrl(record.url);
-    if (urlHash) {
-      const loaded = load(urlHash);
-      if (!loaded) return value;
-      return { ...record, url: dataUrl(loaded.mediaType, loaded.bytes) };
-    }
-    const dataHash = parseAttachmentUrl(record.data);
-    if (dataHash) {
-      const loaded = load(dataHash);
-      if (!loaded) return value;
-      // A `data` field held bare base64, not a data URL, so it is restored bare.
-      return { ...record, data: encodeBase64(loaded.bytes) };
-    }
-
     let changed = false;
     const next: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(record)) {
       const walked = walk(entry, depth + 1);
       if (walked !== entry) changed = true;
       next[key] = walked;
+    }
+
+    const urlHash = parseAttachmentUrl(record.url);
+    if (urlHash) {
+      const loaded = load(urlHash);
+      if (loaded) {
+        next.url = dataUrl(loaded.mediaType, loaded.bytes);
+        changed = true;
+      }
+    }
+    const dataHash = parseAttachmentUrl(record.data);
+    if (dataHash) {
+      const loaded = load(dataHash);
+      if (loaded) {
+        // A `data` field held bare base64, not a data URL, so it is restored bare.
+        next.data = encodeBase64(loaded.bytes);
+        changed = true;
+      }
     }
     return changed ? next : value;
   };
