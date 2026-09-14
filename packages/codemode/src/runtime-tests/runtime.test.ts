@@ -33,6 +33,11 @@ interface Host {
   approve(executionId: string): Promise<ProxyToolOutput>;
   approveWithoutItems(executionId: string): Promise<ProxyToolOutput>;
   runSnippetWithoutItems(snippet: string): Promise<ProxyToolOutput>;
+  resolve(
+    executionId: string,
+    seq: number,
+    result: unknown
+  ): Promise<ProxyToolOutput>;
   expirePaused(maxAgeMs?: number): Promise<string[]>;
   reject(seq: number, executionId: string): Promise<boolean>;
   rollback(executionId: string): Promise<void>;
@@ -609,6 +614,127 @@ describe("codemode durable runtime (e2e)", () => {
       { executionId: out.executionId, status: "completed" },
       { executionId: out.executionId, status: "rolled_back" }
     ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Client-resolved tools (resolution: "client") — pause until resolve()
+  // -------------------------------------------------------------------------
+
+  it("pauses on a client-resolved call and completes once resolved", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => {
+        const answer = await items.ask_user({ question: "color?" });
+        return "answer:" + answer;
+      }`
+    )) as ProxyToolOutput;
+
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+    expect(first.pending).toHaveLength(1);
+    expect(first.pending[0]).toMatchObject({
+      connector: "items",
+      method: "ask_user",
+      args: { question: "color?" },
+      resolution: "client"
+    });
+
+    const resolved = (await h.resolve(
+      first.executionId,
+      first.pending[0].seq,
+      "blue"
+    )) as ProxyToolOutput;
+    expect(resolved.status).toBe("completed");
+    if (resolved.status === "completed") {
+      expect(resolved.result).toBe("answer:blue");
+    }
+  });
+
+  it("approve() does not execute a client-resolved call server-side", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.ask_user({ question: "sure?" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    // Approving a client-resolved action must NOT flip it to executing —
+    // its execute (which would throw) never runs; the run pauses again with
+    // the same pending action awaiting resolve().
+    const approved = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(approved.status).toBe("paused");
+    if (approved.status !== "paused") return;
+    expect(approved.pending).toHaveLength(1);
+    expect(approved.pending[0]).toMatchObject({
+      seq: first.pending[0].seq,
+      method: "ask_user",
+      resolution: "client"
+    });
+
+    // The run is still live — resolving it now completes normally.
+    const resolved = (await h.resolve(
+      first.executionId,
+      first.pending[0].seq,
+      "yes"
+    )) as ProxyToolOutput;
+    expect(resolved.status).toBe("completed");
+    if (resolved.status === "completed") expect(resolved.result).toBe("yes");
+  });
+
+  it("resolve() on a non-pending seq returns an error outcome", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.ask_user({ question: "q" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    // No such seq — the run stays paused and resumable.
+    const stale = (await h.resolve(
+      first.executionId,
+      999,
+      "nope"
+    )) as ProxyToolOutput;
+    expect(stale.status).toBe("error");
+    if (stale.status === "error") {
+      expect(stale.error).toMatch(/no longer pending/);
+    }
+
+    const resolved = (await h.resolve(
+      first.executionId,
+      first.pending[0].seq,
+      "ok"
+    )) as ProxyToolOutput;
+    expect(resolved.status).toBe("completed");
+
+    // A second resolve of the already-applied seq is also stale.
+    const dupe = (await h.resolve(
+      first.executionId,
+      first.pending[0].seq,
+      "again"
+    )) as ProxyToolOutput;
+    expect(dupe.status).toBe("error");
+  });
+
+  it("detects replay divergence on a client-resolved call's args", async () => {
+    const h = host();
+    // The args are nondeterministic and not wrapped in a step — the resolved
+    // value must not be served against different args on replay.
+    const first = (await h.run(
+      `async () => await items.ask_user({ question: "q" + Math.random() })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    const resolved = (await h.resolve(
+      first.executionId,
+      first.pending[0].seq,
+      "answer"
+    )) as ProxyToolOutput;
+    expect(resolved.status).toBe("error");
+    if (resolved.status === "error") {
+      expect(resolved.error).toMatch(/divergence/i);
+    }
   });
 
   // -------------------------------------------------------------------------
