@@ -47,6 +47,24 @@ describe("Sessions storage-ops benchmark", () => {
     });
   });
 
+  it("decides a chunked update from the row's digest, never its continuations", async () => {
+    const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionBenchObject) => {
+      // A 3.2 MiB body spans the 1.5 MiB row budget three times: one message
+      // row plus two continuations.
+      const bench = await instance.benchChunkedUpdates(3.2 * 1024 * 1024);
+      expect(bench.chunks).toBe(2);
+
+      // An identical re-send is one key-side probe of the message row: its
+      // stamped digest settles it, so neither the payload nor either
+      // continuation is read, and nothing is written.
+      expect(bench.noop).toEqual({ rowsRead: 1, rowsWritten: 0 });
+      // A changed body pays that same probe plus the UPDATE locating its
+      // row, then rewrites the row and its two continuations.
+      expect(bench.changed).toEqual({ rowsRead: 2, rowsWritten: 3 });
+    });
+  });
+
   it("adds an FTS delete and insert per changed row once the index exists", async () => {
     const stub = env.SessionSearchHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(

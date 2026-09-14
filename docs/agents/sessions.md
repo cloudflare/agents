@@ -95,6 +95,10 @@ await session.clearMessages();
 
 `updateMessage()` returns the stored form of the message, or `null` when the ID is not in this session. It does not throw for an absent row. An unchanged message writes nothing and dispatches no change event.
 
+That decision is byte-exact and costs one row read. Every write stamps a digest of the stored form on the message row, so an update compares digests on the key-side probe it was making anyway: the stored payload is never read back, and neither are the continuation rows of a large message. There is no option to turn this off and nothing for a caller to assert — deciding whether a row changed is Sessions' own job.
+
+Rows written before the digest existed carry none. The first update of such a row falls back to reassembling the stored content once and stamps a digest, so the fallback is paid at most once per row and no backfill pass ever runs.
+
 Deleting a message splices its children to its parent. Removing a message in the middle of a chain does not make older history unreachable.
 
 ### Row budget
