@@ -154,9 +154,9 @@ export class ChatAbortedExhaustAgent extends ExhaustionBaseAgent {
 /**
  * Exhausts recovery via `work_budget_exceeded`: `maxRecoveryWork: 0` seals the
  * incident as soon as the turn produces ANY recovery work. Unlike the base
- * agent, this one emits enough chunks to bump the durable progress/work meter
- * (a `text-start` past the flush threshold) BEFORE hanging, so each detection
- * sees work accrue beyond the baseline.
+ * agent, this one emits enough chunks to land one durable segment in the
+ * stream log BEFORE hanging, so each detection sees work accrue beyond the
+ * baseline.
  */
 export class ChatWorkBudgetExhaustAgent extends ExhaustionBaseAgent {
   override chatRecovery: ChatRecoveryConfig = {
@@ -170,15 +170,19 @@ export class ChatWorkBudgetExhaustAgent extends ExhaustionBaseAgent {
     _onFinish: unknown,
     _options?: OnChatMessageOptions
   ): Promise<Response> {
-    // Emit a single `text-start` then hang. `text-start` bumps the durable
-    // recovery work/progress meter at production time (independent of flush),
-    // so each interruption banks one unit of work. Staying below the 10-chunk
-    // flush threshold keeps the recoverable partial empty (the retry path),
-    // which avoids the continuation suppression that would swallow a re-emitted
-    // text-start on the continue path.
+    // The work meter is derived from the stream log: a chunk counts once its
+    // packed segment (ten chunks) is flushed, so a lone `text-start` banks
+    // nothing. Emit exactly one segment's worth of chunks — enough to flush —
+    // then hang, so each attempt banks one unit of work and the second
+    // interruption exceeds a zero budget.
     const chunks: Array<{ type: string; [k: string]: unknown }> = [
       { type: "start", messageId: `asst-${Date.now()}` },
-      { type: "text-start" }
+      { type: "text-start", id: "t1" },
+      ...Array.from({ length: 8 }, (_, i) => ({
+        type: "text-delta",
+        id: "t1",
+        delta: `work-${i} `
+      }))
     ];
     const encoder = new TextEncoder();
     let index = 0;

@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/voice",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Compatibility package for the Agents SDK voice exports",
   "repository": {
     "directory": "packages/voice",

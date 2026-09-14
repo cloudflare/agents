@@ -143,7 +143,7 @@ export class TestRetryAgent extends Agent {
     const id = await this.queue("testQueueNoop", "test", {
       retry: retryOpts
     });
-    const item = this.getQueue(id);
+    const item = await this.getQueue(id);
     return item?.retry;
   }
 
@@ -167,28 +167,27 @@ export class TestRetryAgent extends Agent {
 
   // ── getQueues with retry options ──────────────────────────────────
 
-  enqueueMultipleAndGetRetryOptions(): (RetryOptions | undefined)[] {
-    // Use synchronous queue calls (no await) so items are inserted into
-    // SQLite before the background _flushQueue can dequeue any of them.
-    // Each queue() call is async but the SQL INSERT is synchronous —
-    // awaiting would yield to the microtask queue and let the background
-    // flush consume items before we can read them.
-    void this.queue(
+  async enqueueMultipleAndGetRetryOptions(): Promise<
+    (RetryOptions | undefined)[]
+  > {
+    // Items run from the alarm event loop, never inside this invocation, so
+    // every pushed item is still queued when read back here.
+    await this.queue(
       "testQueueNoop",
       { group: "a" },
       {
         retry: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 1000 }
       }
     );
-    void this.queue(
+    await this.queue(
       "testQueueNoop",
       { group: "a" },
       {
         retry: { maxAttempts: 7, baseDelayMs: 200, maxDelayMs: 5000 }
       }
     );
-    void this.queue("testQueueNoop", { group: "b" });
-    const items = this.getQueues("group", "a");
+    await this.queue("testQueueNoop", { group: "b" });
+    const items = await this.getQueues("group", "a");
     return items.map((item) => item.retry);
   }
 

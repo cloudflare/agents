@@ -1,5 +1,7 @@
-import { exports } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
+import { getAgentByName } from "../index";
 import { MessageType } from "../types";
 
 // ── Message types ─────────────────────────────────────────────────────
@@ -186,8 +188,10 @@ describe("Protocol Messages", () => {
       const room = crypto.randomUUID();
       const { ws: existing } = await connectProtocol(room);
 
-      const resetMsg = await sendRpc(existing, "resetStateForLazyInitTest");
+      const resetMsg = await sendRpc(existing, "deleteStateForLazyInitTest");
       expect(resetMsg.success).toBe(true);
+      const agent = await getAgentByName(env.TestProtocolMessagesAgent, room);
+      await evictDurableObject(agent);
 
       const existingStatePromise = waitForMessage<StateMessage>(
         existing,

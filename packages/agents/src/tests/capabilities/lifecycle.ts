@@ -11,6 +11,7 @@ import {
   type LifecycleJobContext,
   type LifecycleJobPushOptions
 } from "../../lifecycle";
+import { State } from "../../state";
 import { WebSockets } from "../../websockets";
 
 type StartupProps = { label: string };
@@ -242,6 +243,16 @@ class PlainHostCallables extends RpcTarget {
     return this.#greeting;
   }
 
+  /** An RpcTarget result: a live stub on Cap'n Web, unserializable as JSON. */
+  counter(): Counter {
+    return new Counter();
+  }
+
+  /** A value JSON cannot carry; the JSON wire must still settle the call. */
+  bigint(): { value: bigint } {
+    return { value: 1n };
+  }
+
   streamNumbers(): ReadableStream<number> {
     return new ReadableStream<number>({
       start(controller) {
@@ -251,6 +262,20 @@ class PlainHostCallables extends RpcTarget {
         controller.close();
       }
     });
+  }
+}
+
+/** Returned by reference over Cap'n Web: the caller gets a live stub. */
+class Counter extends RpcTarget {
+  #value = 0;
+
+  increment(by = 1): number {
+    this.#value += by;
+    return this.#value;
+  }
+
+  value(): number {
+    return this.#value;
   }
 }
 
@@ -280,6 +305,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       onClose: () => {
         this.#webSocketContexts.push(currentWebSocketContext("close"));
       }
+    },
+    // `?tags=N` asks for N user tags, to probe the shared tag policy.
+    getConnectionTags: (_connection, { request }) => {
+      const count = Number(new URL(request.url).searchParams.get("tags") ?? 0);
+      return Array.from({ length: count }, (_, i) => `t${i}`);
     },
     callables: new PlainHostCallables()
   });
@@ -319,6 +349,31 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
         this.#events.push("dispose:second");
       }
     });
+
+  /** Open connections on either wire, for transport tests. */
+  connectionCount(): number {
+    return [...this.#webSockets.getConnections()].length;
+  }
+
+  /** Tags of one connection, for transport tests. */
+  connectionTags(id: string): readonly string[] | undefined {
+    return this.#webSockets.getConnection(id)?.tags;
+  }
+
+  /**
+   * Close one connection from the host side. Returns the error message when
+   * `close()` throws (reserved code, oversize reason), else null.
+   */
+  closeConnection(id: string, code: number, reason: string): string | null {
+    const connection = this.#webSockets.getConnection(id);
+    if (!connection) return "no such connection";
+    try {
+      connection.close(code, reason);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
 
   onStart(props?: StartupProps): void {
     this.#hostContexts.push(currentLifecycleContext("start"));
@@ -635,5 +690,74 @@ export class RetryableStartObject extends DurableObject<Cloudflare.Env> {
 
   getHostStarts(): number {
     return this.hostStarts;
+  }
+}
+
+/**
+ * A plain Durable Object composed with `State` and `WebSockets`, wired so
+ * the capability syncs state over connections. Used to prove `useAgent`'s
+ * state surface works against a non-Agent host.
+ */
+export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
+  readonly #state: State<{ count: number }> = new State<{ count: number }>({
+    initialState: { count: 0 },
+    validateStateChange: (next, source) => {
+      if (next.count < 0) throw new Error("count must not be negative");
+      // The ambient context names the connection the change came from,
+      // exactly as an Agent's validateStateChange sees it.
+      const ambient = getCurrentAgent().connection;
+      if (source !== "server" && ambient?.id !== source.id) {
+        throw new Error(
+          "validator ran outside the sending connection's context"
+        );
+      }
+    },
+    // The state owner decides who hears about a change: everyone but the
+    // connection it came from.
+    onChanged: (_next, source): void => {
+      this.#webSockets.broadcastState(source);
+    }
+  });
+
+  readonly #webSockets: WebSockets = new WebSockets({
+    state: this.#state,
+    // `?readonly=1` connections may not write; `?silent=1` connections get
+    // no protocol frames at all.
+    readonly: (_connection, { request }) =>
+      new URL(request.url).searchParams.has("readonly"),
+    protocol: (_connection, { request }) =>
+      !new URL(request.url).searchParams.has("silent"),
+    handlers: {
+      onMessage: (connection, message) => {
+        connection.send(`echo:${String(message)}`);
+      }
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.#state)
+    .use(this.#webSockets);
+
+  /** Host-side change; onChanged broadcasts it. */
+  async setCount(count: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#state.set({ count });
+  }
+
+  async isReadonly(id: string): Promise<boolean | undefined> {
+    await this.lifecycle.start();
+    const connection = this.#webSockets.getConnection(id);
+    return connection ? this.#webSockets.isReadonly(connection) : undefined;
+  }
+
+  async setReadonly(id: string, readonly: boolean): Promise<void> {
+    await this.lifecycle.start();
+    const connection = this.#webSockets.getConnection(id);
+    if (connection) this.#webSockets.setReadonly(connection, readonly);
+  }
+
+  async getCount(): Promise<number | undefined> {
+    await this.lifecycle.start();
+    return this.#state.get()?.count;
   }
 }
