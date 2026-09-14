@@ -559,6 +559,74 @@ exit 9`)) as {
     expect(removed.error).toContain("File not found");
   });
 
+  it("persists writes inside workspace directories under sandbox roots", async () => {
+    const agent = await freshAgent("bash-sandbox-root-writes");
+    await agent.seed([
+      { path: "/tmp/cache/data.txt", content: "cached\n" },
+      { path: "/usr/project/notes.txt", content: "notes\n" }
+    ]);
+
+    // A workspace directory that happens to live under a sandbox root owns
+    // everything the script writes inside it: creates, subdirectories and
+    // renames all have to survive the sync.
+    const result = (await agent.toolBash(`echo fresh > /tmp/cache/new.txt
+mkdir -p /tmp/cache/sub
+echo deep > /tmp/cache/sub/deep.txt
+mv /tmp/cache/data.txt /tmp/cache/renamed.txt
+echo scratch > /tmp/loose.txt
+echo more > /usr/project/more.txt
+mv /usr/project/notes.txt /usr/project/renamed.txt`)) as {
+      exitCode: number;
+      changedFiles: {
+        created: string[];
+        deleted: string[];
+        directoriesCreated: string[];
+      };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).toContain("/tmp/cache/new.txt");
+    expect(result.changedFiles.created).toContain("/tmp/cache/sub/deep.txt");
+    expect(result.changedFiles.created).toContain("/tmp/cache/renamed.txt");
+    expect(result.changedFiles.created).toContain("/usr/project/more.txt");
+    expect(result.changedFiles.created).toContain("/usr/project/renamed.txt");
+    expect(result.changedFiles.directoriesCreated).toContain("/tmp/cache/sub");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+    expect(result.changedFiles.deleted).toContain("/usr/project/notes.txt");
+    // Scratch written directly under a sandbox root is still the shell's own.
+    expect(result.changedFiles.created).not.toContain("/tmp/loose.txt");
+
+    const renamed = (await agent.toolRead("/tmp/cache/renamed.txt")) as {
+      content: string;
+    };
+    expect(renamed.content).toContain("cached");
+    const created = (await agent.toolRead("/tmp/cache/new.txt")) as {
+      content: string;
+    };
+    expect(created.content).toContain("fresh");
+    const deep = (await agent.toolRead("/tmp/cache/sub/deep.txt")) as {
+      content: string;
+    };
+    expect(deep.content).toContain("deep");
+    const usrRenamed = (await agent.toolRead("/usr/project/renamed.txt")) as {
+      content: string;
+    };
+    expect(usrRenamed.content).toContain("notes");
+    const usrCreated = (await agent.toolRead("/usr/project/more.txt")) as {
+      content: string;
+    };
+    expect(usrCreated.content).toContain("more");
+
+    const scratch = (await agent.toolRead("/tmp/loose.txt")) as {
+      error: string;
+    };
+    expect(scratch.error).toContain("File not found");
+    const gone = (await agent.toolRead("/tmp/cache/data.txt")) as {
+      error: string;
+    };
+    expect(gone.error).toContain("File not found");
+  });
+
   it("persists empty directory creates and deletes", async () => {
     const agent = await freshAgent("bash-empty-dirs");
     await agent.seedDir("/remove-empty");

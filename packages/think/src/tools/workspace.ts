@@ -1155,6 +1155,9 @@ const BASH_READDIR_PAGE_SIZE = 1_000;
 // never be persisted to the workspace — only pre-existing workspace files
 // under these roots keep syncing.
 const BASH_EXCLUDED_SYNC_ROOTS = ["/bin", "/usr", "/dev", "/proc", "/sys"];
+// The sandbox roots themselves: the shell always materializes these, so their
+// presence in the final tree says nothing about what the script did.
+const BASH_SANDBOX_ROOTS = ["/tmp", ...BASH_EXCLUDED_SYNC_ROOTS];
 
 type BashToolInput = {
   script: string;
@@ -1520,16 +1523,48 @@ async function writeWorkspaceBytes(
 }
 
 function isBashSandboxRoot(path: string): boolean {
-  return path === "/tmp" || BASH_EXCLUDED_SYNC_ROOTS.includes(path);
+  return BASH_SANDBOX_ROOTS.includes(path);
+}
+
+function isUnderBashSandboxRoot(path: string): boolean {
+  return BASH_SANDBOX_ROOTS.some(
+    (root) => path === root || path.startsWith(`${root}/`)
+  );
+}
+
+/**
+ * Whether the path descends from a workspace directory the snapshot recorded.
+ *
+ * The sandbox roots are deliberately not ancestors for this purpose: `/tmp`
+ * exists in every shell, so "lives under /tmp" proves nothing about ownership.
+ * A directory the workspace itself held below a root — `/tmp/cache` — does,
+ * and everything the script writes inside it belongs to the workspace too.
+ */
+function hasInitialDirectoryAncestor(
+  path: string,
+  initialDirectories: Set<string>
+): boolean {
+  let current = parentDir(path);
+  while (current !== "/") {
+    if (!isBashSandboxRoot(current) && initialDirectories.has(current)) {
+      return true;
+    }
+    const next = parentDir(current);
+    if (next === current) break;
+    current = next;
+  }
+  return false;
 }
 
 /**
  * Whether a path in the shell's final tree belongs to the workspace.
  *
  * Anything the workspace already held syncs both ways, including files and
- * directories that happen to live under a sandbox root such as `/tmp`. Paths
- * the script created under a sandbox root are the shell's own scratch and
- * builtins and never persist.
+ * directories that happen to live under a sandbox root such as `/tmp`, and so
+ * does anything the script wrote *inside* a workspace-owned directory below a
+ * root — a new file in `/tmp/cache` is workspace content, not scratch. Only
+ * paths created directly under a sandbox root are the shell's own scratch and
+ * builtins, and those never persist.
  */
 function shouldSyncBashPath(
   path: string,
@@ -1541,10 +1576,8 @@ function shouldSyncBashPath(
   if (initialFiles.has(path)) return true;
   if (initialDirectories.has(path)) return true;
   if (protectedPaths.has(path)) return true;
-  if (path === "/tmp" || path.startsWith("/tmp/")) return false;
-  return !BASH_EXCLUDED_SYNC_ROOTS.some(
-    (root) => path === root || path.startsWith(`${root}/`)
-  );
+  if (hasInitialDirectoryAncestor(path, initialDirectories)) return true;
+  return !isUnderBashSandboxRoot(path);
 }
 
 function hasProtectedDescendant(
