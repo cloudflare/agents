@@ -390,6 +390,16 @@
       "types": "./dist/skills/compile.d.ts",
       "import": "./dist/skills/compile.js",
       "require": "./dist/skills/compile.js"
+    },
+    "./payments/x402": {
+      "types": "./dist/payments/x402/index.d.ts",
+      "import": "./dist/payments/x402/index.js",
+      "require": "./dist/payments/x402/index.js"
+    },
+    "./payments/x402/mcp": {
+      "types": "./dist/payments/x402/mcp.d.ts",
+      "import": "./dist/payments/x402/mcp.js",
+      "require": "./dist/payments/x402/mcp.js"
     }
   },
   "publishConfig": {
