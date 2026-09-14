@@ -6,14 +6,16 @@
  */
 export { Tasks } from "./tasks";
 export type { TaskDeleteOptions, TaskListOptions } from "./tasks";
-export type { TaskEventType, TasksOptions } from "./options";
+export type { TaskEventType, TaskFailedRun, TasksOptions } from "./options";
 export type { TaskDurationString, TaskDurationUnit } from "./duration";
 export {
   DuplicateTaskStepError,
   TaskReplayDivergedError,
   TaskSerializationError,
   MissingTaskDefinitionError,
-  NonRetryableError
+  NonRetryableError,
+  TaskAttemptsExhaustedError,
+  TaskDeadlineExceededError
 } from "./errors";
 export { MAX_SERIALIZED_BYTES } from "./serialization";
 export type {

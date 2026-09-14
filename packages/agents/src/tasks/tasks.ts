@@ -29,8 +29,12 @@ import { SqlError } from "../sql-error";
 import { TaskStore } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
-import { MissingTaskDefinitionError } from "./errors";
-import type { TaskEventType, TasksOptions } from "./options";
+import {
+  MissingTaskDefinitionError,
+  TaskAttemptsExhaustedError,
+  TaskDeadlineExceededError
+} from "./errors";
+import type { TaskEventType, TaskFailedRun, TasksOptions } from "./options";
 import {
   AttemptSupersededError,
   TaskCancellation,
@@ -103,7 +107,8 @@ export function setTaskRoutedMemoryLimitHandler(
 }
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
-const CURRENT_FIBER_SCHEMA_VERSION = 1;
+/** 2: `max_attempts` and `deadline_at` on run rows. */
+const CURRENT_FIBER_SCHEMA_VERSION = 2;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -236,7 +241,9 @@ export class Tasks<
   readonly #active = new Map<string, ActiveAttempt>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
-  readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
+  readonly #onError:
+    | ((error: unknown, run: TaskFailedRun) => void | Promise<void>)
+    | undefined;
 
   /**
    * Create a Tasks capability.
@@ -411,6 +418,9 @@ export class Tasks<
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
       this.#store.ensureTables();
+      // A table created at version 1 predates the budget columns; a fresh
+      // table already has them and the migration is a no-op.
+      if (version === 1) this.#store.addRunBudgetColumns();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
     this.#reconcile();
@@ -492,8 +502,13 @@ export class Tasks<
   async #dispatchRun(runId: string): Promise<LifecycleJobOutcome> {
     const active = this.#active.get(runId);
     if (active) {
-      // A live attempt in this isolate; push the claim backstop forward so
-      // the due job does not hot-loop the alarm while it works.
+      // A live attempt in this isolate. Its deadline is the one wake a held
+      // claim cannot push past: enforce it over the attempt, otherwise push
+      // the claim backstop forward so the due job does not hot-loop the
+      // alarm while it works.
+      if (await this.#enforceDeadline(runId, active)) {
+        return this.#wakeOutcome(runId);
+      }
       this.#refreshClaim(runId);
       this.lifecycle.trackAlarmWork(active.promise);
       return this.#wakeOutcome(runId);
@@ -544,7 +559,9 @@ export class Tasks<
   async #dispatchRoutedRun(runId: string): Promise<LifecycleJobOutcome> {
     const active = this.#active.get(runId);
     if (active) {
-      this.#refreshClaim(runId);
+      if (!(await this.#enforceDeadline(runId, active))) {
+        this.#refreshClaim(runId);
+      }
       return this.#wakeOutcome(runId);
     }
     await this.#executeRun(runId);
@@ -698,13 +715,58 @@ export class Tasks<
    * again either way.
    */
   #wakeOutcome(runId: string): LifecycleJobOutcome {
-    const rows = this.#store.sql<{ next_at: number | null }>`
-      SELECT next_at FROM cf_agents_task_runs
+    const next = this.#nextWake(runId);
+    return next === null ? undefined : { rescheduleAt: next };
+  }
+
+  /**
+   * When one non-terminal run must next wake: its `next_at` (claim backstop,
+   * sleep, or retry deadline) brought forward to its deadline, so a parked
+   * run and a held claim both wake to fail on time. `null` for a terminal or
+   * unknown run.
+   */
+  #nextWake(runId: string): number | null {
+    const rows = this.#store.sql<{
+      next_at: number | null;
+      deadline_at: number | null;
+    }>`
+      SELECT next_at, deadline_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
     `;
-    const next = rows[0]?.next_at;
-    return typeof next === "number" ? { rescheduleAt: next } : undefined;
+    const row = rows[0];
+    if (!row) return null;
+    if (row.deadline_at === null) return row.next_at;
+    if (row.next_at === null) return row.deadline_at;
+    return Math.min(row.next_at, row.deadline_at);
+  }
+
+  /**
+   * Fail a live attempt whose run deadline has passed. The run settles
+   * failed under the attempt's generation first, so every later write the
+   * attempt makes is fenced out, then the attempt's signal aborts with the
+   * deadline error so cooperative work unwinds; a signal-deaf attempt simply
+   * runs on as a zombie until its isolate goes.
+   *
+   * @returns True when the deadline was enforced.
+   */
+  async #enforceDeadline(
+    runId: string,
+    active: ActiveAttempt
+  ): Promise<boolean> {
+    const row = this.#store.getRun(runId);
+    if (!row || row.deadline_at === null || row.deadline_at > Date.now()) {
+      return false;
+    }
+    const error = new TaskDeadlineExceededError(runId, row.deadline_at);
+    const failed = await this.#settleFailed(
+      runId,
+      active.generation,
+      toErrorSummary(error)
+    );
+    active.controller.abort(error);
+    if (failed) await this.#observeError(error, row);
+    return true;
   }
 
   /**
@@ -719,12 +781,7 @@ export class Tasks<
    * nothing was written — a same-values upsert is still a billed row write.
    */
   async #syncWake(runId: string): Promise<boolean> {
-    const rows = this.#store.sql<{ next_at: number | null }>`
-      SELECT next_at FROM cf_agents_task_runs
-      WHERE run_id = ${runId}
-        AND state IN ('pending', 'waiting', 'running')
-    `;
-    const next = rows[0]?.next_at ?? null;
+    const next = this.#nextWake(runId);
 
     if (this.lifecycle.routes.source) {
       // The run row stays here; only its deadline mirrors to the root that
@@ -996,6 +1053,22 @@ export class Tasks<
       );
     }
 
+    if (
+      options.maxAttempts !== undefined &&
+      (!Number.isInteger(options.maxAttempts) || options.maxAttempts < 1)
+    ) {
+      throw new Error("maxAttempts must be a positive integer when provided");
+    }
+    const deadlineAt =
+      options.deadline === undefined
+        ? null
+        : options.deadline instanceof Date
+          ? options.deadline.getTime()
+          : options.deadline;
+    if (deadlineAt !== null && !Number.isFinite(deadlineAt)) {
+      throw new Error("deadline must be a finite time when provided");
+    }
+
     const inputJson = serializeTaskValue(
       input,
       `input for Task definition "${definition}"`
@@ -1063,11 +1136,13 @@ export class Tasks<
     this.#store.sql`
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, state, metadata, idempotency_key, retain,
-         attempt, next_at, cancel_requested, created_at, updated_at)
+         attempt, max_attempts, deadline_at, next_at, cancel_requested,
+         created_at, updated_at)
       VALUES
         (${runId}, ${definition}, ${inputJson}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
-         0, ${now}, 0, ${now}, ${now})
+         0, ${options.maxAttempts ?? null}, ${deadlineAt}, ${now}, 0,
+         ${now}, ${now})
     `;
     await this.#syncWake(runId);
     this.#emit("task:accepted", { runId, definition, accepted: true });
@@ -1100,14 +1175,33 @@ export class Tasks<
       await this.#settleCancelled(runId, null, row.cancel_reason ?? undefined);
       return;
     }
+    // The deadline check comes before the due gate: a deadline brings a
+    // parked run's wake forward (see #nextWake), so the wake that fires at
+    // the deadline finds `next_at` still in the future.
+    if (row.deadline_at !== null && row.deadline_at <= now) {
+      await this.#failWithoutAttempt(
+        row,
+        new TaskDeadlineExceededError(runId, row.deadline_at)
+      );
+      return;
+    }
     if (row.next_at !== null && row.next_at > now) return;
+    // Due for a claim. The attempt budget is spent when the last permitted
+    // attempt ended without settling — interrupted, or parked — so this
+    // reclaim fails the run instead of running it again.
+    if (row.max_attempts !== null && row.attempt >= row.max_attempts) {
+      await this.#failWithoutAttempt(
+        row,
+        new TaskAttemptsExhaustedError(runId, row.max_attempts)
+      );
+      return;
+    }
 
     const handler = this.#resolveDefinition(row.definition);
     if (!handler) {
       const error = new MissingTaskDefinitionError(row.definition);
       console.error(error.message);
-      await this.#settleFailed(runId, null, toErrorSummary(error));
-      await this.#observeError(error);
+      await this.#failWithoutAttempt(row, error);
       return;
     }
 
@@ -1288,16 +1382,37 @@ export class Tasks<
       console.error(
         `Task run "${runId}" (definition "${row.definition}") failed: ${summary.name}: ${summary.message}`
       );
+      // A fence rejection here is not a terminal failure of the run: it was
+      // already settled from outside this attempt (its deadline was enforced
+      // over it), and that settlement was observed once, there.
+      await this.#observeError(thrown, row);
     }
-    await this.#observeError(thrown);
   }
 
-  async #observeError(error: unknown): Promise<void> {
+  /** Fail a run Tasks will not claim again, without running its handler. */
+  async #failWithoutAttempt(row: TaskRunRow, error: Error): Promise<void> {
+    const failed = await this.#settleFailed(
+      row.run_id,
+      null,
+      toErrorSummary(error)
+    );
+    if (failed) await this.#observeError(error, row);
+  }
+
+  async #observeError(
+    error: unknown,
+    run: { run_id: string; definition: string }
+  ): Promise<void> {
     if (!this.#onError) return;
     try {
       // Observing terminal failures is host-facing user code: run it inside
       // the host invocation boundary, like definition handlers.
-      await this.lifecycle.runInHostContext(() => this.#onError?.(error));
+      await this.lifecycle.runInHostContext(() =>
+        this.#onError?.(error, {
+          runId: run.run_id,
+          definition: run.definition
+        })
+      );
     } catch {
       // swallow onError errors
     }

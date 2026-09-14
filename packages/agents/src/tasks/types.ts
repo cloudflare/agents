@@ -137,6 +137,14 @@ export interface TaskStep {
     readonly attempt: number;
   } | null;
 
+  /**
+   * Aborted for the whole attempt — on `cancel()`, and when the run's
+   * `deadline` passes — so work awaited outside `step.do()` (a long model
+   * turn, a drain loop) can unwind. Inside a step the per-attempt `signal`
+   * already covers it.
+   */
+  readonly signal: AbortSignal;
+
   /** Run a named step once, replaying its journaled result thereafter. */
   do<T extends TaskValue>(
     name: string,
@@ -206,6 +214,22 @@ export interface TaskRunOptions {
 
   /** Keep terminal state for inspection. Defaults to `true`. */
   retain?: boolean;
+
+  /**
+   * Most claims of the run: the first attempt, each replay after an
+   * interruption, and each wake from a sleep or retry park. When the last
+   * permitted attempt ends without settling, the run fails with
+   * `TaskAttemptsExhaustedError` instead of being claimed again. Unbounded
+   * when omitted.
+   */
+  maxAttempts?: number;
+
+  /**
+   * Wall-clock deadline (epoch milliseconds or a `Date`). A live attempt's
+   * `step.signal` aborts and the run fails with `TaskDeadlineExceededError`;
+   * a parked run fails at its next wake, which the deadline brings forward.
+   */
+  deadline?: number | Date;
 }
 
 /**
@@ -323,6 +347,8 @@ export type TaskRunRow = {
   idempotency_key: string | null;
   retain: number;
   attempt: number;
+  max_attempts: number | null;
+  deadline_at: number | null;
   generation: string | null;
   next_at: number | null;
   wait_reason: TaskWaitReason | null;
