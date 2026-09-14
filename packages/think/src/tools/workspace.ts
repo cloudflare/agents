@@ -1,7 +1,7 @@
 import type { Workspace, FileInfo } from "@cloudflare/shell";
 import type { JSONValue, Tool } from "ai";
-import type { InitialFiles } from "just-bash";
-import { Bash } from "just-bash";
+import type { IFileSystem, InitialFiles } from "just-bash";
+import { Bash, InMemoryFs } from "just-bash";
 import { tool } from "ai";
 import { z } from "zod";
 
@@ -1155,6 +1155,9 @@ const BASH_READDIR_PAGE_SIZE = 1_000;
 // never be persisted to the workspace — only pre-existing workspace files
 // under these roots keep syncing.
 const BASH_EXCLUDED_SYNC_ROOTS = ["/bin", "/usr", "/dev", "/proc", "/sys"];
+// The sandbox roots themselves: the shell always materializes these, so their
+// presence in the final tree says nothing about what the script did.
+const BASH_SANDBOX_ROOTS = ["/tmp", ...BASH_EXCLUDED_SYNC_ROOTS];
 
 type BashToolInput = {
   script: string;
@@ -1200,8 +1203,9 @@ export function createBashTool(options: BashToolOptions): Tool {
       const maxOutputBytes =
         options.maxOutputBytes ?? DEFAULT_BASH_MAX_OUTPUT_BYTES;
       const snapshot = await snapshotWorkspaceForBash(options);
+      const journal: BashFsEvent[] = [];
       const bash = new Bash({
-        files: snapshot.files,
+        fs: createJournalingBashFs(snapshot.files, journal),
         cwd: normalizeWorkspacePath(cwd ?? "/"),
         defenseInDepth: true,
         network: options.network ? {} : undefined
@@ -1238,6 +1242,7 @@ export function createBashTool(options: BashToolOptions): Tool {
         const sync = await syncBashFilesToWorkspace({
           ops: options.ops,
           bash,
+          journal,
           initialFiles: snapshot.initialFiles,
           initialDirectories: snapshot.initialDirectories,
           protectedPaths: snapshot.protectedPaths
@@ -1339,11 +1344,13 @@ async function readAllBashDirEntries(
 async function syncBashFilesToWorkspace({
   ops,
   bash,
+  journal,
   initialFiles,
   initialDirectories,
   protectedPaths
 }: {
   ops: BashOperations;
+  journal: BashFsEvent[];
   bash: {
     fs: {
       getAllPaths(): string[];
@@ -1365,10 +1372,26 @@ async function syncBashFilesToWorkspace({
   const errors: string[] = [];
   const finalFiles = new Map<string, Uint8Array>();
   const finalDirectories = new Set<string>(["/"]);
+  const movedWorkspaceEntries = resolveMovedWorkspaceEntries({
+    journal,
+    initialFiles,
+    initialDirectories,
+    protectedPaths
+  });
 
   for (const rawPath of bash.fs.getAllPaths()) {
     const path = normalizeWorkspacePath(rawPath);
-    if (!shouldSyncBashPath(path, initialFiles, protectedPaths)) continue;
+    if (
+      !shouldSyncBashPath(
+        path,
+        initialFiles,
+        initialDirectories,
+        protectedPaths,
+        movedWorkspaceEntries
+      )
+    ) {
+      continue;
+    }
     const stat = await bash.fs.stat(path).catch(() => null);
     if (stat?.isDirectory) {
       finalDirectories.add(path);
@@ -1431,6 +1454,11 @@ async function syncBashFilesToWorkspace({
     b.localeCompare(a)
   )) {
     if (path === "/" || finalDirectories.has(path)) continue;
+    // The shell always materializes the sandbox roots, so their presence in
+    // the final tree says nothing about the script; never delete the roots
+    // themselves. Workspace-owned directories *below* a root were mounted
+    // from the snapshot and sync like any other directory.
+    if (isBashSandboxRoot(path)) continue;
     if (hasProtectedDescendant(path, protectedPaths)) {
       errors.push(`Skipped deleting protected workspace directory: ${path}`);
       continue;
@@ -1505,18 +1533,262 @@ async function writeWorkspaceBytes(
     });
 }
 
+function isBashSandboxRoot(path: string): boolean {
+  return BASH_SANDBOX_ROOTS.includes(path);
+}
+
+function isUnderBashSandboxRoot(path: string): boolean {
+  return BASH_SANDBOX_ROOTS.some(
+    (root) => path === root || path.startsWith(`${root}/`)
+  );
+}
+
+let shellInfrastructurePathCache: Set<string> | null = null;
+
+/**
+ * Every path the shell materializes for itself, derived by booting an empty
+ * sandbox and reading its filesystem back.
+ *
+ * just-bash writes one file per command into `/bin` and `/usr/bin` (plus the
+ * `/dev` and `/proc` pseudo-files) while constructing the shell, so the set is
+ * read off a throwaway `Bash` rather than hand-copied — it tracks whatever the
+ * installed just-bash actually creates. The probe is built the same way as the
+ * real sandbox (explicit `files`/`cwd`, so no default `/home/user` layout) and
+ * memoized: the constructor is synchronous and the result never changes within
+ * a process.
+ */
+function shellInfrastructurePaths(): Set<string> {
+  if (shellInfrastructurePathCache) return shellInfrastructurePathCache;
+  let paths: string[] = [];
+  try {
+    paths = new Bash({ files: {}, cwd: "/" }).fs.getAllPaths();
+  } catch {
+    // A shell that will not boot bare tells us nothing; fall back to the
+    // sandbox roots alone, which the ancestry check already excludes.
+    paths = [];
+  }
+  shellInfrastructurePathCache = new Set(paths.map(normalizeWorkspacePath));
+  return shellInfrastructurePathCache;
+}
+
+/**
+ * Whether the path descends from a workspace directory the snapshot recorded.
+ *
+ * The sandbox roots are deliberately not ancestors for this purpose: `/tmp`
+ * exists in every shell, so "lives under /tmp" proves nothing about ownership.
+ * A directory the workspace itself held below a root — `/tmp/cache` — does,
+ * and everything the script writes inside it belongs to the workspace too.
+ *
+ * Shell infrastructure directories are excluded for the same reason even when
+ * the workspace happens to hold them: `/usr/bin` is where the shell writes a
+ * file for every builtin, so owning its descendants would sync a hundred-odd
+ * synthetic commands into the workspace. An exact initial file there — say
+ * `/usr/bin/custom-tool` — still syncs, because `shouldSyncBashPath` matches it
+ * by path before it ever consults ancestry.
+ */
+function hasInitialDirectoryAncestor(
+  path: string,
+  initialDirectories: Set<string>
+): boolean {
+  const infrastructure = shellInfrastructurePaths();
+  let current = parentDir(path);
+  while (current !== "/") {
+    if (
+      !isBashSandboxRoot(current) &&
+      !infrastructure.has(current) &&
+      initialDirectories.has(current)
+    ) {
+      return true;
+    }
+    const next = parentDir(current);
+    if (next === current) break;
+    current = next;
+  }
+  return false;
+}
+
+/**
+ * A filesystem mutation the script performed, recorded as it happened.
+ *
+ * `copy` events carry no ownership either way: just-bash implements a
+ * directory `mv` internally as a `cp` of every entry followed by an `rm` of
+ * the source, so a copy event cannot be told apart from a move's own
+ * machinery. Only `move` grants ownership, and only `remove` revokes it.
+ */
+type BashFsEvent =
+  | { type: "move"; source: string; destination: string }
+  | { type: "copy"; source: string; destination: string }
+  | { type: "remove"; path: string };
+
+/**
+ * An in-memory sandbox filesystem that records the moves the script makes.
+ *
+ * just-bash takes a caller-supplied `IFileSystem` (`BashOptions.fs`) and still
+ * materializes its own layout into it, so wrapping the mutating methods of an
+ * `InMemoryFs` gives real provenance rather than an inference from before and
+ * after trees. Every path reaching these methods is already absolute and
+ * resolved against the script's working directory.
+ *
+ * Events are recorded *before* the operation runs, so an outer `mv` is ordered
+ * ahead of the `cp`/`rm` calls it decomposes into — replaying them the other
+ * way round would revoke the move's own source before the move was seen.
+ */
+function createJournalingBashFs(
+  files: InitialFiles,
+  journal: BashFsEvent[]
+): IFileSystem {
+  const fs = new InMemoryFs(files);
+  const mv = fs.mv.bind(fs);
+  const cp = fs.cp.bind(fs);
+  const rm = fs.rm.bind(fs);
+
+  fs.mv = (source, destination) => {
+    journal.push({
+      type: "move",
+      source: normalizeWorkspacePath(source),
+      destination: normalizeWorkspacePath(destination)
+    });
+    return mv(source, destination);
+  };
+  fs.cp = (source, destination, options) => {
+    journal.push({
+      type: "copy",
+      source: normalizeWorkspacePath(source),
+      destination: normalizeWorkspacePath(destination)
+    });
+    return cp(source, destination, options);
+  };
+  fs.rm = (path, options) => {
+    journal.push({ type: "remove", path: normalizeWorkspacePath(path) });
+    return rm(path, options);
+  };
+
+  return fs;
+}
+
+/**
+ * Destinations that workspace content was moved to, from the recorded journal.
+ *
+ * `mv /tmp/cache /tmp/archive` leaves the destination with no initial ancestor,
+ * so structure alone would drop it while the deletion pass removed the source —
+ * losing the content outright. Replaying the journal settles it by provenance
+ * instead of by guessing from content:
+ *
+ *   A move whose source is workspace-owned *at that point in the script* makes
+ *   its destination workspace-owned, and with it everything below. Ownership
+ *   therefore survives edits made after the move, applies to empty directories,
+ *   chains through repeated moves and crosses sandbox roots. A move from
+ *   unowned scratch, and a later `rm` of the destination, take that ownership
+ *   away again.
+ *
+ * Nothing else created directly under a sandbox root is ever adopted, so
+ * scratch stays scratch however closely it resembles deleted workspace content.
+ */
+function resolveMovedWorkspaceEntries({
+  journal,
+  initialFiles,
+  initialDirectories,
+  protectedPaths
+}: {
+  journal: BashFsEvent[];
+  initialFiles: Map<string, Uint8Array>;
+  initialDirectories: Set<string>;
+  protectedPaths: Set<string>;
+}): Set<string> {
+  const moved = new Set<string>();
+  const isOwned = (path: string): boolean =>
+    isStructurallyOwnedBashPath(
+      path,
+      initialFiles,
+      initialDirectories,
+      protectedPaths
+    ) || hasAncestorIn(path, moved);
+
+  for (const event of journal) {
+    if (event.type === "copy") continue;
+    if (event.type === "remove") {
+      forgetSubtree(moved, event.path);
+      continue;
+    }
+    if (isOwned(event.source)) moved.add(event.destination);
+    else forgetSubtree(moved, event.destination);
+    forgetSubtree(moved, event.source);
+  }
+
+  return moved;
+}
+
+/** Drop `path` and everything below it from a set of owned roots. */
+function forgetSubtree(paths: Set<string>, path: string): void {
+  const prefix = `${path}/`;
+  for (const candidate of paths) {
+    if (candidate === path || candidate.startsWith(prefix)) {
+      paths.delete(candidate);
+    }
+  }
+}
+
+/** Whether the path, or one of its ancestors, is in the set. */
+function hasAncestorIn(path: string, paths: Set<string>): boolean {
+  if (paths.size === 0) return false;
+  let current = path;
+  while (current !== "/") {
+    if (paths.has(current)) return true;
+    const next = parentDir(current);
+    if (next === current) break;
+    current = next;
+  }
+  return false;
+}
+
+/**
+ * Whether a path in the shell's final tree belongs to the workspace.
+ *
+ * Anything the workspace already held syncs both ways, including files and
+ * directories that happen to live under a sandbox root such as `/tmp`, and so
+ * does anything the script wrote *inside* a workspace-owned directory below a
+ * root — a new file in `/tmp/cache` is workspace content, not scratch — and so
+ * does an entry a `mv` carried onto a sandbox root, which
+ * {@link resolveMovedWorkspaceEntries} establishes from the recorded journal.
+ * Everything else created directly under a sandbox root is the shell's own
+ * scratch and builtins, and never persists.
+ */
 function shouldSyncBashPath(
   path: string,
   initialFiles: Map<string, Uint8Array>,
+  initialDirectories: Set<string>,
+  protectedPaths: Set<string>,
+  movedWorkspaceEntries: Set<string>
+): boolean {
+  if (
+    isStructurallyOwnedBashPath(
+      path,
+      initialFiles,
+      initialDirectories,
+      protectedPaths
+    )
+  ) {
+    return true;
+  }
+  return hasAncestorIn(path, movedWorkspaceEntries);
+}
+
+/**
+ * Ownership decided by the shape of the workspace alone, before any move the
+ * script made is taken into account.
+ */
+function isStructurallyOwnedBashPath(
+  path: string,
+  initialFiles: Map<string, Uint8Array>,
+  initialDirectories: Set<string>,
   protectedPaths: Set<string>
 ): boolean {
   if (path === "/") return false;
   if (initialFiles.has(path)) return true;
+  if (initialDirectories.has(path)) return true;
   if (protectedPaths.has(path)) return true;
-  if (path === "/tmp" || path.startsWith("/tmp/")) return false;
-  return !BASH_EXCLUDED_SYNC_ROOTS.some(
-    (root) => path === root || path.startsWith(`${root}/`)
-  );
+  if (hasInitialDirectoryAncestor(path, initialDirectories)) return true;
+  return !isUnderBashSandboxRoot(path);
 }
 
 function hasProtectedDescendant(
