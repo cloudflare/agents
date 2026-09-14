@@ -2,7 +2,10 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
-import type { ThinkTestAgent } from "./agents/think-session";
+import type {
+  ThinkTestAgent,
+  ThinkToolsTestAgent
+} from "./agents/think-session";
 
 // Think's transcript broadcast policy at turn boundaries.
 //
@@ -19,6 +22,7 @@ const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
 const MSG_CHAT_MESSAGES_DELTA = "cf_agent_chat_messages_delta";
 const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
 const MSG_STREAM_RESUMING = "cf_agent_stream_resuming";
+const MSG_CLIENT_CAPABILITIES = "cf_agent_chat_client_capabilities";
 
 type Frame = Record<string, unknown> & { __bytes: number };
 
@@ -29,15 +33,29 @@ async function freshAgent(name: string) {
   );
 }
 
-async function connectWS(room: string): Promise<WebSocket> {
+async function connectWS(
+  room: string,
+  options: { declareDeltas?: boolean; agent?: string } = {}
+): Promise<WebSocket> {
   const res = await exports.default.fetch(
-    `http://example.com/agents/think-test-agent/${room}`,
+    `http://example.com/agents/${options.agent ?? "think-test-agent"}/${room}`,
     { headers: { Upgrade: "websocket" } }
   );
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
   ws.accept();
+  if (options.declareDeltas !== false) declareDeltaSupport(ws);
   return ws;
+}
+
+/** What `useAgentChat` sends on every socket open. */
+function declareDeltaSupport(ws: WebSocket): void {
+  ws.send(
+    JSON.stringify({
+      type: MSG_CLIENT_CAPABILITIES,
+      capabilities: { transcriptDeltas: true }
+    })
+  );
 }
 
 /** Record every JSON frame the server sends on `ws`, with its wire size. */
@@ -261,6 +279,268 @@ describe("Think — transcript deltas at turn boundaries", () => {
     } finally {
       if (late) await closeWS(late);
       await closeWS(aligned);
+    }
+  });
+});
+
+describe("Think — delta capability negotiation", () => {
+  it("keeps sending snapshots to a client that never declared delta support", async () => {
+    // An older `agents` client has no `cf_agent_chat_messages_delta` case in
+    // its frame switch and silently drops the frame — which IS the turn's
+    // transcript update, so it would freeze until it reconnected. The server
+    // must not send it one.
+    const room = `delta-old-client-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.addMessages(seedMessages(4, 64));
+
+    const old = await connectWS(room, { declareDeltas: false });
+    const oldFrames = recordFrames(old);
+    try {
+      await waitForFrame(oldFrames, (f) => f.type === MSG_CHAT_MESSAGES);
+      const before = oldFrames.length;
+
+      await agent.testChat("Hello");
+      await waitForFrame(oldFrames, carriesAssistant, { from: before });
+      await settle();
+
+      const turnFrames = oldFrames.slice(before).filter(isTranscriptFrame);
+      expect(turnFrames.map((f) => f.type)).toEqual([
+        MSG_CHAT_MESSAGES,
+        MSG_CHAT_MESSAGES
+      ]);
+      // The whole transcript, every time — the pre-delta behaviour.
+      expect((turnFrames[1].messages as UIMessage[]).length).toBe(6);
+    } finally {
+      await closeWS(old);
+    }
+  });
+
+  it("holds every connection to snapshots while one has not declared support", async () => {
+    // A broadcast is one frame for all sockets: a single undeclared client
+    // pins everyone to snapshots rather than leaving it stale.
+    const room = `delta-mixed-clients-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.addMessages(seedMessages(4, 64));
+
+    const modern = await connectWS(room);
+    const modernFrames = recordFrames(modern);
+    const old = await connectWS(room, { declareDeltas: false });
+    try {
+      await waitForFrame(modernFrames, (f) => f.type === MSG_CHAT_MESSAGES);
+      await settle();
+      const before = modernFrames.length;
+
+      await agent.testChat("Hello");
+      await waitForFrame(modernFrames, carriesAssistant, { from: before });
+      await settle();
+      expect(
+        modernFrames
+          .slice(before)
+          .filter(isTranscriptFrame)
+          .map((f) => f.type)
+      ).toEqual([MSG_CHAT_MESSAGES, MSG_CHAT_MESSAGES]);
+
+      // Once the undeclared client is gone, deltas resume for the rest.
+      await closeWS(old);
+      await settle();
+      const after = modernFrames.length;
+      await agent.testChat("Again");
+      await waitForFrame(modernFrames, carriesAssistant, { from: after });
+      await settle();
+      expect(
+        modernFrames
+          .slice(after)
+          .filter(isTranscriptFrame)
+          .map((f) => f.type)
+      ).toEqual([MSG_CHAT_MESSAGES_DELTA, MSG_CHAT_MESSAGES_DELTA]);
+    } finally {
+      await closeWS(modern);
+    }
+  });
+});
+
+describe("Think — suppressed broadcasts still reach clients", () => {
+  it("carries rows injected mid-turn by a tool on the turn's boundary frame", async () => {
+    // `addMessages` from inside a tool `execute` suppresses its own broadcast
+    // and rides the turn's next one. Under deltas that frame names only the
+    // rows it was given, so the injected row has to be named too — otherwise
+    // it is durable, in the server cache, and invisible to every client.
+    const room = `delta-mid-turn-${crypto.randomUUID()}`;
+    const agent = await getAgentByName(
+      env.ThinkToolsTestAgent as unknown as DurableObjectNamespace<ThinkToolsTestAgent>,
+      room
+    );
+    await agent.setEchoExecuteMode("add-messages");
+
+    const ws = await connectWS(room, { agent: "think-tools-test-agent" });
+    const frames = recordFrames(ws);
+    try {
+      await waitForFrame(frames, (f) => f.type === MSG_CHAT_MESSAGES);
+      const before = frames.length;
+
+      await agent.testChat("call echo");
+      await waitForFrame(frames, carriesAssistant, { from: before });
+      await settle();
+
+      const probe = await agent.getMidTurnAddProbe();
+      expect(probe.insideLoop).toBe(true);
+      expect(probe.persisted).toBe(true);
+
+      const delivered = frames
+        .slice(before)
+        .filter(isTranscriptFrame)
+        .flatMap((f) => f.messages as UIMessage[])
+        .map((m) => m.id);
+      expect(delivered).toContain("mid-turn-injected");
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
+  it("carries `broadcast: false` rows on the next boundary frame", async () => {
+    const room = `delta-no-broadcast-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.addMessages(seedMessages(2, 64));
+
+    const ws = await connectWS(room);
+    const frames = recordFrames(ws);
+    try {
+      await waitForFrame(frames, (f) => f.type === MSG_CHAT_MESSAGES);
+      const before = frames.length;
+
+      await agent.addMessages(
+        [
+          {
+            id: "silent-row",
+            role: "user",
+            parts: [{ type: "text", text: "quiet" }]
+          }
+        ],
+        { broadcast: false }
+      );
+      await settle();
+      // Suppressed means suppressed: nothing on the wire yet.
+      expect(frames.slice(before).filter(isTranscriptFrame)).toEqual([]);
+
+      await agent.testChat("Now speak");
+      await waitForFrame(frames, carriesAssistant, { from: before });
+      await settle();
+
+      const delivered = frames
+        .slice(before)
+        .filter(isTranscriptFrame)
+        .flatMap((f) => f.messages as UIMessage[])
+        .map((m) => m.id);
+      expect(delivered).toContain("silent-row");
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
+  it("still owes deferred rows to a connection the broadcast excluded", async () => {
+    // The incoming-persist broadcast excludes the connection that posted the
+    // turn. That frame must not settle rows the excluded connection has never
+    // been sent — they stay owed until a frame reaches it.
+    const room = `delta-excluded-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.addMessages(seedMessages(2, 64));
+
+    const poster = await connectWS(room);
+    const posterFrames = recordFrames(poster);
+    try {
+      await waitForFrame(posterFrames, (f) => f.type === MSG_CHAT_MESSAGES);
+      await agent.addMessages(
+        [
+          {
+            id: "owed-row",
+            role: "user",
+            parts: [{ type: "text", text: "owed" }]
+          }
+        ],
+        { broadcast: false }
+      );
+      const before = posterFrames.length;
+
+      // Posted over the socket, so the incoming-persist frame excludes it.
+      poster.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "posted",
+                  role: "user",
+                  parts: [{ type: "text", text: "hello" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      await waitForFrame(posterFrames, carriesAssistant, { from: before });
+      await settle();
+
+      const delivered = posterFrames
+        .slice(before)
+        .filter(isTranscriptFrame)
+        .flatMap((f) => f.messages as UIMessage[])
+        .map((m) => m.id);
+      expect(delivered).toContain("owed-row");
+    } finally {
+      await closeWS(poster);
+    }
+  });
+});
+
+describe("Think — transcript identity", () => {
+  it("keeps an over-budget (windowed) transcript on deltas", async () => {
+    // A windowed cache re-reads storage at every incoming turn. Bumping the
+    // epoch on that re-read would force a snapshot on exactly the largest
+    // transcripts deltas are meant to help — so the epoch only moves when the
+    // rows a client holds actually changed.
+    const room = `seeded-windowed-${crypto.randomUUID()}`;
+    const ws = await connectWS(room, {
+      agent: "think-windowed-hydration-agent"
+    });
+    const frames = recordFrames(ws);
+    try {
+      const snapshot = await waitForFrame(
+        frames,
+        (f) => f.type === MSG_CHAT_MESSAGES
+      );
+      // 10 × ~30 KiB stored against a 64 KiB budget: a window, not the path.
+      expect((snapshot.messages as UIMessage[]).length).toBeLessThan(10);
+      const before = frames.length;
+
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "windowed-user",
+                  role: "user",
+                  parts: [{ type: "text", text: "tiny" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      await waitForFrame(frames, carriesAssistant, { from: before });
+      await settle();
+
+      const turnFrames = frames.slice(before).filter(isTranscriptFrame);
+      expect(turnFrames.map((f) => f.type)).toEqual([MSG_CHAT_MESSAGES_DELTA]);
+      expect(turnFrames[0].epoch).toBe(snapshot.epoch);
+    } finally {
+      await closeWS(ws);
     }
   });
 });

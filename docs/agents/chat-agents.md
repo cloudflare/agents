@@ -1660,21 +1660,24 @@ The originating client receives the streaming response. All other clients receiv
 
 The chat protocol uses typed JSON messages over WebSocket:
 
-| Message                          | Direction       | Purpose                     |
-| -------------------------------- | --------------- | --------------------------- |
-| `CF_AGENT_USE_CHAT_REQUEST`      | Client → Server | Send a chat message         |
-| `CF_AGENT_USE_CHAT_RESPONSE`     | Server → Client | Stream response chunks      |
-| `CF_AGENT_CHAT_MESSAGES`         | Server → Client | Full transcript snapshot    |
-| `CF_AGENT_CHAT_MESSAGES_DELTA`   | Server → Client | Changed messages only       |
-| `CF_AGENT_CHAT_CLEAR`            | Bidirectional   | Clear conversation          |
-| `CF_AGENT_CHAT_REQUEST_CANCEL`   | Client → Server | Cancel active stream        |
-| `CF_AGENT_TOOL_RESULT`           | Client → Server | Provide tool output         |
-| `CF_AGENT_TOOL_APPROVAL`         | Client → Server | Approve or reject a tool    |
-| `CF_AGENT_MESSAGE_UPDATED`       | Server → Client | Notify of message update    |
-| `CF_AGENT_STREAM_RESUMING`       | Server → Client | Notify of stream resumption |
-| `CF_AGENT_STREAM_RESUME_REQUEST` | Client → Server | Request stream resume check |
+| Message                             | Direction       | Purpose                        |
+| ----------------------------------- | --------------- | ------------------------------ |
+| `CF_AGENT_USE_CHAT_REQUEST`         | Client → Server | Send a chat message            |
+| `CF_AGENT_USE_CHAT_RESPONSE`        | Server → Client | Stream response chunks         |
+| `CF_AGENT_CHAT_MESSAGES`            | Server → Client | Full transcript snapshot       |
+| `CF_AGENT_CHAT_MESSAGES_DELTA`      | Server → Client | Changed messages only          |
+| `CF_AGENT_CHAT_CLIENT_CAPABILITIES` | Client → Server | Declare optional frame support |
+| `CF_AGENT_CHAT_CLEAR`               | Bidirectional   | Clear conversation             |
+| `CF_AGENT_CHAT_REQUEST_CANCEL`      | Client → Server | Cancel active stream           |
+| `CF_AGENT_TOOL_RESULT`              | Client → Server | Provide tool output            |
+| `CF_AGENT_TOOL_APPROVAL`            | Client → Server | Approve or reject a tool       |
+| `CF_AGENT_MESSAGE_UPDATED`          | Server → Client | Notify of message update       |
+| `CF_AGENT_STREAM_RESUMING`          | Server → Client | Notify of stream resumption    |
+| `CF_AGENT_STREAM_RESUME_REQUEST`    | Client → Server | Request stream resume check    |
 
 `CF_AGENT_CHAT_MESSAGES` carries the whole transcript and an `epoch` naming that snapshot. `CF_AGENT_CHAT_MESSAGES_DELTA` carries only the messages a turn boundary persisted (upsert by id; unknown ids append) and the `epoch` it applies to — the client drops a delta whose epoch differs from the last snapshot it applied, so a delta can never land on the wrong base. `@cloudflare/think` sends deltas during normal turns and a snapshot on connect/resume, after a branch or regeneration, transcript repair, compaction, clear, and whenever a connection has not yet received a snapshot. `@cloudflare/ai-chat` currently sends snapshots only.
+
+Deltas are negotiated. `useAgentChat` sends `CF_AGENT_CHAT_CLIENT_CAPABILITIES` (`{ transcriptDeltas: true }`) on every socket open, and the server sends delta frames only to connections that declared it — a client pinned to an older `agents` release never sends the frame, so it keeps receiving full snapshots instead of silently dropping an unknown frame and going stale.
 
 ## Examples
 

@@ -2993,12 +2993,30 @@ export class Think<
   //     wake every surviving socket is unaligned, which is right — clients
   //     hold an epoch from the previous instance.
   // `_broadcastMessagesDelta` sends a delta only while every connection is
-  // aligned to the current cache epoch; otherwise it falls back to the full
+  // aligned to the current cache epoch AND has declared that it applies delta
+  // frames (`_transcriptDeltaCapable`); otherwise it falls back to the full
   // frame, which re-aligns everyone. The instance prefix keeps an epoch from
   // a previous DO instantiation from colliding with this one.
   private readonly _transcriptInstance = crypto.randomUUID().slice(0, 8);
   private _cacheEpoch = 0;
   private _transcriptAlignment = new Map<string, number | "ignore">();
+  /**
+   * Connections that declared `transcriptDeltas` via the client-capabilities
+   * frame. A client too old to send it (or one that opted out) never sees a
+   * delta: it would silently drop the unknown frame and with it the turn's
+   * transcript update, going stale until it reconnected. Cleared on close;
+   * in-memory only, so a hibernation wake re-negotiates — the conservative
+   * direction, since the fallback is a snapshot.
+   */
+  private _transcriptDeltaCapable = new Set<string>();
+  /**
+   * Ids written while a broadcast was suppressed — `addMessages` mid-turn or
+   * with `broadcast: false`. They used to ride the turn's next full snapshot;
+   * under deltas they must be named explicitly or they would never reach any
+   * client. Folded into the next transcript broadcast and cleared once one
+   * reaches every connection.
+   */
+  private _deferredTranscriptIds = new Set<string>();
   /**
    * Set when a turn discarded a live-streamed partial without persisting it
    * (context-overflow retry). Clients still show the discarded chunks; only a
@@ -3814,9 +3832,36 @@ export class Think<
 
   /** Replace the live cache with a durable storage snapshot. */
   private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
+    if (!this._preservesTranscriptBase(messages)) {
+      this._cacheEpoch++;
+    }
     this._cachedMessages = messages;
-    this._cacheEpoch++;
     return this._cachedMessages;
+  }
+
+  /**
+   * Whether replacing the cache with `next` leaves every row a client already
+   * holds untouched: the same rows, in the same order, with rows only
+   * appended at the tail (which a delta can name). A re-read that produced a
+   * byte-identical transcript is the common case — `_syncMessages()` runs at
+   * every boundary when the cache is windowed or unhydrated, and bumping the
+   * epoch there would force a snapshot on exactly the largest transcripts the
+   * deltas are meant to help.
+   *
+   * Only computed while a delta could actually be sent. With no aligned,
+   * delta-capable connection the epoch bump costs nothing, so the comparison
+   * would be pure waste.
+   */
+  private _preservesTranscriptBase(next: readonly UIMessage[]): boolean {
+    const prev = this._cachedMessages;
+    if (next === prev) return true;
+    if (next.length < prev.length) return false;
+    if (!this._anyConnectionAligned()) return false;
+    for (let i = 0; i < prev.length; i++) {
+      if (next[i].id !== prev[i].id) return false;
+      if (JSON.stringify(next[i]) !== JSON.stringify(prev[i])) return false;
+    }
+    return true;
   }
 
   /**
@@ -11456,10 +11501,19 @@ export class Think<
     // — and suppresses it mid-turn: pushing a transcript frame while a turn
     // streams would clobber the in-progress assistant message on connected
     // clients (the same reason the streaming path defers its broadcast). The
-    // injected messages ride along on the turn's next broadcast.
-    if (this._insideInferenceLoop) return;
+    // injected messages ride along on the turn's next broadcast, which names
+    // them explicitly (`_deferTranscriptIds`) — under deltas a boundary frame
+    // only carries the rows it names, so they would otherwise never arrive.
+    // `broadcast: false` defers the same way: it suppresses the immediate
+    // frame, it does not drop the rows from the transcript clients see.
+    if (this._insideInferenceLoop) {
+      this._deferTranscriptIds(written);
+      return;
+    }
     if (options?.broadcast !== false) {
       this._broadcastMessagesDelta(written);
+    } else {
+      this._deferTranscriptIds(written);
     }
   }
 
@@ -11926,6 +11980,7 @@ export class Think<
     ) => {
       this._pendingResumeConnections.delete(connection.id);
       this._transcriptAlignment.delete(connection.id);
+      this._transcriptDeltaCapable.delete(connection.id);
       this._continuation.releaseConnection(connection.id);
       this._preStream.release(connection.id);
       return _onClose(connection, code, reason, wasClean);
@@ -11985,6 +12040,17 @@ export class Think<
     event: NonNullable<ReturnType<typeof parseProtocolMessage>>
   ): Promise<void> {
     switch (event.type) {
+      case "client-capabilities":
+        // Gate for delta transcript frames. A client that never sends this
+        // (an older `agents` release) keeps receiving full snapshots rather
+        // than silently dropping an unknown frame and going stale.
+        if (event.transcriptDeltas) {
+          this._transcriptDeltaCapable.add(connection.id);
+        } else {
+          this._transcriptDeltaCapable.delete(connection.id);
+        }
+        break;
+
       case "stream-resume-request":
         await this._handleStreamResumeRequest(connection, event.probeId);
         break;
@@ -16782,20 +16848,53 @@ export class Think<
    */
   private _broadcastMessages(exclude?: string[]) {
     this._broadcast(this._snapshotFrame(), exclude);
-    this._transcriptNeedsSnapshot = false;
+    let reachedEveryone = true;
     for (const connection of this.getConnections()) {
-      if (exclude?.includes(connection.id)) continue;
       if (this._transcriptAlignment.get(connection.id) === "ignore") continue;
+      if (exclude?.includes(connection.id)) {
+        // This connection was deliberately skipped, so it did NOT receive the
+        // snapshot. Anything the snapshot was carrying on its behalf — a
+        // forced reconcile, deferred rows — stays owed until one reaches it.
+        reachedEveryone = false;
+        continue;
+      }
       this._transcriptAlignment.set(connection.id, this._cacheEpoch);
+    }
+    if (reachedEveryone) {
+      this._transcriptNeedsSnapshot = false;
+      this._deferredTranscriptIds.clear();
     }
   }
 
-  private _everyConnectionAligned(): boolean {
+  /** A connection is only sent deltas once it has declared it applies them. */
+  private _connectionTakesDeltas(id: string): boolean {
+    return this._transcriptDeltaCapable.has(id);
+  }
+
+  private _everyConnectionAligned(exclude?: string[]): boolean {
     for (const connection of this.getConnections()) {
       const aligned = this._transcriptAlignment.get(connection.id);
-      if (aligned !== "ignore" && aligned !== this._cacheEpoch) return false;
+      if (aligned === "ignore") continue;
+      if (exclude?.includes(connection.id)) continue;
+      if (aligned !== this._cacheEpoch) return false;
+      if (!this._connectionTakesDeltas(connection.id)) return false;
     }
     return true;
+  }
+
+  /** At least one connection could be sent a delta right now. */
+  private _anyConnectionAligned(): boolean {
+    for (const connection of this.getConnections()) {
+      const aligned = this._transcriptAlignment.get(connection.id);
+      if (aligned === "ignore") continue;
+      if (
+        aligned === this._cacheEpoch &&
+        this._connectionTakesDeltas(connection.id)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private _snapshotFrame(): Record<string, unknown> {
@@ -16811,19 +16910,29 @@ export class Think<
    * from the live cache (so the wire copy is exactly what a snapshot would
    * carry). Falls back to a full snapshot when clients cannot be assumed to
    * share the current base: the cache was re-derived since the last snapshot
-   * broadcast, a connection joined mid-stream without one, a retry discarded
-   * streamed chunks, or an id is not in the cache (a windowed cache, or a
-   * message stripped to nothing at persist).
+   * broadcast, a connection joined mid-stream without one, a connection has
+   * not declared that it applies deltas, a retry discarded streamed chunks,
+   * or an id is not in the cache (a windowed cache, or a message stripped to
+   * nothing at persist).
    */
   private _broadcastMessagesDelta(ids: readonly string[], exclude?: string[]) {
-    if (ids.length === 0) return;
-    if (this._transcriptNeedsSnapshot || !this._everyConnectionAligned()) {
+    // Rows written while a broadcast was suppressed (`addMessages` mid-turn
+    // or with `broadcast: false`) ride this one, exactly as they used to ride
+    // the next full snapshot.
+    const wanted = new Set([...ids, ...this._deferredTranscriptIds]);
+    if (wanted.size === 0) return;
+    if (
+      this._transcriptNeedsSnapshot ||
+      !this._everyConnectionAligned(exclude)
+    ) {
       this._broadcastMessages(exclude);
       return;
     }
-    const wanted = new Set(ids);
     const messages = this._cachedMessages.filter((m) => wanted.has(m.id));
-    if (messages.length !== wanted.size) {
+    // Every wanted id must resolve to exactly one cached row. Counting rows
+    // would let a duplicated id in the cache stand in for a missing one.
+    const resolved = new Set(messages.map((m) => m.id));
+    if (resolved.size !== wanted.size) {
       this._broadcastMessages(exclude);
       return;
     }
@@ -16835,6 +16944,33 @@ export class Think<
       },
       exclude
     );
+    // Only a broadcast that reached every connection settles the deferred
+    // rows; an excluded one is still owed them.
+    if (!this._anyExcludedConnection(exclude)) {
+      this._deferredTranscriptIds.clear();
+    }
+  }
+
+  /** Whether `exclude` skipped a live connection that receives transcripts. */
+  private _anyExcludedConnection(exclude?: string[]): boolean {
+    if (!exclude || exclude.length === 0) return false;
+    for (const connection of this.getConnections()) {
+      if (!exclude.includes(connection.id)) continue;
+      if (this._transcriptAlignment.get(connection.id) === "ignore") continue;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Record rows whose broadcast was suppressed so the next transcript frame
+   * still carries them. Without this a mid-turn `addMessages` (from a tool
+   * `execute`) or an `addMessages(..., { broadcast: false })` would be
+   * durable and in the live cache but never reach any client: the turn's
+   * cutover frame is a delta naming only the assistant message.
+   */
+  private _deferTranscriptIds(ids: readonly string[]): void {
+    for (const id of ids) this._deferredTranscriptIds.add(id);
   }
 }
 

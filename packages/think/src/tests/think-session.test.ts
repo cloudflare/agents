@@ -48,6 +48,14 @@ async function connectThinkTestAgentWS(room: string): Promise<WebSocket> {
   const ws = response.webSocket as WebSocket;
   expect(ws).toBeDefined();
   ws.accept();
+  // Transcript deltas are negotiated: without this the server keeps sending
+  // full snapshots (what an older client gets).
+  ws.send(
+    JSON.stringify({
+      type: "cf_agent_chat_client_capabilities",
+      capabilities: { transcriptDeltas: true }
+    })
+  );
   return ws;
 }
 

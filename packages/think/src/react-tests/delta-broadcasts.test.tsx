@@ -59,13 +59,15 @@ async function dispatch(target: EventTarget, data: Record<string, unknown>) {
 
 const CHAT_MESSAGES = "cf_agent_chat_messages";
 const CHAT_MESSAGES_DELTA = "cf_agent_chat_messages_delta";
+const CHAT_RESPONSE = "cf_agent_use_chat_response";
+const CLIENT_CAPABILITIES = "cf_agent_chat_client_capabilities";
 
 function text(msg: string): UIMessage["parts"] {
   return [{ type: "text", text: msg }];
 }
 
 async function mount(name: string) {
-  const { agent, target } = createFakeAgent({
+  const { agent, target, sentMessages } = createFakeAgent({
     name,
     url: `ws://localhost:3000/agents/chat/${name}?_pk=abc`
   });
@@ -96,7 +98,11 @@ async function mount(name: string) {
     );
     await sleep(10);
   });
-  return { target, read: () => screen.getByTestId("transcript").textContent };
+  return {
+    target,
+    sentMessages,
+    read: () => screen.getByTestId("transcript").textContent
+  };
 }
 
 describe("Think client — transcript delta ordering guard", () => {
@@ -217,5 +223,168 @@ describe("Think client — transcript delta ordering guard", () => {
       messages: [{ id: "a1", role: "assistant", parts: text("nope") }]
     });
     expect(read()).toBe("u1:hi");
+  });
+});
+
+describe("Think client — delta capability negotiation", () => {
+  it("declares transcriptDeltas on the socket, and again on every reopen", async () => {
+    const { target, sentMessages } = await mount("delta-capabilities");
+
+    const declarations = () =>
+      sentMessages
+        .map((m) => JSON.parse(m) as { type?: string; capabilities?: unknown })
+        .filter((m) => m.type === CLIENT_CAPABILITIES);
+
+    // The hook mounts before the socket opens in this harness, so nothing is
+    // declared until the first `open`.
+    await act(async () => {
+      target.dispatchEvent(new Event("open"));
+      await sleep(10);
+    });
+    expect(declarations()).toEqual([
+      { type: CLIENT_CAPABILITIES, capabilities: { transcriptDeltas: true } }
+    ]);
+
+    // The server keys the capability by connection, so a reconnect must
+    // re-declare it or the replacement socket silently falls back to
+    // snapshots forever.
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      await sleep(10);
+    });
+    expect(declarations()).toHaveLength(2);
+  });
+});
+
+describe("Think client — delta/snapshot parity", () => {
+  it("adopts the server id for a row matched through a shared toolCallId", async () => {
+    // The snapshot path replaces the list wholesale, so the client always ends
+    // up on the server's ids. A delta must not leave the row pinned to a
+    // locally minted id — regenerate/branch requests key on it.
+    const { target, read } = await mount("delta-id-parity");
+
+    await dispatch(target, {
+      type: CHAT_MESSAGES,
+      epoch: "inst.9",
+      messages: [
+        { id: "u1", role: "user", parts: text("hi") },
+        {
+          id: "local-assistant",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-search",
+              toolCallId: "call-1",
+              state: "input-available",
+              input: {}
+            }
+          ]
+        }
+      ]
+    });
+    await dispatch(target, {
+      type: CHAT_MESSAGES_DELTA,
+      epoch: "inst.9",
+      messages: [
+        {
+          id: "server-assistant",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-search",
+              toolCallId: "call-1",
+              state: "output-available",
+              input: {},
+              output: "done"
+            },
+            { type: "text", text: "found it" }
+          ]
+        }
+      ]
+    });
+    await waitFor(() => expect(read()).toBe("u1:hi|server-assistant:found it"));
+  });
+});
+
+describe("Think client — protected streaming assistant reconciles", () => {
+  /** Drive the hook into an in-flight (protected) assistant stream. */
+  async function startProtectedStream(target: EventTarget) {
+    await act(async () => {
+      target.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({ type: "cf_agent_stream_resuming", id: "s1" })
+        })
+      );
+      await sleep(10);
+    });
+    for (const body of [
+      '{"type":"start","messageId":"a1"}',
+      '{"type":"text-start","id":"t1"}',
+      '{"type":"text-delta","id":"t1","delta":"local copy"}'
+    ]) {
+      await dispatch(target, {
+        type: CHAT_RESPONSE,
+        id: "s1",
+        body,
+        done: false,
+        replay: true
+      });
+    }
+  }
+
+  it("applies the persisted copy once the stream that owned it finishes", async () => {
+    const { target, read } = await mount("delta-protected-reconcile");
+    await dispatch(target, {
+      type: CHAT_MESSAGES,
+      epoch: "inst.7",
+      messages: [{ id: "u1", role: "user", parts: text("hi") }]
+    });
+    await startProtectedStream(target);
+    await waitFor(() => expect(read()).toContain("a1:local copy"));
+
+    // The cutover delta races ahead of the `finish` chunk. The locally
+    // streamed copy is protected, so it stays — but the server's copy is
+    // held, not dropped (on the snapshot path the next boundary's full frame
+    // reconciles it; a delta naming only this row would be lost for good).
+    await dispatch(target, {
+      type: CHAT_MESSAGES_DELTA,
+      epoch: "inst.7",
+      messages: [{ id: "a1", role: "assistant", parts: text("persisted") }]
+    });
+    expect(read()).toBe("u1:hi|a1:local copy");
+
+    await dispatch(target, {
+      type: CHAT_RESPONSE,
+      id: "s1",
+      body: "",
+      done: true
+    });
+    await waitFor(() => expect(read()).toBe("u1:hi|a1:persisted"));
+  });
+
+  it("clears protection when the delta puts a later assistant after it (#1778)", async () => {
+    const { target, read } = await mount("delta-protected-1778");
+    await dispatch(target, {
+      type: CHAT_MESSAGES,
+      epoch: "inst.8",
+      messages: [{ id: "u1", role: "user", parts: text("hi") }]
+    });
+    await startProtectedStream(target);
+    await waitFor(() => expect(read()).toContain("a1:local copy"));
+
+    // The server transcript advanced past the protected message (a HITL
+    // denial persisted, then a follow-up assistant explaining it). Pinning
+    // the local copy would reorder the transcript, so trust the server —
+    // the same escape hatch the snapshot path takes.
+    await dispatch(target, {
+      type: CHAT_MESSAGES_DELTA,
+      epoch: "inst.8",
+      messages: [
+        { id: "a1", role: "assistant", parts: text("denied") },
+        { id: "a2", role: "assistant", parts: text("here is why") }
+      ]
+    });
+    await waitFor(() => expect(read()).toBe("u1:hi|a1:denied|a2:here is why"));
   });
 });

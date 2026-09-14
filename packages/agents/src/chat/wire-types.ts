@@ -38,6 +38,11 @@ export enum MessageType {
    * `CHAT_MESSAGES_DELTA` in `./protocol`.
    */
   CF_AGENT_CHAT_MESSAGES_DELTA = "cf_agent_chat_messages_delta",
+  /**
+   * Client→server: the optional protocol features this client understands.
+   * Sent once per socket open. See `CLIENT_CAPABILITIES` in `./protocol`.
+   */
+  CF_AGENT_CHAT_CLIENT_CAPABILITIES = "cf_agent_chat_client_capabilities",
   /** Client sends tool approval response to server (for tools with needsApproval) */
   CF_AGENT_TOOL_APPROVAL = "cf_agent_tool_approval",
 
@@ -204,6 +209,18 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST;
       /** Opaque correlation id echoed by direct server responses. */
       probeId?: string;
+    }
+  | {
+      /** Client declares the optional protocol features it understands */
+      type: MessageType.CF_AGENT_CHAT_CLIENT_CAPABILITIES;
+      capabilities: {
+        /**
+         * This client applies `CF_AGENT_CHAT_MESSAGES_DELTA`. Absent or
+         * false (including on clients too old to send this frame at all)
+         * means the server must keep sending full snapshots.
+         */
+        transcriptDeltas?: boolean;
+      };
     }
   | {
       /** Client sends tool result to server (for client-side tools) */
