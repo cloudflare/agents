@@ -181,6 +181,41 @@ describe("TwilioAdapter.handleRequest", () => {
     });
   });
 
+  it("preserves Blob audio ordering across an interruption", async () => {
+    const harness = createHarness();
+    await harness.startCall();
+
+    let finishConversion: (() => void) | undefined;
+    class DelayedBlob extends Blob {
+      async arrayBuffer(): Promise<ArrayBuffer> {
+        await new Promise<void>((resolve) => {
+          finishConversion = resolve;
+        });
+        return super.arrayBuffer();
+      }
+    }
+
+    const audioDelivery = harness.agentSocket.emit("message", {
+      data: new DelayedBlob([new Int16Array([0, 0, 0, 0]).buffer])
+    });
+    await Promise.resolve();
+    const interruptDelivery = harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "playback_interrupt" })
+    });
+
+    finishConversion?.();
+    await Promise.all([audioDelivery, interruptDelivery]);
+
+    expect(harness.serverSocket.jsonSent).toEqual([
+      {
+        event: "media",
+        streamSid: "stream-1",
+        media: { payload: "//8=" }
+      },
+      { event: "clear", streamSid: "stream-1" }
+    ]);
+  });
+
   it("interrupts buffered playback after sustained caller speech", async () => {
     const harness = createHarness();
     await harness.startCall();

@@ -34,7 +34,7 @@
  * ```
  */
 
-import { logVoiceError } from "agents/voice/errors";
+import { logVoiceError, toVoiceError } from "agents/voice/errors";
 
 // --- Audio conversion utilities ---
 
@@ -279,15 +279,18 @@ export class TwilioAdapter {
       ws.accept();
       agentSocket = ws;
 
-      // Forward agent messages back to Twilio
-      ws.addEventListener("message", async (event) => {
+      // Forward agent messages back to Twilio in the order they arrived.
+      // Blob conversion is asynchronous, so each message must wait for all
+      // earlier audio and control messages to finish processing.
+      let agentMessageQueue = Promise.resolve();
+      const handleAgentMessage = async (data: unknown) => {
         if (!streamSid) return;
 
-        if (typeof event.data === "string") {
+        if (typeof data === "string") {
           // JSON messages from agent — we can use Twilio marks to track them.
           // Forward as a mark so the Twilio side can correlate events.
           try {
-            const msg = JSON.parse(event.data) as Record<string, unknown>;
+            const msg = JSON.parse(data) as Record<string, unknown>;
 
             if (msg.type === "playback_interrupt") {
               if (!audioGated) sendClear();
@@ -322,14 +325,8 @@ export class TwilioAdapter {
           } catch {
             // ignore non-JSON
           }
-        } else if (
-          event.data instanceof ArrayBuffer ||
-          event.data instanceof Blob
-        ) {
-          const audio =
-            event.data instanceof Blob
-              ? await event.data.arrayBuffer()
-              : event.data;
+        } else if (data instanceof ArrayBuffer || data instanceof Blob) {
+          const audio = data instanceof Blob ? await data.arrayBuffer() : data;
 
           if (audioGated) return;
 
@@ -369,6 +366,24 @@ export class TwilioAdapter {
             );
           }
         }
+      };
+
+      ws.addEventListener("message", (event) => {
+        const data: unknown = event.data;
+        agentMessageQueue = agentMessageQueue
+          .then(() => handleAgentMessage(data))
+          .catch((error: unknown) => {
+            logVoiceError({
+              component: "TwilioAdapter",
+              stage: "message",
+              message: "Failed to process VoiceAgent message",
+              error: toVoiceError(
+                error,
+                "Unknown VoiceAgent message processing error"
+              )
+            });
+          });
+        return agentMessageQueue;
       });
 
       ws.addEventListener("close", () => {});
