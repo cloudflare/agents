@@ -263,8 +263,7 @@ import { truncateOlderMessages } from "agents/chat";
 import {
   Sessions,
   isCompactionMessage,
-  type SessionMessage,
-  type WriteOptions
+  type SessionMessage
 } from "agents/sessions";
 import { ThinkSession } from "./session";
 import {
@@ -3953,12 +3952,11 @@ export class Think<
   }
 
   private async _updateMessageInHistory(
-    message: UIMessage,
-    options?: WriteOptions
+    message: UIMessage
   ): Promise<UIMessage> {
     // `null` means the row is gone (a concurrent clear or delete). Keep the
     // caller's copy so the live cache stays coherent.
-    return ((await this.session.updateMessage(message, options)) ??
+    return ((await this.session.updateMessage(message)) ??
       message) as UIMessage;
   }
 
@@ -14433,22 +14431,12 @@ export class Think<
     if (owner) {
       const ownerParts = owner.parts as Array<Record<string, unknown>>;
       const result = applyToolUpdate(ownerParts, update);
-      if (
-        result &&
-        result.parts[result.index] !== ownerParts[result.index] &&
-        JSON.stringify(result.parts[result.index]) !==
-          JSON.stringify(ownerParts[result.index])
-      ) {
+      if (result && result.parts[result.index] !== ownerParts[result.index]) {
         const updatedMsg = {
           ...owner,
           parts: result.parts as UIMessage["parts"]
         };
-        // `owner` IS the stored row and the matched part just compared as
-        // different, so the row differs by construction: Sessions need not
-        // read it (and its continuations) back to find that out.
-        const safe = await this._updateMessageInHistory(updatedMsg, {
-          compare: "none"
-        });
+        const safe = await this._updateMessageInHistory(updatedMsg);
         // Session change callbacks may run after an immediately scheduled
         // continuation begins. Keep its input cache coherent synchronously.
         // Patch the live cache in place instead of doing a full

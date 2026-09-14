@@ -138,6 +138,27 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     return rows.length > 0 ? Number(rows[0].content_chunks) : null;
   }
 
+  /** The digest stamped on one stored message row, `null` when it has none. */
+  contentHash(sessionId: string, messageId: string): string | null {
+    const rows = this.ctx.storage.sql
+      .exec<{ content_hash: string | null }>(
+        "SELECT content_hash FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+        sessionId,
+        messageId
+      )
+      .toArray();
+    return rows.length > 0 ? (rows[0].content_hash ?? null) : null;
+  }
+
+  /** Make a row look like one written before the digest column existed. */
+  clearContentHash(sessionId: string, messageId: string): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_session_messages SET content_hash = NULL WHERE session_id = ? AND id = ?",
+      sessionId,
+      messageId
+    );
+  }
+
   /** Stored size of one message row, excluding anything it points at. */
   messageRowBytes(sessionId: string, messageId: string): number {
     return Number(
@@ -444,13 +465,9 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
   /**
    * Updates of a message stored across continuation rows. `textBytes` is
    * the body size; above `MAX_INLINE_ROW_BYTES` the row chunks. Reports both
-   * billed counters for an identical re-send under the default compare and
-   * for a changed body written with the given `compare`.
+   * billed counters for an identical re-send and for a changed body.
    */
-  async benchChunkedUpdates(
-    textBytes: number,
-    compare: "stored" | "none"
-  ): Promise<{
+  async benchChunkedUpdates(textBytes: number): Promise<{
     chunks: number;
     noop: { rowsRead: number; rowsWritten: number };
     changed: { rowsRead: number; rowsWritten: number };
@@ -473,7 +490,7 @@ export class SessionBenchObject extends DurableObject<Cloudflare.Env> {
     const noop = this.#billed.stopAll();
 
     this.#billed.start();
-    await session.updateMessage(message(`${body}!`), { compare });
+    await session.updateMessage(message(`${body}!`));
     const changed = this.#billed.stopAll();
     return { chunks, noop, changed };
   }

@@ -366,7 +366,27 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("writes a change the caller vouches for without reading the row back", async () => {
+  it("stamps a digest of the stored form on every write", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("k1", "first body"));
+      const appended = instance.contentHash("", "k1");
+      expect(appended).toMatch(/^[0-9a-f]{64}$/);
+
+      // An identical re-send is decided by the digest and changes nothing.
+      await session.updateMessage(text("k1", "first body"));
+      expect(instance.contentHash("", "k1")).toBe(appended);
+
+      // A changed body restamps.
+      await session.updateMessage(text("k1", "second body"));
+      const updated = instance.contentHash("", "k1");
+      expect(updated).toMatch(/^[0-9a-f]{64}$/);
+      expect(updated).not.toBe(appended);
+    });
+  });
+
+  it("decides unchanged from the digest, and dispatches only real changes", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
@@ -376,38 +396,71 @@ describe("Sessions capability", () => {
         events.push(event);
       });
 
-      // A row that is not there is still reported missing, and nothing is
-      // written for it.
-      expect(
-        await session.updateMessage(text("absent", "body"), {
-          compare: "none"
-        })
-      ).toBeNull();
+      // A row that is not there is reported missing, and nothing is written.
+      expect(await session.updateMessage(text("absent", "body"))).toBeNull();
       expect(events).toEqual([]);
 
-      const stored = await session.updateMessage(text("k1", "second body"), {
-        compare: "none"
-      });
+      const stored = await session.updateMessage(text("k1", "second body"));
       expect(stored?.parts[0].text).toBe("second body");
       expect((await session.getMessage("k1"))?.parts[0].text).toBe(
         "second body"
       );
-      // The caller took over the compare, so an identical re-send IS a
-      // write and is dispatched: the byte-exact guard is the default only.
-      await session.updateMessage(text("k1", "second body"), {
-        compare: "none"
-      });
-      expect(events.map((event) => event.type)).toEqual(["update", "update"]);
+      // An identical re-send after it is absorbed: no second event.
+      await session.updateMessage(text("k1", "second body"));
+      expect(events.map((event) => event.type)).toEqual(["update"]);
     });
   });
 
-  it("still drops surplus continuations when a vouched-for update shrinks", async () => {
+  it("falls back to the stored content for a row written before the digest", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("k1", "first body"));
+      const events: SessionChangeEvent[] = [];
+      instance.sessions.subscribe((event) => {
+        events.push(event);
+      });
+
+      // An undigested row still absorbs an identical re-send — and stamps a
+      // digest, so it pays the read-back at most once.
+      instance.clearContentHash("", "k1");
+      await session.updateMessage(text("k1", "first body"));
+      expect(events).toEqual([]);
+      expect(instance.contentHash("", "k1")).toMatch(/^[0-9a-f]{64}$/);
+
+      // And an undigested row that really changed is written and dispatched.
+      instance.clearContentHash("", "k1");
+      await session.updateMessage(text("k1", "second body"));
+      expect(events.map((event) => event.type)).toEqual(["update"]);
+      expect((await session.getMessage("k1"))?.parts[0].text).toBe(
+        "second body"
+      );
+    });
+  });
+
+  it("falls back across the continuation rows of an undigested large row", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      const body = "y".repeat(3 * 1024 * 1024);
+      await session.appendMessage(text("s1", body));
+      expect(instance.continuationRows("", "s1").length).toBeGreaterThan(0);
+
+      // The reassembled compare spans the continuations, so a change that
+      // lands past the first row's budget is still seen as a change.
+      instance.clearContentHash("", "s1");
+      await session.updateMessage(text("s1", `${body}!`));
+      expect((await session.getMessage("s1"))?.parts[0].text).toBe(`${body}!`);
+    });
+  });
+
+  it("still drops surplus continuations when an update shrinks the row", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
       await session.appendMessage(text("s1", "y".repeat(3 * 1024 * 1024)));
       expect(instance.continuationRows("", "s1").length).toBeGreaterThan(0);
-      await session.updateMessage(text("s1", "short"), { compare: "none" });
+      await session.updateMessage(text("s1", "short"));
       expect(instance.continuationRows("", "s1")).toEqual([]);
       expect((await session.getMessage("s1"))?.parts[0].text).toBe("short");
     });
@@ -1070,7 +1123,10 @@ describe("Sessions capability", () => {
           "content",
           "content_chunks",
           "token_estimate",
-          "created_at"
+          "created_at",
+          // The digest of the stored form, stamped by the write that
+          // produced the row. Nullable: rows older than the column have none.
+          "content_hash"
         ]);
         // A continuation row carries its slice and nothing else: no media
         // type, no size, no hash. It is the message row's tail, not a record.
