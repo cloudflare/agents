@@ -93,11 +93,9 @@ export type { OutgoingMessage, IncomingMessage } from "./wire-types";
 export {
   applyAgentToolEvent,
   createAgentToolEventState,
-  interceptAgentToolBroadcast,
   AgentToolProgressEmitter,
   type AgentToolProgressEmitHooks,
   type AgentToolProgressEmitResult,
-  type AgentToolBroadcastHooks,
   type AgentToolEvent,
   type AgentToolEventMessage,
   type AgentToolEventState,

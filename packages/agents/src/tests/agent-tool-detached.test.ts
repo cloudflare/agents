@@ -104,6 +104,87 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(giveUps).toHaveLength(1);
   });
 
+  it("stops counting a torn-down give-up as outstanding, so the backbone goes quiet", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-settled-${crypto.randomUUID()}`
+    );
+
+    agent.seedDetachedRunForTest("run-settled");
+    // The scripted child accepts the cancel, so the give-up tears it down: no
+    // late completion can ever arrive for this run.
+    await agent.deliverGiveUpForTest("run-settled");
+
+    expect(await agent.readRunStatusForTest("run-settled")).toBe("interrupted");
+    expect(await agent.readChildStillRunningForTest("run-settled")).toBe(0);
+    // Within the grace window a racing late completion can still land, so the
+    // run keeps the backbone awake.
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+
+    agent.backdateGiveUpForTest("run-settled", 10 * 60 * 1000);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+  });
+
+  it("tears down a soft no-progress give-up once the absolute budget passes", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-soft-then-hard-${crypto.randomUUID()}`
+    );
+
+    // No scripted child: the give-up cannot reach the child to cancel it, so
+    // the seal is soft and the run stays outstanding.
+    agent.seedDetachedRunWithStaleProgressForTest(
+      "run-soft",
+      1000,
+      Date.now() - 5000
+    );
+    await agent.detachedReconcileTickForTest();
+    expect(await agent.readChildStillRunningForTest("run-soft")).toBe(1);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+
+    // The absolute ceiling is the hard bound: a later tick that can reach the
+    // child tears it down without re-delivering the give-up.
+    await agent.deliverGiveUpForTest("run-soft");
+    expect(await agent.readChildStillRunningForTest("run-soft")).toBe(0);
+    agent.backdateGiveUpForTest("run-soft", 10 * 60 * 1000);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    const giveUps = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-soft" && e.hook === "onDetachedDone"
+    );
+    expect(giveUps).toHaveLength(1);
+  });
+
+  it("isolates a throwing durable onFinish from its siblings and still re-arms", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-throwing-sibling-${crypto.randomUUID()}`
+    );
+
+    agent.seedDetachedRunForTest(
+      "run-bad",
+      undefined,
+      undefined,
+      "onDetachedAlwaysThrows"
+    );
+    agent.seedDetachedRunForTest("run-good");
+    // Both children inspect terminal on this tick; the first row's callback
+    // throws, the second must still be delivered and the backbone re-armed
+    // for the retry of the first.
+    await agent.deliverFinishForTest("run-good", "completed", "done");
+
+    const good = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-good" && e.hook === "onDetachedDone"
+    );
+    expect(good).toEqual([
+      { hook: "onDetachedDone", runId: "run-good", status: "completed" }
+    ]);
+    expect(await agent.getServerErrorsForTest()).toContain(
+      "detached callback always fails"
+    );
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+    expect(await agent.detachedBackboneSchedulesForTest()).toHaveLength(1);
+  });
+
   it("gives up a silent detached run once its no-progress window elapses (reason: no-progress)", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,
@@ -167,13 +248,12 @@ describe("detached agent-tool delivery (#1752)", () => {
       "onDetachedFailsOnce"
     );
 
-    await expect(
-      agent.deliverFinishCatchingForTest(
-        "run-callback-retry",
-        "completed",
-        "done"
-      )
-    ).resolves.toBe("detached callback failed once");
+    // The callback failure is reported through onError rather than escaping
+    // the tick, so sibling rows and the re-arm are unaffected.
+    await agent.deliverFinishForTest("run-callback-retry", "completed", "done");
+    expect(await agent.getServerErrorsForTest()).toContain(
+      "detached callback failed once"
+    );
     expect(await agent.getDetachedDeliveryLog()).toEqual([
       {
         hook: "onAgentToolFinish",
@@ -300,6 +380,53 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(events).toHaveLength(1);
     expect(events[0].kind).toBe("interrupted");
     expect(events[0].runId).toBe("run-giveup-broadcast");
+  });
+
+  it("delivers a configured milestone from the warm tail, before any backbone tick", async () => {
+    // Regression: the parent row read while forwarding a child chunk did not
+    // project `detached_on_milestones`, so a milestone reached while the parent
+    // was tailing live was never notified — only the (much later) backbone tick
+    // delivered it.
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-milestone-warm-${crypto.randomUUID()}`
+    );
+
+    const { deliveries, backboneTicksRun } =
+      await agent.runDetachedMilestoneOnWarmTailForTest("run-milestone-warm");
+
+    expect(backboneTicksRun).toBe(0);
+    expect(deliveries).toEqual([
+      { runId: "run-milestone-warm", name: "indexed", mode: "narrate" }
+    ]);
+  });
+
+  it("rejects a detached dispatch that would exceed the detached-only cap", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-cap-${crypto.randomUUID()}`
+    );
+
+    // One live detached run already holds the only detached slot; the total cap
+    // stays Infinity, so only the detached budget can reject this dispatch.
+    agent.seedDetachedRunForTest("run-cap-live");
+    await agent.setMaxConcurrentDetachedAgentToolsForTest(1);
+
+    const rejected = await agent.dispatchRunForTest("run-cap-new", "detached");
+    expect(rejected.status).toBe("error");
+    expect(rejected.error).toContain(
+      "maxConcurrentDetachedAgentTools (1) exceeded"
+    );
+    // The dispatch failed synchronously: the row is the terminal error itself.
+    expect(await agent.readRunStatusForTest("run-cap-new")).toBe("error");
+
+    // An AWAITED run is unaffected — the detached cap only bounds background
+    // work inside the (still uncapped) total budget.
+    const awaited = await agent.dispatchRunForTest(
+      "run-cap-awaited",
+      "awaited"
+    );
+    expect(awaited.status).toBe("completed");
   });
 
   it("collapses a concurrent backbone-arm fan-out to a single schedule", async () => {
