@@ -1055,3 +1055,249 @@ describe("Tasks capability", () => {
     });
   });
 });
+
+describe("Tasks run budget", () => {
+  it("exposes the attempt-wide signal to the handler body and cancels through it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("awaitsSignal", {
+        label: "cancel-me"
+      });
+      await waitFor(() => instance.signalWaits.includes("cancel-me"));
+
+      expect(await instance.tasks.cancel(receipt.runId, "enough")).toBe(true);
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
+        "cancelled"
+      ]);
+      if (snapshot.state !== "cancelled") throw new Error("unreachable");
+      expect(snapshot.reason).toBe("enough");
+      expect(instance.signalReasons).toEqual(["TaskCancellation"]);
+    });
+  });
+
+  it("fails a run whose last permitted attempt was interrupted instead of reclaiming it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "spent-run",
+          definition: "pipeline",
+          input: { label: "spent" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 2,
+          maxAttempts: 2,
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, "spent-run", [
+        "failed"
+      ]);
+      if (snapshot.state !== "failed") throw new Error("unreachable");
+      expect(snapshot.error.name).toBe("TaskAttemptsExhaustedError");
+      expect(snapshot.error.message).toMatch(/2 permitted attempts/);
+      expect(instance.stepRuns).toEqual([]);
+      await waitFor(() => instance.runErrorRuns.length > 0);
+      expect(instance.runErrorRuns).toEqual([
+        {
+          runId: "spent-run",
+          definition: "pipeline",
+          name: "TaskAttemptsExhaustedError"
+        }
+      ]);
+    });
+  });
+
+  it("still replays the last permitted attempt", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "last-chance",
+          definition: "pipeline",
+          input: { label: "last" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          maxAttempts: 2,
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, "last-chance", [
+        "completed"
+      ]);
+      expect(snapshot.state).toBe("completed");
+      expect(instance.stepRuns).toEqual(["pipeline:first", "pipeline:second"]);
+    });
+  });
+
+  it("fails a run whose deadline already passed without running it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "pipeline",
+        { label: "late" },
+        { deadline: new Date(Date.now() - 1) }
+      );
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
+        "failed"
+      ]);
+      if (snapshot.state !== "failed") throw new Error("unreachable");
+      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(instance.stepRuns).toEqual([]);
+      await waitFor(() => instance.runErrorRuns.length > 0);
+      expect(instance.runErrorRuns.map((run) => run.runId)).toEqual([
+        receipt.runId
+      ]);
+    });
+  });
+
+  it("wakes a parked run at its deadline and fails it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      // The nap is far in the future; only the deadline can wake the run.
+      const receipt = await instance.tasks.run(
+        "sleeper",
+        { ms: 60_000 },
+        { deadline: Date.now() + 300 }
+      );
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
+        "failed"
+      ]);
+      if (snapshot.state !== "failed") throw new Error("unreachable");
+      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(instance.stepRuns).toEqual(["sleeper:before"]);
+    });
+  });
+
+  it("enforces the deadline over a live attempt that ignores its signal", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "deaf",
+        { label: "deaf" },
+        { deadline: Date.now() + 300 }
+      );
+      await waitFor(() => instance.signalWaits.includes("deaf"));
+
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
+        "failed"
+      ]);
+      if (snapshot.state !== "failed") throw new Error("unreachable");
+      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      await waitFor(() => instance.runErrorRuns.length > 0);
+      expect(instance.runErrorRuns).toEqual([
+        {
+          runId: receipt.runId,
+          definition: "deaf",
+          name: "TaskDeadlineExceededError"
+        }
+      ]);
+    });
+  });
+
+  it("aborts a cooperative live attempt at the deadline and reports it once", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "awaitsSignal",
+        { label: "deadline" },
+        { deadline: Date.now() + 300 }
+      );
+      await waitFor(() => instance.signalWaits.includes("deadline"));
+
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
+        "failed"
+      ]);
+      if (snapshot.state !== "failed") throw new Error("unreachable");
+      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      await waitFor(() => instance.signalReasons.length > 0);
+      expect(instance.signalReasons).toEqual(["TaskDeadlineExceededError"]);
+      // The attempt's own unwinding hit the fence; the enforcement already
+      // observed the failure, so onError saw this run exactly once.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        instance.runErrorRuns.filter((run) => run.runId === receipt.runId)
+      ).toHaveLength(1);
+    });
+  });
+
+  it("adds the budget columns to a version 1 schema on startup", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        // A run table as version 1 created it, before the budget columns.
+        state.storage.sql.exec(`
+          CREATE TABLE cf_agents_task_runs (
+            run_id TEXT PRIMARY KEY,
+            definition TEXT NOT NULL,
+            input TEXT,
+            state TEXT NOT NULL,
+            result TEXT,
+            error_name TEXT,
+            error_message TEXT,
+            status_message TEXT,
+            metadata TEXT,
+            idempotency_key TEXT UNIQUE,
+            retain INTEGER NOT NULL DEFAULT 1,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            generation TEXT,
+            next_at INTEGER,
+            wait_reason TEXT,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            cancel_reason TEXT,
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            updated_at INTEGER NOT NULL,
+            settled_at INTEGER
+          ) WITHOUT ROWID`);
+        await state.storage.put("cf_agents:tasks_schema_version", 1);
+        await instance.lifecycle.start();
+
+        const receipt = await instance.tasks.run(
+          "pipeline",
+          { label: "migrated" },
+          { deadline: Date.now() + 60_000, maxAttempts: 3 }
+        );
+        const snapshot = await waitForState(instance.tasks, receipt.runId, [
+          "completed"
+        ]);
+        expect(snapshot.state).toBe("completed");
+        expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
+          2
+        );
+      }
+    );
+  });
+
+  it("rejects an invalid attempt budget or deadline at acceptance", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await expect(
+        instance.tasks.run("pipeline", { label: "x" }, { maxAttempts: 0 })
+      ).rejects.toThrow(/maxAttempts must be a positive integer/);
+      await expect(
+        instance.tasks.run("pipeline", { label: "x" }, { deadline: Number.NaN })
+      ).rejects.toThrow(/deadline must be a finite time/);
+    });
+  });
+});

@@ -110,6 +110,8 @@ export class TaskStore {
         idempotency_key TEXT UNIQUE,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER,
+        deadline_at INTEGER,
         generation TEXT,
         next_at INTEGER,
         wait_reason TEXT,
@@ -149,6 +151,24 @@ export class TaskStore {
         completed_at INTEGER,
         PRIMARY KEY (run_id, step_name)
       ) WITHOUT ROWID`);
+  }
+
+  /**
+   * Schema version 2: the per-run attempt budget and deadline columns. A
+   * fresh object gets them from `ensureTables`; an object created at version
+   * 1 adds them here. Adding an existing column is the only expected failure
+   * and means the table is already current.
+   */
+  addRunBudgetColumns(): void {
+    for (const column of ["max_attempts INTEGER", "deadline_at INTEGER"]) {
+      const query = `ALTER TABLE cf_agents_task_runs ADD COLUMN ${column}`;
+      try {
+        this.#storage.sql.exec(query);
+      } catch (cause) {
+        if (/duplicate column/i.test(String(cause))) continue;
+        throw new SqlError(query, cause);
+      }
+    }
   }
 
   rowToSnapshot<Output extends TaskValue>(

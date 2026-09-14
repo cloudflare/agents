@@ -106,6 +106,22 @@ the existing run instead of creating a second one; `accepted: false` on the
 receipt marks that join. Pass `metadata` to retain JSON alongside the run and
 `retain: false` to remove the record after terminal settlement.
 
+Two options bound a run. `maxAttempts` caps how many times it is claimed —
+the first attempt, each replay after an interruption, and each wake from a
+sleep or retry park all count — and once the last permitted attempt ends
+without settling, the run fails with `TaskAttemptsExhaustedError` instead of
+being claimed again. `deadline` (epoch milliseconds or a `Date`) is a
+wall-clock bound: a live attempt's `step.signal` aborts and the run fails
+with `TaskDeadlineExceededError`; a parked run is woken at the deadline and
+fails there. Both are unbounded when omitted.
+
+```ts
+await this.tasks.run("build-report@v1", input, {
+  maxAttempts: 10,
+  deadline: Date.now() + 60 * 60 * 1000
+});
+```
+
 `run()` and `handle()` type the definition name and its input against the
 declared map. A handle is a typed lens scoped to one definition — its `run`,
 `get`, `getByIdempotencyKey`, and `cancel` see only that definition's runs,
@@ -128,11 +144,16 @@ and at most 1 MiB serialized.
 | `step.sleepUntil(name, when)` | Sleep until a wall-clock time.                                                                               |
 | `step.status(message)`        | Update observable progress; replays stay silent over old ground.                                             |
 | `step.idempotencyKey(name)`   | The stable external deduplication key `step.do(name, …)` receives.                                           |
+| `step.signal`                 | Aborts for the whole attempt on `cancel()` and at the run's `deadline`, for work awaited outside a step.     |
 
 Each `do` attempt receives `{ attempt, idempotencyKey, signal }`. The signal
 aborts on cancellation and on the attempt timeout (default 5 minutes); a
 callback that ignores it still loses the attempt, and a stale attempt's late
-writes are rejected.
+writes are rejected. Work held in the handler body rather than in a step — a
+long model turn, a drain loop — has no step timeout, so it watches
+`step.signal` instead: it aborts on `cancel()` and when the run's `deadline`
+passes, and a body that ignores it runs on as a zombie whose writes the
+generation fence rejects.
 
 A callback that throws retries on a durable delay (default: 5 attempts,
 exponential backoff). Throw `NonRetryableError` to fail the run immediately.
@@ -200,6 +221,17 @@ before re-entering irreversible work:
 A step callback that throws is not an interruption; the retry policy owns
 it, with the run parked `waiting` between attempts. Interruptions also emit
 a `task:attempt:interrupted` event carrying the same step name.
+
+Replays are unbounded unless the run carries a `maxAttempts` budget. With
+one, a run whose attempts keep dying — a deterministic crash, a body that
+never settles — fails with `TaskAttemptsExhaustedError` at the reclaim after
+its last permitted attempt, and the handler is not run again.
+
+Every terminal failure reaches the constructor's `onError(error, run)`,
+including the ones Tasks records without running a handler: a missing
+definition, an exhausted attempt budget, a passed deadline. `run` names the
+`runId` and `definition`, so a host that keeps its own record of the work
+can settle it.
 
 ## Inspection and control
 

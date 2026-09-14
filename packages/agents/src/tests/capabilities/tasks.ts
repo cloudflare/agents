@@ -20,6 +20,16 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly stepRuns: string[] = [];
   /** Terminal run errors observed through the capability's onError. */
   readonly runErrors: string[] = [];
+  /** The run each onError observation named, with the error's name. */
+  readonly runErrorRuns: Array<{
+    runId: string;
+    definition: string;
+    name: string;
+  }> = [];
+  /** Handler bodies that entered an await on `step.signal`, by input label. */
+  readonly signalWaits: string[] = [];
+  /** Abort reasons `step.signal` delivered to handler bodies. */
+  readonly signalReasons: string[] = [];
   /** Failures injected into flaky step callbacks before they succeed. */
   failuresBeforeSuccess = 0;
   /** Platform-shaped failures injected at handler level before success. */
@@ -129,6 +139,35 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
             signal.addEventListener("abort", fail, { once: true });
           });
         });
+      },
+
+      /**
+       * Awaits outside any step until the attempt-wide `step.signal` aborts,
+       * then unwinds with its reason — the shape of a long model turn or a
+       * drain loop held in the handler body.
+       */
+      awaitsSignal: async (input: { label: string }, step: TaskStep) => {
+        this.signalWaits.push(input.label);
+        await new Promise<never>((_resolve, reject) => {
+          const fail = () => {
+            const reason: unknown = step.signal.reason;
+            this.signalReasons.push(
+              reason instanceof Error
+                ? reason.name
+                : ((reason as { constructor?: { name?: string } })?.constructor
+                    ?.name ?? String(reason))
+            );
+            reject(reason);
+          };
+          if (step.signal.aborted) return fail();
+          step.signal.addEventListener("abort", fail, { once: true });
+        });
+      },
+
+      /** Holds the handler body forever and ignores `step.signal`. */
+      deaf: async (input: { label: string }, _step: TaskStep) => {
+        this.signalWaits.push(input.label);
+        await new Promise<never>(() => {});
       },
 
       /** Ignores its signal; the engine's timeout race must still win. */
@@ -360,10 +399,15 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },
     stepTimeout: 2_000,
-    onError: (error) => {
+    onError: (error, run) => {
       this.runErrors.push(
         error instanceof Error ? error.message : String(error)
       );
+      this.runErrorRuns.push({
+        runId: run.runId,
+        definition: run.definition,
+        name: error instanceof Error ? error.name : String(error)
+      });
     }
   });
 
@@ -457,14 +501,17 @@ export function seedTaskRun(
     readonly nextAt: number;
     readonly retain?: boolean;
     readonly idempotencyKey?: string;
+    readonly maxAttempts?: number;
+    readonly deadlineAt?: number;
   }
 ): void {
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_agents_task_runs
        (run_id, definition, input, state, generation, attempt, next_at,
-        idempotency_key, retain, cancel_requested, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        idempotency_key, retain, max_attempts, deadline_at, cancel_requested,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     options.runId,
     options.definition,
     options.input === undefined ? null : JSON.stringify(options.input),
@@ -474,6 +521,8 @@ export function seedTaskRun(
     options.nextAt,
     options.idempotencyKey ?? null,
     options.retain === false ? 0 : 1,
+    options.maxAttempts ?? null,
+    options.deadlineAt ?? null,
     now,
     now
   );

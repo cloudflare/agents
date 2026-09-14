@@ -215,6 +215,7 @@ export class ReplayStep implements TaskStep {
     readonly name: string;
     readonly attempt: number;
   } | null;
+  readonly signal: AbortSignal;
 
   constructor(
     engine: TaskStepEngine,
@@ -226,6 +227,7 @@ export class ReplayStep implements TaskStep {
     this.#engine = engine;
     this.#live = options.startsLive;
     this.interrupted = options.interrupted ?? null;
+    this.signal = engine.attemptSignal;
   }
 
   do<T extends TaskValue>(
@@ -423,6 +425,12 @@ export class ReplayStep implements TaskStep {
       if (error instanceof AttemptSupersededError) throw error;
       const cancellation = this.#engine.cancellationRequested();
       if (cancellation) throw new TaskCancellation(cancellation.reason);
+      // The attempt itself was ended from outside (its deadline passed and
+      // the run is already settled): not a step outcome, so neither retry
+      // nor fail the step — unwind with the reason.
+      if (this.#engine.attemptSignal.aborted) {
+        throw this.#engine.attemptSignal.reason;
+      }
       // A condemned isolate cannot recover in-process. Leave the journal row
       // running and let the whole Task reach the alarm boundary, where a code
       // update defers to fresh code and a memory reset enters the breaker.
