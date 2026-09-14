@@ -281,7 +281,13 @@ Key behaviors:
 - **Give-up vs. finish are independent.** A budget give-up is delivered as
   `status: "interrupted"`, `reason: "budget-exceeded"`. Because `interrupted` is
   soft, a child that completes after the give-up still re-fires `onFinish` with
-  the real result — a premature give-up never hides a late completion.
+  the real result — a premature give-up never hides a late completion. When the
+  give-up managed to tear the child down, the backbone keeps watching for two
+  more top-cadence ticks (in case a completion was already racing the cancel)
+  and then lets the run settle. A give-up that could not reach the child leaves
+  it running and is torn down once the absolute ceiling passes. One run's
+  failing `onFinish` is reported through `onError` and never blocks its
+  siblings.
 - **Bounded.** Every detached run has an absolute `maxBudgetMs` ceiling
   (per-run, or the `detachedMaxBudgetMs` static option; default 24h). On expiry
   the parent gives up watching and tears the child down so an abandoned run

@@ -356,8 +356,46 @@ export class TestAgentToolReplayAgent extends Agent {
     await this.onDetachedDone(run, result);
   }
 
+  /** A durable `onFinish` that always fails, to prove one bad row is isolated. */
+  async onDetachedAlwaysThrows(): Promise<void> {
+    throw new Error("detached callback always fails");
+  }
+
   getDetachedDeliveryLog(): DetachedDeliveryLogEntry[] {
     return this.detachedDeliveryLog;
+  }
+
+  serverErrorsForTest: string[] = [];
+
+  override onError(connectionOrError: unknown, error?: unknown): void {
+    const cause = error ?? connectionOrError;
+    this.serverErrorsForTest.push(
+      cause instanceof Error ? cause.message : String(cause)
+    );
+  }
+
+  getServerErrorsForTest(): string[] {
+    return this.serverErrorsForTest;
+  }
+
+  /** Age a delivered give-up so the run falls outside the settled grace window. */
+  backdateGiveUpForTest(runId: string, ageMs: number): void {
+    this.sql`
+      UPDATE cf_agent_tool_runs
+      SET give_up_delivered_at = ${Date.now() - ageMs}
+      WHERE run_id = ${runId}
+    `;
+  }
+
+  hasOutstandingDetachedRunsForTest(): boolean {
+    return this._agentTool.hasOutstandingDetachedRuns();
+  }
+
+  readChildStillRunningForTest(runId: string): number | null {
+    const rows = this.sql<{ child_still_running: number | null }>`
+      SELECT child_still_running FROM cf_agent_tool_runs WHERE run_id = ${runId}
+    `;
+    return rows[0]?.child_still_running ?? null;
   }
 
   /** Seed a `running` detached run row with the `onDetachedDone` hook wired. */
@@ -534,19 +572,6 @@ export class TestAgentToolReplayAgent extends Agent {
         await this._agentTool.reconcileTick();
       }
     );
-  }
-
-  async deliverFinishCatchingForTest(
-    runId: string,
-    status: Exclude<AgentToolTerminalStatus, "interrupted">,
-    text: string
-  ): Promise<string | null> {
-    try {
-      await this.deliverFinishForTest(runId, status, text);
-      return null;
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
   }
 
   /**

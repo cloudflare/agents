@@ -1517,20 +1517,6 @@ export class Agent<
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
       ensureMcpServerTable(this.ctx.storage);
 
-      // Queue and schedule schema and migrations are owned by the Queue and
-      // Scheduler capabilities.
-      const addColumnIfNotExists = (sql: string) => {
-        try {
-          this.ctx.storage.sql.exec(sql);
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          if (!message.toLowerCase().includes("duplicate column")) {
-            throw error;
-          }
-        }
-      };
-
       // Workflow tracking table for Agent-Workflow integration
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_workflows (

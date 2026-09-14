@@ -65,6 +65,18 @@ export const DETACHED_DELIVERY_LEASE_MS = 60_000;
 // stops waking the object) once no detached run remains outstanding.
 export const DETACHED_BACKBONE_CADENCE_S = [5, 15, 30, 120];
 
+/**
+ * How long a give-up that tore its child down keeps the backbone re-arming.
+ * A cancel can race a completion that was already in flight, and the finish
+ * slot stays open so that late result still repairs the row (#1752); two full
+ * top-cadence ticks is enough to observe it. After that the run is settled
+ * and stops holding the backbone awake.
+ */
+export const DETACHED_SETTLED_GRACE_MS =
+  2 *
+  DETACHED_BACKBONE_CADENCE_S[DETACHED_BACKBONE_CADENCE_S.length - 1] *
+  1000;
+
 // Detached runs hold a concurrency slot for their ENTIRE life and have no
 // observer to notice them piling up. With both caps defaulting to `Infinity`
 // that is a real leak footgun, so the framework emits an edge-triggered warning

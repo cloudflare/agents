@@ -50,6 +50,7 @@ import {
   DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
   DETACHED_BACKBONE_CADENCE_S,
   DETACHED_DELIVERY_LEASE_MS,
+  DETACHED_SETTLED_GRACE_MS,
   DETACHED_LIVE_COUNT_WARN_THRESHOLD,
   DETACHED_NOTIFY_CALLBACK,
   resolveAgentToolsOptions,
@@ -805,11 +806,19 @@ export class AgentTools extends LifecycleCapability {
     return recovery;
   }
 
-  /** Whether any detached run is still awaiting terminal delivery. */
+  /**
+   * Whether any detached run is still awaiting terminal delivery. A run whose
+   * give-up tore the child down is settled once the grace window for a racing
+   * late completion has passed, even though its finish slot stays open.
+   */
   hasOutstandingDetachedRuns(): boolean {
     const rows = this.#sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM cf_agent_tool_runs
       WHERE detached = 1 AND finish_delivered_at IS NULL
+        AND NOT (
+          give_up_delivered_at IS NOT NULL AND child_still_running = 0
+          AND give_up_delivered_at < ${Date.now() - DETACHED_SETTLED_GRACE_MS}
+        )
     `;
     return (rows[0]?.n ?? 0) > 0;
   }
@@ -883,115 +892,21 @@ export class AgentTools extends LifecycleCapability {
              give_up_delivered_at
       FROM cf_agent_tool_runs
       WHERE detached = 1 AND finish_delivered_at IS NULL
+        AND NOT (
+          give_up_delivered_at IS NOT NULL AND child_still_running = 0
+          AND give_up_delivered_at < ${Date.now() - DETACHED_SETTLED_GRACE_MS}
+        )
       ORDER BY started_at ASC
     `;
 
     for (const row of rows) {
-      const runId = row.run_id;
-      let inspection: AgentToolRunInspection | null = null;
       try {
-        const adapter = await this.#childAdapter(row.agent_type, runId);
-        inspection = await adapter.inspectAgentToolRun(runId);
-      } catch {
-        // Treat an unreachable child like a null inspection: keep waiting within
-        // budget rather than sealing (a single failure is not proof it is gone).
-      }
-
-      // Deliver any configured milestone notifications the warm tail missed
-      // (e.g. the parent was evicted when the milestone landed). Idempotent:
-      // the host delivery keys on (runId, name), so re-delivering an
-      // already-notified milestone is a no-op. Runs regardless of terminal
-      // state — a milestone reached just before completion still notifies.
-      if (inspection?.milestones && row.detached_on_milestones) {
-        const milestoneRunInfo = this.#runInfoFromRow(row);
-        for (const milestone of inspection.milestones) {
-          this.#maybeDeliverMilestone(row, milestoneRunInfo, milestone);
-        }
-      }
-
-      if (
-        inspection &&
-        this.#isHardTerminal(inspection.status as AgentToolRunStatus)
-      ) {
-        const result = this.#terminalResultFromInspection(
-          row.agent_type,
-          inspection
-        );
-        await this.#deliverDetachedTerminal(
-          runId,
-          "finish",
-          result,
-          { sequence: Date.now(), serialize: true },
-          inspection.completedAt
-        );
-        continue;
-      }
-
-      // Still non-terminal. Give up only once (the give_up slot guards
-      // re-delivery), on whichever bound trips first:
-      //  - the absolute `detached_max_budget_at` ceiling (taking too long), or
-      //  - the resetting no-progress window: once the child has reported at
-      //    least one signal and then goes silent past the window. A child that
-      //    has never reported has no signal time and is bounded ONLY by the
-      //    absolute ceiling — never given up on merely for being slow.
-      const now = Date.now();
-      const budgetAt = row.detached_max_budget_at;
-      // ANY signal resets the window — ephemeral progress OR a durable milestone
-      // (milestones bump the child's signal clock but leave `progress` unset, so
-      // a milestone-only child must still count as alive). After eviction the
-      // child's inspect is authoritative; `last_progress_at` is the warm-tail
-      // cache fallback.
-      const latestMilestone = inspection?.milestones?.length
-        ? inspection.milestones[inspection.milestones.length - 1].at
-        : undefined;
-      const signalTimes = [
-        inspection?.progress?.at,
-        latestMilestone,
-        row.last_progress_at
-      ].filter((t): t is number => typeof t === "number");
-      const lastSignalAt =
-        signalTimes.length > 0 ? Math.max(...signalTimes) : undefined;
-      const noProgressBudgetMs = row.detached_no_progress_budget_ms;
-      const overAbsolute = budgetAt !== null && now >= budgetAt;
-      const overNoProgress =
-        typeof noProgressBudgetMs === "number" &&
-        noProgressBudgetMs > 0 &&
-        Number.isFinite(noProgressBudgetMs) &&
-        typeof lastSignalAt === "number" &&
-        now - lastSignalAt >= noProgressBudgetMs;
-      if (
-        (overAbsolute || overNoProgress) &&
-        row.give_up_delivered_at === null
-      ) {
-        let childTornDown = false;
-        try {
-          const adapter = await this.#childAdapter(row.agent_type, runId);
-          await adapter.cancelAgentToolRun(
-            runId,
-            overAbsolute
-              ? "detached budget exceeded"
-              : "detached run went silent past its no-progress window"
-          );
-          childTornDown = true;
-        } catch {
-          // Could not confirm teardown; the child may complete anyway and the
-          // finish slot (still open) will deliver the real result.
-        }
-        await this.#deliverDetachedTerminal(
-          runId,
-          "give_up",
-          {
-            runId,
-            agentType: row.agent_type,
-            status: "interrupted",
-            error: overAbsolute
-              ? "detached run exceeded its budget before completing"
-              : "detached run went silent past its no-progress window",
-            reason: overAbsolute ? "budget-exceeded" : "no-progress",
-            childStillRunning: !childTornDown
-          },
-          { serialize: true }
-        );
+        await this.#reconcileDetachedRow(row);
+      } catch (error) {
+        // One run's delivery failing (a throwing durable `onFinish`, a child
+        // that cannot be reached) must not skip its siblings or the re-arm
+        // below; the slot ledger retries this row on a later tick.
+        await this.#safeOnError(error);
       }
     }
 
@@ -1005,6 +920,130 @@ export class AgentTools extends LifecycleCapability {
         DETACHED_BACKBONE_CADENCE_S.length - 1
       );
       await this.#pushBackbone(nextIndex);
+    }
+  }
+
+  async #reconcileDetachedRow(row: AgentToolRunStorageRow): Promise<void> {
+    const runId = row.run_id;
+    let inspection: AgentToolRunInspection | null = null;
+    try {
+      const adapter = await this.#childAdapter(row.agent_type, runId);
+      inspection = await adapter.inspectAgentToolRun(runId);
+    } catch {
+      // Treat an unreachable child like a null inspection: keep waiting within
+      // budget rather than sealing (a single failure is not proof it is gone).
+    }
+
+    // Deliver any configured milestone notifications the warm tail missed
+    // (e.g. the parent was evicted when the milestone landed). Idempotent:
+    // the host delivery keys on (runId, name), so re-delivering an
+    // already-notified milestone is a no-op. Runs regardless of terminal
+    // state — a milestone reached just before completion still notifies.
+    if (inspection?.milestones && row.detached_on_milestones) {
+      const milestoneRunInfo = this.#runInfoFromRow(row);
+      for (const milestone of inspection.milestones) {
+        this.#maybeDeliverMilestone(row, milestoneRunInfo, milestone);
+      }
+    }
+
+    if (
+      inspection &&
+      this.#isHardTerminal(inspection.status as AgentToolRunStatus)
+    ) {
+      const result = this.#terminalResultFromInspection(
+        row.agent_type,
+        inspection
+      );
+      await this.#deliverDetachedTerminal(
+        runId,
+        "finish",
+        result,
+        { sequence: Date.now(), serialize: true },
+        inspection.completedAt
+      );
+      return;
+    }
+
+    // Still non-terminal. Give up only once (the give_up slot guards
+    // re-delivery), on whichever bound trips first:
+    //  - the absolute `detached_max_budget_at` ceiling (taking too long), or
+    //  - the resetting no-progress window: once the child has reported at
+    //    least one signal and then goes silent past the window. A child that
+    //    has never reported has no signal time and is bounded ONLY by the
+    //    absolute ceiling — never given up on merely for being slow.
+    const now = Date.now();
+    const budgetAt = row.detached_max_budget_at;
+    // ANY signal resets the window — ephemeral progress OR a durable milestone
+    // (milestones bump the child's signal clock but leave `progress` unset, so
+    // a milestone-only child must still count as alive). After eviction the
+    // child's inspect is authoritative; `last_progress_at` is the warm-tail
+    // cache fallback.
+    const latestMilestone = inspection?.milestones?.length
+      ? inspection.milestones[inspection.milestones.length - 1].at
+      : undefined;
+    const signalTimes = [
+      inspection?.progress?.at,
+      latestMilestone,
+      row.last_progress_at
+    ].filter((t): t is number => typeof t === "number");
+    const lastSignalAt =
+      signalTimes.length > 0 ? Math.max(...signalTimes) : undefined;
+    const noProgressBudgetMs = row.detached_no_progress_budget_ms;
+    const overAbsolute = budgetAt !== null && now >= budgetAt;
+    const overNoProgress =
+      typeof noProgressBudgetMs === "number" &&
+      noProgressBudgetMs > 0 &&
+      Number.isFinite(noProgressBudgetMs) &&
+      typeof lastSignalAt === "number" &&
+      now - lastSignalAt >= noProgressBudgetMs;
+    if (
+      overAbsolute &&
+      row.give_up_delivered_at !== null &&
+      row.child_still_running !== 0
+    ) {
+      // A soft no-progress give-up left the child running; the absolute
+      // ceiling is the hard bound, so tear it down now. The give-up was
+      // already delivered, so only the row's liveness changes, and the run
+      // stops counting as outstanding.
+      const adapter = await this.#childAdapter(row.agent_type, runId);
+      await adapter.cancelAgentToolRun(runId, "detached budget exceeded");
+      this.#sql`
+          UPDATE cf_agent_tool_runs
+          SET child_still_running = 0
+          WHERE run_id = ${runId}
+        `;
+      return;
+    }
+    if ((overAbsolute || overNoProgress) && row.give_up_delivered_at === null) {
+      let childTornDown = false;
+      try {
+        const adapter = await this.#childAdapter(row.agent_type, runId);
+        await adapter.cancelAgentToolRun(
+          runId,
+          overAbsolute
+            ? "detached budget exceeded"
+            : "detached run went silent past its no-progress window"
+        );
+        childTornDown = true;
+      } catch {
+        // Could not confirm teardown; the child may complete anyway and the
+        // finish slot (still open) will deliver the real result.
+      }
+      await this.#deliverDetachedTerminal(
+        runId,
+        "give_up",
+        {
+          runId,
+          agentType: row.agent_type,
+          status: "interrupted",
+          error: overAbsolute
+            ? "detached run exceeded its budget before completing"
+            : "detached run went silent past its no-progress window",
+          reason: overAbsolute ? "budget-exceeded" : "no-progress",
+          childStillRunning: !childTornDown
+        },
+        { serialize: true }
+      );
     }
   }
 

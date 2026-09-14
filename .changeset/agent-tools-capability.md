@@ -25,6 +25,7 @@ Move agent tools into a Lifecycle capability with a parent role and a child role
 **What changed underneath**
 
 - The detached reconcile backbone is one singleflight Lifecycle job instead of a self-scheduling `_cfDetachedReconcileTick` schedule. Anything that listed schedules to observe it should read `agentTools.pendingDetachedReconcile()`.
+- The backbone goes quiet after a give-up that tore its child down: the run stays outstanding for two top-cadence ticks so a racing late completion can still repair it, then stops re-arming. A soft no-progress give-up that left the child running is torn down once the absolute budget passes. A durable `onFinish` that throws is reported through `onError` and no longer skips the sibling runs or the re-arm in that tick.
 - `cf_agent_tool_runs` is owned by the capability under its own schema version. Existing tables converge in place; new tables omit the never-read `input_redacted` column.
 - Child-run chunk attribution is an explicit `observeChunk` / `observeError` tap from the harness's frame sender instead of a `broadcast()` override that parsed every outgoing frame. `interceptAgentToolBroadcast` and `AgentToolBroadcastHooks` are removed from `agents/chat`.
 - Think and AIChatAgent share one child implementation. `AIChatAgent`'s `cf_ai_chat_agent_tool_runs` and `cf_ai_chat_agent_tool_milestones` rows fold into `cf_agent_tool_child_runs` and `cf_agent_tool_milestones` on first wake and the legacy tables are dropped. A Think turn that was skipped before running is sealed as `error` with a clear message, as before.
