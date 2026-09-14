@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "agents-x402-tools-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "PAY_TO": "",
+    "FACILITATOR_URL": "https://x402.org/facilitator"
+  }
+}

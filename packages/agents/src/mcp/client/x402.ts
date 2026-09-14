@@ -101,6 +101,10 @@ export interface X402AugmentedServer {
   ): RegisteredTool;
 }
 
+/**
+ * @deprecated Feature-frozen. Use withX402 from agents/payments/x402/mcp on
+ * an MCP SDK v2 tool callback, then register it with server.registerTool().
+ */
 export function withX402<T extends McpServer>(
   server: T,
   cfg: X402Config
@@ -348,6 +352,10 @@ export type X402ClientConfig = {
 
 class PaymentCapError extends Error {}
 
+/**
+ * @deprecated Feature-frozen. Use a normal MCP SDK v2 client and upstream
+ * x402Client for payment creation. See examples/next/x402-tools for migration.
+ */
 export function withX402Client<T extends CompatibleMcpClient>(
   client: T,
   x402Config: X402ClientConfig
