@@ -2791,7 +2791,7 @@ const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = object
 > extends Agent<Env, State, Props> {
   // Root requestId of the in-flight recovery chain, threaded into each
   // continuation's snapshot so chained continuations keep owning the original
