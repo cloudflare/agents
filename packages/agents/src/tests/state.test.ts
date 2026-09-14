@@ -407,7 +407,7 @@ describe("state management", () => {
       await agentStub.insertCorruptedState();
 
       // Access state - should trigger try-catch and recover to initialState
-      const state = await agentStub.getStateAfterCorruption();
+      const state = await agentStub.getState();
 
       // Should have recovered to initialState
       expect(state).toEqual({

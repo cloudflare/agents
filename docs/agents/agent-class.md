@@ -226,7 +226,7 @@ console.log(result); // 5
 
 ### `this.queue` and friends
 
-Agents include a built-in task queue for deferred execution. This is useful for offloading work or retrying operations. The available methods are `this.queue`, `this.dequeue`, `this.dequeueAll`, `this.dequeueAllByCallback`, `this.getQueue`, and `this.getQueues`.
+Agents include a durable background queue. This is useful for offloading work or retrying operations. The available methods are `this.queue`, `this.dequeue`, `this.dequeueAll`, `this.dequeueAllByCallback`, `this.getQueue`, and `this.getQueues`, all asynchronous.
 
 ```ts
 class MyAgent extends Agent {
@@ -241,7 +241,7 @@ class MyAgent extends Agent {
 }
 ```
 
-Tasks are stored in the `cf_agents_queues` SQL table and are automatically flushed in sequence. If a task succeeds, it's automatically dequeued.
+Items are stored as jobs in the `cf_agents_jobs` SQL table, the Lifecycle-owned job queue, and run from the alarm loop in push order. A successful item is removed; a failing one is retried, then dropped with a `queue:error` event. See [Queue](./queue.md).
 
 ### `this.schedule` and friends
 

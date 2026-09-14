@@ -11,7 +11,7 @@ Related:
   `AIChatAgent` and `Think` are both supported chat bases.
 - [`sub-agent-routing.md`](./sub-agent-routing.md) describes the current
   facet-backed routing mechanics.
-- [`examples/next/chats`](../examples/next/chats) demonstrates the basic
+- [`examples/next/routing`](../examples/next/routing) demonstrates the basic
   two-object shape: a per-user index and independent chat Durable Objects.
 - [`examples/assistant`](../examples/assistant) shows the user-scoped services
   that must remain shared across chats: workspace, MCP connections, OAuth, and
@@ -198,7 +198,7 @@ second initialization with different ownership data is an invariant violation.
 Retries with the same values are no-ops.
 
 The first implementation may use a deterministic composite `agentName` as
-shown in `examples/next/chats`, but the catalog remains the abstraction. Client
+shown in `examples/next/routing`, but the catalog remains the abstraction. Client
 code must not derive the physical name itself.
 
 ## Request and WebSocket routing
@@ -496,7 +496,7 @@ reproduction Worker and its source were deleted after verification.
 
 ### Phase 1: harden the reference pattern
 
-Evolve `examples/next/chats` to demonstrate:
+Evolve `examples/next/routing` to demonstrate:
 
 - opaque physical Chat names resolved by the User catalog;
 - User-gated Chat fetch and WebSocket routing;

@@ -21,6 +21,10 @@
         "name": "PlainLifecycleObject"
       },
       {
+        "class_name": "StatefulPlainObject",
+        "name": "StatefulPlainObject"
+      },
+      {
         "class_name": "RetryableStartObject",
         "name": "RetryableStartObject"
       },
@@ -35,6 +39,10 @@
       {
         "class_name": "SchedulerStartupWarnObject",
         "name": "SchedulerStartupWarnObject"
+      },
+      {
+        "class_name": "QueueHarnessObject",
+        "name": "QueueHarnessObject"
       },
       {
         "class_name": "TaskHarnessObject",
@@ -405,10 +413,12 @@
       "new_sqlite_classes": [
         "CapabilityHarnessObject",
         "PlainLifecycleObject",
+        "StatefulPlainObject",
         "RetryableStartObject",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
+        "QueueHarnessObject",
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",

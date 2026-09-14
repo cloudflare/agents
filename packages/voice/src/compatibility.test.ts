@@ -9,10 +9,9 @@ const pairs = [
 
 describe("@cloudflare/voice compatibility exports", () => {
   it.each(pairs)("re-exports %s from %s", async (legacyPath, agentsPath) => {
-    const [legacy, canonical] = await Promise.all([
-      import(legacyPath),
-      import(agentsPath)
-    ]);
+    // Import sequentially to avoid a Vite module-cache race between entrypoints.
+    const legacy = await import(legacyPath);
+    const canonical = await import(agentsPath);
 
     expect(Object.keys(legacy).sort()).toEqual(Object.keys(canonical).sort());
     for (const name of Object.keys(canonical)) {
