@@ -708,6 +708,104 @@ echo scratch > /tmp/loose.txt`)) as {
     expect(scratch.error).toContain("File not found");
   });
 
+  it("keeps moved content that the script edits afterwards", async () => {
+    const agent = await freshAgent("bash-move-then-edit");
+    await agent.seed([{ path: "/tmp/cache/data.txt", content: "cached\n" }]);
+
+    // Ownership follows the move itself, so it survives later writes that
+    // change the content out from under any before/after comparison.
+    const result = (await agent.toolBash(`mv /tmp/cache /tmp/archive
+echo more >> /tmp/archive/data.txt`)) as {
+      exitCode: number;
+      changedFiles: { created: string[]; deleted: string[] };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).toContain("/tmp/archive/data.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+
+    const moved = (await agent.toolRead("/tmp/archive/data.txt")) as {
+      content: string;
+    };
+    expect(moved.content).toContain("cached");
+    expect(moved.content).toContain("more");
+  });
+
+  it("keeps an empty workspace directory moved onto a sandbox root", async () => {
+    const agent = await freshAgent("bash-move-empty-dir");
+    await agent.seedDir("/tmp/empty");
+
+    const result = (await agent.toolBash("mv /tmp/empty /tmp/moved")) as {
+      exitCode: number;
+      changedFiles: {
+        directoriesCreated: string[];
+        directoriesDeleted: string[];
+      };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.directoriesCreated).toContain("/tmp/moved");
+    expect(result.changedFiles.directoriesDeleted).toContain("/tmp/empty");
+
+    const listed = (await agent.toolList("/tmp")) as { entries: string[] };
+    expect(listed.entries).toContain("moved/");
+    expect(listed.entries).not.toContain("empty/");
+  });
+
+  it("keeps content moved across sandbox roots and through a chain of moves", async () => {
+    const agent = await freshAgent("bash-move-chain");
+    await agent.seed([
+      { path: "/tmp/cache/data.txt", content: "cached\n" },
+      { path: "/tmp/chain/link.txt", content: "chained\n" },
+      { path: "/usr/project/keep.txt", content: "keep\n" }
+    ]);
+
+    const result =
+      (await agent.toolBash(`mv /tmp/cache/data.txt /usr/project/data.txt
+mv /tmp/chain /tmp/first
+mv /tmp/first /usr/second`)) as {
+        exitCode: number;
+        changedFiles: { created: string[]; deleted: string[] };
+      };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).toContain("/usr/project/data.txt");
+    expect(result.changedFiles.created).toContain("/usr/second/link.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/chain/link.txt");
+
+    const crossRoot = (await agent.toolRead("/usr/project/data.txt")) as {
+      content: string;
+    };
+    expect(crossRoot.content).toContain("cached");
+    const chained = (await agent.toolRead("/usr/second/link.txt")) as {
+      content: string;
+    };
+    expect(chained.content).toContain("chained");
+  });
+
+  it("does not adopt scratch that matches deleted workspace content", async () => {
+    const agent = await freshAgent("bash-scratch-lookalike");
+    await agent.seed([{ path: "/tmp/cache/data.txt", content: "cached\n" }]);
+
+    // No move happened, so byte-identical scratch under a sandbox root stays
+    // the shell's own however closely it resembles the deleted file.
+    const result = (await agent.toolBash(`rm /tmp/cache/data.txt
+printf 'cached\\n' > /tmp/data.txt`)) as {
+      exitCode: number;
+      changedFiles: { created: string[]; deleted: string[] };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).not.toContain("/tmp/data.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+
+    const scratch = (await agent.toolRead("/tmp/data.txt")) as {
+      error: string;
+    };
+    expect(scratch.error).toContain("File not found");
+  });
+
   it("persists empty directory creates and deletes", async () => {
     const agent = await freshAgent("bash-empty-dirs");
     await agent.seedDir("/remove-empty");
