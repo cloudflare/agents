@@ -1368,6 +1368,11 @@ async function syncBashFilesToWorkspace({
   const errors: string[] = [];
   const finalFiles = new Map<string, Uint8Array>();
   const finalDirectories = new Set<string>(["/"]);
+  const movedWorkspaceEntries = await detectMovedWorkspaceEntries({
+    bash,
+    initialFiles,
+    initialDirectories
+  });
 
   for (const rawPath of bash.fs.getAllPaths()) {
     const path = normalizeWorkspacePath(rawPath);
@@ -1376,7 +1381,8 @@ async function syncBashFilesToWorkspace({
         path,
         initialFiles,
         initialDirectories,
-        protectedPaths
+        protectedPaths,
+        movedWorkspaceEntries
       )
     ) {
       continue;
@@ -1532,6 +1538,34 @@ function isUnderBashSandboxRoot(path: string): boolean {
   );
 }
 
+let shellInfrastructurePathCache: Set<string> | null = null;
+
+/**
+ * Every path the shell materializes for itself, derived by booting an empty
+ * sandbox and reading its filesystem back.
+ *
+ * just-bash writes one file per command into `/bin` and `/usr/bin` (plus the
+ * `/dev` and `/proc` pseudo-files) while constructing the shell, so the set is
+ * read off a throwaway `Bash` rather than hand-copied — it tracks whatever the
+ * installed just-bash actually creates. The probe is built the same way as the
+ * real sandbox (explicit `files`/`cwd`, so no default `/home/user` layout) and
+ * memoized: the constructor is synchronous and the result never changes within
+ * a process.
+ */
+function shellInfrastructurePaths(): Set<string> {
+  if (shellInfrastructurePathCache) return shellInfrastructurePathCache;
+  let paths: string[] = [];
+  try {
+    paths = new Bash({ files: {}, cwd: "/" }).fs.getAllPaths();
+  } catch {
+    // A shell that will not boot bare tells us nothing; fall back to the
+    // sandbox roots alone, which the ancestry check already excludes.
+    paths = [];
+  }
+  shellInfrastructurePathCache = new Set(paths.map(normalizeWorkspacePath));
+  return shellInfrastructurePathCache;
+}
+
 /**
  * Whether the path descends from a workspace directory the snapshot recorded.
  *
@@ -1539,16 +1573,177 @@ function isUnderBashSandboxRoot(path: string): boolean {
  * exists in every shell, so "lives under /tmp" proves nothing about ownership.
  * A directory the workspace itself held below a root — `/tmp/cache` — does,
  * and everything the script writes inside it belongs to the workspace too.
+ *
+ * Shell infrastructure directories are excluded for the same reason even when
+ * the workspace happens to hold them: `/usr/bin` is where the shell writes a
+ * file for every builtin, so owning its descendants would sync a hundred-odd
+ * synthetic commands into the workspace. An exact initial file there — say
+ * `/usr/bin/custom-tool` — still syncs, because `shouldSyncBashPath` matches it
+ * by path before it ever consults ancestry.
  */
 function hasInitialDirectoryAncestor(
   path: string,
   initialDirectories: Set<string>
 ): boolean {
+  const infrastructure = shellInfrastructurePaths();
   let current = parentDir(path);
   while (current !== "/") {
-    if (!isBashSandboxRoot(current) && initialDirectories.has(current)) {
+    if (
+      !isBashSandboxRoot(current) &&
+      !infrastructure.has(current) &&
+      initialDirectories.has(current)
+    ) {
       return true;
     }
+    const next = parentDir(current);
+    if (next === current) break;
+    current = next;
+  }
+  return false;
+}
+
+/**
+ * Entries the script moved out of the workspace and onto a sandbox root.
+ *
+ * `mv /tmp/cache /tmp/archive` leaves the destination with no initial ancestor,
+ * so ancestry alone would drop it while the deletion pass removed the source —
+ * losing the content outright. just-bash exposes no rename or mutation events
+ * and no journal on its in-memory filesystem, so provenance has to be inferred
+ * from the before/after trees:
+ *
+ *   A new entry sitting directly under a sandbox root is workspace content when
+ *   an initial workspace path under that same root has vanished from the final
+ *   tree (a move happened) *and* the new entry's contents match the vanished
+ *   one exactly — the same set of relative file paths holding the same bytes.
+ *
+ * Vanished subtrees with no files are not matched: an empty directory carries
+ * nothing to lose, and matching on emptiness alone would adopt unrelated
+ * scratch directories. Everything else created directly under a sandbox root
+ * stays the shell's own and is discarded, so `echo scratch > /tmp/loose.txt`
+ * still never reaches the workspace.
+ */
+async function detectMovedWorkspaceEntries({
+  bash,
+  initialFiles,
+  initialDirectories
+}: {
+  bash: {
+    fs: {
+      getAllPaths(): string[];
+      stat(path: string): Promise<{ isFile: boolean; isDirectory: boolean }>;
+      readFileBuffer(path: string): Promise<Uint8Array>;
+    };
+  };
+  initialFiles: Map<string, Uint8Array>;
+  initialDirectories: Set<string>;
+}): Promise<Set<string>> {
+  const moved = new Set<string>();
+  const finalPaths = bash.fs.getAllPaths().map(normalizeWorkspacePath);
+  const finalPathSet = new Set(finalPaths);
+
+  const vanished: string[] = [];
+  for (const path of [...initialFiles.keys(), ...initialDirectories]) {
+    if (path === "/" || isBashSandboxRoot(path)) continue;
+    if (!isUnderBashSandboxRoot(path)) continue;
+    if (finalPathSet.has(path)) continue;
+    vanished.push(path);
+  }
+  if (vanished.length === 0) return moved;
+
+  const infrastructure = shellInfrastructurePaths();
+  const candidates = finalPaths.filter(
+    (path) =>
+      isBashSandboxRoot(parentDir(path)) &&
+      !initialFiles.has(path) &&
+      !initialDirectories.has(path) &&
+      !infrastructure.has(path)
+  );
+  if (candidates.length === 0) return moved;
+
+  const sources = new Map<string, Map<string, Uint8Array>>();
+  for (const path of vanished) {
+    const files = initialSubtreeFiles(path, initialFiles);
+    if (files.size > 0) sources.set(path, files);
+  }
+  if (sources.size === 0) return moved;
+
+  for (const candidate of candidates) {
+    const sandboxRoot = parentDir(candidate);
+    const candidateFiles = await finalSubtreeFiles(bash, candidate, finalPaths);
+    if (candidateFiles.size === 0) continue;
+    for (const [source, sourceFiles] of sources) {
+      if (!source.startsWith(`${sandboxRoot}/`)) continue;
+      if (sourceFiles.size !== candidateFiles.size) continue;
+      if (![...sourceFiles.keys()].every((rel) => candidateFiles.has(rel))) {
+        continue;
+      }
+      let matches = true;
+      for (const [rel, absolute] of candidateFiles) {
+        const bytes = await bash.fs.readFileBuffer(absolute).catch(() => null);
+        if (bytes === null || !bytesEqual(bytes, sourceFiles.get(rel)!)) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      moved.add(candidate);
+      sources.delete(source);
+      break;
+    }
+  }
+
+  return moved;
+}
+
+/** Files the snapshot held at `root`, keyed by path relative to it. */
+function initialSubtreeFiles(
+  root: string,
+  initialFiles: Map<string, Uint8Array>
+): Map<string, Uint8Array> {
+  const files = new Map<string, Uint8Array>();
+  const own = initialFiles.get(root);
+  if (own) {
+    files.set("", own);
+    return files;
+  }
+  const prefix = `${root}/`;
+  for (const [path, bytes] of initialFiles) {
+    if (path.startsWith(prefix)) files.set(path.slice(prefix.length), bytes);
+  }
+  return files;
+}
+
+/** Files the final tree holds at `root`, keyed by path relative to it. */
+async function finalSubtreeFiles(
+  bash: {
+    fs: {
+      stat(path: string): Promise<{ isFile: boolean; isDirectory: boolean }>;
+    };
+  },
+  root: string,
+  finalPaths: string[]
+): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  const prefix = `${root}/`;
+  const descendants = finalPaths.filter((path) => path.startsWith(prefix));
+  if (descendants.length === 0) {
+    const stat = await bash.fs.stat(root).catch(() => null);
+    if (stat?.isFile) files.set("", root);
+    return files;
+  }
+  for (const path of descendants) {
+    const stat = await bash.fs.stat(path).catch(() => null);
+    if (stat?.isFile) files.set(path.slice(prefix.length), path);
+  }
+  return files;
+}
+
+/** Whether the path is, or lives inside, an entry a move brought in. */
+function hasMovedAncestor(path: string, moved: Set<string>): boolean {
+  if (moved.size === 0) return false;
+  let current = path;
+  while (current !== "/") {
+    if (moved.has(current)) return true;
     const next = parentDir(current);
     if (next === current) break;
     current = next;
@@ -1562,21 +1757,25 @@ function hasInitialDirectoryAncestor(
  * Anything the workspace already held syncs both ways, including files and
  * directories that happen to live under a sandbox root such as `/tmp`, and so
  * does anything the script wrote *inside* a workspace-owned directory below a
- * root — a new file in `/tmp/cache` is workspace content, not scratch. Only
- * paths created directly under a sandbox root are the shell's own scratch and
- * builtins, and those never persist.
+ * root — a new file in `/tmp/cache` is workspace content, not scratch — and so
+ * does an entry a move carried out onto a sandbox root, which
+ * {@link detectMovedWorkspaceEntries} identifies by content. Everything else
+ * created directly under a sandbox root is the shell's own scratch and
+ * builtins, and never persists.
  */
 function shouldSyncBashPath(
   path: string,
   initialFiles: Map<string, Uint8Array>,
   initialDirectories: Set<string>,
-  protectedPaths: Set<string>
+  protectedPaths: Set<string>,
+  movedWorkspaceEntries: Set<string>
 ): boolean {
   if (path === "/") return false;
   if (initialFiles.has(path)) return true;
   if (initialDirectories.has(path)) return true;
   if (protectedPaths.has(path)) return true;
   if (hasInitialDirectoryAncestor(path, initialDirectories)) return true;
+  if (hasMovedAncestor(path, movedWorkspaceEntries)) return true;
   return !isUnderBashSandboxRoot(path);
 }
 
