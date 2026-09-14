@@ -414,6 +414,7 @@ function withAgentSpan<T>(
 
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
+const MSG_CHAT_MESSAGES_DELTA = CHAT_MESSAGE_TYPES.CHAT_MESSAGES_DELTA;
 const MSG_CHAT_RESPONSE = CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
 const MSG_CHAT_CLEAR = CHAT_MESSAGE_TYPES.CHAT_CLEAR;
 const MSG_MESSAGE_UPDATED = CHAT_MESSAGE_TYPES.MESSAGE_UPDATED;
@@ -2972,6 +2973,61 @@ export class Think<
 
   /** Cached messages, kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
+
+  // ── Transcript broadcast epochs ─────────────────────────────────
+  //
+  // Clients receive the transcript either as a full `MSG_CHAT_MESSAGES`
+  // snapshot or as a `MSG_CHAT_MESSAGES_DELTA` carrying only the messages a
+  // turn boundary persisted. A delta is only safe against the snapshot it
+  // was minted for, so every snapshot carries an epoch and every delta the
+  // epoch it applies to:
+  //   - `_cacheEpoch` bumps whenever the live cache is wholesale replaced
+  //     (`_replaceCachedMessages`: hydration, branch/regeneration resync,
+  //     compaction, clear, repair) — a base clients can no longer be assumed
+  //     to share.
+  //   - `_transcriptAlignment` records, per connection, the epoch of the
+  //     last snapshot it was sent (broadcast or per-connection: connect,
+  //     dropped-submit rollback). A connection that joined mid-stream has no
+  //     entry; a sub-agent-routed connection is `"ignore"` (it never receives
+  //     transcript frames). The map is in-memory only: after a hibernation
+  //     wake every surviving socket is unaligned, which is right — clients
+  //     hold an epoch from the previous instance.
+  // `_broadcastMessagesDelta` sends a delta only while every connection is
+  // aligned to the current cache epoch AND has declared that it applies delta
+  // frames (`_transcriptDeltaCapable`); otherwise it falls back to the full
+  // frame, which re-aligns everyone. The instance prefix keeps an epoch from
+  // a previous DO instantiation from colliding with this one.
+  private readonly _transcriptInstance = crypto.randomUUID().slice(0, 8);
+  private _cacheEpoch = 0;
+  private _transcriptAlignment = new Map<string, number | "ignore">();
+  /**
+   * Connections that declared `transcriptDeltas` via the client-capabilities
+   * frame. A client too old to send it (or one that opted out) never sees a
+   * delta: it would silently drop the unknown frame and with it the turn's
+   * transcript update, going stale until it reconnected. Cleared on close;
+   * in-memory only, so a hibernation wake re-negotiates — the conservative
+   * direction, since the fallback is a snapshot.
+   */
+  private _transcriptDeltaCapable = new Set<string>();
+  /**
+   * Ids written while a broadcast was suppressed — `addMessages` mid-turn or
+   * with `broadcast: false`. They used to ride the turn's next full snapshot;
+   * under deltas they must be named explicitly or they would never reach any
+   * client. Folded into the next transcript broadcast and cleared once one
+   * reaches every connection.
+   */
+  private _deferredTranscriptIds = new Set<string>();
+  /**
+   * Set when a turn discarded a live-streamed partial without persisting it
+   * (context-overflow retry). Clients still show the discarded chunks; only a
+   * snapshot reconciles them to the real answer, so the next broadcast is
+   * forced full even if the cache epoch happens to match.
+   */
+  private _transcriptNeedsSnapshot = false;
+
+  private get _transcriptEpoch(): string {
+    return `${this._transcriptInstance}.${this._cacheEpoch}`;
+  }
   private _unsubscribeSessionChanges: (() => void) | undefined;
 
   /**
@@ -3776,8 +3832,36 @@ export class Think<
 
   /** Replace the live cache with a durable storage snapshot. */
   private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
+    if (!this._preservesTranscriptBase(messages)) {
+      this._cacheEpoch++;
+    }
     this._cachedMessages = messages;
     return this._cachedMessages;
+  }
+
+  /**
+   * Whether replacing the cache with `next` leaves every row a client already
+   * holds untouched: the same rows, in the same order, with rows only
+   * appended at the tail (which a delta can name). A re-read that produced a
+   * byte-identical transcript is the common case — `_syncMessages()` runs at
+   * every boundary when the cache is windowed or unhydrated, and bumping the
+   * epoch there would force a snapshot on exactly the largest transcripts the
+   * deltas are meant to help.
+   *
+   * Only computed while a delta could actually be sent. With no aligned,
+   * delta-capable connection the epoch bump costs nothing, so the comparison
+   * would be pure waste.
+   */
+  private _preservesTranscriptBase(next: readonly UIMessage[]): boolean {
+    const prev = this._cachedMessages;
+    if (next === prev) return true;
+    if (next.length < prev.length) return false;
+    if (!this._anyConnectionAligned()) return false;
+    for (let i = 0; i < prev.length; i++) {
+      if (next[i].id !== prev[i].id) return false;
+      if (JSON.stringify(next[i]) !== JSON.stringify(prev[i])) return false;
+    }
+    return true;
   }
 
   /**
@@ -8058,14 +8142,15 @@ export class Think<
               ? await userMessage(this.messages)
               : this._normalizeChatMessages(userMessage);
 
+          const appended: string[] = [];
           for (const msg of this._stampChannel(
             resolved,
             options?.channel,
             options?.metadata
           )) {
-            await this._appendMessageToHistory(msg);
+            appended.push((await this._appendMessageToHistory(msg)).id);
           }
-          this._broadcastMessages();
+          this._broadcastMessagesDelta(appended);
 
           const chatBody = async () => {
             // Bounded compact-and-retry loop (opt-in via
@@ -11390,15 +11475,20 @@ export class Think<
     }
 
     let parentId = options?.parentId;
+    const written: string[] = [];
     for (const message of resolved) {
       const existing = await this.session.getMessage(message.id);
       if (existing) {
         // Append mode is idempotent by id (existing id → no-op); upsert updates
         // the content in place. Neither path re-parents an existing message.
-        if (mode === "upsert") await this._updateMessageInHistory(message);
+        if (mode === "upsert") {
+          await this._updateMessageInHistory(message);
+          written.push(message.id);
+        }
         parentId = message.id;
       } else {
         const stored = await this._appendMessageToHistory(message, parentId);
+        written.push(stored.id);
         parentId = stored.id;
       }
     }
@@ -11406,14 +11496,24 @@ export class Think<
     // The live cache is kept coherent automatically by the Sessions change
     // listener wired in `onStart`, which handles
     // both linear appends and branches (an explicit `parentId` triggers a full
-    // resync). So `addMessages` only owns the broadcast — and suppresses it
-    // mid-turn: pushing a full `MSG_CHAT_MESSAGES` snapshot while a turn streams
-    // would clobber the in-progress assistant message on connected clients (the
-    // same reason the streaming path defers its snapshot). The injected messages
-    // ride along on the turn's next broadcast.
-    if (this._insideInferenceLoop) return;
+    // resync, which also bumps the cache epoch so the broadcast below is a
+    // snapshot rather than a delta). So `addMessages` only owns the broadcast
+    // — and suppresses it mid-turn: pushing a transcript frame while a turn
+    // streams would clobber the in-progress assistant message on connected
+    // clients (the same reason the streaming path defers its broadcast). The
+    // injected messages ride along on the turn's next broadcast, which names
+    // them explicitly (`_deferTranscriptIds`) — under deltas a boundary frame
+    // only carries the rows it names, so they would otherwise never arrive.
+    // `broadcast: false` defers the same way: it suppresses the immediate
+    // frame, it does not drop the rows from the transcript clients see.
+    if (this._insideInferenceLoop) {
+      this._deferTranscriptIds(written);
+      return;
+    }
     if (options?.broadcast !== false) {
-      this._broadcastMessages();
+      this._broadcastMessagesDelta(written);
+    } else {
+      this._deferTranscriptIds(written);
     }
   }
 
@@ -11489,11 +11589,12 @@ export class Think<
           return;
         }
 
+        const appended: string[] = [];
         for (const msg of this._stampChannel(resolved, channel)) {
-          await this._appendMessageToHistory(msg);
+          appended.push((await this._appendMessageToHistory(msg)).id);
         }
         options?.onMessagesApplied?.();
-        this._broadcastMessages();
+        this._broadcastMessagesDelta(appended);
 
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
@@ -11834,6 +11935,7 @@ export class Think<
         ctx.request
       );
       if (requestTargetsSubAgent) {
+        this._transcriptAlignment.set(connection.id, "ignore");
         return _onConnect(connection, ctx);
       }
 
@@ -11849,6 +11951,10 @@ export class Think<
         // because `this.messages` at this point still only contains
         // the user message — the assistant message is not persisted
         // until the stream finishes.
+        //
+        // This connection therefore holds no transcript base: the final
+        // broadcast must be a snapshot, not a delta (it stays out of
+        // `_transcriptAlignment` until one reaches it).
         this._notifyStreamResuming(connection);
       } else {
         // No active stream. If a turn is accepted but its stream hasn't started
@@ -11860,6 +11966,7 @@ export class Think<
         for (const message of await this._buildIdleConnectMessages()) {
           connection.send(JSON.stringify(message));
         }
+        this._transcriptAlignment.set(connection.id, this._cacheEpoch);
       }
       return _onConnect(connection, ctx);
     };
@@ -11872,6 +11979,8 @@ export class Think<
       wasClean: boolean
     ) => {
       this._pendingResumeConnections.delete(connection.id);
+      this._transcriptAlignment.delete(connection.id);
+      this._transcriptDeltaCapable.delete(connection.id);
       this._continuation.releaseConnection(connection.id);
       this._preStream.release(connection.id);
       return _onClose(connection, code, reason, wasClean);
@@ -11931,6 +12040,17 @@ export class Think<
     event: NonNullable<ReturnType<typeof parseProtocolMessage>>
   ): Promise<void> {
     switch (event.type) {
+      case "client-capabilities":
+        // Gate for delta transcript frames. A client that never sends this
+        // (an older `agents` release) keeps receiving full snapshots rather
+        // than silently dropping an unknown frame and going stale.
+        if (event.transcriptDeltas) {
+          this._transcriptDeltaCapable.add(connection.id);
+        } else {
+          this._transcriptDeltaCapable.delete(connection.id);
+        }
+        break;
+
       case "stream-resume-request":
         await this._handleStreamResumeRequest(connection, event.probeId);
         break;
@@ -12165,7 +12285,11 @@ export class Think<
       }
       const { branchParentId } = reconciledTurn;
 
-      this._broadcastMessages([connection.id]);
+      // The originating connection already holds what it posted. Everyone
+      // else gets just the rows this request wrote — unless this is a
+      // regeneration, whose branch re-derives the cache (a bumped epoch turns
+      // the delta into a snapshot, which the branch's shorter path needs).
+      this._broadcastMessagesDelta(reconciledTurn.persisted, [connection.id]);
       messagesPersisted = true;
 
       // ── Enter turn queue ────────────────────────────────────────
@@ -12875,8 +12999,11 @@ export class Think<
       // partial would leave an orphan beside the recovered answer — and any tool
       // work it captured would be re-issued by the retry, duplicating records.
       // The live-streamed chunks already reached clients; the driver's
-      // post-retry `_broadcastMessages()` reconciles them to the real answer.
+      // post-retry broadcast reconciles them to the real answer — which a
+      // delta cannot do (the discarded message is not a row it could name),
+      // so force that broadcast to be a snapshot.
       if (overflowRetry) {
+        this._transcriptNeedsSnapshot = true;
         this._completeResumableStream(streamId);
         streamFinalized = true;
         return { status: "overflow_retry", error: streamError };
@@ -12904,7 +13031,7 @@ export class Think<
           undefined,
           { discard: this._discardStreamAtCutover(requestId) }
         );
-        this._broadcastMessages();
+        this._broadcastMessagesDelta([assistantMsg.id]);
       }
       // Nothing to persist (or the persist threw): settle the finished stream.
       this._resumableStream.finalizePending();
@@ -13344,8 +13471,11 @@ export class Think<
       // partial would leave an orphan beside the recovered answer — and any tool
       // work it captured would be re-issued by the retry, duplicating records.
       // The live-streamed chunks already reached clients; the retry's
-      // `_broadcastMessages()` reconciles them to the real answer.
+      // broadcast reconciles them to the real answer — which a delta cannot
+      // do (the discarded message is not a row it could name), so force that
+      // broadcast to be a snapshot.
       if (overflowRetry && options?.overflowRecovery) {
+        this._transcriptNeedsSnapshot = true;
         this._completeResumableStream(streamId);
         this._pendingResumeConnections.clear();
         doneSent = true;
@@ -13488,7 +13618,7 @@ export class Think<
             parentId,
             { discard: this._discardStreamAtCutover(requestId) }
           );
-          this._broadcastMessages();
+          this._broadcastMessagesDelta([assistantMsg.id]);
         }
         // Nothing to persist (or the persist threw): settle the finished
         // stream so it is not mistaken for an interrupted turn.
@@ -13655,7 +13785,11 @@ export class Think<
       isRegeneration: boolean;
       isCurrent: () => boolean;
     }
-  ): Promise<{ branchParentId: string | undefined } | null> {
+  ): Promise<{
+    branchParentId: string | undefined;
+    /** Ids of the rows this request actually wrote (echoes are skipped). */
+    persisted: string[];
+  } | null> {
     const spanAttributes = {
       "cloudflare.agents.component": "think",
       "cloudflare.agents.turn.request_id": options.requestId,
@@ -13681,6 +13815,7 @@ export class Think<
     if (options.isRegeneration && reconciled.length > 0) {
       branchParentId = reconciled[reconciled.length - 1].id;
     }
+    const persistedIds: string[] = [];
 
     const persisted = await withAgentSpan(
       this,
@@ -13692,11 +13827,12 @@ export class Think<
 
         for (const msg of reconciled) {
           if (!options.isCurrent()) return false;
-          await this._persistIncomingMessage(
+          const written = await this._persistIncomingMessage(
             msg,
             serverMessages,
             serverMessagesById
           );
+          if (written) persistedIds.push(written.id);
         }
 
         if (!options.isCurrent()) return false;
@@ -13710,7 +13846,7 @@ export class Think<
         return true;
       }
     );
-    return persisted ? { branchParentId } : null;
+    return persisted ? { branchParentId, persisted: persistedIds } : null;
   }
 
   /**
@@ -13744,7 +13880,7 @@ export class Think<
     msg: UIMessage,
     serverMessages: readonly UIMessage[],
     serverMessagesById?: ReadonlyMap<string, UIMessage>
-  ): Promise<void> {
+  ): Promise<UIMessage | null> {
     const resolved =
       msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
     const prior = serverMessagesById?.get(resolved.id);
@@ -13753,9 +13889,9 @@ export class Think<
       JSON.stringify(prior) ===
         JSON.stringify(stripReservedMetadata(sanitizeMessage(resolved)))
     ) {
-      return;
+      return null;
     }
-    await this._upsertMessageInHistory(resolved, undefined, "client");
+    return this._upsertMessageInHistory(resolved, undefined, "client");
   }
 
   /**
@@ -16159,12 +16295,8 @@ export class Think<
   }
 
   private _rollbackDroppedSubmit(connection: Connection): void {
-    connection.send(
-      JSON.stringify({
-        type: MSG_CHAT_MESSAGES,
-        messages: this.messages
-      })
-    );
+    connection.send(JSON.stringify(this._snapshotFrame()));
+    this._transcriptAlignment.set(connection.id, this._cacheEpoch);
   }
 
   // ── Auto-continuation ──────────────────────────────────────────
@@ -16560,9 +16692,7 @@ export class Think<
   private async _buildIdleConnectMessages(): Promise<
     Array<Record<string, unknown>>
   > {
-    const messages: Array<Record<string, unknown>> = [
-      { type: MSG_CHAT_MESSAGES, messages: this.messages }
-    ];
+    const messages: Array<Record<string, unknown>> = [this._snapshotFrame()];
     // Replay an in-progress "recovering…" status so a client that connects
     // mid-recovery reads the turn as working rather than frozen (#1620). This
     // is a plain status frame the client handles on connect (unlike a terminal
@@ -16707,11 +16837,140 @@ export class Think<
     this.broadcast(JSON.stringify(message), exclude);
   }
 
+  /**
+   * Broadcast the whole transcript. Re-aligns every connection to the current
+   * cache epoch, so deltas may follow. Still the right frame for connect and
+   * resume, branch/regeneration (rows before the tail change), transcript
+   * repair and orphan materialisation (rows the client never streamed change
+   * in place), stalled/errored partial re-anchors, and after a discarded
+   * overflow-retry partial — anything where the client's view may hold rows
+   * a delta cannot name.
+   */
   private _broadcastMessages(exclude?: string[]) {
+    this._broadcast(this._snapshotFrame(), exclude);
+    let reachedEveryone = true;
+    for (const connection of this.getConnections()) {
+      if (this._transcriptAlignment.get(connection.id) === "ignore") continue;
+      if (exclude?.includes(connection.id)) {
+        // This connection was deliberately skipped, so it did NOT receive the
+        // snapshot. Anything the snapshot was carrying on its behalf — a
+        // forced reconcile, deferred rows — stays owed until one reaches it.
+        reachedEveryone = false;
+        continue;
+      }
+      this._transcriptAlignment.set(connection.id, this._cacheEpoch);
+    }
+    if (reachedEveryone) {
+      this._transcriptNeedsSnapshot = false;
+      this._deferredTranscriptIds.clear();
+    }
+  }
+
+  /** A connection is only sent deltas once it has declared it applies them. */
+  private _connectionTakesDeltas(id: string): boolean {
+    return this._transcriptDeltaCapable.has(id);
+  }
+
+  private _everyConnectionAligned(exclude?: string[]): boolean {
+    for (const connection of this.getConnections()) {
+      const aligned = this._transcriptAlignment.get(connection.id);
+      if (aligned === "ignore") continue;
+      if (exclude?.includes(connection.id)) continue;
+      if (aligned !== this._cacheEpoch) return false;
+      if (!this._connectionTakesDeltas(connection.id)) return false;
+    }
+    return true;
+  }
+
+  /** At least one connection could be sent a delta right now. */
+  private _anyConnectionAligned(): boolean {
+    for (const connection of this.getConnections()) {
+      const aligned = this._transcriptAlignment.get(connection.id);
+      if (aligned === "ignore") continue;
+      if (
+        aligned === this._cacheEpoch &&
+        this._connectionTakesDeltas(connection.id)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private _snapshotFrame(): Record<string, unknown> {
+    return {
+      type: MSG_CHAT_MESSAGES,
+      messages: this.messages,
+      epoch: this._transcriptEpoch
+    };
+  }
+
+  /**
+   * Broadcast only the messages a turn boundary persisted, by id, resolved
+   * from the live cache (so the wire copy is exactly what a snapshot would
+   * carry). Falls back to a full snapshot when clients cannot be assumed to
+   * share the current base: the cache was re-derived since the last snapshot
+   * broadcast, a connection joined mid-stream without one, a connection has
+   * not declared that it applies deltas, a retry discarded streamed chunks,
+   * or an id is not in the cache (a windowed cache, or a message stripped to
+   * nothing at persist).
+   */
+  private _broadcastMessagesDelta(ids: readonly string[], exclude?: string[]) {
+    // Rows written while a broadcast was suppressed (`addMessages` mid-turn
+    // or with `broadcast: false`) ride this one, exactly as they used to ride
+    // the next full snapshot.
+    const wanted = new Set([...ids, ...this._deferredTranscriptIds]);
+    if (wanted.size === 0) return;
+    if (
+      this._transcriptNeedsSnapshot ||
+      !this._everyConnectionAligned(exclude)
+    ) {
+      this._broadcastMessages(exclude);
+      return;
+    }
+    const messages = this._cachedMessages.filter((m) => wanted.has(m.id));
+    // Every wanted id must resolve to exactly one cached row. Counting rows
+    // would let a duplicated id in the cache stand in for a missing one.
+    const resolved = new Set(messages.map((m) => m.id));
+    if (resolved.size !== wanted.size) {
+      this._broadcastMessages(exclude);
+      return;
+    }
     this._broadcast(
-      { type: MSG_CHAT_MESSAGES, messages: this.messages },
+      {
+        type: MSG_CHAT_MESSAGES_DELTA,
+        epoch: this._transcriptEpoch,
+        messages
+      },
       exclude
     );
+    // Only a broadcast that reached every connection settles the deferred
+    // rows; an excluded one is still owed them.
+    if (!this._anyExcludedConnection(exclude)) {
+      this._deferredTranscriptIds.clear();
+    }
+  }
+
+  /** Whether `exclude` skipped a live connection that receives transcripts. */
+  private _anyExcludedConnection(exclude?: string[]): boolean {
+    if (!exclude || exclude.length === 0) return false;
+    for (const connection of this.getConnections()) {
+      if (!exclude.includes(connection.id)) continue;
+      if (this._transcriptAlignment.get(connection.id) === "ignore") continue;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Record rows whose broadcast was suppressed so the next transcript frame
+   * still carries them. Without this a mid-turn `addMessages` (from a tool
+   * `execute`) or an `addMessages(..., { broadcast: false })` would be
+   * durable and in the live cache but never reach any client: the turn's
+   * cutover frame is a delta naming only the assistant message.
+   */
+  private _deferTranscriptIds(ids: readonly string[]): void {
+    for (const id of ids) this._deferredTranscriptIds.add(id);
   }
 }
 

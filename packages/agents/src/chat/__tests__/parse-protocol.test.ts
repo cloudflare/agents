@@ -155,6 +155,37 @@ describe("parseProtocolMessage", () => {
     expect(event).toEqual({ type: "messages", messages: [] });
   });
 
+  it("parses a client capabilities declaration", () => {
+    expect(
+      parseProtocolMessage(
+        JSON.stringify({
+          type: CHAT_MESSAGE_TYPES.CLIENT_CAPABILITIES,
+          capabilities: { transcriptDeltas: true }
+        })
+      )
+    ).toEqual({ type: "client-capabilities", transcriptDeltas: true });
+  });
+
+  it("treats a missing or non-boolean capability as unsupported", () => {
+    // The server must only send an optional frame on an explicit `true` —
+    // anything else is a client that cannot apply it.
+    for (const capabilities of [
+      undefined,
+      {},
+      { transcriptDeltas: false },
+      { transcriptDeltas: "yes" }
+    ]) {
+      expect(
+        parseProtocolMessage(
+          JSON.stringify({
+            type: CHAT_MESSAGE_TYPES.CLIENT_CAPABILITIES,
+            capabilities
+          })
+        )
+      ).toEqual({ type: "client-capabilities", transcriptDeltas: false });
+    }
+  });
+
   it("does not parse server-to-client types", () => {
     expect(
       parseProtocolMessage(
@@ -174,6 +205,11 @@ describe("parseProtocolMessage", () => {
     expect(
       parseProtocolMessage(
         JSON.stringify({ type: CHAT_MESSAGE_TYPES.MESSAGE_UPDATED })
+      )
+    ).toBeNull();
+    expect(
+      parseProtocolMessage(
+        JSON.stringify({ type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES_DELTA })
       )
     ).toBeNull();
   });

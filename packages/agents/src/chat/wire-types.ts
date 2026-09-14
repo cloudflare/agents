@@ -32,6 +32,17 @@ export enum MessageType {
   CF_AGENT_TOOL_RESULT = "cf_agent_tool_result",
   /** Server notifies client that a message was updated (e.g., tool result applied) */
   CF_AGENT_MESSAGE_UPDATED = "cf_agent_message_updated",
+  /**
+   * Server→client: only the transcript messages that changed at a turn
+   * boundary, tagged with the `epoch` of the snapshot they apply to. See
+   * `CHAT_MESSAGES_DELTA` in `./protocol`.
+   */
+  CF_AGENT_CHAT_MESSAGES_DELTA = "cf_agent_chat_messages_delta",
+  /**
+   * Client→server: the optional protocol features this client understands.
+   * Sent once per socket open. See `CLIENT_CAPABILITIES` in `./protocol`.
+   */
+  CF_AGENT_CHAT_CLIENT_CAPABILITIES = "cf_agent_chat_client_capabilities",
   /** Client sends tool approval response to server (for tools with needsApproval) */
   CF_AGENT_TOOL_APPROVAL = "cf_agent_tool_approval",
 
@@ -58,6 +69,25 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       /** Indicates this message contains updated chat messages */
       type: MessageType.CF_AGENT_CHAT_MESSAGES;
       /** Array of chat messages */
+      messages: readonly ChatMessage[];
+      /**
+       * Identity of this snapshot's base. A later
+       * `CF_AGENT_CHAT_MESSAGES_DELTA` applies only when its `epoch` equals
+       * the one from the last snapshot the client applied. Omitted by servers
+       * that never send deltas.
+       */
+      epoch?: string;
+    }
+  | {
+      /**
+       * Only the messages that changed since the last snapshot (upsert by id;
+       * unknown ids append in order). Dropped by the client unless `epoch`
+       * matches the snapshot it currently holds.
+       */
+      type: MessageType.CF_AGENT_CHAT_MESSAGES_DELTA;
+      /** Identity of the snapshot base this delta applies to. */
+      epoch: string;
+      /** The changed messages, in transcript order. */
       messages: readonly ChatMessage[];
     }
   | {
@@ -179,6 +209,18 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST;
       /** Opaque correlation id echoed by direct server responses. */
       probeId?: string;
+    }
+  | {
+      /** Client declares the optional protocol features it understands */
+      type: MessageType.CF_AGENT_CHAT_CLIENT_CAPABILITIES;
+      capabilities: {
+        /**
+         * This client applies `CF_AGENT_CHAT_MESSAGES_DELTA`. Absent or
+         * false (including on clients too old to send this frame at all)
+         * means the server must keep sending full snapshots.
+         */
+        transcriptDeltas?: boolean;
+      };
     }
   | {
       /** Client sends tool result to server (for client-side tools) */

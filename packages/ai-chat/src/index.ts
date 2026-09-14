@@ -1121,6 +1121,13 @@ export class AIChatAgent<
           return _onMessage(connection, message);
         }
 
+        // AIChatAgent only ever sends full transcript snapshots, so there is
+        // nothing to negotiate — swallow the frame rather than leaking a
+        // protocol message into the consumer's `onMessage`.
+        if (event.type === "client-capabilities") {
+          return;
+        }
+
         // Handle chat request
         if (event.type === "chat-request" && event.init.method === "POST") {
           const { body } = event.init;

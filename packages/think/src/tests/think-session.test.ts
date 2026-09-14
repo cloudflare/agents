@@ -21,7 +21,7 @@ import type {
 } from "./agents/think-session";
 import type { ChatResponseResult, SaveMessagesResult } from "../think";
 
-const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
+const MSG_CHAT_MESSAGES_DELTA = "cf_agent_chat_messages_delta";
 const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 
@@ -48,6 +48,14 @@ async function connectThinkTestAgentWS(room: string): Promise<WebSocket> {
   const ws = response.webSocket as WebSocket;
   expect(ws).toBeDefined();
   ws.accept();
+  // Transcript deltas are negotiated: without this the server keeps sending
+  // full snapshots (what an older client gets).
+  ws.send(
+    JSON.stringify({
+      type: "cf_agent_chat_client_capabilities",
+      capabilities: { transcriptDeltas: true }
+    })
+  );
   return ws;
 }
 
@@ -199,10 +207,12 @@ describe("Think — core", () => {
     const ws = await connectThinkTestAgentWS(room);
 
     try {
+      // The turn boundary persists the user message; an aligned observer
+      // gets it as a delta carrying just that row.
       const userBroadcast = waitForProtocolMessage(ws, (message) => {
         const messages = message.messages as UIMessage[] | undefined;
         return (
-          message.type === MSG_CHAT_MESSAGES &&
+          message.type === MSG_CHAT_MESSAGES_DELTA &&
           Array.isArray(messages) &&
           messages.length === 1 &&
           messages[0].role === "user"
@@ -211,10 +221,10 @@ describe("Think — core", () => {
       const assistantBroadcast = waitForProtocolMessage(ws, (message) => {
         const messages = message.messages as UIMessage[] | undefined;
         return (
-          message.type === MSG_CHAT_MESSAGES &&
+          message.type === MSG_CHAT_MESSAGES_DELTA &&
           Array.isArray(messages) &&
-          messages.length === 2 &&
-          messages[1].role === "assistant"
+          messages.length === 1 &&
+          messages[0].role === "assistant"
         );
       });
 
@@ -251,10 +261,10 @@ describe("Think — core", () => {
       const assistantBroadcast = waitForProtocolMessage(ws, (message) => {
         const messages = message.messages as UIMessage[] | undefined;
         return (
-          message.type === MSG_CHAT_MESSAGES &&
+          message.type === MSG_CHAT_MESSAGES_DELTA &&
           Array.isArray(messages) &&
-          messages.length === 2 &&
-          messages[1].role === "assistant"
+          messages.length === 1 &&
+          messages[0].role === "assistant"
         );
       });
 
