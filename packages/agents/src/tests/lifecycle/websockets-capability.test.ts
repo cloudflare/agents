@@ -1,225 +1,596 @@
-import { env } from "cloudflare:workers";
-import {
-  subscribe as subscribeDiagnostic,
-  unsubscribe as unsubscribeDiagnostic
-} from "node:diagnostics_channel";
+import { env, RpcTarget } from "cloudflare:workers";
 import { newWebSocketRpcSession } from "capnweb";
 import { describe, expect, it } from "vitest";
 import { routeAgentRequest } from "../..";
-import { CALLABLES_RPC_QUERY, CALLABLES_RPC_VALUE } from "../../websockets";
+import { WebSockets } from "../../websockets";
+import {
+  CAPNWEB_TRANSPORT_QUERY,
+  CAPNWEB_TRANSPORT_SEND,
+  CAPNWEB_TRANSPORT_VALUE,
+  type TransportHostPipe
+} from "../../websockets/transport-protocol";
 
 /**
- * The WebSockets capability's callables endpoint: an `RpcTarget`'s
- * methods served over a Cap'n Web session claimed from
- * `?__agents_rpc=capnweb` upgrades.
- *
- * The capability's connection-handler surface is covered by the
- * Lifecycle WebSocket suites — PlainLifecycleObject's handlers live in
- * its WebSockets capability.
+ * A plain host speaks the Agent protocol on every connection: the
+ * capability identifies it on connect and answers `rpc` frames against
+ * `callables`, so `useAgent` / `AgentClient` need nothing from `Agent`.
  */
+type Frame = Record<string, unknown>;
 
-type PlainHostCallables = {
-  add(a: number, b: number): Promise<number>;
-  fail(message: string): Promise<never>;
-  hostContext(): Promise<boolean>;
-  greeting(): Promise<string>;
-  streamNumbers(): Promise<ReadableStream<number>>;
-};
+function frameReader(socket: WebSocket) {
+  const frames: Frame[] = [];
+  const waiters: Array<(frame: Frame) => void> = [];
+  socket.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") return;
+    let frame: Frame;
+    try {
+      frame = JSON.parse(event.data) as Frame;
+    } catch {
+      return;
+    }
+    const waiter = waiters.shift();
+    if (waiter) waiter(frame);
+    else frames.push(frame);
+  });
+  return () =>
+    frames.length > 0
+      ? Promise.resolve(frames.shift() as Frame)
+      : new Promise<Frame>((resolve) => waiters.push(resolve));
+}
 
-type AgentCallables = {
-  multiply(a: number, b: number): Promise<number>;
-  add(a: number, b: number): Promise<number>;
-};
-
-async function connectCallables<Api>(path: string) {
-  const url = new URL(path, "https://example.com");
-  url.searchParams.set(CALLABLES_RPC_QUERY, CALLABLES_RPC_VALUE);
+async function upgrade(url: URL): Promise<WebSocket> {
   const response = await routeAgentRequest(
     new Request(url, { headers: { Upgrade: "websocket" } }),
     env
   );
-  expect(response).not.toBeNull();
-  expect(response!.status).toBe(101);
+  expect(response?.status).toBe(101);
   const socket = response!.webSocket as WebSocket;
-  expect(socket).toBeDefined();
   socket.accept();
-  const rpc = newWebSocketRpcSession<Api>(socket);
-  return {
-    rpc,
-    close() {
-      try {
-        (rpc as Partial<Disposable>)[Symbol.dispose]?.();
-      } catch {
-        socket.close();
-      }
-    }
-  };
+  return socket;
 }
 
-describe("WebSockets capability callables", () => {
-  it("serves the target's methods on a plain lifecycle host", async () => {
-    const session = await connectCallables<PlainHostCallables>(
-      `/agents/plain-lifecycle-object/${crypto.randomUUID()}`
-    );
-    try {
-      await expect(session.rpc.add(2, 3)).resolves.toBe(5);
-    } finally {
-      session.close();
-    }
-  });
-
-  it("invokes methods on the real target — private fields work", async () => {
-    const session = await connectCallables<PlainHostCallables>(
-      `/agents/plain-lifecycle-object/${crypto.randomUUID()}`
-    );
-    try {
-      await expect(session.rpc.greeting()).resolves.toBe("host");
-    } finally {
-      session.close();
-    }
-  });
-
-  it("runs methods inside the host invocation boundary", async () => {
-    const session = await connectCallables<PlainHostCallables>(
-      `/agents/plain-lifecycle-object/${crypto.randomUUID()}`
-    );
-    try {
-      await expect(session.rpc.hostContext()).resolves.toBe(true);
-    } finally {
-      session.close();
-    }
-  });
-
-  it("propagates thrown errors and emits rpc events", async () => {
+describe("plain host Agent protocol on the hibernating wire", () => {
+  it("identifies the host, then answers rpc frames against callables", async () => {
     const name = crypto.randomUUID();
-    const observed: Array<Record<string, unknown>> = [];
-    const handler = (event: unknown) => {
-      if (event === null || typeof event !== "object") return;
-      const record = event as Record<string, unknown>;
-      if (record.name !== name || record.source !== "websockets") return;
-      observed.push(record);
-    };
-    // `rpc`/`rpc:error` events route to the dedicated rpc diagnostics
-    // channel, same as the Agent's legacy RPC protocol events.
-    subscribeDiagnostic("agents:rpc", handler);
-    const session = await connectCallables<PlainHostCallables>(
-      `/agents/plain-lifecycle-object/${name}`
+    const socket = await upgrade(
+      new URL(`/agents/plain-lifecycle-object/${name}`, "https://example.com")
     );
+    const next = frameReader(socket);
     try {
-      await expect(session.rpc.add(1, 1)).resolves.toBe(2);
-      await expect(session.rpc.fail("kaboom")).rejects.toThrow("kaboom");
-      expect(observed).toEqual([
-        expect.objectContaining({
-          type: "rpc",
-          payload: { method: "add", streaming: false }
-        }),
-        expect.objectContaining({
-          type: "rpc:error",
-          payload: { method: "fail", error: "kaboom" }
-        })
-      ]);
-    } finally {
-      unsubscribeDiagnostic("agents:rpc", handler);
-      session.close();
-    }
-  });
+      expect(await next()).toEqual({
+        type: "cf_agent_identity",
+        name,
+        agent: "plain-lifecycle-object"
+      });
 
-  it("rejects names outside the target's interface", async () => {
-    const session = await connectCallables<
-      PlainHostCallables & { unregistered(): Promise<unknown> }
-    >(`/agents/plain-lifecycle-object/${crypto.randomUUID()}`);
-    try {
-      await expect(session.rpc.unregistered()).rejects.toThrow();
-    } finally {
-      session.close();
-    }
-  });
-
-  it("streams ReadableStream results to the caller", async () => {
-    const session = await connectCallables<PlainHostCallables>(
-      `/agents/plain-lifecycle-object/${crypto.randomUUID()}`
-    );
-    try {
-      const stream = await session.rpc.streamNumbers();
-      const reader = stream.getReader();
-      const chunks: number[] = [];
-      while (true) {
-        const next = await reader.read();
-        if (next.done) break;
-        chunks.push(next.value);
-      }
-      expect(chunks).toEqual([1, 2, 3]);
-    } finally {
-      session.close();
-    }
-  });
-
-  it("serves an Agent's decorated methods over capnweb — one interface, every wire", async () => {
-    const session = await connectCallables<
-      AgentCallables & { notCallableMethod(): Promise<unknown> }
-    >(`/agents/test-callable-agent/${crypto.randomUUID()}`);
-    try {
-      await expect(session.rpc.multiply(6, 7)).resolves.toBe(42);
-      await expect(session.rpc.add(2, 3)).resolves.toBe(5);
-      // Undecorated methods stay unreachable.
-      await expect(session.rpc.notCallableMethod()).rejects.toThrow();
-    } finally {
-      session.close();
-    }
-  });
-
-  it("serves decorated methods over capnweb without an explicit target", async () => {
-    const session = await connectCallables<{
-      childMethod(): Promise<string>;
-      parentMethod(): Promise<string>;
-      nonCallableMethod(): Promise<unknown>;
-    }>(`/agents/test-child-agent/${crypto.randomUUID()}`);
-    try {
-      await expect(session.rpc.childMethod()).resolves.toBeDefined();
-      await expect(session.rpc.parentMethod()).resolves.toBeDefined();
-      await expect(session.rpc.nonCallableMethod()).rejects.toThrow();
-    } finally {
-      session.close();
-    }
-  });
-
-  it("serves the same interface over the legacy JSON RPC wire", async () => {
-    const name = crypto.randomUUID();
-    const response = await routeAgentRequest(
-      new Request(`https://example.com/agents/test-callable-agent/${name}`, {
-        headers: { Upgrade: "websocket" }
-      }),
-      env
-    );
-    expect(response!.status).toBe(101);
-    const socket = response!.webSocket as WebSocket;
-    socket.accept();
-
-    const reply = new Promise<Record<string, unknown>>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("Timed out waiting for RPC reply")),
-        5000
+      socket.send(
+        JSON.stringify({ type: "rpc", id: "1", method: "add", args: [2, 3] })
       );
+      expect(await next()).toEqual({
+        type: "rpc",
+        id: "1",
+        success: true,
+        done: true,
+        result: 5
+      });
+
+      socket.send(
+        JSON.stringify({
+          type: "rpc",
+          id: "2",
+          method: "fail",
+          args: ["kaboom"]
+        })
+      );
+      expect(await next()).toEqual({
+        type: "rpc",
+        id: "2",
+        success: false,
+        error: "kaboom"
+      });
+
+      socket.send(
+        JSON.stringify({ type: "rpc", id: "3", method: "nope", args: [] })
+      );
+      expect(await next()).toMatchObject({ id: "3", success: false });
+
+      // A ReadableStream result streams as chunks, then a final done frame.
+      socket.send(
+        JSON.stringify({
+          type: "rpc",
+          id: "4",
+          method: "streamNumbers",
+          args: []
+        })
+      );
+      expect(await next()).toMatchObject({ id: "4", done: false, result: 1 });
+      expect(await next()).toMatchObject({ id: "4", done: false, result: 2 });
+      expect(await next()).toMatchObject({ id: "4", done: false, result: 3 });
+      expect(await next()).toMatchObject({ id: "4", done: true });
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("still passes non-rpc frames to the host's onMessage", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(
+      new URL(`/agents/plain-lifecycle-object/${name}`, "https://example.com")
+    );
+    const text = new Promise<string>((resolve) => {
       socket.addEventListener("message", (event) => {
-        if (typeof event.data !== "string") return;
-        const frame = JSON.parse(event.data) as Record<string, unknown>;
-        if (frame.type === "rpc" && frame.id === "legacy-1") {
-          clearTimeout(timer);
-          resolve(frame);
-        }
+        const data = String(event.data);
+        if (data.startsWith("echo:")) resolve(data);
       });
     });
-    socket.send(
-      JSON.stringify({
+    try {
+      socket.send("hello");
+      expect(await text).toBe("echo:hello");
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+});
+
+describe("plain host Agent protocol on the Cap'n Web wire", () => {
+  it("delivers identity through the pipe and answers rpc frames", async () => {
+    const name = crypto.randomUUID();
+    const url = new URL(
+      `/agents/plain-lifecycle-object/${name}`,
+      "https://example.com"
+    );
+    url.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+    const socket = await upgrade(url);
+
+    const frames: Frame[] = [];
+    const waiters: Array<(frame: Frame) => void> = [];
+    class Inbox extends RpcTarget {
+      message(value: string) {
+        const frame = JSON.parse(value) as Frame;
+        const waiter = waiters.shift();
+        if (waiter) waiter(frame);
+        else frames.push(frame);
+      }
+    }
+    const next = () =>
+      frames.length > 0
+        ? Promise.resolve(frames.shift() as Frame)
+        : new Promise<Frame>((resolve) => waiters.push(resolve));
+    const pipe = newWebSocketRpcSession<TransportHostPipe>(socket, new Inbox());
+    try {
+      expect(await next()).toEqual({
+        type: "cf_agent_identity",
+        name,
+        agent: "plain-lifecycle-object"
+      });
+      await pipe[CAPNWEB_TRANSPORT_SEND](
+        JSON.stringify({ type: "rpc", id: "1", method: "add", args: [4, 5] })
+      );
+      expect(await next()).toMatchObject({ id: "1", success: true, result: 9 });
+
+      // The session is a live connection on the host.
+      const members =
+        await env.PlainLifecycleObject.getByName(name).connectionCount();
+      expect(members).toBe(1);
+    } finally {
+      pipe[Symbol.dispose]();
+    }
+  });
+
+  it("serves callables natively on the session root: stubs, streams, errors", async () => {
+    const name = crypto.randomUUID();
+    const url = new URL(
+      `/agents/plain-lifecycle-object/${name}`,
+      "https://example.com"
+    );
+    url.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+    const socket = await upgrade(url);
+    const frames: Frame[] = [];
+    const waiters: Array<(frame: Frame) => void> = [];
+    class Inbox extends RpcTarget {
+      message(value: string) {
+        let frame: Frame;
+        try {
+          frame = JSON.parse(value) as Frame;
+        } catch {
+          return; // the fixture's own "connected:" text frame
+        }
+        const waiter = waiters.shift();
+        if (waiter) waiter(frame);
+        else frames.push(frame);
+      }
+    }
+    const next = () =>
+      frames.length > 0
+        ? Promise.resolve(frames.shift() as Frame)
+        : new Promise<Frame>((resolve) => waiters.push(resolve));
+    type Root = TransportHostPipe & {
+      add(a: number, b: number): Promise<number>;
+      fail(message: string): Promise<never>;
+      hostContext(): Promise<boolean>;
+      counter(): Promise<{
+        increment(by?: number): Promise<number>;
+        value(): Promise<number>;
+      }>;
+      streamNumbers(): Promise<ReadableStream<number>>;
+    };
+    const root = newWebSocketRpcSession<Root>(socket, new Inbox());
+    try {
+      await expect(root.add(2, 3)).resolves.toBe(5);
+      await expect(root.hostContext()).resolves.toBe(true);
+      await expect(root.fail("kaboom")).rejects.toThrow("kaboom");
+
+      // An RpcTarget result is a live stub: state lives on the host side.
+      const counter = await root.counter();
+      await expect(counter.increment()).resolves.toBe(1);
+      await expect(counter.increment(5)).resolves.toBe(6);
+      await expect(counter.value()).resolves.toBe(6);
+
+      const chunks: number[] = [];
+      for await (const n of await root.streamNumbers()) chunks.push(n);
+      expect(chunks).toEqual([1, 2, 3]);
+
+      // The same result cannot cross the JSON wire: the rpc frame path
+      // reports an error instead of a stub.
+      expect(await next()).toMatchObject({ type: "cf_agent_identity" });
+      await root[CAPNWEB_TRANSPORT_SEND](
+        JSON.stringify({ type: "rpc", id: "x", method: "counter", args: [] })
+      );
+      expect(await next()).toMatchObject({
         type: "rpc",
-        id: "legacy-1",
-        method: "multiply",
-        args: [6, 7]
+        id: "x",
+        success: false
+      });
+    } finally {
+      root[Symbol.dispose]();
+    }
+  });
+
+  it("rejects a callables target that shadows the frame pipe", () => {
+    class Bad extends RpcTarget {
+      [CAPNWEB_TRANSPORT_SEND]() {}
+    }
+    expect(() => new WebSockets({ callables: new Bad() })).toThrow(
+      /frame pipe/
+    );
+  });
+
+  it("settles a JSON-wire call whose result cannot be serialized", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(
+      new URL(`/agents/plain-lifecycle-object/${name}`, "https://example.com")
+    );
+    const next = frameReader(socket);
+    try {
+      expect(await next()).toMatchObject({ type: "cf_agent_identity" });
+      socket.send(
+        JSON.stringify({ type: "rpc", id: "1", method: "bigint", args: [] })
+      );
+      expect(await next()).toMatchObject({
+        id: "1",
+        success: false,
+        error: expect.stringContaining("not JSON-serializable")
+      });
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("applies the same tag limits on the Cap'n Web wire", async () => {
+    const name = crypto.randomUUID();
+    const base = new URL(
+      `/agents/plain-lifecycle-object/${name}`,
+      "https://example.com"
+    );
+    base.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+
+    // Ten user tags plus the id is eleven: both wires reject the upgrade
+    // the same way — Lifecycle answers 101 and closes the socket with 1011.
+    const closeCodeOf = async (response: Response | null) => {
+      const ws = response?.webSocket;
+      if (!ws) throw new Error(`expected an upgrade, got ${response?.status}`);
+      ws.accept();
+      return new Promise<number>((resolve) =>
+        ws.addEventListener("close", (event) => resolve(event.code), {
+          once: true
+        })
+      );
+    };
+    const tooMany = new URL(base);
+    tooMany.searchParams.set("tags", "10");
+    const plain = new URL(tooMany);
+    plain.searchParams.delete(CAPNWEB_TRANSPORT_QUERY);
+    for (const url of [tooMany, plain]) {
+      const response = await routeAgentRequest(
+        new Request(url, { headers: { Upgrade: "websocket" } }),
+        env
+      );
+      expect(await closeCodeOf(response)).toBe(1011);
+    }
+    expect(
+      await env.PlainLifecycleObject.getByName(name).connectionCount()
+    ).toBe(0);
+
+    const ok = new URL(base);
+    ok.searchParams.set("tags", "9");
+    ok.searchParams.set("_pk", "tagged-" + name);
+    const socket = await upgrade(ok);
+    class Inbox extends RpcTarget {
+      message() {}
+    }
+    const root = newWebSocketRpcSession<TransportHostPipe>(socket, new Inbox());
+    try {
+      const tags = await env.PlainLifecycleObject.getByName(
+        name
+      ).connectionTags("tagged-" + name);
+      expect(tags).toHaveLength(10);
+      expect(tags?.[0]).toBe("tagged-" + name);
+    } finally {
+      root[Symbol.dispose]();
+    }
+  });
+
+  it("keeps a Cap'n Web connection tracked when close() is given an invalid code", async () => {
+    const name = crypto.randomUUID();
+    const url = new URL(
+      `/agents/plain-lifecycle-object/${name}`,
+      "https://example.com"
+    );
+    url.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+    url.searchParams.set("_pk", "c-" + name);
+    const socket = await upgrade(url);
+    class Inbox extends RpcTarget {
+      message() {}
+    }
+    const root = newWebSocketRpcSession<TransportHostPipe>(socket, new Inbox());
+    const host = env.PlainLifecycleObject.getByName(name);
+    const closedEvent = new Promise<number>((resolve) =>
+      socket.addEventListener("close", (event) => resolve(event.code), {
+        once: true
       })
     );
-    const frame = await reply;
-    expect(frame.success).toBe(true);
-    expect(frame.result).toBe(42);
-    socket.close();
+    try {
+      // 1006 is reserved: WebSocket.close() throws, and so does ours, with
+      // the connection left open and still counted.
+      expect(await host.closeConnection("c-" + name, 1006, "nope")).toMatch(
+        /./
+      );
+      expect(await host.connectionCount()).toBe(1);
+
+      expect(await host.closeConnection("c-" + name, 4000, "bye")).toBeNull();
+      expect(await closedEvent).toBe(4000);
+      expect(await host.connectionCount()).toBe(0);
+    } finally {
+      try {
+        root[Symbol.dispose]();
+      } catch {
+        // already closed by the host
+      }
+    }
+  });
+});
+
+/**
+ * A plain host that composes `State` with `WebSockets` gets the hook's
+ * whole state surface: pushed on connect, updated from the client,
+ * broadcast to everyone else, and validated by the host.
+ */
+describe("state sync over connections on a plain host", () => {
+  const hostUrl = (name: string) =>
+    new URL(`/agents/stateful-plain-object/${name}`, "https://example.com");
+
+  it("pushes state on connect, after identity", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(hostUrl(name));
+    const next = frameReader(socket);
+    try {
+      expect(await next()).toMatchObject({ type: "cf_agent_identity", name });
+      expect(await next()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 0 }
+      });
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("applies a client update and broadcasts it to the others", async () => {
+    const name = crypto.randomUUID();
+    const alice = await upgrade(hostUrl(name));
+    const aliceNext = frameReader(alice);
+    await aliceNext();
+    await aliceNext();
+    const bob = await upgrade(hostUrl(name));
+    const bobNext = frameReader(bob);
+    await bobNext();
+    await bobNext();
+    try {
+      alice.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 7 } })
+      );
+      // Bob sees it; the sender is excluded since it already has the value.
+      expect(await bobNext()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 7 }
+      });
+      expect(await env.StatefulPlainObject.getByName(name).getCount()).toBe(7);
+    } finally {
+      alice.close(1000, "done");
+      bob.close(1000, "done");
+    }
+  });
+
+  it("answers a rejected update with cf_agent_state_error and changes nothing", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(hostUrl(name));
+    const next = frameReader(socket);
+    await next();
+    await next();
+    try {
+      socket.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: -1 } })
+      );
+      // The validator's reason stays server-side; the client gets the
+      // same generic answer an Agent gives.
+      expect(await next()).toEqual({
+        type: "cf_agent_state_error",
+        error: "State update rejected"
+      });
+      expect(await env.StatefulPlainObject.getByName(name).getCount()).toBe(0);
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("broadcasts a host-side change", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(hostUrl(name));
+    const next = frameReader(socket);
+    await next();
+    await next();
+    try {
+      await env.StatefulPlainObject.getByName(name).setCount(42);
+      expect(await next()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 42 }
+      });
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("broadcasts to a second socket that shares the sender's _pk", async () => {
+    // `_pk` is client-supplied, so two live sockets can carry one id.
+    // Excluding the sender by id would starve the other socket.
+    const name = crypto.randomUUID();
+    const shared = `shared-${name}`;
+    const url = hostUrl(name);
+    url.searchParams.set("_pk", shared);
+    const alice = await upgrade(url);
+    const aliceNext = frameReader(alice);
+    await aliceNext();
+    await aliceNext();
+    const bob = await upgrade(url);
+    const bobNext = frameReader(bob);
+    await bobNext();
+    await bobNext();
+    try {
+      alice.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 5 } })
+      );
+      expect(await bobNext()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 5 }
+      });
+    } finally {
+      alice.close(1000, "done");
+      bob.close(1000, "done");
+    }
+  });
+
+  it("syncs state over the Cap'n Web transport too", async () => {
+    const name = crypto.randomUUID();
+    const url = hostUrl(name);
+    url.searchParams.set(CAPNWEB_TRANSPORT_QUERY, CAPNWEB_TRANSPORT_VALUE);
+    const socket = await upgrade(url);
+    const frames: Frame[] = [];
+    const waiters: Array<(frame: Frame) => void> = [];
+    class Inbox extends RpcTarget {
+      message(value: string) {
+        let frame: Frame;
+        try {
+          frame = JSON.parse(value) as Frame;
+        } catch {
+          return;
+        }
+        const waiter = waiters.shift();
+        if (waiter) waiter(frame);
+        else frames.push(frame);
+      }
+    }
+    const next = () =>
+      frames.length > 0
+        ? Promise.resolve(frames.shift() as Frame)
+        : new Promise<Frame>((resolve) => waiters.push(resolve));
+    const pipe = newWebSocketRpcSession<TransportHostPipe>(socket, new Inbox());
+    try {
+      expect(await next()).toMatchObject({ type: "cf_agent_identity" });
+      expect(await next()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 0 }
+      });
+      await pipe[CAPNWEB_TRANSPORT_SEND](
+        JSON.stringify({ type: "cf_agent_state", state: { count: 3 } })
+      );
+      expect(await env.StatefulPlainObject.getByName(name).getCount()).toBe(3);
+    } finally {
+      pipe[Symbol.dispose]();
+    }
+  });
+
+  it("refuses state writes from a readonly connection", async () => {
+    const name = crypto.randomUUID();
+    const url = hostUrl(name);
+    url.searchParams.set("readonly", "1");
+    url.searchParams.set("_pk", "ro-" + name);
+    const socket = await upgrade(url);
+    const next = frameReader(socket);
+    await next();
+    await next();
+    const host = env.StatefulPlainObject.getByName(name);
+    try {
+      socket.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 9 } })
+      );
+      expect(await next()).toEqual({
+        type: "cf_agent_state_error",
+        error: "Connection is readonly"
+      });
+      expect(await host.getCount()).toBe(0);
+      expect(await host.isReadonly("ro-" + name)).toBe(true);
+
+      // Flags never leak into the user-visible connection state, and
+      // flipping the flag later takes effect.
+      await host.setReadonly("ro-" + name, false);
+      socket.send(
+        JSON.stringify({ type: "cf_agent_state", state: { count: 9 } })
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await host.getCount()).toBe(9);
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+
+  it("sends no protocol frames to a no-protocol connection, on connect or broadcast", async () => {
+    const name = crypto.randomUUID();
+    const url = hostUrl(name);
+    url.searchParams.set("silent", "1");
+    const silent = await upgrade(url);
+    const silentFrames: string[] = [];
+    silent.addEventListener("message", (e) =>
+      silentFrames.push(String(e.data))
+    );
+    const loud = await upgrade(hostUrl(name));
+    const loudNext = frameReader(loud);
+    await loudNext();
+    await loudNext();
+    try {
+      // The silent socket still works for the host's own frames.
+      silent.send("hello");
+      await new Promise((r) => setTimeout(r, 50));
+      expect(silentFrames).toEqual(["echo:hello"]);
+
+      await env.StatefulPlainObject.getByName(name).setCount(4);
+      expect(await loudNext()).toEqual({
+        type: "cf_agent_state",
+        state: { count: 4 }
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(silentFrames).toEqual(["echo:hello"]);
+    } finally {
+      silent.close(1000, "done");
+      loud.close(1000, "done");
+    }
   });
 });

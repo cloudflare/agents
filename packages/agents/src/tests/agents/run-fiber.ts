@@ -57,6 +57,23 @@ export class TestRunFiberAgent extends Agent {
     });
   }
 
+  async runWithFailingCleanup(value: string): Promise<string> {
+    this.sql`
+      CREATE TRIGGER fail_run_fiber_cleanup
+      BEFORE DELETE ON cf_agents_runs
+      WHEN OLD.name = 'cleanup-failure'
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+      END
+    `;
+
+    try {
+      return await this.runFiber("cleanup-failure", async () => value);
+    } finally {
+      this.sql`DROP TRIGGER fail_run_fiber_cleanup`;
+    }
+  }
+
   async runWithCheckpoint(steps: string[]): Promise<string[]> {
     return this.runFiber("checkpoint", async (ctx) => {
       const completed: string[] = [];
