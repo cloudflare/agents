@@ -346,6 +346,8 @@ export type X402ClientConfig = {
   confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
 };
 
+class PaymentCapError extends Error {}
+
 export function withX402Client<T extends CompatibleMcpClient>(
   client: T,
   x402Config: X402ClientConfig
@@ -358,6 +360,25 @@ export function withX402Client<T extends CompatibleMcpClient>(
   // Create v2 x402 payment client with EVM scheme support
   const paymentClient = new x402Client();
   registerClientEvmScheme(paymentClient, { signer: account });
+
+  // Selection applies scheme support and network preference before this hook.
+  // Enforce the cap on the requirement that will actually be signed.
+  paymentClient.onBeforePaymentCreation(async ({ selectedRequirements }) => {
+    const { scheme, amount } = selectedRequirements;
+    if (
+      scheme !== "exact" ||
+      typeof amount !== "string" ||
+      !/^\d+$/.test(amount)
+    ) {
+      throw new Error("Invalid payment amount or scheme");
+    }
+    const value = BigInt(amount);
+    if (value > maxPaymentValue) {
+      throw new PaymentCapError(
+        `Payment exceeds client cap: ${value} > ${maxPaymentValue}`
+      );
+    }
+  });
 
   // If a preferred network is specified, register a policy to prefer it
   if (x402Config.network) {
@@ -428,28 +449,6 @@ export function withX402Client<T extends CompatibleMcpClient>(
         };
       }
 
-      // Check max payment value against the first requirement's amount
-      const selectedReq = accepts[0];
-      if (!selectedReq || selectedReq.scheme !== "exact") return res;
-
-      let amount: bigint;
-      try {
-        amount = BigInt(selectedReq.amount);
-      } catch {
-        return res; // malformed amount — return original error
-      }
-      if (amount > maxPaymentValue) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Payment exceeds client cap: ${amount} > ${maxPaymentValue}`
-            }
-          ]
-        };
-      }
-
       // Reconstruct the PaymentRequired response for the v2 x402 client
       const paymentRequiredResponse: PaymentRequired = {
         x402Version: (maybeX402Error.x402Version as number) ?? 2,
@@ -464,16 +463,25 @@ export function withX402Client<T extends CompatibleMcpClient>(
           | undefined
       };
 
-      // Create the payment payload using the v2 x402 client
+      // Snapshot requirements so retained approval references cannot change them
+      // between the cap check and signing.
       let paymentPayload: PaymentPayload;
       try {
         paymentPayload = await paymentClient.createPaymentPayload(
-          paymentRequiredResponse
+          structuredClone(paymentRequiredResponse)
         );
-      } catch {
+      } catch (error) {
         return {
           isError: true,
-          content: [{ type: "text", text: "Failed to create payment payload" }]
+          content: [
+            {
+              type: "text",
+              text:
+                error instanceof PaymentCapError
+                  ? error.message
+                  : "Failed to create payment payload"
+            }
+          ]
         };
       }
 

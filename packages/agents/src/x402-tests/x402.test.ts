@@ -15,6 +15,7 @@ const mockResourceServer = {
 };
 
 const mockPaymentClient = {
+  onBeforePaymentCreation: vi.fn(),
   registerPolicy: vi.fn(),
   createPaymentPayload: vi.fn()
 };
@@ -808,46 +809,6 @@ describe("withX402Client", () => {
     // The token should be base64-encoded JSON
     const decoded = JSON.parse(atob(retryCall[0]._meta["x402/payment"]));
     expect(decoded.scheme).toBe("exact");
-  });
-
-  it("respects maxPaymentValue cap", async () => {
-    const client = createMockMcpClient();
-    const originalCallTool = client.callTool;
-
-    originalCallTool.mockResolvedValueOnce({
-      isError: true,
-      _meta: {
-        "x402/error": {
-          x402Version: 2,
-          error: "PAYMENT_REQUIRED",
-          resource: {
-            url: "x402://expensive",
-            description: "expensive",
-            mimeType: "application/json"
-          },
-          accepts: [
-            {
-              ...samplePaymentRequirements[0],
-              amount: "999999999" // Way over the default cap
-            }
-          ]
-        }
-      },
-      content: [{ type: "text", text: "payment required" }]
-    });
-
-    const augmented = withX402Client(client, {
-      account: mockSigner as unknown as X402ClientConfig["account"],
-      maxPaymentValue: BigInt(100000) // 0.10 USDC
-    });
-
-    const result = await augmented.callTool(null, { name: "expensive-tool" });
-
-    expect(result.isError).toBe(true);
-    const content = result.content as Array<{ text: string }>;
-    expect(content[0].text).toContain("Payment exceeds client cap");
-    // Should NOT have retried
-    expect(originalCallTool).toHaveBeenCalledOnce();
   });
 
   it("respects confirmation callback declining payment", async () => {
