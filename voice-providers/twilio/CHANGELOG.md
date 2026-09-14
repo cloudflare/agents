@@ -1,5 +1,11 @@
 # @cloudflare/voice-twilio
 
+## 0.1.1
+
+### Patch Changes
+
+- [#2270](https://github.com/cloudflare/agents/pull/2270) [`a7b2913`](https://github.com/cloudflare/agents/commit/a7b29135acf127cdf4a44114652970d0a22300de) Thanks [@cjol](https://github.com/cjol)! - Fix Twilio Media Streams calls failing to connect, play audio, or stop playback on barge-in. Durable Object WebSocket upgrades now keep their HTTP(S) URL, agent audio works with both `Blob` and `ArrayBuffer` delivery, and sustained caller speech clears Twilio's buffered audio while interrupting the active VoiceAgent response.
+
 ## 0.1.0
 
 ### Minor Changes
