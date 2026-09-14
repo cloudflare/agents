@@ -128,6 +128,14 @@ function int16ToArrayBuffer(samples: Int16Array): ArrayBuffer {
   return buffer;
 }
 
+function meanSquaredEnergy(samples: Int16Array): number {
+  if (samples.length === 0) return 0;
+
+  let sum = 0;
+  for (const sample of samples) sum += sample * sample;
+  return sum / samples.length;
+}
+
 // --- Twilio protocol types ---
 
 interface TwilioStartMessage {
@@ -159,6 +167,11 @@ interface TwilioMediaMessage {
 }
 
 // --- Adapter ---
+
+const SPEECH_ENERGY_THRESHOLD = 250_000;
+const SPEECH_DEBOUNCE_FRAMES = 3;
+const PLAYBACK_GRACE_MS = 1000;
+const AGENT_PCM_BYTES_PER_SECOND = 16_000 * 2;
 
 export interface TwilioAdapterOptions {
   /**
@@ -214,6 +227,16 @@ export class TwilioAdapter {
     let streamSid: string | null = null;
     let agentSocket: WebSocket | null = null;
     let callSid: string | null = null;
+    let audioGated = false;
+    let estimatedPlaybackEndAt = 0;
+    let loudFrames = 0;
+
+    const sendClear = () => {
+      estimatedPlaybackEndAt = 0;
+      if (serverSocket.readyState === WebSocket.OPEN && streamSid) {
+        serverSocket.send(JSON.stringify({ event: "clear", streamSid }));
+      }
+    };
 
     // Connect to the VoiceAgent DO
     const connectToAgent = async (instanceId: string) => {
@@ -266,6 +289,22 @@ export class TwilioAdapter {
           try {
             const msg = JSON.parse(event.data) as Record<string, unknown>;
 
+            if (msg.type === "playback_interrupt") {
+              if (!audioGated) sendClear();
+              audioGated = false;
+              loudFrames = 0;
+              return;
+            }
+
+            if (
+              msg.type === "status" &&
+              (msg.status === "listening" ||
+                msg.status === "thinking" ||
+                msg.status === "speaking")
+            ) {
+              audioGated = false;
+            }
+
             if (
               serverSocket.readyState === WebSocket.OPEN &&
               (msg.type === "transcript" ||
@@ -292,6 +331,8 @@ export class TwilioAdapter {
               ? await event.data.arrayBuffer()
               : event.data;
 
+          if (audioGated) return;
+
           // Audio from agent. This is expected to be 16kHz 16-bit mono PCM.
           //
           // IMPORTANT: The default Workers AI TTS returns MP3, which cannot
@@ -314,6 +355,11 @@ export class TwilioAdapter {
           const payload = btoa(binary);
 
           if (serverSocket.readyState === WebSocket.OPEN) {
+            const now = Date.now();
+            const durationMs =
+              (audio.byteLength / AGENT_PCM_BYTES_PER_SECOND) * 1000;
+            estimatedPlaybackEndAt =
+              Math.max(now, estimatedPlaybackEndAt) + durationMs;
             serverSocket.send(
               JSON.stringify({
                 event: "media",
@@ -367,6 +413,25 @@ export class TwilioAdapter {
           const pcm8k = decodeMulawToPCM(mulawBytes);
           const pcm16k = resamplePCM(pcm8k, 8000, 16000);
           const pcmBuffer = int16ToArrayBuffer(pcm16k);
+
+          loudFrames =
+            meanSquaredEnergy(pcm16k) > SPEECH_ENERGY_THRESHOLD
+              ? loudFrames + 1
+              : 0;
+          const agentSpeaking =
+            Date.now() < estimatedPlaybackEndAt + PLAYBACK_GRACE_MS;
+          if (
+            !audioGated &&
+            agentSpeaking &&
+            loudFrames >= SPEECH_DEBOUNCE_FRAMES
+          ) {
+            audioGated = true;
+            loudFrames = 0;
+            sendClear();
+            if (agentSocket?.readyState === WebSocket.OPEN) {
+              agentSocket.send(JSON.stringify({ type: "interrupt" }));
+            }
+          }
 
           if (agentSocket?.readyState === WebSocket.OPEN) {
             agentSocket.send(pcmBuffer);

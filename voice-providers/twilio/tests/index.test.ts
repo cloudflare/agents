@@ -65,6 +65,7 @@ interface Harness {
   serverSocket: FakeWebSocket;
   getAgentRequest(): Request | null;
   startCall(): Promise<void>;
+  sendInbound(payload: string): Promise<void>;
 }
 
 function createHarness(): Harness {
@@ -119,6 +120,19 @@ function createHarness(): Harness {
             }
           }
         })
+      }),
+    sendInbound: (payload: string) =>
+      activeServerSocket.emit("message", {
+        data: JSON.stringify({
+          event: "media",
+          streamSid: "stream-1",
+          media: {
+            track: "inbound",
+            chunk: "1",
+            timestamp: "0",
+            payload
+          }
+        })
       })
   };
 }
@@ -151,5 +165,63 @@ describe("TwilioAdapter.handleRequest", () => {
         media: { payload: "//8=" }
       }
     ]);
+  });
+
+  it("clears Twilio playback when the VoiceAgent reports an interruption", async () => {
+    const harness = createHarness();
+    await harness.startCall();
+
+    await harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "playback_interrupt" })
+    });
+
+    expect(harness.serverSocket.jsonSent).toContainEqual({
+      event: "clear",
+      streamSid: "stream-1"
+    });
+  });
+
+  it("interrupts buffered playback after sustained caller speech", async () => {
+    const harness = createHarness();
+    await harness.startCall();
+    const agentAudio = new Int16Array(320).fill(5_000).buffer;
+    await harness.agentSocket.emit("message", { data: agentAudio });
+
+    // G.711 mulaw byte 0xce decodes to 988, above the speech threshold.
+    const callerSpeech = btoa(
+      String.fromCharCode(...new Uint8Array(160).fill(0xce))
+    );
+    await harness.sendInbound(callerSpeech);
+    await harness.sendInbound(callerSpeech);
+    expect(
+      harness.serverSocket.jsonSent.filter(
+        (message) => message.event === "clear"
+      )
+    ).toHaveLength(0);
+
+    await harness.sendInbound(callerSpeech);
+
+    expect(harness.serverSocket.jsonSent).toContainEqual({
+      event: "clear",
+      streamSid: "stream-1"
+    });
+    expect(harness.agentSocket.jsonSent).toContainEqual({ type: "interrupt" });
+
+    await harness.agentSocket.emit("message", { data: agentAudio });
+    expect(
+      harness.serverSocket.jsonSent.filter(
+        (message) => message.event === "media"
+      )
+    ).toHaveLength(1);
+
+    await harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "status", status: "listening" })
+    });
+    await harness.agentSocket.emit("message", { data: agentAudio });
+    expect(
+      harness.serverSocket.jsonSent.filter(
+        (message) => message.event === "media"
+      )
+    ).toHaveLength(2);
   });
 });
