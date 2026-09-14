@@ -57,6 +57,9 @@ export interface DynamicAgentHostPort {
   readonly tasks: {
     __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
   };
+  readonly _queue: {
+    __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix: string): Promise<void>;
+  };
   /** Local (non-facet-index) durable fiber recovery pass. */
   _checkRunFibers(): Promise<void>;
   /** Overridable RPC entry points — call via the host so subclass overrides intercept. */
@@ -84,16 +87,12 @@ export interface DynamicAgentHostPort {
       tag?: string
     ): Iterable<Connection<TState>>;
   };
-  _ensureConnectionWrapped(connection: Connection): void;
   _unsafe_getConnectionFlag(connection: Connection, key: string): unknown;
   _unsafe_setConnectionFlag(
     connection: Connection,
     key: string,
     value: unknown
   ): void;
-  readonly _rawStateAccessors: {
-    get(connection: Connection): { getRaw(): unknown } | undefined;
-  };
   shouldConnectionBeReadonly(
     connection: Connection,
     context: { request: Request }
@@ -103,7 +102,6 @@ export interface DynamicAgentHostPort {
     connection: Connection,
     context: { request: Request }
   ): boolean;
-  _setConnectionNoProtocol(connection: Connection): void;
   getConnectionTags(
     connection: Connection,
     context: { request: Request }

@@ -230,7 +230,8 @@ export class ThinkToolRollbackE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return {
       totalExecutions: rows.reduce((n, r) => n + r.count, 0),
@@ -320,7 +321,8 @@ export class ThinkPersistFalseE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     const assistant = this.messages.filter((m) => m.role === "assistant");
     const settledToolPartsInTranscript = assistant.reduce((n, m) => {
@@ -538,8 +540,12 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
 
   @callable()
   async hasFiberRows(): Promise<boolean> {
+    // Chat turns run on the Tasks capability (cf_agents_task_runs); facet
+    // turns stay on the legacy fiber engine (cf_agents_runs). An in-flight
+    // durable turn exists if either engine holds a row.
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as count
     `;
     return rows[0].count > 0;
   }
@@ -630,7 +636,8 @@ export class ThinkStallRecoveryE2EAgent extends Think<Env> {
           .join("")
       : "";
     const fiberRows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return {
       assistantMessages: assistant.length,
@@ -781,7 +788,8 @@ export class ThinkTaskParentE2EAgent extends Think<Env> {
       this.sql<{ c: number }>`SELECT COUNT(*) as c FROM parent_task_log`[0]
         ?.c ?? 0;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     let child: {
       totalExecutions: number;
@@ -887,7 +895,8 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
       LIMIT 1
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     let child: {
       totalExecutions: number;
@@ -1005,7 +1014,8 @@ export class ThinkSlowChildE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return {
       totalExecutions: rows.reduce((n, r) => n + r.count, 0),
@@ -1077,7 +1087,8 @@ export class ThinkSlowChildParentE2EAgent extends Think<Env> {
       LIMIT 1
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     let child: {
       maxIndex: number;
@@ -1768,8 +1779,10 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
 
   @callable()
   async hasFiberRows(): Promise<boolean> {
+    // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return (rows[0]?.c ?? 0) > 0;
   }
@@ -1945,8 +1958,10 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
 
   @callable()
   async hasFiberRows(): Promise<boolean> {
+    // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return (rows[0]?.c ?? 0) > 0;
   }
@@ -2056,26 +2071,36 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
     };
   }
 
+  override async sendWorkflowEvent(
+    workflowName: string & {},
+    workflowId: string,
+    event: { type: string; payload: unknown }
+  ): Promise<void> {
+    await super.sendWorkflowEvent(workflowName, workflowId, event);
+    const delivered =
+      (await this.ctx.storage.get<number>("e2e:delivered_notifications")) ?? 0;
+    await this.ctx.storage.put("e2e:delivered_notifications", delivered + 1);
+  }
+
+  /** Delivered workflow events plus notifications still queued. */
   @callable()
   async getNotificationStats(): Promise<{ total: number; delivered: number }> {
-    this
-      .sql`CREATE TABLE IF NOT EXISTS cf_think_workflow_notifications (notification_id TEXT PRIMARY KEY, submission_id TEXT, workflow_name TEXT, workflow_id TEXT, event_type TEXT, payload_json TEXT, attempts INTEGER, last_error TEXT, created_at INTEGER, updated_at INTEGER, delivered_at INTEGER)`;
-    const total =
-      this.sql<{ c: number }>`
-        SELECT COUNT(*) as c FROM cf_think_workflow_notifications
-      `[0]?.c ?? 0;
     const delivered =
+      (await this.ctx.storage.get<number>("e2e:delivered_notifications")) ?? 0;
+    const pending =
       this.sql<{ c: number }>`
-        SELECT COUNT(*) as c FROM cf_think_workflow_notifications
-        WHERE delivered_at IS NOT NULL
+        SELECT COUNT(*) as c FROM cf_agents_jobs
+        WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
       `[0]?.c ?? 0;
-    return { total, delivered };
+    return { total: delivered + pending, delivered };
   }
 
   @callable()
   async hasFiberRows(): Promise<boolean> {
+    // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return (rows[0]?.c ?? 0) > 0;
   }
@@ -2257,8 +2282,10 @@ export class ThinkActionPauseRecoveryE2EAgent extends Think<Env> {
 
   @callable()
   async hasFiberRows(): Promise<boolean> {
+    // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
     `;
     return (rows[0]?.c ?? 0) > 0;
   }

@@ -21,7 +21,8 @@ import {
   LifecycleCapability,
   type LifecycleHostContextScope,
   type LifecycleRouteAddress,
-  type LifecycleServices
+  type LifecycleServices,
+  type LifecycleStatus
 } from "./capability";
 import {
   runInLifecycleHostContext,
@@ -150,17 +151,6 @@ export type LifecycleOptions = {
   readonly maxAlarmMemoryLimitStrikes?: number;
 };
 
-/** Placement of a capability in the dispatch order. */
-export type LifecycleUseOptions = {
-  /**
-   * Dispatch after every non-fallback capability, whenever it was
-   * installed. For a host's catch-all, such as a WebSockets capability
-   * that claims every upgrade, so middleware installed later still runs
-   * first.
-   */
-  readonly fallback?: boolean;
-};
-
 /**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
  *
@@ -170,6 +160,9 @@ export type LifecycleUseOptions = {
  *
  * @experimental The API surface may change before stabilizing.
  */
+/** The dispatch hooks a catch-all can monopolize; uniqueness is per hook. */
+const CATCH_ALL_HOOKS = ["onRequest", "onWebSocketUpgrade"] as const;
+
 export class Lifecycle<
   Env extends object = Cloudflare.Env,
   Props extends Record<string, unknown> = Record<string, unknown>
@@ -184,13 +177,12 @@ export class Lifecycle<
   readonly #jobQueue: JobQueue;
   readonly #jobDriver: JobDriver;
 
-  #status: "zero" | "starting" | "started" = "zero";
+  #status: LifecycleStatus = "zero";
   #alarmRearmQueue: Promise<void> = Promise.resolve();
   #rearmRequestedDuringStart = false;
   #pendingEvents: LifecycleEvent[] = [];
   #alarmsDisabled = false;
   #capabilitiesLocked = false;
-  readonly #fallbacks = new Set<DurableObjectCapability<Props>>();
   #handlersInstalled = false;
 
   /**
@@ -285,17 +277,17 @@ export class Lifecycle<
   /**
    * Add a reusable capability before this lifecycle starts.
    *
-   * Capabilities dispatch in registration order, except that fallbacks
-   * always come after non-fallbacks.
+   * Capabilities dispatch in registration order, except that a capability
+   * declaring `claims: "catch-all"` always comes last, whenever it was
+   * installed. Catch-alls are unique per dispatch hook: two may coexist
+   * when they claim disjoint traffic (one `onRequest`, one
+   * `onWebSocketUpgrade`), but a second catch-all for the same hook could
+   * never be reached and is refused.
    *
    * @param capability - The capability to add.
-   * @param options - Dispatch placement.
    * @returns This lifecycle.
    */
-  use(
-    capability: DurableObjectCapability<Props>,
-    options?: LifecycleUseOptions
-  ): this {
+  use(capability: DurableObjectCapability<Props>): this {
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
@@ -311,17 +303,31 @@ export class Lifecycle<
       );
     }
 
-    const firstFallback = this.#capabilities.findIndex((candidate) =>
-      this.#fallbacks.has(candidate)
+    const catchAllIndex = this.#capabilities.findIndex(
+      (candidate) => candidate.claims === "catch-all"
     );
-    if (options?.fallback) this.#fallbacks.add(capability);
-    this.#capabilities.splice(
-      options?.fallback || firstFallback === -1
-        ? this.#capabilities.length
-        : firstFallback,
-      0,
-      capability
-    );
+    if (capability.claims === "catch-all") {
+      for (const hook of CATCH_ALL_HOOKS) {
+        if (!capability[hook]) continue;
+        const rival = this.#capabilities.find(
+          (candidate) => candidate.claims === "catch-all" && candidate[hook]
+        );
+        if (!rival) continue;
+        const installed = lifecycleCapabilityId(rival);
+        throw new Error(
+          `Lifecycle already has a catch-all for ${hook}${
+            installed ? ` (${JSON.stringify(installed)})` : ""
+          }; a second one could never be reached`
+        );
+      }
+      this.#capabilities.push(capability);
+    } else {
+      this.#capabilities.splice(
+        catchAllIndex === -1 ? this.#capabilities.length : catchAllIndex,
+        0,
+        capability
+      );
+    }
 
     if (capability instanceof LifecycleCapability) {
       bindLifecycleCapability(
@@ -340,6 +346,10 @@ export class Lifecycle<
       payload
     });
     return Object.freeze({
+      get name() {
+        return lifecycle.name;
+      },
+      className: this.#parentClassName,
       storage: this.#ctx.storage,
       sockets: Object.freeze({
         accept: (ws: WebSocket, tags: string[]) =>
@@ -347,7 +357,7 @@ export class Lifecycle<
         get: (tag?: string) => this.#ctx.getWebSockets(tag)
       }),
       ready: () => this.#readyForCapabilityOperation(),
-      starting: () => this.#status === "starting",
+      status: () => this.#status,
       jobs: this.#jobsForOwner(capabilityId),
       trackAlarmWork: (work: Promise<unknown>) =>
         this.#jobDriver.trackAlarmWork(work),

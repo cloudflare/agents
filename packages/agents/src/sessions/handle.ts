@@ -249,16 +249,20 @@ export class Session {
    * caller owns startup ordering) and defers everything that follows a
    * write — the change-feed dispatch and auto-compaction: call the returned
    * `after()` once the transaction commits, or subscribers (the host's
-   * message mirror) never hear about the write. Will break without notice;
-   * never use from application code.
+   * message mirror) never hear about the write. If the transaction rolls
+   * back after an `upsert` ran inside it, call `abandon()`: the write is
+   * gone but the in-memory tail and token-total caches already moved.
+   * Will break without notice; never use from application code.
    */
   __DO_NOT_USE_WILL_BREAK__sync(): {
     upsert(
       message: SessionMessage,
       options?: AppendOptions
     ): { result: AppendResult; after: () => Promise<void> };
+    abandon(): void;
   } {
     return {
+      abandon: () => this.#core.forgetCaches(this.sessionId),
       upsert: (message, options = {}) => {
         const prepared = this.#prepare(message, options.source);
         if (!this.#core.exists(this.sessionId, message.id)) {

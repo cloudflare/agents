@@ -3,6 +3,10 @@ import { routeAgentRequest } from "agents";
 import { createBrowserRuntime, createBrowserTools } from "../tools/browser";
 
 export { HostBridgeLoopback } from "../extensions";
+export {
+  ConnectionStateParent,
+  ConnectionStateThink
+} from "./agents/connection-state";
 
 // Facet class behind tools built on createCodemodeRuntime (execute tool).
 export { CodemodeRuntime } from "@cloudflare/codemode";

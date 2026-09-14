@@ -180,10 +180,6 @@ import type {
   RetryOptions,
   WSMessage
 } from "agents";
-import type {
-  LifecycleJobContext,
-  LifecycleJobOutcome
-} from "agents/lifecycle";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -1930,7 +1926,40 @@ type ThinkWorkflowPromptContext = {
 };
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
-const THINK_WORKFLOW_NOTIFICATIONS_JOB_ID = "think:workflow-notifications";
+/** Queue callback that delivers one terminal-submission workflow event. */
+const WORKFLOW_NOTIFICATION_CALLBACK = "_cfDeliverWorkflowNotification";
+/**
+ * A workflow notification never retries in-process: a failed delivery
+ * schedules its own retry with backoff (see `_cfDeliverWorkflowNotification`)
+ * so the alarm loop is not held while a workflow is unreachable.
+ */
+const WORKFLOW_NOTIFICATION_RETRY: RetryOptions = { maxAttempts: 1 };
+/** Longest wait between two delivery attempts of one workflow notification. */
+const WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS = 10 * 60;
+/**
+ * How long delivery of one workflow notification keeps being retried after
+ * its first failure. Long enough to ride out an outage of the workflow
+ * binding; a target still failing after this is treated as permanently
+ * unreachable rather than waking the object every ten minutes forever.
+ */
+const WORKFLOW_NOTIFICATION_GIVE_UP_MS = 12 * 60 * 60 * 1000;
+/** Queue callback that runs one connection-less continuation turn. */
+const CONNECTIONLESS_CONTINUATION_CALLBACK = "_cfRunConnectionlessContinuation";
+/** Queue callback that runs one media-eviction pass. */
+const MEDIA_EVICTION_CALLBACK = "_cfEvictAgedMedia";
+/** Queue callback that runs one pending submission. */
+const SUBMISSION_RUN_CALLBACK = "_cfRunSubmission";
+
+function workflowNotificationItemId(
+  submissionId: string,
+  eventType: string
+): string {
+  return `workflow-notification:${submissionId}:${eventType}`;
+}
+
+function submissionRunItemId(submissionId: string): string {
+  return `submission:${submissionId}`;
+}
 
 /**
  * Message-metadata keys that are server-written turn context (stamped by
@@ -2084,18 +2113,15 @@ type ThinkSubmissionRow = {
   completed_at: number | null;
 };
 
-type ThinkWorkflowNotificationRow = {
-  notification_id: string;
-  submission_id: string;
-  workflow_name: string;
-  workflow_id: string;
-  event_type: string;
-  payload_json: string;
-  attempts: number;
-  last_error: string | null;
-  created_at: number;
-  updated_at: number;
-  delivered_at: number | null;
+/** Payload of one queued workflow notification. */
+type WorkflowNotificationPayload = {
+  workflowName: string;
+  workflowId: string;
+  event: { type: string; payload: unknown };
+  /** Failed deliveries so far; drives the retry backoff. */
+  attempts?: number;
+  /** Epoch ms of the first failed delivery; bounds the retry window. */
+  firstFailedAt?: number;
 };
 
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
@@ -3334,14 +3360,8 @@ export class Think<
             async () => {
               await this._sweepActionLedger();
               await this._sweepActionPendingApprovals();
+              await this._migrateLegacyWorkflowNotifications();
               await this._recoverSubmissionsOnStart();
-              this._recoverWorkflowNotifications();
-              if (this._hasPendingSubmissions()) {
-                await this._scheduleSubmissionDrain();
-              }
-              if (this._hasPendingWorkflowNotifications()) {
-                this._startWorkflowNotificationDrain();
-              }
             },
             "Pending submissions / workflow notifications were not recovered on " +
               "this wake; the next successful wake will recover them."
@@ -3565,7 +3585,6 @@ export class Think<
   }
 
   private _mediaEvictionRunning = false;
-  private _mediaEvictionScheduled = false;
   /**
    * A request that arrived while a pass was running. That pass read its
    * candidates before the request's append landed, so the request is kept
@@ -3609,16 +3628,17 @@ export class Think<
   }
 
   /**
-   * Schedule a bounded media-eviction pass (see `mediaEviction`).
+   * Queue a bounded media-eviction pass (see `mediaEviction`).
    *
-   * Coalesces repeated requests and defers past the current event-loop work,
-   * so it is safe to call from the cache-refresh path that `onStart` runs
-   * inside `blockConcurrencyWhile`: the pass itself never runs in `onStart`,
-   * and `_evictAgedMediaBestEffort` swallows its own failures, so a bad pass
-   * can never brick the object.
+   * The pass is one queue item with a stable id, so repeated requests
+   * coalesce and the pass runs from the alarm loop, never inside the
+   * request or the `blockConcurrencyWhile` cache refresh that asked for it.
+   * A request that lands while a pass is running is re-evaluated once the
+   * pass ends, so media aged by an append during the pass is not left until
+   * the next one. `_evictAgedMediaBestEffort` swallows its own failures, so
+   * a bad pass can never brick the object.
    */
   private _scheduleMediaEvictionPass(): void {
-    if (this._mediaEvictionScheduled) return;
     if (this._mediaEvictionRunning) {
       this._mediaEvictionPending = true;
       return;
@@ -3658,11 +3678,19 @@ export class Think<
         return;
       }
     }
-    this._mediaEvictionScheduled = true;
-    setTimeout(() => {
-      this._mediaEvictionScheduled = false;
-      void this._evictAgedMediaBestEffort();
-    }, 0);
+    void this.queue(MEDIA_EVICTION_CALLBACK, undefined, {
+      id: "media-eviction"
+    }).catch((error) => {
+      console.error("[Think] Failed to queue media eviction pass", error);
+    });
+  }
+
+  /**
+   * Run one media-eviction pass.
+   * @internal Queue callback.
+   */
+  async _cfEvictAgedMedia(): Promise<void> {
+    await this._evictAgedMediaBestEffort();
   }
 
   /**
@@ -4111,20 +4139,12 @@ export class Think<
   });
   private static MESSAGE_DEBOUNCE_MS = 750;
   private _submissionTableEnsured = false;
-  private _workflowNotificationTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
   private _actionLedgerTableEnsured = false;
   private _actionPendingTableEnsured = false;
-  private _drainingSubmissions = false;
-  private _drainingWorkflowNotifications = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
   private _programmaticStreamErrors = new Map<string, string>();
   protected static submissionRecoveryStaleMs = 15 * 60 * 1000;
-
-  override async alarm(): Promise<void> {
-    await super.alarm();
-    this._startWorkflowNotificationDrain();
-  }
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -5344,10 +5364,12 @@ export class Think<
         }
       });
 
-      const previous = this._configGet("skillsFingerprint");
+      const previous = (this._skillsFingerprint ??=
+        this._configGet("skillsFingerprint") ?? null);
       if (previous !== registry.fingerprint) {
         await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", registry.fingerprint);
+        this._skillsFingerprint = registry.fingerprint;
       }
     } catch (error) {
       console.warn(
@@ -5418,6 +5440,12 @@ export class Think<
     return null;
   }
 
+  /**
+   * The persisted skills fingerprint, read from `think_config` once per
+   * object lifetime; `null` once read and absent. Saves the per-turn probe.
+   */
+  private _skillsFingerprint: string | null | undefined;
+
   private async _refreshSkillsIfChanged(): Promise<void> {
     if (!this._skillRegistry) return;
 
@@ -5427,10 +5455,12 @@ export class Think<
       await this._skillRegistry.refresh();
       this._logSkillWarnings(this._skillRegistry);
       await this._configureSkillWorkspace(this._skillRegistry);
-      const previous = this._configGet("skillsFingerprint");
+      const previous = (this._skillsFingerprint ??=
+        this._configGet("skillsFingerprint") ?? null);
       if (previous !== this._skillRegistry.fingerprint) {
         await this.context.refreshSystemPrompt();
         this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
+        this._skillsFingerprint = this._skillRegistry.fingerprint;
       }
     } catch (error) {
       console.warn(
@@ -6488,7 +6518,9 @@ export class Think<
         // Proactive context guard (Layer 1) runs first so `beforeStep` sees the
         // recompacted messages and can still override them if it wants to.
         const guarded = await this._maybeProactiveContextCompact(event);
-        const result = await this.beforeStep(event);
+        const result = await this.beforeStep(
+          guarded ? { ...event, messages: guarded } : event
+        );
         const base = result == null ? {} : result;
         // Only apply the guard's recompacted messages when the subclass didn't
         // set its own `messages` override for this step.
@@ -9511,40 +9543,6 @@ export class Think<
     this._submissionTableEnsured = true;
   }
 
-  private _ensureWorkflowNotificationTable(): void {
-    if (this._workflowNotificationTableEnsured) return;
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_think_workflow_notifications (
-        notification_id TEXT PRIMARY KEY,
-        submission_id TEXT NOT NULL,
-        workflow_name TEXT NOT NULL,
-        workflow_id TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        delivered_at INTEGER
-      )
-    `;
-    try {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE cf_think_workflow_notifications ADD COLUMN delivered_at INTEGER"
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.toLowerCase().includes("duplicate column")) {
-        throw error;
-      }
-    }
-    this.sql`
-      CREATE INDEX IF NOT EXISTS cf_think_workflow_notifications_created_idx
-      ON cf_think_workflow_notifications (delivered_at, created_at, notification_id)
-    `;
-    this._workflowNotificationTableEnsured = true;
-  }
-
   private _readSubmission(submissionId: string): ThinkSubmissionRow | null {
     this._ensureSubmissionTable();
     const rows = this.sql<ThinkSubmissionRow>`
@@ -9737,10 +9735,7 @@ export class Think<
     };
   }
 
-  private async _emitSubmissionStatus(
-    row: ThinkSubmissionRow,
-    output?: unknown
-  ): Promise<void> {
+  private async _emitSubmissionStatus(row: ThinkSubmissionRow): Promise<void> {
     const inspection = this._inspectionFromSubmissionRow(row);
     this._emit("submission:status", {
       submissionId: inspection.submissionId,
@@ -9761,9 +9756,6 @@ export class Think<
         error: inspection.error
       });
     }
-    if (this._isTerminalSubmissionStatus(inspection.status)) {
-      await this._enqueueWorkflowNotification(inspection, output);
-    }
     await this.keepAliveWhile(async () => {
       try {
         await this.onSubmissionStatus(inspection);
@@ -9777,211 +9769,164 @@ export class Think<
     _submission: ThinkSubmissionInspection
   ): void | Promise<void> {}
 
-  private async _enqueueWorkflowNotification(
-    submission: ThinkSubmissionInspection,
-    output?: unknown
-  ): Promise<void> {
-    this._insertWorkflowNotification(submission, output);
-    this._startWorkflowNotificationDrain();
-  }
-
+  /**
+   * Queue the workflow event for a submission that just went terminal.
+   *
+   * The item is written synchronously (the Lifecycle has started whenever a
+   * submission transitions), so call this in the same synchronous block as
+   * the terminal status write: the two commit together and no recovery scan
+   * is needed. A repeated push for the same submission and event type
+   * replaces the pending item rather than duplicating it.
+   */
   private _insertWorkflowNotification(
     submission: ThinkSubmissionInspection,
-    output?: unknown,
-    override?: { status: ThinkSubmissionStatus; error: string }
+    output?: unknown
   ): boolean {
     const workflowPrompt = this._readWorkflowPromptContext(
       submission.metadata ?? null
     );
     if (!workflowPrompt) return false;
 
-    this._ensureWorkflowNotificationTable();
-    const now = Date.now();
-    const status = override?.status ?? submission.status;
-    const error = override?.error ?? submission.error;
+    const { status, error } = submission;
     const payload = {
       submissionId: submission.submissionId,
       status,
       ...(status === "completed" && { output }),
       ...(error && { error })
     };
-    this.sql`
-      INSERT OR IGNORE INTO cf_think_workflow_notifications (
-        notification_id, submission_id, workflow_name, workflow_id, event_type,
-        payload_json, attempts, last_error, created_at, updated_at, delivered_at
-      )
-      VALUES (
-        ${`${submission.submissionId}:${workflowPrompt.workflow.eventType}`},
-        ${submission.submissionId},
-        ${workflowPrompt.workflow.name},
-        ${workflowPrompt.workflow.id},
-        ${workflowPrompt.workflow.eventType},
-        ${JSON.stringify(payload)},
-        0,
-        NULL,
-        ${now},
-        ${now},
-        NULL
-      )
-    `;
+    void this.queue(
+      WORKFLOW_NOTIFICATION_CALLBACK,
+      {
+        workflowName: workflowPrompt.workflow.name,
+        workflowId: workflowPrompt.workflow.id,
+        event: { type: workflowPrompt.workflow.eventType, payload }
+      } satisfies WorkflowNotificationPayload,
+      {
+        id: workflowNotificationItemId(
+          submission.submissionId,
+          workflowPrompt.workflow.eventType
+        ),
+        retry: WORKFLOW_NOTIFICATION_RETRY
+      }
+    ).catch((error) => {
+      console.error("[Think] Failed to queue workflow notification", error);
+    });
     return true;
   }
 
-  private _recoverWorkflowNotifications(): void {
-    this._ensureSubmissionTable();
-    this._ensureWorkflowNotificationTable();
-    const terminalRows = this.sql<ThinkSubmissionRow>`
-      SELECT submission_id, idempotency_key, request_id, stream_id, status,
-             messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at
-      FROM cf_think_submissions
-      WHERE status IN ('aborted', 'skipped', 'error')
-      ORDER BY completed_at DESC, created_at DESC
-      LIMIT 100
-    `;
-
-    let recovered = false;
-    for (const row of terminalRows) {
-      const inspection = this._inspectionFromSubmissionRow(row);
-      const workflowPrompt = this._readWorkflowPromptContext(
-        inspection.metadata ?? null
-      );
-      if (!workflowPrompt) continue;
-      const notificationId = `${inspection.submissionId}:${workflowPrompt.workflow.eventType}`;
-      const existing = this.sql<{ notification_id: string }>`
-        SELECT notification_id
-        FROM cf_think_workflow_notifications
-        WHERE notification_id = ${notificationId}
-        LIMIT 1
-      `;
-      if (existing[0]) continue;
-
-      recovered = this._insertWorkflowNotification(inspection) || recovered;
-    }
-    if (recovered) this._startWorkflowNotificationDrain();
-  }
-
-  private _startWorkflowNotificationDrain(): void {
-    if (!this._hasPendingWorkflowNotifications()) return;
-    void this.keepAliveWhile(() => this._drainWorkflowNotifications()).catch(
-      (error) => {
-        console.error("[Think] Failed to drain workflow notifications", error);
-        void this._rearmWorkflowNotificationAlarm();
-      }
+  /** Queue the workflow event for a row that a caller just made terminal. */
+  private _enqueueTerminalWorkflowNotification(
+    row: ThinkSubmissionRow | null,
+    output?: unknown
+  ): void {
+    if (!row || !this._isTerminalSubmissionStatus(row.status)) return;
+    this._insertWorkflowNotification(
+      this._inspectionFromSubmissionRow(row),
+      output
     );
   }
 
-  private _hasPendingWorkflowNotifications(): boolean {
-    this._ensureWorkflowNotificationTable();
-    const pending = this.sql<{ notification_id: string }>`
-      SELECT notification_id
-      FROM cf_think_workflow_notifications
-      WHERE delivered_at IS NULL
-      LIMIT 1
-    `;
-    return pending.length > 0;
-  }
-
-  private async _drainWorkflowNotifications(): Promise<void> {
-    if (this._drainingWorkflowNotifications) return;
-    this._ensureWorkflowNotificationTable();
-    this._drainingWorkflowNotifications = true;
+  /**
+   * Deliver one workflow notification. Runs from the queue on first
+   * delivery; a failed delivery schedules this same callback again with
+   * exponential backoff (2s doubling, capped at ten minutes) so a
+   * temporarily unreachable workflow still gets its terminal event. Once
+   * the first failure is twelve hours old delivery gives up by throwing:
+   * the dispatching capability reports it through its error event and the
+   * Agent's `onError`.
+   * @internal Queue and schedule callback.
+   */
+  async _cfDeliverWorkflowNotification(
+    payload: WorkflowNotificationPayload
+  ): Promise<void> {
     try {
-      const rows = this.sql<ThinkWorkflowNotificationRow>`
-        SELECT notification_id, submission_id, workflow_name, workflow_id,
-               event_type, payload_json, attempts, last_error, created_at,
-               updated_at, delivered_at
-        FROM cf_think_workflow_notifications
-        WHERE delivered_at IS NULL
-        ORDER BY created_at ASC, notification_id ASC
-        LIMIT 25
-      `;
-      for (const row of rows) {
-        try {
-          const payload = JSON.parse(row.payload_json) as unknown;
-          await this.sendWorkflowEvent(
-            row.workflow_name as string & {},
-            row.workflow_id,
-            {
-              type: row.event_type,
-              payload
-            }
-          );
-          this.sql`
-            UPDATE cf_think_workflow_notifications
-            SET payload_json = '{}',
-                last_error = NULL,
-                updated_at = ${Date.now()},
-                delivered_at = ${Date.now()}
-            WHERE notification_id = ${row.notification_id}
-              AND delivered_at IS NULL
-          `;
-        } catch (error) {
-          this.sql`
-            UPDATE cf_think_workflow_notifications
-            SET attempts = attempts + 1,
-                last_error = ${error instanceof Error ? error.message : String(error)},
-                updated_at = ${Date.now()}
-            WHERE notification_id = ${row.notification_id}
-          `;
-        }
+      await this.sendWorkflowEvent(
+        payload.workflowName as string & {},
+        payload.workflowId,
+        payload.event
+      );
+    } catch (error) {
+      const attempts = (payload.attempts ?? 0) + 1;
+      const firstFailedAt = payload.firstFailedAt ?? Date.now();
+      if (Date.now() - firstFailedAt >= WORKFLOW_NOTIFICATION_GIVE_UP_MS) {
+        const summary =
+          `Workflow notification for submission ${JSON.stringify(
+            (payload.event.payload as { submissionId?: string })?.submissionId
+          )} (${payload.workflowName}/${payload.workflowId}, ${payload.event.type}) ` +
+          `could not be delivered after ${attempts} attempts over 12h; giving up`;
+        console.error(`[Think] ${summary}`, error);
+        // Deliberately no `cause`: the dispatching capability preserves any
+        // error whose cause chain is a platform-class failure, which would
+        // keep the item alive past this cutoff.
+        throw new Error(summary);
       }
-    } finally {
-      this._drainingWorkflowNotifications = false;
+      const delaySeconds = Math.min(
+        WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS,
+        2 ** Math.min(attempts, 20)
+      );
+      console.error(
+        `[Think] Workflow notification delivery failed (attempt ${attempts}); ` +
+          `retrying in ${delaySeconds}s`,
+        error
+      );
+      await this.schedule(delaySeconds, WORKFLOW_NOTIFICATION_CALLBACK, {
+        ...payload,
+        attempts,
+        firstFailedAt
+      } satisfies WorkflowNotificationPayload);
     }
-    await this._rearmWorkflowNotificationAlarm();
   }
 
-  private _nextWorkflowNotificationAlarm(): number | null {
-    this._ensureWorkflowNotificationTable();
-    const pending = this.sql<{ attempts: number; updated_at: number }>`
-      SELECT attempts, updated_at
+  /**
+   * Move undelivered rows of the retired `cf_think_workflow_notifications`
+   * outbox into the queue and drop the table. Idempotent: a missing table
+   * means a fresh object or a completed migration.
+   *
+   * TEMPORARY: one-shot upgrade path for objects that were mid-delivery when
+   * this release landed. Remove in the next minor release, once every
+   * deployed object has started on this version and migrated.
+   */
+  private async _migrateLegacyWorkflowNotifications(): Promise<void> {
+    const tables = this.ctx.storage.sql
+      .exec(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='cf_think_workflow_notifications'"
+      )
+      .toArray();
+    if (tables.length === 0) return;
+
+    const rows = this.sql<{
+      submission_id: string;
+      workflow_name: string;
+      workflow_id: string;
+      event_type: string;
+      payload_json: string;
+    }>`
+      SELECT submission_id, workflow_name, workflow_id, event_type, payload_json
       FROM cf_think_workflow_notifications
       WHERE delivered_at IS NULL
       ORDER BY created_at ASC, notification_id ASC
-      LIMIT 1
     `;
-    if (!pending[0]) return null;
-    const delayMs = Math.min(
-      5 * 60 * 1000,
-      1000 * 2 ** Math.min(pending[0].attempts, 8)
-    );
-    return Math.max(pending[0].updated_at + delayMs, Date.now() + 1);
-  }
-
-  /**
-   * Drive the Think-owned workflow-notification host job. Unknown fns
-   * delegate to Agent's dispatch.
-   */
-  protected override _onHostJob(
-    fn: string,
-    context: LifecycleJobContext
-  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
-    if (fn === "thinkWorkflowNotifications") {
-      this._startWorkflowNotificationDrain();
-      const next = this._nextWorkflowNotificationAlarm();
-      return next === null ? undefined : { rescheduleAt: next };
-    }
-    return super._onHostJob(fn, context);
-  }
-
-  /**
-   * Sync the workflow-notification wake job with pending-notification state.
-   * Replaces the pull-based `_getExtensionAlarm()` contribution.
-   */
-  private async _rearmWorkflowNotificationAlarm(): Promise<void> {
-    const next = this._nextWorkflowNotificationAlarm();
-    if (next === null) {
-      if (this.lifecycle.jobs.get(THINK_WORKFLOW_NOTIFICATIONS_JOB_ID)) {
-        await this.lifecycle.jobs.cancel(THINK_WORKFLOW_NOTIFICATIONS_JOB_ID);
+    for (const row of rows) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(row.payload_json);
+      } catch {
+        continue;
       }
-      return;
+      await this.queue(
+        WORKFLOW_NOTIFICATION_CALLBACK,
+        {
+          workflowName: row.workflow_name,
+          workflowId: row.workflow_id,
+          event: { type: row.event_type, payload }
+        } satisfies WorkflowNotificationPayload,
+        {
+          id: workflowNotificationItemId(row.submission_id, row.event_type),
+          retry: WORKFLOW_NOTIFICATION_RETRY
+        }
+      );
     }
-    await this.lifecycle.jobs.push({
-      id: THINK_WORKFLOW_NOTIFICATIONS_JOB_ID,
-      fn: "thinkWorkflowNotifications",
-      time: next
-    });
+    this.sql`DROP TABLE cf_think_workflow_notifications`;
   }
 
   async inspectSubmission(
@@ -10125,6 +10070,8 @@ export class Think<
 
     const updated = this._readSubmission(submissionId);
     if (updated?.status === "aborted") {
+      this._enqueueTerminalWorkflowNotification(updated);
+      await this.dequeue(submissionRunItemId(submissionId));
       await this._emitSubmissionStatus(updated);
     }
   }
@@ -10184,7 +10131,7 @@ export class Think<
         const existing = existingById ?? existingByKey;
         if (existing) {
           if (existing.status === "pending") {
-            await this._scheduleSubmissionDrain();
+            await this._queueSubmissionRun(existing.submission_id);
           }
           return {
             ...this._inspectionFromSubmissionRow(existing),
@@ -10222,7 +10169,7 @@ export class Think<
           idempotencyKey: row.idempotency_key ?? undefined
         });
         await this._emitSubmissionStatus(row);
-        await this._scheduleSubmissionDrain();
+        await this._queueSubmissionRun(submissionId);
 
         return {
           ...this._inspectionFromSubmissionRow(row),
@@ -10232,52 +10179,44 @@ export class Think<
     });
   }
 
-  private async _scheduleSubmissionDrain(): Promise<void> {
-    await this.schedule(0, "_drainThinkSubmissions", undefined, {
-      idempotent: true
-    });
+  /**
+   * Queue the run of one pending submission. Idempotent: the stable id
+   * replaces an item already queued for the submission in place, keeping
+   * its FIFO slot, and re-arms the physical alarm so a lost alarm recovers.
+   */
+  private async _queueSubmissionRun(submissionId: string): Promise<void> {
+    await this.queue(
+      SUBMISSION_RUN_CALLBACK,
+      { submissionId },
+      { id: submissionRunItemId(submissionId) }
+    );
   }
 
-  private _hasPendingSubmissions(): boolean {
+  /** Queue a run for every pending submission that has none. */
+  private async _queuePendingSubmissionRuns(): Promise<void> {
     this._ensureSubmissionTable();
     const pending = this.sql<{ submission_id: string }>`
       SELECT submission_id
       FROM cf_think_submissions
       WHERE status = 'pending'
-      LIMIT 1
+      ORDER BY created_at ASC, submission_id ASC
     `;
-    return pending.length > 0;
-  }
-
-  async _drainThinkSubmissions(): Promise<void> {
-    await this._drainSubmissions();
-  }
-
-  private async _drainSubmissions(): Promise<void> {
-    this._ensureSubmissionTable();
-    if (this._drainingSubmissions) return;
-    this._drainingSubmissions = true;
-    try {
-      while (true) {
-        const rows = this.sql<ThinkSubmissionRow>`
-          SELECT submission_id, idempotency_key, request_id, stream_id, status,
-                 messages_json, metadata_json, error_message, created_at,
-                 messages_applied_at, started_at, completed_at
-          FROM cf_think_submissions
-          WHERE status = 'pending'
-          ORDER BY created_at ASC, submission_id ASC
-          LIMIT 1
-        `;
-        const row = rows[0];
-        if (!row) break;
-        await this._runSubmission(row);
-      }
-    } finally {
-      this._drainingSubmissions = false;
+    for (const row of pending) {
+      await this._queueSubmissionRun(row.submission_id);
     }
   }
 
-  private async _runSubmission(row: ThinkSubmissionRow): Promise<void> {
+  /**
+   * Run one pending submission. Runs on the Lifecycle alarm loop through the
+   * Queue capability, one item at a time in submission order; a row that is
+   * no longer pending (cancelled, skipped, or claimed by an overlapping
+   * dispatch) is a no-op.
+   * @internal Queue callback.
+   */
+  async _cfRunSubmission(payload: { submissionId: string }): Promise<void> {
+    this._ensureSubmissionTable();
+    const row = this._readSubmission(payload.submissionId);
+    if (!row || row.status !== "pending") return;
     await this._admitTurn({
       admission: "execute-submission",
       trigger: "submission",
@@ -10395,7 +10334,7 @@ export class Think<
       this._submissionAbortControllers.delete(row.submission_id);
       const updated = this._readSubmission(row.submission_id);
       if (updated && this._isTerminalSubmissionStatus(updated.status)) {
-        await this._emitSubmissionStatus(updated, output);
+        await this._emitSubmissionStatus(updated);
       }
     }
   }
@@ -10423,6 +10362,16 @@ export class Think<
           completed_at = ${Date.now()}
       WHERE status = 'pending'
     `;
+    for (const row of pending) {
+      this._enqueueTerminalWorkflowNotification(
+        this._readSubmission(row.submission_id)
+      );
+      void this.dequeue(submissionRunItemId(row.submission_id)).catch(
+        (error) => {
+          console.error("[Think] Failed to dequeue skipped submission", error);
+        }
+      );
+    }
     return pending;
   }
 
@@ -10464,6 +10413,7 @@ export class Think<
           `;
           const updated = this._readSubmission(row.submission_id);
           if (updated?.status === "error") {
+            this._enqueueTerminalWorkflowNotification(updated);
             await this._emitSubmissionStatus(updated);
           }
           continue;
@@ -10479,6 +10429,7 @@ export class Think<
           `;
           const updated = this._readSubmission(row.submission_id);
           if (updated?.status === "error") {
+            this._enqueueTerminalWorkflowNotification(updated);
             await this._emitSubmissionStatus(updated);
           }
           continue;
@@ -10516,9 +10467,14 @@ export class Think<
       `;
       const updated = this._readSubmission(row.submission_id);
       if (updated?.status === "error") {
+        this._enqueueTerminalWorkflowNotification(updated);
         await this._emitSubmissionStatus(updated);
       }
     }
+
+    // Rows still pending (reverted above, or accepted before their run
+    // item existed) get their run queued; queued ones keep their slot.
+    await this._queuePendingSubmissionRuns();
   }
 
   private async _getSubmissionMessagesAppliedState(
@@ -12922,16 +12878,23 @@ export class Think<
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
     let after: (() => Promise<void>) | undefined;
-    this._resumableStream.cutover(
-      streamId,
-      () => {
-        after = sync.upsert(toPersist as SessionMessage, {
-          parentId,
-          source: "server"
-        }).after;
-      },
-      { discard: options.discard ?? true }
-    );
+    try {
+      this._resumableStream.cutover(
+        streamId,
+        () => {
+          after = sync.upsert(toPersist as SessionMessage, {
+            parentId,
+            source: "server"
+          }).after;
+        },
+        { discard: options.discard ?? true }
+      );
+    } catch (error) {
+      // The settle transaction rolled back: the row never landed, but the
+      // session's in-memory caches already counted it.
+      sync.abandon();
+      throw error;
+    }
     await after?.();
   }
 
@@ -13101,16 +13064,38 @@ export class Think<
     await this._upsertMessageInHistory(resolved, undefined, "client");
   }
 
-  private _persistClientTools(): void {
-    if (this._lastClientTools) {
-      this._configSet("lastClientTools", JSON.stringify(this._lastClientTools));
+  /**
+   * The serialized form last written to (or read from) `think_config` for a
+   * request-context key. Every chat request re-sends its client tools and
+   * body; comparing here turns the per-request write into a no-op when
+   * nothing changed. `undefined` means "not persisted" (row absent).
+   */
+  private _persistedRequestContext: {
+    lastClientTools?: string;
+    lastBody?: string;
+  } = {};
+
+  private _persistRequestContextKey(
+    key: "lastClientTools" | "lastBody",
+    value: unknown
+  ): void {
+    const json = value ? JSON.stringify(value) : undefined;
+    if (this._persistedRequestContext[key] === json) return;
+    if (json === undefined) {
+      this._configDelete(key);
     } else {
-      this._configDelete("lastClientTools");
+      this._configSet(key, json);
     }
+    this._persistedRequestContext[key] = json;
+  }
+
+  private _persistClientTools(): void {
+    this._persistRequestContextKey("lastClientTools", this._lastClientTools);
   }
 
   private _restoreClientTools(): void {
     const raw = this._configGet("lastClientTools");
+    this._persistedRequestContext.lastClientTools = raw;
     if (raw) {
       try {
         this._lastClientTools = JSON.parse(raw);
@@ -13121,15 +13106,12 @@ export class Think<
   }
 
   private _persistBody(): void {
-    if (this._lastBody) {
-      this._configSet("lastBody", JSON.stringify(this._lastBody));
-    } else {
-      this._configDelete("lastBody");
-    }
+    this._persistRequestContextKey("lastBody", this._lastBody);
   }
 
   private _restoreBody(): void {
     const raw = this._configGet("lastBody");
+    this._persistedRequestContext.lastBody = raw;
     if (raw) {
       try {
         this._lastBody = JSON.parse(raw);
@@ -13637,7 +13619,7 @@ export class Think<
     if (target) {
       this._scheduleAutoContinuation(target);
     } else {
-      this._runConnectionlessContinuation();
+      await this._queueConnectionlessContinuation();
     }
     return true;
   }
@@ -14449,10 +14431,16 @@ export class Think<
   }
 
   /**
-   * Classify a recovered turn as `retry` or `continue`. A pre-stream turn with no
-   * partial re-runs its user message (`retryTargetUserId`), unless the stream is
-   * already terminal — a terminal stream is never retried (it completed), only
-   * its submission is reconciled in dispatch.
+   * Classify a recovered turn as `retry` or `continue`. A turn that left no
+   * persisted partial re-runs its user message (`retryTargetUserId`), unless
+   * the stream is already terminal — a terminal stream is never retried (it
+   * completed), only its submission is reconciled in dispatch.
+   *
+   * The stream row is opened before inference, so an interrupted turn can
+   * have a stream id and still nothing to continue from; what decides retry is
+   * the absence of persisted content and a leaf that is still the turn's user
+   * message. Mirrors `AIChatAgent`'s empty-partial new-turn rule (#1691): a
+   * `continue` here would find no assistant message and skip the turn.
    */
   private async _classifyRecoveredThinkTurn(
     input: ClassifyRecoveredTurnInput
@@ -14464,7 +14452,6 @@ export class Think<
       input.streamStatus === "completed" || input.streamStatus === "error";
     const retryTargetUserId = await this._recoverablePreStreamUserId(
       input.snapshot,
-      input.streamId,
       input.partial
     );
     const shouldRetryBase = retryTargetUserId !== null && !streamIsTerminal;
@@ -14606,14 +14593,12 @@ export class Think<
 
   private async _recoverablePreStreamUserId(
     snapshot: ChatFiberSnapshot | null,
-    streamId: string,
     partial: { text: string; parts: unknown[] }
   ): Promise<string | null> {
     if (
       !snapshot ||
       snapshot.continuation ||
       !snapshot.latestUserMessageId ||
-      streamId ||
       partial.text ||
       partial.parts.length > 0
     ) {
@@ -15192,7 +15177,10 @@ export class Think<
         AND status = 'running'
     `;
     const updated = this._readSubmission(row.submission_id);
-    if (updated) await this._emitSubmissionStatus(updated);
+    if (updated?.status === "error") {
+      this._enqueueTerminalWorkflowNotification(updated);
+      await this._emitSubmissionStatus(updated);
+    }
   }
 
   private async _completeRecoveredSubmission(
@@ -15229,6 +15217,7 @@ export class Think<
     `;
     const updated = rows[0];
     if (updated && this._isTerminalSubmissionStatus(updated.status)) {
+      this._enqueueTerminalWorkflowNotification(updated);
       await this._emitSubmissionStatus(updated);
     }
   }
@@ -15621,63 +15610,71 @@ export class Think<
   }
 
   /**
-   * Run a continuation turn that does NOT require a live client connection.
+   * Queue a continuation turn that does NOT require a live client connection.
    *
    * Used when a durable approval (a paused action or codemode execution) is
    * resolved via RPC from a surface with no open chat socket — e.g. an ops
    * dashboard, a webhook, or a voice backend approving hours/days later. The
-   * connection-bound auto-continuation barrier (`_fireAutoContinuation`) cannot
-   * fire without a `Connection`, so this mirrors its turn body but streams via
-   * `broadcast` (a no-op when nobody is attached) and always persists, so a
-   * client that reconnects later resumes the continued turn from history.
-   *
-   * Wrapped in `keepAliveWhile` because the resolving RPC returns before the
-   * continuation finishes (mirrors the submission-drain pattern).
+   * item is durable, so the turn still runs if the object leaves memory
+   * before the alarm fires; the last request body and client tools it needs
+   * are persisted config, restored on start. Approvals landing while one
+   * continuation is pending or running coalesce onto the single item.
    */
-  private _runConnectionlessContinuation(): void {
-    void this.keepAliveWhile(async () => {
-      const requestId = crypto.randomUUID();
-      const abortSignal = this._aborts.getSignal(requestId);
-      try {
-        await this._admitTurn({
-          admission: "queue",
-          trigger: "auto-continuation",
-          requestId,
-          continuation: true,
-          allowNested: true,
-          execute: async () => {
-            const continuationBody = async () => {
-              const result = await agentContext.run(
-                {
-                  agent: this,
-                  connection: undefined,
-                  request: undefined,
-                  email: undefined
-                },
-                () =>
-                  this._runInferenceLoop({
-                    signal: abortSignal,
-                    clientTools: this._lastClientTools,
-                    body: this._lastBody,
-                    continuation: true
-                  })
-              );
-              if (result) {
-                await this._streamResult(requestId, result, abortSignal, {
-                  continuation: true
-                });
-              }
-            };
-
-            await this._runChatRecoveryFiber(requestId, true, continuationBody);
-          }
-        });
-      } catch (error) {
-        console.error("[Think] Connection-less continuation failed:", error);
-      } finally {
-        this._aborts.remove(requestId);
-      }
+  private async _queueConnectionlessContinuation(): Promise<void> {
+    await this.queue(CONNECTIONLESS_CONTINUATION_CALLBACK, undefined, {
+      id: "connectionless-continuation"
     });
+  }
+
+  /**
+   * Run one connection-less continuation turn. Mirrors the connection-bound
+   * auto-continuation turn body but streams via `broadcast` (a no-op when
+   * nobody is attached) and always persists, so a client that reconnects
+   * later resumes the continued turn from history.
+   * @internal Queue callback.
+   */
+  async _cfRunConnectionlessContinuation(): Promise<void> {
+    const requestId = crypto.randomUUID();
+    const abortSignal = this._aborts.getSignal(requestId);
+    try {
+      await this._admitTurn({
+        admission: "queue",
+        trigger: "auto-continuation",
+        requestId,
+        continuation: true,
+        allowNested: true,
+        execute: async () => {
+          const continuationBody = async () => {
+            const result = await agentContext.run(
+              {
+                agent: this,
+                connection: undefined,
+                request: undefined,
+                email: undefined
+              },
+              () =>
+                this._runInferenceLoop({
+                  signal: abortSignal,
+                  clientTools: this._lastClientTools,
+                  body: this._lastBody,
+                  continuation: true
+                })
+            );
+            if (result) {
+              await this._streamResult(requestId, result, abortSignal, {
+                continuation: true
+              });
+            }
+          };
+
+          await this._runChatRecoveryFiber(requestId, true, continuationBody);
+        }
+      });
+    } catch (error) {
+      console.error("[Think] Connection-less continuation failed:", error);
+    } finally {
+      this._aborts.remove(requestId);
+    }
   }
 
   // ── Response hook ──────────────────────────────────────────────
