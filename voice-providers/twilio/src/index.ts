@@ -234,7 +234,6 @@ export class TwilioAdapter {
       // Create a WebSocket connection to the agent
       const agentUrl = new URL(request.url);
       agentUrl.pathname = `/agents/${agentName.toLowerCase()}/${instanceId}`;
-      agentUrl.protocol = agentUrl.protocol.replace("http", "ws");
 
       const agentResp = await stub.fetch(
         new Request(agentUrl.toString(), {
@@ -253,18 +252,20 @@ export class TwilioAdapter {
         return;
       }
 
+      ws.binaryType = "arraybuffer";
       ws.accept();
       agentSocket = ws;
 
       // Forward agent messages back to Twilio
-      ws.addEventListener("message", (event) => {
+      ws.addEventListener("message", async (event) => {
         if (!streamSid) return;
 
         if (typeof event.data === "string") {
           // JSON messages from agent — we can use Twilio marks to track them.
           // Forward as a mark so the Twilio side can correlate events.
           try {
-            const msg = JSON.parse(event.data);
+            const msg = JSON.parse(event.data) as Record<string, unknown>;
+
             if (
               serverSocket.readyState === WebSocket.OPEN &&
               (msg.type === "transcript" ||
@@ -282,7 +283,15 @@ export class TwilioAdapter {
           } catch {
             // ignore non-JSON
           }
-        } else if (event.data instanceof ArrayBuffer) {
+        } else if (
+          event.data instanceof ArrayBuffer ||
+          event.data instanceof Blob
+        ) {
+          const audio =
+            event.data instanceof Blob
+              ? await event.data.arrayBuffer()
+              : event.data;
+
           // Audio from agent. This is expected to be 16kHz 16-bit mono PCM.
           //
           // IMPORTANT: The default Workers AI TTS returns MP3, which cannot
@@ -292,7 +301,7 @@ export class TwilioAdapter {
           // custom synthesize() that returns 16kHz 16-bit PCM).
           //
           // Convert: 16kHz PCM → resample to 8kHz → encode mulaw → base64
-          const pcm16k = new Int16Array(event.data);
+          const pcm16k = new Int16Array(audio);
           const pcm8k = resamplePCM(pcm16k, 16000, 8000);
           const mulawBytes = new Uint8Array(pcm8k.length);
           for (let i = 0; i < pcm8k.length; i++) {
