@@ -18,25 +18,30 @@ const STREAM_CHUNKS: readonly ChannelChunk[] = [
 ];
 
 /**
- * Every chunk variant and the title, none of which the text-only smoke test
- * can produce. This is a request-shape test: Slack rejected an earlier title
- * with `streaming_mode_mismatch`, which no mock could catch.
+ * Representative rich parts and the title, none of which the text-only smoke
+ * test can produce. This is a request-shape test: Slack rejected an earlier
+ * title with `streaming_mode_mismatch`, which no mock could catch.
  */
 const RICH_CHUNKS: readonly ChannelChunk[] = [
+  { type: "reasoning-start", id: "live-reasoning" },
   {
-    type: "tool",
-    name: "search",
-    status: "started",
+    type: "reasoning",
+    id: "live-reasoning",
+    text: "Checking the live provider."
+  },
+  { type: "reasoning-end", id: "live-reasoning" },
+  {
+    type: "tool-input-available",
+    toolCallId: "live-search",
+    toolName: "search",
     title: "Searching docs",
-    detail: "query: streaming"
+    input: { query: "streaming" }
   },
   { type: "text", text: uniqueText("Rich streaming ") },
-  { type: "reasoning", text: "every Channel may ignore this" },
   {
-    type: "tool",
-    name: "search",
-    status: "completed",
-    title: "Searching docs"
+    type: "tool-output-available",
+    toolCallId: "live-search",
+    output: { matches: 1 }
   },
   { type: "text", text: "smoke test." },
   { type: "source", url: "https://example.com", title: "Example" }
@@ -66,7 +71,7 @@ describe("live channel streaming", () => {
   });
 
   test.each(providers)(
-    "streams every chunk variant through %s",
+    "streams rich parts through %s",
     async (_name, create) => {
       await withDestination(create, async (channel) => {
         const session = chunkPump((chunks) =>

@@ -1,3 +1,12 @@
+import type { ChannelChunk } from "./chunks";
+export type {
+  ChannelChunk,
+  ChannelFinishReason,
+  ChannelJsonObject,
+  ChannelJsonValue,
+  ChannelProviderMetadata
+} from "./chunks";
+
 import type {
   ChannelEmailIngress,
   ChannelIngress,
@@ -10,6 +19,32 @@ import type {
 } from "./surface";
 
 export type Awaitable<T> = T | Promise<T>;
+
+export type ChannelChunkAudience =
+  | { type: "conversation" }
+  | { type: "participant"; participantId: string };
+
+export type ChannelConversationChunk = ChannelChunk & {
+  /** Omit for conversation-visible content. */
+  audience?: ChannelChunkAudience;
+};
+
+export type ChannelConversationMessage = {
+  id: string;
+  author:
+    | { type: "participant"; participantId: string }
+    | { type: "agent"; agentId?: string }
+    | { type: "system" };
+  content: readonly ChannelConversationChunk[];
+};
+
+export type ChannelConversationSnapshot = {
+  messages: readonly ChannelConversationMessage[];
+};
+
+export type ChannelMessageResolver = (context: {
+  conversationId: string;
+}) => Awaitable<ChannelConversationSnapshot>;
 
 /** A transport-neutral outbound message whose canonical content is Markdown. */
 export type ChannelMessage = {
@@ -52,28 +87,6 @@ export type DeliveryResult =
       error: DeliveryFailure;
     };
 
-/**
- * One element of a progressively generated answer.
- *
- * The variants describe what an Agent produces, not what a provider renders.
- * Any Channel may ignore any variant, so `text` alone must always be a
- * complete answer; a variant carrying meaning `text` does not is a bug in the
- * variant.
- */
-export type ChannelChunk =
-  | { type: "text"; text: string }
-  | { type: "reasoning"; text: string }
-  | {
-      type: "tool";
-      /** Stable identity for one invocation when the producer provides it. */
-      id?: string;
-      name: string;
-      status: "started" | "completed" | "failed";
-      title?: string;
-      detail?: string;
-    }
-  | { type: "source"; url: string; title?: string };
-
 /** The normalized stream shape accepted by `ChannelHost.stream`. */
 export type ChannelChunkSource = ReadableStream<ChannelChunk>;
 
@@ -81,6 +94,23 @@ export type ChannelChunkSource = ReadableStream<ChannelChunk>;
 export type ChannelDeliveryOptions = {
   /** Caller-owned correlation an Adapter may use where the provider supports it. */
   delivery?: ChannelDeliveryContext;
+};
+
+/** Optional projections of non-text stream parts into a provider message. */
+export type ChannelPartRenderingOptions = {
+  /** Show tool names and lifecycle status, never tool inputs or outputs. */
+  tools?: boolean;
+  /** Show provider-exposed reasoning content. */
+  reasoning?: boolean;
+};
+
+export type ChannelResponseContext = {
+  /** Stable identity for this response attempt and its durable chunk log. */
+  id: string;
+  /** Application conversation that owns the response. */
+  conversationId: string;
+  /** Stable canonical assistant message identity. */
+  messageId: string;
 };
 
 /** Caller options for one streamed answer. */
@@ -93,6 +123,8 @@ export type ChannelStreamOptions = {
   title?: string;
   /** Caller-owned correlation an Adapter may use where the provider supports it. */
   delivery?: ChannelDeliveryContext;
+  /** Required when the Host has durable Streams configured. */
+  response?: ChannelResponseContext;
 };
 
 /**

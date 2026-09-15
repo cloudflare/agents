@@ -10,6 +10,7 @@ export * from "./routes";
 export {
   consumeChunks,
   type ChunkConsumer,
+  type ConsumeChunksOptions,
   type StreamOutcome
 } from "./stream";
 export * from "./surface";
