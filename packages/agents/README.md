@@ -135,10 +135,190 @@ import { ChannelHost } from "agents/channels";
 import { email } from "agents/channels/email";
 import { slack } from "agents/channels/slack";
 import { telegram } from "agents/channels/telegram";
+import { web } from "agents/channels/web";
 ```
 
 See the [Voice](../../docs/agents/voice.md) and
 [Channels](../../docs/agents/channels.md) references.
+
+Slack and Telegram can include tool status and provider-exposed reasoning in a
+streamed message:
+
+```typescript
+const slackChannel = slack({
+  botToken: env.SLACK_BOT_TOKEN,
+  renderParts: { tools: true, reasoning: true }
+});
+const telegramChannel = telegram({
+  botToken: env.TELEGRAM_BOT_TOKEN,
+  renderParts: { tools: true, reasoning: true }
+});
+```
+
+Tool inputs and outputs are never included. Slack shows tools by default to
+preserve its existing task updates. Telegram hides tools by default, and both
+Channels hide reasoning unless it is enabled explicitly.
+
+### Durable response streams
+
+A `ChannelHost` can record its neutral `ChannelChunk` stream before delivery.
+Install the same `Streams` capability on the Durable Object and pass it to the
+Host:
+
+```typescript
+import { ChannelHost } from "agents/channels";
+import { Lifecycle } from "agents/lifecycle";
+import { Streams } from "agents/streams";
+
+readonly streams = new Streams();
+readonly channels = new ChannelHost({
+  channels: { slack: this.slack },
+  streams: this.streams
+});
+readonly lifecycle = Lifecycle.install(this).use(this.streams);
+```
+
+Each streamed response then supplies stable application identities:
+
+```typescript
+await this.channels.stream(surface, chunks, {
+  response: {
+    id: responseId,
+    conversationId,
+    messageId: assistantMessageId
+  }
+});
+```
+
+The Host inserts or validates the opening message ID, assigns stable IDs and
+boundaries to implicit parts, durably appends every chunk before the Channel
+receives it, and settles the response stream with its source.
+`Streams.read(responseId)` can replay the recorded prefix and follow a live
+tail. Use one response ID per assistant response attempt. Transcript
+snapshots remain application-owned conversation state rather than a derived
+view of temporary response logs.
+
+### Web chat on a Durable Object
+
+The Web Channel speaks the existing browser chat protocol without requiring an
+Agent subclass. Install its WebSockets capability separately:
+
+```typescript
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import { ChannelHost } from "agents/channels";
+import { web } from "agents/channels/web";
+import { Streams } from "agents/streams";
+
+export class Conversation extends DurableObject {
+  readonly streams = new Streams();
+  readonly web = web({
+    resolveIdentity(request) {
+      // These values must come from authenticated request data.
+      const url = new URL(request.url);
+      return {
+        conversationId: url.searchParams.get("conversationId")!,
+        participantId: url.searchParams.get("participantId")!
+      };
+    }
+  });
+  readonly channels: ChannelHost = new ChannelHost({
+    channels: { web: this.web },
+    streams: this.streams,
+    async resolveMessages({ conversationId }) {
+      return {
+        messages: await loadConversationMessages(conversationId)
+      };
+    },
+    onMessage: async ({ message }) => {
+      if (!message.replySurface) return;
+      await this.channels.deliver(message.replySurface, {
+        markdown: `You said: ${message.message.text}`
+      });
+    },
+    async onApprovalResponse({ response }) {
+      await applyApproval(
+        response.interactionId,
+        response.decision,
+        response.actor
+      );
+    },
+    async onCancel({ request }) {
+      await cancelOperation(request.operationId);
+    },
+    async onConversationReset({ request }) {
+      await clearConversationMessages(request.thread.id);
+    }
+  });
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.streams)
+    .use(this.web.webSockets);
+
+  async onRequest(request: Request) {
+    return (
+      (await this.channels.handleRequest(request)) ??
+      new Response("Not found", { status: 404 })
+    );
+  }
+}
+```
+
+Route authenticated upgrade and `/get-messages` requests to this object from
+your Worker. The `onRequest` forwarding above lets the default `useAgentChat`
+loader obtain the same participant-filtered canonical snapshot that Web sends
+when a socket connects. Use
+`channels.stream(replySurface, chunks, { response })` for progressive output,
+including rich shared `ChannelChunk` events. Supply one stable response ID per
+attempt plus its conversation and canonical assistant-message IDs, as shown in
+the durable response-stream section above. The client can use
+`WebSocketChatTransport` from `agents/chat/transport`.
+
+Explicit browser cancellation immediately stops matching Web delivery and then
+calls `onCancel` with the same opaque `operationId` exposed on the initiating
+message or continuation event. The application uses that callback to stop model
+or task execution. Clear calls `onConversationReset`; only after the application
+finishes its own reset policy does Web acknowledge and broadcast the clear. The
+application should remove both canonical messages and any durable response logs
+that its reset policy considers part of the conversation.
+
+Interactive approvals use the same transport-neutral interface as every other
+Channel: call `channels.requestApproval(surface, options)`, then handle the
+participant's decision in `onApprovalResponse`. Client tool definitions and
+results route through `onMessage` and `onToolResult`. An `autoContinue` value is
+advisory; the application decides when all results or approvals are ready and
+starts any continuation through `channels.stream()`. Returning from one callback
+without streaming leaves that continuation pending so another outstanding result
+can complete the turn; the application must eventually stream or cancel the
+operation. Web owns only the existing resume offer/ack mechanics.
+
+Connections resolved to the same conversation receive full canonical history
+snapshots when they connect and when the application admits a user message. The
+application returns transport-neutral messages from `resolveMessages`; the Web
+Channel projects their `ChannelChunk` content into browser messages. It keeps a
+transient admitted-message overlay while canonical storage catches up. Ordinary
+assistant output streams to every live conversation connection. After streaming,
+the Channel broadcasts a reconciliation snapshot only when canonical history
+contains the completed assistant message. Browser client tools can be marked for
+one participant with a chunk `audience`, so another participant's snapshot does
+not expose them.
+
+When Streams are configured, the Web Channel discovers the latest response for
+the conversation during the existing resume request/ACK handshake. It replays
+the neutral durable chunks through the Web projection, then tails new chunks
+without switching to a second live-delivery path. Browser-local tool chunks are
+replayed only to their initiating participant. A settled response already
+present in the canonical transcript is not replayed again.
+
+Incoming `cf_agent_chat_messages` frames are deliberately ignored. They are a
+lossy browser projection produced by `useAgentChat.setMessages()`, not an
+authoritative replacement for application storage. Set
+`syncMessagesToServer: false` when using server-authoritative Channel history.
+
+The capability claims ordinary WebSocket upgrades on the object; do not combine
+it with another plain-WebSocket handler that owns the same requests.
+
+See the [live test instructions](./src/channels/live-tests/README.md) for the
+bare Durable Object fixture and shared provider scenarios.
 
 ### State Management
 

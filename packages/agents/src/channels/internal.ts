@@ -1,8 +1,53 @@
-import type { ChannelMessage, DeliveryResult } from "./channel";
-import type { ChannelIngressResult } from "./ingress";
+import type { Streams, StreamJson } from "../streams";
+import type {
+  ChannelMessage,
+  ChannelMessageResolver,
+  ChannelStreamOptions,
+  DeliveryResult
+} from "./channel";
+import type { ChannelIngressEnvelope, ChannelIngressResult } from "./ingress";
 import { isChannelMessageSurface, type ChannelMessageSurface } from "./surface";
 
 const textEncoder = new TextEncoder();
+
+/** @internal Binds shared Host services to a configured Channel. */
+export const bindChannelHost = Symbol("bindChannelHost");
+
+/** @internal Contributes Channel-specific durable response metadata. */
+export const describeChannelResponse = Symbol("describeChannelResponse");
+
+/** @internal Binds push-based ingress to the Host's normal dispatch path. */
+export const bindChannelIngress = Symbol("bindChannelIngress");
+
+export type ChannelHostServices = {
+  channelKey: string;
+  resolveMessages?: ChannelMessageResolver;
+  responseStreams?: Pick<Streams, "list" | "read" | "status">;
+};
+
+/** @internal Implemented by Channels that consume shared Host services. */
+export type BindableChannelHost = {
+  [bindChannelHost](services: ChannelHostServices): void;
+};
+
+/** @internal Implemented by Channels that describe their response context. */
+export type DescribableChannelResponse = {
+  [describeChannelResponse](
+    surface: ChannelMessageSurface,
+    options: ChannelStreamOptions
+  ): Record<string, StreamJson> | undefined;
+};
+
+export type ChannelIngressDispatchOutcome = "handled" | "ignored";
+
+/** @internal Implemented by Channels whose provider pushes live events. */
+export type BindableChannelIngress<TRaw = unknown> = {
+  [bindChannelIngress](
+    dispatch: (
+      envelope: ChannelIngressEnvelope<TRaw>
+    ) => Promise<ChannelIngressDispatchOutcome>
+  ): void;
+};
 
 export function encodeUtf8(value: string): Uint8Array<ArrayBuffer> {
   return textEncoder.encode(value);

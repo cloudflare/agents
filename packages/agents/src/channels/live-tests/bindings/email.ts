@@ -171,6 +171,7 @@ export function emailBinding(): LiveDeliveryBinding {
     host,
     surface,
     destination: `email inbox ${to}`,
+    observationTimeoutMs: 600_000,
     async open() {
       session = await openFastmail(fastmailToken);
       await clear();

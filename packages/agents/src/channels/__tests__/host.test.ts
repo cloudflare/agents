@@ -12,8 +12,14 @@ import {
   type ChannelIngress,
   type ChannelIngressEnvelope,
   type ChannelRouteContext,
-  type ChannelRouteEvent
+  type ChannelRouteEvent,
+  type ChannelToolResult
 } from "..";
+import {
+  bindChannelIngress,
+  type BindableChannelIngress,
+  type ChannelIngressDispatchOutcome
+} from "../internal";
 
 const delivered = async () => ({ status: "delivered" as const });
 const surface = {
@@ -58,6 +64,37 @@ function approval(eventId = "event-2"): ChannelApprovalResponse {
   };
 }
 
+function toolResult(eventId = "event-tool-1"): ChannelToolResult {
+  return {
+    type: "tool-result",
+    eventId,
+    thread: {
+      id: "provider-thread-tool",
+      isDirectMessage: true
+    },
+    replySurface: {
+      channelKey: "unstamped",
+      version: 1,
+      address: { destination: "thread-tool" },
+      label: "Tool thread"
+    },
+    actor: {
+      id: "actor-tool",
+      identity: { channelKey: "unstamped", subject: "actor-tool" }
+    },
+    toolCallId: "call-1",
+    toolName: "pick_date",
+    result: { success: true, output: { date: "2026-09-12" } },
+    autoContinue: true,
+    clientTools: [
+      {
+        name: "pick_date",
+        inputSchema: { type: "object", properties: {} }
+      }
+    ]
+  };
+}
+
 function httpIngress<TRaw>(
   path: string,
   events: readonly ChannelIngressEnvelope<TRaw>[],
@@ -90,6 +127,126 @@ function host(
 }
 
 describe("stateless ChannelHost", () => {
+  it("dispatches cancellation and conversation reset requests through Host callbacks", async () => {
+    let push:
+      | ((
+          envelope: ChannelIngressEnvelope<null>
+        ) => Promise<ChannelIngressDispatchOutcome>)
+      | undefined;
+    const channel: Channel<null> & BindableChannelIngress<null> = {
+      [bindChannelIngress](dispatch) {
+        push = dispatch;
+      }
+    };
+    const onCancel = vi.fn();
+    const onConversationReset = vi.fn();
+    new ChannelHost({
+      channels: { web: channel },
+      onCancel,
+      onConversationReset
+    } as ConstructorParameters<typeof ChannelHost>[0]);
+
+    await push?.({
+      raw: null,
+      event: {
+        type: "cancel-request",
+        eventId: "cancel-1",
+        thread: { id: "conversation-1", isDirectMessage: false },
+        actor: { id: "participant-1" },
+        operationId: "response-1"
+      } as never
+    });
+    await push?.({
+      raw: null,
+      event: {
+        type: "conversation-reset-request",
+        eventId: "reset-1",
+        thread: { id: "conversation-1", isDirectMessage: false },
+        actor: { id: "participant-1" }
+      } as never
+    });
+
+    expect(onCancel).toHaveBeenCalledWith({
+      channelKey: "web",
+      route: "conversation-1",
+      dispatchId: expect.stringMatching(/^sha256:[\da-f]{64}$/),
+      request: expect.objectContaining({
+        type: "cancel-request",
+        operationId: "response-1"
+      })
+    });
+    expect(onConversationReset).toHaveBeenCalledWith({
+      channelKey: "web",
+      route: "conversation-1",
+      dispatchId: expect.stringMatching(/^sha256:[\da-f]{64}$/),
+      request: expect.objectContaining({
+        type: "conversation-reset-request"
+      })
+    });
+  });
+
+  it.each([
+    ["cancel-request", { operationId: "operation-1" }, "onCancel"],
+    ["conversation-reset-request", {}, "onConversationReset"]
+  ])("rejects an unhandled %s", async (type, details, callback) => {
+    let push:
+      | ((
+          envelope: ChannelIngressEnvelope<null>
+        ) => Promise<ChannelIngressDispatchOutcome>)
+      | undefined;
+    const channel: Channel<null> & BindableChannelIngress<null> = {
+      [bindChannelIngress](dispatch) {
+        push = dispatch;
+      }
+    };
+    new ChannelHost({ channels: { web: channel } });
+
+    await expect(
+      push?.({
+        raw: null,
+        event: {
+          type,
+          eventId: `${type}-1`,
+          thread: { id: "conversation-1", isDirectMessage: false },
+          ...details
+        } as never
+      })
+    ).rejects.toThrow(`without an ${callback} callback`);
+  });
+
+  it("routes push-based Channel ingress through onMessage", async () => {
+    let push:
+      | ((
+          envelope: ChannelIngressEnvelope<{ requestId: string }>
+        ) => Promise<ChannelIngressDispatchOutcome>)
+      | undefined;
+    const channel: Channel<{ requestId: string }> &
+      BindableChannelIngress<{ requestId: string }> = {
+      [bindChannelIngress](dispatch) {
+        push = dispatch;
+      },
+      route: vi.fn((_event, raw) => `request:${raw.requestId}`)
+    };
+    const onMessage = vi.fn();
+    host({ web: channel }, { onMessage });
+    expect(push).toBeDefined();
+
+    await push!({ event: message(), raw: { requestId: "turn-1" } });
+
+    expect(channel.route).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: "event-1" }),
+      { requestId: "turn-1" },
+      expect.objectContaining({ findUser: expect.any(Function) })
+    );
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelKey: "web",
+        route: "request:turn-1",
+        message: expect.objectContaining({ type: "message" })
+      })
+    );
+  });
+
   it("allows an outbound-only Host without ingress callbacks", async () => {
     const deliver = vi.fn(delivered);
     const channelHost = new ChannelHost({
@@ -591,6 +748,116 @@ describe("stateless ChannelHost", () => {
       })
     );
     expect(onApprovalResponse.mock.calls[0]?.[0]).not.toHaveProperty("raw");
+  });
+
+  it("routes tool results and stamps their reply surface and actor identity", async () => {
+    const onToolResult = vi.fn();
+    const route = vi.fn(() => "tool-route");
+    const event = toolResult();
+    const channelHost = host(
+      {
+        browser: {
+          route,
+          ingress: httpIngress("/tool-result", [{ event, raw: null }])
+        }
+      },
+      { onToolResult }
+    );
+
+    await channelHost.handleRequest(
+      new Request("https://example.com/tool-result", { method: "POST" })
+    );
+
+    const stampedEvent = expect.objectContaining({
+      replySurface: expect.objectContaining({ channelKey: "browser" }),
+      actor: expect.objectContaining({
+        identity: expect.objectContaining({ channelKey: "browser" })
+      })
+    });
+    expect(route).toHaveBeenCalledWith(stampedEvent, null, expect.any(Object));
+    expect(onToolResult).toHaveBeenCalledWith({
+      channelKey: "browser",
+      route: "tool-route",
+      dispatchId: expect.stringMatching(/^sha256:[\da-f]{64}$/),
+      result: stampedEvent
+    });
+  });
+
+  it("does not dispatch ignored tool results", async () => {
+    const onToolResult = vi.fn();
+    const onApprovalResponse = vi.fn();
+    const channelHost = host(
+      {
+        browser: {
+          route: () => null,
+          ingress: httpIngress("/ignored-tool", [
+            { event: toolResult(), raw: null }
+          ])
+        }
+      },
+      { onToolResult, onApprovalResponse }
+    );
+
+    await channelHost.handleRequest(
+      new Request("https://example.com/ignored-tool", { method: "POST" })
+    );
+
+    expect(onToolResult).not.toHaveBeenCalled();
+    expect(onApprovalResponse).not.toHaveBeenCalled();
+  });
+
+  it("returns HTTP 500 when a routed tool result has no handler", async () => {
+    const onApprovalResponse = vi.fn();
+    const channelHost = host(
+      {
+        browser: {
+          ingress: httpIngress("/unhandled-tool", [
+            { event: toolResult(), raw: null }
+          ])
+        }
+      },
+      { onApprovalResponse }
+    );
+
+    const response = await channelHost.handleRequest(
+      new Request("https://example.com/unhandled-tool", { method: "POST" })
+    );
+
+    expect(response?.status).toBe(500);
+    expect(onApprovalResponse).not.toHaveBeenCalled();
+  });
+
+  it("preserves client tool schemas on inbound messages", async () => {
+    const onMessage = vi.fn();
+    const event: ChannelInboundMessageInput = {
+      ...message(),
+      message: {
+        ...message().message,
+        clientTools: [
+          {
+            name: "confirm",
+            description: "Ask the user to confirm",
+            inputSchema: true
+          }
+        ]
+      }
+    };
+    const channelHost = host(
+      {
+        browser: {
+          ingress: httpIngress("/client-tools", [{ event, raw: null }])
+        }
+      },
+      { onMessage }
+    );
+
+    await channelHost.handleRequest(
+      new Request("https://example.com/client-tools", { method: "POST" })
+    );
+
+    expect(onMessage.mock.calls[0]?.[0].message.message.clientTools).toEqual(
+      event.message.clientTools
+    );
   });
 
   it("stamps inbound reply surfaces with the configured Channel key", async () => {
