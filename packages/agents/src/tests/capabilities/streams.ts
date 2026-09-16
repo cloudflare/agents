@@ -14,6 +14,31 @@ import { Tasks, type TaskStep } from "../../tasks";
 export class StreamHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly streams = new Streams({ maxChunkBytes: 1024 });
   readonly lifecycle = Lifecycle.install(this).use(this.streams);
+
+  onStart(): void {
+    // Created at startup, outside any settle transaction, so a rolled-back
+    // settle takes the note rows with it but not the table.
+    this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS test_notes (note TEXT NOT NULL)"
+    );
+  }
+
+  /** One durable row, written from a settle-transaction callback. */
+  note(note: string): void {
+    this.ctx.storage.sql.exec("INSERT INTO test_notes (note) VALUES (?)", note);
+  }
+
+  /**
+   * Every note row in the order it was written. Repeats are kept: a callback
+   * that ran twice has to be visible as two rows.
+   */
+  notes(): string[] {
+    return [
+      ...this.ctx.storage.sql.exec<{ note: string }>(
+        "SELECT note FROM test_notes ORDER BY rowid"
+      )
+    ].map((row) => row.note);
+  }
 }
 
 /**

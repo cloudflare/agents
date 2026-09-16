@@ -205,6 +205,26 @@ platform-class failures (a superseded isolate after a deploy, a memory-limit
 reset) preserve the job for a fresh invocation, and a terminal application
 failure reaches the owner's `onJobError()`, whose result decides advancement.
 
+A caller that must write its job row inside its own
+`storage.transactionSync()` cannot await the re-arm in there.
+`jobs.pushSync()` and `jobs.cancelSync()` run the same SQL write without it,
+and the caller calls `jobs.rearm()` once the transaction commits — so the job
+takes part in the caller's transaction, and a throw rolls the caller's rows
+and the job back together. `jobs.get()` and `jobs.list()` are safe in there
+too, so the decision to push can be read from the queue inside the same
+transaction. During startup the re-arm is deferred and coalesced to the end
+of startup anyway, so a sync push from `onStart()` needs no explicit call.
+
+Nothing repairs a re-arm lost elsewhere. A `pushSync` whose `rearm()` never
+runs — a crash between the two, or a forgotten call — leaves a row with no
+alarm behind it, and startup re-arms only when a mutation during startup
+asked it to, so an owner that pushes this way outside startup needs a
+startup reconcile of its own (Tasks re-mirrors every non-terminal run into
+the queue; Scheduler re-schedules idempotently). A lost `cancelSync` re-arm
+is the harmless direction: the surplus alarm fires, finds nothing due, and
+the driver's own end-of-alarm re-arm deletes it — one spurious wake, not a
+stranded job.
+
 A job pushed with `exclusive: true` suppresses ordinary alarm candidates
 while it is pending — Agent's deferred destroy uses this so a condemned
 object cannot be kept alive by other work. A `singleflight` job is skipped

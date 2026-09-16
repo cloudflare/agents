@@ -81,6 +81,31 @@ export interface StreamWriter {
 
   /** Settle the stream as errored. Same no-op contract as {@link close}. */
   error(reason?: string, options?: StreamSettleOptions): void;
+
+  /**
+   * Register a synchronous callback to run inside this stream's settle
+   * transaction, alongside any `commit` passed to {@link close} or
+   * {@link error}. Same contract as {@link StreamSettleOptions.commit}: it
+   * must not await; a throw rolls the settle back and leaves the stream
+   * live. Callbacks run in registration order, before the settle call's own
+   * `commit`, and the set is fixed when `close()`/`error()` is called —
+   * registering or unregistering from inside a callback changes only a
+   * later settle, not the run in progress.
+   *
+   * Only the call that ends the stream runs them. A settle that transitions
+   * nothing (already terminal, or deleted) runs neither these nor its own
+   * `commit`, and reports nothing back: a registrant whose write must land
+   * is responsible for checking the stream's state itself, the same
+   * obligation {@link StreamSettleOptions.commit} carries.
+   *
+   * Registrations belong to this writer object rather than to the stream:
+   * reopening a live stream returns a fresh writer with none, and once this
+   * writer's own call has settled the stream it takes no more — a callback
+   * registered after that never runs, and unregistering it is a no-op.
+   *
+   * @returns A function that unregisters the callback.
+   */
+  onCommit(fn: () => void): () => void;
 }
 
 /**

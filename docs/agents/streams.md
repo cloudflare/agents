@@ -181,6 +181,32 @@ failed producer. `commit` must not await; a Session handle's
 message write, and returns a `notify()` to dispatch the change feed after
 the transaction commits.
 
+A writer can also register its own cutover writes up front, for code that
+holds the writer but does not own the `close()` call:
+
+```ts
+const unregister = stream.onCommit(() => sessionSync.upsert(message));
+```
+
+Registered callbacks run inside the same settle transaction, in registration
+order, before the `commit` passed to `close()`/`error()`, and under the same
+rules: synchronous only, and a throw rolls the whole settle back. The set is
+fixed when `close()`/`error()` is called, so registering or unregistering
+from inside a callback changes only a later settle.
+
+They belong to the writer object rather than to the stream — reopening a live
+stream returns a fresh writer with none — and only the call that ends the
+stream runs them. A `close()` that transitions nothing, because the stream
+was already terminal or discarded, runs neither the registered callbacks nor
+its own `commit`, and reports nothing back; code whose write has to land must
+check the stream's state itself, exactly as a `commit` caller does. Once this
+writer's own call has settled the stream it accepts no more registrations, so
+a callback registered after that never runs and its unregister is a no-op.
+
+One cost: a writer with callbacks registered settles through the transaction
+path, never the cheaper non-transactional one. Writers that never call
+`onCommit` are unaffected, and so is a writer whose stream has settled.
+
 Measured on a real Durable Object (400-chunk chat turn, 10 chunks per
 write): the old log paid 42 rows to write and another 42 to sweep; blocks
 pay 42 to write and 3 to cut over.

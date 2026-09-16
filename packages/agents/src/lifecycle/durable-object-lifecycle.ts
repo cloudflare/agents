@@ -739,11 +739,34 @@ export class Lifecycle<
       await this.rearmAlarm();
       return result;
     };
+    // The `*Sync` verbs run the queue write inside the caller's own
+    // `transactionSync()`, where the async re-arm cannot be awaited — the
+    // caller re-arms once its transaction commits. While startup runs,
+    // `rearmAlarm()` only records the request and returns, so record it the
+    // same way here: a sync mutation from `onStart` is then covered by the
+    // one coalesced re-arm `#ensureInitialized` runs when startup ends. The
+    // queue itself repairs its cached "table exists" bit when a rolled-back
+    // caller transaction was what lazily created the table, so these writes
+    // — and the `get`/`list` a caller reads before deciding to push — are
+    // safe inside a transaction that may not commit.
+    const noteRearmDuringStartup = (): void => {
+      if (this.#status === "starting") this.#rearmRequestedDuringStart = true;
+    };
     return Object.freeze({
       push: (options: LifecycleJobPushOptions) =>
         rearmAfter(() => this.#jobQueue.push(owner, options)),
       cancel: (id: string) =>
         rearmAfter(() => this.#jobQueue.cancel(owner, id)),
+      pushSync: (options: LifecycleJobPushOptions) => {
+        const job = this.#jobQueue.push(owner, options);
+        noteRearmDuringStartup();
+        return job;
+      },
+      cancelSync: (id: string) => {
+        const cancelled = this.#jobQueue.cancel(owner, id);
+        noteRearmDuringStartup();
+        return cancelled;
+      },
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
       get: (id: string) => this.#jobQueue.get(owner, id),
