@@ -1050,10 +1050,12 @@ type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
   output?: unknown;
+  messageId?: string;
 };
 
 type ProgrammaticMessagesResult = SaveMessagesResult & {
   output?: unknown;
+  messageId?: string;
 };
 
 type ChatRecoveryRetryData = {
@@ -1329,6 +1331,7 @@ export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
 
 /** Result of {@link Think.runTurn} in `mode: "wait"`. */
 export type TurnResult = SaveMessagesResult & {
+  /** Persisted assistant produced by this completed turn; absent otherwise. */
   message?: SessionMessage;
   continuation: boolean;
 };
@@ -8298,17 +8301,19 @@ export class Think<
   }
 
   private async _enrichTurnResult(
-    result: SaveMessagesResult,
+    result: SaveMessagesResult & { messageId?: string },
     continuation: boolean
   ): Promise<TurnResult> {
-    let message: SessionMessage | undefined;
-    if (result.status === "completed") {
-      const leaf = await this.session.getLatestLeaf();
-      if (leaf?.role === "assistant") {
-        message = leaf;
-      }
-    }
-    return { ...result, continuation, message };
+    const { messageId, ...turnResult } = result;
+    const message =
+      result.status === "completed" && messageId !== undefined
+        ? await this.session.getMessage(messageId)
+        : null;
+    return {
+      ...turnResult,
+      continuation,
+      ...(message !== null && { message })
+    };
   }
 
   private async _runTurnWait(options: RunTurnWait): Promise<TurnResult> {
@@ -11332,7 +11337,9 @@ export class Think<
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const requestId = crypto.randomUUID();
-    return this._runProgrammaticMessagesTurn(requestId, messages, options);
+    const { messageId: _messageId, ...result } =
+      await this._runProgrammaticMessagesTurn(requestId, messages, options);
+    return result;
   }
 
   /**
@@ -11447,6 +11454,7 @@ export class Think<
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let output: unknown;
+    let messageId: string | undefined;
     let wasAborted = false;
 
     await this._admitTurn({
@@ -11583,6 +11591,7 @@ export class Think<
               status = streamResult.status;
               error = streamResult.error;
               output = streamResult.output;
+              messageId = streamResult.messageId;
               return;
             }
           };
@@ -11609,7 +11618,8 @@ export class Think<
       requestId,
       status,
       ...(error !== undefined && { error }),
-      ...(output !== undefined && { output })
+      ...(output !== undefined && { output }),
+      ...(status === "completed" && messageId !== undefined && { messageId })
     };
   }
 
@@ -11633,7 +11643,7 @@ export class Think<
   protected async continueLastTurn(
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
-  ): Promise<SaveMessagesResult> {
+  ): Promise<ProgrammaticMessagesResult> {
     const trigger = options?.trigger ?? "programmatic";
     this._assertNotInsideAdmittedTurn(trigger);
     const lastLeaf = await this.session.getLatestLeaf();
@@ -11654,6 +11664,7 @@ export class Think<
     const channel = options?.channel ?? this._channelFromLatestUserMessage();
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
+    let messageId: string | undefined;
     let wasAborted = false;
 
     await this._admitTurn({
@@ -11703,6 +11714,7 @@ export class Think<
               );
               status = streamResult.status;
               error = streamResult.error;
+              messageId = streamResult.messageId;
             }
           };
 
@@ -11724,7 +11736,12 @@ export class Think<
       status = "aborted";
     }
 
-    return { requestId, status, ...(error !== undefined && { error }) };
+    return {
+      requestId,
+      status,
+      ...(error !== undefined && { error }),
+      ...(status === "completed" && messageId !== undefined && { messageId })
+    };
   }
 
   private async _retryLastUserTurn(
@@ -13179,6 +13196,7 @@ export class Think<
     let streamAborted = false;
     let streamError: string | undefined;
     let output: unknown;
+    let persistedMessageId: string | undefined;
     // Set when an in-stream overflow error is recoverable (opt-in): suppresses
     // terminal delivery so the driver can compact and re-run the turn.
     let overflowRetry = false;
@@ -13482,12 +13500,16 @@ export class Think<
         const assistantMsg = accumulator.toMessage();
 
         if (accumulator.parts.length > 0) {
-          await this._persistAssistantMessageWithCutover(
-            streamId,
-            assistantMsg,
-            parentId,
-            { discard: this._discardStreamAtCutover(requestId) }
-          );
+          const storedMessageId =
+            await this._persistAssistantMessageWithCutover(
+              streamId,
+              assistantMsg,
+              parentId,
+              { discard: this._discardStreamAtCutover(requestId) }
+            );
+          if (!streamError && !streamAborted) {
+            persistedMessageId = storedMessageId;
+          }
           this._broadcastMessages();
         }
         // Nothing to persist (or the persist threw): settle the finished
@@ -13520,7 +13542,10 @@ export class Think<
       ? { status: "error", error: streamError }
       : {
           status: streamAborted ? "aborted" : "completed",
-          ...(output !== undefined && { output })
+          ...(output !== undefined && { output }),
+          ...(persistedMessageId !== undefined && {
+            messageId: persistedMessageId
+          })
         };
   }
 
@@ -13566,24 +13591,26 @@ export class Think<
     msg: UIMessage,
     parentId?: string,
     options: { discard?: boolean } = {}
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const toPersist = this._strippedForPersist(msg);
-    if (toPersist === null) return;
+    if (toPersist === null) return undefined;
     if (this._resumableStream.pendingCutoverId !== streamId) {
       // The stream was settled by another path (a stall, an error): plain persist.
-      await this._upsertMessageInHistory(toPersist, parentId);
-      return;
+      return (await this._upsertMessageInHistory(toPersist, parentId)).id;
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
+    let storedMessageId: string | undefined;
     let after: (() => Promise<void>) | undefined;
     try {
       this._resumableStream.cutover(
         streamId,
         () => {
-          after = sync.upsert(toPersist as SessionMessage, {
+          const write = sync.upsert(toPersist as SessionMessage, {
             parentId,
             source: "server"
-          }).after;
+          });
+          storedMessageId = write.result.message.id;
+          after = write.after;
         },
         { discard: options.discard ?? true }
       );
@@ -13594,6 +13621,7 @@ export class Think<
       throw error;
     }
     await after?.();
+    return storedMessageId;
   }
 
   /**

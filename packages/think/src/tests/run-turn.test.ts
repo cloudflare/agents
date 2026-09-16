@@ -307,6 +307,10 @@ describe("Think — runTurn", () => {
       "Function input"
     )) as TurnResult;
     expect(fnResult.status).toBe("completed");
+    expect(textPart(fnResult.message ?? {})).toMatchObject({
+      type: "text",
+      text: "Function reply"
+    });
 
     const messages = (await agent.getStoredMessages()) as UIMessage[];
     expect(messages).toHaveLength(4);
@@ -344,6 +348,7 @@ describe("Think — runTurn", () => {
 
     const emptyArray = await agent.testSaveMessages([]);
     expect(emptyArray.status).toBe("completed");
+    expect(Object.hasOwn(emptyArray, "messageId")).toBe(false);
     expect((await agent.getStoredMessages()) as UIMessage[]).toHaveLength(3);
 
     await agent.setProgrammaticResponseForTest("Empty function reply");
@@ -385,6 +390,88 @@ describe("Think — runTurn", () => {
       continuation: true
     });
     expect(result.message).toBeUndefined();
+  });
+
+  it("returns a queued continuation's own message before a follow-up turn", async () => {
+    const agent = await freshProgrammaticAgent("runturn-queued-continuation");
+    await agent.setProgrammaticResponseForTest("Seed answer");
+    await agent.testRunTurnWaitString("Seed question");
+
+    const [continuation, followUp] =
+      await agent.testContinuationQueuedWithFollowUp();
+
+    expect(continuation).toMatchObject({
+      status: "completed",
+      continuation: true
+    });
+    expect(continuation).toMatchObject({
+      hasMessage: true,
+      messageText: "Continuation answer"
+    });
+    expect(followUp).toMatchObject({
+      status: "completed",
+      continuation: false
+    });
+    expect(followUp).toMatchObject({
+      hasMessage: true,
+      messageText: "Follow-up answer"
+    });
+  });
+
+  it("returns a persisted snapshot when the response hook mutates history", async () => {
+    const agent = await freshProgrammaticAgent("runturn-response-hook-history");
+    await agent.setProgrammaticResponseForTest("Persisted answer");
+
+    const result = await agent.testRunTurnWithHistoryChangingResponseHook();
+
+    expect(result).toMatchObject({
+      status: "completed",
+      hasMessage: true,
+      messageText: "Persisted answer"
+    });
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(textPart(messages.at(-1) ?? {})).toMatchObject({
+      type: "text",
+      text: "Hook follow-up"
+    });
+  });
+
+  it("returns stored tool output with toJSON without suppressing the response hook", async () => {
+    const agent = await freshProgrammaticAgent("runturn-to-json-output");
+
+    const { result, responseHookCalls, toolOutputAnswer } =
+      await agent.testRunTurnWithToJsonToolResult();
+
+    expect(result).toMatchObject({
+      status: "completed",
+      hasMessage: true,
+      messageText: "Done with tools"
+    });
+    expect(responseHookCalls).toBe(1);
+    expect(toolOutputAnswer).toBe(42);
+  });
+
+  it("does not borrow an old assistant when a continuation persists no content", async () => {
+    const agent = await freshProgrammaticAgent("runturn-stripped-answer");
+    await agent.setProgrammaticResponseForTest("Seed answer");
+    await agent.testRunTurnWaitString("Seed question");
+    await agent.setFinalAnswerResponseForTest({ answer: "Structured only" });
+
+    const result = (await agent.testRunTurnContinuation()) as TurnResult;
+
+    expect(result.status).toBe("completed");
+    expect(result.message).toBeUndefined();
+    expect((await agent.getStoredMessages()) as UIMessage[]).toHaveLength(2);
+  });
+
+  it("omits a persisted partial message from an aborted turn result", async () => {
+    const agent = await freshProgrammaticAgent("runturn-aborted-result");
+    await agent.setDelayedChunkResponse(["Partial", " answer"], 40);
+
+    const result = await agent.testRunTurnAbortMidStream("Abort me", 60);
+
+    expect(result).toMatchObject({ status: "aborted", hasMessage: false });
+    expect((await agent.getStoredMessages()) as UIMessage[]).toHaveLength(2);
   });
 
   it("submit mode returns SubmitMessagesResult equivalent to submitMessages", async () => {
@@ -664,6 +751,32 @@ describe("Think — runTurn", () => {
 
     const fnSubmit = await agent.testRunTurnSubmitWithFunction();
     expect(fnSubmit?.message).toContain("function input");
+  });
+
+  it("returns each queued wait turn's own assistant message", async () => {
+    const agent = await freshProgrammaticAgent("runturn-queued-results");
+
+    const [first, second] = await agent.testOverlappingRunTurnWaits();
+
+    expect(first).toMatchObject({
+      status: "completed",
+      hasMessage: true,
+      messageText: "First answer"
+    });
+    expect(second).toMatchObject({
+      status: "completed",
+      hasMessage: true,
+      messageText: "Second answer"
+    });
+    expect(first.messageId).not.toBe(second.messageId);
+
+    const storedMessages = (await agent.getStoredMessages()) as UIMessage[];
+    const storedAssistantIds = storedMessages
+      .filter((message) => message.role === "assistant")
+      .map((message) => message.id);
+    expect(storedAssistantIds).toHaveLength(2);
+    expect(storedAssistantIds).toContain(first.messageId);
+    expect(storedAssistantIds).toContain(second.messageId);
   });
 
   it("concurrent non-nested wait enqueues behind an active turn", async () => {
