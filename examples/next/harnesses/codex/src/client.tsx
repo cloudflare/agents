@@ -9,46 +9,59 @@ import {
   Text
 } from "@cloudflare/kumo";
 import {
+  ArrowClockwiseIcon,
   CheckCircleIcon,
   CodeIcon,
   GearIcon,
   MoonIcon,
   PaperPlaneRightIcon,
   PlusIcon,
-  WrenchIcon,
-  XIcon,
+  StopCircleIcon,
   SunIcon,
   TerminalIcon,
-  XCircleIcon
+  WrenchIcon,
+  XCircleIcon,
+  XIcon
 } from "@phosphor-icons/react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
-import { createRoot } from "react-dom/client";
 import { code } from "@streamdown/code";
+import { useHarnessSession } from "@cloudflare/agents-next-harness/react";
+import type { HarnessEvent } from "@cloudflare/agents-next-harness";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
 import type {
-  CodexOperationSnapshot,
-  CodexToolInfo,
+  CodexProtocol,
   CodexWorkspaceFile,
   SessionMessage
 } from "./protocol";
-import { useCodexSession, type KernelEvent } from "./use-codex-session";
 
-type ToolActivity = {
-  callId: string;
-  name: string;
-  /** Id of the assistant message holding the call's arguments. */
-  callMessageId?: string;
-  /** Id of the tool message holding the full output. */
-  outputMessageId?: string;
-  status: "running" | "completed" | "failed";
-  preview?: string;
-  bytes?: number;
-};
+/** The tools the kernel offers the model; mirrors `workspace_tools()`. */
+const TOOLS = [
+  {
+    name: "workspace_write",
+    description: "Write UTF-8 text to a durable workspace path."
+  },
+  {
+    name: "workspace_read",
+    description:
+      "Read UTF-8 text from a durable workspace path, in ranges with offset and max_bytes."
+  }
+] as const;
 
 const SESSION_KEY = "codex-session";
+const DEMO_FILE = "/codex/result.txt";
 const DEFAULT_PROMPT =
   "Use workspace_write to save a short note in /codex/result.txt. Then use workspace_read to verify the exact contents before you finish.";
+
+type CodexEvent = HarnessEvent<CodexProtocol>;
+
+/** What the kernel reported on its last transition. */
+type KernelStats = {
+  readonly phase: string;
+  readonly modelRound: number;
+  readonly transitions: number;
+  readonly kernelMs: number;
+};
 
 function randomSession(): string {
   return `demo-${crypto.randomUUID().slice(0, 8)}`;
@@ -62,14 +75,17 @@ function getSession(): string {
   return created;
 }
 
+/** The demo's own HTTP routes, beside the harness's WebSocket link. */
+function demoRoute(name: string, route: string): string {
+  return `/agents/coder/${encodeURIComponent(name)}/${route}`;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringField(value: unknown, field: string): string | undefined {
-  if (!isRecord(value)) return undefined;
-  const candidate = value[field];
-  return typeof candidate === "string" ? candidate : undefined;
+function partText(part: SessionMessage["parts"][number]): string {
+  return part.text ?? part.reasoning ?? "";
 }
 
 function ModeToggle() {
@@ -96,70 +112,48 @@ function ModeToggle() {
   );
 }
 
-function collectToolActivity(events: readonly KernelEvent[]): ToolActivity[] {
-  const tools = new Map<string, ToolActivity>();
+/** Tool calls the live event log knows about, newest state wins. */
+function collectTools(
+  events: readonly CodexEvent[]
+): Map<string, { status: "running" | "completed" | "failed" }> {
+  const tools = new Map<
+    string,
+    { status: "running" | "completed" | "failed" }
+  >();
   for (const event of events) {
-    if (event.type === "tool_started") {
-      const callId = String(event.call_id ?? event.effect_id ?? event.seq);
-      tools.set(callId, {
-        callId,
-        name: String(event.name ?? "Tool"),
-        callMessageId: stringField(event.arguments, "$message"),
-        status: "running"
+    const body = event.body;
+    if (body.type === "tool_start") {
+      tools.set(body.toolCallId, { status: "running" });
+    } else if (body.type === "tool_end") {
+      tools.set(body.toolCallId, {
+        status: body.isError ? "failed" : "completed"
       });
-      continue;
     }
-    if (event.type !== "tool_completed") continue;
-    const callId = String(event.call_id ?? event.effect_id ?? event.seq);
-    const previous = tools.get(callId);
-    const output = event.output;
-    tools.set(callId, {
-      callId,
-      name: String(event.name ?? previous?.name ?? "Tool"),
-      callMessageId: previous?.callMessageId,
-      outputMessageId: stringField(output, "messageId"),
-      status: event.success === false ? "failed" : "completed",
-      preview: stringField(output, "preview"),
-      bytes:
-        isRecord(output) && typeof output.bytes === "number"
-          ? output.bytes
-          : undefined
-    });
   }
-  return [...tools.values()];
+  return tools;
 }
 
-function modelRounds(events: readonly KernelEvent[]): number {
-  return events.filter((event) => event.type === "model_requested").length;
-}
-
-function reasoningText(events: readonly KernelEvent[]): string {
-  return events
-    .filter((event) => event.type === "reasoning_delta")
-    .map((event) => String(event.delta ?? ""))
-    .join("");
-}
-
-function toolSummary(tool: ToolActivity): string {
-  let path: string | undefined;
-  try {
-    path = stringField(JSON.parse(tool.preview ?? ""), "path");
-  } catch {
-    path = undefined;
+/** Kernel counters from the last checkpoint frame of the log. */
+function kernelStats(events: readonly CodexEvent[]): KernelStats | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const body = events[index]?.body;
+    if (body?.type === "extension" && body.body.type === "kernel_checkpoint") {
+      return {
+        phase: body.body.phase,
+        modelRound: body.body.modelRound,
+        transitions: body.body.transitions,
+        kernelMs: body.body.kernelMs
+      };
+    }
   }
-  const verb =
-    tool.name === "workspace_write"
-      ? tool.status === "running"
-        ? "Writing"
-        : "Wrote"
-      : tool.name === "workspace_read"
-        ? tool.status === "running"
-          ? "Reading"
-          : "Read"
-        : tool.status === "running"
-          ? "Running"
-          : "Finished";
-  return path ? `${verb} ${path}` : verb;
+  return null;
+}
+
+function kernelEventCount(events: readonly CodexEvent[]): number {
+  return events.filter(
+    (event) =>
+      event.body.type === "extension" && event.body.body.type === "kernel_event"
+  ).length;
 }
 
 function JsonBlock({ value }: { value: unknown }) {
@@ -170,29 +164,41 @@ function JsonBlock({ value }: { value: unknown }) {
   );
 }
 
-function toolPart(message: SessionMessage | null | undefined, callId: string) {
-  return message?.parts.find((part) => part.toolCallId === callId);
+function toolSummary(name: string, input: unknown, running: boolean): string {
+  const path =
+    isRecord(input) && typeof input.path === "string" ? input.path : undefined;
+  const verb =
+    name === "workspace_write"
+      ? running
+        ? "Writing"
+        : "Wrote"
+      : name === "workspace_read"
+        ? running
+          ? "Reading"
+          : "Read"
+        : running
+          ? "Running"
+          : "Finished";
+  return path ? `${verb} ${path}` : verb;
 }
 
 function ToolCard({
-  tool,
-  messages,
-  onExpand
+  name,
+  callId,
+  input,
+  output,
+  status
 }: {
-  tool: ToolActivity;
-  messages: Readonly<Record<string, SessionMessage | null>>;
-  onExpand: (messageId: string) => void;
+  name: string;
+  callId: string;
+  input: unknown;
+  output: unknown;
+  status: "running" | "completed" | "failed";
 }) {
-  const call = tool.callMessageId
-    ? toolPart(messages[tool.callMessageId], tool.callId)
-    : undefined;
-  const result = tool.outputMessageId
-    ? toolPart(messages[tool.outputMessageId], tool.callId)
-    : undefined;
   const icon =
-    tool.status === "running" ? (
+    status === "running" ? (
       <GearIcon size={14} className="animate-spin text-kumo-inactive" />
-    ) : tool.status === "failed" ? (
+    ) : status === "failed" ? (
       <XCircleIcon size={14} className="text-kumo-danger" />
     ) : (
       <CheckCircleIcon size={14} className="text-kumo-success" />
@@ -200,29 +206,21 @@ function ToolCard({
 
   return (
     <details
+      key={callId}
       className="rounded-xl border border-kumo-line bg-kumo-base"
-      onToggle={(event) => {
-        if (!event.currentTarget.open) return;
-        for (const id of [tool.callMessageId, tool.outputMessageId]) {
-          if (id && messages[id] === undefined) onExpand(id);
-        }
-      }}
     >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
         {icon}
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-semibold">
-            {tool.name}
-          </span>
+          <span className="block truncate text-xs font-semibold">{name}</span>
           <span className="block truncate text-xs text-kumo-subtle">
-            {toolSummary(tool)}
-            {tool.bytes !== undefined ? ` · ${tool.bytes} bytes` : ""}
+            {toolSummary(name, input, status === "running")}
           </span>
         </span>
-        <Badge variant={tool.status === "failed" ? "destructive" : "secondary"}>
-          {tool.status === "running"
+        <Badge variant={status === "failed" ? "destructive" : "secondary"}>
+          {status === "running"
             ? "Running"
-            : tool.status === "failed"
+            : status === "failed"
               ? "Failed"
               : "Done"}
         </Badge>
@@ -232,14 +230,14 @@ function ToolCard({
           <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
             Arguments
           </p>
-          <JsonBlock value={call?.input ?? "Loading from the transcript"} />
+          <JsonBlock value={input ?? ""} />
         </div>
-        {tool.status !== "running" && (
+        {status !== "running" && (
           <div>
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
               Result
             </p>
-            <JsonBlock value={result?.output ?? tool.preview ?? ""} />
+            <JsonBlock value={output ?? "No output recorded"} />
           </div>
         )}
       </div>
@@ -257,126 +255,101 @@ function UserMessage({ text }: { text: string }) {
   );
 }
 
-function AssistantMessage({
-  operation,
-  events,
-  messages,
-  onExpandTool,
-  children
-}: {
-  operation: CodexOperationSnapshot;
-  events: readonly KernelEvent[];
-  messages: Readonly<Record<string, SessionMessage | null>>;
-  onExpandTool: (messageId: string) => void;
-  children?: ReactNode;
-}) {
-  const tools = useMemo(() => collectToolActivity(events), [events]);
-  const reasoning = useMemo(() => reasoningText(events), [events]);
-  const rounds = modelRounds(events);
-  const running =
-    operation.status === "queued" || operation.status === "running";
-
+function AssistantHead({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-3">
       <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
         <CodeIcon size={17} weight="bold" />
       </div>
-      <div className="min-w-0 flex-1 space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Text size="sm" bold>
-            Codex
-          </Text>
-          {running ? (
-            <span className="flex items-center gap-1.5 text-xs text-kumo-subtle">
-              <span className="size-1.5 animate-pulse rounded-full bg-kumo-accent" />
-              Working
-            </span>
-          ) : operation.status === "completed" ? (
-            <span className="text-xs font-medium text-kumo-success">
-              Turn completed
-            </span>
-          ) : (
-            <span className="text-xs font-medium text-kumo-danger">
-              Turn failed
-            </span>
-          )}
-        </div>
-
-        {running && events.length === 0 && (
-          <Surface className="max-w-xl rounded-xl px-4 py-3 ring ring-kumo-line">
-            <div className="flex items-center gap-2 text-sm text-kumo-subtle">
-              <GearIcon size={15} className="animate-spin" />
-              Waking the durable operation
-            </div>
-          </Surface>
-        )}
-
-        {reasoning.length > 0 && (
-          <details className="max-w-xl rounded-xl border border-kumo-line px-3 py-2">
-            <summary className="cursor-pointer list-none text-xs font-semibold text-kumo-subtle">
-              Reasoning
-            </summary>
-            <p className="mt-2 whitespace-pre-wrap text-xs italic leading-5 text-kumo-subtle">
-              {reasoning}
-            </p>
-          </details>
-        )}
-
-        {tools.length > 0 && (
-          <div className="max-w-xl space-y-2">
-            {tools.map((tool) => (
-              <ToolCard
-                key={tool.callId}
-                tool={tool}
-                messages={messages}
-                onExpand={onExpandTool}
-              />
-            ))}
-          </div>
-        )}
-
-        {operation.output && (
-          <Streamdown
-            className="sd-theme max-w-xl text-sm leading-6 text-kumo-default"
-            controls={false}
-            plugins={{ code }}
-          >
-            {operation.output}
-          </Streamdown>
-        )}
-
-        {operation.error && (
-          <div
-            role="alert"
-            className="max-w-xl rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-          >
-            {operation.error}
-          </div>
-        )}
-
-        {events.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 text-[11px] text-kumo-inactive">
-            <span>
-              {rounds} model {rounds === 1 ? "round" : "rounds"}
-            </span>
-            <span aria-hidden="true">·</span>
-            <Badge variant="secondary">{events.length} events</Badge>
-          </div>
-        )}
-
-        {children}
-      </div>
+      <div className="min-w-0 flex-1 space-y-3">{children}</div>
     </div>
   );
 }
 
+/**
+ * One stored assistant message: text, reasoning, and every tool call it
+ * made, with the output the matching `tool` message holds.
+ */
+function AssistantMessage({
+  message,
+  outputs,
+  tools
+}: {
+  message: SessionMessage;
+  outputs: ReadonlyMap<string, unknown>;
+  tools: ReadonlyMap<string, { status: "running" | "completed" | "failed" }>;
+}) {
+  const text = message.parts
+    .filter((part) => part.type === "text")
+    .map(partText)
+    .join("");
+  const reasoning = message.parts
+    .filter((part) => part.type === "reasoning")
+    .map(partText)
+    .join("");
+  const calls = message.parts.filter(
+    (part) => part.type.startsWith("tool-") && part.toolCallId
+  );
+
+  return (
+    <AssistantHead>
+      <Text size="sm" bold>
+        Codex
+      </Text>
+      {reasoning.length > 0 && (
+        <details className="max-w-xl rounded-xl border border-kumo-line px-3 py-2">
+          <summary className="cursor-pointer list-none text-xs font-semibold text-kumo-subtle">
+            Reasoning
+          </summary>
+          <p className="mt-2 whitespace-pre-wrap text-xs italic leading-5 text-kumo-subtle">
+            {reasoning}
+          </p>
+        </details>
+      )}
+      {calls.length > 0 && (
+        <div className="max-w-xl space-y-2">
+          {calls.map((part) => {
+            const callId = part.toolCallId ?? "";
+            const output = outputs.get(callId);
+            return (
+              <ToolCard
+                key={callId}
+                callId={callId}
+                name={part.toolName ?? part.type.replace(/^tool-/, "")}
+                input={part.input}
+                output={output}
+                status={
+                  output !== undefined
+                    ? "completed"
+                    : (tools.get(callId)?.status ?? "running")
+                }
+              />
+            );
+          })}
+        </div>
+      )}
+      {text.length > 0 && (
+        <Streamdown
+          className="sd-theme max-w-xl text-sm leading-6 text-kumo-default"
+          controls={false}
+          plugins={{ code }}
+        >
+          {text}
+        </Streamdown>
+      )}
+    </AssistantHead>
+  );
+}
+
 function Sidebar({
-  tools,
   file,
+  stats,
+  kernelEvents,
   onClose
 }: {
-  tools: readonly CodexToolInfo[];
   file: CodexWorkspaceFile | null;
+  stats: KernelStats | null;
+  kernelEvents: number;
   onClose: () => void;
 }) {
   return (
@@ -397,7 +370,7 @@ function Sidebar({
         />
       </div>
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {tools.map((tool) => (
+        {TOOLS.map((tool) => (
           <Surface
             key={tool.name}
             className="rounded-lg p-3 ring ring-kumo-line"
@@ -415,7 +388,7 @@ function Sidebar({
           </Text>
           <Surface className="mt-2 rounded-lg p-3 ring ring-kumo-line">
             <code className="text-[11px] text-kumo-subtle">
-              {file?.path ?? "/codex/result.txt"}
+              {file?.path ?? DEMO_FILE}
             </code>
             {file?.found ? (
               <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap">
@@ -428,6 +401,20 @@ function Sidebar({
             )}
           </Surface>
         </div>
+        <div className="pt-2">
+          <Text size="xs" variant="secondary" bold>
+            Kernel
+          </Text>
+          <Surface className="mt-2 space-y-1 rounded-lg p-3 text-xs text-kumo-subtle ring ring-kumo-line">
+            <p>Phase {stats?.phase ?? "idle"}</p>
+            <p>Model round {stats?.modelRound ?? 0}</p>
+            <p>
+              {stats?.transitions ?? 0} transitions ·{" "}
+              {(stats?.kernelMs ?? 0).toFixed(1)} ms
+            </p>
+            <p>{kernelEvents} kernel events</p>
+          </Surface>
+        </div>
       </div>
     </aside>
   );
@@ -436,39 +423,59 @@ function Sidebar({
 function App() {
   const [session, setSession] = useState(getSession);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [file, setFile] = useState<CodexWorkspaceFile | null>(null);
   const [toolsOpen, setToolsOpen] = useState(
     () => window.matchMedia("(min-width: 1100px)").matches
   );
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const {
-    status,
-    operations,
-    events,
-    file,
-    tools,
-    messages,
-    error,
-    active,
-    submit,
-    inspectMessage
-  } = useCodexSession(session);
+  const harness = useHarnessSession<CodexProtocol>({
+    agent: "coder",
+    name: session
+  });
+  const { connection, status, messages, events, live, error } = harness;
 
-  const connected = status === "open";
-  const busy = active !== null;
+  const connected = connection === "open";
+  const busy = status?.state === "running" || status?.state === "retrying";
 
-  const eventCount = Object.values(events).reduce(
-    (sum, list) => sum + list.length,
-    0
-  );
+  const readFile = useCallback(async () => {
+    const response = await fetch(demoRoute(session, "file"));
+    if (!response.ok) return;
+    setFile((await response.json()) as CodexWorkspaceFile);
+  }, [session]);
+
+  // The Workspace is read over HTTP, not the harness link: it is the demo's
+  // own state, not part of the conversation.
+  const settled = events.filter(
+    (event) => event.body.type === "operation_settled"
+  ).length;
+  useEffect(() => {
+    void readFile();
+  }, [readFile, settled]);
+
+  // Tool outputs live in the transcript's `tool` messages, keyed by call id.
+  const outputs = useMemo(() => {
+    const found = new Map<string, unknown>();
+    for (const message of messages) {
+      if (message.role !== "tool") continue;
+      for (const part of message.parts) {
+        if (part.toolCallId) found.set(part.toolCallId, part.output);
+      }
+    }
+    return found;
+  }, [messages]);
+  const tools = useMemo(() => collectTools(events), [events]);
+  const stats = useMemo(() => kernelStats(events), [events]);
+  const kernelEvents = useMemo(() => kernelEventCount(events), [events]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [operations.length, eventCount, active?.status]);
+  }, [messages.length, live?.text, status?.state]);
 
   const send = () => {
     const trimmed = prompt.trim();
     if (trimmed.length === 0 || busy || !connected) return;
     setPrompt("");
-    submit(trimmed);
+    void harness.prompt(trimmed);
   };
 
   const newSession = () => {
@@ -476,7 +483,16 @@ function App() {
     localStorage.setItem(SESSION_KEY, next);
     setSession(next);
     setPrompt(DEFAULT_PROMPT);
+    setFile(null);
   };
+
+  const restart = () => {
+    void fetch(demoRoute(session, "restart"), { method: "POST" });
+  };
+
+  const lastResult = [...events]
+    .reverse()
+    .find((event) => event.body.type === "operation_settled");
 
   return (
     <div
@@ -509,10 +525,18 @@ function App() {
               <Badge variant={connected ? "success" : "secondary"}>
                 {connected
                   ? "Live"
-                  : status === "connecting"
+                  : connection === "connecting"
                     ? "Connecting"
                     : "Reconnecting"}
               </Badge>
+              <Button
+                variant="ghost"
+                shape="square"
+                aria-label="Restart and verify"
+                title="Abort the Durable Object and watch the turn resume"
+                onClick={restart}
+                icon={<ArrowClockwiseIcon size={16} />}
+              />
               <Button
                 variant="ghost"
                 shape="square"
@@ -536,7 +560,7 @@ function App() {
 
         <main className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl space-y-6 px-5 py-6">
-            {operations.length === 0 && (
+            {messages.length === 0 && (
               <div className="py-10 sm:py-16">
                 <Empty
                   icon={<TerminalIcon size={32} />}
@@ -546,17 +570,56 @@ function App() {
               </div>
             )}
 
-            {operations.map((operation) => (
-              <div key={operation.operationId} className="space-y-5">
-                <UserMessage text={operation.prompt} />
+            {messages.map((message) =>
+              message.role === "user" ? (
+                <UserMessage
+                  key={message.id}
+                  text={message.parts.map(partText).join("")}
+                />
+              ) : message.role === "assistant" ? (
                 <AssistantMessage
-                  operation={operation}
-                  events={events[operation.operationId] ?? []}
-                  messages={messages}
-                  onExpandTool={inspectMessage}
-                ></AssistantMessage>
-              </div>
-            ))}
+                  key={message.id}
+                  message={message}
+                  outputs={outputs}
+                  tools={tools}
+                />
+              ) : null
+            )}
+
+            {live && live.text.length > 0 && (
+              <AssistantHead>
+                <Streamdown
+                  className="sd-theme max-w-xl text-sm leading-6 text-kumo-default"
+                  controls={false}
+                  plugins={{ code }}
+                >
+                  {live.text}
+                </Streamdown>
+              </AssistantHead>
+            )}
+
+            {busy && (
+              <AssistantHead>
+                <span className="flex items-center gap-2 text-sm text-kumo-subtle">
+                  <GearIcon size={15} className="animate-spin" />
+                  {stats
+                    ? `Kernel ${stats.phase.replace(/_/g, " ")}, round ${stats.modelRound}`
+                    : "Waking the durable operation"}
+                </span>
+              </AssistantHead>
+            )}
+
+            {lastResult?.body.type === "operation_settled" &&
+              lastResult.body.result.status !== "completed" && (
+                <div
+                  role="alert"
+                  className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
+                >
+                  Turn {lastResult.body.result.status}:{" "}
+                  {lastResult.body.result.error?.message ??
+                    lastResult.body.result.stopReason.type}
+                </div>
+              )}
 
             {error && (
               <div
@@ -595,16 +658,27 @@ function App() {
                 placeholder="Describe a coding task"
                 className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
               />
-              <Button
-                type="submit"
-                variant="primary"
-                shape="square"
-                aria-label="Run turn"
-                loading={busy}
-                disabled={busy || !connected || prompt.trim().length === 0}
-                icon={<PaperPlaneRightIcon size={18} />}
-                className="mb-0.5"
-              />
+              {busy ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  shape="square"
+                  aria-label="Interrupt the turn"
+                  onClick={() => void harness.interrupt()}
+                  icon={<StopCircleIcon size={18} />}
+                  className="mb-0.5"
+                />
+              ) : (
+                <Button
+                  type="submit"
+                  variant="primary"
+                  shape="square"
+                  aria-label="Run turn"
+                  disabled={!connected || prompt.trim().length === 0}
+                  icon={<PaperPlaneRightIcon size={18} />}
+                  className="mb-0.5"
+                />
+              )}
             </div>
           </form>
           <div className="flex items-center justify-center gap-2 px-5 py-3">
@@ -619,8 +693,9 @@ function App() {
 
       {toolsOpen ? (
         <Sidebar
-          tools={tools}
           file={file}
+          stats={stats}
+          kernelEvents={kernelEvents}
           onClose={() => setToolsOpen(false)}
         />
       ) : null}

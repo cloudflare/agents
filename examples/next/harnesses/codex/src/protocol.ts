@@ -1,94 +1,73 @@
 /**
- * Wire contract between the browser and the Codex harness. This module is
- * imported by both the client and the Durable Object, so it must stay free of
- * runtime imports.
+ * What the browser and the Durable Object agree on: the Codex runtime's
+ * harness protocol and the JSON the demo's HTTP routes return. This module
+ * has no runtime imports, so the client bundle and the Worker both take it.
+ *
+ * The conversation itself does not appear here. Prompts, transcript,
+ * operations and events all ride the shared harness link
+ * (`@cloudflare/agents-next-harness/protocol`); only the two demo-specific
+ * reads below are Codex's own.
  */
-import type { SessionMessage } from "agents/sessions";
-import type { CodexOperationSnapshot } from "./codex-harness";
-import type { KernelJson } from "./kernel-types";
+import type {
+  KernelAction,
+  KernelCheckpoint,
+  KernelJson
+} from "./kernel-types";
 
+export type {
+  KernelAction,
+  KernelCheckpoint,
+  KernelJson
+} from "./kernel-types";
 export type { SessionMessage } from "agents/sessions";
-export type { CodexOperationSnapshot } from "./codex-harness";
-export type { KernelJson } from "./kernel-types";
 
-/** A Workspace file read for the demo. */
+/**
+ * The vocabulary `CodexRuntime` adds to the core harness events.
+ *
+ * Kernel events ride as extension frames so the shared React hook keeps
+ * rendering messages, tools and status the same way it does for every other
+ * harness, while the demo can still show the raw Codex event stream.
+ */
+export type CodexProtocol = {
+  event:
+    | { type: "kernel_event"; event: KernelJson }
+    | {
+        type: "kernel_checkpoint";
+        phase: string;
+        modelRound: number;
+        transitions: number;
+        kernelMs: number;
+      };
+  /** Codex takes prompts and nothing else. */
+  submit: { kind: never; payload: never };
+  result: {
+    output: string | null;
+    transitions: number;
+    kernelMs: number;
+  };
+};
+
+/** `GET /agents/coder/:name/file`: one Workspace file read for the demo. */
 export type CodexWorkspaceFile = {
   readonly path: string;
   readonly found: boolean;
   readonly content?: string;
 };
 
-/** One tool the kernel offers the model. */
-export type CodexToolInfo = {
-  readonly name: string;
-  readonly description: string;
+/**
+ * `GET /agents/coder/:name/operation/:id`: the kernel state of one
+ * operation. A few hundred bytes whatever the transcript weighs.
+ */
+export type CodexKernelSnapshot = {
+  readonly operationId: string;
+  readonly checkpoint: KernelCheckpoint | null;
+  readonly action: KernelAction | null;
+  readonly transitions: number;
+  readonly kernelMs: number;
 };
 
-/** Everything the client needs to render a session on connect. */
-export type CodexSessionSnapshot = {
-  readonly operations: readonly CodexOperationSnapshot[];
-  readonly file: CodexWorkspaceFile;
-  readonly tools: readonly CodexToolInfo[];
-};
+/** `POST /agents/coder/:name/restart`: the object aborts after replying. */
+export type CodexRestartAck = { readonly restarting: true };
 
-/** Messages a browser sends over the WebSockets capability. */
-export type CodexClientMessage =
-  | { readonly type: "snapshot"; readonly id: string }
-  | {
-      readonly type: "submit";
-      readonly id: string;
-      readonly prompt: string;
-      readonly operationId?: string;
-    }
-  | {
-      /** Replay an operation's durable event stream from `from`, then tail it. */
-      readonly type: "subscribe";
-      readonly operationId: string;
-      readonly from?: number;
-    }
-  | {
-      /** Read one operation with its kernel checkpoint. */
-      readonly type: "operation";
-      readonly id: string;
-      readonly operationId: string;
-    }
-  | {
-      /** Read one transcript message, such as a tool call's input or output. */
-      readonly type: "message";
-      readonly id: string;
-      readonly messageId: string;
-    }
-  | {
-      /** Abort the Durable Object so the client can watch it recover. */
-      readonly type: "restart";
-      readonly id: string;
-    };
-
-/** Messages the Durable Object sends to a browser. */
-export type CodexServerMessage =
-  | { readonly type: "snapshot"; readonly snapshot: CodexSessionSnapshot }
-  | {
-      /** An operation was accepted, settled, or read on demand. */
-      readonly type: "operation";
-      readonly id?: string;
-      readonly operation: CodexOperationSnapshot;
-    }
-  | {
-      readonly type: "events";
-      readonly operationId: string;
-      readonly seq: number;
-      readonly lastSeq: number;
-      readonly events: readonly KernelJson[];
-    }
-  | { readonly type: "stream_end"; readonly operationId: string }
-  | {
-      readonly type: "message";
-      readonly id: string;
-      readonly message: SessionMessage | null;
-    }
-  | {
-      readonly type: "result";
-      readonly id: string;
-      readonly result: KernelJson;
-    }
-  | { readonly type: "error"; readonly id?: string; readonly message: string };
+/** Every demo route answers a failure with this shape. */
+export type CodexRouteError = { readonly error: string };

@@ -3,20 +3,23 @@ import type {
   LanguageModelV4CallOptions,
   LanguageModelV4GenerateResult
 } from "@ai-sdk/provider";
+import { Harness } from "@cloudflare/agents-next-harness";
+import type {
+  HarnessReceipt,
+  HarnessResult
+} from "@cloudflare/agents-next-harness";
 import { Workspace } from "@cloudflare/shell";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
-import { HarnessBuildError } from "../harness-runtime";
 import type { JsonObject, JsonValue } from "../json";
+import { toJsonValue } from "../json";
 import type {
   HarnessRevision,
-  HarnessSnapshot,
-  HarnessTurn,
-  HarnessTurnReceipt
+  SelfModifyingProtocol,
+  SelfModifyingSnapshot
 } from "../protocol";
-import { toJsonValue } from "../json";
 import type {
   HarnessInferenceResult,
   HarnessMessage,
@@ -24,7 +27,7 @@ import type {
   HarnessToolCall,
   HarnessToolDefinition
 } from "../runtime-types";
-import { SelfModifyingHarness } from "../self-modifying-harness";
+import { SelfModifyingRuntime } from "../self-modifying-runtime";
 
 const CREATED_TOOL_SOURCE = `import type { CustomTool } from "../types";
 
@@ -242,6 +245,44 @@ class TestLanguageModel implements LanguageModelV4 {
   }
 }
 
+/** The snapshot minus its journal, which recursive JSON makes unRPC-able. */
+export type TestSnapshot = Omit<SelfModifyingSnapshot, "journal">;
+
+/** What one settled prompt turn looks like to a test. */
+export type TurnReport = {
+  readonly status: HarnessResult["status"];
+  readonly output: string | null;
+  readonly error: string | null;
+  readonly code: string | null;
+  readonly revisionId: number | null;
+  readonly rounds: number | null;
+  readonly isolateRun: number | null;
+};
+
+/** A source operation's outcome, so tests can assert on rejections. */
+export type Outcome<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: string; readonly phase: string };
+
+function outcome<T>(
+  result: HarnessResult<SelfModifyingProtocol>,
+  read: (raw: SelfModifyingProtocol["result"]) => T
+): Outcome<T> {
+  if (result.status === "completed" && result.raw !== undefined) {
+    return { ok: true, value: read(result.raw) };
+  }
+  return {
+    ok: false,
+    error: result.error?.message ?? result.stopReason.type,
+    phase: result.error?.code ?? "unknown"
+  };
+}
+
+function revisionOf(raw: SelfModifyingProtocol["result"]): HarnessRevision {
+  if (!("revision" in raw)) throw new Error("Expected a revision result");
+  return raw.revision;
+}
+
 /** Test-only Durable Object with a deterministic LanguageModelV4. */
 export class TestSelfModifyingHarnessObject extends DurableObject<Env> {
   private readonly workspace = new Workspace({
@@ -250,91 +291,138 @@ export class TestSelfModifyingHarnessObject extends DurableObject<Env> {
   });
   private readonly tasks = new Tasks();
   private readonly streams = new Streams();
-  private readonly harness = new SelfModifyingHarness({
-    tasks: this.tasks,
-    streams: this.streams,
+  private readonly runtime = new SelfModifyingRuntime({
     workspace: this.workspace,
     loader: this.env.LOADER,
     model: new TestLanguageModel()
+  });
+  private readonly harness = new Harness<SelfModifyingProtocol>({
+    tasks: this.tasks,
+    streams: this.streams,
+    runtime: this.runtime
   });
   private readonly lifecycle = Lifecycle.install(this)
     .use(this.tasks)
     .use(this.streams)
     .use(this.harness);
 
-  /** The snapshot without the recursive JSON journal, which RPC typing chokes on. */
+  /** The active revision, its source, and the revision list. */
   async snapshot(): Promise<TestSnapshot> {
-    const { journal: _journal, ...rest } = await this.harness.snapshot();
+    await this.lifecycle.start();
+    const { journal: _journal, ...rest } = this.runtime.snapshot();
     return rest;
   }
 
-  /** Admit and run a turn to settlement in this invocation. */
-  prompt(text: string): Promise<HarnessTurn> {
-    return this.harness.prompt(text);
+  /** Admit a prompt and return its receipt without waiting for the turn. */
+  async admit(prompt: string, operationId?: string): Promise<HarnessReceipt> {
+    await this.lifecycle.start();
+    return this.harness
+      .session()
+      .prompt(prompt, operationId === undefined ? {} : { operationId });
   }
 
-  /** Admit a turn for queued execution and return its receipt. */
-  submit(text: string, turnId: string): Promise<HarnessTurnReceipt> {
-    return this.harness.submit(text, turnId);
+  /** Admit a prompt and wait for its settled turn. */
+  async prompt(prompt: string): Promise<TurnReport> {
+    const receipt = await this.admit(prompt);
+    await this.#wait(receipt.operationId);
+    return this.report(receipt.operationId);
   }
 
-  turn(turnId: string): Promise<HarnessTurn | null> {
-    return this.harness.getTurn(turnId);
+  /** The settled state of one turn, or its queued status while it runs. */
+  async report(operationId: string): Promise<TurnReport> {
+    await this.lifecycle.start();
+    const result = await this.harness.session().result(operationId);
+    const operation = this.runtime.operation(operationId);
+    const raw = result?.raw;
+    return {
+      status: result?.status ?? "declined",
+      output: raw && "output" in raw ? (raw.output ?? null) : null,
+      error: result?.error?.message ?? null,
+      code: result?.error?.code ?? null,
+      revisionId: operation?.revisionId ?? null,
+      rounds: operation?.rounds ?? null,
+      isolateRun: operation?.isolateRun ?? null
+    };
   }
 
-  async writeSource(path: string, content: string): Promise<Outcome<null>> {
-    try {
-      await this.harness.writeSource(path, content);
-      return { ok: true, value: null };
-    } catch (error) {
-      return failure(error);
-    }
+  /** Whether one operation has settled yet, for a detached submission. */
+  async settled(operationId: string): Promise<string | null> {
+    await this.lifecycle.start();
+    return (await this.harness.session().result(operationId))?.status ?? null;
   }
 
+  /** Write one working source file through a durable submission. */
+  async writeSource(
+    path: string,
+    content: string
+  ): Promise<Outcome<{ readonly path: string }>> {
+    const result = await this.#submit({
+      kind: "write_source",
+      payload: { path, content }
+    });
+    return outcome(result, (raw) => {
+      if (!("path" in raw)) throw new Error("Expected a path result");
+      return { path: raw.path };
+    });
+  }
+
+  /** Build and activate the working source through a durable submission. */
   async activate(note: string): Promise<Outcome<HarnessRevision>> {
-    try {
-      return { ok: true, value: await this.harness.activate(note) };
-    } catch (error) {
-      return failure(error);
-    }
+    return outcome(
+      await this.#submit({ kind: "activate", payload: { note } }),
+      revisionOf
+    );
   }
 
-  restore(revisionId: number): Promise<HarnessRevision> {
-    return this.harness.restore(revisionId);
+  /** Restore an activated snapshot through a durable submission. */
+  async restore(revisionId: number): Promise<Outcome<HarnessRevision>> {
+    return outcome(
+      await this.#submit({ kind: "restore", payload: { revisionId } }),
+      revisionOf
+    );
   }
 
-  /** Every event type appended to one turn's durable stream, in order. */
-  async streamEventTypes(streamId: string): Promise<string[]> {
+  /** Every event type in the session's durable log, in seq order. */
+  async eventTypes(from?: string): Promise<string[]> {
+    await this.lifecycle.start();
     const types: string[] = [];
-    for await (const chunk of this.streams.read(streamId)) {
-      const event = chunk.chunk;
-      if (
-        typeof event === "object" &&
-        event !== null &&
-        "type" in event &&
-        typeof event.type === "string"
-      ) {
-        types.push(event.type);
-      }
+    const controller = new AbortController();
+    for await (const event of this.harness.session().events({
+      ...(from === undefined ? {} : { from }),
+      signal: controller.signal,
+      onUpToDate: () => controller.abort()
+    })) {
+      if ("preview" in event) continue;
+      const body = event.body;
+      types.push(
+        body.type === "extension" ? `extension:${body.body.type}` : body.type
+      );
     }
     return types;
   }
-}
 
-/** The harness snapshot minus its journal. */
-export type TestSnapshot = Omit<HarnessSnapshot, "journal">;
+  /** The transcript the shared client renders. */
+  async messages(): Promise<string[]> {
+    await this.lifecycle.start();
+    return (await this.harness.session().messages()).messages.map((message) =>
+      message.parts
+        .filter((part) => part.type === "text")
+        .map((part) => part.text ?? "")
+        .join("")
+    );
+  }
 
-/** A fallible operation's outcome, so tests can assert on rejections. */
-export type Outcome<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: string; readonly phase?: string };
+  async #submit(
+    submission: SelfModifyingProtocol["submit"]
+  ): Promise<HarnessResult<SelfModifyingProtocol>> {
+    await this.lifecycle.start();
+    const receipt = await this.harness.session().submit(submission);
+    return this.#wait(receipt.operationId);
+  }
 
-function failure(error: unknown): Outcome<never> {
-  return {
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-    ...(error instanceof HarnessBuildError ? { phase: error.phase } : {})
-  };
+  #wait(operationId: string): Promise<HarnessResult<SelfModifyingProtocol>> {
+    return this.harness.session().wait(operationId, { timeoutMs: 20_000 });
+  }
 }
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };

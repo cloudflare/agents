@@ -11,11 +11,9 @@ export default defineConfig({
     })
   ],
   test: {
-    name: "self-modifying-harness",
+    name: "next-codex-harness",
     include: [path.join(testsDir, "**/*.test.ts")],
-    // Each turn bundles source and boots Dynamic Workers; a cold cache is
-    // slow enough that the default budget is not enough.
-    testTimeout: 60_000,
-    hookTimeout: 60_000
+    testTimeout: 30_000,
+    hookTimeout: 30_000
   }
 });

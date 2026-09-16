@@ -1,8 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Type } from "typebox";
-import { PiHarness } from "./harness/pi-harness";
-import type { PiEvent, PiTool } from "./harness/types";
+import { Harness } from "@cloudflare/agents-next-harness";
+import { PiRuntime } from "./harness/pi-runtime";
+import type { PiProtocol, PiTool, PiToolInfo } from "./harness/types";
 import { Lifecycle } from "agents/lifecycle";
 import { createModels } from "./providers/models";
 import { workersAI } from "./providers/workers-ai";
@@ -247,36 +248,38 @@ function memoryKeyOf(call: ToolCallEvent): string {
 export class PiAgent extends DurableObject<Env> {
   readonly tasks = new Tasks();
   readonly streams = new Streams();
-  readonly harness = new PiHarness<ToolContext>({
-    models: createModels({ providers: [workersAI(this.env.AI)] }),
-    model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
+  readonly harness = new Harness<PiProtocol>({
     tasks: this.tasks,
     streams: this.streams,
-    thinkingLevel: "low",
-    toolContext: { storage: this.ctx.storage, now: () => new Date() },
-    tools: () => createTools(),
-    skills: [skills],
-    systemPrompt:
-      "You are a concise playground assistant. Use tools whenever they can answer the request. Explain tool results plainly. You can calculate, roll dice, read the current time, and persist or recall facts for this session.",
-    retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
-    compaction: {
-      enabled: true,
-      reserveTokens: 4000,
-      keepRecentTokens: 12000
-    },
-    configure: (hooks) => {
-      // Pi hooks are process-local and re-registered on every wake.
-      hooks.on("before_tool", (event) => {
-        const call = toolCallOf(event);
-        if (
-          call?.toolName === "remember" &&
-          memoryKeyOf(call).startsWith("_")
-        ) {
-          return { block: { reason: "Memory names cannot start with _." } };
-        }
-        return undefined;
-      });
-    }
+    runtime: new PiRuntime<ToolContext>({
+      models: createModels({ providers: [workersAI(this.env.AI)] }),
+      model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
+      thinkingLevel: "low",
+      toolContext: { storage: this.ctx.storage, now: () => new Date() },
+      tools: () => createTools(),
+      skills: [skills],
+      systemPrompt:
+        "You are a concise playground assistant. Use tools whenever they can answer the request. Explain tool results plainly. You can calculate, roll dice, read the current time, and persist or recall facts for this session.",
+      retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
+      compaction: {
+        enabled: true,
+        reserveTokens: 4000,
+        keepRecentTokens: 12000
+      },
+      configure: (hooks) => {
+        // Pi hooks are process-local and re-registered on every wake.
+        hooks.on("before_tool", (event) => {
+          const call = toolCallOf(event);
+          if (
+            call?.toolName === "remember" &&
+            memoryKeyOf(call).startsWith("_")
+          ) {
+            return { block: { reason: "Memory names cannot start with _." } };
+          }
+          return undefined;
+        });
+      }
+    })
   });
 
   readonly webSockets = new WebSockets(this.harness.webSockets());
@@ -287,15 +290,23 @@ export class PiAgent extends DurableObject<Env> {
     .use(this.webSockets)
     .use(this.harness);
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    // Surface durable operation lifecycle in the tail log for local `wrangler
-    // dev` observability; a real host would forward these to its own sink.
-    this.harness.on((event: PiEvent) => {
-      if (event.type === "fault" || event.type === "operation_end") {
-        console.log("pi", event);
-      }
-    });
+  /**
+   * Host routes the harness link deliberately does not carry. The capability
+   * owns one WebSocket protocol; anything this demo adds on top of it, like
+   * the tool catalog its sidebar lists, is a plain HTTP route Lifecycle
+   * dispatches here after the capabilities decline it.
+   */
+  async onRequest(request: Request): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    if (pathname.endsWith("/tools")) {
+      const tools: PiToolInfo[] = createTools().map((tool) => ({
+        name: tool.name,
+        label: tool.label,
+        description: tool.description
+      }));
+      return Response.json({ tools });
+    }
+    return new Response("Not found", { status: 404 });
   }
 }
 

@@ -1,16 +1,23 @@
 import { Workspace } from "@cloudflare/shell";
+import { Harness } from "@cloudflare/agents-next-harness";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { Sessions } from "agents/sessions";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
-import { CodexHarness } from "../codex-harness";
+import { CodexRuntime } from "../codex-runtime";
+import type { CodexProtocol } from "../protocol";
 import { StressModel, type StressScenario } from "./model";
 
 type StressEnv = {
   STRESS: DurableObjectNamespace<StressCoder>;
   WORKSPACE: R2Bucket;
 };
+
+/** The session every stress run drives. */
+const SESSION = "main";
+/** Longest one synthetic operation may take before the run is abandoned. */
+const RUN_TIMEOUT_MS = 120_000;
 
 /** Result of one synthetic operation. */
 export type StressRun = {
@@ -53,19 +60,22 @@ export class StressCoder extends DurableObject<StressEnv> {
     r2: this.env.WORKSPACE,
     r2Prefix: this.ctx.id.toString()
   });
-  private readonly codex = new CodexHarness({
-    tasks: this.tasks,
-    streams: this.streams,
+  private readonly codex = new CodexRuntime({
     sessions: this.sessions,
     workspace: this.workspace,
     model: this.model,
     compaction: false
   });
+  private readonly harness = new Harness<CodexProtocol>({
+    tasks: this.tasks,
+    streams: this.streams,
+    runtime: this.codex
+  });
   private readonly lifecycle = Lifecycle.install(this)
     .use(this.tasks)
     .use(this.streams)
     .use(this.sessions)
-    .use(this.codex);
+    .use(this.harness);
 
   /** Run one operation to settlement under the given scenario. */
   async run(scenario: StressScenario, promptBytes = 64): Promise<StressRun> {
@@ -74,43 +84,42 @@ export class StressCoder extends DurableObject<StressEnv> {
     const before = this.model.calls;
     const prompt = `stress ${"x".repeat(Math.max(0, promptBytes - 7))}`;
     const started = performance.now();
-    const receipt = await this.codex.submit({ prompt });
-    for (;;) {
-      const snapshot = await this.codex.snapshot(receipt.operationId);
-      if (
-        snapshot &&
-        (snapshot.status === "completed" || snapshot.status === "failed")
-      ) {
-        return {
-          operationId: snapshot.operationId,
-          status: snapshot.status,
-          wallMs: Math.round(performance.now() - started),
-          kernelMs: Number(snapshot.kernelMs.toFixed(2)),
-          transitions: snapshot.transitions,
-          checkpointBytes: JSON.stringify(snapshot.checkpoint).length,
-          events: (await this.codex.events(snapshot.operationId)).length,
-          modelCalls: this.model.calls - before,
-          ...(snapshot.error === undefined ? {} : { error: snapshot.error })
-        };
-      }
-      await scheduler.wait(20);
-    }
+    const session = this.harness.session(SESSION);
+    const receipt = await session.prompt(prompt);
+    const result = await session.wait(receipt.operationId, {
+      timeoutMs: RUN_TIMEOUT_MS
+    });
+    const kernel = this.codex.kernelSnapshot(receipt.operationId);
+    return {
+      operationId: receipt.operationId,
+      status: result.status,
+      wallMs: Math.round(performance.now() - started),
+      kernelMs: Number((kernel?.kernelMs ?? 0).toFixed(2)),
+      transitions: kernel?.transitions ?? 0,
+      checkpointBytes: JSON.stringify(kernel?.checkpoint ?? null).length,
+      events: await this.#countEvents(receipt.cursor),
+      modelCalls: this.model.calls - before,
+      ...(result.error === undefined ? {} : { error: result.error.message })
+    };
   }
 
-  /** The Tasks journal for one operation's driver run, for diagnosis. */
+  /** The Tasks journal for the session's driver run, for diagnosis. */
   steps(operationId: string): unknown {
     const sql = this.ctx.storage.sql;
+    // The harness drives one Tasks run per session, not one per operation.
+    const runId = `harness:harness:${SESSION}`;
     return {
       run: sql
         .exec(
           "SELECT state, attempt, error_name FROM cf_agents_task_runs WHERE run_id = ?",
-          `codex:${operationId}`
+          runId
         )
         .toArray(),
       steps: sql
         .exec(
-          "SELECT step_name, kind, state, attempt, error_name FROM cf_agents_task_steps WHERE run_id = ?",
-          `codex:${operationId}`
+          "SELECT step_name, kind, state, attempt, error_name FROM cf_agents_task_steps WHERE run_id = ? AND step_name LIKE ?",
+          runId,
+          `${operationId}:%`
         )
         .toArray()
     };
@@ -145,6 +154,20 @@ export class StressCoder extends DurableObject<StressEnv> {
       databaseBytes: sql.databaseSize,
       kernelMemoryBytes: await this.codex.kernelMemoryBytes()
     };
+  }
+
+  /** Durable frames this operation appended, replayed from its cursor. */
+  async #countEvents(from: string): Promise<number> {
+    const controller = new AbortController();
+    let seen = 0;
+    for await (const event of this.harness.session(SESSION).events({
+      from,
+      signal: controller.signal,
+      onUpToDate: () => controller.abort()
+    })) {
+      if (!("preview" in event)) seen += 1;
+    }
+    return seen;
   }
 }
 

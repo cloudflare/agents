@@ -13,6 +13,7 @@
     "test": "vitest run --config src/tests/vitest.config.ts"
   },
   "dependencies": {
+    "@cloudflare/agents-next-harness": "*",
     "@cloudflare/kumo": "^2.6.0",
     "@earendil-works/chord": "file:vendor/pi-dev/earendil-works-chord-0.84.4.tgz",
     "@earendil-works/pi-agent-core": "file:vendor/pi-dev/earendil-works-pi-agent-core-0.84.4.tgz",

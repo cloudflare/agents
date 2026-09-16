@@ -13,6 +13,7 @@ import {
   customToolsFromLegacyDefinitions,
   modelToolDefinitions
 } from "./system-tools";
+import type { SelfModifyingTurnEvent } from "./protocol";
 import type { HarnessRevision, SelfModifyingHarnessStore } from "./store";
 
 /** Editable source operations exposed narrowly to the per-turn host bridge. */
@@ -41,10 +42,46 @@ export type HarnessActivation = {
   restore(revisionId: number, activationKey: string): Promise<HarnessRevision>;
 };
 
+/** What the per-turn host reports to the runtime driving it. */
+export type HarnessTurnEvent =
+  | SelfModifyingTurnEvent
+  | {
+      readonly type: "tool_started";
+      readonly callId: string;
+      readonly name: string;
+      readonly input: JsonValue;
+    }
+  | {
+      readonly type: "tool_completed";
+      readonly callId: string;
+      readonly name: string;
+      readonly result: JsonValue;
+    }
+  | {
+      readonly type: "tool_failed";
+      readonly callId: string;
+      readonly name: string;
+      readonly result: JsonValue;
+    };
+
+/** Append one trusted journal record, optionally once under a stable key. */
+export type HarnessJournalSink = (
+  kind: string,
+  data: JsonObject,
+  eventKey?: string
+) => void;
+
 /** Durable event sink used by a running turn. */
 export type HarnessEventSink = {
-  /** Append a JSON event only when its stable key has not been projected. */
-  emit(eventKey: string, event: JsonObject): void;
+  /** Project one event only when its stable key has not been projected. */
+  emit(eventKey: string, event: HarnessTurnEvent): void;
+  /** Journal a trusted record and mirror it into the turn's event log. */
+  journal: HarnessJournalSink;
+  /**
+   * Live-only assistant text for attached clients. The model adapter is
+   * generate-only, so one round's text arrives as one delta.
+   */
+  preview(delta: string): void;
 };
 
 /** Invalid data returned by editable harness code. */
@@ -204,7 +241,7 @@ function requireMatchingEffect(
  * Durable Object storage, model bindings, Worker Loader, or raw credentials.
  */
 export class SelfModifyingTurnHost extends RpcTarget {
-  readonly #turnId: string;
+  readonly #operationId: string;
   readonly #source: HarnessSourceOperations;
   readonly #store: SelfModifyingHarnessStore;
   readonly #model: LanguageModelV4;
@@ -213,7 +250,7 @@ export class SelfModifyingTurnHost extends RpcTarget {
 
   /** Construct one turn-scoped authority object. */
   constructor(options: {
-    readonly turnId: string;
+    readonly operationId: string;
     readonly source: HarnessSourceOperations;
     readonly store: SelfModifyingHarnessStore;
     readonly model: LanguageModelV4;
@@ -221,7 +258,7 @@ export class SelfModifyingTurnHost extends RpcTarget {
     readonly events: HarnessEventSink;
   }) {
     super();
-    this.#turnId = options.turnId;
+    this.#operationId = options.operationId;
     this.#source = options.source;
     this.#store = options.store;
     this.#model = options.model;
@@ -234,7 +271,7 @@ export class SelfModifyingTurnHost extends RpcTarget {
     const request = inferenceRequest(value);
     const effectKey = String(request.round);
     const hash = await requestHash(request);
-    const existing = this.#store.effect(this.#turnId, "model", effectKey);
+    const existing = this.#store.effect(this.#operationId, "model", effectKey);
     if (existing) {
       requireMatchingEffect(
         existing.requestHash,
@@ -256,7 +293,7 @@ export class SelfModifyingTurnHost extends RpcTarget {
         return replayed;
       }
     } else {
-      this.#store.beginEffect(this.#turnId, "model", effectKey, hash);
+      this.#store.beginEffect(this.#operationId, "model", effectKey, hash);
     }
 
     this.#events.emit(`model:${effectKey}:start`, {
@@ -270,7 +307,8 @@ export class SelfModifyingTurnHost extends RpcTarget {
       tools: modelToolDefinitions(request.customTools)
     });
     const json = toJsonValue(result);
-    this.#store.completeEffect(this.#turnId, "model", effectKey, json);
+    this.#store.completeEffect(this.#operationId, "model", effectKey, json);
+    if (result.text !== "") this.#events.preview(result.text);
     this.#events.emit(`model:${effectKey}:finish`, {
       type: "model_completed",
       round: request.round,
@@ -294,7 +332,7 @@ export class SelfModifyingTurnHost extends RpcTarget {
     }
     const request = { name, input };
     const hash = await requestHash(request);
-    const existing = this.#store.effect(this.#turnId, "tool", callId);
+    const existing = this.#store.effect(this.#operationId, "tool", callId);
     if (existing) {
       requireMatchingEffect(existing.requestHash, hash, `tool call ${callId}`);
       if (existing.state === "completed" && existing.result !== null) {
@@ -315,7 +353,7 @@ export class SelfModifyingTurnHost extends RpcTarget {
         return existing.result;
       }
     } else {
-      this.#store.beginEffect(this.#turnId, "tool", callId, hash);
+      this.#store.beginEffect(this.#operationId, "tool", callId, hash);
     }
 
     this.#events.emit(`tool:${callId}:start`, {
@@ -330,7 +368,7 @@ export class SelfModifyingTurnHost extends RpcTarget {
     } catch (error) {
       result = toolFailure(error);
     }
-    this.#store.completeEffect(this.#turnId, "tool", callId, result);
+    this.#store.completeEffect(this.#operationId, "tool", callId, result);
     this.#events.emit(`tool:${callId}:finish`, {
       type: isToolFailure(result) ? "tool_failed" : "tool_completed",
       callId,
@@ -350,11 +388,10 @@ export class SelfModifyingTurnHost extends RpcTarget {
     if (typeof text !== "string") {
       throw new HarnessProtocolError("journal note must be a string");
     }
-    this.#store.journal(
-      this.#turnId,
+    this.#events.journal(
       "note",
       { text: text.slice(0, 4000) },
-      `turn:${this.#turnId}:runtime-note:${key.slice(0, 200)}`
+      `turn:${this.#operationId}:runtime-note:${key.slice(0, 200)}`
     );
     return Promise.resolve();
   }
@@ -374,14 +411,10 @@ export class SelfModifyingTurnHost extends RpcTarget {
         const path = stringValue(record, "path", name);
         const content = stringValue(record, "content", name);
         await this.#source.write(path, content);
-        this.#store.journal(
-          this.#turnId,
+        this.#events.journal(
           "source_written",
-          {
-            path,
-            bytes: new TextEncoder().encode(content).byteLength
-          },
-          `turn:${this.#turnId}:tool:${callId}:source-written`
+          { path, bytes: new TextEncoder().encode(content).byteLength },
+          `turn:${this.#operationId}:tool:${callId}:source-written`
         );
         return {
           path,
@@ -391,11 +424,10 @@ export class SelfModifyingTurnHost extends RpcTarget {
       case "delete_file": {
         const path = stringValue(record, "path", name);
         const deleted = await this.#source.delete(path);
-        this.#store.journal(
-          this.#turnId,
+        this.#events.journal(
           "source_deleted",
           { path, deleted },
-          `turn:${this.#turnId}:tool:${callId}:source-deleted`
+          `turn:${this.#operationId}:tool:${callId}:source-deleted`
         );
         return { path, deleted };
       }
@@ -406,7 +438,7 @@ export class SelfModifyingTurnHost extends RpcTarget {
         return toJsonValue(
           await this.#activation.activate(
             note,
-            `tool:${this.#turnId}:${callId}:activate`
+            `tool:${this.#operationId}:${callId}:activate`
           )
         );
       }
@@ -416,16 +448,15 @@ export class SelfModifyingTurnHost extends RpcTarget {
         return toJsonValue(
           await this.#activation.restore(
             numberValue(record, "revisionId", name),
-            `tool:${this.#turnId}:${callId}:restore`
+            `tool:${this.#operationId}:${callId}:restore`
           )
         );
       case "journal_note": {
         const text = stringValue(record, "text", name).slice(0, 4000);
-        this.#store.journal(
-          this.#turnId,
+        this.#events.journal(
           "note",
           { text },
-          `turn:${this.#turnId}:tool:${callId}:note`
+          `turn:${this.#operationId}:tool:${callId}:note`
         );
         return { recorded: true };
       }

@@ -8,7 +8,7 @@ function object(
   return env.SELF_MODIFYING_HARNESS_TEST.getByName(name);
 }
 
-describe("self-modifying Lifecycle harness", () => {
+describe("self-modifying Harness runtime", () => {
   it("loads one fresh isolate per turn and activates only valid source", async () => {
     const stub = object(`activation-${crypto.randomUUID()}`);
     const genesis = await stub.snapshot();
@@ -17,17 +17,30 @@ describe("self-modifying Lifecycle harness", () => {
 
     const escaped = await stub.writeSource("../outside.ts", "nope");
     expect(escaped.ok).toBe(false);
-    if (!escaped.ok) expect(escaped.error).toContain("under /harness/");
+    if (!escaped.ok) {
+      expect(escaped.error).toContain("under /harness/");
+      expect(escaped.phase).toBe("source");
+    }
 
     const first = await stub.prompt("hello");
     const second = await stub.prompt("again");
     expect(first.output).toBe("precise: hello");
     expect(second.output).toBe("precise: again");
+    expect(first.revisionId).toBe(1);
     expect(first.isolateRun).toBe(1);
     expect(second.isolateRun).toBe(1);
-    const events = await stub.streamEventTypes(first.streamId);
-    expect(events[0]).toBe("turn_started");
-    expect(events.at(-1)).toBe("turn_completed");
+    expect(await stub.messages()).toEqual([
+      "hello",
+      "precise: hello",
+      "again",
+      "precise: again"
+    ]);
+    const events = await stub.eventTypes();
+    expect(events[0]).toBe("session_opened");
+    expect(events).toContain("message_start");
+    expect(events).toContain("extension:model_completed");
+    expect(events).toContain("message_end");
+    expect(events.at(-1)).toBe("operation_settled");
 
     const identity = genesis.files.find(
       (file) => file.path === "src/identity.ts"
@@ -38,7 +51,9 @@ describe("self-modifying Lifecycle harness", () => {
       "PERSONA: pirate"
     );
     expect(pirateSource).toBeTruthy();
-    await stub.writeSource("src/identity.ts", pirateSource ?? "");
+    expect(
+      (await stub.writeSource("src/identity.ts", pirateSource ?? "")).ok
+    ).toBe(true);
     expect(
       (await stub.snapshot()).files.find(
         (file) => file.path === "src/identity.ts"
@@ -150,25 +165,29 @@ export const shadowTool: CustomTool = {
     expect((await stub.snapshot()).active.revisionId).toBe(1);
   });
 
-  it("drives a detached submission through the Tasks queue", async () => {
+  it("drives a detached prompt through the Harness driver", async () => {
     const stub = object(`queued-${crypto.randomUUID()}`);
-    const turnId = crypto.randomUUID();
-    const submitted = await stub.submit("queued work", turnId);
-    expect(submitted).toMatchObject({ turnId, accepted: true });
+    const operationId = crypto.randomUUID();
+    const receipt = await stub.admit("queued work", operationId);
+    expect(receipt).toMatchObject({
+      operationId,
+      accepted: true,
+      state: "queued"
+    });
 
     await expect
-      .poll(async () => (await stub.turn(turnId))?.state, {
-        timeout: 10_000,
+      .poll(() => stub.settled(operationId), {
+        timeout: 20_000,
         interval: 100
       })
       .toBe("completed");
-    const completed = await stub.turn(turnId);
-    expect(completed?.output).toBe("precise: queued work");
-    expect(completed?.isolateRun).toBe(1);
+    const completed = await stub.report(operationId);
+    expect(completed.output).toBe("precise: queued work");
+    expect(completed.isolateRun).toBe(1);
   });
 
   it("creates and auto-discovers a Custom tool in one turn", async () => {
-    const stub = object(`tool-creation-${crypto.randomUUID()}`);
+    const stub = object(`tool-discovery-${crypto.randomUUID()}`);
 
     const created = await stub.prompt("Create and activate a greeting tool");
     expect(created.output).toBe(
@@ -209,9 +228,34 @@ export const shadowTool: CustomTool = {
     expect(after.revisions[0]?.parentRevisionId).toBe(1);
     expect((await stub.prompt("new self")).output).toBe("toolsmith: new self");
 
-    const restore = await stub.restore(1);
-    expect(restore.revisionId).toBe(3);
-    expect(restore.parentRevisionId).toBe(2);
+    const restored = await stub.restore(1);
+    expect(restored.ok).toBe(true);
+    if (restored.ok) {
+      expect(restored.value.revisionId).toBe(3);
+      expect(restored.value.parentRevisionId).toBe(2);
+    }
     expect((await stub.prompt("restored")).output).toBe("precise: restored");
+  });
+
+  it("settles a failed turn with the runtime's own error", async () => {
+    const stub = object(`failure-${crypto.randomUUID()}`);
+    await stub.snapshot();
+    await stub.writeSource(
+      "src/index.ts",
+      `export default {
+  manifest: { name: "broken", version: "1" },
+  runTurn() {
+    throw new Error("the editable harness refused this turn");
+  }
+};
+`
+    );
+    expect((await stub.activate("throwing harness")).ok).toBe(true);
+
+    const failed = await stub.prompt("break");
+    expect(failed.status).toBe("failed");
+    expect(failed.code).toBe("turn");
+    expect(failed.error).toContain("refused this turn");
+    expect((await stub.eventTypes()).at(-1)).toBe("operation_settled");
   });
 });
