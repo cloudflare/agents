@@ -381,6 +381,7 @@ type UseAgentOptions<State> = {
   host?: string; // Custom host
   path?: string; // Custom path prefix
   transport?: "cf-websocket" | "capnweb"; // Wire (default: "cf-websocket")
+  heartbeat?: { intervalMs?: number; timeoutMs?: number } | false; // See Heartbeat
 
   // Query parameters
   query?:
@@ -429,6 +430,7 @@ type AgentClientOptions<State> = {
   name?: string; // Instance name (default: "default")
   path?: string; // Custom path prefix
   query?: Record<string, string>;
+  heartbeat?: { intervalMs?: number; timeoutMs?: number } | false; // See Heartbeat
 
   // Callbacks
   onStateUpdate?: (state: State, source: "server" | "client") => void;
@@ -473,6 +475,36 @@ const agent = useAgent({
   }
 });
 ```
+
+## Heartbeat
+
+Cloudflare closes a WebSocket that carries no traffic for a while, and it
+does so without a close frame: the browser still reports the socket as
+open, so a message sent after a long idle period is lost and no reconnect
+runs. Both clients guard against this by default.
+
+While the socket is open, `useAgent` and `AgentClient` send a `ping` text
+frame every 30 seconds. The Agent (or any host using the `WebSockets`
+capability) answers `pong` through the Durable Object's auto-response pair,
+which costs nothing and never wakes the object. If no `pong` arrives within
+10 seconds the client closes the socket locally, so the usual reconnect
+runs — `ready` resets, transmitted calls reject, and the next open
+re-identifies.
+
+```ts
+// Tune it
+useAgent({
+  agent: "ChatAgent",
+  heartbeat: { intervalMs: 15_000, timeoutMs: 5_000 }
+});
+
+// Or turn it off: the socket is then subject to the network's idle timeout
+new AgentClient({ agent: "ChatAgent", host, heartbeat: false });
+```
+
+`pong` frames are consumed by the client before any JSON parsing, so
+`onMessage` and `useAgentChat` never see them. An older host that does not
+answer pings is simply reconnected after each timeout, which is harmless.
 
 ## Error Handling
 

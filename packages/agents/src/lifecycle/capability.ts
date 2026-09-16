@@ -65,6 +65,12 @@ export type LifecycleSockets = {
   readonly accept: (ws: WebSocket, tags: string[]) => void;
   /** Every hibernated socket on the object, optionally by tag. */
   readonly get: (tag?: string) => WebSocket[];
+  /**
+   * Have the platform answer one exact text frame with another on every
+   * hibernated socket, without waking the object
+   * (`setWebSocketAutoResponse`). A no-op where the runtime lacks it.
+   */
+  readonly setAutoResponse: (request: string, response: string) => void;
 };
 
 /**

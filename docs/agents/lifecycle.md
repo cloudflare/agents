@@ -417,6 +417,26 @@ Handlers are wire-agnostic. Both kinds of connection dispatch the same
 `onConnect`/`onMessage`/`onClose`/`onError`, appear in `getConnections()`,
 and honour `connection.close(code, reason)`.
 
+### Heartbeat
+
+Cloudflare closes a WebSocket that carries no traffic in either direction
+for a while, and does so without a close frame: the browser still reports
+`OPEN`, sends go nowhere, and no reconnect runs. The capability and the
+clients close that gap together:
+
+- Before its first hibernating accept, the capability registers a
+  `ping` → `pong` auto-response pair (`setWebSocketAutoResponse`). The
+  platform answers every `ping` text frame with `pong` on every hibernated
+  socket without waking the object, at no cost, on `Agent` and plain hosts
+  alike. A `ping` that reaches the capability anyway — the Cap'n Web wire,
+  or a runtime without auto-response — is answered the same way and never
+  reaches `onMessage`.
+- `AgentClient` and `useAgent` send `ping` every 30 seconds while the socket
+  is open and reconnect if no `pong` arrives within 10 seconds. See the
+  `heartbeat` option in the [client SDK](./client-sdk.md#heartbeat).
+
+Nothing is stored per connection. A client that never pings is unaffected.
+
 ## Native RPC
 
 Native Durable Object RPC does not pass through `fetch`. An RPC method that

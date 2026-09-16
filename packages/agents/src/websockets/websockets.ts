@@ -23,6 +23,7 @@ import {
   setConnectionReadonly
 } from "./connection-flags";
 import { exposableMethods, type CallableInvoker } from "./callables-target";
+import { HEARTBEAT_PING, HEARTBEAT_PONG } from "./heartbeat";
 import type {
   SyncedState,
   WebSocketHandlers,
@@ -164,6 +165,8 @@ export class WebSockets extends LifecycleCapability {
   readonly #callables: ReadonlyMap<string, CallableInvoker>;
   readonly #sessions = new Map<string, CapnWebSession>();
   #manager: ConnectionManager | undefined;
+  /** Whether the ping/pong auto-response pair is registered on this instance. */
+  #heartbeatRegistered = false;
 
   constructor(options: WebSocketsOptions = {}) {
     super("websockets");
@@ -270,6 +273,18 @@ export class WebSockets extends LifecycleCapability {
     return this.#manager;
   }
 
+  /**
+   * Have the platform answer the client heartbeat on every hibernated
+   * socket: a `ping` text frame gets `pong` back without waking the
+   * object, at no cost. Registered once per instance, before the first
+   * accept; the platform keeps the pair while sockets hibernate.
+   */
+  #registerHeartbeat(): void {
+    if (this.#heartbeatRegistered) return;
+    this.#heartbeatRegistered = true;
+    this.lifecycle.sockets.setAutoResponse(HEARTBEAT_PING, HEARTBEAT_PONG);
+  }
+
   // ── Wire-independent protocol ──────────────────────────────────────────
 
   async #connect(
@@ -308,6 +323,13 @@ export class WebSockets extends LifecycleCapability {
     connection: Connection,
     message: WebSocketMessage
   ): Promise<void> {
+    // A heartbeat ping the platform did not answer — the Cap'n Web wire,
+    // or a runtime without auto-response — is answered here and never
+    // reaches the host: it is transport traffic, not a message.
+    if (message === HEARTBEAT_PING) {
+      this.#send(connection, HEARTBEAT_PONG);
+      return;
+    }
     if (
       this.#state &&
       this.#protocol !== false &&
@@ -388,6 +410,7 @@ export class WebSockets extends LifecycleCapability {
       : [];
 
     // Hibernating WebSockets remain connected while the object is evicted.
+    this.#registerHeartbeat();
     connection = this.#connectionManager.accept(connection, { tags });
     await this.#connect(connection, ctx);
 

@@ -84,6 +84,52 @@ function SuspenseWrapper({ children }: { children: React.ReactNode }) {
 }
 
 describe("useAgent hook", () => {
+  describe("heartbeat", () => {
+    it("pings on the interval and keeps pong out of onMessage", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onMessage = vi.fn();
+      let capturedAgent: TestAgent | null = null;
+      const onAgent = vi.fn((agent: TestAgent) => {
+        capturedAgent = agent;
+      });
+
+      const { container } = await render(
+        <SuspenseWrapper>
+          <TestAgentComponent
+            options={{
+              agent: "TestStateAgent",
+              name: "hook-heartbeat",
+              host,
+              protocol,
+              heartbeat: { intervalMs: 100, timeoutMs: 2000 },
+              onMessage
+            }}
+            onAgent={onAgent}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(() => {
+        expect(
+          container.querySelector('[data-testid="agent-status"]')?.textContent
+        ).toBe("connected");
+      });
+
+      const send = vi.spyOn(capturedAgent!, "send");
+      await vi.waitFor(
+        () => {
+          const pings = send.mock.calls.filter(([data]) => data === "ping");
+          expect(pings.length).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 5000 }
+      );
+      // The hook consumes pong before it can reach the user's handler.
+      const seen = onMessage.mock.calls.map(([event]) => event.data);
+      expect(seen).not.toContain("pong");
+      expect(capturedAgent!.identified).toBe(true);
+    });
+  });
+
   describe("connection lifecycle", () => {
     it("should connect and receive identity", async () => {
       const { host, protocol } = getTestWorkerHost();

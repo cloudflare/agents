@@ -17,9 +17,12 @@ import {
   boundCapnWebSocket,
   type CapnWebSocket
 } from "./websockets/capnweb-socket";
+import { Heartbeat, HEARTBEAT_PONG } from "./websockets/heartbeat";
+import type { HeartbeatOptions } from "./websockets/heartbeat";
 import type { AgentTransport } from "./websockets/transport-protocol";
 
 export type { AgentTransport } from "./websockets/transport-protocol";
+export type { HeartbeatOptions } from "./websockets/heartbeat";
 
 export class AgentConnectionError extends Error {
   code: number;
@@ -118,6 +121,15 @@ export type AgentClientOptions<State = unknown> = Omit<
     defaultCallTimeout?: number;
     /** Called when the connection closes with a terminal code and will not reconnect. */
     onConnectionError?: (error: AgentConnectionError) => void;
+    /**
+     * Keep an idle socket alive and notice when the network drops it.
+     * While the socket is open the client sends a `ping` text frame every
+     * `intervalMs` (default 30 000) and the host answers `pong` without
+     * waking; if no `pong` arrives within `timeoutMs` (default 10 000) the
+     * socket is closed locally and the normal reconnect runs. Pass `false`
+     * to send nothing.
+     */
+    heartbeat?: HeartbeatOptions;
   };
 
 /**
@@ -517,6 +529,7 @@ export class AgentClient<
    */
   readonly #capnWeb: { current: CapnWebSocket | null };
   readonly #nativeQueue = new NativeCallQueue();
+  readonly #heartbeat: Heartbeat;
 
   constructor(options: AgentClientOptions<State>) {
     const capnWeb: { current: CapnWebSocket | null } = { current: null };
@@ -561,8 +574,15 @@ export class AgentClient<
     // Initialize ready promise
     this._resetReady();
 
+    this.#heartbeat = new Heartbeat(this, options.heartbeat);
+
     this.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
+        // Heartbeat answer: liveness only, never a message.
+        if (event.data === HEARTBEAT_PONG) {
+          this.#heartbeat.pong();
+          return;
+        }
         let parsedMessage: Record<string, unknown>;
         try {
           parsedMessage = JSON.parse(event.data);
@@ -674,6 +694,7 @@ export class AgentClient<
     // dispatching "open" — anything queued has now been transmitted.
     this.addEventListener("open", () => {
       this.connectionError = null;
+      this.#heartbeat.start();
       for (const pending of this._pendingCalls.values()) {
         pending.transmitted = true;
       }
@@ -684,6 +705,9 @@ export class AgentClient<
     // Clean up pending calls and reset ready state when connection closes
     this.addEventListener("close", (event) => {
       const terminalClose = isTerminalCloseEvent(event);
+      // The heartbeat belongs to the socket that just closed; the next
+      // open starts it again.
+      this.#heartbeat.stop();
       // Reset ready state for next connection
       this.identified = false;
       this._resetReady();
@@ -747,6 +771,7 @@ export class AgentClient<
    * underlying WebSocket close event fires.
    */
   close(code?: number, reason?: string) {
+    this.#heartbeat.stop();
     // Immediately reject all pending calls on intentional close
     this._rejectPendingCalls("Connection closed");
 

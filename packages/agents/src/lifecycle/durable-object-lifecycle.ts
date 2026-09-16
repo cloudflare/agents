@@ -354,7 +354,21 @@ export class Lifecycle<
       sockets: Object.freeze({
         accept: (ws: WebSocket, tags: string[]) =>
           this.#ctx.acceptWebSocket(ws, tags),
-        get: (tag?: string) => this.#ctx.getWebSockets(tag)
+        get: (tag?: string) => this.#ctx.getWebSockets(tag),
+        setAutoResponse: (request: string, response: string) => {
+          // Guarded: a test double or an older runtime may lack the
+          // auto-response API, and a heartbeat is not worth failing an
+          // upgrade over — the object then answers pings itself.
+          if (
+            typeof this.#ctx.setWebSocketAutoResponse !== "function" ||
+            typeof WebSocketRequestResponsePair !== "function"
+          ) {
+            return;
+          }
+          this.#ctx.setWebSocketAutoResponse(
+            new WebSocketRequestResponsePair(request, response)
+          );
+        }
       }),
       ready: () => this.#readyForCapabilityOperation(),
       status: () => this.#status,

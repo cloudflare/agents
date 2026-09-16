@@ -31,6 +31,8 @@ import {
   CAPNWEB_TRANSPORT_VALUE,
   type AgentTransport
 } from "./websockets/transport-protocol";
+import { Heartbeat, HEARTBEAT_PONG } from "./websockets/heartbeat";
+import type { HeartbeatOptions } from "./websockets/heartbeat";
 import { buildSubAgentPathUnchecked } from "./sub-routing";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
@@ -265,6 +267,15 @@ export type UseAgentOptions<State = unknown> = Omit<
     defaultCallTimeout?: number;
     /** Called when the connection closes with a terminal code and will not reconnect. */
     onConnectionError?: (error: AgentConnectionError) => void;
+    /**
+     * Keep an idle socket alive and notice when the network drops it.
+     * While the socket is open the hook sends a `ping` text frame every
+     * `intervalMs` (default 30 000) and the host answers `pong` without
+     * waking; if no `pong` arrives within `timeoutMs` (default 10 000) the
+     * socket is closed locally and the normal reconnect runs. Pass `false`
+     * to send nothing.
+     */
+    heartbeat?: HeartbeatOptions;
   };
 
 type OptionalArgsAgentMethodCall<AgentT> = <
@@ -363,6 +374,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     onConnectionError,
     shouldReconnectOnClose,
     transport = "cf-websocket",
+    heartbeat,
     ...restOptions
   } = options;
   // PartySocket keeps reconnection, buffering, and backoff; the transport
@@ -452,6 +464,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // that stale `agent` references held by old effect closures still
   // route their traffic to the live socket instead of a dead one.
   const socketRef = useRef<PartySocket | null>(null);
+  // The live socket's heartbeat; created per socket in an effect below.
+  const heartbeatRef = useRef<Heartbeat | null>(null);
 
   const defaultCallTimeoutRef = useRef(
     defaultCallTimeout ?? DEFAULT_CALL_TIMEOUT_MS
@@ -734,6 +748,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     onOpen: (event: Event) => {
       connectionErrorAddressKeyRef.current = null;
       setConnectionError(null);
+      heartbeatRef.current?.start();
       // The socket is open: transmit any RPC requests that were issued
       // while disconnected (or while a previous socket was being
       // replaced). They were never handed to a socket before, so this
@@ -743,6 +758,11 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     },
     onMessage: (message) => {
       if (typeof message.data === "string") {
+        // Heartbeat answer: liveness only, never a message.
+        if (message.data === HEARTBEAT_PONG) {
+          heartbeatRef.current?.pong();
+          return;
+        }
         let parsedMessage: Record<string, unknown>;
         try {
           parsedMessage = JSON.parse(message.data);
@@ -870,6 +890,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         (event.target as PartySocket | null) ?? socketRef.current;
       const isCurrentSocket = closedSocket === socketRef.current;
       const terminalClose = isTerminalCloseEvent(event);
+      if (isCurrentSocket) heartbeatRef.current?.stop();
 
       // Calls transmitted on the closed socket can never receive their
       // response — reject them. Calls still queued (never transmitted)
@@ -926,6 +947,29 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   };
   // Update the live-socket ref before anything below can use it.
   socketRef.current = agent;
+
+  // One heartbeat per socket object. The effect cleanup clears its timers,
+  // so a replaced socket — or a StrictMode double mount — leaks nothing;
+  // a socket that is already open when the effect runs starts at once.
+  const heartbeatDisabled = heartbeat === false;
+  const heartbeatIntervalMs =
+    heartbeat === false ? undefined : heartbeat?.intervalMs;
+  const heartbeatTimeoutMs =
+    heartbeat === false ? undefined : heartbeat?.timeoutMs;
+  useEffect(() => {
+    const controller = new Heartbeat(
+      agent,
+      heartbeatDisabled
+        ? false
+        : { intervalMs: heartbeatIntervalMs, timeoutMs: heartbeatTimeoutMs }
+    );
+    heartbeatRef.current = controller;
+    if (agent.readyState === agent.OPEN) controller.start();
+    return () => {
+      controller.stop();
+      if (heartbeatRef.current === controller) heartbeatRef.current = null;
+    };
+  }, [agent, heartbeatDisabled, heartbeatIntervalMs, heartbeatTimeoutMs]);
 
   // When `usePartySocket` replaces the socket object (connection options
   // changed — async query refresh, path change, enabled toggle, ...) the

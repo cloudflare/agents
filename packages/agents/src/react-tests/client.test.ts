@@ -989,6 +989,61 @@ describe("AgentClient", () => {
     });
   });
 
+  describe("heartbeat", () => {
+    it("sends ping on the interval, receives pong, and stays connected", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onClose = vi.fn();
+      const pongs: string[] = [];
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: "heartbeat-test",
+        host,
+        protocol,
+        heartbeat: { intervalMs: 100, timeoutMs: 2000 }
+      });
+      client.addEventListener("close", onClose);
+      client.addEventListener("message", (event) => {
+        if (event.data === "pong") pongs.push(event.data);
+      });
+      const send = vi.spyOn(client, "send");
+
+      await client.ready;
+
+      await vi.waitFor(
+        () => {
+          const pings = send.mock.calls.filter(([data]) => data === "ping");
+          expect(pings.length).toBeGreaterThanOrEqual(3);
+          expect(pongs.length).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 5000 }
+      );
+
+      // Every pong was answered by the platform: no timeout, no reconnect.
+      expect(onClose).not.toHaveBeenCalled();
+      expect(client.identified).toBe(true);
+    });
+
+    it("sends nothing when disabled", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: "heartbeat-disabled-test",
+        host,
+        protocol,
+        heartbeat: false
+      });
+      const send = vi.spyOn(client, "send");
+
+      await client.ready;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(send.mock.calls.filter(([data]) => data === "ping")).toEqual([]);
+      expect(client.identified).toBe(true);
+    });
+  });
+
   describe("query parameters", () => {
     it("should pass query params in connection", async () => {
       const { host, protocol } = getTestWorkerHost();

@@ -18,6 +18,13 @@ export type {
   WebSocketsOptions
 } from "./options";
 export {
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  HEARTBEAT_PING,
+  HEARTBEAT_PONG,
+  type HeartbeatOptions
+} from "./heartbeat";
+export {
   CAPNWEB_TRANSPORT_QUERY,
   CAPNWEB_TRANSPORT_VALUE,
   capnWebTransportUrl,
