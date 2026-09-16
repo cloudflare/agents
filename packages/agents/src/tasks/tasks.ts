@@ -1,7 +1,7 @@
 /**
  * Durable replayable execution for Lifecycle Objects. `Tasks` owns the
- * `cf_agents_task_runs` and `cf_agents_task_steps` tables, the definitions registry, run
- * acceptance, generation-fenced claiming, and due-run processing.
+ * run, step, and event tables, the definitions registry, run acceptance,
+ * generation-fenced claiming, and due-run processing.
  *
  * Tasks consumes only the standard capability services: storage, the job
  * queue, the host invocation boundary, and events. Every non-terminal run's
@@ -22,30 +22,46 @@ import { SqlError } from "../sql-error";
 import { TaskStore } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
-import { MissingTaskDefinitionError } from "./errors";
+import {
+  MissingTaskDefinitionError,
+  TaskEventIdempotencyConflictError,
+  TaskRunNotFoundError,
+  TaskRunTerminalError,
+  TaskSerializationError
+} from "./errors";
 import type { TaskEventType, TasksOptions } from "./options";
 import {
   AttemptSupersededError,
   TaskCancellation,
   isTaskCancellation,
   isTaskSuspension,
+  MAX_EVENT_TYPE_LENGTH,
   ReplayStep,
   toErrorSummary,
   type TaskStepEngine,
   type ResolvedStepPolicy
 } from "./replay";
-import { deserializeTaskValue, serializeTaskValue } from "./serialization";
+import {
+  deserializeTaskValue,
+  MAX_SERIALIZED_BYTES,
+  serializeTaskValue
+} from "./serialization";
 import type {
   Task,
   TaskCallbacks,
+  TaskEvent,
+  TaskEventReceipt,
+  TaskEventRow,
   TaskHandlers,
   TaskInput,
+  TaskJsonCompatible,
   TaskOutput,
   TaskReceipt,
   TaskRunOptions,
   TaskRunRow,
   TaskRunSnapshot,
   TaskRunState,
+  TaskSendEventOptions,
   TaskValue
 } from "./types";
 
@@ -77,7 +93,7 @@ export function setTaskDefinitionResolver(
 }
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
-const CURRENT_FIBER_SCHEMA_VERSION = 1;
+const CURRENT_FIBER_SCHEMA_VERSION = 2;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -95,6 +111,7 @@ const CLAIM_SLACK_MS = 30_000;
 
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_DEFINITION_NAME_LENGTH = 256;
+const MAX_EVENT_IDEMPOTENCY_KEY_LENGTH = 256;
 /**
  * Queue-job id prefix for run wakes. Run IDs are caller-selectable, so the
  * job id namespaces them instead of exposing them verbatim to the shared
@@ -251,6 +268,171 @@ export class Tasks<
     return this.#accept(definition, input, options);
   }
 
+  /** Durably buffer one event for a non-terminal run. */
+  async sendEvent<Payload>(
+    runId: string,
+    type: string,
+    payload: Payload &
+      (Payload extends TaskJsonCompatible<Payload> ? unknown : never),
+    options: TaskSendEventOptions = {}
+  ): Promise<TaskEventReceipt<Payload>> {
+    await this.lifecycle.ready();
+    if (typeof type !== "string" || type.length === 0) {
+      throw new Error("Task event types must be non-empty strings");
+    }
+    if (type.length > MAX_EVENT_TYPE_LENGTH) {
+      throw new Error(
+        `Task event type exceeds ${MAX_EVENT_TYPE_LENGTH} characters`
+      );
+    }
+    if (
+      options.idempotencyKey !== undefined &&
+      options.idempotencyKey.length === 0
+    ) {
+      throw new Error(
+        "Task event idempotencyKey must be a non-empty string when provided"
+      );
+    }
+    if (
+      options.idempotencyKey !== undefined &&
+      options.idempotencyKey.length > MAX_EVENT_IDEMPOTENCY_KEY_LENGTH
+    ) {
+      throw new Error(
+        `Task event idempotencyKey exceeds ${MAX_EVENT_IDEMPOTENCY_KEY_LENGTH} characters`
+      );
+    }
+    const payloadJson = serializeTaskValue(
+      payload,
+      `payload of event ${JSON.stringify(type)} for run "${runId}"`,
+      { rejectNonFiniteNumbers: true }
+    );
+    if (payloadJson === null) {
+      throw new TaskSerializationError(
+        `payload of event ${JSON.stringify(type)} for run "${runId}"`,
+        "undefined is not a JSON event payload"
+      );
+    }
+
+    const persistedPayload = deserializeTaskValue(payloadJson) as Payload;
+    let wake = false;
+    let definition: string | null = null;
+    const receipt = this.#store.transaction<TaskEventReceipt<Payload>>(() => {
+      const run = this.#store.getRun(runId);
+      if (!run) throw new TaskRunNotFoundError(runId);
+      definition = run.definition;
+      if (
+        run.state === "completed" ||
+        run.state === "failed" ||
+        run.state === "cancelled"
+      ) {
+        throw new TaskRunTerminalError(runId, run.state);
+      }
+
+      let event: TaskEvent<Payload>;
+      let accepted: boolean;
+      let available: boolean;
+      if (options.idempotencyKey !== undefined) {
+        const existing = this.#store.sql<TaskEventRow>`
+          SELECT * FROM cf_agents_task_events
+          WHERE run_id = ${runId}
+            AND idempotency_key = ${options.idempotencyKey}
+        `[0];
+        if (existing) {
+          if (existing.type !== type || existing.payload !== payloadJson) {
+            throw new TaskEventIdempotencyConflictError(
+              runId,
+              options.idempotencyKey
+            );
+          }
+          event = this.#store.rowToEvent<Payload>(existing);
+          accepted = false;
+          available = existing.consumed_at === null;
+        } else {
+          event = this.#insertEvent(
+            runId,
+            type,
+            payloadJson,
+            persistedPayload,
+            options.idempotencyKey
+          );
+          accepted = true;
+          available = true;
+        }
+      } else {
+        event = this.#insertEvent(runId, type, payloadJson, persistedPayload);
+        accepted = true;
+        available = true;
+      }
+
+      if (available && run.state === "waiting" && run.wait_reason === "event") {
+        const matching = this.#store.sql<{ present: number }>`
+          SELECT 1 AS present FROM cf_agents_task_steps
+          WHERE run_id = ${runId} AND kind = 'wait_event'
+            AND state = 'waiting' AND event_type = ${type}
+          LIMIT 1
+        `;
+        if (matching.length > 0) {
+          const now = Date.now();
+          this.#store.sql`
+            UPDATE cf_agents_task_runs
+            SET next_at = ${now}, updated_at = ${now}
+            WHERE run_id = ${runId} AND state = 'waiting'
+              AND wait_reason = 'event'
+          `;
+          wake = true;
+        }
+      }
+
+      return { ...event, accepted };
+    });
+    if (wake) await this.#syncWake(runId);
+    if (receipt.accepted) {
+      this.#emit("task:event:received", {
+        runId,
+        definition,
+        type,
+        eventId: receipt.eventId
+      });
+    }
+    return receipt;
+  }
+
+  #insertEvent<Payload>(
+    runId: string,
+    type: string,
+    payloadJson: string,
+    payload: Payload,
+    idempotencyKey?: string
+  ): TaskEvent<Payload> {
+    const event: TaskEvent<Payload> = {
+      eventId: `event_${nanoid()}`,
+      type,
+      payload,
+      createdAt: Date.now()
+    };
+    const eventJson = serializeTaskValue(
+      event,
+      `event ${JSON.stringify(type)} for run "${runId}"`
+    );
+    if (eventJson === null) throw new Error("A Task event cannot be undefined");
+    const serializedSize = new TextEncoder().encode(eventJson).byteLength;
+    if (serializedSize > MAX_SERIALIZED_BYTES - 2) {
+      throw new TaskSerializationError(
+        `event ${JSON.stringify(type)} for run "${runId}"`,
+        `serialized size ${serializedSize} bytes leaves no room for a journal batch`
+      );
+    }
+    this.#store.sql`
+      INSERT INTO cf_agents_task_events
+        (event_id, run_id, type, payload, serialized_size, idempotency_key,
+         created_at)
+      VALUES
+        (${event.eventId}, ${runId}, ${type}, ${payloadJson},
+         ${serializedSize}, ${idempotencyKey ?? null}, ${event.createdAt})
+    `;
+    return event;
+  }
+
   /**
    * A typed handle scoped to one declared definition: its `run`, `get`,
    * `getByIdempotencyKey`, and `cancel` see only that definition's runs. The
@@ -290,7 +472,9 @@ export class Tasks<
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
-      this.#store.ensureTables();
+      const sqlVersion = this.#store.stepSchemaVersion();
+      if (sqlVersion === 1) this.#store.migrateV1ToV2();
+      else this.#store.ensureTables();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
     this.#reconcile();
@@ -405,13 +589,18 @@ export class Tasks<
 
   /** Mirror every non-terminal run into the queue (startup reconcile). */
   async #syncAllWakes(): Promise<void> {
-    const rows = this.#store.sql<{ run_id: string; next_at: number }>`
+    const rows = this.#store.sql<{ run_id: string; next_at: number | null }>`
       SELECT run_id, next_at FROM cf_agents_task_runs
       WHERE state IN ('pending', 'waiting', 'running')
-        AND next_at IS NOT NULL
     `;
     let skipped = false;
     for (const { run_id, next_at } of rows) {
+      if (next_at === null) {
+        if (this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${run_id}`)) {
+          await this.#syncWake(run_id);
+        }
+        continue;
+      }
       // On restart the mirror usually survived alongside the run row (same
       // storage), and a same-values upsert is still a billed row write —
       // skip it when the durable job already carries this run's deadline.
@@ -657,6 +846,13 @@ export class Tasks<
       await this.#settleCancelled(runId, null, row.cancel_reason ?? undefined);
       return;
     }
+    if (
+      row.state === "waiting" &&
+      row.wait_reason === "event" &&
+      row.next_at === null
+    ) {
+      return;
+    }
     if (row.next_at !== null && row.next_at > now) return;
 
     const handler = this.#resolveDefinition(row.definition);
@@ -813,21 +1009,37 @@ export class Tasks<
         );
         return;
       }
-      const suspended = this.#store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE cf_agents_task_runs
-         SET state = 'waiting', wait_reason = ?, next_at = ?, generation = NULL,
-             updated_at = ?
-         WHERE run_id = ? AND generation = ? AND state = 'running'`,
-        [thrown.reason, thrown.wakeAt, Date.now()]
-      );
+      const now = Date.now();
+      let wakeAt = thrown.wakeAt;
+      const suspended = this.#store.transaction(() => {
+        // An event may arrive after the handler unwinds but before this park.
+        // Rechecking under the same synchronous transaction makes that event
+        // an immediate replay instead of leaving an indefinite wait asleep.
+        if (thrown.reason === "event" && thrown.event) {
+          const available = this.#store.sql<{ present: number }>`
+            SELECT 1 AS present FROM cf_agents_task_events
+            WHERE run_id = ${runId} AND type = ${thrown.event.type}
+              AND consumed_at IS NULL
+            LIMIT 1
+          `;
+          if (available.length > 0) wakeAt = now;
+        }
+        return this.#store.fencedWrite(
+          runId,
+          generation,
+          `UPDATE cf_agents_task_runs
+           SET state = 'waiting', wait_reason = ?, next_at = ?, generation = NULL,
+               updated_at = ?
+           WHERE run_id = ? AND generation = ? AND state = 'running'`,
+          [thrown.reason, wakeAt, now]
+        );
+      });
       if (suspended) {
         this.#emit("task:waiting", {
           runId,
           definition: row.definition,
           reason: thrown.reason,
-          wakeAt: thrown.wakeAt
+          wakeAt
         });
         await this.#syncWake(runId);
       }
@@ -989,10 +1201,16 @@ export class Tasks<
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE state = 'running' AND generation IS NOT NULL
     `;
-    // Non-terminal rows must always carry a deadline; repair any without one.
+    // Pending and timer waits must carry deadlines. Indefinite event waits
+    // intentionally have none and therefore create no alarm.
     this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
-      WHERE state IN ('pending', 'waiting') AND next_at IS NULL
+      WHERE state = 'pending' AND next_at IS NULL
+    `;
+    this.#store.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
+      WHERE state = 'waiting' AND next_at IS NULL
+        AND coalesce(wait_reason, 'sleep') != 'event'
     `;
   }
 

@@ -9,6 +9,7 @@ import {
   type TaskSchedulerCoexistObject
 } from "../capabilities/tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
+import { MAX_SERIALIZED_BYTES } from "../../tasks";
 import type { Tasks, TaskRunSnapshot, TaskValue } from "../../tasks";
 
 /**
@@ -61,6 +62,79 @@ async function waitFor(
 }
 
 describe("Tasks capability", () => {
+  it("migrates a v1 step journal without losing rows", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        // Simulate a crash after the v1 SQL committed but before its version
+        // marker did. Startup must inspect SQLite instead of trusting KV.
+        await state.storage.put("cf_agents:tasks_schema_version", 0);
+        state.storage.sql.exec(`
+          CREATE TABLE cf_agents_task_steps (
+            run_id TEXT NOT NULL,
+            step_name TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
+            state TEXT NOT NULL CHECK (state IN (
+              'running', 'waiting', 'completed', 'failed'
+            )),
+            result TEXT,
+            error_name TEXT,
+            error_message TEXT,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            next_at INTEGER,
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            updated_at INTEGER NOT NULL,
+            completed_at INTEGER,
+            PRIMARY KEY (run_id, step_name)
+          ) WITHOUT ROWID
+        `);
+        const now = Date.now();
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_task_steps
+             (run_id, step_name, kind, state, attempt, created_at, updated_at,
+              completed_at)
+           VALUES ('old-run', 'old-step', 'sleep', 'completed', 0, ?, ?, ?)`,
+          now,
+          now,
+          now
+        );
+
+        await instance.lifecycle.start();
+
+        expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
+          2
+        );
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT step_name, kind, state FROM cf_agents_task_steps WHERE run_id = 'old-run'"
+            )
+            .toArray()
+        ).toEqual([
+          { step_name: "old-step", kind: "sleep", state: "completed" }
+        ]);
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_task_steps
+             (run_id, step_name, kind, state, attempt, event_type,
+              created_at, updated_at)
+           VALUES ('new-run', 'event-step', 'wait_event', 'waiting', 0,
+                   'approval', ?, ?)`,
+          now,
+          now
+        );
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT name FROM sqlite_master WHERE name = 'cf_agents_task_events'"
+            )
+            .toArray()
+        ).toHaveLength(1);
+      }
+    );
+  });
+
   it("accepts runs durably and deduplicates acceptance", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
@@ -340,6 +414,421 @@ describe("Tasks capability", () => {
       if (snapshot.state !== "completed") throw new Error("unreachable");
       expect(snapshot.result).toBe("done");
       expect(instance.stepRuns).toEqual(["sleeper:before", "sleeper:after"]);
+    });
+  });
+
+  it("buffers an event, wakes an indefinite wait, and consumes it once", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("eventWaiter", {
+          type: "approval"
+        });
+        const parked = await waitForState(instance.tasks, receipt.runId, [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting" || parked.reason !== "event") {
+          throw new Error("expected event wait");
+        }
+        expect("wakeAt" in parked).toBe(false);
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT id FROM cf_agents_jobs WHERE id = ?",
+              `task:${receipt.runId}`
+            )
+            .toArray()
+        ).toEqual([]);
+
+        await instance.tasks.sendEvent(receipt.runId, "Approval", {
+          value: "wrong case"
+        });
+        expect((await instance.tasks.get(receipt.runId))?.state).toBe(
+          "waiting"
+        );
+
+        const sent = await instance.tasks.sendEvent(
+          receipt.runId,
+          "approval",
+          { value: "yes" },
+          { idempotencyKey: "approval:1" }
+        );
+        expect(sent.accepted).toBe(true);
+
+        const completed = await waitForState(instance.tasks, receipt.runId, [
+          "completed"
+        ]);
+        if (completed.state !== "completed") throw new Error("unreachable");
+        expect(completed.result).toEqual({
+          eventId: sent.eventId,
+          type: "approval",
+          payload: { value: "yes" },
+          createdAt: sent.createdAt
+        });
+        const [event] = state.storage.sql
+          .exec(
+            "SELECT consumed_step_name FROM cf_agents_task_events WHERE event_id = ?",
+            sent.eventId
+          )
+          .toArray();
+        expect(event?.consumed_step_name).toBe("incoming");
+      }
+    );
+  });
+
+  it("buffers events during work without interrupting the active step", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("eventDuringWork");
+      await waitFor(() => instance.releaseEventWork !== undefined);
+
+      const sent = await instance.tasks.sendEvent(receipt.runId, "approval", {
+        value: "buffered"
+      });
+      expect((await instance.tasks.get(receipt.runId))?.state).toBe("running");
+      expect(instance.stepRuns).toEqual(["eventDuringWork:work"]);
+
+      instance.releaseEventWork?.();
+      const completed = await waitForState(instance.tasks, receipt.runId, [
+        "completed"
+      ]);
+      if (completed.state !== "completed") throw new Error("unreachable");
+      expect(completed.result).toMatchObject({
+        eventId: sent.eventId,
+        payload: { value: "buffered" }
+      });
+    });
+  });
+
+  it("times out an event wait durably", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    let runId = "";
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("eventTimeout");
+        runId = receipt.runId;
+        const parked = await waitForState(instance.tasks, runId, ["waiting"]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("event");
+        expect(parked.wakeAt).toBeTypeOf("number");
+        backdateTaskWake(state.storage, runId, "incoming");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const completed = await waitForState(instance.tasks, runId, [
+        "completed"
+      ]);
+      if (completed.state !== "completed") throw new Error("unreachable");
+      expect(completed.result).toBeNull();
+    });
+  });
+
+  it("does not consume an event accepted after a timed wait deadline", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    let runId = "";
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("eventTimeout");
+        runId = receipt.runId;
+        await waitForState(instance.tasks, runId, ["waiting"]);
+        backdateTaskWake(state.storage, runId, "incoming");
+        const late = await instance.tasks.sendEvent(runId, "approval", {
+          value: "late"
+        });
+        expect(late.accepted).toBe(true);
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const completed = await waitForState(instance.tasks, runId, [
+          "completed"
+        ]);
+        if (completed.state !== "completed") throw new Error("unreachable");
+        expect(completed.result).toBeNull();
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT consumed_at FROM cf_agents_task_events WHERE run_id = ?",
+              runId
+            )
+            .toArray()
+        ).toEqual([{ consumed_at: null }]);
+      }
+    );
+  });
+
+  it("rejects an event whose envelope cannot fit in the journal", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("eventWaiter", {
+          type: "chunk"
+        });
+        await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+        const payload = "x".repeat(MAX_SERIALIZED_BYTES - 2);
+        await expect(
+          instance.tasks.sendEvent(receipt.runId, "chunk", payload)
+        ).rejects.toMatchObject({ name: "TaskSerializationError" });
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT event_id FROM cf_agents_task_events WHERE run_id = ?",
+              receipt.runId
+            )
+            .toArray()
+        ).toEqual([]);
+      }
+    );
+  });
+
+  it("rejects non-finite event numbers and oversized idempotency keys", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("eventWaiter", {
+        type: "value"
+      });
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+      await expect(
+        instance.tasks.sendEvent(receipt.runId, "value", {
+          nested: [Number.POSITIVE_INFINITY]
+        })
+      ).rejects.toMatchObject({ name: "TaskSerializationError" });
+      await expect(
+        instance.tasks.sendEvent(
+          receipt.runId,
+          "value",
+          { value: 1 },
+          { idempotencyKey: "x".repeat(257) }
+        )
+      ).rejects.toThrow(/exceeds 256 characters/);
+    });
+  });
+
+  it("bounds event batches by journal size before consuming them", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    let runId = "";
+    const chunk = "x".repeat(600_000);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("eventSizedDrain");
+        runId = receipt.runId;
+        await waitForState(instance.tasks, runId, ["waiting"]);
+        await instance.tasks.sendEvent(runId, "chunk", chunk);
+        await instance.tasks.sendEvent(runId, "chunk", chunk);
+        backdateTaskWake(state.storage, runId, "gate");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const completed = await waitForState(instance.tasks, runId, [
+          "completed"
+        ]);
+        if (completed.state !== "completed") throw new Error("unreachable");
+        expect(completed.result).toEqual([chunk.length]);
+        expect(
+          state.storage.sql
+            .exec(
+              `SELECT COUNT(*) AS count FROM cf_agents_task_events
+               WHERE run_id = ? AND consumed_at IS NULL`,
+              runId
+            )
+            .one().count
+        ).toBe(1);
+      }
+    );
+  });
+
+  it("repairs a missing wake when an event delivery is retried", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("eventWaiter", {
+          type: "approval"
+        });
+        await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+
+        const event = {
+          eventId: "event_wake_repair",
+          type: "approval",
+          payload: { value: "yes" },
+          createdAt: Date.now()
+        };
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_task_events
+             (event_id, run_id, type, payload, serialized_size,
+              idempotency_key, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          event.eventId,
+          receipt.runId,
+          event.type,
+          JSON.stringify(event.payload),
+          new TextEncoder().encode(JSON.stringify(event)).byteLength,
+          "approval:repair",
+          event.createdAt
+        );
+
+        const retried = await instance.tasks.sendEvent(
+          receipt.runId,
+          event.type,
+          event.payload,
+          { idempotencyKey: "approval:repair" }
+        );
+        expect(retried.accepted).toBe(false);
+        expect(retried.eventId).toBe(event.eventId);
+
+        const completed = await waitForState(instance.tasks, receipt.runId, [
+          "completed"
+        ]);
+        if (completed.state !== "completed") throw new Error("unreachable");
+        expect(completed.result).toMatchObject({ eventId: event.eventId });
+      }
+    );
+  });
+
+  it("takes buffered events FIFO in bounded, consume-once batches", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    let runId = "";
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("eventDrain");
+        runId = receipt.runId;
+        await waitForState(instance.tasks, runId, ["waiting"]);
+        await instance.tasks.sendEvent(runId, "item", { value: 1 });
+        await instance.tasks.sendEvent(runId, "other", { value: 9 });
+        await instance.tasks.sendEvent(runId, "item", { value: 2 });
+        await instance.tasks.sendEvent(runId, "item", { value: 3 });
+        backdateTaskWake(state.storage, runId, "gate");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const completed = await waitForState(instance.tasks, runId, [
+          "completed"
+        ]);
+        if (completed.state !== "completed") throw new Error("unreachable");
+        expect(completed.result).toMatchObject({
+          first: [{ payload: { value: 1 } }, { payload: { value: 2 } }],
+          second: [{ payload: { value: 3 } }]
+        });
+        const available = state.storage.sql
+          .exec(
+            "SELECT type FROM cf_agents_task_events WHERE run_id = ? AND consumed_at IS NULL",
+            runId
+          )
+          .toArray();
+        expect(available).toEqual([{ type: "other" }]);
+      }
+    );
+  });
+
+  it("replays a journaled event take without consuming later arrivals", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    let runId = "";
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        instance.failuresBeforeSuccess = 1;
+        const receipt = await instance.tasks.run("eventReplay");
+        runId = receipt.runId;
+        await waitForState(instance.tasks, runId, ["waiting"]);
+        await instance.tasks.sendEvent(runId, "item", { value: 1 });
+        await instance.tasks.sendEvent(runId, "item", { value: 2 });
+        backdateTaskWake(state.storage, runId, "gate");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const parked = await waitForState(instance.tasks, runId, ["waiting"]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("retry");
+        await instance.tasks.sendEvent(runId, "item", { value: 3 });
+        backdateTaskWake(state.storage, runId, "after-events");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const completed = await waitForState(instance.tasks, runId, [
+          "completed"
+        ]);
+        if (completed.state !== "completed") throw new Error("unreachable");
+        expect(completed.result).toMatchObject([
+          { payload: { value: 1 } },
+          { payload: { value: 2 } }
+        ]);
+        expect(instance.stepRuns).toEqual([
+          "eventReplay:after-events",
+          "eventReplay:after-events"
+        ]);
+        const available = state.storage.sql
+          .exec(
+            "SELECT payload FROM cf_agents_task_events WHERE run_id = ? AND consumed_at IS NULL",
+            runId
+          )
+          .toArray();
+        expect(available).toEqual([{ payload: '{"value":3}' }]);
+      }
+    );
+  });
+
+  it("deduplicates events and rejects conflicts or invalid targets", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await expect(
+        instance.tasks.sendEvent("missing", "item", { value: 1 })
+      ).rejects.toMatchObject({ name: "TaskRunNotFoundError" });
+
+      const receipt = await instance.tasks.run("eventDrain");
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+      const first = await instance.tasks.sendEvent(
+        receipt.runId,
+        "item",
+        { value: 1 },
+        { idempotencyKey: "delivery:1" }
+      );
+      const duplicate = await instance.tasks.sendEvent(
+        receipt.runId,
+        "item",
+        { value: 1 },
+        { idempotencyKey: "delivery:1" }
+      );
+      expect(duplicate).toEqual({ ...first, accepted: false });
+      await expect(
+        instance.tasks.sendEvent(
+          receipt.runId,
+          "item",
+          { value: 2 },
+          { idempotencyKey: "delivery:1" }
+        )
+      ).rejects.toMatchObject({ name: "TaskEventIdempotencyConflictError" });
+
+      await instance.tasks.cancel(receipt.runId);
+      await expect(
+        instance.tasks.sendEvent(receipt.runId, "item", { value: 3 })
+      ).rejects.toMatchObject({ name: "TaskRunTerminalError" });
     });
   });
 

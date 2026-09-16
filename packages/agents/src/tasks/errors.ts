@@ -106,3 +106,43 @@ export class TaskSerializationError extends Error {
     this.name = "TaskSerializationError";
   }
 }
+
+/** Thrown when an event targets a Task run that does not exist. */
+export class TaskRunNotFoundError extends Error {
+  readonly runId: string;
+
+  constructor(runId: string) {
+    super(`Task run "${runId}" does not exist`);
+    this.name = "TaskRunNotFoundError";
+    this.runId = runId;
+  }
+}
+
+/** Thrown when an event targets a Task run that has already settled. */
+export class TaskRunTerminalError extends Error {
+  readonly runId: string;
+  readonly state: "completed" | "failed" | "cancelled";
+
+  constructor(runId: string, state: "completed" | "failed" | "cancelled") {
+    super(`Task run "${runId}" is already ${state}`);
+    this.name = "TaskRunTerminalError";
+    this.runId = runId;
+    this.state = state;
+  }
+}
+
+/** Thrown when one event idempotency key is reused for different content. */
+export class TaskEventIdempotencyConflictError extends Error {
+  readonly runId: string;
+  readonly idempotencyKey: string;
+
+  constructor(runId: string, idempotencyKey: string) {
+    super(
+      `Task event idempotency key "${idempotencyKey}" was already used with ` +
+        `different content in run "${runId}"`
+    );
+    this.name = "TaskEventIdempotencyConflictError";
+    this.runId = runId;
+    this.idempotencyKey = idempotencyKey;
+  }
+}

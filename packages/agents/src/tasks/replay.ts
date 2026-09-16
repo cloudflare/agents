@@ -21,8 +21,13 @@ import type {
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,
+  TaskEvent,
+  TaskJson,
+  TaskJsonEventStepName,
   TaskStepRow,
+  TaskTakeEventsOptions,
   TaskValue,
+  TaskWaitForEventOptions,
   TaskWaitReason
 } from "./types";
 
@@ -43,6 +48,12 @@ export const MAX_STEPS_PER_RUN = 10_000;
 /** Longest accepted step name. Step names are durable journal keys. */
 export const MAX_STEP_NAME_LENGTH = 256;
 
+/** Longest accepted mailbox event type. */
+export const MAX_EVENT_TYPE_LENGTH = 256;
+
+/** Largest event drain one step may journal. */
+export const MAX_EVENTS_PER_TAKE = 1_000;
+
 /**
  * Thrown by the engine to end one execution attempt while its run waits for
  * a durable deadline (sleep or retry). Not an `Error` subclass so a step
@@ -50,12 +61,18 @@ export const MAX_STEP_NAME_LENGTH = 256;
  * it; the capability re-checks with {@link isTaskSuspension}.
  */
 export class TaskSuspension {
-  readonly wakeAt: number;
+  readonly wakeAt: number | null;
   readonly reason: TaskWaitReason;
+  readonly event: { readonly type: string } | undefined;
 
-  constructor(wakeAt: number, reason: TaskWaitReason) {
+  constructor(
+    wakeAt: number | null,
+    reason: TaskWaitReason,
+    event?: { readonly type: string }
+  ) {
     this.wakeAt = wakeAt;
     this.reason = reason;
+    this.event = event;
   }
 }
 
@@ -113,6 +130,17 @@ export interface TaskStepEngine {
 
   /** Journal an already-elapsed sleep born-completed, in one row write. */
   insertCompletedSleep(name: string): void;
+
+  /** Atomically consume mailbox rows and journal one event step result. */
+  consumeEventStep(
+    name: string,
+    kind: "wait_event" | "take_events",
+    type: string,
+    limit: number,
+    wakeAt: number | null
+  ):
+    | { state: "waiting" }
+    | { state: "completed"; result: TaskEvent | TaskEvent[] | null };
 
   /** Claim the next attempt of an existing step. Returns the new attempt. */
   claimStepAttempt(name: string): number;
@@ -313,6 +341,113 @@ export class ReplayStep implements TaskStep {
     return this.#sleepAt(name, () => wakeAt);
   }
 
+  waitForEvent<Payload = TaskJson>(
+    name: TaskJsonEventStepName<Payload>,
+    type: string
+  ): Promise<TaskEvent<Payload>>;
+  waitForEvent<Payload = TaskJson>(
+    name: TaskJsonEventStepName<Payload>,
+    type: string,
+    options: TaskWaitForEventOptions
+  ): Promise<TaskEvent<Payload> | null>;
+  async waitForEvent<Payload = TaskJson>(
+    name: string,
+    type: string,
+    options?: TaskWaitForEventOptions
+  ): Promise<TaskEvent<Payload> | null> {
+    const timeoutMs =
+      options === undefined
+        ? null
+        : parseTaskDuration(options.timeout, "event wait timeout");
+    this.#enterStep(name);
+    this.#validateEventType(type);
+
+    const row = this.#engine.readStep(name);
+    if (row !== undefined) {
+      if (row.kind !== "wait_event" || row.event_type !== type) {
+        throw new TaskReplayDivergedError(
+          name,
+          `journaled as a ${row.kind} step for ${JSON.stringify(row.event_type)} ` +
+            `but replayed as an event wait for ${JSON.stringify(type)}`
+        );
+      }
+      if (row.state === "completed") {
+        return deserializeTaskValue(row.result) as TaskEvent<Payload> | null;
+      }
+    } else {
+      this.#live = true;
+      this.#assertStepCapacity();
+    }
+
+    this.#live = true;
+    const wakeAt =
+      row === undefined
+        ? timeoutMs === null
+          ? null
+          : Date.now() + timeoutMs
+        : row.next_at;
+    const outcome = this.#engine.consumeEventStep(
+      name,
+      "wait_event",
+      type,
+      1,
+      wakeAt
+    );
+    if (outcome.state === "waiting") {
+      throw new TaskSuspension(wakeAt, "event", { type });
+    }
+    return outcome.result as TaskEvent<Payload> | null;
+  }
+
+  takeEvents<Payload = TaskJson>(
+    name: TaskJsonEventStepName<Payload>,
+    type: string,
+    options?: TaskTakeEventsOptions
+  ): Promise<TaskEvent<Payload>[]>;
+  async takeEvents<Payload = TaskJson>(
+    name: string,
+    type: string,
+    options: TaskTakeEventsOptions = {}
+  ): Promise<TaskEvent<Payload>[]> {
+    this.#enterStep(name);
+    this.#validateEventType(type);
+    const limit = options.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_EVENTS_PER_TAKE) {
+      throw new Error(
+        `Invalid event take limit: expected an integer from 1 to ${MAX_EVENTS_PER_TAKE}, got ${limit}`
+      );
+    }
+
+    const row = this.#engine.readStep(name);
+    if (row !== undefined) {
+      if (row.kind !== "take_events" || row.event_type !== type) {
+        throw new TaskReplayDivergedError(
+          name,
+          `journaled as a ${row.kind} step for ${JSON.stringify(row.event_type)} ` +
+            `but replayed as an event take for ${JSON.stringify(type)}`
+        );
+      }
+      if (row.state === "completed") {
+        return deserializeTaskValue(row.result) as TaskEvent<Payload>[];
+      }
+    } else {
+      this.#live = true;
+      this.#assertStepCapacity();
+    }
+
+    const outcome = this.#engine.consumeEventStep(
+      name,
+      "take_events",
+      type,
+      limit,
+      null
+    );
+    if (outcome.state === "waiting") {
+      throw new Error("A non-blocking event take cannot wait");
+    }
+    return outcome.result as TaskEvent<Payload>[];
+  }
+
   async status(message: string): Promise<void> {
     if (!this.#live) return;
     this.#engine.writeStatus(String(message));
@@ -344,6 +479,26 @@ export class ReplayStep implements TaskStep {
 
     const cancellation = this.#engine.cancellationRequested();
     if (cancellation) throw new TaskCancellation(cancellation.reason);
+  }
+
+  #validateEventType(type: string): void {
+    if (typeof type !== "string" || type.length === 0) {
+      throw new Error("Task event types must be non-empty strings");
+    }
+    if (type.length > MAX_EVENT_TYPE_LENGTH) {
+      throw new Error(
+        `Task event type exceeds ${MAX_EVENT_TYPE_LENGTH} characters`
+      );
+    }
+  }
+
+  #assertStepCapacity(): void {
+    if (this.#engine.countSteps() >= MAX_STEPS_PER_RUN) {
+      throw new Error(
+        `Run exceeded ${MAX_STEPS_PER_RUN} steps; split the work across ` +
+          `multiple Task runs`
+      );
+    }
   }
 
   /** First persist wins: the recorded wake time is authoritative. */

@@ -825,6 +825,22 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
         });
       }
       return "ran-to-completion";
+    },
+
+    eventThenSlowStep: async (_input: undefined, step: TaskStep) => {
+      const event = await step.waitForEvent<{ value: string }>(
+        "approval",
+        "approval"
+      );
+      await step.do("slow-after-event", async () => {
+        this.sql`
+          INSERT INTO e2e_task_event_progress (executed_at)
+          VALUES (${Date.now()})
+        `;
+        await fiberSleep(5000);
+        return "done";
+      });
+      return event;
     }
   } satisfies TaskHandlers;
 
@@ -840,6 +856,11 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
         run_id TEXT NOT NULL,
         interrupted_step TEXT,
         recovered_at INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS e2e_task_event_progress (
+        executed_at INTEGER NOT NULL
       )
     `;
   }
@@ -862,6 +883,36 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
       { runId: "e2e-guarded" }
     );
     return receipt.runId;
+  }
+
+  @callable()
+  async startEventRun(): Promise<string> {
+    const receipt = await this.tasks.run("eventThenSlowStep", undefined, {
+      runId: "e2e-event"
+    });
+    return receipt.runId;
+  }
+
+  @callable()
+  async sendApproval(value: string): Promise<void> {
+    await this.tasks.sendEvent(
+      "e2e-event",
+      "approval",
+      { value },
+      { idempotencyKey: "approval:1" }
+    );
+  }
+
+  @callable()
+  getEventProgress(): { executions: number; available: number } {
+    const executions = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM e2e_task_event_progress
+    `[0]?.count;
+    const available = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_events
+      WHERE run_id = 'e2e-event' AND consumed_at IS NULL
+    `[0]?.count;
+    return { executions: executions ?? 0, available: available ?? 0 };
   }
 
   @callable()

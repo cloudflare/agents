@@ -58,6 +58,14 @@ options)` inserts the run row and returns a receipt without waiting for
 - **Cancellation is cooperative.** A parked run settles at once; a live
   attempt is aborted through its signal and settles at its next step
   boundary.
+- **External input is a run mailbox.** `sendEvent()` durably appends a
+  run-scoped event. `waitForEvent()` and `takeEvents()` consume matching
+  events FIFO by exact type, atomically with their journal entry, so replay
+  returns the original delivery instead of consuming again. Indefinite waits
+  carry no deadline and create no queue job; timed waits use the existing
+  wake path. Events arriving before a wait remain buffered. Batch reads stop
+  before the journal's serialized-value limit rather than accepting a result
+  that cannot be replayed.
 - **Claim backstop.** A claimed attempt carries a durable deadline
   (`stepTimeout` plus slack); if its isolate dies, the deadline wakes the
   object and the run is reclaimed and replayed.
@@ -101,11 +109,18 @@ mirror (newer pushes win over drive results at the queue). See
 [alarm-coordination.md](./alarm-coordination.md) for the queue model
 itself.
 
+An indefinite event wait is the deliberate exception: its `next_at` is
+`NULL`, so its queue mirror is absent. A matching `sendEvent()` makes it due
+and restores the same per-run wake job. The park path rechecks the mailbox
+immediately before clearing the generation, closing the arrival-versus-park
+race without interrupting a currently running handler.
+
 ### Module layout
 
-`tasks.ts` holds the state machine (~900 lines); `store.ts` owns the two
-tables (`cf_agents_task_runs`, `cf_agents_task_steps`: DDL, row access,
-fenced writes, snapshot projection); `engine-port.ts` builds the
+`tasks.ts` holds the state machine; `store.ts` owns the three tables
+(`cf_agents_task_runs`, `cf_agents_task_steps`, and
+`cf_agents_task_events`: DDL, row access, fenced writes, snapshot
+projection); `engine-port.ts` builds the
 storage-side port `ReplayStep` drives; `replay.ts` is the replay/journal
 engine; types, errors, serialization, and duration parsing are their own
 modules.
@@ -173,6 +188,10 @@ by using the API rather than reasoning about it:
   live state (streams, connections, SQL) transactionally, and carry their
   own billing and latency. Object-local work needs an object-local engine;
   the two compose (a task step may start a workflow).
+- **A separate general-purpose inbox.** Rejected because unsolicited input
+  has no durable continuation to resume. Application code should start a new
+  Task for unrelated messages; the mailbox exists only to deliver input to a
+  known run.
 - **One Durable Object per run.** Maximizes isolation but breaks the point
   of agent-local work: sharing the agent's state and identity.
 

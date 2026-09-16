@@ -172,4 +172,44 @@ describe("tasks capability eviction e2e", () => {
     expect(recoveries[0].run_id).toBe(runId);
     expect(recoveries[0].interrupted_step).toMatch(/^step:\d+$/);
   });
+
+  it("keeps an event wait and its consumed journal across SIGKILL", async () => {
+    wrangler = await startAndWait();
+
+    const runId = (await callTaskAgent("startEventRun")) as string;
+    expect(runId).toBe("e2e-event");
+    await waitForRunState(runId, "waiting");
+
+    // An indefinite wait survives a restart without an alarm or hot loop.
+    wrangler = await killAndRestart();
+    await callTaskAgent("sendApproval", ["yes"]);
+
+    for (let i = 0; i < 20; i++) {
+      const progress = (await callTaskAgent("getEventProgress")) as {
+        executions: number;
+        available: number;
+      };
+      if (progress.executions > 0) {
+        expect(progress.available).toBe(0);
+        break;
+      }
+      await sleep(250);
+      if (i === 19) throw new Error("post-event step did not start");
+    }
+
+    // Kill after consumption but before the following step completes. Replay
+    // must use the event step's journal rather than consume another event.
+    wrangler = await killAndRestart();
+    const completed = await waitForRunState(runId, "completed");
+    expect(completed.result).toMatchObject({
+      type: "approval",
+      payload: { value: "yes" }
+    });
+    const progress = (await callTaskAgent("getEventProgress")) as {
+      executions: number;
+      available: number;
+    };
+    expect(progress.executions).toBe(2);
+    expect(progress.available).toBe(0);
+  });
 });

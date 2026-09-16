@@ -10,8 +10,8 @@ import {
   type TaskStepEngine,
   type ResolvedStepPolicy
 } from "./replay";
-import { serializeTaskValue } from "./serialization";
-import type { TaskStepRow } from "./types";
+import { MAX_SERIALIZED_BYTES, serializeTaskValue } from "./serialization";
+import type { TaskEvent, TaskEventRow, TaskStepRow } from "./types";
 import type { TaskStore } from "./store";
 
 /** @internal What one step engine needs from its owning capability. */
@@ -94,6 +94,122 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
             (${runId}, ${name}, 'sleep', 'completed', 0, NULL, ${now},
              ${now}, ${now})
         `;
+    },
+    consumeEventStep: (name, kind, type, limit, wakeAt) => {
+      const outcome = deps.store.transaction<
+        | { state: "waiting" }
+        | { state: "completed"; result: TaskEvent | TaskEvent[] | null }
+      >(() => {
+        assertCurrent();
+        const now = Date.now();
+        const candidates =
+          kind === "wait_event"
+            ? deps.store.sql<TaskEventRow>`
+                SELECT * FROM cf_agents_task_events
+                WHERE run_id = ${runId} AND type = ${type}
+                  AND consumed_at IS NULL
+                ORDER BY sequence ASC
+                LIMIT 1
+              `
+            : deps.store.sql<TaskEventRow>`
+                WITH limited AS (
+                  SELECT *
+                  FROM cf_agents_task_events
+                  WHERE run_id = ${runId} AND type = ${type}
+                    AND consumed_at IS NULL
+                  ORDER BY sequence ASC
+                  LIMIT ${limit}
+                ), candidates AS (
+                  SELECT limited.*,
+                    SUM(serialized_size + 1) OVER (
+                      ORDER BY sequence ASC
+                    ) AS cumulative_size
+                  FROM limited
+                )
+                SELECT sequence, event_id, run_id, type, payload,
+                       serialized_size, idempotency_key, consumed_step_name,
+                       created_at, consumed_at
+                FROM candidates
+                WHERE cumulative_size <= ${MAX_SERIALIZED_BYTES - 1}
+                ORDER BY sequence ASC
+              `;
+        const rows =
+          kind === "wait_event" && wakeAt !== null
+            ? candidates.filter((row) => row.created_at <= wakeAt)
+            : candidates;
+        const events = rows.map((row) => deps.store.rowToEvent(row));
+        const timedOut =
+          kind === "wait_event" && wakeAt !== null && wakeAt <= now;
+
+        if (events.length === 0 && kind === "wait_event" && !timedOut) {
+          const existing = deps.store.sql<{ present: number }>`
+            SELECT 1 AS present FROM cf_agents_task_steps
+            WHERE run_id = ${runId} AND step_name = ${name}
+          `;
+          if (existing.length === 0) {
+            deps.store.sql`
+              INSERT INTO cf_agents_task_steps
+                (run_id, step_name, kind, state, attempt, next_at, event_type,
+                 created_at, updated_at)
+              VALUES
+                (${runId}, ${name}, 'wait_event', 'waiting', 0, ${wakeAt},
+                 ${type}, ${now}, ${now})
+            `;
+          }
+          return { state: "waiting" };
+        }
+
+        for (const row of rows) {
+          deps.store.sql`
+            UPDATE cf_agents_task_events
+            SET consumed_step_name = ${name}, consumed_at = ${now}
+            WHERE sequence = ${row.sequence} AND consumed_at IS NULL
+          `;
+        }
+        const result = kind === "take_events" ? events : (events[0] ?? null);
+        const resultJson = serializeTaskValue(
+          result,
+          `result of event step "${name}" in run "${runId}"`
+        );
+        const existing = deps.store.sql<{ present: number }>`
+          SELECT 1 AS present FROM cf_agents_task_steps
+          WHERE run_id = ${runId} AND step_name = ${name}
+        `;
+        if (existing.length === 0) {
+          deps.store.sql`
+            INSERT INTO cf_agents_task_steps
+              (run_id, step_name, kind, state, result, attempt, next_at,
+               event_type, created_at, completed_at, updated_at)
+            VALUES
+              (${runId}, ${name}, ${kind}, 'completed', ${resultJson}, 0, NULL,
+               ${type}, ${now}, ${now}, ${now})
+          `;
+        } else {
+          deps.store.sql`
+            UPDATE cf_agents_task_steps
+            SET state = 'completed', result = ${resultJson}, next_at = NULL,
+                completed_at = ${now}, updated_at = ${now}
+            WHERE run_id = ${runId} AND step_name = ${name}
+          `;
+        }
+        return { state: "completed", result };
+      });
+      if (outcome.state === "completed") {
+        const consumedEvents = Array.isArray(outcome.result)
+          ? outcome.result
+          : outcome.result === null
+            ? []
+            : [outcome.result];
+        if (consumedEvents.length > 0) {
+          deps.emit("task:event:consumed", {
+            step: name,
+            type,
+            count: consumedEvents.length,
+            eventIds: consumedEvents.map((event) => event.eventId)
+          });
+        }
+      }
+      return outcome;
     },
     claimStepAttempt: (name) => {
       assertCurrent();

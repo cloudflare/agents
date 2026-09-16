@@ -22,6 +22,27 @@ export type TaskJson =
  */
 export type TaskValue = TaskJson | undefined | void;
 
+/** @internal JSON-compatible projection that also accepts named interfaces. */
+export type TaskJsonCompatible<Value> = Value extends
+  | string
+  | number
+  | boolean
+  | null
+  ? Value
+  : Value extends (...args: never[]) => unknown
+    ? never
+    : Value extends readonly unknown[]
+      ? { [Key in keyof Value]: TaskJsonCompatible<Value[Key]> }
+      : Value extends object
+        ? Extract<keyof Value, symbol> extends never
+          ? { [Key in keyof Value]: TaskJsonCompatible<Value[Key]> }
+          : never
+        : never;
+
+/** @internal Rejects invalid explicit payload types through a step name. */
+export type TaskJsonEventStepName<Payload> =
+  Payload extends TaskJsonCompatible<Payload> ? string : never;
+
 /**
  * Constraint for a Tasks definitions map: named handlers invoked from the
  * beginning on every execution attempt, with completed steps returning
@@ -117,6 +138,41 @@ export interface TaskStepConfig {
   timeout?: number | TaskDurationString;
 }
 
+/** One durable event delivered to a Task run. */
+export type TaskEvent<Payload = TaskJson> = {
+  /** Stable ID assigned when the event is accepted. */
+  readonly eventId: string;
+  /** Exact, case-sensitive event type. */
+  readonly type: string;
+  /** JSON payload supplied by the sender. */
+  readonly payload: Payload;
+  /** Wall-clock time when the event was durably accepted. */
+  readonly createdAt: number;
+};
+
+/** Receipt returned after durably accepting or deduplicating an event. */
+export type TaskEventReceipt<Payload = TaskJson> = TaskEvent<Payload> & {
+  /** False when the idempotency key matched an existing identical event. */
+  readonly accepted: boolean;
+};
+
+/** Options for sending one event to a Task run. */
+export interface TaskSendEventOptions {
+  /** Stable key, up to 256 characters, deduplicating delivery attempts. */
+  readonly idempotencyKey?: string;
+}
+
+/** Options for a timed event wait. Omit the options to wait indefinitely. */
+export interface TaskWaitForEventOptions {
+  readonly timeout: number | TaskDurationString;
+}
+
+/** Options for draining currently buffered events without waiting. */
+export interface TaskTakeEventsOptions {
+  /** Maximum events to consume. Defaults to 100. */
+  readonly limit?: number;
+}
+
 /**
  * The step API a Task handler receives. Named steps are the run's durable
  * journal: `do` memoizes completed results, sleeps persist their first
@@ -158,6 +214,28 @@ export interface TaskStep {
   sleepUntil(name: string, when: number | Date): Promise<void>;
 
   /**
+   * Wait durably for the next unconsumed event of an exact type. Events sent
+   * before the wait remain buffered. Without a timeout this waits
+   * indefinitely and creates no alarm.
+   */
+  waitForEvent<Payload = TaskJson>(
+    name: TaskJsonEventStepName<Payload>,
+    type: string
+  ): Promise<TaskEvent<Payload>>;
+  waitForEvent<Payload = TaskJson>(
+    name: TaskJsonEventStepName<Payload>,
+    type: string,
+    options: TaskWaitForEventOptions
+  ): Promise<TaskEvent<Payload> | null>;
+
+  /** Consume currently buffered events of an exact type without waiting. */
+  takeEvents<Payload = TaskJson>(
+    name: TaskJsonEventStepName<Payload>,
+    type: string,
+    options?: TaskTakeEventsOptions
+  ): Promise<TaskEvent<Payload>[]>;
+
+  /**
    * Update observable progress. Replays stay silent until execution reaches
    * new ground, so old progress is not re-published as new.
    */
@@ -181,7 +259,7 @@ export type TaskRunState =
   | "cancelled";
 
 /** Why a waiting run is waiting. */
-export type TaskWaitReason = "sleep" | "retry";
+export type TaskWaitReason = "sleep" | "retry" | "event";
 
 /** Safe projection of an error retained with a failed run. */
 export interface TaskError {
@@ -250,8 +328,18 @@ export type TaskRunSnapshot<Output extends TaskValue> =
       runId: string;
       definition: string;
       state: "waiting";
-      reason: TaskWaitReason;
+      reason: "sleep" | "retry";
       wakeAt: number;
+      createdAt: number;
+      statusMessage?: string;
+      metadata?: Record<string, TaskJson>;
+    }
+  | {
+      runId: string;
+      definition: string;
+      state: "waiting";
+      reason: "event";
+      wakeAt?: number;
       createdAt: number;
       statusMessage?: string;
       metadata?: Record<string, TaskJson>;
@@ -338,7 +426,7 @@ export type TaskRunRow = {
 export type TaskStepRow = {
   run_id: string;
   step_name: string;
-  kind: "do" | "sleep";
+  kind: "do" | "sleep" | "wait_event" | "take_events";
   state: "running" | "waiting" | "completed" | "failed";
   result: string | null;
   error_name: string | null;
@@ -349,4 +437,19 @@ export type TaskStepRow = {
   started_at: number | null;
   updated_at: number;
   completed_at: number | null;
+  event_type: string | null;
+};
+
+/** @internal Raw `cf_agents_task_events` SQLite row. */
+export type TaskEventRow = {
+  sequence: number;
+  event_id: string;
+  run_id: string;
+  type: string;
+  payload: string;
+  serialized_size: number;
+  idempotency_key: string | null;
+  consumed_step_name: string | null;
+  created_at: number;
+  consumed_at: number | null;
 };

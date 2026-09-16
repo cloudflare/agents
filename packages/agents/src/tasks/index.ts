@@ -10,7 +10,10 @@ export type { TaskEventType, TasksOptions } from "./options";
 export type { TaskDurationString, TaskDurationUnit } from "./duration";
 export {
   DuplicateTaskStepError,
+  TaskEventIdempotencyConflictError,
   TaskReplayDivergedError,
+  TaskRunNotFoundError,
+  TaskRunTerminalError,
   TaskSerializationError,
   MissingTaskDefinitionError,
   NonRetryableError
@@ -20,6 +23,8 @@ export type {
   Task,
   TaskCallbacks,
   TaskError,
+  TaskEvent,
+  TaskEventReceipt,
   TaskHandlers,
   TaskInput,
   TaskJson,
@@ -28,9 +33,12 @@ export type {
   TaskRunOptions,
   TaskRunSnapshot,
   TaskRunState,
+  TaskSendEventOptions,
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,
+  TaskTakeEventsOptions,
   TaskValue,
+  TaskWaitForEventOptions,
   TaskWaitReason
 } from "./types";
