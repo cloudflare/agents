@@ -69,28 +69,6 @@ export type TestChatResult = {
   interruptedCalls: number;
 };
 
-/** Serializable projection of a public wait turn result for Worker RPC tests. */
-export type TestRunTurnResult = {
-  requestId: string;
-  status: SaveMessagesResult["status"];
-  continuation: boolean;
-  hasMessage: boolean;
-  messageId?: string;
-  messageText?: string;
-};
-
-function summarizeRunTurnResultForTest(result: TurnResult): TestRunTurnResult {
-  const text = result.message?.parts.find((part) => part.type === "text")?.text;
-  return {
-    requestId: result.requestId,
-    status: result.status,
-    continuation: result.continuation,
-    hasMessage: result.message !== undefined,
-    ...(result.message !== undefined && { messageId: result.message.id }),
-    ...(text !== undefined && { messageText: text })
-  };
-}
-
 /** Shallow JSON object for DO RPC returns (`Record<string, unknown>` fails RPC typing). */
 export type RpcJsonObject = Record<
   string,
@@ -250,43 +228,17 @@ function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
   };
 }
 
-function latestUserPromptText(callOptions: unknown): string {
-  if (callOptions === null || typeof callOptions !== "object") return "";
-  if (!("prompt" in callOptions) || !Array.isArray(callOptions.prompt)) {
-    return "";
-  }
+/** Typed model-call subset used by prompt-sensitive test models. */
+export type MockModelCallOptions = {
+  prompt?: Array<{
+    role?: string;
+    content?: string | Array<{ type?: string; text?: string }>;
+  }>;
+};
 
-  for (let index = callOptions.prompt.length - 1; index >= 0; index--) {
-    const promptItem = callOptions.prompt[index];
-    if (
-      promptItem === null ||
-      typeof promptItem !== "object" ||
-      !("role" in promptItem) ||
-      promptItem.role !== "user" ||
-      !("content" in promptItem)
-    ) {
-      continue;
-    }
-    if (typeof promptItem.content === "string") return promptItem.content;
-    if (!Array.isArray(promptItem.content)) return "";
-    return promptItem.content
-      .flatMap((part: unknown) =>
-        part !== null &&
-        typeof part === "object" &&
-        "type" in part &&
-        part.type === "text" &&
-        "text" in part &&
-        typeof part.text === "string"
-          ? [part.text]
-          : []
-      )
-      .join("");
-  }
-  return "";
-}
-
-function createMockModel(
-  response: string | ((callOptions: unknown) => string),
+/** Create a streaming text model with static or prompt-derived output. */
+export function createMockModel(
+  response: string | ((callOptions: MockModelCallOptions) => string),
   options: MockModelOptions = {}
 ): LanguageModel {
   return {
@@ -297,7 +249,7 @@ function createMockModel(
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream(callOptions: unknown) {
+    doStream(callOptions: MockModelCallOptions) {
       options.onCall?.(captureModelCallSettings(callOptions));
       const responseText =
         typeof response === "function" ? response(callOptions) : response;
@@ -3735,7 +3687,8 @@ export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
 // Extends Think with tools configured for tool integration testing.
 // Uses a mock model that calls the "echo" tool on first invocation.
 
-function createToolCallingMockModel(
+/** Create a two-step model that calls `echo` before its final text answer. */
+export function createToolCallingMockModel(
   toolInput = JSON.stringify({ message: "hello" })
 ): LanguageModel {
   let callCount = 0;
@@ -5097,15 +5050,6 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
   private _programmaticResponse = "Programmatic response";
-  private _queuedProgrammaticResponses: string[] = [];
-  private _respondToQueuedQuestion = false;
-  private _blockNextTurnAtBeforeTurn: {
-    markStarted: () => void;
-    release: Promise<void>;
-  } | null = null;
-  private _responseHookMessage: UIMessage | null = null;
-  private _mutateResponseHookMessage = false;
-  private _useToJsonToolModel = false;
   private _finalAnswerResponse: unknown = undefined;
   private _nestedAdmissionMode:
     | "wait"
@@ -5148,11 +5092,15 @@ export class ThinkProgrammaticTestAgent extends Think {
         cause: new Error(message)
       });
     }
-    return super.continueLastTurn(body, options);
+    const result = await super.continueLastTurn(body, options);
+    return {
+      requestId: result.requestId,
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error })
+    };
   }
 
   override getModel(): LanguageModel {
-    if (this._useToJsonToolModel) return createToolCallingMockModel();
     if (this._useRecoveryToolModel) return createToolCallingMockModel();
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
@@ -5169,37 +5117,10 @@ export class ThinkProgrammaticTestAgent extends Think {
         this._delayedChunks.delayMs
       );
     }
-    if (this._respondToQueuedQuestion) {
-      return createMockModel((callOptions) =>
-        latestUserPromptText(callOptions) === "First question"
-          ? "First answer"
-          : "Second answer"
-      );
-    }
-    return createMockModel(
-      this._queuedProgrammaticResponses.shift() ?? this._programmaticResponse
-    );
+    return createMockModel(this._programmaticResponse);
   }
 
   override getTools(): ToolSet {
-    if (this._useToJsonToolModel) {
-      return {
-        echo: tool({
-          description: "Return an object serialized through its own toJSON",
-          inputSchema: z.object({ message: z.string() }),
-          execute: () => ({
-            answer: 42,
-            toJSON() {
-              return { answer: 42 };
-            }
-          }),
-          toModelOutput: ({ output }) => ({
-            type: "text",
-            value: JSON.stringify(output)
-          })
-        })
-      };
-    }
     if (!this._useRecoveryToolModel) return {};
     return {
       echo: tool({
@@ -5225,16 +5146,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.getMessages();
   }
 
-  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+  override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
-    if (this._mutateResponseHookMessage) {
-      this._mutateResponseHookMessage = false;
-      const text = result.message.parts.find((part) => part.type === "text");
-      if (text?.type === "text") text.text = "Mutated by response hook";
-    }
-    const hookMessage = this._responseHookMessage;
-    this._responseHookMessage = null;
-    if (hookMessage) await this.addMessages([hookMessage]);
   }
 
   override async sendWorkflowEvent(
@@ -5268,12 +5181,6 @@ export class ThinkProgrammaticTestAgent extends Think {
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
     });
-    const blockedTurn = this._blockNextTurnAtBeforeTurn;
-    if (blockedTurn) {
-      this._blockNextTurnAtBeforeTurn = null;
-      blockedTurn.markStarted();
-      await blockedTurn.release;
-    }
     if (this._nestedAdmissionMode && !this._nestedAdmissionAttempted) {
       this._nestedAdmissionAttempted = true;
       try {
@@ -5611,128 +5518,6 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async testRunTurnWaitString(text: string): Promise<TurnResult> {
     return this.runTurn({ mode: "wait", input: text });
-  }
-
-  /** Run two public wait turns concurrently with distinct model answers. */
-  async testOverlappingRunTurnWaits(): Promise<
-    [TestRunTurnResult, TestRunTurnResult]
-  > {
-    this._respondToQueuedQuestion = true;
-    try {
-      const [first, second] = await Promise.all([
-        this.runTurn({ mode: "wait", input: "First question" }),
-        this.runTurn({ mode: "wait", input: "Second question" })
-      ]);
-      return [
-        summarizeRunTurnResultForTest(first),
-        summarizeRunTurnResultForTest(second)
-      ];
-    } finally {
-      this._respondToQueuedQuestion = false;
-    }
-  }
-
-  /** Queue a follow-up behind a blocked public continuation turn. */
-  async testContinuationQueuedWithFollowUp(): Promise<
-    [TestRunTurnResult, TestRunTurnResult]
-  > {
-    let markStarted = () => {};
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    let releaseTurn = () => {};
-    const release = new Promise<void>((resolve) => {
-      releaseTurn = resolve;
-    });
-    this._blockNextTurnAtBeforeTurn = { markStarted, release };
-    this._queuedProgrammaticResponses = [
-      "Continuation answer",
-      "Follow-up answer"
-    ];
-
-    const continuation = this.runTurn({
-      mode: "wait",
-      continuation: true
-    });
-    await started;
-    const followUp = this.runTurn({
-      mode: "wait",
-      input: "Follow-up question"
-    });
-    releaseTurn();
-    const [continuationResult, followUpResult] = await Promise.all([
-      continuation,
-      followUp
-    ]);
-    return [
-      summarizeRunTurnResultForTest(continuationResult),
-      summarizeRunTurnResultForTest(followUpResult)
-    ];
-  }
-
-  /** Change history and mutate the hook message after a public wait turn. */
-  async testRunTurnWithHistoryChangingResponseHook(): Promise<TestRunTurnResult> {
-    this._mutateResponseHookMessage = true;
-    this._responseHookMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      parts: [{ type: "text", text: "Hook follow-up" }]
-    };
-    return summarizeRunTurnResultForTest(
-      await this.runTurn({ mode: "wait", input: "Hook question" })
-    );
-  }
-
-  /** Return a wait result whose raw tool output has an own toJSON method. */
-  async testRunTurnWithToJsonToolResult(): Promise<{
-    result: TestRunTurnResult;
-    responseHookCalls: number;
-    toolOutputAnswer: number | null;
-  }> {
-    this._useToJsonToolModel = true;
-    const hooksBefore = this._responseLog.length;
-    try {
-      const result = await this.runTurn({
-        mode: "wait",
-        input: "Run the serialization tool"
-      });
-      const output = result.message?.parts.find((part) =>
-        part.type.startsWith("tool-")
-      )?.output;
-      const toolOutputAnswer =
-        output !== null &&
-        typeof output === "object" &&
-        "answer" in output &&
-        typeof output.answer === "number"
-          ? output.answer
-          : null;
-      return {
-        result: summarizeRunTurnResultForTest(result),
-        responseHookCalls: this._responseLog.length - hooksBefore,
-        toolOutputAnswer
-      };
-    } finally {
-      this._useToJsonToolModel = false;
-    }
-  }
-
-  /** Abort a public wait turn after streaming has started. */
-  async testRunTurnAbortMidStream(
-    text: string,
-    abortAfterMs: number
-  ): Promise<TestRunTurnResult> {
-    const controller = new AbortController();
-    setTimeout(
-      () => controller.abort(new Error("mid-stream runTurn abort")),
-      abortAfterMs
-    );
-    return summarizeRunTurnResultForTest(
-      await this.runTurn({
-        mode: "wait",
-        input: text,
-        signal: controller.signal
-      })
-    );
   }
 
   async testRunTurnWaitWithFn(text: string): Promise<TurnResult> {

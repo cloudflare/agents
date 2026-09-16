@@ -1050,12 +1050,10 @@ type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
   output?: unknown;
-  messageId?: string;
 };
 
 type ProgrammaticMessagesResult = SaveMessagesResult & {
   output?: unknown;
-  messageId?: string;
 };
 
 type ChatRecoveryRetryData = {
@@ -1568,6 +1566,11 @@ const admittedTurnContext = new AsyncLocalStorage<{
   channel?: string | undefined;
   continuation?: boolean | undefined;
   generation?: number | undefined;
+}>();
+
+const waitTurnResultContext = new AsyncLocalStorage<{
+  agent: unknown;
+  messageId?: string;
 }>();
 
 // Drains the underlying model stream when a drain loop exits early (in-stream
@@ -8301,16 +8304,18 @@ export class Think<
   }
 
   private async _enrichTurnResult(
-    result: SaveMessagesResult & { messageId?: string },
+    result: SaveMessagesResult,
     continuation: boolean
   ): Promise<TurnResult> {
-    const { messageId, ...turnResult } = result;
+    const capture = waitTurnResultContext.getStore();
     const message =
-      result.status === "completed" && messageId !== undefined
-        ? await this.session.getMessage(messageId)
+      result.status === "completed" &&
+      capture?.agent === this &&
+      capture.messageId !== undefined
+        ? await this.session.getMessage(capture.messageId)
         : null;
     return {
-      ...turnResult,
+      ...result,
       continuation,
       ...(message !== null && { message })
     };
@@ -8319,39 +8324,43 @@ export class Think<
   private async _runTurnWait(options: RunTurnWait): Promise<TurnResult> {
     this._validateRunTurnAdmission(options, "wait");
 
-    if (options.continuation === true) {
-      const result = await this.continueLastTurn(options.body, {
-        signal: options.signal,
-        channel: options.channel
-      });
-      return this._enrichTurnResult(result, true);
-    }
+    return waitTurnResultContext.run({ agent: this }, async () => {
+      if (options.continuation === true) {
+        const result = await this.continueLastTurn(options.body, {
+          signal: options.signal,
+          channel: options.channel
+        });
+        return this._enrichTurnResult(result, true);
+      }
 
-    const input = options.input;
-    if (input === undefined) {
-      throw new TypeError("runTurn: supply either input or continuation: true");
-    }
+      const input = options.input;
+      if (input === undefined) {
+        throw new TypeError(
+          "runTurn: supply either input or continuation: true"
+        );
+      }
 
-    if (typeof input === "function") {
+      if (typeof input === "function") {
+        const result = await this._runProgrammaticMessagesTurn(
+          crypto.randomUUID(),
+          input,
+          { signal: options.signal, channel: options.channel }
+        );
+        return this._enrichTurnResult(result, false);
+      }
+
+      const messages = this._normalizeRunTurnMessages(input);
+      if (messages.length === 0) {
+        return { requestId: "", status: "skipped", continuation: false };
+      }
+
       const result = await this._runProgrammaticMessagesTurn(
         crypto.randomUUID(),
-        input,
+        messages,
         { signal: options.signal, channel: options.channel }
       );
       return this._enrichTurnResult(result, false);
-    }
-
-    const messages = this._normalizeRunTurnMessages(input);
-    if (messages.length === 0) {
-      return { requestId: "", status: "skipped", continuation: false };
-    }
-
-    const result = await this._runProgrammaticMessagesTurn(
-      crypto.randomUUID(),
-      messages,
-      { signal: options.signal, channel: options.channel }
-    );
-    return this._enrichTurnResult(result, false);
+    });
   }
 
   private async _runTurnSubmit(
@@ -11337,9 +11346,7 @@ export class Think<
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const requestId = crypto.randomUUID();
-    const { messageId: _messageId, ...result } =
-      await this._runProgrammaticMessagesTurn(requestId, messages, options);
-    return result;
+    return this._runProgrammaticMessagesTurn(requestId, messages, options);
   }
 
   /**
@@ -11454,7 +11461,6 @@ export class Think<
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let output: unknown;
-    let messageId: string | undefined;
     let wasAborted = false;
 
     await this._admitTurn({
@@ -11591,7 +11597,6 @@ export class Think<
               status = streamResult.status;
               error = streamResult.error;
               output = streamResult.output;
-              messageId = streamResult.messageId;
               return;
             }
           };
@@ -11618,8 +11623,7 @@ export class Think<
       requestId,
       status,
       ...(error !== undefined && { error }),
-      ...(output !== undefined && { output }),
-      ...(status === "completed" && messageId !== undefined && { messageId })
+      ...(output !== undefined && { output })
     };
   }
 
@@ -11643,7 +11647,7 @@ export class Think<
   protected async continueLastTurn(
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
-  ): Promise<ProgrammaticMessagesResult> {
+  ): Promise<SaveMessagesResult> {
     const trigger = options?.trigger ?? "programmatic";
     this._assertNotInsideAdmittedTurn(trigger);
     const lastLeaf = await this.session.getLatestLeaf();
@@ -11664,7 +11668,6 @@ export class Think<
     const channel = options?.channel ?? this._channelFromLatestUserMessage();
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
-    let messageId: string | undefined;
     let wasAborted = false;
 
     await this._admitTurn({
@@ -11714,7 +11717,6 @@ export class Think<
               );
               status = streamResult.status;
               error = streamResult.error;
-              messageId = streamResult.messageId;
             }
           };
 
@@ -11736,12 +11738,7 @@ export class Think<
       status = "aborted";
     }
 
-    return {
-      requestId,
-      status,
-      ...(error !== undefined && { error }),
-      ...(status === "completed" && messageId !== undefined && { messageId })
-    };
+    return { requestId, status, ...(error !== undefined && { error }) };
   }
 
   private async _retryLastUserTurn(
@@ -13196,7 +13193,6 @@ export class Think<
     let streamAborted = false;
     let streamError: string | undefined;
     let output: unknown;
-    let persistedMessageId: string | undefined;
     // Set when an in-stream overflow error is recoverable (opt-in): suppresses
     // terminal delivery so the driver can compact and re-run the turn.
     let overflowRetry = false;
@@ -13507,8 +13503,9 @@ export class Think<
               parentId,
               { discard: this._discardStreamAtCutover(requestId) }
             );
-          if (!streamError && !streamAborted) {
-            persistedMessageId = storedMessageId;
+          if (!streamError && !streamAborted && storedMessageId !== undefined) {
+            const capture = waitTurnResultContext.getStore();
+            if (capture?.agent === this) capture.messageId = storedMessageId;
           }
           this._broadcastMessages();
         }
@@ -13542,10 +13539,7 @@ export class Think<
       ? { status: "error", error: streamError }
       : {
           status: streamAborted ? "aborted" : "completed",
-          ...(output !== undefined && { output }),
-          ...(persistedMessageId !== undefined && {
-            messageId: persistedMessageId
-          })
+          ...(output !== undefined && { output })
         };
   }
 
