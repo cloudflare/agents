@@ -20,6 +20,8 @@ const entries = [
   "src/mcp/server/index.ts",
   "src/mcp/client/do-oauth-client-provider.ts",
   "src/mcp/client/x402.ts",
+  "src/payments/x402/index.ts",
+  "src/payments/x402/mcp.ts",
   "src/observability/index.ts",
   "src/observability/ai/index.ts",
   "src/queue/index.ts",

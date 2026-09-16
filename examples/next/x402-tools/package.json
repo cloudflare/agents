@@ -1,0 +1,28 @@
+{
+  "name": "@cloudflare/agents-x402-tools-example",
+  "description": "A paid MCP tool built on the generic x402 payment core",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "call": "tsx --env-file=.env src/client.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@x402/core": "^2.17.0",
+    "@x402/evm": "^2.17.0",
+    "agents": "*",
+    "viem": "^2.53.1",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@types/node": "^26.0.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.115.0"
+  }
+}

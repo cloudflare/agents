@@ -1,5 +1,7 @@
 # x402 MCP — Paid Tools
 
+> Legacy example: `agents/x402` wrappers and `McpAgent` are deprecated and feature-frozen. See the [MCP SDK v2 paid-tool example](../next/x402-tools/) for the generic payment core, thin MCP adapter, and migration notes.
+
 Paid MCP tools using the [x402 payment protocol](https://x402.org). Includes both a server (`PayMCP`) with free and paid tools, and a client agent (`PayAgent`) that handles the payment confirmation flow — all in one Worker.
 
 ## What it demonstrates
