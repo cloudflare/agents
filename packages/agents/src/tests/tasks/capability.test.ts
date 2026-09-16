@@ -1124,7 +1124,7 @@ describe("Tasks run budget", () => {
           "failed"
         ]);
         if (snapshot.state !== "failed") throw new Error("unreachable");
-        expect(snapshot.error.name).toBe("TaskAttemptsExhaustedError");
+        expect(snapshot.error.name).toBe("TaskInterruptionsExhaustedError");
         expect(snapshot.error.message).toMatch(/interrupted 1 time\b/);
         expect(instance.stepRuns).toEqual([]);
         await waitFor(() => instance.runErrorRuns.length > 0);
@@ -1132,7 +1132,7 @@ describe("Tasks run budget", () => {
           {
             runId: "spent-run",
             definition: "pipeline",
-            name: "TaskAttemptsExhaustedError"
+            name: "TaskInterruptionsExhaustedError"
           }
         ]);
         // The failure is itself an interruption, and is counted like one:
@@ -1527,7 +1527,9 @@ describe("Tasks run budget", () => {
         const receipt = await instance.tasks.run(
           "sleeper",
           { ms: 60_000 },
-          { retries: { limit: 2, delay: "1 minute", backoff: "constant" } }
+          {
+            interruptions: { limit: 2, delay: "1 minute", backoff: "constant" }
+          }
         );
         await waitForState(instance.tasks, receipt.runId, ["waiting"]);
         return receipt.runId;
@@ -1571,7 +1573,9 @@ describe("Tasks run budget", () => {
         const receipt = await instance.tasks.run(
           "sleeper",
           { ms: 60_000 },
-          { retries: { limit: 1, delay: "1 minute", backoff: "constant" } }
+          {
+            interruptions: { limit: 1, delay: "1 minute", backoff: "constant" }
+          }
         );
         await waitForState(instance.tasks, receipt.runId, ["waiting"]);
         return receipt.runId;
@@ -1610,7 +1614,9 @@ describe("Tasks run budget", () => {
         const receipt = await instance.tasks.run(
           "concurrent",
           { label: "cc" },
-          { retries: { limit: 2, delay: "1 minute", backoff: "constant" } }
+          {
+            interruptions: { limit: 2, delay: "1 minute", backoff: "constant" }
+          }
         );
         const parked = await waitForState(instance.tasks, receipt.runId, [
           "waiting"
@@ -1853,7 +1859,7 @@ describe("Tasks run budget", () => {
         const receipt = await instance.tasks.run(
           "pipeline",
           { label: "migrated" },
-          { deadline: Date.now() + 60_000, retries: { limit: 3 } }
+          { deadline: Date.now() + 60_000, interruptions: { limit: 3 } }
         );
         const snapshot = await waitForState(instance.tasks, receipt.runId, [
           "completed"
@@ -1873,18 +1879,18 @@ describe("Tasks run budget", () => {
         instance.tasks.run(
           "pipeline",
           { label: "x" },
-          { retries: { limit: 0 } }
+          { interruptions: { limit: 0 } }
         )
-      ).rejects.toThrow(/run retries\.limit/);
+      ).rejects.toThrow(/run interruptions\.limit/);
       await expect(
         instance.tasks.run(
           "pipeline",
           { label: "x" },
           // SAFETY: the duration is deliberately unparseable; the type only
           // admits well-formed strings, and the runtime guard is the point.
-          { retries: { delay: "not a duration" as "1 second" } }
+          { interruptions: { delay: "not a duration" as "1 second" } }
         )
-      ).rejects.toThrow(/run retries\.delay/);
+      ).rejects.toThrow(/run interruptions\.delay/);
       // The same validator names the step side of the option, so the two
       // call sites cannot be swapped without a test noticing.
       const stepPolicy = await instance.tasks.run("badStepPolicy");

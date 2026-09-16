@@ -31,7 +31,7 @@ import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
 import {
   MissingTaskDefinitionError,
-  TaskAttemptsExhaustedError,
+  TaskInterruptionsExhaustedError,
   TaskDeadlineExceededError
 } from "./errors";
 import type { TaskEventType, TaskFailedRun, TasksOptions } from "./options";
@@ -1065,9 +1065,13 @@ export class Tasks<
     // and persisted with the run: a later change to the capability's step
     // defaults must not silently re-bound runs already in flight.
     const retryPolicy =
-      options.retries === undefined
+      options.interruptions === undefined
         ? null
-        : resolveRetryPolicy(this.#stepDefaults, options.retries, "run");
+        : resolveRetryPolicy(
+            this.#stepDefaults,
+            options.interruptions,
+            "run interruptions"
+          );
     const deadlineAt =
       options.deadline === undefined
         ? null
@@ -1246,7 +1250,7 @@ export class Tasks<
         if (interruptions >= policy.retryLimit) {
           await this.#failWithoutAttempt(
             row,
-            new TaskAttemptsExhaustedError(runId, interruptions),
+            new TaskInterruptionsExhaustedError(runId, interruptions),
             interruptions
           );
           return;

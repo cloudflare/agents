@@ -106,7 +106,7 @@ the existing run instead of creating a second one; `accepted: false` on the
 receipt marks that join. Pass `metadata` to retain JSON alongside the run and
 `retain: false` to remove the record after terminal settlement.
 
-Two options bound a run. `retries` is the run's policy for _interrupted_
+Two options bound a run. `interruptions` is the run's policy for _interrupted_
 attempts — an attempt whose isolate died mid-execution and is being
 reclaimed — and it takes the same `{ limit, delay, backoff }` shape as a
 step's, with the same meanings: `limit` is total attempts including the
@@ -116,7 +116,7 @@ consecutive — an attempt that reaches a durable boundary under its own
 power clears it — so a run is failed only for dying repeatedly, never for
 having survived a deploy days ago. A wake from a sleep or a step retry park
 is not an attempt and costs nothing. The interruption that reaches `limit`
-fails the run with `TaskAttemptsExhaustedError` instead of replaying it
+fails the run with `TaskInterruptionsExhaustedError` instead of replaying it
 again. Omitted, an interruption replays immediately, without bound.
 `deadline` (epoch milliseconds or a `Date`) is a wall-clock bound: a live
 attempt's `step.signal` aborts and the run fails with
@@ -125,7 +125,7 @@ there.
 
 ```ts
 await this.tasks.run("build-report@v1", input, {
-  retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
+  interruptions: { limit: 3, delay: "30 seconds", backoff: "exponential" },
   deadline: Date.now() + 60 * 60 * 1000
 });
 ```
@@ -158,11 +158,10 @@ and at most 1 MiB serialized.
 Each `do` attempt receives `{ attempt, idempotencyKey, signal }`. The signal
 aborts on cancellation and on the attempt timeout (default 5 minutes); a
 callback that ignores it still loses the attempt, and a stale attempt's late
-writes are rejected. Work held in the handler body rather than in a step — a
-long model turn, a drain loop — has no step timeout, so it watches
-`step.signal` instead: it aborts on `cancel()` and when the run's `deadline`
-passes, and a body that ignores it runs on as a zombie whose writes the
-generation fence rejects.
+writes are rejected. Work awaited in the handler body rather than in a step
+has no step timeout; `step.signal` is how it learns the attempt is over: it
+aborts on `cancel()` and when the run's `deadline` passes. A body that
+ignores it runs on as a zombie whose writes the generation fence rejects.
 
 A callback that throws retries on a durable delay (default: 5 attempts,
 exponential backoff). Throw `NonRetryableError` to fail the run immediately.
@@ -231,11 +230,11 @@ A step callback that throws is not an interruption; the step's retry policy
 owns it, with the run parked `waiting` between attempts. Interruptions also
 emit a `task:attempt:interrupted` event carrying the same step name.
 
-Replays are immediate and unbounded unless the run carries a `retries`
-policy. With one, each interruption parks the run `waiting` (reason
+Replays are immediate and unbounded unless the run carries an
+`interruptions` policy. With one, each interruption parks the run `waiting` (reason
 `interrupted`) for its backoff before replaying, and a run whose attempts
 keep dying — a deterministic crash, a body that never settles — fails with
-`TaskAttemptsExhaustedError` at `limit`, without running the handler again.
+`TaskInterruptionsExhaustedError` at `limit`, without running the handler again.
 Only consecutive deaths spend that budget: an attempt that gets as far as a
 sleep or a step retry park clears the count. `step.attempt`, by contrast,
 counts every claim including those parks, so it is a replay counter rather

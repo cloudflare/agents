@@ -3,7 +3,7 @@ import { getCurrentAgent, Lifecycle } from "../../lifecycle";
 import {
   Tasks,
   NonRetryableError,
-  TaskAttemptsExhaustedError,
+  TaskInterruptionsExhaustedError,
   type TaskStep
 } from "../../tasks";
 import { Scheduler } from "../../schedules";
@@ -473,7 +473,7 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         definition: run.definition,
         name: error instanceof Error ? error.name : String(error)
       });
-      if (error instanceof TaskAttemptsExhaustedError) {
+      if (error instanceof TaskInterruptionsExhaustedError) {
         this.runErrorInterruptions.push(error.interruptions);
       }
     }

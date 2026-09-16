@@ -99,7 +99,7 @@ export interface TaskStepAttempt {
 }
 
 /**
- * Retry policy shape, shared by a `step.do()` config and a run's `retries`
+ * Retry policy shape, shared by a `step.do()` config and a run's `interruptions`
  * so one number never means two things: `limit` counts total attempts
  * including the first in both places, and `delay`/`backoff` space the
  * retries out durably.
@@ -140,7 +140,7 @@ export interface TaskStep {
    * This execution's claim number for the run: 1 on the first attempt, and
    * one higher on every later claim — a replay after an unclean
    * interruption, and equally a wake from a sleep or a step retry park.
-   * It is not the counter a run's `retries` bounds; that one counts only
+   * It is not the counter a run's `interruptions` bounds; that one counts only
    * interruptions.
    */
   readonly attempt: number;
@@ -251,9 +251,9 @@ export interface TaskRunOptions {
    * interruption replays immediately, without bound. When present, fields
    * left unset fall back to the capability's step `retries` defaults, and
    * the interruption that reaches `limit` fails the run with
-   * `TaskAttemptsExhaustedError`.
+   * `TaskInterruptionsExhaustedError`.
    */
-  retries?: TaskRetryConfig;
+  interruptions?: TaskRetryConfig;
 
   /**
    * Wall-clock deadline (epoch milliseconds or a `Date`). A live attempt's

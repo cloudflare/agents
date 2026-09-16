@@ -101,7 +101,7 @@ export class MissingTaskDefinitionError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskAttemptsExhaustedError extends Error {
+export class TaskInterruptionsExhaustedError extends Error {
   readonly runId: string;
   /** Consecutive attempts of this run lost to an unclean interruption. */
   readonly interruptions: number;
@@ -110,7 +110,7 @@ export class TaskAttemptsExhaustedError extends Error {
     super(
       `Task run "${runId}" was interrupted ${interruptions} time${interruptions === 1 ? "" : "s"} and its retry budget is spent.`
     );
-    this.name = "TaskAttemptsExhaustedError";
+    this.name = "TaskInterruptionsExhaustedError";
     this.runId = runId;
     this.interruptions = interruptions;
   }

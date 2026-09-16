@@ -14,7 +14,7 @@ export {
   TaskSerializationError,
   MissingTaskDefinitionError,
   NonRetryableError,
-  TaskAttemptsExhaustedError,
+  TaskInterruptionsExhaustedError,
   TaskDeadlineExceededError
 } from "./errors";
 export { MAX_SERIALIZED_BYTES } from "./serialization";

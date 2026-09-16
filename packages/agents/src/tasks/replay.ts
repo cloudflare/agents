@@ -188,8 +188,8 @@ export function computeRetryDelayMs(
 /**
  * Resolve one retry policy against defaults, validating as it goes.
  *
- * @param context - What is being resolved (`"step"`, `"run"`), used to name
- * the offending option in validation errors.
+ * @param context - The option being resolved (`"step retries"`,
+ * `"run interruptions"`), used to name it in validation errors.
  */
 export function resolveRetryPolicy(
   defaults: ResolvedRetryPolicy,
@@ -199,14 +199,14 @@ export function resolveRetryPolicy(
   const limit = retries?.limit ?? defaults.retryLimit;
   if (!Number.isInteger(limit) || limit < 1) {
     throw new Error(
-      `Invalid ${context} retries.limit: expected an integer >= 1, got ${limit}`
+      `Invalid ${context}.limit: expected an integer >= 1, got ${limit}`
     );
   }
   return {
     retryLimit: limit,
     retryDelayMs:
       retries?.delay !== undefined
-        ? parseTaskDuration(retries.delay, `${context} retries.delay`)
+        ? parseTaskDuration(retries.delay, `${context}.delay`)
         : defaults.retryDelayMs,
     backoff: retries?.backoff ?? defaults.backoff
   };
@@ -218,7 +218,7 @@ export function resolveStepPolicy(
   config: TaskStepConfig | undefined
 ): ResolvedStepPolicy {
   return {
-    ...resolveRetryPolicy(defaults, config?.retries, "step"),
+    ...resolveRetryPolicy(defaults, config?.retries, "step retries"),
     timeoutMs:
       config?.timeout !== undefined
         ? parseTaskDuration(config.timeout, "step timeout")

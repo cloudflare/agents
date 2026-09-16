@@ -3,7 +3,7 @@ import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
   Tasks,
   NonRetryableError,
-  TaskAttemptsExhaustedError,
+  TaskInterruptionsExhaustedError,
   TaskDeadlineExceededError,
   type Task,
   type TaskReceipt,
@@ -45,7 +45,7 @@ object.tasks.run(
   "report",
   { topic: "chips" },
   {
-    retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
+    interruptions: { limit: 3, delay: "30 seconds", backoff: "exponential" },
     deadline: Date.now() + 60_000
   }
 ) satisfies Promise<TaskReceipt>;
@@ -59,7 +59,7 @@ object.tasks.run(
   { topic: "chips" },
   {
     // @ts-expect-error durations use second/minute/hour/day/week units.
-    retries: { delay: "5 parsecs" }
+    interruptions: { delay: "5 parsecs" }
   }
 );
 // One shape spans both sides, so a step config and a run policy cannot
@@ -137,6 +137,6 @@ step.sleep("bad", "5 parsecs");
 step.do("function-result", () => () => {});
 
 new NonRetryableError("stop") satisfies Error;
-new TaskAttemptsExhaustedError("task_x", 3) satisfies Error;
-new TaskAttemptsExhaustedError("task_x", 3).interruptions satisfies number;
+new TaskInterruptionsExhaustedError("task_x", 3) satisfies Error;
+new TaskInterruptionsExhaustedError("task_x", 3).interruptions satisfies number;
 new TaskDeadlineExceededError("task_x", Date.now()) satisfies Error;
