@@ -1,0 +1,50 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "claude-code-harness-example",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/agents/*", "/_harness/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ClaudeCodeSession",
+        "class_name": "ClaudeCodeSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ClaudeCodeSession"]
+    }
+  ],
+  // One container per session object. The build context is the harnesses
+  // directory because the image needs the shared wire contracts too.
+  "containers": [
+    {
+      "class_name": "ClaudeCodeSession",
+      "image": "./Dockerfile",
+      "image_build_context": "../",
+      "instance_type": "standard-2",
+      "max_instances": 3
+    }
+  ],
+  "vars": {
+    "DOORBELL_URL": "https://claude-code-harness-example.mattzcarey.workers.dev/_harness/doorbell",
+    // Set to "echo" for a keyless smoke deploy of the whole path.
+    "HARNESS_ENGINE": "claude-code",
+    // Tags every model request on a shared AI Gateway (`cf-aig-metadata`).
+    "AI_GATEWAY_PROJECT": "claude-code-harness-test"
+  },
+  // Deploy-time vars, not in this file: ANTHROPIC_BASE_URL (the gateway's
+  // Anthropic endpoint, `wrangler deploy --var ANTHROPIC_BASE_URL:...`).
+  // Secrets, set with `wrangler secret put`, never in this file:
+  //   ANTHROPIC_API_KEY
+  "observability": {
+    "enabled": true
+  }
+}

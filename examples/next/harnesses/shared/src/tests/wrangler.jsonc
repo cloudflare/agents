@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "main": "remote-worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "HARNESS_TEST", "class_name": "HarnessTestObject" },
+      {
+        "name": "REMOTE_HARNESS_TEST",
+        "class_name": "RemoteHarnessTestObject"
+      }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["HarnessTestObject"] },
+    { "tag": "v2", "new_sqlite_classes": ["RemoteHarnessTestObject"] }
+  ]
+}

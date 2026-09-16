@@ -1,0 +1,10 @@
+# The build context is `examples/next/harnesses`, so everything a harness
+# example keeps for local development is excluded here rather than in each
+# image. Only `shared/src`, the typed engine layer and a daemon's own
+# sources are copied in.
+**/node_modules
+**/vendor
+**/dist
+**/.wrangler
+**/wasm-kernel/target
+**/*.tgz

@@ -1,0 +1,25 @@
+// The daemon's TypeScript project.
+//
+// Deliberately not named `tsconfig.json`: the repository's root typecheck
+// globs every `**/tsconfig.json` and runs it, and this project's
+// dependencies are installed with `npm` inside this directory rather than
+// by the workspace, so a fresh checkout has nothing for it to resolve.
+// `npm run typecheck` here points at this file.
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}

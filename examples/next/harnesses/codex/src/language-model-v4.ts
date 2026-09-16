@@ -2,7 +2,8 @@ import type {
   LanguageModelV4,
   LanguageModelV4FunctionTool,
   LanguageModelV4Message,
-  LanguageModelV4StreamPart
+  LanguageModelV4StreamPart,
+  LanguageModelV4Usage
 } from "@ai-sdk/provider";
 import type { SessionMessage, SessionMessagePart } from "agents/sessions";
 import type {
@@ -24,10 +25,37 @@ export class ModelRoundError extends Error {
   override readonly name = "ModelRoundError";
 }
 
+/** Tokens one model round reported, in the harness's vocabulary. */
+export type ModelUsage = {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly reasoningTokens?: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+};
+
 /** Outcome of one model round: what the kernel gets and what was stored. */
 export type ModelRound = {
   readonly result: KernelEffectResult;
   readonly messageId: string;
+  /** Absent when the provider reported no usage. */
+  readonly usage?: ModelUsage;
+};
+
+/** One token delta as the provider streamed it. */
+export type ModelDelta = {
+  readonly type: "text" | "reasoning";
+  readonly delta: string;
+};
+
+/** Everything the caller controls about one round. */
+export type ModelRoundOptions = {
+  readonly signal?: AbortSignal;
+  /**
+   * Called for every token delta. The harness turns these into previews:
+   * live-only frames that are never persisted.
+   */
+  readonly onDelta?: (delta: ModelDelta) => void;
 };
 
 /**
@@ -55,11 +83,11 @@ export async function completeCodexModel(
   action: Extract<KernelAction, { type: "model" }>,
   messageId: string,
   transcript: ModelTranscript,
-  abortSignal?: AbortSignal
+  options: ModelRoundOptions = {}
 ): Promise<ModelRound> {
   const request = parseResponsesRequest(action.request);
   const result = await model.doStream({
-    abortSignal,
+    ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
     prompt: sessionMessagesToPrompt(
       request.instructions,
       await transcript.history()
@@ -68,7 +96,11 @@ export async function completeCodexModel(
     toolChoice: { type: "auto" },
     temperature: 0
   });
-  const round = await consumeModelStream(result.stream, action.effect_id);
+  const round = await consumeModelStream(
+    result.stream,
+    action.effect_id,
+    options.onDelta
+  );
   if (round.failure !== undefined) {
     // Nothing is stored for a failed round, so a retry starts clean.
     throw new ModelRoundError(round.failure);
@@ -80,7 +112,11 @@ export async function completeCodexModel(
     metadata: { responseId: round.responseId }
   };
   if (round.parts.length > 0) await transcript.record(message);
-  return { result: round.result(messageId), messageId };
+  return {
+    result: round.result(messageId),
+    messageId,
+    ...(round.usage === undefined ? {} : { usage: round.usage })
+  };
 }
 
 function parseResponsesRequest(value: KernelJson): {
@@ -251,12 +287,14 @@ type ConsumedStream = {
   readonly responseId: string;
   /** Set when the provider returned no usable response. */
   readonly failure?: string;
+  readonly usage?: ModelUsage;
   result(messageId: string): KernelEffectResult;
 };
 
 async function consumeModelStream(
   stream: ReadableStream<LanguageModelV4StreamPart>,
-  fallbackResponseId: string
+  fallbackResponseId: string,
+  onDelta?: (delta: ModelDelta) => void
 ): Promise<ConsumedStream> {
   const blocks: StreamBlock[] = [];
   const blockIndexes = new Map<string, number>();
@@ -276,17 +314,19 @@ async function consumeModelStream(
         break;
       case "reasoning-delta":
         appendTextDelta(blocks, blockIndexes, "reasoning", part.id, part.delta);
+        onDelta?.({ type: "reasoning", delta: part.delta });
         break;
       case "text-start":
         startTextBlock(blocks, blockIndexes, "text", part.id);
         break;
       case "text-delta":
         appendTextDelta(blocks, blockIndexes, "text", part.id, part.delta);
+        onDelta?.({ type: "text", delta: part.delta });
         break;
       case "tool-input-start":
         if (part.providerExecuted) {
           throw new Error(
-            `CodexHarness does not support provider-executed tool ${JSON.stringify(part.toolName)}`
+            `The Codex runtime does not support provider-executed tool ${JSON.stringify(part.toolName)}`
           );
         }
         startToolBlock(blocks, blockIndexes, part.id, part.toolName);
@@ -294,7 +334,7 @@ async function consumeModelStream(
       case "tool-call": {
         if (part.providerExecuted) {
           throw new Error(
-            `CodexHarness does not support provider-executed tool ${JSON.stringify(part.toolName)}`
+            `The Codex runtime does not support provider-executed tool ${JSON.stringify(part.toolName)}`
           );
         }
         const block = startToolBlock(
@@ -321,7 +361,7 @@ async function consumeModelStream(
       case "tool-approval-request":
       case "tool-result":
         throw new Error(
-          `CodexHarness does not support LanguageModelV4 stream part ${JSON.stringify(part.type)}`
+          `The Codex runtime does not support LanguageModelV4 stream part ${JSON.stringify(part.type)}`
         );
       case "raw":
       case "reasoning-end":
@@ -335,24 +375,21 @@ async function consumeModelStream(
   }
 
   const parts = blocksToParts(blocks);
+  const usage = finish ? modelUsage(finish.usage) : undefined;
+  const base = { parts, responseId, ...(usage === undefined ? {} : { usage }) };
   const failure = (message: string) => (messageId: string) =>
     modelFailure(blocks, messageId, responseId, message);
 
   if (streamError !== undefined) {
-    return {
-      parts,
-      responseId,
-      failure: streamError,
-      result: failure(streamError)
-    };
+    return { ...base, failure: streamError, result: failure(streamError) };
   }
   if (!finish) {
     const message = "LanguageModelV4 stream ended without finish";
-    return { parts, responseId, failure: message, result: failure(message) };
+    return { ...base, failure: message, result: failure(message) };
   }
   if (finish.finishReason.unified === "error") {
     const message = `LanguageModelV4 failed with ${finish.finishReason.raw ?? "unknown reason"}`;
-    return { parts, responseId, failure: message, result: failure(message) };
+    return { ...base, failure: message, result: failure(message) };
   }
   if (
     finish.finishReason.unified === "length" ||
@@ -360,8 +397,7 @@ async function consumeModelStream(
   ) {
     const reason = finish.finishReason.unified;
     return {
-      parts,
-      responseId,
+      ...base,
       result: (messageId) => ({
         type: "model",
         frames: [
@@ -386,11 +422,10 @@ async function consumeModelStream(
   );
   if (toolCallCount === 0 && !hasText) {
     const message = "LanguageModelV4 returned neither text nor a tool call";
-    return { parts, responseId, failure: message, result: failure(message) };
+    return { ...base, failure: message, result: failure(message) };
   }
   return {
-    parts,
-    responseId,
+    ...base,
     result: (messageId) => ({
       type: "model",
       frames: [
@@ -402,6 +437,28 @@ async function consumeModelStream(
       ]
     })
   };
+}
+
+/** Map a V4 usage record to the harness's flat token counts. */
+function modelUsage(usage: LanguageModelV4Usage): ModelUsage | undefined {
+  const mapped: ModelUsage = {
+    ...(usage.inputTokens.total === undefined
+      ? {}
+      : { inputTokens: usage.inputTokens.total }),
+    ...(usage.outputTokens.total === undefined
+      ? {}
+      : { outputTokens: usage.outputTokens.total }),
+    ...(usage.outputTokens.reasoning === undefined
+      ? {}
+      : { reasoningTokens: usage.outputTokens.reasoning }),
+    ...(usage.inputTokens.cacheRead === undefined
+      ? {}
+      : { cacheReadTokens: usage.inputTokens.cacheRead }),
+    ...(usage.inputTokens.cacheWrite === undefined
+      ? {}
+      : { cacheWriteTokens: usage.inputTokens.cacheWrite })
+  };
+  return Object.keys(mapped).length === 0 ? undefined : mapped;
 }
 
 function startTextBlock(

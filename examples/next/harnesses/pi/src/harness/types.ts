@@ -1,7 +1,5 @@
 import type { Static, TSchema } from "typebox";
 import type { SkillSource } from "agents/skills";
-import type { Streams } from "agents/streams";
-import type { Tasks } from "agents/tasks";
 
 /** Invocation-scoped cancellation and application values used by pi callbacks. */
 export interface PiContext {
@@ -120,7 +118,7 @@ export interface PiToolInvocation {
   setMemo(name: string, value: unknown | undefined): Promise<void>;
 }
 
-/** Tool definition executed by {@link PiHarness}. */
+/** Tool definition executed by {@link PiRuntime}. */
 export type PiTool<
   ToolContext extends object | undefined = object | undefined,
   Parameters extends TSchema = TSchema,
@@ -236,24 +234,21 @@ export type PiResources = {
 
 // ── Configuration ─────────────────────────────────────────────────────────
 
-/** Configuration for the Durable Object hosted pi harness. */
-export type PiHarnessConfig<
+/**
+ * Configuration for the pi runtime. Everything durable belongs to the shared
+ * Harness capability: this is the pi engine's own configuration and nothing
+ * else.
+ */
+export type PiRuntimeConfig<
   ToolContext extends object | undefined = object | undefined
 > = {
   /** Pi provider registry used for model lookup and streaming. */
   readonly models: PiModels;
   /**
    * Initial model for newly created lanes: a catalog model object, or a
-   * provider and model id resolved against `models` when the harness attaches.
+   * provider and model id resolved against `models` when the runtime attaches.
    */
   readonly model: PiModel | PiModelIdentity;
-  /**
-   * Durable execution for operations. Each lane's work runs as one Task run
-   * that replays after eviction; pi's session is the recovery evidence.
-   */
-  readonly tasks: Tasks;
-  /** Durable output. Every operation's live events land in one stream. */
-  readonly streams: Streams;
   readonly thinkingLevel?: PiThinkingLevel;
   readonly activeToolNames?: readonly string[];
   /** Static tools or a hook re-run before every drive pass. */
@@ -283,8 +278,6 @@ export type PiHarnessConfig<
   readonly steeringMode?: "all" | "one-at-a-time";
   readonly followUpMode?: "all" | "one-at-a-time";
   readonly toolExecution?: "sequential" | "parallel";
-  /** Default lane used when a call names none. @default "main" */
-  readonly defaultLane?: string;
   /** Register process-local hooks after each isolate wake. */
   readonly configure?: (
     hooks: PiHookRegistry,
@@ -296,11 +289,6 @@ export type PiHarnessConfig<
 
 /** Operation kind as recorded by pi. */
 export type PiOperationKind = "run" | "compaction" | "navigation";
-
-/** Text with optional images, accepted wherever a message is submitted. */
-export type PiMessageInput =
-  | string
-  | { readonly text: string; readonly images?: readonly PiImage[] };
 
 /** Operation submitted to a lane. */
 export type PiOperationRequest =
@@ -390,106 +378,11 @@ export type PiMessage = {
   readonly error?: string;
 };
 
-/** Compact streaming delta for an in-flight assistant message. */
-export type PiMessageDelta =
-  | { readonly type: "start"; readonly message: PiMessage }
-  | {
-      readonly type: "text_start";
-      readonly index: number;
-      readonly text: string;
-    }
-  | {
-      readonly type: "text_delta";
-      readonly index: number;
-      readonly delta: string;
-    }
-  | { readonly type: "text_end"; readonly index: number; readonly text: string }
-  | {
-      readonly type: "thinking_start";
-      readonly index: number;
-      readonly text: string;
-    }
-  | {
-      readonly type: "thinking_delta";
-      readonly index: number;
-      readonly delta: string;
-    }
-  | {
-      readonly type: "thinking_end";
-      readonly index: number;
-      readonly text: string;
-    }
-  | {
-      readonly type: "toolcall_start";
-      readonly index: number;
-      readonly id: string;
-      readonly name: string;
-      readonly arguments: PiJson;
-    }
-  | {
-      readonly type: "toolcall_checkpoint";
-      readonly index: number;
-      readonly json: string;
-    }
-  | {
-      readonly type: "toolcall_delta";
-      readonly index: number;
-      readonly delta: string;
-    }
-  | {
-      readonly type: "toolcall_end";
-      readonly index: number;
-      readonly id: string;
-      readonly name: string;
-      readonly arguments: PiJson;
-    };
-
 /** Message queued for a running or future operation. */
 export type PiQueuedItem = {
   readonly entryId: string;
   readonly kind: "steer" | "followUp" | "nextRun" | "write";
   readonly message?: PiMessage;
-};
-
-/** Tool call currently executing inside an operation. */
-export type PiRunningTool = {
-  readonly toolCallId: string;
-  readonly toolName: string;
-  readonly arguments: PiJson;
-  readonly partial?: PiToolResult;
-};
-
-/** Live status of a lane's current operation. */
-export type PiOperationStatus = {
-  readonly operationId: string;
-  readonly kind: PiOperationKind;
-  readonly status: "running" | "aborting";
-  readonly startedAt: number;
-  /** Assistant message being streamed, rebuilt from durable progress. */
-  readonly streaming?: PiMessage;
-  readonly runningTools: readonly PiRunningTool[];
-  readonly retry?: {
-    readonly attempt: number;
-    readonly maxAttempts: number;
-    readonly nextAttemptAt: number;
-  };
-  readonly deferred?: PiDeferredHandle;
-};
-
-/** Submission accepted by the harness but not yet admitted by pi. */
-export type PiPendingSubmission = {
-  readonly operationId: string;
-  readonly lane: string;
-  readonly request: PiOperationRequest;
-  readonly submittedAt: number;
-};
-
-/** Durable output stream of one operation. */
-export type PiOperationStream = {
-  readonly streamId: string;
-  readonly operationId: string;
-  /** Next chunk sequence number; replay from a lower cursor to catch up. */
-  readonly cursor: number;
 };
 
 /** One tool offered to the model, for display. */
@@ -499,31 +392,15 @@ export type PiToolInfo = {
   readonly description: string;
 };
 
-/** Point-in-time view of one lane. */
-export type PiLaneSnapshot = {
-  readonly lane: string;
-  readonly messages: readonly PiMessage[];
-  readonly operation: PiOperationStatus | null;
-  readonly stream: PiOperationStream | null;
-  readonly pending: readonly PiPendingSubmission[];
-  readonly queue: readonly PiQueuedItem[];
-  readonly model: PiModelIdentity;
-  readonly thinkingLevel: PiThinkingLevel;
-  readonly activeTools: readonly string[];
-  /** Every registered tool, including skill tools. */
-  readonly tools: readonly PiToolInfo[];
-  readonly usage: PiUsage;
-};
+// ── Events ────────────────────────────────────────────────────────────────
 
-/** Live event projected from pi's harness events. */
+/**
+ * Live pi event with no core equivalent, carried as a harness extension
+ * frame. Messages, tool calls, usage and faults are projected onto the core
+ * event bodies instead, so every harness renders them the same way, and
+ * token deltas are previews rather than events.
+ */
 export type PiEvent =
-  | {
-      readonly type: "operation_start";
-      readonly operationId: string;
-      readonly kind: PiOperationKind;
-      readonly startedAt: number;
-    }
-  | ({ readonly type: "operation_end" } & PiOperationResult)
   | { readonly type: "operation_abort"; readonly operationId: string }
   | {
       readonly type: "operation_wait";
@@ -551,30 +428,7 @@ export type PiEvent =
       readonly operationId: string;
       readonly turnId: string;
     }
-  | {
-      readonly type: "message_start";
-      readonly operationId?: string;
-      readonly message: PiMessage;
-    }
-  | {
-      readonly type: "message_delta";
-      readonly operationId: string;
-      readonly delta: PiMessageDelta;
-    }
-  | {
-      readonly type: "message_end";
-      readonly operationId?: string;
-      readonly entryId?: string;
-    }
   | { readonly type: "message"; readonly message: PiMessage }
-  | {
-      readonly type: "tool_start";
-      readonly operationId: string;
-      readonly turnId: string;
-      readonly toolCallId: string;
-      readonly toolName: string;
-      readonly arguments: PiJson;
-    }
   | {
       readonly type: "tool_update";
       readonly operationId: string;
@@ -582,15 +436,6 @@ export type PiEvent =
       readonly toolCallId: string;
       readonly toolName: string;
       readonly partial: PiToolResult;
-    }
-  | {
-      readonly type: "tool_end";
-      readonly operationId: string;
-      readonly turnId: string;
-      readonly toolCallId: string;
-      readonly toolName: string;
-      readonly result: PiToolResult;
-      readonly error: boolean;
     }
   | { readonly type: "queue_update"; readonly queue: readonly PiQueuedItem[] }
   | {
@@ -623,130 +468,66 @@ export type PiEvent =
       /** The committed transcript changed shape; re-read messages. */
       readonly type: "transcript_reset";
       readonly reason: "compaction" | "navigation";
-    }
-  | { readonly type: "fault"; readonly code: string; readonly message: string };
-
-/** Envelope for events delivered to in-process listeners. */
-export type PiEventContext = {
-  readonly lane: string;
-  readonly operationId?: string;
-};
-
-/** In-process event listener. Deliveries are synchronous and best-effort. */
-export type PiEventListener = (event: PiEvent, context: PiEventContext) => void;
-
-/** Pi prompt outcome with the updated display-ready transcript. */
-export type PiPromptResponse = PiOperationResult & {
-  readonly messages: readonly PiMessage[];
-};
-
-/** Options for reading one lane's durable transcript. */
-export type PiTranscriptOptions = {
-  readonly lane?: string;
-  readonly order?: "newestFirst" | "oldestFirst";
-  readonly context?: PiContext;
-};
-
-/** Options naming a lane and carrying an invocation context. */
-export type PiLaneOptions = {
-  readonly lane?: string;
-  readonly context?: PiContext;
-};
-
-/** Options for submitting one durable pi operation. */
-export type PiSubmitOptions = PiLaneOptions & {
-  readonly operationId?: string;
-};
-
-/** Durable receipt returned before a submitted operation has to settle. */
-export type PiSubmissionReceipt = {
-  readonly operationId: string;
-  readonly lane: string;
-  /** False when this operation id was already submitted or settled. */
-  readonly accepted: boolean;
-};
-
-/** Receipt for a message queued into a lane's inbox. */
-export type PiQueueReceipt = {
-  readonly entryId: string;
-};
-
-/** Outcome of a durable abort request. */
-export type PiAbortResult = {
-  readonly operationId: string;
-  /** False when the operation was already aborting. */
-  readonly newlyRequested: boolean;
-} | null;
-
-/** Wire message sent by a browser client over the WebSockets transport. */
-export type PiClientMessage =
-  | {
-      readonly type: "subscribe";
-      readonly id?: string;
-      readonly streamId: string;
-      /** Replay from this chunk sequence; omit or 0 for the whole stream. */
-      readonly from?: number;
-    }
-  | {
-      readonly type: "unsubscribe";
-      readonly id?: string;
-      readonly streamId: string;
-    }
-  | { readonly type: "snapshot"; readonly id: string }
-  | {
-      readonly type: "submit";
-      readonly id: string;
-      readonly request: PiOperationRequest;
-    }
-  | {
-      readonly type: "abort";
-      readonly id: string;
-      readonly operationId?: string;
-    }
-  | {
-      /** Queue a message the running operation reads at its next turn. */
-      readonly type: "steer";
-      readonly id: string;
-      readonly message: PiMessageInput;
     };
 
-/** Wire message sent to a browser client over the WebSockets transport. */
-export type PiServerMessage =
+// ── The harness protocol ──────────────────────────────────────────────────
+
+/**
+ * JSON as the shared harness types spell it. `JsonValue` is defined with
+ * mutable arrays and without `undefined`, so a readonly pi value is not
+ * assignable to it even though it is plain JSON. This widens arrays and drops
+ * `undefined`; property names, discriminants and `readonly` are untouched.
+ */
+export type PiWire<Value> = Value extends undefined
+  ? never
+  : Value extends readonly (infer Element)[]
+    ? PiWire<Element>[]
+    : Value extends object
+      ? { [Key in keyof Value]: PiWire<Value[Key]> }
+      : Value;
+
+/**
+ * The operations pi accepts beyond a prompt and a compaction, submitted with
+ * `session.submit()`. Each becomes one inbox row of that kind.
+ */
+export type PiSubmission =
   | {
-      readonly type: "snapshot";
-      readonly id?: string;
-      readonly snapshot: PiLaneSnapshot;
+      readonly kind: "skill";
+      readonly payload: {
+        readonly name: string;
+        readonly additionalInstructions?: string;
+      };
     }
   | {
-      /** One durable chunk of an operation stream. */
-      readonly type: "events";
-      readonly lane: string;
-      readonly streamId: string;
-      readonly operationId: string;
-      /** Sequence of the first chunk in this batch. */
-      readonly seq: number;
-      /** Sequence of the last chunk; resubscribe from `lastSeq + 1`. */
-      readonly lastSeq: number;
-      readonly events: readonly PiEvent[];
+      readonly kind: "prompt_template";
+      readonly payload: {
+        readonly name: string;
+        readonly args?: readonly string[];
+      };
     }
   | {
-      /** A lane event that happened while no operation stream was open. */
-      readonly type: "event";
-      readonly lane: string;
-      readonly event: PiEvent;
-    }
-  | {
-      /** A new operation opened a stream on the subscribed lane. */
-      readonly type: "stream_start";
-      readonly lane: string;
-      readonly streamId: string;
-      readonly operationId: string;
-    }
-  | {
-      readonly type: "stream_end";
-      readonly lane: string;
-      readonly streamId: string;
-      readonly operationId: string;
-    }
-  | { readonly type: "result"; readonly id: string; readonly result: PiJson }
-  | { readonly type: "error"; readonly id?: string; readonly message: string };
+      readonly kind: "navigation";
+      readonly payload: {
+        /** Entry to make the branch tip, or null for the branch root. */
+        readonly targetId: string | null;
+        readonly summarize?: boolean;
+        readonly label?: string;
+        readonly customInstructions?: string;
+      };
+    };
+
+/**
+ * The terminal record of one harness operation: pi's own operation result,
+ * or the queue receipt of a steered message, which settles as soon as pi has
+ * taken it.
+ */
+export type PiResult =
+  | PiOperationResult
+  | { readonly kind: "steer"; readonly entryId: string };
+
+/** Pi's vocabulary at the harness seam: events, submissions and results. */
+export type PiProtocol = {
+  readonly event: PiWire<PiEvent>;
+  readonly submit: PiWire<PiSubmission>;
+  readonly result: PiWire<PiResult>;
+};

@@ -24,14 +24,19 @@ import {
   XIcon
 } from "@phosphor-icons/react";
 import { code } from "@streamdown/code";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
-import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
-import { usePiSession } from "./use-pi-session";
+import { useHarnessSession } from "@cloudflare/agents-next-harness/react";
+import type { SessionMessage, SessionMessagePart } from "agents/sessions";
+import type { PiProtocol, PiToolInfo } from "./protocol";
+
+/** One tool call pi has started and not yet finished. */
+type RunningTool = { readonly toolCallId: string; readonly toolName: string };
 import "./styles.css";
 
+const AGENT = "pi-agent";
 const SESSION_KEY = "pi-harness-session";
 const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
@@ -100,7 +105,7 @@ function ToolCallCard({
   part,
   running
 }: {
-  part: Extract<TranscriptPart, { type: "tool-call" }>;
+  part: SessionMessagePart;
   running: boolean;
 }) {
   return (
@@ -112,7 +117,7 @@ function ToolCallCard({
           <CheckCircleIcon size={14} className="text-kumo-success" />
         )}
         <span className="min-w-0 flex-1 truncate text-xs font-semibold">
-          {part.name}
+          {part.toolName}
         </span>
         <Badge variant="secondary">{running ? "Running" : "Called"}</Badge>
       </summary>
@@ -120,63 +125,49 @@ function ToolCallCard({
         <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
           Arguments
         </p>
-        <JsonBlock value={part.arguments} />
+        <JsonBlock value={part.input} />
       </div>
     </details>
   );
 }
 
-function ToolResultCard({
-  part
-}: {
-  part: Extract<TranscriptPart, { type: "tool-result" }>;
-}) {
-  const text = part.content
-    .filter((content) => content.type === "text")
-    .map((content) => (content.type === "text" ? content.text : ""))
-    .join("\n");
-  const images = part.content.filter((content) => content.type === "image");
+function ToolResultCard({ part }: { part: SessionMessagePart }) {
+  const failed = part.state === "output-error";
+  const output =
+    typeof part.output === "string" ? part.output : JSON.stringify(part.output);
   return (
     <details className="rounded-xl border border-kumo-line bg-kumo-base">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
-        {part.error ? (
+        {failed ? (
           <XCircleIcon size={14} className="text-kumo-danger" />
         ) : (
           <CheckCircleIcon size={14} className="text-kumo-success" />
         )}
         <span className="min-w-0 flex-1 truncate text-xs">
-          <span className="font-semibold">{part.name}</span>
-          {text ? <span className="ml-2 text-kumo-subtle">{text}</span> : null}
+          <span className="font-semibold">{part.toolName}</span>
+          {output ? (
+            <span className="ml-2 text-kumo-subtle">{output}</span>
+          ) : null}
         </span>
-        <Badge variant={part.error ? "destructive" : "secondary"}>
-          {part.error ? "Failed" : "Done"}
+        <Badge variant={failed ? "destructive" : "secondary"}>
+          {failed ? "Failed" : "Done"}
         </Badge>
       </summary>
       <div className="space-y-3 border-t border-kumo-line px-3 py-3">
-        {text ? (
+        {output ? (
           <div>
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
               Result
             </p>
-            <JsonBlock value={text} />
+            <JsonBlock value={output} />
           </div>
         ) : null}
-        {images.map((image, index) =>
-          image.type === "image" ? (
-            <img
-              key={index}
-              src={`data:${image.mimeType};base64,${image.data}`}
-              alt={`${part.name} output`}
-              className="max-w-full rounded-lg"
-            />
-          ) : null
-        )}
-        {part.details !== undefined ? (
+        {part.result !== undefined ? (
           <div>
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
               Details
             </p>
-            <JsonBlock value={part.details} />
+            <JsonBlock value={part.result} />
           </div>
         ) : null}
       </div>
@@ -184,53 +175,74 @@ function ToolResultCard({
   );
 }
 
-function AssistantPart({
+function Markdown({ text }: { text: string }) {
+  return (
+    <Streamdown
+      className="sd-theme text-sm leading-6"
+      plugins={{ code }}
+      controls={false}
+    >
+      {text}
+    </Streamdown>
+  );
+}
+
+function Reasoning({ text }: { text: string }) {
+  return (
+    <details className="rounded-xl border border-kumo-line px-3 py-2">
+      <summary className="cursor-pointer list-none text-xs font-semibold text-kumo-subtle">
+        Thinking
+      </summary>
+      <p className="mt-2 whitespace-pre-wrap text-xs italic leading-5 text-kumo-subtle">
+        {text}
+      </p>
+    </details>
+  );
+}
+
+function Part({
   part,
-  running
+  runningTools
 }: {
-  part: TranscriptPart;
-  running: boolean;
+  part: SessionMessagePart;
+  runningTools: readonly RunningTool[];
 }) {
   switch (part.type) {
     case "text":
-      return (
-        <Streamdown
-          className="sd-theme text-sm leading-6"
-          plugins={{ code }}
-          controls={false}
-        >
-          {part.text}
-        </Streamdown>
-      );
-    case "thinking":
-      return (
-        <details className="rounded-xl border border-kumo-line px-3 py-2">
-          <summary className="cursor-pointer list-none text-xs font-semibold text-kumo-subtle">
-            Thinking
-          </summary>
-          <p className="mt-2 whitespace-pre-wrap text-xs italic leading-5 text-kumo-subtle">
-            {part.text}
-          </p>
-        </details>
-      );
+      return <Markdown text={part.text ?? ""} />;
+    case "reasoning":
+      return <Reasoning text={part.text ?? part.reasoning ?? ""} />;
     case "tool-call":
-      return <ToolCallCard part={part} running={running} />;
-    case "tool-result":
-      return <ToolResultCard part={part} />;
-    case "image":
       return (
-        <img
-          src={`data:${part.mimeType};base64,${part.data}`}
-          alt=""
-          className="max-w-full rounded-lg"
+        <ToolCallCard
+          part={part}
+          running={runningTools.some(
+            (tool) => tool.toolCallId === part.toolCallId
+          )}
         />
       );
+    case "tool-result":
+      return <ToolResultCard part={part} />;
+    case "file":
+      return part.url ? (
+        <img src={part.url} alt="" className="max-w-full rounded-lg" />
+      ) : null;
+    default:
+      return null;
   }
 }
 
-function UserMessage({ message }: { message: TranscriptMessage }) {
+function Avatar() {
+  return (
+    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
+      <BrainIcon size={17} weight="bold" />
+    </div>
+  );
+}
+
+function UserMessage({ message }: { message: SessionMessage }) {
   const text = message.parts
-    .map((part) => (part.type === "text" ? part.text : ""))
+    .map((part) => (part.type === "text" ? (part.text ?? "") : ""))
     .join("");
   return (
     <div className="flex justify-end">
@@ -243,45 +255,28 @@ function UserMessage({ message }: { message: TranscriptMessage }) {
 
 function AssistantMessage({
   message,
-  streaming = false,
   runningTools
 }: {
-  message: TranscriptMessage;
-  streaming?: boolean;
-  runningTools: readonly string[];
+  message: SessionMessage;
+  runningTools: readonly RunningTool[];
 }) {
   return (
     <div className="flex items-start gap-3">
-      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
-        <BrainIcon size={17} weight="bold" />
-      </div>
+      <Avatar />
       <div className="min-w-0 flex-1 space-y-3">
         {message.parts.map((part, index) => (
-          <AssistantPart
+          <Part
             key={`${message.id}-${index}`}
             part={part}
-            running={
-              streaming &&
-              part.type === "tool-call" &&
-              runningTools.includes(part.name)
-            }
+            runningTools={runningTools}
           />
         ))}
-        {streaming ? <span className="streaming-cursor" /> : null}
-        {message.error ? (
-          <div
-            role="alert"
-            className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-          >
-            {message.error}
-          </div>
-        ) : null}
       </div>
     </div>
   );
 }
 
-function ToolMessage({ message }: { message: TranscriptMessage }) {
+function ToolMessage({ message }: { message: SessionMessage }) {
   return (
     <div className="ml-11 space-y-2">
       {message.parts.map((part, index) =>
@@ -295,36 +290,42 @@ function ToolMessage({ message }: { message: TranscriptMessage }) {
 
 function Message({
   message,
-  streaming = false,
   runningTools
 }: {
-  message: TranscriptMessage;
-  streaming?: boolean;
-  runningTools: readonly string[];
+  message: SessionMessage;
+  runningTools: readonly RunningTool[];
 }) {
   switch (message.role) {
     case "user":
       return <UserMessage message={message} />;
-    case "assistant":
-      return (
-        <AssistantMessage
-          message={message}
-          streaming={streaming}
-          runningTools={runningTools}
-        />
-      );
     case "tool":
       return <ToolMessage message={message} />;
+    default:
+      return <AssistantMessage message={message} runningTools={runningTools} />;
   }
+}
+
+/** The assistant message being streamed, rebuilt from live token deltas. */
+function LiveMessage({ text, reasoning }: { text: string; reasoning: string }) {
+  return (
+    <div className="flex items-start gap-3">
+      <Avatar />
+      <div className="min-w-0 flex-1 space-y-3">
+        {reasoning ? <Reasoning text={reasoning} /> : null}
+        {text ? <Markdown text={text} /> : null}
+        <span className="streaming-cursor" />
+      </div>
+    </div>
+  );
 }
 
 function Sidebar({
   tools,
-  activeTools,
+  runningTools,
   onClose
 }: {
-  tools: readonly ToolInfo[];
-  activeTools: readonly string[];
+  tools: readonly PiToolInfo[];
+  runningTools: readonly RunningTool[];
   onClose: () => void;
 }) {
   return (
@@ -351,7 +352,9 @@ function Sidebar({
             className="rounded-lg p-3 ring ring-kumo-line"
           >
             <div className="flex items-center gap-2">
-              {activeTools.includes(tool.name) ? (
+              {runningTools.some(
+                (running) => running.toolName === tool.name
+              ) ? (
                 <GearIcon size={14} className="animate-spin text-kumo-accent" />
               ) : (
                 <WrenchIcon size={14} className="text-kumo-inactive" />
@@ -366,36 +369,76 @@ function Sidebar({
   );
 }
 
+/** The demo's tool catalog, over the host's own HTTP route. */
+function useTools(session: string): readonly PiToolInfo[] {
+  const [tools, setTools] = useState<readonly PiToolInfo[]>([]);
+  useEffect(() => {
+    let live = true;
+    fetch(`/agents/${AGENT}/${session}/tools`)
+      .then((response) => response.json())
+      .then((body) => {
+        if (live) setTools((body as { tools: PiToolInfo[] }).tools);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [session]);
+  return tools;
+}
+
 function App() {
   const [session, setSession] = useState(getSession);
-  const [prompt, setPrompt] = useState("");
+  const [draft, setDraft] = useState("");
   const [toolsOpen, setToolsOpen] = useState(
     () => window.matchMedia("(min-width: 1100px)").matches
   );
   const endRef = useRef<HTMLDivElement>(null);
+  const tools = useTools(session);
   const {
+    connection,
     status,
     messages,
+    events,
     live,
-    running,
-    runningTools,
-    tools,
     error,
-    submit: submitPrompt,
-    abort
-  } = usePiSession(session);
+    prompt,
+    interrupt
+  } = useHarnessSession<PiProtocol>({ agent: AGENT, name: session });
+
+  // Tool calls pi has started and not finished, from the durable event log.
+  const runningTools = useMemo(() => {
+    const open = new Map<string, string>();
+    for (const event of events) {
+      const body = event.body;
+      if (body.type === "tool_start") open.set(body.toolCallId, body.toolName);
+      else if (body.type === "tool_end") open.delete(body.toolCallId);
+      else if (body.type === "operation_settled") open.clear();
+    }
+    return [...open].map(([toolCallId, toolName]) => ({
+      toolCallId,
+      toolName
+    }));
+  }, [events]);
+
+  const running =
+    status?.state === "running" ||
+    status?.state === "retrying" ||
+    status?.state === "blocked";
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, live, running]);
 
-  const connected = status === "open";
+  const connected = connection === "open";
+  const steerable = status?.capabilities.includes("steer") ?? false;
 
-  const submit = () => {
-    const text = prompt.trim();
-    if (!text || running || !connected) return;
-    setPrompt("");
-    submitPrompt(text);
+  const send = () => {
+    const text = draft.trim();
+    if (!text || !connected) return;
+    setDraft("");
+    // A prompt sent while pi is running folds into the turn it is taking.
+    void prompt(text, running && steerable ? { delivery: "steer" } : {});
   };
 
   const newSession = () => {
@@ -435,7 +478,7 @@ function App() {
               <Badge variant={connected ? "success" : "secondary"}>
                 {connected
                   ? "Live"
-                  : status === "connecting"
+                  : connection === "connecting"
                     ? "Connecting"
                     : "Reconnecting"}
               </Badge>
@@ -477,7 +520,7 @@ function App() {
                       size="sm"
                       icon={suggestion.icon}
                       disabled={!connected}
-                      onClick={() => setPrompt(suggestion.value)}
+                      onClick={() => setDraft(suggestion.value)}
                     >
                       {suggestion.label}
                     </Button>
@@ -495,20 +538,22 @@ function App() {
             ))}
 
             {live ? (
-              <Message message={live} streaming runningTools={runningTools} />
+              <LiveMessage text={live.text} reasoning={live.reasoning} />
             ) : null}
 
             {running && !live ? (
               <div className="flex items-start gap-3">
-                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
-                  <BrainIcon size={17} weight="bold" />
-                </div>
+                <Avatar />
                 <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
                   <div className="flex items-center gap-2 text-sm text-kumo-subtle">
                     <GearIcon size={15} className="animate-spin" />
                     {runningTools.length > 0
-                      ? `Running ${runningTools.join(", ")}`
-                      : "Waking the durable operation"}
+                      ? `Running ${runningTools
+                          .map((tool) => tool.toolName)
+                          .join(", ")}`
+                      : status?.state === "retrying"
+                        ? "Waiting out a provider retry"
+                        : "Waking the durable operation"}
                   </div>
                 </Surface>
               </div>
@@ -531,23 +576,27 @@ function App() {
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              submit();
+              send();
             }}
             className="mx-auto max-w-3xl px-5 pt-4"
           >
             <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
               <InputArea
-                value={prompt}
-                onValueChange={setPrompt}
+                value={draft}
+                onValueChange={setDraft}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    submit();
+                    send();
                   }
                 }}
-                placeholder="Ask Pi to use a tool"
+                placeholder={
+                  running && steerable
+                    ? "Steer the running turn"
+                    : "Ask Pi to use a tool"
+                }
                 aria-label="Message Pi"
-                disabled={!connected || running}
+                disabled={!connected}
                 rows={2}
                 className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
               />
@@ -557,7 +606,7 @@ function App() {
                   variant="secondary"
                   shape="square"
                   aria-label="Stop"
-                  onClick={abort}
+                  onClick={() => void interrupt()}
                   icon={<StopIcon size={18} weight="fill" />}
                   className="mb-0.5"
                 />
@@ -567,7 +616,7 @@ function App() {
                   variant="primary"
                   shape="square"
                   aria-label="Send message"
-                  disabled={!connected || prompt.trim() === ""}
+                  disabled={!connected || draft.trim() === ""}
                   icon={<PaperPlaneRightIcon size={18} />}
                   className="mb-0.5"
                 />
@@ -587,7 +636,7 @@ function App() {
       {toolsOpen ? (
         <Sidebar
           tools={tools}
-          activeTools={runningTools}
+          runningTools={runningTools}
           onClose={() => setToolsOpen(false)}
         />
       ) : null}

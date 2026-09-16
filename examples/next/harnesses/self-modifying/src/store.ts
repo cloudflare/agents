@@ -1,5 +1,9 @@
+import type { SessionMessage } from "agents/sessions";
 import type { JsonObject, JsonValue } from "./json";
-import type { HarnessMessage, HarnessTurnResult } from "./runtime-types";
+import type { HarnessMessage } from "./runtime-types";
+
+/** Newest messages read for a transcript page, before the byte budget. */
+const TRANSCRIPT_ROW_LIMIT = 200;
 
 /** One activated source revision. */
 export type HarnessRevision = {
@@ -17,25 +21,26 @@ export type HarnessBuild = HarnessRevision & {
   readonly source: Readonly<Record<string, string>>;
 };
 
-/** Durable state of one admitted harness turn. */
-export type HarnessTurn = {
-  readonly turnId: string;
-  readonly streamId: string;
-  readonly revisionId: number;
-  readonly state: "queued" | "running" | "completed" | "failed";
-  readonly prompt: string;
-  readonly output: string | null;
-  readonly error: string | null;
+/**
+ * What the runtime keeps about one operation beside the operation row the
+ * Harness base already owns: the input it must replay after an eviction,
+ * the revision a turn is pinned to, and the two isolate metrics the base
+ * cannot know.
+ */
+export type SelfModifyingOperation = {
+  readonly operationId: string;
+  readonly kind: string;
+  readonly payload: JsonValue;
+  readonly revisionId: number | null;
   readonly rounds: number | null;
   readonly isolateRun: number | null;
   readonly createdAt: number;
-  readonly completedAt: number | null;
 };
 
 /** One trusted append-only journal record. */
 export type JournalRecord = {
   readonly seq: number;
-  readonly turnId: string | null;
+  readonly operationId: string | null;
   readonly kind: string;
   readonly data: JsonObject;
   readonly createdAt: number;
@@ -62,28 +67,25 @@ type BuildRow = RevisionRow & {
   source_json: string;
 };
 
-type TurnRow = {
-  turn_id: string;
-  stream_id: string;
-  revision_id: number;
-  state: string;
-  prompt: string;
-  output: string | null;
-  error: string | null;
+type OperationRow = {
+  operation_id: string;
+  kind: string;
+  payload_json: string;
+  revision_id: number | null;
   rounds: number | null;
   isolate_run: number | null;
   created_at: number;
-  completed_at: number | null;
 };
 
 type MessageRow = {
+  operation_id: string;
   role: string;
   content: string;
 };
 
 type JournalRow = {
   seq: number;
-  turn_id: string | null;
+  operation_id: string | null;
   kind: string;
   data_json: string;
   created_at: number;
@@ -105,35 +107,34 @@ function revisionFromRow(row: RevisionRow): HarnessRevision {
   };
 }
 
-function turnState(value: string): HarnessTurn["state"] {
-  if (
-    value === "queued" ||
-    value === "running" ||
-    value === "completed" ||
-    value === "failed"
-  ) {
-    return value;
-  }
-  throw new Error(`Unknown harness turn state ${JSON.stringify(value)}`);
-}
-
-function turnFromRow(row: TurnRow): HarnessTurn {
+function operationFromRow(row: OperationRow): SelfModifyingOperation {
   return {
-    turnId: row.turn_id,
-    streamId: row.stream_id,
+    operationId: row.operation_id,
+    kind: row.kind,
+    payload: JSON.parse(row.payload_json) as JsonValue,
     revisionId: row.revision_id,
-    state: turnState(row.state),
-    prompt: row.prompt,
-    output: row.output,
-    error: row.error,
     rounds: row.rounds,
     isolateRun: row.isolate_run,
-    createdAt: row.created_at,
-    completedAt: row.completed_at
+    createdAt: row.created_at
   };
 }
 
-/** SQLite persistence owned by the trusted self-modifying capability. */
+function journalFromRow(row: JournalRow): JournalRecord {
+  return {
+    seq: row.seq,
+    operationId: row.operation_id,
+    kind: row.kind,
+    data: JSON.parse(row.data_json) as JsonObject,
+    createdAt: row.created_at
+  };
+}
+
+function messageRole(value: string): HarnessMessage["role"] {
+  if (value === "user" || value === "assistant") return value;
+  throw new Error(`Unknown harness message role ${JSON.stringify(value)}`);
+}
+
+/** SQLite persistence owned by the trusted self-modifying runtime. */
 export class SelfModifyingHarnessStore {
   readonly #storage: DurableObjectStorage;
   readonly #sql: SqlStorage;
@@ -144,7 +145,7 @@ export class SelfModifyingHarnessStore {
     this.#sql = storage.sql;
   }
 
-  /** Create every trusted metadata, history, turn, and effect table. */
+  /** Create every trusted metadata, history, operation, and effect table. */
   ensureSchema(): void {
     this.#sql.exec(`
       CREATE TABLE IF NOT EXISTS self_modifying_builds (
@@ -166,37 +167,33 @@ export class SelfModifyingHarnessStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       ) WITHOUT ROWID;
-      CREATE TABLE IF NOT EXISTS self_modifying_turns (
-        turn_id TEXT PRIMARY KEY,
-        stream_id TEXT NOT NULL UNIQUE,
-        revision_id INTEGER NOT NULL,
-        state TEXT NOT NULL,
-        prompt TEXT NOT NULL,
-        output TEXT,
-        error TEXT,
+      CREATE TABLE IF NOT EXISTS self_modifying_operations (
+        operation_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        revision_id INTEGER,
         rounds INTEGER,
         isolate_run INTEGER,
-        created_at INTEGER NOT NULL,
-        completed_at INTEGER
+        created_at INTEGER NOT NULL
       ) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS self_modifying_messages (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        turn_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        UNIQUE(turn_id, role)
+        UNIQUE(operation_id, role)
       );
       CREATE TABLE IF NOT EXISTS self_modifying_journal (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        turn_id TEXT,
+        operation_id TEXT,
         event_key TEXT UNIQUE,
         kind TEXT NOT NULL,
         data_json TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS self_modifying_effects (
-        turn_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
         effect_kind TEXT NOT NULL,
         effect_key TEXT NOT NULL,
         request_hash TEXT NOT NULL,
@@ -204,19 +201,19 @@ export class SelfModifyingHarnessStore {
         result_json TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
-        PRIMARY KEY (turn_id, effect_kind, effect_key)
+        PRIMARY KEY (operation_id, effect_kind, effect_key)
       ) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS self_modifying_stream_events (
-        turn_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
         event_key TEXT NOT NULL,
-        PRIMARY KEY (turn_id, event_key)
+        PRIMARY KEY (operation_id, event_key)
       ) WITHOUT ROWID;
     `);
   }
 
   /** Return the active compiled revision, or null before genesis. */
   activeBuild(): HarnessBuild | null {
-    const rows = this.#sql
+    const row = this.#sql
       .exec<BuildRow>(`
         SELECT r.revision_id, r.source_hash, r.parent_revision_id,
                r.note, r.created_at, b.main_module, b.modules_json,
@@ -226,14 +223,14 @@ export class SelfModifyingHarnessStore {
         JOIN self_modifying_builds b ON b.source_hash = r.source_hash
         WHERE m.key = 'active_revision'
       `)
-      .toArray();
-    const row = rows.at(0);
+      .toArray()
+      .at(0);
     return row ? this.#buildFromRow(row) : null;
   }
 
   /** Return one compiled revision by its monotonic revision ID. */
   build(revisionId: number): HarnessBuild | null {
-    const rows = this.#sql
+    const row = this.#sql
       .exec<BuildRow>(
         `SELECT r.revision_id, r.source_hash, r.parent_revision_id,
                 r.note, r.created_at, b.main_module, b.modules_json,
@@ -243,8 +240,8 @@ export class SelfModifyingHarnessStore {
          WHERE r.revision_id = ?`,
         revisionId
       )
-      .toArray();
-    const row = rows.at(0);
+      .toArray()
+      .at(0);
     return row ? this.#buildFromRow(row) : null;
   }
 
@@ -335,148 +332,154 @@ export class SelfModifyingHarnessStore {
     });
   }
 
-  /** Admit one turn and append its user message atomically. */
-  beginTurn(input: {
-    readonly turnId: string;
-    readonly streamId: string;
-    readonly revisionId: number;
-    readonly prompt: string;
-  }): HarnessTurn {
+  /**
+   * Record one operation's replayable input before it starts, and append a
+   * turn's user message in the same transaction.
+   */
+  beginOperation(input: {
+    readonly operationId: string;
+    readonly kind: string;
+    readonly payload: JsonValue;
+    readonly revisionId?: number;
+    readonly prompt?: string;
+  }): void {
     const now = Date.now();
     this.#storage.transactionSync(() => {
       this.#sql.exec(
-        `INSERT OR IGNORE INTO self_modifying_turns
-           (turn_id, stream_id, revision_id, state, prompt, created_at)
-         VALUES (?, ?, ?, 'queued', ?, ?)`,
-        input.turnId,
-        input.streamId,
-        input.revisionId,
-        input.prompt,
+        `INSERT OR IGNORE INTO self_modifying_operations
+           (operation_id, kind, payload_json, revision_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        input.operationId,
+        input.kind,
+        JSON.stringify(input.payload),
+        input.revisionId ?? null,
         now
       );
+      if (input.prompt === undefined) return;
       this.#sql.exec(
         `INSERT OR IGNORE INTO self_modifying_messages
-           (turn_id, role, content, created_at)
+           (operation_id, role, content, created_at)
          VALUES (?, 'user', ?, ?)`,
-        input.turnId,
+        input.operationId,
         input.prompt,
         now
       );
     });
-    const turn = this.turn(input.turnId);
-    if (!turn) throw new Error(`Turn ${input.turnId} was not admitted`);
-    return turn;
   }
 
-  /** Mark an admitted turn as executing. */
-  markRunning(turnId: string): void {
-    this.#sql.exec(
-      "UPDATE self_modifying_turns SET state = 'running' WHERE turn_id = ? AND state = 'queued'",
-      turnId
-    );
-  }
-
-  /** Persist terminal output and its display-ready assistant message. */
-  completeTurn(turnId: string, result: HarnessTurnResult): void {
-    const now = Date.now();
-    this.#storage.transactionSync(() => {
-      this.#sql.exec(
-        `UPDATE self_modifying_turns
-         SET state = 'completed', output = ?, rounds = ?, isolate_run = ?,
-             completed_at = ?
-         WHERE turn_id = ?`,
-        result.output,
-        result.rounds,
-        result.isolateRun,
-        now,
-        turnId
-      );
-      this.#sql.exec(
-        `INSERT OR IGNORE INTO self_modifying_messages
-           (turn_id, role, content, created_at)
-         VALUES (?, 'assistant', ?, ?)`,
-        turnId,
-        result.output,
-        now
-      );
-    });
-  }
-
-  /** Persist one terminal turn failure. */
-  failTurn(turnId: string, error: string): void {
-    this.#sql.exec(
-      `UPDATE self_modifying_turns
-       SET state = 'failed', error = ?, completed_at = ?
-       WHERE turn_id = ?`,
-      error,
-      Date.now(),
-      turnId
-    );
-  }
-
-  /** Read one turn. */
-  turn(turnId: string): HarnessTurn | null {
+  /** Read one recorded operation. */
+  operation(operationId: string): SelfModifyingOperation | null {
     const row = this.#sql
-      .exec<TurnRow>(
-        "SELECT * FROM self_modifying_turns WHERE turn_id = ?",
-        turnId
+      .exec<OperationRow>(
+        "SELECT * FROM self_modifying_operations WHERE operation_id = ?",
+        operationId
       )
       .toArray()
       .at(0);
-    return row ? turnFromRow(row) : null;
+    return row ? operationFromRow(row) : null;
   }
 
-  /** List recent turns newest first. */
-  turns(limit = 30): HarnessTurn[] {
-    return this.#sql
-      .exec<TurnRow>(
-        "SELECT * FROM self_modifying_turns ORDER BY created_at DESC LIMIT ?",
-        limit
-      )
-      .toArray()
-      .map(turnFromRow);
-  }
-
-  /** Read the bounded visible conversation before a given turn. */
-  historyBefore(turnId: string, limit = 40): HarnessMessage[] {
-    const rows = this.#sql
-      .exec<MessageRow>(
-        `SELECT role, content FROM (
-           SELECT m.seq, m.role, m.content
-           FROM self_modifying_messages m
-           JOIN self_modifying_messages current ON current.turn_id = ? AND current.role = 'user'
-           WHERE m.seq < current.seq
-           ORDER BY m.seq DESC LIMIT ?
-         ) ORDER BY seq ASC`,
-        turnId,
-        limit
-      )
-      .toArray();
-    return rows.map((row) => {
-      if (row.role !== "user" && row.role !== "assistant") {
-        throw new Error(`Unknown harness message role ${row.role}`);
-      }
-      return { role: row.role, content: row.content };
+  /**
+   * Persist a turn's display-ready assistant message, and the two isolate
+   * metrics the Harness base does not record when the turn produced them.
+   */
+  completeTurn(
+    operationId: string,
+    result: {
+      readonly output: string;
+      readonly rounds?: number;
+      readonly isolateRun?: number;
+    }
+  ): void {
+    const now = Date.now();
+    this.#storage.transactionSync(() => {
+      this.#sql.exec(
+        `UPDATE self_modifying_operations
+         SET rounds = COALESCE(?, rounds), isolate_run = COALESCE(?, isolate_run)
+         WHERE operation_id = ?`,
+        result.rounds ?? null,
+        result.isolateRun ?? null,
+        operationId
+      );
+      this.#sql.exec(
+        `INSERT OR IGNORE INTO self_modifying_messages
+           (operation_id, role, content, created_at)
+         VALUES (?, 'assistant', ?, ?)`,
+        operationId,
+        result.output,
+        now
+      );
     });
   }
 
-  /** Append a trusted journal record, optionally once under a stable key. */
+  /** Read the bounded visible conversation before a given turn. */
+  historyBefore(operationId: string, limit = 40): HarnessMessage[] {
+    return this.#sql
+      .exec<MessageRow>(
+        `SELECT operation_id, role, content FROM (
+           SELECT m.seq, m.operation_id, m.role, m.content
+           FROM self_modifying_messages m
+           JOIN self_modifying_messages current
+             ON current.operation_id = ? AND current.role = 'user'
+           WHERE m.seq < current.seq
+           ORDER BY m.seq DESC LIMIT ?
+         ) ORDER BY seq ASC`,
+        operationId,
+        limit
+      )
+      .toArray()
+      .map((row) => ({ role: messageRole(row.role), content: row.content }));
+  }
+
+  /** The user-visible transcript, oldest first, within a byte budget. */
+  transcript(maxBytes: number): SessionMessage[] {
+    const rows = this.#sql
+      .exec<MessageRow>(
+        `SELECT operation_id, role, content FROM self_modifying_messages
+         ORDER BY seq DESC LIMIT ?`,
+        TRANSCRIPT_ROW_LIMIT
+      )
+      .toArray();
+    const messages: SessionMessage[] = [];
+    let bytes = 0;
+    for (const row of rows) {
+      bytes += row.content.length;
+      if (bytes > maxBytes && messages.length > 0) break;
+      messages.push({
+        id: `${row.role}:${row.operation_id}`,
+        role: row.role,
+        parts: [{ type: "text", text: row.content }]
+      });
+    }
+    return messages.reverse();
+  }
+
+  /**
+   * Append a trusted journal record, optionally once under a stable key.
+   * Returns the stored record, or null when that key was already written.
+   */
   journal(
-    turnId: string | null,
+    operationId: string | null,
     kind: string,
     data: JsonObject,
     eventKey?: string
-  ): void {
-    this.#sql.exec(
+  ): JournalRecord | null {
+    const now = Date.now();
+    const cursor = this.#sql.exec(
       `INSERT OR IGNORE INTO self_modifying_journal
-         (turn_id, event_key, kind, data_json, created_at)
+         (operation_id, event_key, kind, data_json, created_at)
        VALUES (?, ?, ?, ?, ?)`,
-      turnId,
+      operationId,
       eventKey ?? null,
       kind,
       JSON.stringify(data),
-      Date.now()
+      now
     );
+    if (cursor.rowsWritten === 0) return null;
+    const seq = this.#sql
+      .exec<{ seq: number }>("SELECT last_insert_rowid() AS seq")
+      .one().seq;
+    return { seq, operationId, kind, data, createdAt: now };
   }
 
   /** List trusted journal records newest first. */
@@ -487,22 +490,16 @@ export class SelfModifyingHarnessStore {
         limit
       )
       .toArray()
-      .map((row) => ({
-        seq: row.seq,
-        turnId: row.turn_id,
-        kind: row.kind,
-        data: JSON.parse(row.data_json) as JsonObject,
-        createdAt: row.created_at
-      }));
+      .map(journalFromRow);
   }
 
   /** Read model or tool effect evidence. */
-  effect(turnId: string, kind: string, key: string): EffectRecord | null {
+  effect(operationId: string, kind: string, key: string): EffectRecord | null {
     const row = this.#sql
       .exec<EffectRow>(
         `SELECT request_hash, state, result_json FROM self_modifying_effects
-         WHERE turn_id = ? AND effect_kind = ? AND effect_key = ?`,
-        turnId,
+         WHERE operation_id = ? AND effect_kind = ? AND effect_key = ?`,
+        operationId,
         kind,
         key
       )
@@ -523,7 +520,7 @@ export class SelfModifyingHarnessStore {
 
   /** Record an effect intent before external work starts. */
   beginEffect(
-    turnId: string,
+    operationId: string,
     kind: string,
     key: string,
     requestHash: string
@@ -531,10 +528,10 @@ export class SelfModifyingHarnessStore {
     const now = Date.now();
     this.#sql.exec(
       `INSERT OR IGNORE INTO self_modifying_effects
-         (turn_id, effect_kind, effect_key, request_hash, state,
+         (operation_id, effect_kind, effect_key, request_hash, state,
           created_at, updated_at)
        VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
-      turnId,
+      operationId,
       kind,
       key,
       requestHash,
@@ -545,28 +542,28 @@ export class SelfModifyingHarnessStore {
 
   /** Settle one effect with a JSON result. */
   completeEffect(
-    turnId: string,
+    operationId: string,
     kind: string,
     key: string,
     result: JsonValue
   ): void {
     this.#sql.exec(
       `UPDATE self_modifying_effects SET state = 'completed', result_json = ?, updated_at = ?
-       WHERE turn_id = ? AND effect_kind = ? AND effect_key = ?`,
+       WHERE operation_id = ? AND effect_kind = ? AND effect_key = ?`,
       JSON.stringify(result),
       Date.now(),
-      turnId,
+      operationId,
       kind,
       key
     );
   }
 
-  /** Claim one event key before projecting it into Streams. */
-  claimStreamEvent(turnId: string, eventKey: string): boolean {
+  /** Claim one event key before projecting it into the operation's log. */
+  claimStreamEvent(operationId: string, eventKey: string): boolean {
     const cursor = this.#sql.exec(
-      `INSERT OR IGNORE INTO self_modifying_stream_events (turn_id, event_key)
+      `INSERT OR IGNORE INTO self_modifying_stream_events (operation_id, event_key)
        VALUES (?, ?)`,
-      turnId,
+      operationId,
       eventKey
     );
     return cursor.rowsWritten > 0;

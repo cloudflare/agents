@@ -1,10 +1,17 @@
+/**
+ * What the browser needs to talk about a pi session: the harness protocol pi
+ * declares, and the projected pi types its events carry. No runtime imports,
+ * so the client bundle never reaches a server module.
+ */
 export type {
-  PiClientMessage as ClientMessage,
-  PiEvent as TranscriptEvent,
-  PiLaneSnapshot as LaneSnapshot,
-  PiMessage as TranscriptMessage,
-  PiMessageDelta as MessageDelta,
-  PiMessagePart as TranscriptPart,
-  PiServerMessage as ServerMessage,
-  PiToolInfo as ToolInfo
+  PiEvent,
+  PiMessage,
+  PiMessagePart,
+  PiOperationResult,
+  PiProtocol,
+  PiQueuedItem,
+  PiResult,
+  PiSubmission,
+  PiToolInfo,
+  PiToolResult
 } from "./harness/types";

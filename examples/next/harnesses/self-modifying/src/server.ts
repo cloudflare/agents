@@ -1,14 +1,16 @@
-import { DurableObject } from "cloudflare:workers";
+import { Harness } from "@cloudflare/agents-next-harness";
 import { Workspace } from "@cloudflare/shell";
+import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
 import { WebSockets } from "agents/websockets";
 import { createWorkersAI } from "workers-ai-provider";
-import { SelfModifyingHarness } from "./self-modifying-harness";
+import type { SelfModifyingProtocol } from "./protocol";
+import { SelfModifyingRuntime } from "./self-modifying-runtime";
 
-/** Plain Durable Object hosting the self-modifying Lifecycle capability. */
+/** Plain Durable Object hosting the shared Harness over an editable runtime. */
 export class SelfModifyingHarnessObject extends DurableObject<Env> {
   readonly workersAI = createWorkersAI({ binding: this.env.AI });
   readonly workspace = new Workspace({
@@ -17,12 +19,15 @@ export class SelfModifyingHarnessObject extends DurableObject<Env> {
   });
   readonly tasks = new Tasks();
   readonly streams = new Streams();
-  readonly harness = new SelfModifyingHarness({
-    tasks: this.tasks,
-    streams: this.streams,
+  readonly runtime = new SelfModifyingRuntime({
     workspace: this.workspace,
     loader: this.env.LOADER,
     model: this.workersAI("@cf/moonshotai/kimi-k2.7-code")
+  });
+  readonly harness = new Harness<SelfModifyingProtocol>({
+    tasks: this.tasks,
+    streams: this.streams,
+    runtime: this.runtime
   });
   readonly webSockets = new WebSockets(this.harness.webSockets());
   readonly lifecycle = Lifecycle.install(this)
@@ -30,6 +35,22 @@ export class SelfModifyingHarnessObject extends DurableObject<Env> {
     .use(this.streams)
     .use(this.webSockets)
     .use(this.harness);
+
+  /**
+   * The one read the harness link does not carry, because it is about this
+   * host and not about the session: the active revision, its exact source,
+   * the revision list and the trusted journal. Lifecycle dispatches this
+   * after every capability declines the request, and `routeAgentRequest`
+   * forwards `/agents/self-modifying-harness/<name>/snapshot` here.
+   */
+  async onRequest(request: Request): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    if (request.method !== "GET" || !pathname.endsWith("/snapshot")) {
+      return new Response("Not found", { status: 404 });
+    }
+    await this.lifecycle.start();
+    return Response.json(this.runtime.snapshot());
+  }
 }
 
 export default {

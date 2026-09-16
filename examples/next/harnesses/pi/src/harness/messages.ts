@@ -4,13 +4,13 @@ import type {
   Entry,
   LaneQueuedItem
 } from "@earendil-works/pi-agent-core";
-import type { AssistantMessageFrame } from "@earendil-works/pi-ai";
+import type { SessionMessage, SessionMessagePart } from "agents/sessions";
 import type {
   PiJson,
   PiMessage,
-  PiMessageDelta,
   PiMessagePart,
   PiQueuedItem,
+  PiToolContent,
   PiToolResult
 } from "./types";
 
@@ -134,83 +134,6 @@ export function projectToolResult(
   };
 }
 
-/** Project pi's compact assistant frame into the public delta shape. */
-export function projectFrame(
-  frame: AssistantMessageFrame,
-  messageId: string
-): PiMessageDelta | undefined {
-  switch (frame.type) {
-    case "start": {
-      const message = projectAgentMessage(frame.partial, messageId);
-      return message ? { type: "start", message } : undefined;
-    }
-    case "text_start":
-      return {
-        type: "text_start",
-        index: frame.contentIndex,
-        text: frame.content.text
-      };
-    case "text_delta":
-      return {
-        type: "text_delta",
-        index: frame.contentIndex,
-        delta: frame.delta
-      };
-    case "text_end":
-      return {
-        type: "text_end",
-        index: frame.contentIndex,
-        text: frame.content
-      };
-    case "thinking_start":
-      return {
-        type: "thinking_start",
-        index: frame.contentIndex,
-        text: frame.content.thinking
-      };
-    case "thinking_delta":
-      return {
-        type: "thinking_delta",
-        index: frame.contentIndex,
-        delta: frame.delta
-      };
-    case "thinking_end":
-      return {
-        type: "thinking_end",
-        index: frame.contentIndex,
-        text: frame.content
-      };
-    case "toolcall_start":
-      return {
-        type: "toolcall_start",
-        index: frame.contentIndex,
-        id: frame.toolCall.id,
-        name: frame.toolCall.name,
-        arguments: asJson(frame.toolCall.arguments)
-      };
-    case "toolcall_checkpoint":
-      return {
-        type: "toolcall_checkpoint",
-        index: frame.contentIndex,
-        json: frame.json
-      };
-    case "toolcall_delta":
-      return {
-        type: "toolcall_delta",
-        index: frame.contentIndex,
-        delta: frame.delta
-      };
-    case "toolcall_end":
-      return {
-        type: "toolcall_end",
-        index: frame.contentIndex,
-        id: frame.id,
-        name: frame.name,
-        arguments: asJson(frame.arguments)
-      };
-  }
-}
-
 /** Project a lane's queued inbox items. */
 export function projectQueue(items: readonly LaneQueuedItem[]): PiQueuedItem[] {
   return items.map((item) => {
@@ -224,4 +147,62 @@ export function projectQueue(items: readonly LaneQueuedItem[]): PiQueuedItem[] {
       ...(message === undefined ? {} : { message })
     };
   });
+}
+
+/** Flatten a tool result's content into the text a transcript shows. */
+function contentText(content: readonly PiToolContent[]): string {
+  return content
+    .filter((part) => part.type === "text")
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("\n");
+}
+
+/**
+ * Project one pi message part onto the shared `SessionMessagePart` shape, so
+ * every harness renders the same transcript whatever ran the loop. Pi's own
+ * extras (a tool result's structured details, an image's bytes) ride the
+ * fields the shape already has.
+ */
+export function toSessionParts(
+  parts: readonly PiMessagePart[]
+): SessionMessagePart[] {
+  return parts.map((part): SessionMessagePart => {
+    switch (part.type) {
+      case "text":
+        return { type: "text", text: part.text };
+      case "thinking":
+        return { type: "reasoning", text: part.text };
+      case "image":
+        return {
+          type: "file",
+          mediaType: part.mimeType,
+          url: `data:${part.mimeType};base64,${part.data}`
+        };
+      case "tool-call":
+        return {
+          type: "tool-call",
+          toolCallId: part.id,
+          toolName: part.name,
+          input: part.arguments
+        };
+      case "tool-result":
+        return {
+          type: "tool-result",
+          toolCallId: part.id,
+          toolName: part.name,
+          output: contentText(part.content),
+          ...(part.details === undefined ? {} : { result: part.details }),
+          state: part.error ? "output-error" : "output-available"
+        };
+    }
+  });
+}
+
+/** Project one pi message onto the shared transcript shape. */
+export function toSessionMessage(message: PiMessage): SessionMessage {
+  return {
+    id: message.id,
+    role: message.role,
+    parts: toSessionParts(message.parts)
+  };
 }

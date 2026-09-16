@@ -1,7 +1,10 @@
+import type { HarnessEvent } from "@cloudflare/agents-next-harness";
+import { useHarnessSession } from "@cloudflare/agents-next-harness/react";
 import {
   Badge,
   Button,
   Empty,
+  Input,
   InputArea,
   PoweredByCloudflare,
   Surface,
@@ -11,32 +14,49 @@ import {
   ArrowCounterClockwiseIcon,
   CheckCircleIcon,
   CodeIcon,
+  FloppyDiskIcon,
   GearIcon,
   MoonIcon,
   PaperPlaneRightIcon,
+  PlayIcon,
   PlusIcon,
   SunIcon,
   XCircleIcon,
   XIcon
 } from "@phosphor-icons/react";
 import { code } from "@streamdown/code";
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
+import type { SessionMessage } from "agents/sessions";
+import {
+  StrictMode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
-import type { HarnessSnapshot, HarnessTurn } from "./protocol";
-import { useHarnessSession, type TurnEvent } from "./use-harness-session";
+import type { SelfModifyingProtocol, SelfModifyingSnapshot } from "./protocol";
 import "./styles.css";
 
 type InspectorTab = "code" | "revisions" | "activity";
 
 type ToolActivity = {
-  callId: string;
-  name: string;
-  input: unknown;
-  status: "running" | "completed" | "failed";
-  result?: unknown;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly input: unknown;
+  readonly status: "running" | "completed" | "failed";
+  readonly output?: unknown;
 };
 
+/** What one operation's frames say about the turn that produced them. */
+type TurnActivity = {
+  readonly tools: readonly ToolActivity[];
+  readonly rounds: number;
+  readonly revisionId: number | null;
+};
+
+const AGENT = "self-modifying-harness";
 const OBJECT_KEY = "self-modifying-harness-object";
 const SUGGESTIONS = [
   {
@@ -72,37 +92,79 @@ function shortTime(value: number): string {
   });
 }
 
-function collectTools(events: readonly TurnEvent[]): ToolActivity[] {
-  const tools = new Map<string, ToolActivity>();
-  for (const event of events) {
-    const callId = typeof event.callId === "string" ? event.callId : null;
-    if (!callId) continue;
-    const name = typeof event.name === "string" ? event.name : "tool";
-    if (event.type === "tool_started") {
-      tools.set(callId, {
-        callId,
-        name,
-        input: event.input,
-        status: "running"
-      });
-      continue;
-    }
-    if (event.type === "tool_completed" || event.type === "tool_failed") {
-      const previous = tools.get(callId);
-      tools.set(callId, {
-        callId,
-        name,
-        input: previous?.input,
-        status: event.type === "tool_failed" ? "failed" : "completed",
-        result: event.result
-      });
-    }
-  }
-  return [...tools.values()];
+function messageText(message: SessionMessage): string {
+  return message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text ?? "")
+    .join("");
 }
 
-function modelRounds(events: readonly TurnEvent[]): number {
-  return events.filter((event) => event.type === "model_started").length;
+/** The operation a `user:<id>` or `assistant:<id>` message belongs to. */
+function operationOf(messageId: string): string {
+  const separator = messageId.indexOf(":");
+  return separator === -1 ? messageId : messageId.slice(separator + 1);
+}
+
+/** Fold the durable event log into per-operation tool and model activity. */
+function activityOf(
+  events: readonly HarnessEvent<SelfModifyingProtocol>[]
+): Map<string, TurnActivity> {
+  const turns = new Map<
+    string,
+    {
+      tools: Map<string, ToolActivity>;
+      rounds: number;
+      revisionId: number | null;
+    }
+  >();
+  for (const event of events) {
+    const operationId = event.operationId;
+    if (operationId === undefined) continue;
+    let turn = turns.get(operationId);
+    if (!turn) {
+      turn = { tools: new Map(), rounds: 0, revisionId: null };
+      turns.set(operationId, turn);
+    }
+    const body = event.body;
+    if (body.type === "tool_start") {
+      turn.tools.set(body.toolCallId, {
+        toolCallId: body.toolCallId,
+        toolName: body.toolName,
+        input: body.input,
+        status: "running"
+      });
+    } else if (body.type === "tool_end") {
+      const started = turn.tools.get(body.toolCallId);
+      turn.tools.set(body.toolCallId, {
+        toolCallId: body.toolCallId,
+        toolName: started?.toolName ?? "tool",
+        input: started?.input,
+        status: body.isError ? "failed" : "completed",
+        output: body.output
+      });
+    } else if (
+      body.type === "extension" &&
+      body.body.type === "model_started"
+    ) {
+      turn.rounds = Math.max(turn.rounds, body.body.round);
+    } else if (body.type === "operation_settled") {
+      const raw = body.result.raw;
+      if (raw && typeof raw === "object" && "revisionId" in raw) {
+        const revisionId = raw.revisionId;
+        if (typeof revisionId === "number") turn.revisionId = revisionId;
+      }
+    }
+  }
+  return new Map(
+    [...turns].map(([operationId, turn]) => [
+      operationId,
+      {
+        tools: [...turn.tools.values()],
+        rounds: turn.rounds,
+        revisionId: turn.revisionId
+      }
+    ])
+  );
 }
 
 function ModeToggle() {
@@ -149,7 +211,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
         {icon}
         <span className="min-w-0 flex-1 truncate text-xs font-semibold">
-          {tool.name}
+          {tool.toolName}
         </span>
         <Badge variant={tool.status === "failed" ? "destructive" : "secondary"}>
           {tool.status === "running"
@@ -168,12 +230,12 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
             <JsonBlock value={tool.input} />
           </div>
         ) : null}
-        {tool.result !== undefined ? (
+        {tool.output !== undefined ? (
           <div>
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
               Result
             </p>
-            <JsonBlock value={tool.result} />
+            <JsonBlock value={tool.output} />
           </div>
         ) : null}
       </div>
@@ -182,15 +244,16 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
 }
 
 function AssistantMessage({
-  turn,
-  events
+  text,
+  activity,
+  running
 }: {
-  turn: HarnessTurn;
-  events: readonly TurnEvent[];
+  text: string;
+  activity: TurnActivity | undefined;
+  running: boolean;
 }) {
-  const tools = useMemo(() => collectTools(events), [events]);
-  const rounds = modelRounds(events);
-  const running = turn.state === "queued" || turn.state === "running";
+  const tools = activity?.tools ?? [];
+  const rounds = activity?.rounds ?? 0;
 
   return (
     <div className="flex items-start gap-3">
@@ -202,24 +265,23 @@ function AssistantMessage({
           <Text size="sm" bold>
             Harness
           </Text>
-          <Badge variant="secondary">revision {turn.revisionId}</Badge>
+          {activity?.revisionId !== null &&
+          activity?.revisionId !== undefined ? (
+            <Badge variant="secondary">revision {activity.revisionId}</Badge>
+          ) : null}
           {running ? (
             <span className="flex items-center gap-1.5 text-xs text-kumo-subtle">
               <span className="size-1.5 animate-pulse rounded-full bg-kumo-accent" />
               {rounds > 0 ? `Round ${rounds}` : "Starting"}
             </span>
-          ) : turn.state === "failed" ? (
-            <span className="text-xs font-medium text-kumo-danger">
-              Turn failed
-            </span>
           ) : null}
         </div>
 
-        {running && events.length === 0 ? (
+        {running && tools.length === 0 && text === "" ? (
           <Surface className="max-w-xl rounded-xl px-4 py-3 ring ring-kumo-line">
             <div className="flex items-center gap-2 text-sm text-kumo-subtle">
               <GearIcon size={15} className="animate-spin" />
-              Loading revision {turn.revisionId} into a fresh isolate
+              Loading the pinned revision into a fresh isolate
             </div>
           </Surface>
         ) : null}
@@ -227,38 +289,19 @@ function AssistantMessage({
         {tools.length > 0 ? (
           <div className="max-w-xl space-y-2">
             {tools.map((tool) => (
-              <ToolCard key={tool.callId} tool={tool} />
+              <ToolCard key={tool.toolCallId} tool={tool} />
             ))}
           </div>
         ) : null}
 
-        {turn.output ? (
+        {text ? (
           <Streamdown
             className="sd-theme max-w-xl text-sm leading-6"
             plugins={{ code }}
             controls={false}
           >
-            {turn.output}
+            {text}
           </Streamdown>
-        ) : null}
-
-        {turn.error ? (
-          <div
-            role="alert"
-            className="max-w-xl rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-          >
-            {turn.error}
-          </div>
-        ) : null}
-
-        {!running && turn.rounds !== null ? (
-          <div className="flex flex-wrap items-center gap-2 text-[11px] text-kumo-inactive">
-            <span>
-              {turn.rounds} model {turn.rounds === 1 ? "round" : "rounds"}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>{shortTime(turn.createdAt)}</span>
-          </div>
         ) : null}
       </div>
     </div>
@@ -277,19 +320,34 @@ function UserMessage({ text }: { text: string }) {
 
 function Inspector({
   snapshot,
+  busy,
   onClose,
-  onRestore,
-  busy
+  onWrite,
+  onActivate,
+  onRestore
 }: {
-  snapshot: HarnessSnapshot | null;
-  onClose: () => void;
-  onRestore: (revisionId: number) => void;
+  snapshot: SelfModifyingSnapshot | null;
   busy: boolean;
+  onClose: () => void;
+  onWrite: (path: string, content: string) => void;
+  onActivate: (note: string) => void;
+  onRestore: (revisionId: number) => void;
 }) {
   const [tab, setTab] = useState<InspectorTab>("code");
   const [selectedPath, setSelectedPath] = useState("src/index.ts");
+  const [draft, setDraft] = useState<string | null>(null);
+  const [note, setNote] = useState("");
   const selected =
     snapshot?.files.find((file) => file.path === selectedPath) ?? null;
+  const activeRevisionId = snapshot?.active.revisionId ?? null;
+
+  // The editor always starts from the active revision's exact source; a save
+  // goes to the working tree, which only becomes visible once activated.
+  useEffect(() => {
+    setDraft(null);
+  }, [selectedPath, activeRevisionId]);
+
+  const content = draft ?? selected?.content ?? "";
 
   return (
     <aside
@@ -299,7 +357,7 @@ function Inspector({
       <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
         <div className="min-w-0">
           <Text size="sm" bold>
-            Active revision {snapshot?.active.revisionId ?? "…"}
+            Active revision {activeRevisionId ?? "…"}
           </Text>
           <p className="truncate font-mono text-[10px] text-kumo-subtle">
             {snapshot?.active.sourceHash.slice(0, 16) ?? ""}
@@ -355,16 +413,56 @@ function Inspector({
               </button>
             ))}
           </nav>
-          <pre className="m-0 min-w-0 overflow-auto bg-kumo-contrast p-4 text-xs leading-relaxed text-kumo-inverse">
-            <code>{selected?.content ?? "Select a source file"}</code>
-          </pre>
+          <div className="flex min-h-0 min-w-0 flex-col">
+            <textarea
+              value={content}
+              spellCheck={false}
+              aria-label={`Source of ${selectedPath}`}
+              onChange={(event) => setDraft(event.target.value)}
+              className="min-h-0 flex-1 resize-none bg-kumo-contrast p-4 font-mono text-xs leading-relaxed text-kumo-inverse outline-none"
+            />
+            <div className="flex flex-wrap items-center gap-2 border-t border-kumo-line p-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy || draft === null}
+                icon={<FloppyDiskIcon size={13} />}
+                onClick={() => {
+                  if (draft === null) return;
+                  onWrite(selectedPath, draft);
+                  setDraft(null);
+                }}
+              >
+                Save to working tree
+              </Button>
+              <Input
+                value={note}
+                onValueChange={setNote}
+                aria-label="Activation note"
+                placeholder="Activation note"
+                className="min-w-0 flex-1"
+              />
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={busy}
+                icon={<PlayIcon size={13} />}
+                onClick={() => {
+                  onActivate(note.trim() === "" ? "operator activation" : note);
+                  setNote("");
+                }}
+              >
+                Activate
+              </Button>
+            </div>
+          </div>
         </div>
       ) : null}
 
       {tab === "revisions" ? (
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
           {snapshot?.revisions.map((revision) => {
-            const active = revision.revisionId === snapshot.active.revisionId;
+            const active = revision.revisionId === activeRevisionId;
             return (
               <Surface
                 key={revision.revisionId}
@@ -426,38 +524,50 @@ function Inspector({
 function App() {
   const [name, setName] = useState(getObjectName);
   const [prompt, setPrompt] = useState("");
+  const [snapshot, setSnapshot] = useState<SelfModifyingSnapshot | null>(null);
+  const [dismissed, setDismissed] = useState<string | undefined>(undefined);
   const [inspectorOpen, setInspectorOpen] = useState(
     () => window.matchMedia("(min-width: 1100px)").matches
   );
   const endRef = useRef<HTMLDivElement>(null);
-  const {
-    status,
-    snapshot,
-    events,
-    error,
-    active,
-    submit,
-    restore,
-    dismissError
-  } = useHarnessSession(name);
+  const session = useHarnessSession<SelfModifyingProtocol>({
+    agent: AGENT,
+    name
+  });
+  const { connection, status, messages, events, live, error } = session;
 
-  const connected = status === "open";
-  const busy = active !== null;
-  const turns = snapshot?.turns ?? [];
+  const connected = connection === "open";
+  const busy =
+    status !== null &&
+    (status.state === "running" || status.queuedOperations > 0);
+  const activity = useMemo(() => activityOf(events), [events]);
+  // Every settled operation may have changed the source, the revision
+  // pointer or the journal, so the host snapshot is read again.
+  const settlements = events.filter(
+    (event) => event.body.type === "operation_settled"
+  ).length;
 
-  const eventCount = Object.values(events).reduce(
-    (sum, list) => sum + list.length,
-    0
-  );
+  const loadSnapshot = useCallback(async () => {
+    const response = await fetch(
+      `/agents/${AGENT}/${encodeURIComponent(name)}/snapshot`
+    );
+    if (!response.ok) return;
+    setSnapshot((await response.json()) as SelfModifyingSnapshot);
+  }, [name]);
+
+  useEffect(() => {
+    void loadSnapshot();
+  }, [loadSnapshot, settlements]);
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns.length, eventCount, active?.state]);
+  }, [messages.length, live?.text, events.length]);
 
   const send = (text = prompt) => {
     const trimmed = text.trim();
     if (trimmed === "" || busy || !connected) return;
     setPrompt("");
-    submit(trimmed);
+    void session.prompt(trimmed);
   };
 
   const newObject = () => {
@@ -466,8 +576,23 @@ function App() {
     const url = new URL(location.href);
     url.searchParams.delete("agent");
     history.replaceState(null, "", url);
+    setSnapshot(null);
     setName(next);
   };
+
+  // A running operation is a turn only when the transcript already carries
+  // its user message; `activate` and the other submissions are not turns.
+  const runningOperation =
+    status?.state === "running" ? status.operationId : undefined;
+  const runningTurn =
+    runningOperation !== undefined &&
+    messages.some(
+      (message) =>
+        message.role === "user" && operationOf(message.id) === runningOperation
+    )
+      ? runningOperation
+      : undefined;
+  const shownError = error === dismissed ? undefined : error;
 
   return (
     <div
@@ -497,7 +622,7 @@ function App() {
               <Badge variant={connected ? "success" : "secondary"}>
                 {connected
                   ? "Live"
-                  : status === "connecting"
+                  : connection === "connecting"
                     ? "Connecting"
                     : "Reconnecting"}
               </Badge>
@@ -525,7 +650,7 @@ function App() {
 
         <main className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl space-y-6 px-5 py-6">
-            {turns.length === 0 ? (
+            {messages.length === 0 ? (
               <div className="py-10 sm:py-16">
                 <Empty
                   icon={<CodeIcon size={32} />}
@@ -548,28 +673,39 @@ function App() {
               </div>
             ) : null}
 
-            {turns.map((turn) => (
-              <div key={turn.turnId} className="space-y-5">
-                <UserMessage text={turn.prompt} />
+            {messages.map((message) =>
+              message.role === "user" ? (
+                <UserMessage key={message.id} text={messageText(message)} />
+              ) : (
                 <AssistantMessage
-                  turn={turn}
-                  events={events[turn.turnId] ?? []}
+                  key={message.id}
+                  text={messageText(message)}
+                  activity={activity.get(operationOf(message.id))}
+                  running={false}
                 />
-              </div>
-            ))}
+              )
+            )}
 
-            {error ? (
+            {runningTurn !== undefined ? (
+              <AssistantMessage
+                text={live?.text ?? ""}
+                activity={activity.get(runningTurn)}
+                running
+              />
+            ) : null}
+
+            {shownError ? (
               <div
                 role="alert"
                 className="flex items-start justify-between gap-3 rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
               >
-                <span>{error}</span>
+                <span>{shownError}</span>
                 <Button
                   variant="ghost"
                   shape="square"
                   size="sm"
                   aria-label="Dismiss"
-                  onClick={dismissError}
+                  onClick={() => setDismissed(shownError)}
                   icon={<XIcon size={14} />}
                 />
               </div>
@@ -631,7 +767,18 @@ function App() {
           snapshot={snapshot}
           busy={busy || !connected}
           onClose={() => setInspectorOpen(false)}
-          onRestore={restore}
+          onWrite={(path, content) => {
+            void session.submit({
+              kind: "write_source",
+              payload: { path, content }
+            });
+          }}
+          onActivate={(note) => {
+            void session.submit({ kind: "activate", payload: { note } });
+          }}
+          onRestore={(revisionId) => {
+            void session.submit({ kind: "restore", payload: { revisionId } });
+          }}
         />
       ) : null}
     </div>

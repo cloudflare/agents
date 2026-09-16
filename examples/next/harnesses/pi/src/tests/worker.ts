@@ -4,62 +4,71 @@ import {
   fauxToolCall
 } from "@earendil-works/pi-ai";
 import { DurableObject } from "cloudflare:workers";
+import { Harness } from "@cloudflare/agents-next-harness";
 import { Lifecycle } from "agents/lifecycle";
+import type { SessionMessage } from "agents/sessions";
 import { Streams } from "agents/streams";
 import { Tasks } from "agents/tasks";
 import { Type } from "typebox";
-import { PiHarness } from "../harness/pi-harness";
-import type { PiEvent, PiMessage, PiTool } from "../harness/types";
+import { PiRuntime } from "../harness/pi-runtime";
+import type { PiProtocol, PiTool } from "../harness/types";
 import { createModels } from "../providers/models";
 
 const multiplyParameters = Type.Object({ value: Type.Number() });
+const waitParameters = Type.Object({});
 const TOOL_REVISION_KEY = "test:pi:revision";
+/** Long enough for a test to interrupt or steer the running operation. */
+const WAIT_TOOL_MS = 5_000;
 
 type ToolContext = {
   readonly revision: number;
 };
 
-function messageText(message: PiMessage): string {
+function messageText(message: SessionMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
-    .map((part) => (part.type === "text" ? part.text : ""))
+    .map((part) => part.text ?? "")
     .join("");
 }
 
-/** Real Durable Object fixture using pi-ai's faux provider. */
+/** Real Durable Object fixture: the shared Harness over pi's faux provider. */
 export class PiHarnessTestObject extends DurableObject<Env> {
   readonly #faux = fauxProvider();
   readonly tasks = new Tasks();
   readonly streams = new Streams();
-  readonly harness = new PiHarness<ToolContext>({
-    models: createModels({ providers: [this.#faux.provider] }),
-    model: this.#faux.getModel(),
+  readonly harness = new Harness<PiProtocol>({
     tasks: this.tasks,
     streams: this.streams,
-    thinkingLevel: "off",
-    retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
-    compaction: { enabled: false, reserveTokens: 0, keepRecentTokens: 0 },
-    toolContext: async () => ({
-      revision: (await this.ctx.storage.get<number>(TOOL_REVISION_KEY)) ?? 1
-    }),
-    tools: () => [this.#multiplyTool()],
-    systemPrompt: "Use the supplied test tool."
+    runtime: new PiRuntime<ToolContext>({
+      models: createModels({ providers: [this.#faux.provider] }),
+      model: this.#faux.getModel(),
+      thinkingLevel: "off",
+      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+      compaction: { enabled: false, reserveTokens: 0, keepRecentTokens: 0 },
+      toolContext: async () => ({
+        revision: (await this.ctx.storage.get<number>(TOOL_REVISION_KEY)) ?? 1
+      }),
+      tools: () => [this.#multiplyTool(), this.#waitTool()],
+      systemPrompt: "Use the supplied test tool."
+    })
   });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.tasks)
     .use(this.streams)
     .use(this.harness);
 
-  /** Run one pi-ai faux-provider turn containing a tool call. */
+  /** Run one faux-provider turn containing a tool call, and wait for it. */
   async runMultiply(
     value: number,
     revision: number
   ): Promise<{
     readonly operationId: string;
     readonly status: string;
+    readonly cursor: string;
     readonly messages: readonly string[];
     readonly result: number | null;
   }> {
+    await this.lifecycle.start();
     await this.ctx.storage.put(TOOL_REVISION_KEY, revision);
     this.#faux.setResponses([
       fauxAssistantMessage(fauxToolCall("multiply", { value }), {
@@ -67,41 +76,112 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       }),
       fauxAssistantMessage("tool complete")
     ]);
-    const response = await this.harness.prompt(`multiply ${value}`);
-    const resultPart = response.messages
+    const session = this.harness.session();
+    const receipt = await session.prompt(`multiply ${value}`);
+    const outcome = await session.wait(receipt.operationId, {
+      timeoutMs: 20_000
+    });
+    const page = await session.messages();
+    const details = page.messages
       .flatMap((message) => message.parts)
       .filter((part) => part.type === "tool-result")
-      .at(-1);
+      .at(-1)?.result;
     const result =
-      resultPart?.type === "tool-result" &&
-      typeof resultPart.details === "object" &&
-      resultPart.details !== null &&
-      "result" in resultPart.details &&
-      typeof resultPart.details.result === "number"
-        ? resultPart.details.result
+      typeof details === "object" &&
+      details !== null &&
+      "result" in details &&
+      typeof details.result === "number"
+        ? details.result
         : null;
     return {
-      operationId: response.operationId,
-      status: response.status,
-      messages: response.messages.map(messageText),
+      operationId: receipt.operationId,
+      status: outcome.status,
+      cursor: outcome.cursor,
+      messages: page.messages.map(messageText),
       result
     };
   }
 
   /** Read the durable transcript without starting another model turn. */
   async messages(): Promise<readonly string[]> {
-    return (await this.harness.getMessages()).map(messageText);
+    await this.lifecycle.start();
+    return (await this.harness.session().messages()).messages.map(messageText);
   }
 
-  /** Read projected event type names from one operation's durable stream. */
-  async eventTypes(operationId: string): Promise<readonly string[]> {
-    const events: PiEvent[] = [];
-    for await (const chunk of this.streams.read(
-      this.harness.streamId(operationId)
-    )) {
-      events.push(...(chunk.chunk as unknown as PiEvent[]));
+  async status(): Promise<{
+    readonly state: string;
+    readonly capabilities: readonly string[];
+  }> {
+    await this.lifecycle.start();
+    const status = await this.harness.session().status();
+    return { state: status.state, capabilities: status.capabilities };
+  }
+
+  /** Replay the durable log, naming each frame by its event type. */
+  async eventTypes(from?: string): Promise<readonly string[]> {
+    await this.lifecycle.start();
+    const controller = new AbortController();
+    const types: string[] = [];
+    for await (const event of this.harness.session().events({
+      ...(from === undefined ? {} : { from }),
+      signal: controller.signal,
+      onUpToDate: () => controller.abort()
+    })) {
+      if ("preview" in event) continue;
+      const body = event.body;
+      types.push(
+        body.type === "extension" ? `extension:${body.body.type}` : body.type
+      );
     }
-    return events.map((event) => event.type);
+    return types;
+  }
+
+  /** Start a turn whose tool call blocks until interrupted or timed out. */
+  async startWaiting(): Promise<string> {
+    await this.lifecycle.start();
+    this.#faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage("done waiting")
+    ]);
+    const receipt = await this.harness.session().prompt("wait for me");
+    return receipt.operationId;
+  }
+
+  /** Fold a message into the running turn. */
+  async steer(text: string): Promise<{
+    readonly accepted: boolean;
+    readonly status: string;
+    /** The pi queue entry the steered message landed in, when it took one. */
+    readonly entryId: string | null;
+  }> {
+    await this.lifecycle.start();
+    const session = this.harness.session();
+    const receipt = await session.prompt(text, { delivery: "steer" });
+    const outcome = await session.wait(receipt.operationId, {
+      timeoutMs: 20_000
+    });
+    const raw = outcome.raw;
+    return {
+      accepted: receipt.accepted,
+      status: outcome.status,
+      entryId: raw && "entryId" in raw ? raw.entryId : null
+    };
+  }
+
+  async interrupt(operationId: string): Promise<{
+    readonly requested: string | null;
+    readonly status: string;
+    readonly stopReason: string;
+  }> {
+    await this.lifecycle.start();
+    const session = this.harness.session();
+    const interrupted = await session.interrupt();
+    const outcome = await session.wait(operationId, { timeoutMs: 20_000 });
+    return {
+      requested: interrupted.operationId,
+      status: outcome.status,
+      stopReason: outcome.stopReason.type
+    };
   }
 
   #multiplyTool(): PiTool<
@@ -120,6 +200,45 @@ export class PiHarnessTestObject extends DurableObject<Env> {
         return {
           content: [{ type: "text", text: String(result) }],
           details: { result, revision: context.revision }
+        };
+      }
+    };
+  }
+
+  #waitTool(): PiTool<
+    ToolContext,
+    typeof waitParameters,
+    { readonly interrupted: boolean }
+  > {
+    return {
+      name: "wait",
+      label: "Wait",
+      description: "Block until the operation is interrupted.",
+      parameters: waitParameters,
+      replay: "never",
+      async execute(
+        _id,
+        _input,
+        _onUpdate,
+        _toolContext,
+        _invocation,
+        piContext
+      ) {
+        const signal = piContext.abortSignal;
+        const interrupted = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(false), WAIT_TOOL_MS);
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve(true);
+            },
+            { once: true }
+          );
+        });
+        return {
+          content: [{ type: "text", text: interrupted ? "stopped" : "waited" }],
+          details: { interrupted }
         };
       }
     };

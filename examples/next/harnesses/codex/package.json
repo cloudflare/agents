@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^4.0.0",
+    "@cloudflare/agents-next-harness": "*",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/shell": "*",
     "@phosphor-icons/react": "^2.1.10",

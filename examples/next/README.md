@@ -20,6 +20,8 @@ lands.
 | [`harnesses/codex`](./harnesses/codex)                   | This PR   | A static Codex Rust/Wasm loop composed as a Lifecycle capability, using LanguageModelV4 and Shell Workspace                                    |
 | [`harnesses/pi`](./harnesses/pi)                         | This PR   | Experimental: pi `AgentHarness` on a pinned pi dev build, composed as an example-local Lifecycle capability                                    |
 | [`harnesses/self-modifying`](./harnesses/self-modifying) | This PR   | A Lifecycle capability runs editable harness revisions in fresh Dynamic Workers with trusted System tools and auto-discovered Custom tools     |
+| [`harnesses/shared`](./harnesses/shared)                 | This PR   | The one `Harness` capability every harness example composes: one developer API over pluggable runtimes                                         |
+| [`harnesses/claude-code`](./harnesses/claude-code)       | This PR   | Claude Code in a Cloudflare Container as a remote harness runtime, driven over Cap'n Web                                                       |
 
 Each example is an independent workspace package and should stay focused on one
 capability. Once the APIs are stable, move the examples into the main examples
