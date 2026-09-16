@@ -4,6 +4,9 @@ import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 
 const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
+// An observer already holding the connect snapshot receives a turn's
+// persisted rows as deltas; the assistant lands in the second one.
+const MSG_CHAT_MESSAGES_DELTA = "cf_agent_chat_messages_delta";
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
@@ -52,23 +55,26 @@ function collectMessages(
   });
 }
 
-function waitForMessageOfType(
-  ws: WebSocket,
-  type: string,
-  timeout = 3000
-): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
+function waitForAssistantBroadcast(ws: WebSocket, timeout = 3000) {
+  return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`Timeout waiting for ${type}`)),
+      () => reject(new Error("no assistant transcript frame")),
       timeout
     );
     const handler = (e: MessageEvent) => {
       try {
-        const msg = JSON.parse(e.data as string) as Record<string, unknown>;
-        if (msg.type === type) {
+        const msg = JSON.parse(e.data as string) as {
+          type?: string;
+          messages?: Array<{ role: string }>;
+        };
+        if (
+          (msg.type === MSG_CHAT_MESSAGES ||
+            msg.type === MSG_CHAT_MESSAGES_DELTA) &&
+          msg.messages?.some((m) => m.role === "assistant")
+        ) {
           clearTimeout(timer);
           ws.removeEventListener("message", handler);
-          resolve(msg);
+          resolve();
         }
       } catch {
         // ignore
@@ -204,7 +210,7 @@ describe("Think — streaming flow", () => {
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
 
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
+    await waitForAssistantBroadcast(ws);
 
     const messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(2);
@@ -233,7 +239,7 @@ describe("Think — clear", () => {
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
 
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
+    await waitForAssistantBroadcast(ws);
 
     const messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(2);
@@ -292,7 +298,7 @@ describe("Think — message persistence", () => {
     const responsesPromise = collectMessagesOfType(ws, MSG_CHAT_RESPONSE, true);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
+    await waitForAssistantBroadcast(ws);
     await closeWS(ws);
 
     const messages1 = (await agent1.getMessages()) as unknown as UIMessage[];

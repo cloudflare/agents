@@ -1308,6 +1308,15 @@ export function useAgentChat<
     assistantId: string;
     anchorMessageId: string | null;
   } | null>(null);
+  // Epoch of the last `CF_AGENT_CHAT_MESSAGES` snapshot applied; deltas
+  // tagged with any other epoch are dropped (see the delta handler).
+  const transcriptEpochRef = useRef<string | null>(null);
+  // Server copy of a message this tab is protecting mid-stream, held back by
+  // `upsertDeltaMessages` and applied when protection is released. On the
+  // snapshot path the next boundary's full frame reconciles the locally
+  // streamed copy to the persisted one; a delta naming only that message
+  // would otherwise be dropped for good.
+  const deferredProtectedDeltaRef = useRef<ChatMessage | null>(null);
 
   const preserveProtectedStreamingAssistant = useCallback(
     (
@@ -1338,6 +1347,7 @@ export function useAgentChat<
           .some((message) => message.role === "assistant")
       ) {
         protectedStreamingAssistantRef.current = null;
+        deferredProtectedDeltaRef.current = null;
         return [...messages];
       }
 
@@ -1353,6 +1363,95 @@ export function useAgentChat<
         ...messages.filter((message) => message.id !== protection.assistantId),
         protectedAssistant
       ];
+    },
+    []
+  );
+
+  /**
+   * Apply a server delta (`CF_AGENT_CHAT_MESSAGES_DELTA`) onto the current
+   * list: replace by id (or by a shared `toolCallId`, for an assistant the
+   * client minted under its own id), else append in delta order. A message
+   * this tab is protecting mid-stream keeps the local copy, exactly as the
+   * snapshot path does via `preserveProtectedStreamingAssistant`.
+   */
+  const upsertDeltaMessages = useCallback(
+    (
+      delta: readonly ChatMessage[],
+      currentMessages: readonly ChatMessage[]
+    ): ChatMessage[] => {
+      const protection = protectedStreamingAssistantRef.current;
+
+      const apply = (respectProtection: boolean): ChatMessage[] => {
+        const next = [...currentMessages];
+        for (const incoming of delta) {
+          let idx = next.findIndex((m) => m.id === incoming.id);
+          if (idx < 0 && incoming.role === "assistant") {
+            const toolCallIds = new Set(
+              incoming.parts
+                .filter((p) => "toolCallId" in p && p.toolCallId)
+                .map((p) => (p as { toolCallId: string }).toolCallId)
+            );
+            if (toolCallIds.size > 0) {
+              idx = next.findIndex((m) =>
+                m.parts.some(
+                  (p) =>
+                    "toolCallId" in p &&
+                    toolCallIds.has((p as { toolCallId: string }).toolCallId)
+                )
+              );
+            }
+          }
+          if (idx < 0) {
+            next.push(incoming);
+            continue;
+          }
+          if (
+            respectProtection &&
+            protection &&
+            next[idx].id === protection.assistantId
+          ) {
+            // Hold the server's copy: `restoreProtectedStreamingAssistant`
+            // applies it once the stream that owns this message finishes, so
+            // the persisted copy still wins (parity with the snapshot path,
+            // where the next boundary's full frame does the reconciling).
+            deferredProtectedDeltaRef.current = incoming;
+            continue;
+          }
+          // Parity with the snapshot path, which replaces the list wholesale
+          // and so always adopts the server's ids: a row matched through a
+          // shared `toolCallId` under a client-minted id takes the server id
+          // too, so later frames and regenerate/branch requests agree with
+          // the server on which row is which.
+          next[idx] = incoming;
+        }
+        return next;
+      };
+
+      if (!protection) {
+        return apply(false);
+      }
+
+      // #1778 escape hatch, matching `preserveProtectedStreamingAssistant`:
+      // if applying the delta puts another assistant message *after* the one
+      // we are protecting, the server transcript has advanced past it (e.g. a
+      // HITL denial persisted, then a follow-up assistant explaining it).
+      // Clear protection and trust the server rather than pinning a stale
+      // local copy the delta path would otherwise never reconcile.
+      const authoritative = apply(false);
+      const protectedIndex = authoritative.findIndex(
+        (m) => m.id === protection.assistantId
+      );
+      if (
+        protectedIndex >= 0 &&
+        authoritative
+          .slice(protectedIndex + 1)
+          .some((m) => m.role === "assistant")
+      ) {
+        protectedStreamingAssistantRef.current = null;
+        deferredProtectedDeltaRef.current = null;
+        return authoritative;
+      }
+      return apply(true);
     },
     []
   );
@@ -1376,6 +1475,7 @@ export function useAgentChat<
           assistantId: assistantInfo.message.id,
           anchorMessageId: currentMessages[assistantInfo.index - 1]?.id ?? null
         };
+        deferredProtectedDeltaRef.current = null;
       }
 
       return moveMessageToEnd(currentMessages, assistantInfo.message.id);
@@ -1393,6 +1493,8 @@ export function useAgentChat<
       }
 
       protectedStreamingAssistantRef.current = null;
+      const deferred = deferredProtectedDeltaRef.current;
+      deferredProtectedDeltaRef.current = null;
       setMessages((prevMessages: ChatMessage[]) => {
         const sourceIdx = prevMessages.findIndex(
           (m) => m.id === protection.assistantId
@@ -1400,7 +1502,12 @@ export function useAgentChat<
         if (sourceIdx < 0) return prevMessages;
 
         const result = [...prevMessages];
-        const [msg] = result.splice(sourceIdx, 1);
+        // A delta that named this message while it was protected was held
+        // back rather than dropped; now that the stream is done, the
+        // persisted copy replaces the locally streamed one (the snapshot
+        // path gets this from the next boundary's full frame).
+        const [local] = result.splice(sourceIdx, 1);
+        const msg = deferred ?? local;
         if (!msg) return prevMessages;
 
         if (protection.anchorMessageId === null) {
@@ -1855,6 +1962,42 @@ export function useAgentChat<
 
   const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
+  /**
+   * A cross-tab observer builds the in-flight assistant via the broadcast
+   * accumulator, not the local transport — so `protectedStreamingAssistantRef`
+   * is never armed for it. Without this, a behind-the-stream snapshot (or a
+   * cutover delta carrying a copy the replay hasn't caught up to) would
+   * replace the observed assistant's streamed parts until the next chunk
+   * re-merges them. Re-apply the accumulator — it adopted the server id from
+   * the `start` chunk, so `mergeInto` replaces the copy in place (or appends
+   * a not-yet-persisted turn).
+   *
+   * Only re-applied when the accumulator is at least as complete as the
+   * incoming copy of the same message. A fresh observer rebuilding from a
+   * chunk-0 replay can briefly trail a fully-persisted copy; merging then
+   * would drop parts until replay catches up.
+   */
+  const reapplyObservedAccumulator = useCallback(
+    (next: ChatMessage[]): ChatMessage[] => {
+      const observed = streamStateRef.current;
+      if (
+        observed.status !== "observing" ||
+        observed.accumulator.parts.length === 0
+      ) {
+        return next;
+      }
+      const idx = next.findIndex(
+        (m) => m.id === observed.accumulator.messageId
+      );
+      const incomingParts = idx >= 0 ? next[idx].parts.length : 0;
+      if (observed.accumulator.parts.length >= incomingParts) {
+        return observed.accumulator.mergeInto(next) as ChatMessage[];
+      }
+      return next;
+    },
+    []
+  );
+
   const [isServerStreaming, setIsServerStreaming] = useState(false);
   // #1620: a durable chat turn is being recovered (interrupted by a
   // deploy/eviction or a stream-stall watchdog abort and now resuming). Driven
@@ -1900,43 +2043,40 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES: {
-          setMessages((currentMessages: ChatMessage[]) => {
-            let next = preserveProtectedStreamingAssistant(
-              data.messages,
-              currentMessages
-            );
-            // A cross-tab observer builds the in-flight assistant via the
-            // broadcast accumulator, not the local transport — so
-            // `protectedStreamingAssistantRef` is never armed for it. Without
-            // this, a behind-the-stream snapshot would replace the observed
-            // assistant's streamed parts until the next chunk re-merges them
-            // (the same disappear/reappear the originating tab gets without the
-            // start-chunk re-arm above). Re-apply the accumulator — it adopted
-            // the server id from the `start` chunk, so `mergeInto` replaces the
-            // snapshot's copy in place (or appends a not-yet-persisted turn).
-            const observed = streamStateRef.current;
-            if (
-              observed.status === "observing" &&
-              observed.accumulator.parts.length > 0
-            ) {
-              // Only re-apply the live accumulator when it is at least as
-              // complete as the snapshot's copy of the same message. A fresh
-              // observer rebuilding its accumulator from a chunk-0 replay can
-              // briefly trail a fully-persisted snapshot; merging then would drop
-              // parts until replay catches up. In steady-state live observing the
-              // accumulator is always at or ahead of the snapshot, so this still
-              // fixes the disappear/reappear flicker.
-              const snapshotIdx = next.findIndex(
-                (m) => m.id === observed.accumulator.messageId
-              );
-              const snapshotParts =
-                snapshotIdx >= 0 ? next[snapshotIdx].parts.length : 0;
-              if (observed.accumulator.parts.length >= snapshotParts) {
-                next = observed.accumulator.mergeInto(next) as ChatMessage[];
-              }
-            }
-            return next;
-          });
+          // The snapshot is the base every later delta applies to. An
+          // epoch-less snapshot comes from a server that never sends deltas;
+          // record `null` so a stray delta can't match it.
+          transcriptEpochRef.current = data.epoch ?? null;
+          setMessages((currentMessages: ChatMessage[]) =>
+            reapplyObservedAccumulator(
+              preserveProtectedStreamingAssistant(
+                data.messages,
+                currentMessages
+              )
+            )
+          );
+          break;
+        }
+
+        case MessageType.CF_AGENT_CHAT_MESSAGES_DELTA: {
+          // Out-of-order guard: a delta is only meaningful against the
+          // snapshot it was minted for. This tab may never have received that
+          // snapshot (it connected mid-stream and the server owes it a full
+          // frame at the next boundary), or may hold an older one (the server
+          // re-derived its transcript since — branch, compaction, clear). In
+          // both cases the server follows up with a full snapshot; applying
+          // the delta now would splice rows onto the wrong base.
+          if (
+            transcriptEpochRef.current === null ||
+            data.epoch !== transcriptEpochRef.current
+          ) {
+            break;
+          }
+          setMessages((currentMessages: ChatMessage[]) =>
+            reapplyObservedAccumulator(
+              upsertDeltaMessages(data.messages, currentMessages)
+            )
+          );
           break;
         }
 
@@ -2373,8 +2513,30 @@ export function useAgentChat<
       }
     }
 
+    /**
+     * Tell the server which optional frames this client understands. Servers
+     * that send transcript deltas only send them to a connection that has
+     * declared `transcriptDeltas`; without this a client pinned to an older
+     * `agents` release would silently drop the frame — and with it the turn's
+     * transcript update — instead of falling back to snapshots. Re-sent on
+     * every socket open, since the server keys it by connection.
+     */
+    const declareClientCapabilities = () => {
+      try {
+        agent.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_CHAT_CLIENT_CAPABILITIES,
+            capabilities: { transcriptDeltas: true }
+          })
+        );
+      } catch {
+        // The socket closed under us; the next open re-declares.
+      }
+    };
+
     function onAgentOpen() {
       socketIsOpen = true;
+      declareClientCapabilities();
       if (!sawClose) return;
       sawClose = false;
       reconnectProbePendingRef.current = true;
@@ -2384,6 +2546,12 @@ export function useAgentChat<
     agent.addEventListener("message", onAgentMessage);
     agent.addEventListener("close", onAgentClose);
     agent.addEventListener("open", onAgentOpen);
+    // `useAgentChat` can mount after the socket is already open, so the first
+    // `open` event may predate this effect.
+    if ((agent as unknown as { readyState?: number }).readyState === 1) {
+      socketIsOpen = true;
+      declareClientCapabilities();
+    }
 
     return () => {
       disposed = true;
@@ -2399,6 +2567,7 @@ export function useAgentChat<
       setIsServerStreaming(false);
       setIsRecovering(false);
       protectedStreamingAssistantRef.current = null;
+      deferredProtectedDeltaRef.current = null;
       localResponseIds.clear();
 
       // Invalidate both sides of an old agent/Chat generation. Transport
@@ -2413,6 +2582,8 @@ export function useAgentChat<
     resume,
     customTransport,
     preserveProtectedStreamingAssistant,
+    reapplyObservedAccumulator,
+    upsertDeltaMessages,
     resetToolContinuation,
     resetMatchingHydratedAssistantForReplay,
     restoreProtectedStreamingAssistant,

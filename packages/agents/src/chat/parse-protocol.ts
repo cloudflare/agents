@@ -43,7 +43,8 @@ export type ChatProtocolEvent =
     }
   | { type: "stream-resume-request"; probeId?: string }
   | { type: "stream-resume-ack"; id: string }
-  | { type: "messages"; messages: unknown[] };
+  | { type: "messages"; messages: unknown[] }
+  | { type: "client-capabilities"; transcriptDeltas: boolean };
 
 /**
  * Parse a raw WebSocket message string into a typed protocol event.
@@ -126,6 +127,16 @@ export function parseProtocolMessage(raw: string): ChatProtocolEvent | null {
         type: "stream-resume-ack",
         id: data.id as string
       };
+
+    case CHAT_MESSAGE_TYPES.CLIENT_CAPABILITIES: {
+      const capabilities = data.capabilities as
+        | { transcriptDeltas?: unknown }
+        | undefined;
+      return {
+        type: "client-capabilities",
+        transcriptDeltas: capabilities?.transcriptDeltas === true
+      };
+    }
 
     case CHAT_MESSAGE_TYPES.CHAT_MESSAGES:
       return {
