@@ -269,6 +269,20 @@ export class HarnessTestObject extends DurableObject<Env> {
     );
   }
 
+  /** Every frame seq of the session's durable log, in replay order. */
+  async seqs(sessionId?: string) {
+    await this.lifecycle.start();
+    const seqs: number[] = [];
+    const controller = new AbortController();
+    for await (const event of this.harness.session(sessionId).events({
+      signal: controller.signal,
+      onUpToDate: () => controller.abort()
+    })) {
+      if (!("preview" in event)) seqs.push(event.seq);
+    }
+    return seqs;
+  }
+
   /** Replay the whole durable log, without tailing. */
   async eventTypes(from?: string, sessionId?: string) {
     await this.lifecycle.start();
@@ -318,9 +332,12 @@ export class HarnessTestObject extends DurableObject<Env> {
     );
   }
 
-  async listSessions() {
+  async listSessions(limit?: number, cursor?: string) {
     await this.lifecycle.start();
-    return this.harness.sessions.list();
+    return this.harness.sessions.list({
+      ...(limit === undefined ? {} : { limit }),
+      ...(cursor === undefined ? {} : { cursor })
+    });
   }
 
   async deleteSession(sessionId: string) {

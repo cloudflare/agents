@@ -271,11 +271,13 @@ export function useHarnessSession<P extends HarnessProtocol = HarnessProtocol>(
     }
   });
 
+  const subKey = JSON.stringify(options.sub ?? []);
   useEffect(() => {
     setState(initialState());
     cursor.current = undefined;
     subscribed.current = false;
-  }, [options.name, sessionId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.agent, options.name, sessionId, subKey]);
 
   const call = useCallback(
     (method: HarnessCallMethod, ...args: JsonValue[]): Promise<JsonValue> =>

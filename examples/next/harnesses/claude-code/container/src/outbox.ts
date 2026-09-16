@@ -151,6 +151,7 @@ export class Outbox {
     );
     const at = Date.now();
     const appended: OutboxFrame[] = [];
+    let bytes = 0;
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       let seq = this.#highWaterSeq;
@@ -158,7 +159,7 @@ export class Outbox {
         seq += 1;
         const body = JSON.stringify(entry.body);
         insert.run(this.#session, seq, entry.operationId, body, at);
-        this.#bytes += body.length;
+        bytes += body.length;
         appended.push({
           seq,
           operationId: entry.operationId,
@@ -167,7 +168,9 @@ export class Outbox {
         });
       }
       this.#db.exec("COMMIT");
+      // Accounting follows the commit, so a rolled-back batch counts nothing.
       this.#highWaterSeq = seq;
+      this.#bytes += bytes;
     } catch (error) {
       this.#db.exec("ROLLBACK");
       throw error;
@@ -213,20 +216,21 @@ export class Outbox {
    * Record an inbox row as applied. False means it was applied before, which
    * is how a redelivery is recognised.
    */
+  /** True when a delivery with this key was already taken by the engine. */
+  isApplied(key: string): boolean {
+    return (
+      this.#db.prepare("SELECT key FROM applied WHERE key = ?").get(key) !==
+      undefined
+    );
+  }
+
+  /** Record a delivery the engine took. Idempotent. */
   markApplied(key: string, seq: number): boolean {
-    const existing = this.#db
-      .prepare("SELECT key FROM applied WHERE key = ?")
-      .get(key);
-    if (existing !== undefined) return false;
+    if (this.isApplied(key)) return false;
     this.#db
       .prepare("INSERT INTO applied(key, seq) VALUES(?, ?)")
       .run(key, seq);
     return true;
-  }
-
-  /** Undo a `markApplied` whose routing threw, so the row can be redelivered. */
-  unmarkApplied(key: string): void {
-    this.#db.prepare("DELETE FROM applied WHERE key = ?").run(key);
   }
 
   /** The most recently applied keys, newest last, bounded for the hello answer. */

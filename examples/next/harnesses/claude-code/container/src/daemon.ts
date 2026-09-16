@@ -185,6 +185,8 @@ export type DaemonOptions = {
 export class DaemonRoot extends RpcTarget implements HarnessDaemonApi {
   readonly #options: DaemonOptions;
   readonly #requests: RequestRegistry;
+  /** Delivery keys the engine is taking right now. */
+  readonly #applying = new Set<string>();
   readonly #sweep: NodeJS.Timeout;
   #subscription: Subscription | undefined;
   #previews = true;
@@ -316,20 +318,24 @@ export class DaemonRoot extends RpcTarget implements HarnessDaemonApi {
   }> {
     this.#fence(req.runtimeId);
     const { outbox } = this.#options;
-    if (!outbox.markApplied(req.row.key, req.row.seq)) {
+    // The key is recorded as applied only once the engine has taken the
+    // row, so a daemon that dies between the two leaves no evidence of an
+    // input the engine never received; the in-flight set covers a
+    // duplicate delivery racing the first one inside this process.
+    if (this.#applying.has(req.row.key) || outbox.isApplied(req.row.key)) {
       return {
         accepted: false,
         seq: outbox.highWaterSeq,
         code: "E_ALREADY_APPLIED"
       };
     }
+    this.#applying.add(req.row.key);
     let code: HarnessWireErrorCode | undefined;
     try {
       code = await this.#route(req.row);
-    } catch (error) {
-      // The row was never applied, so let the Durable Object redeliver it.
-      outbox.unmarkApplied(req.row.key);
-      throw error;
+      outbox.markApplied(req.row.key, req.row.seq);
+    } finally {
+      this.#applying.delete(req.row.key);
     }
     return {
       accepted: code === undefined,

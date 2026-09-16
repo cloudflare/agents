@@ -57,11 +57,11 @@ describe("Outbox", () => {
 
   it("dedupes applied keys", () => {
     const box = outbox();
+    expect(box.isApplied("op-1")).toBe(false);
     expect(box.markApplied("op-1", 1)).toBe(true);
+    expect(box.isApplied("op-1")).toBe(true);
     expect(box.markApplied("op-1", 1)).toBe(false);
     expect(box.appliedKeys(10)).toEqual(["op-1"]);
-    box.unmarkApplied("op-1");
-    expect(box.markApplied("op-1", 1)).toBe(true);
   });
 
   it("prunes below an ack and keeps the floor honest", () => {

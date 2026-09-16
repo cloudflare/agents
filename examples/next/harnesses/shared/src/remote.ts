@@ -723,6 +723,10 @@ export class ContainerHarnessRuntime<
     if (doorbellHeaders && Object.keys(doorbellHeaders).length > 0) {
       env[HARNESS_ENV.doorbellHeaders] = JSON.stringify(doorbellHeaders);
     }
+    // Container env is immutable once live, so the digest covers values as
+    // well as keys: a rotated credential relaunches. The runtime id is the
+    // one value left out, because it names the generation being adopted.
+    const { [HARNESS_ENV.runtimeId]: _expected, ...launched } = env;
     const digest = await sha256(
       JSON.stringify({
         engine: this.#options.engine.id,
@@ -730,7 +734,9 @@ export class ContainerHarnessRuntime<
         enableInternet: launch.enableInternet,
         entrypoint: launch.entrypoint ?? null,
         port,
-        keys: Object.keys(env).sort()
+        env: Object.keys(launched)
+          .sort()
+          .map((key) => [key, launched[key]])
       })
     );
     if (container.running && state.launch_digest !== digest) {

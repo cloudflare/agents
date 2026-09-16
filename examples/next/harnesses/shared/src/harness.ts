@@ -919,15 +919,36 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
     let seeding = this.#seeding.get(sessionId);
     if (!seeding) {
       seeding = (async () => {
-        const [newest] = await this.#streams.list({
-          tag: harnessSessionTag(sessionId),
-          limit: 1
-        });
-        const sessionLog = await this.#streams.status(
-          harnessSessionStreamId(sessionId)
-        );
-        let max = -1;
-        for (const status of [newest, sessionLog]) {
+        // The highest seq can sit in any of: a settled operation (its row
+        // records `last_seq`), an operation still running (its log's tail),
+        // or the session log. The newest-created stream is not enough: a
+        // steer settles a newer operation while an older one keeps
+        // appending higher seqs.
+        let max =
+          this.#sql<{ max: number | null }>(
+            `SELECT MAX(last_seq) AS max FROM cf_agents_harness_operations
+             WHERE session_id = ? AND last_seq IS NOT NULL`,
+            sessionId
+          )[0]?.max ?? -1;
+        const candidates = [
+          await this.#streams.status(harnessSessionStreamId(sessionId)),
+          ...(await this.#streams.list({
+            tag: harnessSessionTag(sessionId),
+            limit: 1
+          }))
+        ];
+        for (const row of this.#sql<{ operation_id: string }>(
+          `SELECT operation_id FROM cf_agents_harness_operations
+           WHERE session_id = ? AND status = 'running'`,
+          sessionId
+        )) {
+          candidates.push(
+            await this.#streams.status(
+              harnessOperationStreamId(sessionId, row.operation_id)
+            )
+          );
+        }
+        for (const status of candidates) {
           if (!status || status.cursor === 0) continue;
           for await (const chunk of this.#streams.read(status.streamId, {
             from: status.cursor - 1
@@ -1108,13 +1129,21 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
       Math.min(options.limit ?? SESSION_LIST_LIMIT, 1000)
     );
     const order = options.order === "desc" ? "DESC" : "ASC";
-    const after = options.cursor === undefined ? null : Number(options.cursor);
+    const cmp = order === "ASC" ? ">" : "<";
+    // The cursor is the last row's (created_at, session_id) pair, the same
+    // key the ordering uses, so sessions created in one millisecond page
+    // without skips.
+    const anchor = parseSessionCursor(options.cursor);
     const rows = this.#sql<SessionRow>(
       `SELECT * FROM cf_agents_harness_sessions
-       WHERE (? IS NULL OR (created_at ${order === "ASC" ? ">" : "<"} ?))
+       WHERE (? IS NULL
+              OR created_at ${cmp} ?
+              OR (created_at = ? AND session_id ${cmp} ?))
        ORDER BY created_at ${order}, session_id ${order} LIMIT ?`,
-      after,
-      after,
+      anchor === undefined ? null : anchor.createdAt,
+      anchor?.createdAt ?? 0,
+      anchor?.createdAt ?? 0,
+      anchor?.sessionId ?? "",
       limit + 1
     );
     const page = rows.slice(0, limit);
@@ -1130,7 +1159,7 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
     return {
       sessions,
       ...(rows.length > limit && last
-        ? { cursor: String(last.created_at) }
+        ? { cursor: `${last.created_at}:${last.session_id}` }
         : {})
     };
   }
@@ -1154,16 +1183,21 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
         ?.reject(new HarnessClosedError("Session deleted"));
       this.#askWaiters.delete(request.request_id);
     }
-    const streams = await this.#streams.list({
-      tag: harnessSessionTag(sessionId),
-      limit: 1000
-    });
-    for (const status of streams) {
-      if (status.state === "streaming") {
-        const writer = await this.#streams.open(status.streamId);
-        writer.error("session deleted");
+    // `Streams.list()` is one bounded page with no cursor: delete until
+    // the tag lists nothing, so a long session leaves no logs behind.
+    for (;;) {
+      const streams = await this.#streams.list({
+        tag: harnessSessionTag(sessionId),
+        limit: 1000
+      });
+      if (streams.length === 0) break;
+      for (const status of streams) {
+        if (status.state === "streaming") {
+          const writer = await this.#streams.open(status.streamId);
+          writer.error("session deleted");
+        }
+        await this.#streams.delete(status.streamId);
       }
-      await this.#streams.delete(status.streamId);
     }
     this.lifecycle.storage.transactionSync(() => {
       const sql = this.lifecycle.storage.sql;
@@ -2338,6 +2372,16 @@ function timeoutReply(type: string): HarnessReply | undefined {
     default:
       return undefined;
   }
+}
+
+function parseSessionCursor(
+  cursor: string | undefined
+): { readonly createdAt: number; readonly sessionId: string } | undefined {
+  if (cursor === undefined || cursor === "") return undefined;
+  const at = cursor.indexOf(":");
+  const createdAt = Number(at < 0 ? cursor : cursor.slice(0, at));
+  if (!Number.isFinite(createdAt)) return undefined;
+  return { createdAt, sessionId: at < 0 ? "" : cursor.slice(at + 1) };
 }
 
 function parseCursor(cursor: string | undefined): number {

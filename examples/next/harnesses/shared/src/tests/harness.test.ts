@@ -174,5 +174,24 @@ describe("shared Harness", () => {
       1
     );
     expect((await stub.status()).state).toBe("idle");
+    // A fresh isolate re-seeds the seq counter from the durable logs: the
+    // frames it appends after the eviction must not reuse a number.
+    const seqs = await stub.seqs();
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(new Set(seqs).size).toBe(seqs.length);
+  });
+
+  it("pages sessions created in the same millisecond without skipping any", async () => {
+    const stub = fresh();
+    for (const id of ["s1", "s2", "s3", "s4", "s5"]) await stub.run("x", id);
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const page = await stub.listSessions(2, cursor);
+      seen.push(...page.sessions.map((session) => session.sessionId));
+      if (page.cursor === undefined) break;
+      cursor = page.cursor;
+    }
+    expect(seen).toEqual(["s1", "s2", "s3", "s4", "s5"]);
   });
 });
