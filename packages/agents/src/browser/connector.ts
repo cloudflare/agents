@@ -19,6 +19,14 @@ import {
   type BrowserSessionInfo,
   type BrowserTargetInfo
 } from "./browser-run";
+import {
+  applyLiveViewMode,
+  LIVE_VIEW_URL_TTL_MS,
+  mintLiveView,
+  type BrowserLiveView,
+  type BrowserLiveViewUrl,
+  type LiveViewMode
+} from "./live-view";
 import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
 import type {
   BrowserSessionStore,
@@ -111,47 +119,12 @@ export interface BrowserConnectorSweepResult {
   swept: Array<{ key: string; sessionId: string }>;
 }
 
-/**
- * Live View rendering mode (the `mode` query param the hosted UI at
- * `live.browser.run` understands):
- *
- * - `"tab"` — a standalone, interactive page view (best for handing control
- *   to a human).
- * - `"devtools"` — the full DevTools inspector panel (Elements, Console,
- *   Network, …).
- *
- * Omit it to use whatever mode the binding's `devtoolsFrontendUrl` defaults
- * to.
- */
-export type LiveViewMode = "tab" | "devtools";
-
-/** A single tab's Live View URL. */
-export interface BrowserLiveViewUrl {
-  /** Open this in a browser to watch/control the tab in real time. */
-  url: string;
-  /** CDP target (tab) id the URL points at. */
-  targetId: string;
-  /** Milliseconds the URL stays valid from when it was generated (~5 min). */
-  expiresInMs: number;
-}
-
-export interface BrowserLiveViewTarget {
-  targetId: string;
-  /** Embeddable Live View URL (the `devtoolsFrontendUrl`) for this tab. */
-  url: string;
-  /** The page the tab is currently showing (e.g. `https://example.com`). */
-  pageUrl?: string;
-  title?: string;
-  type?: string;
-}
-
-/** Live View URLs for every tab in a (shared) session. */
-export interface BrowserLiveView {
-  sessionId: string;
-  targets: BrowserLiveViewTarget[];
-  /** Milliseconds the URLs stay valid from when they were generated (~5 min). */
-  expiresInMs: number;
-}
+export type {
+  BrowserLiveView,
+  BrowserLiveViewTarget,
+  BrowserLiveViewUrl,
+  LiveViewMode
+} from "./live-view";
 
 const EXEC_KEY_PREFIX = "cdp:exec:";
 /**
@@ -176,13 +149,6 @@ export const DEFAULT_EXEC_SWEEP_IDLE_MS = 24 * 60 * 60 * 1000;
  * keep an active or recently-resumed execution out of sweep range.
  */
 const EXEC_TOUCH_INTERVAL_MS = 60 * 1000;
-
-/**
- * Browser Run mints `devtoolsFrontendUrl`s (the Live View links) that are
- * valid for ~5 minutes. We surface the window so callers can decide how long
- * a shared link is good for before re-listing targets.
- */
-const LIVE_VIEW_URL_TTL_MS = 5 * 60 * 1000;
 
 function isMissingBrowserSession(error: unknown): boolean {
   // Browser Run uses 404 for unknown ids and 410 after keep_alive expiry.
@@ -210,22 +176,6 @@ function formatToolValidationError(
     return `${location ? ` at ${location}` : ""}: ${error.error}`;
   });
   return `Invalid arguments for ${connector}.${tool}${details.join(";")}`;
-}
-
-/**
- * Rewrite the hosted Live View UI's `mode` query param (`tab` | `devtools`).
- * The raw `devtoolsFrontendUrl` is returned unchanged when no mode is asked
- * for or the URL can't be parsed.
- */
-function applyLiveViewMode(rawUrl: string, mode?: LiveViewMode): string {
-  if (!mode) return rawUrl;
-  try {
-    const url = new URL(rawUrl);
-    url.searchParams.set("mode", mode === "devtools" ? "devtools" : "tab");
-    return url.toString();
-  } catch {
-    return rawUrl;
-  }
 }
 
 interface CachedSocket {
@@ -767,20 +717,7 @@ export class BrowserConnector extends CodemodeConnector {
   }): Promise<BrowserLiveView | undefined> {
     const info = await this.sessionInfo();
     if (!info) return undefined;
-    const targets = (info.targets ?? [])
-      .filter((target) => target.devtoolsFrontendUrl)
-      .map((target) => ({
-        targetId: target.id,
-        url: applyLiveViewMode(target.devtoolsFrontendUrl!, options?.mode),
-        pageUrl: target.url,
-        title: target.title,
-        type: target.type
-      }));
-    return {
-      sessionId: info.sessionId,
-      targets,
-      expiresInMs: LIVE_VIEW_URL_TTL_MS
-    };
+    return mintLiveView(info.sessionId, info.targets ?? [], options?.mode);
   }
 
   /** Close the shared (reuse/promoted) session, if one exists. */

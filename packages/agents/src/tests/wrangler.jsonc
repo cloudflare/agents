@@ -45,6 +45,14 @@
         "name": "QueueHarnessObject"
       },
       {
+        "class_name": "BrowserHarnessObject",
+        "name": "BrowserHarnessObject"
+      },
+      {
+        "class_name": "TestBrowserAgent",
+        "name": "TestBrowserAgent"
+      },
+      {
         "class_name": "TaskHarnessObject",
         "name": "TaskHarnessObject"
       },
@@ -419,6 +427,8 @@
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
         "QueueHarnessObject",
+        "BrowserHarnessObject",
+        "TestBrowserAgent",
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
