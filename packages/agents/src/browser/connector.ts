@@ -1097,11 +1097,9 @@ export class BrowserConnector extends CodemodeConnector {
     }
     if (cached) this.#dropSocket(executionId);
 
-    const session = await connectBrowserSession(
-      browser,
-      stored.sessionId,
-      this.#options.timeout
-    );
+    const session = await connectBrowserSession(browser, stored.sessionId, {
+      timeoutMs: this.#options.timeout
+    });
     this.#sockets.set(executionId, {
       session,
       browserSessionId: stored.sessionId,
