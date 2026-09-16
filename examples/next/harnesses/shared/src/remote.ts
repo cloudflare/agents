@@ -37,6 +37,7 @@ import {
 import {
   DEFAULT_SESSION_ID,
   HarnessDetachedError,
+  HarnessOperationNotFoundError,
   type HarnessCapability,
   type HarnessEventBody,
   type HarnessInput,
@@ -82,8 +83,6 @@ export type ContainerHarnessIdleOptions = {
   readonly renewIntervalMs?: number;
   /** After the last operation settles with nobody attached: `shutdown()` then `destroy()`. Default 120_000. */
   readonly stopContainerAfterIdleMs?: number;
-  /** Auto-resume a lost operation only after a clean exit (code 0 or 143). Default `"on-clean-exit"`. */
-  readonly resumePolicy?: "on-clean-exit" | "never";
 };
 
 export type ContainerHarnessRuntimeOptions<
@@ -163,8 +162,7 @@ const DEFAULT_IDLE: Required<ContainerHarnessIdleOptions> = {
   detachAfterIdleMs: 20_000,
   keepAliveMs: 900_000,
   renewIntervalMs: 300_000,
-  stopContainerAfterIdleMs: 120_000,
-  resumePolicy: "on-clean-exit"
+  stopContainerAfterIdleMs: 120_000
 };
 /** Health probe backoff: 250 ms doubling to 2 s, abandoned after a minute. */
 const PROBE_START_MS = 250;
@@ -418,8 +416,7 @@ export class ContainerHarnessRuntime<
         options.idle?.renewIntervalMs ?? DEFAULT_IDLE.renewIntervalMs,
       stopContainerAfterIdleMs:
         options.idle?.stopContainerAfterIdleMs ??
-        DEFAULT_IDLE.stopContainerAfterIdleMs,
-      resumePolicy: options.idle?.resumePolicy ?? DEFAULT_IDLE.resumePolicy
+        DEFAULT_IDLE.stopContainerAfterIdleMs
     };
   }
 
@@ -502,6 +499,8 @@ export class ContainerHarnessRuntime<
       sessionId
     );
     this.#logOrdinal = undefined;
+    // The transcript this runtime projected is the session's too.
+    await this.#options.sessions.session(sessionId).clearMessages();
   }
 
   /**
@@ -923,6 +922,10 @@ export class ContainerHarnessRuntime<
       cursor = state.last_wire_seq;
     } else {
       // R0: a different container answered. Everything in flight is lost.
+      // The operation is not re-run: its prompt is already in the mirrored
+      // transcript, and a tool that was half-way through its side effects
+      // would run again. The next prompt continues the session in context;
+      // the message says whether the exit was clean so a caller can decide.
       const active = ctx.active();
       if (active) {
         const exit = hello.priorExit ?? this.#lastExit;
@@ -1240,6 +1243,26 @@ export class ContainerHarnessRuntime<
     }
   }
 
+  /**
+   * A control frame names an operation the base has no row for: one it
+   * declined or deleted while the daemon kept going. Dropping the frame is
+   * the safe answer; failing the pass would poison whatever is queued.
+   */
+  async #forKnownOperation(
+    link: DaemonLink<P>,
+    operationId: string,
+    apply: () => Promise<unknown>
+  ): Promise<void> {
+    try {
+      await apply();
+    } catch (error) {
+      if (!(error instanceof HarnessOperationNotFoundError)) throw error;
+      console.warn(
+        `Harness container for ${link.sessionId} sent a frame for unknown operation ${operationId}; dropped`
+      );
+    }
+  }
+
   /** The socket or the stream failed mid-drain. Detach; come back if there is work. */
   async #wireFailed(
     ctx: HarnessDriveContext<P>,
@@ -1337,11 +1360,15 @@ export class ContainerHarnessRuntime<
     const body = frame.body;
     switch (body.type) {
       case "begin": {
-        await ctx.begin(body.operationId, { delivery: body.delivery });
+        await this.#forKnownOperation(link, body.operationId, () =>
+          ctx.begin(body.operationId, { delivery: body.delivery })
+        );
         return undefined;
       }
       case "settle": {
-        await ctx.settle(body.operationId, body.settlement);
+        await this.#forKnownOperation(link, body.operationId, () =>
+          ctx.settle(body.operationId, body.settlement)
+        );
         return undefined;
       }
       case "request_open": {

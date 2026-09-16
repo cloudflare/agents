@@ -264,6 +264,8 @@ export class CodexRuntime implements HarnessRuntime<CodexProtocol> {
   async delete(_sessionId: string): Promise<void> {
     // One conversation per object, so every row belongs to this session.
     this.#storage?.sql.exec("DELETE FROM cf_codex_operations");
+    // The model's history lives in Sessions; a deleted session starts empty.
+    await this.#session.clearMessages();
   }
 
   // ── The turn loop ────────────────────────────────────────────────────────

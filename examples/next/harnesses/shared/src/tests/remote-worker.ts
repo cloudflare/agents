@@ -52,11 +52,15 @@ export class FakeContainer implements Container {
     });
   }
 
+  /** Set by the sidecar: the daemon's state dies with the container. */
+  onDestroy: (() => void) | undefined;
+
   async destroy(): Promise<void> {
     this.running = false;
     const exited = this.#exited;
     this.#exited = undefined;
     exited?.();
+    this.onDestroy?.();
   }
 
   signal(_signo: number): void {}
@@ -106,6 +110,8 @@ function sidecarFor(id: string): Sidecar {
     container: new FakeContainer(),
     daemon: new FakeDaemonState()
   };
+  // A destroyed container takes its outbox and generation with it.
+  fresh.container.onDestroy = () => fresh.daemon.crash("destroyed", 0);
   SIDECARS.set(id, fresh);
   return fresh;
 }
@@ -292,6 +298,11 @@ export class RemoteHarnessTestObject extends DurableObject<Env> {
     await this.lifecycle.start();
     const { engine, ...rest } = await this.runtime.info();
     return { ...rest, engineJson: JSON.stringify(engine ?? null) };
+  }
+
+  async deleteSession() {
+    await this.lifecycle.start();
+    await this.harness.sessions.delete("main");
   }
 
   async refuseDials(count: number) {

@@ -356,6 +356,19 @@ describe("the engine's own transcript across container generations", () => {
     expect(state.row?.restore_pending).toBe(0);
   });
 
+  it("deletes the projected transcript with the session", async () => {
+    const stub = fresh();
+    await stub.run("first");
+    expect((await stub.sessionMessages()).length).toBeGreaterThan(0);
+    await stub.deleteSession();
+    expect(await stub.sessionMessages()).toEqual([]);
+    // A prompt after the delete starts a session with nothing behind it.
+    const { result } = await stub.run("second");
+    expect(result.status).toBe("completed");
+    const roles = (await stub.sessionMessages()).map((message) => message.role);
+    expect(roles).toEqual(["user", "assistant"]);
+  });
+
   it("reports the engine session on info()", async () => {
     const stub = fresh();
     const cold = await stub.info();

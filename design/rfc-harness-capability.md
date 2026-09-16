@@ -1108,7 +1108,6 @@ export type ContainerHarnessRuntimeOptions<P extends HarnessProtocol> = {
     readonly keepAliveMs?: number; // 900_000, ceiling 6 h
     readonly renewIntervalMs?: number; // 300_000
     readonly stopContainerAfterIdleMs?: number; // 120_000
-    readonly resumePolicy?: "on-clean-exit" | "never";
     readonly deferAfterMs?: number; // 0 = off
   };
 };
@@ -1382,13 +1381,20 @@ A clean reconcile with nothing to do costs zero durable writes.
 
 **Idle policy** (all numbers on `idle`):
 
-| Option                     | Default           | Effect                                                                                                                                                                                |
-| -------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `detachAfterIdleMs`        | 20 s              | close the control socket when no browser is attached and nothing is in flight. The DO becomes evictable; the container keeps working                                                  |
-| `keepAliveMs`              | 15 min            | `setInactivityTimeout`. Ceiling 6 h                                                                                                                                                   |
-| `renewIntervalMs`          | 5 min             | Lifecycle job: re-attach, renew, drain, detach. Worst-case survival after an eviction is `keepAliveMs - renewIntervalMs`, which is why the interval sits well under the keep-alive    |
-| `stopContainerAfterIdleMs` | 2 min             | after the last operation settles with nobody attached: `shutdown()` then `destroy()`. The explicit destroy is the mechanism; lowering the keep-alive is decorative                    |
-| `resumePolicy`             | `"on-clean-exit"` | auto-resume only after exit code 0 or 143 (SIGTERM); a crash needs an explicit re-submit, because a mid-flight tool does not re-run on resume and a naive re-run double-applies edits |
+| Option                     | Default | Effect                                                                                                                                                                             |
+| -------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `detachAfterIdleMs`        | 20 s    | close the control socket when no browser is attached and nothing is in flight. The DO becomes evictable; the container keeps working                                               |
+| `keepAliveMs`              | 15 min  | `setInactivityTimeout`. Ceiling 6 h                                                                                                                                                |
+| `renewIntervalMs`          | 5 min   | Lifecycle job: re-attach, renew, drain, detach. Worst-case survival after an eviction is `keepAliveMs - renewIntervalMs`, which is why the interval sits well under the keep-alive |
+| `stopContainerAfterIdleMs` | 2 min   | after the last operation settles with nobody attached: `shutdown()` then `destroy()`. The explicit destroy is the mechanism; lowering the keep-alive is decorative                 |
+
+There is no auto-resume of a lost operation, clean exit or not. A new container
+generation settles what was running as `E_ENGINE_LOST` (the message says whether
+the exit was clean), and the next prompt continues the session on the restored
+transcript. Re-running the operation would put its prompt into the engine's
+transcript a second time and re-run a tool that was half-way through its side
+effects; a `resumePolicy` that continues a SIGTERM'd turn waits on verification
+item 7 below.
 
 **The socket closes the moment an operation becomes blocked with no browser attached.**
 The daemon's parked promise does not care, the request row is durable on both sides, and
@@ -1570,8 +1576,9 @@ blast radius above is the reason to run them first.
 3. Restore on a fresh container: the DO ships the mirrored entries in `configure()` in
    128 KiB chunks, the daemon writes them under `CLAUDE_CONFIG_DIR` with the pinned
    `cwd`, and only then passes `resume`. A session id alone does not resume; the file
-   must exist. Unverified end to end, hence `resumePolicy: "on-clean-exit"` and a failed
-   restore degrading to a fresh engine session with the transcript replayed as context.
+   must exist. Verified end to end on a killed container (the example's `kill` route);
+   a refused restore is reported as `E_ENGINE_RESUME` on the log and the engine starts a
+   fresh session.
 
 `snapshotContainer()` is not used: restore is boot-time only and mutually exclusive with
 `image`, so a restored session could never take a new Claude Code version.
@@ -2006,10 +2013,12 @@ it blocks:
    `intercept` becomes the default.
 5. The secret header survives the tunnelled upgrade. Blocks the dial; fallback is the
    secret in the path.
-6. A `.jsonl` restored from the mirror resumes in a fresh container. Blocks
-   `resumePolicy` beyond `"on-clean-exit"`.
+6. A `.jsonl` restored from the mirror resumes in a fresh container. Verified
+   2026-09-15 through the `SessionStore` seam (a fact planted before `kill` is recalled
+   after it, `resumed: true`).
 7. A SIGTERM'd turn continues on resume and a SIGKILL'd one does not; `monitor()`
-   settles on OOM. Blocks auto-resume being safe.
+   settles on OOM. Blocks any `resumePolicy`: until then a lost operation always
+   settles and the next prompt continues the session.
 8. `interceptOutboundHttps` applied by incarnation A still governs after B adopts, and
    re-application is idempotent. Blocks the doorbell under `enableInternet: false`.
 9. `/proc/1/environ` is not readable by the `agent` user under `containers_pid_namespace`.
