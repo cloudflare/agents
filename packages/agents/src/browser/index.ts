@@ -15,9 +15,11 @@ export {
   BrowserRenderingError,
   type BrowserBinding,
   type BrowserRecording,
+  type BrowserSessionGuardrails,
   type BrowserSessionInfo,
   type BrowserTargetInfo,
-  type ConnectBrowserOptions
+  type ConnectBrowserOptions,
+  type ConnectBrowserSessionOptions
 } from "./browser-run";
 
 export {
