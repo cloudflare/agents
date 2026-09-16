@@ -17,6 +17,10 @@
         "name": "CapabilityHarnessObject"
       },
       {
+        "class_name": "HeartbeatSilentObject",
+        "name": "HeartbeatSilentObject"
+      },
+      {
         "class_name": "PlainLifecycleObject",
         "name": "PlainLifecycleObject"
       },
@@ -412,6 +416,7 @@
     {
       "new_sqlite_classes": [
         "CapabilityHarnessObject",
+        "HeartbeatSilentObject",
         "PlainLifecycleObject",
         "StatefulPlainObject",
         "RetryableStartObject",

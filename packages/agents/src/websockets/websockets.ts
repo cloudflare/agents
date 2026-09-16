@@ -167,6 +167,8 @@ export class WebSockets extends LifecycleCapability {
   #manager: ConnectionManager | undefined;
   /** Whether the ping/pong auto-response pair is registered on this instance. */
   #heartbeatRegistered = false;
+  /** Whether this host answers the client heartbeat at all. */
+  readonly #heartbeat: boolean;
 
   constructor(options: WebSocketsOptions = {}) {
     super("websockets");
@@ -175,6 +177,7 @@ export class WebSockets extends LifecycleCapability {
     this.#protocol = options.protocol ?? true;
     this.#readonly = options.readonly;
     this.#state = options.state;
+    this.#heartbeat = options.heartbeat ?? true;
     this.#callables = options.callables
       ? exposableMethods(options.callables)
       : new Map();
@@ -277,10 +280,11 @@ export class WebSockets extends LifecycleCapability {
    * Have the platform answer the client heartbeat on every hibernated
    * socket: a `ping` text frame gets `pong` back without waking the
    * object, at no cost. Registered once per instance, before the first
-   * accept; the platform keeps the pair while sockets hibernate.
+   * accept; the platform keeps the pair while sockets hibernate. A host
+   * that opted out with `heartbeat: false` registers nothing.
    */
   #registerHeartbeat(): void {
-    if (this.#heartbeatRegistered) return;
+    if (!this.#heartbeat || this.#heartbeatRegistered) return;
     this.#heartbeatRegistered = true;
     this.lifecycle.sockets.setAutoResponse(HEARTBEAT_PING, HEARTBEAT_PONG);
   }
@@ -325,8 +329,10 @@ export class WebSockets extends LifecycleCapability {
   ): Promise<void> {
     // A heartbeat ping the platform did not answer — the Cap'n Web wire,
     // or a runtime without auto-response — is answered here and never
-    // reaches the host: it is transport traffic, not a message.
-    if (message === HEARTBEAT_PING) {
+    // reaches the host: it is transport traffic, not a message. A host
+    // that opted out with `heartbeat: false` sees the frame like any
+    // other message.
+    if (this.#heartbeat && message === HEARTBEAT_PING) {
       this.#send(connection, HEARTBEAT_PONG);
       return;
     }

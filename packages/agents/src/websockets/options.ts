@@ -114,6 +114,22 @@ export interface WebSocketsOptions {
   readonly state?: SyncedState;
 
   /**
+   * Whether the host answers the client connection heartbeat.
+   *
+   * - `true` (default): the capability registers the platform
+   *   auto-response pair so a `ping` text frame is answered with `pong`
+   *   without waking the object, and answers `ping` itself on any wire
+   *   the platform did not cover. Either way the frame never reaches
+   *   `onMessage`.
+   * - `false`: the capability does nothing about the heartbeat. No
+   *   auto-response pair is registered and a `ping` frame is delivered to
+   *   `onMessage` as an ordinary message, for a host that owns the frame
+   *   itself. A client heartbeat then gets no answer unless the host
+   *   sends one, and times out.
+   */
+  readonly heartbeat?: boolean;
+
+  /**
    * Tags attached to each accepted connection, queryable through
    * `getConnections(tag)`. The connection id is always the first tag.
    */

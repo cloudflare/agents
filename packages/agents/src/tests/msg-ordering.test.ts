@@ -48,8 +48,10 @@ describe("WebSocket ordering / races", () => {
     });
 
     // Hammer a burst right away — if ordering is wrong
-    // the first echo might not be tagged
-    for (let i = 0; i < 25; i++) ws.send("ping");
+    // the first echo might not be tagged. (Not "ping": that frame is
+    // the connection heartbeat, answered by the platform and never
+    // delivered to `onMessage`.)
+    for (let i = 0; i < 25; i++) ws.send("burst");
 
     await donePromise;
     ws.close();
@@ -66,7 +68,7 @@ describe("WebSocket ordering / races", () => {
     expect(setupTypes).toContain(MessageType.CF_AGENT_MCP_SERVERS);
 
     // The key assertion: the first echo must have tagged=true.
-    // This proves onConnect ran and tagged the connection before onMessage processed pings.
+    // This proves onConnect ran and tagged the connection before onMessage processed the burst.
     const firstEcho = messages[echoIdx];
     expect(firstEcho.tagged).toBe(true);
   });

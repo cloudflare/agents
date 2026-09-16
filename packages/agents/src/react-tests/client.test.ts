@@ -6,6 +6,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { AgentClient, agentFetch } from "../client";
 import { getTestWorkerHost, getTestWorkerUrl } from "./test-config";
+import {
+  HEARTBEAT_PING,
+  HEARTBEAT_PONG,
+  HEARTBEAT_TIMEOUT_REASON
+} from "../websockets/heartbeat";
 
 describe("AgentClient", () => {
   describe("worker connectivity", () => {
@@ -990,38 +995,92 @@ describe("AgentClient", () => {
   });
 
   describe("heartbeat", () => {
-    it("sends ping on the interval, receives pong, and stays connected", async () => {
+    it("pings the host on the interval, gets pong, and stays open across several intervals", async () => {
       const { host, protocol } = getTestWorkerHost();
       const onClose = vi.fn();
-      const pongs: string[] = [];
+      const frames: string[] = [];
 
       client = new AgentClient({
         agent: "TestStateAgent",
-        name: "heartbeat-test",
+        name: `heartbeat-alive-${crypto.randomUUID()}`,
         host,
         protocol,
-        heartbeat: { intervalMs: 100, timeoutMs: 2000 }
+        heartbeat: { intervalMs: 50, timeoutMs: 2000 }
       });
       client.addEventListener("close", onClose);
       client.addEventListener("message", (event) => {
-        if (event.data === "pong") pongs.push(event.data);
+        if (typeof event.data === "string") frames.push(event.data);
       });
       const send = vi.spyOn(client, "send");
 
       await client.ready;
 
+      // Several intervals' worth of pings, each answered: the pong
+      // timeout never fires, so no ping is skipped for an outstanding one.
       await vi.waitFor(
         () => {
-          const pings = send.mock.calls.filter(([data]) => data === "ping");
-          expect(pings.length).toBeGreaterThanOrEqual(3);
-          expect(pongs.length).toBeGreaterThanOrEqual(2);
+          const pings = send.mock.calls.filter(
+            ([data]) => data === HEARTBEAT_PING
+          );
+          expect(pings.length).toBeGreaterThanOrEqual(4);
         },
         { timeout: 5000 }
       );
 
-      // Every pong was answered by the platform: no timeout, no reconnect.
+      // The host answered every one of them: a missed pong would have
+      // closed this socket.
+      expect(
+        frames.filter((frame) => frame === HEARTBEAT_PONG).length
+      ).toBeGreaterThanOrEqual(3);
       expect(onClose).not.toHaveBeenCalled();
+      expect(client.readyState).toBe(client.OPEN);
       expect(client.identified).toBe(true);
+
+      // The host never saw the ping as a message, so nothing came back
+      // but the pongs; the client never parsed one as a protocol frame.
+      expect(frames).not.toContain(HEARTBEAT_PING);
+      expect(client.connectionError).toBeNull();
+    });
+
+    it("reconnects with the heartbeat reason, non-terminally, when the host never pongs", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onConnectionError = vi.fn();
+      const events: string[] = [];
+
+      // This host opted out of the heartbeat and answers nothing, so the
+      // socket stays open on the wire while no pong ever arrives — the
+      // shape of a socket the network dropped silently.
+      client = new AgentClient({
+        agent: "HeartbeatSilentObject",
+        name: `heartbeat-silent-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        onConnectionError,
+        heartbeat: { intervalMs: 50, timeoutMs: 300 }
+      });
+      client.addEventListener("open", () => events.push("open"));
+      // `onclose` gets the close event as the socket built it; the
+      // `addEventListener` path is handed a clone whose code and reason
+      // partysocket does not carry across.
+      client.onclose = (event: CloseEvent) =>
+        events.push(`close:${event.code}:${event.reason}`);
+
+      await client.ready;
+
+      await vi.waitFor(
+        () => {
+          const closed = events.indexOf(
+            `close:1000:${HEARTBEAT_TIMEOUT_REASON}`
+          );
+          expect(closed).toBeGreaterThanOrEqual(0);
+          // Not terminal: the socket opens again after the drop.
+          expect(events.slice(closed + 1)).toContain("open");
+        },
+        { timeout: 10000 }
+      );
+
+      expect(onConnectionError).not.toHaveBeenCalled();
+      expect(client.shouldReconnect).toBe(true);
     });
 
     it("sends nothing when disabled", async () => {
@@ -1029,7 +1088,7 @@ describe("AgentClient", () => {
 
       client = new AgentClient({
         agent: "TestStateAgent",
-        name: "heartbeat-disabled-test",
+        name: `heartbeat-disabled-${crypto.randomUUID()}`,
         host,
         protocol,
         heartbeat: false
@@ -1037,10 +1096,48 @@ describe("AgentClient", () => {
       const send = vi.spyOn(client, "send");
 
       await client.ready;
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Several default-short intervals' worth of silence.
+      await new Promise((resolve) => setTimeout(resolve, 500));
 
-      expect(send.mock.calls.filter(([data]) => data === "ping")).toEqual([]);
+      expect(
+        send.mock.calls.filter(([data]) => data === HEARTBEAT_PING)
+      ).toEqual([]);
       expect(client.identified).toBe(true);
+    });
+
+    it("stops pinging once the client is closed", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: `heartbeat-close-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        heartbeat: { intervalMs: 50, timeoutMs: 2000 }
+      });
+      const send = vi.spyOn(client, "send");
+
+      await client.ready;
+      await vi.waitFor(
+        () => {
+          const pings = send.mock.calls.filter(
+            ([data]) => data === HEARTBEAT_PING
+          );
+          expect(pings.length).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 5000 }
+      );
+
+      client.close(1000, "done");
+      const pingsAtClose = send.mock.calls.filter(
+        ([data]) => data === HEARTBEAT_PING
+      ).length;
+
+      // Many intervals later the timers are still gone.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(
+        send.mock.calls.filter(([data]) => data === HEARTBEAT_PING).length
+      ).toBe(pingsAtClose);
     });
   });
 

@@ -197,8 +197,10 @@ describe("a plain Durable Object hub routing to one Agent per chat", () => {
         if (data.startsWith("echo:")) resolve(data);
       });
     });
-    socket.send("ping");
-    expect(await echoed).toBe("echo:ping");
+    // Not "ping": that frame is the connection heartbeat, answered by
+    // the platform and never delivered to the host.
+    socket.send("hello");
+    expect(await echoed).toBe("echo:hello");
 
     const closed = new Promise<void>((resolve) =>
       socket.addEventListener("close", () => resolve(), { once: true })

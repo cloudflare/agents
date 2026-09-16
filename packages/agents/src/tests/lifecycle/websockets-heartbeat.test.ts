@@ -1,8 +1,9 @@
 import { env, RpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { newWebSocketRpcSession } from "capnweb";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { routeAgentRequest } from "../..";
+import type { HeartbeatSilentObject } from "../capabilities/heartbeat";
 import {
   CAPNWEB_TRANSPORT_QUERY,
   CAPNWEB_TRANSPORT_SEND,
@@ -112,6 +113,43 @@ describe("heartbeat on the hibernating wire", () => {
         frame = await next();
       }
       expect(frame).toBe(HEARTBEAT_PONG);
+    } finally {
+      socket.close(1000, "done");
+    }
+  });
+});
+
+describe("a host that opted out of the heartbeat", () => {
+  it("registers no pair and delivers ping to onMessage like any other frame", async () => {
+    const name = crypto.randomUUID();
+    const socket = await upgrade(
+      new URL(`/agents/heartbeat-silent-object/${name}`, "https://example.com")
+    );
+    const next = textReader(socket);
+    try {
+      expect(JSON.parse(await next())).toMatchObject({
+        type: "cf_agent_identity"
+      });
+
+      const namespace =
+        env.HeartbeatSilentObject as unknown as DurableObjectNamespace;
+      expect(await autoResponsePair(namespace, name)).toBeNull();
+
+      socket.send(HEARTBEAT_PING);
+      const stub = namespace.get(
+        namespace.idFromName(name)
+      ) as DurableObjectStub<HeartbeatSilentObject>;
+      await vi.waitFor(async () => {
+        expect(await stub.receivedFrames()).toContain(HEARTBEAT_PING);
+      });
+
+      // Nothing was sent back: this is the silent-drop shape the client
+      // heartbeat has to notice for itself.
+      const answered = await Promise.race([
+        next(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 200))
+      ]);
+      expect(answered).toBeNull();
     } finally {
       socket.close(1000, "done");
     }

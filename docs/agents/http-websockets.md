@@ -576,9 +576,11 @@ export class PresenceAgent extends Agent {
     this.broadcastPresence();
   }
 
-  // Heartbeat to update lastSeen
+  // Liveness ping to update lastSeen. The bare `ping` frame is the
+  // built-in connection heartbeat — answered before `onMessage` — so an
+  // app-level ping needs a frame of its own.
   onMessage(connection: Connection<UserState>, message: WSMessage) {
-    if (message === "ping") {
+    if (message === "presence-ping") {
       connection.setState((prev) => ({
         ...prev!,
         lastSeen: Date.now()

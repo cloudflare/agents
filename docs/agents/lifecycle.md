@@ -437,6 +437,15 @@ clients close that gap together:
 
 Nothing is stored per connection. A client that never pings is unaffected.
 
+A host that owns the `ping` frame itself opts out with `heartbeat: false`:
+the capability then registers no auto-response pair and delivers `ping` to
+`onMessage` like any other message. A client heartbeat gets no answer
+unless the host sends one, and times out.
+
+```ts
+new WebSockets({ heartbeat: false, handlers });
+```
+
 ## Native RPC
 
 Native Durable Object RPC does not pass through `fetch`. An RPC method that
