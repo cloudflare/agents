@@ -188,7 +188,7 @@ await this.queue("processWebhook", webhookData, {
 });
 ```
 
-If the callback throws, it is retried before the task is dequeued. After all attempts are exhausted, the task is dequeued and the error is logged.
+If the callback throws, it is retried before the item is removed. After all attempts are exhausted, the item is dropped, a `queue:error` event is emitted, and the error is logged.
 
 ## Validation
 

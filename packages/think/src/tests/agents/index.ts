@@ -28,7 +28,9 @@ export {
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
   ThinkMediaEvictionAgent,
-  ThinkMediaEvictionAutoAgent
+  ThinkMediaEvictionAutoAgent,
+  ThinkPointerHydrationAgent,
+  ThinkLegacySessionApiAgent
 } from "./think-session";
 export { ThinkFetchToolsTestAgent } from "./fetch-tools";
 export { ThinkExecuteToolAgent } from "./execute-tool";

@@ -5,6 +5,9 @@ export default defineConfig({
     projects: [
       "src/tests/vitest.config.ts",
       "src/react-tests/vitest.config.ts",
+      "src/voice/tests/vitest.config.ts",
+      "src/voice/react-tests/vitest.config.ts",
+      "src/channels/vitest.config.ts",
       "src/node-tests/vitest.config.ts",
       "src/x402-tests/vitest.config.ts",
       "src/chat/__tests__/vitest.config.ts",

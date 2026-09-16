@@ -25,6 +25,150 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return JSON.stringify({ type: "text-delta", delta: `${index}:${filler}` });
   }
 
+  /** Durable-marker values the adapter reported through `onProgress`. */
+  readonly progressReports: number[] = [];
+
+  #adapter(): ResumableStream {
+    return new ResumableStream(
+      this.streams,
+      <T = Record<string, unknown>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] =>
+        [
+          ...this.ctx.storage.sql.exec(
+            strings.reduce(
+              (q, part, i) => q + part + (i < values.length ? "?" : ""),
+              ""
+            ),
+            ...values
+          )
+        ] as T[],
+      { onProgress: (durable) => this.progressReports.push(durable) }
+    );
+  }
+
+  /**
+   * A host whose startup retried constructs the adapter again on the same
+   * capability. A stream retired afterwards must count once, not once per
+   * construction.
+   */
+  async probeReconstruction(): Promise<{ marker: number; reports: number }> {
+    await this.lifecycle.start();
+    this.#adapter();
+    this.#adapter();
+    const adapter = this.#adapter();
+    const id = adapter.start("rebuilt-req");
+    for (let i = 0; i < 10; i++) adapter.storeChunk(id, this.#body(i, 60));
+    adapter.finish(id);
+    adapter.cutover(id, () => {});
+    return {
+      marker: adapter.progressMarker(),
+      reports: this.progressReports.length
+    };
+  }
+
+  /**
+   * A completed chat stream deleted through the capability's public
+   * `delete()`, which bypasses the adapter: the marker must not move.
+   */
+  async probePublicDelete(): Promise<{ before: number; after: number }> {
+    await this.lifecycle.start();
+    const adapter = this.#adapter();
+    const id = adapter.start("public-delete-req");
+    for (let i = 0; i < 10; i++) adapter.storeChunk(id, this.#body(i, 60));
+    adapter.complete(id);
+    const before = adapter.progressMarker();
+    await this.streams.delete(id);
+    return { before, after: adapter.progressMarker() };
+  }
+
+  /**
+   * The recovery progress marker derived from the stream log, observed at
+   * each point where the old KV counter would have been bumped or where
+   * rows go away. Returns the marker after every step plus the rows
+   * written by the whole sequence, so a test can pin both the value and
+   * that no per-chunk write exists.
+   */
+  async probeProgressMarker(): Promise<{
+    marker: Record<string, number>;
+    rowsWritten: number;
+  }> {
+    await this.lifecycle.start();
+    const adapter = this.#adapter();
+    const marker: Record<string, number> = {};
+    const before = this.#totalChanges();
+
+    marker.fresh = adapter.progressMarker();
+    const first = adapter.start("req-1");
+    marker.opened = adapter.progressMarker();
+    for (let i = 0; i < 25; i++) adapter.storeChunk(first, this.#body(i, 60));
+    // 25 chunks pack into 2 flushed segments and 5 buffered chunks.
+    marker.buffered = adapter.progressMarker();
+    adapter.flushBuffer();
+    marker.flushed = adapter.progressMarker();
+    // A replay reads the log without appending.
+    for (const _ of adapter.getStreamChunks(first)) {
+      // drain
+    }
+    marker.replayed = adapter.progressMarker();
+    // The cutover deletes the rows; their segments move to the retired total.
+    adapter.finish(first);
+    adapter.cutover(first, () => {});
+    marker.cutOver = adapter.progressMarker();
+
+    // A second turn whose completed row is reclaimed by the next start().
+    const second = adapter.start("req-2");
+    for (let i = 0; i < 10; i++) adapter.storeChunk(second, this.#body(i, 60));
+    adapter.complete(second);
+    marker.completed = adapter.progressMarker();
+    const third = adapter.start("req-3");
+    marker.reclaimed = adapter.progressMarker();
+    adapter.storeChunk(third, this.#body(0, 60));
+    adapter.flushBuffer();
+    marker.thirdFlushed = adapter.progressMarker();
+
+    // Forwarded child output credits explicitly, one unit each.
+    adapter.creditProgress();
+    marker.credited = adapter.progressMarker();
+
+    // Clearing history retires everything still in the table.
+    adapter.clearAll();
+    marker.cleared = adapter.progressMarker();
+
+    // Seeding takes the max, never lowering the marker.
+    adapter.seedProgress(2);
+    marker.seededLow = adapter.progressMarker();
+    adapter.seedProgress(marker.cleared + 40);
+    marker.seededHigh = adapter.progressMarker();
+
+    return { marker, rowsWritten: this.#totalChanges() - before };
+  }
+
+  /**
+   * The legacy-counter seed against segments retired before it: the seed
+   * must add to them, not replace them, and must be idempotent.
+   */
+  async probeSeedOrdering(): Promise<Record<string, number>> {
+    await this.lifecycle.start();
+    const adapter = this.#adapter();
+    const marker: Record<string, number> = {};
+    const first = adapter.start("seed-req-1");
+    for (let i = 0; i < 20; i++) adapter.storeChunk(first, this.#body(i, 60));
+    adapter.finish(first);
+    adapter.cutover(first, () => {});
+    marker.retiredBeforeSeed = adapter.progressMarker();
+    adapter.seedProgress(40);
+    marker.seeded = adapter.progressMarker();
+    adapter.seedProgress(40);
+    marker.seededAgain = adapter.progressMarker();
+    adapter.seedProgress(10);
+    marker.seededLower = adapter.progressMarker();
+    adapter.creditProgress();
+    marker.credited = adapter.progressMarker();
+    return marker;
+  }
+
   /**
    * The replatformed path: real `ResumableStream` over the real Streams
    * capability — packed segments through the read-fenced append (one chunk
@@ -201,10 +345,21 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
         now,
         now
       ),
-      realChunkAppend: w(
-        `INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at)
-         VALUES ('probe-s', 0, '"x"', ?)`,
+      realBlockOpen: w(
+        `INSERT INTO cf_agents_stream_blocks
+           (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+         VALUES ('probe-s', 0, 0, 1, '"x"', ?, ?)`,
+        now,
         now
+      ),
+      realBlockAppend: w(
+        `UPDATE cf_agents_stream_blocks
+         SET body = body || ',' || '"y"', seq_to = 2, updated_at = ?
+         WHERE stream_id = 'probe-s' AND block = 0`,
+        now
+      ),
+      realBlockDelete: w(
+        `DELETE FROM cf_agents_stream_blocks WHERE stream_id = 'probe-s'`
       ),
       realStreamSettle: w(
         `UPDATE cf_agents_streams
@@ -259,8 +414,8 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
         continue;
       }
       const tail = sql.exec(
-        `SELECT seq, created_at FROM cf_agents_stream_chunks
-         WHERE stream_id = ? ORDER BY seq DESC LIMIT 1`,
+        `SELECT seq_to, updated_at FROM cf_agents_stream_blocks
+         WHERE stream_id = ? ORDER BY block DESC LIMIT 1`,
         row.stream_id
       );
       [...tail];

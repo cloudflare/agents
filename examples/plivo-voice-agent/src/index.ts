@@ -4,7 +4,7 @@ import {
   WorkersAIFluxSTT,
   type TTSProvider,
   type VoiceTurnContext
-} from "@cloudflare/voice";
+} from "agents/voice";
 import { PlivoAdapter } from "@cloudflare/voice-plivo";
 import { streamText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";

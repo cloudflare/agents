@@ -12,12 +12,12 @@
  */
 
 import { useState, useRef } from "react";
-import { useVoiceAgent, type VoiceAudioInput } from "@cloudflare/voice/react";
+import { useVoiceAgent, type VoiceAudioInput } from "agents/voice/react";
 import type {
   VoiceStatus,
   TranscriptMessage,
   VoicePipelineMetrics
-} from "@cloudflare/voice/react";
+} from "agents/voice/react";
 
 const STUN_SERVER = "stun:stun.cloudflare.com:3478";
 

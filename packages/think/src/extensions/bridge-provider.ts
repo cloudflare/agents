@@ -1,6 +1,6 @@
 /**
  * Bridge providers that adapt extension Worker RPC into Session's
- * ContextProvider / SkillProvider / WritableContextProvider interfaces.
+ * ContextProvider / WritableContextProvider interfaces.
  *
  * When an extension declares context blocks in its manifest, Think creates
  * a bridge provider for each block. The bridge delegates `get()`, `load()`,

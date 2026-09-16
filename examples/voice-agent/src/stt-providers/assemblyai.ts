@@ -4,7 +4,7 @@ import {
   type AssemblyAILanguageCode,
   type AssemblyAIVoiceFocus
 } from "@cloudflare/voice-assemblyai";
-import type { Transcriber } from "@cloudflare/voice";
+import type { Transcriber } from "agents/voice";
 import { getEnvString, getProviderKeyterms } from "./utils";
 
 const ASSEMBLYAI_PROMPT =

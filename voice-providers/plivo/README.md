@@ -17,7 +17,7 @@ The adapter bridges Plivo's bidirectional audio streaming protocol to VoiceAgent
 ## Install
 
 ```bash
-npm install @cloudflare/voice-plivo
+npm install agents @cloudflare/voice-plivo
 ```
 
 ## Usage
@@ -28,7 +28,7 @@ Two endpoints are needed — `/answer` (Plivo fetches this when a call comes in)
 
 ```typescript
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
+import { withVoice, type VoiceTurnContext } from "agents/voice";
 import { PlivoAdapter } from "@cloudflare/voice-plivo";
 
 const VoiceAgent = withVoice(Agent);
@@ -103,7 +103,7 @@ By default, each phone call creates a new VoiceAgent instance (using the Plivo C
 VoiceAgent's default TTS (`WorkersAITTS`) outputs MP3. The Plivo adapter expects raw PCM to encode as mulaw. For production use, configure a TTS provider that outputs PCM directly:
 
 ```typescript
-import { type TTSProvider } from "@cloudflare/voice";
+import { type TTSProvider } from "agents/voice";
 
 class PlivoPCMTTS implements TTSProvider {
   constructor(private ai: Ai) {}
@@ -163,7 +163,7 @@ runtime, so it needs no Plivo secrets.
 
 The same `VoiceAgent` instance can handle:
 
-- **Web voice** via the `@cloudflare/voice` browser client
+- **Web voice** via the `agents/voice` browser client
 - **Phone calls** via this Plivo adapter
 - **Text chat** via `sendText()`
 - **Email** via `routeAgentEmail()`

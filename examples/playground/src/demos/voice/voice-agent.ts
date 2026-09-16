@@ -4,7 +4,7 @@ import {
   WorkersAIFluxSTT,
   WorkersAITTS,
   type VoiceTurnContext
-} from "@cloudflare/voice";
+} from "agents/voice";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 

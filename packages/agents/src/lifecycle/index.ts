@@ -11,6 +11,7 @@ export {
   type LifecycleHostContextScope,
   type LifecycleRoutes,
   type LifecycleServices,
+  type LifecycleStatus,
   type LifecycleSockets
 } from "./capability";
 export {
@@ -20,6 +21,8 @@ export {
 } from "./current-agent";
 export {
   Lifecycle,
+  type LifecycleOptions,
+  type MemoryLimitContext,
   type LifecycleJobContext,
   type LifecycleJobs,
   type LifecycleJob,

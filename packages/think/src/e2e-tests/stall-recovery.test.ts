@@ -14,7 +14,8 @@
  * a terminal stream error.
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { killProcess, killProcessOnPort } from "./wrangler-process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";
 import path from "node:path";
@@ -40,27 +41,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function killProcessOnPort(port: number): void {
-  try {
-    const output = execSync(
-      `lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null || true`
-    )
-      .toString()
-      .trim();
-    if (output) {
-      for (const pid of output.split("\n").filter(Boolean)) {
-        try {
-          process.kill(Number(pid), "SIGKILL");
-        } catch {
-          // already dead
-        }
-      }
-    }
-  } catch {
-    // lsof unavailable
-  }
-}
-
 function startWrangler(): ChildProcess {
   const configPath = path.join(__dirname, "wrangler.jsonc");
   const child = spawn(
@@ -80,6 +60,9 @@ function startWrangler(): ChildProcess {
     {
       cwd: __dirname,
       stdio: ["pipe", "pipe", "pipe"],
+      // A process-group leader, so killProcess() can take down wrangler and
+      // every workerd it spawns in one signal.
+      detached: true,
       env: { ...process.env, NODE_ENV: "test" }
     }
   );
@@ -106,41 +89,6 @@ async function waitForReady(maxAttempts = 60, delayMs = 1000): Promise<void> {
     await sleep(delayMs);
   }
   throw new Error("Wrangler did not start in time");
-}
-
-function killProcessTree(pid: number): void {
-  let children: number[] = [];
-  try {
-    children = execSync(`pgrep -P ${pid} 2>/dev/null || true`)
-      .toString()
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map(Number);
-  } catch {
-    // pgrep unavailable
-  }
-  for (const child of children) killProcessTree(child);
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // already dead
-  }
-}
-
-function killProcess(child: ChildProcess): Promise<void> {
-  return new Promise((resolve) => {
-    if (!child.pid) {
-      resolve();
-      return;
-    }
-    const fallback = setTimeout(resolve, 3000);
-    child.on("exit", () => {
-      clearTimeout(fallback);
-      resolve();
-    });
-    killProcessTree(child.pid);
-  });
 }
 
 function sendChatMessage(text: string): Promise<void> {

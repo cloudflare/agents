@@ -1,4 +1,4 @@
-import type { Transcriber } from "@cloudflare/voice";
+import type { Transcriber } from "agents/voice";
 import type { Connection } from "agents";
 import { createAssemblyAITranscriber } from "./stt-providers/assemblyai";
 import { createElevenLabsTranscriber } from "./stt-providers/elevenlabs";

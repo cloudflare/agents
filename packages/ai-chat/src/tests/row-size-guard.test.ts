@@ -1,11 +1,12 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
 
-describe("Row Size Guard and Incremental Persistence", () => {
+describe("Oversized rows and incremental persistence", () => {
   describe("Incremental persistence", () => {
     it("persists new messages and skips unchanged ones on second call", async () => {
       const room = crypto.randomUUID();
@@ -80,7 +81,50 @@ describe("Row Size Guard and Incremental Persistence", () => {
       ws.close(1000);
     });
 
-    it("cache is cleared on chat clear", async () => {
+    it("writes nothing when persisting an unchanged transcript", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      const messages: ChatMessage[] = [
+        { id: "noop-1", role: "user", parts: [{ type: "text", text: "Hi" }] },
+        {
+          id: "noop-2",
+          role: "assistant",
+          parts: [{ type: "text", text: "Hello" }]
+        }
+      ];
+
+      // Arm the change-feed counter, then take the baseline after the writes
+      // that actually change storage.
+      await agentStub.sessionChangeEventCountForTest();
+      await agentStub.persistMessages(messages);
+      const afterFirstWrite = await agentStub.sessionChangeEventCountForTest();
+      expect(afterFirstWrite).toBeGreaterThan(0);
+
+      // Re-persisting identical rows is a no-op: Sessions skips the row write
+      // and dispatches no change event.
+      await agentStub.persistMessages(messages);
+      expect(await agentStub.sessionChangeEventCountForTest()).toBe(
+        afterFirstWrite
+      );
+      expect(
+        ((await agentStub.getPersistedMessages()) as ChatMessage[]).map(
+          (m) => m.id
+        )
+      ).toEqual(["noop-1", "noop-2"]);
+      expect(
+        ((await agentStub.getMessagesForTest()) as ChatMessage[]).map(
+          (m) => m.id
+        )
+      ).toEqual(["noop-1", "noop-2"]);
+
+      ws.close(1000);
+    });
+
+    it("re-accepts a cleared message id", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
@@ -106,7 +150,6 @@ describe("Row Size Guard and Incremental Persistence", () => {
       expect(persisted.length).toBe(0);
 
       // Persist a new message with the same ID -- should succeed
-      // (cache was cleared, so it won't skip)
       await agentStub.persistMessages([
         {
           id: "clear-cache-1",
@@ -126,7 +169,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
     });
   });
 
-  describe("Row size enforcement", () => {
+  describe("Oversized rows offload losslessly", () => {
     it("messages under 1.8MB pass through unchanged", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
@@ -163,14 +206,15 @@ describe("Row Size Guard and Incremental Persistence", () => {
       ws.close(1000);
     });
 
-    it("messages over 1.8MB have tool outputs compacted", async () => {
+    it("splits an oversized tool output across rows and reads it back byte-for-byte", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
-      // Create a message with a huge tool output that pushes over 1.8MB
+      // A tool output that cannot fit one SQLite row. Sessions splits the
+      // message across continuation rows instead of truncating it.
       const hugeOutput = "X".repeat(1_900_000);
       const message: ChatMessage = {
         id: "size-big",
@@ -186,65 +230,28 @@ describe("Row Size Guard and Incremental Persistence", () => {
         ] as ChatMessage["parts"]
       };
 
-      // Should NOT throw -- the guard compacts the output
       await agentStub.persistMessages([message]);
 
-      const persisted =
-        (await agentStub.getPersistedMessages()) as ChatMessage[];
-      expect(persisted.length).toBe(1);
+      const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(stored.length).toBe(1);
+      expect((stored[0].parts[0] as { output: unknown }).output).toBe(
+        hugeOutput
+      );
+      expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
 
-      // Output should be compacted (not the original huge string), keeping the
-      // structured truncation marker rather than a flat summary string.
-      const part = persisted[0].parts[0] as { output: unknown };
-      const outputStr = part.output as string;
-      expect(outputStr).toContain("[truncated");
-      expect(outputStr).toContain("chars]");
-      expect(outputStr.length).toBeLessThan(hugeOutput.length);
+      // No compaction metadata is stamped: nothing was lost.
+      expect(stored[0].metadata).toBeUndefined();
 
       ws.close(1000);
     });
 
-    it("compacted messages have metadata with compactedToolOutputs", async () => {
+    it("stores an oversized user text part losslessly", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
-      const message: ChatMessage = {
-        id: "meta-compact",
-        role: "assistant",
-        parts: [
-          {
-            type: "tool-bigTool",
-            toolCallId: "call_meta",
-            state: "output-available",
-            input: {},
-            output: "Y".repeat(1_900_000)
-          }
-        ] as ChatMessage["parts"]
-      };
-
-      await agentStub.persistMessages([message]);
-
-      const persisted =
-        (await agentStub.getPersistedMessages()) as ChatMessage[];
-      const metadata = persisted[0].metadata as Record<string, unknown>;
-      expect(metadata).toBeDefined();
-      expect(metadata.compactedToolOutputs).toEqual(["call_meta"]);
-
-      ws.close(1000);
-    });
-
-    it("non-assistant messages pass through even if large", async () => {
-      const room = crypto.randomUUID();
-      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
-
-      const agentStub = await getAgentByName(env.TestChatAgent, room);
-
-      // A large user message (no tool outputs to compact)
-      // This tests the text truncation fallback for non-assistant messages
       const largeText = "Z".repeat(1_900_000);
       const message: ChatMessage = {
         id: "user-big",
@@ -252,24 +259,23 @@ describe("Row Size Guard and Incremental Persistence", () => {
         parts: [{ type: "text", text: largeText }]
       };
 
-      // Should not crash
       await agentStub.persistMessages([message]);
 
-      const persisted =
-        (await agentStub.getPersistedMessages()) as ChatMessage[];
-      expect(persisted.length).toBe(1);
+      const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(stored.length).toBe(1);
+      expect((stored[0].parts[0] as { text: string }).text).toBe(largeText);
+      expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
 
-      // Text should be truncated
-      const textPart = persisted[0].parts[0] as { text: string };
-      expect(textPart.text).toContain("truncated for storage");
-      expect(textPart.text.length).toBeLessThan(largeText.length);
+      // The in-memory cache holds the same message the store does.
+      const cached = (await agentStub.getMessagesForTest()) as ChatMessage[];
+      expect((cached[0].parts[0] as { text: string }).text).toBe(largeText);
 
       ws.close(1000);
     });
   });
 
   describe("Unicode byte-length measurement", () => {
-    it("compacts messages with multi-byte Unicode that exceed byte limit", async () => {
+    it("splits multi-byte Unicode on byte boundaries, not character counts", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
@@ -277,9 +283,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // CJK character \u4e00 is 1 JS char but 3 bytes in UTF-8.
-      // 700,000 CJK chars = 700,000 JS chars (under 1.8M char limit)
-      // but 2,100,000 UTF-8 bytes (over 1.8MB byte limit).
-      // This tests that the byte-length guard catches it.
+      // 700,000 CJK chars fit a character-count limit but not a byte budget.
       const cjkOutput = "\u4e00".repeat(700_000);
 
       const message: ChatMessage = {
@@ -298,15 +302,12 @@ describe("Row Size Guard and Incremental Persistence", () => {
 
       await agentStub.persistMessages([message]);
 
-      const persisted =
-        (await agentStub.getPersistedMessages()) as ChatMessage[];
-      expect(persisted.length).toBe(1);
-
-      // The tool output should be compacted (byte size exceeds limit)
-      const part = persisted[0].parts[0] as { output: unknown };
-      expect(typeof part.output).toBe("string");
-      expect((part.output as string).length).toBeLessThan(cjkOutput.length);
-      expect(part.output as string).toContain("[truncated");
+      const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(stored.length).toBe(1);
+      expect((stored[0].parts[0] as { output: unknown }).output).toBe(
+        cjkOutput
+      );
+      expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
 
       ws.close(1000);
     });
@@ -370,6 +371,61 @@ describe("Row Size Guard and Incremental Persistence", () => {
       expect(chunks[1].body).toContain("text-end");
 
       ws.close(1000);
+    });
+  });
+
+  describe("Wake hydration of a split message", () => {
+    it("rehydrates an attachment and a split row after an eviction", async () => {
+      const room = `row-chunk-wake-${crypto.randomUUID()}`;
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      const url = `data:image/png;base64,${btoa("o".repeat(2 * 1024 * 1024))}`;
+      await agentStub.persistMessages([
+        {
+          id: "wake-user",
+          role: "user",
+          parts: [
+            { type: "text", text: "look at this" },
+            { type: "file", mediaType: "image/png", url }
+          ]
+        },
+        {
+          id: "wake-assistant",
+          role: "assistant",
+          parts: [{ type: "text", text: "seen" }]
+        }
+      ]);
+      // The image is an attachment, so it leaves the row rather than splitting
+      // it; the long prose below is what actually chunks. Both must survive a
+      // wake identically.
+      expect(await agentStub.continuationRowCountForTest()).toBe(0);
+
+      await agentStub.persistMessages([
+        {
+          id: "wake-long",
+          role: "assistant",
+          parts: [{ type: "text", text: "p".repeat(2 * 1024 * 1024) }]
+        }
+      ]);
+      expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);
+
+      await evictDurableObject(agentStub);
+
+      const restored = (await agentStub.getMessagesForTest()) as ChatMessage[];
+      expect(restored.map((message) => message.id)).toEqual([
+        "wake-user",
+        "wake-assistant",
+        "wake-long"
+      ]);
+      expect(restored[0].parts[1]).toMatchObject({ type: "file", url });
+
+      const response = await exports.default.fetch(
+        `http://example.com/agents/test-chat-agent/${room}/get-messages`
+      );
+      expect((await response.json()) as ChatMessage[]).toEqual(restored);
+
+      await agentStub.clearSessionForTest();
+      expect(await agentStub.continuationRowCountForTest()).toBe(0);
     });
   });
 });

@@ -11,13 +11,13 @@ Build stateful AI agents on Cloudflare Workers. Every agent is a Durable Object 
 
 Pick the base class that matches what you are building. They share the same Durable Object foundation, so you can start small and move up without re-platforming.
 
-| You are building...                                            | Use                                                                                | Why                                                                                                                    |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Stateful backend logic, real-time sync, custom protocols       | [`Agent`](./agent-class.md)                                                        | The core class: state, WebSockets, scheduling, SQL, and sub-agents. No opinions about chat or LLMs.                    |
-| A chat UI where you own the loop, the stream, and the response | [`AIChatAgent`](./chat-agents.md)                                                  | A thin chat-protocol adapter for `useAgentChat`. Bring your own agentic loop and custom streaming.                     |
-| A durable, general-purpose reasoning agent                     | [`Think`](https://github.com/cloudflare/agents/blob/main/docs/think/index.md)      | Opinionated runtime: agentic loop, sessions, tools, memory, compaction, recovery, and multi-channel delivery built in. |
-| A voice agent (speech in, speech out)                          | [Voice mixins](https://github.com/cloudflare/agents/blob/main/docs/voice/index.md) | `withVoice` adds real-time STT/TTS, interruption and barge-in, and conversation persistence to an agent.               |
-| Durable multi-step processes (not chat)                        | [Workflows](./workflows.md)                                                        | Long-running, retryable step orchestration with Cloudflare Workflows.                                                  |
+| You are building...                                            | Use                                                                           | Why                                                                                                                    |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Stateful backend logic, real-time sync, custom protocols       | [`Agent`](./agent-class.md)                                                   | The core class: state, WebSockets, scheduling, SQL, and sub-agents. No opinions about chat or LLMs.                    |
+| A chat UI where you own the loop, the stream, and the response | [`AIChatAgent`](./chat-agents.md)                                             | A thin chat-protocol adapter for `useAgentChat`. Bring your own agentic loop and custom streaming.                     |
+| A durable, general-purpose reasoning agent                     | [`Think`](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) | Opinionated runtime: agentic loop, sessions, tools, memory, compaction, recovery, and multi-channel delivery built in. |
+| A voice agent (speech in, speech out)                          | [Voice mixins](./voice.md)                                                    | `withVoice` adds real-time STT/TTS, interruption and barge-in, and conversation persistence to an agent.               |
+| Durable multi-step processes (not chat)                        | [Workflows](./workflows.md)                                                   | Long-running, retryable step orchestration with Cloudflare Workflows.                                                  |
 
 Not sure? Start with [`Agent`](./agent-class.md) for raw building blocks, or [`Think`](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) if you want a chat or reasoning agent that already handles the hard parts.
 
@@ -40,8 +40,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 ## Core Concepts
 
 - [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStateChanged()`
-- [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
-- [Sub-agents](./sub-agents.md) - Parent/child DO composition via facets, nested routing, and direct child connections
+- [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works, plus `RoutedAgents` for a hub that routes to many independent Agents
+- [Dynamic agents](./sub-agents.md) - Facet-backed child agents for code the parent supervises (dynamic/generated code, per-run tool agents, sandboxes) — not the recommended primitive for many independent peers like chats
 - [HTTP & WebSockets](./http-websockets.md) - Request handling and real-time connections
 - [Callable Methods](./callable-methods.md) - The `@callable` decorator and client-server method calls
 - [Readonly Connections](./readonly-connections.md) - Restricting which connections can modify state
@@ -57,13 +57,13 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Webhooks](./webhooks.md) - Receiving and sending webhook events
 - [Push Notifications](./push-notifications.md) - Browser push notifications via Web Push API and scheduled delivery
 - TODO: [SMS](./sms.md) - Text message integration (Twilio, etc.)
-- [Voice Agents](https://github.com/cloudflare/agents/blob/main/docs/voice/index.md) - Build voice agents with real-time speech-to-text, text-to-speech, and conversation persistence
+- [Voice Agents](./voice.md) - Build voice agents with real-time speech-to-text, text-to-speech, and conversation persistence
+- [Channels](./channels.md) - Send and receive messages through Slack, Telegram, email, browser voice, or custom adapters
 - [Chat SDK State](./chat-sdk.md) - Store Chat SDK subscriptions, locks, queues, and history in Agents sub-agents
-- TODO: [Messengers](./messengers.md) - Slack, Discord, Telegram, and other chat platforms
 
 ## Background Processing
 
-- [Queue](./queue.md) - Immediate background task execution
+- [Queue](./queue.md) - Durable background task execution
 - [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
 - [Retries](./retries.md) - Automatic retries with exponential backoff and jitter
 - [Durable Execution](./durable-execution.md) - `runFiber()`, `startFiber()`, `stash()`, and crash recovery for long tasks
@@ -80,7 +80,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Server-Driven Messages](./server-driven-messages.md) - Autonomous agent workflows: scheduled follow-ups, queue processing, webhooks, chained reasoning
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
-- [Sessions (Experimental)](./sessions.md) - Persistent conversation storage with tree-structured messages, context blocks, compaction, and search
+- [Sessions (Experimental)](./sessions.md) - Durable message trees, streamed history, compaction, search, and lossless attachment offload
+- [Context (Experimental)](./context.md) - System-prompt blocks, frozen prompts, writable/searchable/loadable providers, and their tools
 - [Workspace (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) - Durable virtual filesystem backed by SQLite + R2
 - [Codemode (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/agents/codemode.md) - LLM-generated executable code for tool orchestration
 - [Client Tools Continuation](./client-tools-continuation.md) - Handling tool calls across client/server

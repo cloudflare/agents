@@ -103,6 +103,53 @@ describe("createCodemodeRuntime", () => {
     });
   });
 
+  it("projects the model-facing output without the durable call log", async () => {
+    const runtime = createCodemodeRuntime({
+      ctx: createMockCtx({}),
+      executor: createMockExecutor(),
+      connectors: []
+    });
+    const codemode = runtime.tool();
+
+    const output = {
+      status: "completed",
+      executionId: "exec_1",
+      result: { ok: true },
+      logs: ["hi"],
+      calls: [{ seq: 0, args: { big: "x".repeat(10_000) }, result: {} }]
+    };
+    expect(codemode.toModelOutput({ output })).toEqual({
+      type: "json",
+      value: {
+        status: "completed",
+        executionId: "exec_1",
+        result: { ok: true },
+        logs: ["hi"]
+      }
+    });
+    // The persisted output is untouched — UIs keep the audit trail.
+    expect(output.calls).toHaveLength(1);
+
+    // Sandbox logs are bounded like a result; BigInt and cycles never throw.
+    const noisy = codemode.toModelOutput({
+      output: {
+        status: "completed",
+        executionId: "exec_2",
+        result: 10n,
+        logs: Array.from({ length: 5_000 }, (_, i) => `line ${i}`)
+      }
+    }).value as { result: unknown; logs: unknown[] };
+    expect(noisy.result).toBe("10");
+    expect(JSON.stringify(noisy.logs).length).toBeLessThanOrEqual(24_000);
+
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const projected = codemode.toModelOutput({
+      output: { status: "completed", executionId: "exec_3", result: cyclic }
+    }).value as { error?: string };
+    expect(projected.error).toMatch(/could not be serialized/);
+  });
+
   it("executes directly without an AI SDK adapter", async () => {
     const runtimeStub = {
       begin: vi.fn(async () => "exec_direct"),

@@ -2,7 +2,7 @@
  * Voice transport wrapper that intercepts server audio and routes it
  * to a TelnyxCallBridge for PSTN playback.
  *
- * Wraps any VoiceTransport from @cloudflare/voice/client, forwarding
+ * Wraps any VoiceTransport from agents/voice/client, forwarding
  * all messages to VoiceClient while also feeding binary audio into the
  * phone bridge. VoiceClient still receives everything — it manages
  * status, interrupts, and transcript state normally.
@@ -15,7 +15,7 @@
  *
  * @example
  * ```typescript
- * import { WebSocketVoiceTransport, VoiceClient } from "@cloudflare/voice/client";
+ * import { WebSocketVoiceTransport, VoiceClient } from "agents/voice/client";
  * import { TelnyxPhoneTransport, createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx/browser";
  *
  * const telnyx = await createTelnyxVoiceConfig({
@@ -42,13 +42,13 @@
  * ```
  */
 
-import type { VoiceTransport } from "@cloudflare/voice/client";
+import type { VoiceTransport } from "agents/voice/client";
 import type { TelnyxCallBridge } from "../providers/call-bridge.js";
 
 export interface TelnyxPhoneTransportConfig {
   /**
    * The underlying transport to wrap. Typically a `WebSocketVoiceTransport`
-   * from @cloudflare/voice/client.
+   * from agents/voice/client.
    */
   inner: VoiceTransport;
   /** The call bridge to route audio into. */

@@ -20,6 +20,7 @@ import type {
 import {
   isDurableObjectCodeUpdateReset,
   isPlatformFailure,
+  resolveRetryConfig,
   tryN,
   validateRetryOptions
 } from "../retries";
@@ -34,6 +35,7 @@ import {
   type ScheduleTiming
 } from "./schedule-timing";
 import type {
+  RecoveryLoopScheduleOptions,
   Schedule,
   ScheduleCriteria,
   ScheduleOptions,
@@ -73,6 +75,19 @@ export function setSchedulerCallbackResolver(
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
 /** Version 2: schedule rows live in the Lifecycle job queue. */
 const CURRENT_SCHEDULE_SCHEMA_VERSION = 2;
+
+/**
+ * Legacy schedule callbacks whose rows drive chat recovery loops from before
+ * the job queue carried breaker membership. The migration is the one place
+ * allowed to know legacy names (it already drops `_cf_keepAliveHeartbeat`
+ * rows by name): a recovery row migrated without its `recoveryLoop` flag
+ * would escape the alarm memory-limit breaker (#1825) and could re-trigger
+ * a doomed loop on an upgraded object.
+ */
+const LEGACY_RECOVERY_LOOP_CALLBACKS = new Set([
+  "_chatRecoveryContinue",
+  "_chatRecoveryRetry"
+]);
 
 const DEFAULT_RETRY: Required<RetryOptions> = {
   maxAttempts: 3,
@@ -128,17 +143,6 @@ type InsertResult<T> = {
   readonly schedule: Schedule<T>;
   readonly created: boolean;
 };
-
-function resolveRetryConfig(
-  retry: RetryOptions | undefined,
-  defaults: Required<RetryOptions>
-): Required<RetryOptions> {
-  return {
-    maxAttempts: retry?.maxAttempts ?? defaults.maxAttempts,
-    baseDelayMs: retry?.baseDelayMs ?? defaults.baseDelayMs,
-    maxDelayMs: retry?.maxDelayMs ?? defaults.maxDelayMs
-  };
-}
 
 function isSchedulerJobPayload(value: unknown): value is SchedulerJobPayload {
   return (
@@ -268,7 +272,8 @@ export class Scheduler<
         } satisfies SchedulerJobPayload,
         retry: resolveRetryConfig(retry, this.#retryDefaults),
         singleflight: row.type === "interval",
-        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds
+        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+        recoveryLoop: LEGACY_RECOVERY_LOOP_CALLBACKS.has(row.callback)
       });
     }
     storage.sql.exec("DROP TABLE cf_agents_schedules");
@@ -663,36 +668,6 @@ export class Scheduler<
     }
   }
 
-  /**
-   * @internal Apply the alarm memory-limit breaker's policy to this
-   * Scheduler's recovery schedules (#1825). The host names the callbacks
-   * whose jobs drive a recovery loop; sealed purges them, otherwise they are
-   * delayed to `nextTime` (epoch ms) so the next attempt runs on a fresh
-   * isolate after a backoff. Lifecycle handles the job that was executing.
-   */
-  async applyMemoryLimitPolicy(options: {
-    readonly callbacks: ReadonlyArray<string>;
-    readonly sealed: boolean;
-    readonly nextTime?: number;
-  }): Promise<void> {
-    const callbacks = new Set(options.callbacks);
-    for (const { job } of this.#ownedJobs()) {
-      if (!callbacks.has(job.fn)) continue;
-      try {
-        if (options.sealed) {
-          await this.lifecycle.jobs.cancel(job.id);
-        } else if (
-          options.nextTime !== undefined &&
-          job.time <= options.nextTime
-        ) {
-          await this.lifecycle.jobs.reschedule(job.id, options.nextTime);
-        }
-      } catch {
-        // best-effort at a host failure boundary
-      }
-    }
-  }
-
   // ── Validation ───────────────────────────────────────────────────────────
 
   #validateSchedule(
@@ -751,7 +726,7 @@ export class Scheduler<
     callback: string,
     options?: ScheduleOptions
   ): void {
-    if (!this.lifecycle.starting()) return;
+    if (this.lifecycle.status() !== "starting") return;
     if (options?.idempotent !== undefined) return;
     if (typeof when === "string") return;
     if (this.#warnedStartupCallbacks.has(callback)) return;
@@ -814,6 +789,10 @@ export class Scheduler<
     const idempotent = isRecurring(timing)
       ? options?.idempotent !== false
       : Boolean(options?.idempotent);
+    // Not part of public ScheduleOptions. See RecoveryLoopScheduleOptions.
+    const recoveryLoop = (
+      options as Partial<RecoveryLoopScheduleOptions> | undefined
+    )?.recoveryLoop;
 
     if (idempotent) {
       const existing = this.#findMatchingJob(
@@ -823,6 +802,23 @@ export class Scheduler<
         JSON.stringify(payload)
       );
       if (existing) {
+        // A dedup hit onto a row without breaker membership the caller asks
+        // for (a row migrated from the legacy schedule table) re-pushes the
+        // same durable intent in place with the flag — otherwise the row
+        // would escape the alarm memory-limit breaker (#1825) forever.
+        if (recoveryLoop && !existing.job.recoveryLoop) {
+          await this.lifecycle.jobs.push({
+            id: existing.job.id,
+            fn: existing.job.fn,
+            time: existing.job.time,
+            payload: existing.job.payload,
+            retry: existing.job.retry,
+            singleflight: existing.job.singleflight,
+            exclusive: existing.job.exclusive,
+            hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+            recoveryLoop: true
+          });
+        }
         // A dedup hit still re-arms so a lost physical alarm recovers, as
         // idempotent re-scheduling on startup historically guaranteed.
         await this.lifecycle.jobs.rearm();
@@ -851,7 +847,8 @@ export class Scheduler<
       payload: jobPayload,
       retry: resolveRetryConfig(options?.retry, this.#retryDefaults),
       singleflight: timing.type === "interval",
-      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds
+      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+      recoveryLoop
     });
 
     return {

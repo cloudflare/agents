@@ -12,7 +12,7 @@
  *
  * @example
  * ```typescript
- * import { withVoice } from "@cloudflare/voice";
+ * import { withVoice } from "agents/voice";
  * import { PlivoAdapter } from "@cloudflare/voice-plivo";
  *
  * export class MyAgent extends VoiceAgent<Env> {
@@ -32,7 +32,7 @@
  * ```
  */
 
-import { logVoiceError } from "@cloudflare/voice/errors";
+import { logVoiceError } from "agents/voice/errors";
 import {
   meanSquaredEnergy,
   mulawBase64ToPcm16,

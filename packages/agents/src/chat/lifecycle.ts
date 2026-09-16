@@ -224,7 +224,7 @@ export type ChatRecoveryProgressContext = {
  * Configuration for durable chat recovery, which is always enabled for chat
  * turns. `true` uses these defaults: `maxAttempts: 10`,
  * `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000` (5 min),
- * `maxRecoveryWork: 1000`, and a generic terminal message. Assign an object to
+ * `maxRecoveryWork: 10000`, and a generic terminal message. Assign an object to
  * tune recovery without disabling its durable bookkeeping.
  *
  * **Apply this as a class field or in the constructor — never assign it in
