@@ -1,0 +1,33 @@
+{
+  "name": "@cloudflare/agents-next-harness",
+  "description": "Shared Harness capability for the next harness examples: one developer API over pluggable runtimes",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./protocol": "./src/protocol.ts",
+    "./react": "./src/react.ts",
+    "./remote": "./src/remote.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config src/tests/vitest.config.ts"
+  },
+  "dependencies": {
+    "agents": "*",
+    "capnweb": "^0.12.0"
+  },
+  "peerDependencies": {
+    "react": "^19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.19.1",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@types/react": "^19.2.17",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.10",
+    "wrangler": "^4.115.0",
+    "ws": "^8.21.3"
+  }
+}
