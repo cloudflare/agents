@@ -811,6 +811,24 @@ describe("withX402Client", () => {
     expect(decoded.scheme).toBe("exact");
   });
 
+  it("registers a before-payment hook that enforces maxPaymentValue", async () => {
+    withX402Client(createMockMcpClient(), {
+      account: mockSigner as unknown as X402ClientConfig["account"],
+      maxPaymentValue: 100n
+    });
+    const [hook] =
+      mockPaymentClient.onBeforePaymentCreation.mock.calls.at(-1) ?? [];
+    expect(hook).toBeTypeOf("function");
+    const run = (amount: string) =>
+      hook({
+        selectedRequirements: { ...samplePaymentRequirements[0], amount }
+      });
+    await expect(run("100")).resolves.toBeUndefined();
+    await expect(run("101")).rejects.toThrow(
+      "Payment exceeds client cap: 101 > 100"
+    );
+  });
+
   it("respects confirmation callback declining payment", async () => {
     const client = createMockMcpClient();
     const originalCallTool = client.callTool;
