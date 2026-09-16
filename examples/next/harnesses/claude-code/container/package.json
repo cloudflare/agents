@@ -1,0 +1,25 @@
+{
+  "name": "harnessd-claude-code",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "The harness daemon that runs inside the Claude Code container: Cap'n Web over ws, a node:sqlite outbox, and one engine",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --format=esm --target=node24 --external:@anthropic-ai/claude-agent-sdk --banner:js=\"import{createRequire as __nodeRequire}from'node:module';const require=__nodeRequire(import.meta.url);\" --outfile=dist/main.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p harnessd.tsconfig.json"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.268",
+    "capnweb": "^0.12.0",
+    "ws": "^8.21.3",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.10"
+  }
+}

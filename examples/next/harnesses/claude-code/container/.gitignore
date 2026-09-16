@@ -1,0 +1,4 @@
+# The image installs this project with `npm ci`, so the lockfile is source
+# here even though the repository ignores lockfiles everywhere else.
+!package-lock.json
+dist/

@@ -1,0 +1,29 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  // A real harnessd (echo engine) the live test dials when it is running.
+  "vars": {
+    "HARNESSD_URL": "http://127.0.0.1:18790",
+    "HARNESSD_SECRET": "live-secret"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CLAUDE_CODE_PROTOCOL_TEST",
+        "class_name": "ClaudeCodeProtocolTestObject"
+      },
+      { "name": "LIVE_DAEMON_TEST", "class_name": "LiveDaemonTestObject" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ClaudeCodeProtocolTestObject",
+        "LiveDaemonTestObject"
+      ]
+    }
+  ]
+}
