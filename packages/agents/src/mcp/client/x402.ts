@@ -347,6 +347,9 @@ export type X402ClientConfig = {
 };
 
 class PaymentCapError extends Error {}
+// Thrown when the selected requirement cannot be cap-checked; the caller
+// returns the server's original 402 result, as before the hook existed.
+class PaymentPassthroughError extends Error {}
 
 export function withX402Client<T extends CompatibleMcpClient>(
   client: T,
@@ -362,17 +365,18 @@ export function withX402Client<T extends CompatibleMcpClient>(
   registerClientEvmScheme(paymentClient, { signer: account });
 
   // Selection applies scheme support and network preference before this hook.
-  // Enforce the cap on the requirement that will actually be signed.
+  // Enforce the cap on the requirement that will actually be signed. We throw
+  // rather than return `{ abort: true }` because @x402/core rewraps an abort in
+  // a plain Error, which would lose the typed errors the catch below relies on.
   paymentClient.onBeforePaymentCreation(async ({ selectedRequirements }) => {
     const { scheme, amount } = selectedRequirements;
-    if (
-      scheme !== "exact" ||
-      typeof amount !== "string" ||
-      !/^\d+$/.test(amount)
-    ) {
-      throw new Error("Invalid payment amount or scheme");
+    if (scheme !== "exact") throw new PaymentPassthroughError();
+    let value: bigint;
+    try {
+      value = BigInt(amount);
+    } catch {
+      throw new PaymentPassthroughError(); // malformed amount
     }
-    const value = BigInt(amount);
     if (value > maxPaymentValue) {
       throw new PaymentCapError(
         `Payment exceeds client cap: ${value} > ${maxPaymentValue}`
@@ -449,6 +453,9 @@ export function withX402Client<T extends CompatibleMcpClient>(
         };
       }
 
+      // No signable requirement: return the original error, as before
+      if (!accepts.some((req) => req.scheme === "exact")) return res;
+
       // Reconstruct the PaymentRequired response for the v2 x402 client
       const paymentRequiredResponse: PaymentRequired = {
         x402Version: (maybeX402Error.x402Version as number) ?? 2,
@@ -463,14 +470,14 @@ export function withX402Client<T extends CompatibleMcpClient>(
           | undefined
       };
 
-      // Snapshot requirements so retained approval references cannot change them
-      // between the cap check and signing.
+      // Create the payment payload using the v2 x402 client
       let paymentPayload: PaymentPayload;
       try {
         paymentPayload = await paymentClient.createPaymentPayload(
-          structuredClone(paymentRequiredResponse)
+          paymentRequiredResponse
         );
       } catch (error) {
+        if (error instanceof PaymentPassthroughError) return res;
         return {
           isError: true,
           content: [

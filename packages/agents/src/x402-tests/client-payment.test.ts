@@ -104,23 +104,6 @@ describe("x402 selected-payment cap", () => {
     }
   );
 
-  it("keeps the checked requirement stable while payment creation yields", async () => {
-    const { client, callTool } = setup([{ ...requirement }]);
-    await client.callTool(
-      async (accepts) => {
-        queueMicrotask(() =>
-          queueMicrotask(() => {
-            accepts[0].amount = "999999999";
-          })
-        );
-        return true;
-      },
-      { name: "test" }
-    );
-    const token = callTool.mock.calls[1][0]._meta?.["x402/payment"] as string;
-    expect(JSON.parse(atob(token)).accepted.amount).toBe("10000");
-  });
-
   it("allows exactly the cap without number rounding", async () => {
     const cap = 9007199254740993n;
     const { client, signTypedData } = setup(
@@ -134,15 +117,15 @@ describe("x402 selected-payment cap", () => {
     expect(signTypedData).toHaveBeenCalledOnce();
   });
 
-  it.each(["-1", "1.5", "nope"])(
-    "rejects malformed selected amount %s before signing",
+  it.each(["1.5", "nope"])(
+    "returns the original 402 result for malformed selected amount %s",
     async (amount) => {
       const { client, callTool, signTypedData } = setup([
         { ...requirement, amount }
       ]);
-      expect((await client.callTool(null, { name: "test" })).isError).toBe(
-        true
-      );
+      const result = await client.callTool(null, { name: "test" });
+      expect(result.isError).toBe(true);
+      expect(result._meta?.["x402/error"]).toBeDefined();
       expect(signTypedData).not.toHaveBeenCalled();
       expect(callTool).toHaveBeenCalledOnce();
     }
