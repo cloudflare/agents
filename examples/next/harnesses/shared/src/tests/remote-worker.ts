@@ -388,6 +388,10 @@ export class RemoteHarnessTestObject extends DurableObject<Env> {
     this.#sidecar.daemon.preapply(operationId, operationId, text);
   }
 
+  async strayOperation(operationId: string) {
+    this.#sidecar.daemon.stray(operationId);
+  }
+
   async finishParked(operationId: string) {
     this.#sidecar.daemon.finish(operationId);
   }

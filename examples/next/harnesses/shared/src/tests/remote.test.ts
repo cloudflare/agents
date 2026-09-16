@@ -178,6 +178,36 @@ describe("ContainerHarnessRuntime over the daemon wire", () => {
     ]);
   });
 
+  it("drops frames for an operation it never admitted and keeps draining", async () => {
+    const stub = fresh();
+    await stub.run("first");
+    await until(
+      async () => ((await stub.info()).attached ? undefined : true),
+      "the runtime to detach"
+    );
+    // Left in the outbox by a daemon the object had stopped listening to.
+    await stub.strayOperation("op-ghost");
+    const { result } = await stub.run("second");
+    expect(result.status).toBe("completed");
+    expect(await stub.messages()).toEqual([
+      "first",
+      "echo: first",
+      "second",
+      "echo: second"
+    ]);
+    const turn = [
+      "operation_started",
+      "message_start",
+      "message_end",
+      "operation_settled"
+    ];
+    expect(await stub.eventTypes()).toEqual([
+      "session_opened",
+      ...turn,
+      ...turn
+    ]);
+  });
+
   it("closes the socket when nothing is attached, leaving the container up", async () => {
     const stub = fresh();
     await stub.run("hello");

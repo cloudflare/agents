@@ -254,6 +254,16 @@ export class FakeDaemonState {
   }
 
   /** Finish a turn parked by a `slow` prompt. */
+  /**
+   * Test knob: a whole turn for an operation the Durable Object never
+   * admitted, as a daemon that outlived a decline or a delete would leave
+   * in its outbox.
+   */
+  stray(operationId: string): void {
+    this.#emit(operationId, { type: "begin", operationId, delivery: "queue" });
+    this.#complete(operationId, "ghost");
+  }
+
   finish(operationId: string): void {
     const text = this.#parked.get(operationId);
     if (text === undefined) return;

@@ -1244,22 +1244,25 @@ export class ContainerHarnessRuntime<
   }
 
   /**
-   * A control frame names an operation the base has no row for: one it
-   * declined or deleted while the daemon kept going. Dropping the frame is
-   * the safe answer; failing the pass would poison whatever is queued.
+   * A frame that names an operation the base has no row for, one it
+   * declined or deleted while the daemon kept going: the whole frame is
+   * dropped, control or event, so the cursor moves past it. Failing the
+   * pass instead would stall every later frame behind it and poison what
+   * is queued.
    */
-  async #forKnownOperation(
+  async #applyOrDrop(
+    ctx: HarnessDriveContext<P>,
     link: DaemonLink<P>,
-    operationId: string,
-    apply: () => Promise<unknown>
-  ): Promise<void> {
+    frame: HarnessWireFrame<P>
+  ): Promise<HarnessOperationHandle<P> | undefined> {
     try {
-      await apply();
+      return await this.#applyFrame(ctx, link, frame);
     } catch (error) {
       if (!(error instanceof HarnessOperationNotFoundError)) throw error;
       console.warn(
-        `Harness container for ${link.sessionId} sent a frame for unknown operation ${operationId}; dropped`
+        `Harness container for ${link.sessionId} sent ${frame.body.type} (seq ${frame.seq}) for an operation this session does not have; dropped`
       );
+      return undefined;
     }
   }
 
@@ -1313,7 +1316,7 @@ export class ContainerHarnessRuntime<
     );
     for (const frame of frames) {
       if (frame.seq <= link.cursor) continue;
-      const handle = await this.#applyFrame(ctx, link, frame);
+      const handle = await this.#applyOrDrop(ctx, link, frame);
       if (handle) touched.add(handle);
       link.cursor = frame.seq;
     }
@@ -1360,15 +1363,11 @@ export class ContainerHarnessRuntime<
     const body = frame.body;
     switch (body.type) {
       case "begin": {
-        await this.#forKnownOperation(link, body.operationId, () =>
-          ctx.begin(body.operationId, { delivery: body.delivery })
-        );
+        await ctx.begin(body.operationId, { delivery: body.delivery });
         return undefined;
       }
       case "settle": {
-        await this.#forKnownOperation(link, body.operationId, () =>
-          ctx.settle(body.operationId, body.settlement)
-        );
+        await ctx.settle(body.operationId, body.settlement);
         return undefined;
       }
       case "request_open": {
