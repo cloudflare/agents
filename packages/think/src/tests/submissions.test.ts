@@ -173,6 +173,12 @@ type ThinkSubmissionTestStub = {
   >;
   getResponseLog(): Promise<Array<{ status: string; requestId: string }>>;
   getSubmissionLog(): Promise<ThinkSubmissionInspection[]>;
+  inspectRetainedSubmissionStreamForTest(requestId: string): Promise<{
+    streamStatus: string | null;
+    hasActiveStream: boolean;
+    hasActiveRequestStream: boolean;
+    resumeFrames: Array<{ type: string; reason?: string }>;
+  }>;
 };
 
 async function freshAgent(
@@ -1155,6 +1161,49 @@ describe("Think durable submissions", () => {
     await expect(agent.getStoredMessages()).resolves.toHaveLength(0);
   });
 
+  it("keeps completed submission evidence idle and reclaims it on the next stream", async () => {
+    const agent = await freshAgent();
+    const first = await agent.testSubmitMessages("First submission");
+    const completed = await waitForSubmission(
+      agent,
+      first.submissionId,
+      (submission) => submission.status === "completed"
+    );
+    expect(completed.requestId).toBeTruthy();
+    const requestId = completed.requestId ?? first.submissionId;
+    await expect(
+      agent.inspectRetainedSubmissionStreamForTest(requestId)
+    ).resolves.toEqual({
+      streamStatus: "completed",
+      hasActiveStream: false,
+      hasActiveRequestStream: false,
+      resumeFrames: [{ type: "cf_agent_stream_resume_none", reason: "idle" }]
+    });
+    await agent.recoverSubmissionsForTest();
+    await agent.recoverSubmissionsForTest();
+    expect(
+      (await agent.getSubmissionLog()).filter(
+        (entry) =>
+          entry.submissionId === first.submissionId &&
+          entry.status === "completed"
+      )
+    ).toHaveLength(1);
+
+    const second = await agent.testSubmitMessages("Next submission");
+    await waitForSubmission(
+      agent,
+      second.submissionId,
+      (submission) => submission.status === "completed"
+    );
+    await expect(
+      agent.inspectRetainedSubmissionStreamForTest(requestId)
+    ).resolves.toMatchObject({
+      streamStatus: null,
+      hasActiveStream: false,
+      hasActiveRequestStream: false
+    });
+  });
+
   it("requeues stale running submissions when messages were not applied", async () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({
@@ -1279,14 +1328,22 @@ describe("Think durable submissions", () => {
     });
   });
 
-  it.each(["tasks", "legacy-schedule"] as const)(
-    "does not error running submissions while a recovered retry is pending on %s",
-    async (transport) => {
+  it.each([
+    ["tasks", "original"],
+    ["legacy-schedule", "original"],
+    ["tasks", "successor"],
+    ["legacy-schedule", "successor"]
+  ] as const)(
+    "does not error running submissions while a recovered retry is pending on %s with the %s request identity",
+    async (transport, requestIdentity) => {
       const agent = await freshAgent();
       const submissionId = `sub-chat-recovery-retry-${transport}`;
       await agent.insertSubmissionForTest({
         submissionId,
-        requestId: submissionId,
+        requestId:
+          requestIdentity === "successor"
+            ? `successor-${submissionId}`
+            : submissionId,
         status: "running",
         messagesAppliedAt: Date.now()
       });

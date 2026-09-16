@@ -6292,6 +6292,39 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.getMessages();
   }
 
+  /** Inspect retained submission evidence through the real resume handshake. */
+  async inspectRetainedSubmissionStreamForTest(requestId: string): Promise<{
+    streamStatus: string | null;
+    hasActiveStream: boolean;
+    hasActiveRequestStream: boolean;
+    resumeFrames: Array<{ type: string; reason?: string }>;
+  }> {
+    const resumeFrames: Array<{ type: string; reason?: string }> = [];
+    const connection = {
+      id: "submission-retention-probe",
+      readyState: WebSocket.OPEN,
+      send(message: string) {
+        resumeFrames.push(JSON.parse(message));
+      }
+    };
+    // SAFETY: the real resume driver only needs this open connection's id and
+    // send method on its idle path; the private host method has this signature.
+    const host = this as unknown as {
+      _handleStreamResumeRequest(target: typeof connection): Promise<void>;
+    };
+    await host._handleStreamResumeRequest(connection);
+    return {
+      streamStatus:
+        this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
+        null,
+      hasActiveStream: this._resumableStream.hasActiveStream(),
+      hasActiveRequestStream:
+        this._resumableStream.latestActiveStreamInfoForRequest(requestId) !==
+        null,
+      resumeFrames
+    };
+  }
+
   async getResponseLog(): Promise<ChatResponseResult[]> {
     return this._responseLog;
   }
@@ -8096,6 +8129,261 @@ export class ThinkRecoveryTestAgent extends Think {
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
     return super.waitUntilStable(options);
+  }
+
+  /**
+   * Gate real recovery work at each ownership boundary and run startup ledger
+   * reconciliation there. Only the seed is synthetic; Tasks and turns are real.
+   */
+  async reproduceSubmissionRecoveryHandoffGapForTest(
+    recoveryKind: "retry" | "continue",
+    pauseAt:
+      | "before-acceptance"
+      | "after-acceptance"
+      | "before-completion" = "before-acceptance",
+    streamOutcome: "completed" | "error" = "completed"
+  ): Promise<{
+    duringHandoff: string | null;
+    afterCompletion: string | null;
+    requestRebound: boolean;
+    handoffSignals: number;
+    activeChatTasks: number;
+    activeRecoveryTasks: number;
+    terminalStatuses: string[];
+    responseCount: number;
+    error: string | null;
+  }> {
+    const submissionId = `handoff-${recoveryKind}-${crypto.randomUUID()}`;
+    const userMessage: UIMessage = {
+      id: `user-${submissionId}`,
+      role: "user",
+      parts: [{ type: "text", text: "Recover this submission" }]
+    };
+    await this.session.appendMessage(userMessage);
+    let targetAssistantId: string | undefined;
+    if (recoveryKind === "continue") {
+      targetAssistantId = `assistant-${submissionId}`;
+      await this.session.appendMessage({
+        id: targetAssistantId,
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      });
+    }
+
+    // SAFETY: this inert fixture reaches Think's private startup/bookkeeping
+    // seams without exposing production test hooks. These are their signatures.
+    const internals = this as unknown as {
+      _ensureSubmissionTable(): void;
+      _updateChatRecoveryIncident(
+        incidentId: string | undefined,
+        status: string,
+        reason?: string
+      ): Promise<void>;
+    };
+    internals._ensureSubmissionTable();
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      ) VALUES (
+        ${submissionId}, NULL, ${submissionId}, NULL, 'running',
+        ${JSON.stringify([userMessage])}, NULL, NULL, ${now},
+        ${now}, ${now}, NULL
+      )
+    `;
+
+    const callback =
+      recoveryKind === "retry"
+        ? ("_chatRecoveryRetry" as const)
+        : ("_chatRecoveryContinue" as const);
+    const data = {
+      incidentId: `incident-${submissionId}`,
+      originalRequestId: submissionId,
+      recoveredRequestId: submissionId,
+      ...(recoveryKind === "retry"
+        ? { targetUserId: userMessage.id }
+        : { targetAssistantId })
+    };
+    if (recoveryKind === "retry") {
+      await this.preScheduleRecoveryRetryForTest(data);
+    } else {
+      await this.preScheduleRecoveryContinueForTest(data);
+    }
+
+    const createGate = () => {
+      let resolve = () => {};
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    };
+    const paused = createGate();
+    const release = createGate();
+    const terminal = createGate();
+    const detachedFinished = createGate();
+    const pause = async () => {
+      paused.resolve();
+      await release.promise;
+    };
+    const session = this.session;
+    const getLatestLeaf = session.getLatestLeaf.bind(session);
+    const beforeStep = this.beforeStep.bind(this);
+    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
+    const onSubmissionStatus = this.onSubmissionStatus.bind(this);
+    const onChatResponse = this.onChatResponse.bind(this);
+    const getModel = this.getModel.bind(this);
+    const retryDetached = this._chatRecoveryRetryDetached.bind(this);
+    const continueDetached = this._chatRecoveryContinueDetached.bind(this);
+    let handoffSignals = 0;
+    let responseCount = 0;
+    const terminalStatuses: string[] = [];
+    let latestLeafReads = 0;
+    session.getLatestLeaf = async () => {
+      const leaf = await getLatestLeaf();
+      latestLeafReads++;
+      if (pauseAt === "before-acceptance" && latestLeafReads === 2) {
+        await pause();
+      }
+      return leaf;
+    };
+    this.beforeStep = async (ctx) => {
+      if (pauseAt === "after-acceptance") await pause();
+      return beforeStep(ctx);
+    };
+    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+      // The successor Task has been removed, but ledger completion has not
+      // started. This is the exact terminal-stream / ledger handoff window.
+      if (
+        pauseAt === "before-completion" &&
+        id === data.incidentId &&
+        (status === "completed" || status === "failed")
+      ) {
+        await pause();
+      }
+      return updateIncident(id, status, reason);
+    };
+    this.onSubmissionStatus = async (submission) => {
+      await onSubmissionStatus(submission);
+      if (
+        submission.submissionId === submissionId &&
+        submission.status !== "running"
+      ) {
+        terminalStatuses.push(submission.status);
+        terminal.resolve();
+      }
+    };
+    this.onChatResponse = async (result) => {
+      responseCount++;
+      await onChatResponse(result);
+    };
+    if (streamOutcome === "error") {
+      this.getModel = () => createInBandErrorMockModel("handoff stream error");
+    }
+    this._chatRecoveryRetryDetached = async (input, onTurnStarted) => {
+      try {
+        await retryDetached(input, () => {
+          handoffSignals++;
+          onTurnStarted?.();
+        });
+      } finally {
+        detachedFinished.resolve();
+      }
+    };
+    this._chatRecoveryContinueDetached = async (input, onTurnStarted) => {
+      try {
+        await continueDetached(input, () => {
+          handoffSignals++;
+          onTurnStarted?.();
+        });
+      } finally {
+        detachedFinished.resolve();
+      }
+    };
+
+    const recoveryWork = runQueuedRecoveryTaskForTest(this, callback);
+    try {
+      await paused.promise;
+      // Once accepted, explicitly wait for the predecessor to settle so the
+      // successor alone must protect the row. Before acceptance the signal
+      // count proves the predecessor has NOT been told to hand off.
+      if (pauseAt !== "before-acceptance") await recoveryWork;
+      const handoffSignalsAtPause = handoffSignals;
+      const activeRecoveryTasks = recoveryWorkCountForTest(this, callback);
+      const chatTasks = this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
+          AND state IN ('pending', 'running', 'waiting', 'recovering')
+      `;
+      const row = this.sql<{ request_id: string }>`
+        SELECT request_id FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0];
+      await this.recoverSubmissionsOnStartForTest();
+      // Repeated reconciliation must not duplicate terminal notifications.
+      await this.recoverSubmissionsOnStartForTest();
+      const duringHandoff = await this.getSubmissionStatusForTest(submissionId);
+
+      release.resolve();
+      await recoveryWork;
+      await terminal.promise;
+      await detachedFinished.promise;
+      const afterCompletion =
+        await this.getSubmissionStatusForTest(submissionId);
+      const completed = this.sql<{ error_message: string | null }>`
+        SELECT error_message FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0];
+      return {
+        duringHandoff,
+        afterCompletion,
+        requestRebound: row?.request_id !== submissionId,
+        handoffSignals: handoffSignalsAtPause,
+        activeChatTasks: chatTasks[0]?.count ?? 0,
+        activeRecoveryTasks,
+        terminalStatuses,
+        responseCount,
+        error: completed?.error_message ?? null
+      };
+    } finally {
+      release.resolve();
+      session.getLatestLeaf = getLatestLeaf;
+      this.beforeStep = beforeStep;
+      internals._updateChatRecoveryIncident = updateIncident;
+      this.onSubmissionStatus = onSubmissionStatus;
+      this.onChatResponse = onChatResponse;
+      this.getModel = getModel;
+      this._chatRecoveryRetryDetached = retryDetached;
+      this._chatRecoveryContinueDetached = continueDetached;
+    }
+  }
+
+  /** A subclass can settle recovery without accepting a successor Task. */
+  async recoverSubmissionWithoutSuccessorForTest(): Promise<{
+    status: string | null;
+    activeRecoveryTasks: number;
+  }> {
+    const submissionId = `no-successor-${crypto.randomUUID()}`;
+    await this.seedRunningSubmissionForTest(submissionId);
+    const continueLastTurn = this.continueLastTurn.bind(this);
+    this.continueLastTurn = async () => ({ requestId: "", status: "skipped" });
+    try {
+      await this.preScheduleRecoveryContinueForTest({
+        recoveredRequestId: submissionId,
+        originalRequestId: submissionId
+      });
+      await runQueuedRecoveryTaskForTest(this, "_chatRecoveryContinue");
+      return {
+        status: await this.getSubmissionStatusForTest(submissionId),
+        activeRecoveryTasks: recoveryWorkCountForTest(
+          this,
+          "_chatRecoveryContinue"
+        )
+      };
+    } finally {
+      this.continueLastTurn = continueLastTurn;
+    }
   }
 
   /** Seed a `running` durable submission keyed by `requestId` (== submission id). */

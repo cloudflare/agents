@@ -277,52 +277,33 @@ describe("Think submission recovery e2e", () => {
     expect(log).toContain(`${submissionId}:error`);
   });
 
-  it("preserves a pending retry across restart and completes once", async () => {
+  it("preserves a production-scheduled empty-stream retry across a second restart", async () => {
     const agent = "submission-pending-retry";
     const submissionId = "sub-pending-retry";
 
     wrangler = startWrangler();
     await waitForReady();
+    await callAgent(agent, "seedRecoverableEmptySubmission", [submissionId]);
 
-    await expect(
-      callAgent(agent, "startSubmission", [
-        submissionId,
-        "Recover this pending retry"
-      ])
-    ).resolves.toBe(submissionId);
-
+    // Restart #1 runs real interrupted-chat classification. The empty opened
+    // stream becomes a retry carrying production-owned incident/submission data.
+    wrangler = await restartWrangler(wrangler);
     await pollUntil(
-      "submission running with fiber before retry staging",
-      async () => {
-        const view = (await callAgent(agent, "getSubmission", [
+      "production-scheduled retry backoff",
+      () =>
+        callAgent(agent, "hasWaitingRecoveryRetry", [
           submissionId
-        ])) as SubmissionView;
-        const messageCount = (await callAgent(
-          agent,
-          "getMessageCount"
-        )) as number;
-        const hasFibers = (await callAgent(agent, "hasFiberRows")) as boolean;
-        const hasStream = (await callAgent(agent, "hasOpenedSubmissionStream", [
-          submissionId
-        ])) as boolean;
-        return {
-          status: view?.status ?? null,
-          messageCount,
-          hasFibers,
-          hasStream
-        };
-      },
-      (state) =>
-        state.status === "running" &&
-        state.messageCount > 0 &&
-        state.hasFibers &&
-        state.hasStream,
+        ]) as Promise<boolean>,
+      (waiting) => waiting,
       { attempts: 30, delayMs: 100 }
     );
+    await expect(
+      callAgent(agent, "getSubmission", [submissionId])
+    ).resolves.toMatchObject({ status: "running" });
 
-    await callAgent(agent, "stagePendingRecoveryRetry", [submissionId]);
+    // Restart #2 lands after the first recovery Task has settled and while its
+    // real delayed successor owns the still-running submission.
     wrangler = await restartWrangler(wrangler);
-
     const view = await pollUntil(
       "empty-stream retry completion",
       () =>
@@ -331,7 +312,7 @@ describe("Think submission recovery e2e", () => {
         ]) as Promise<SubmissionView>,
       (submission) =>
         submission?.status === "completed" || submission?.status === "error",
-      { attempts: 40, delayMs: 500 }
+      { attempts: 60, delayMs: 500 }
     );
     expect(view?.status).toBe("completed");
 

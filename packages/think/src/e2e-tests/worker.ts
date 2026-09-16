@@ -10,7 +10,8 @@ import { Agent, callable, routeAgentRequest } from "agents";
 import type { FiberContext } from "agents";
 import {
   CHAT_RECOVERY_TASK_NAME,
-  chatRecoveryTaskRunOptions
+  createChatFiberSnapshot,
+  wrapChatFiberSnapshot
 } from "agents/chat";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
@@ -1683,6 +1684,8 @@ export class ThinkContextOverflowE2EAgent extends Think<Env> {
 
 const SUBMISSION_STATUS_LOG_KEY = "test:submission-status-log";
 const SUBMISSION_RESPONSE_LOG_KEY = "test:submission-response-log";
+const SUBMISSION_FORCE_STABLE_TIMEOUT_KEY =
+  "test:submission-force-stable-timeout";
 
 export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
@@ -1698,6 +1701,18 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   // Continue an interrupted turn so a recoverable submission can complete.
   override async onChatRecovery(): Promise<ChatRecoveryOptions> {
     return { continue: true };
+  }
+
+  protected override async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    if (
+      await this.ctx.storage.get<boolean>(SUBMISSION_FORCE_STABLE_TIMEOUT_KEY)
+    ) {
+      await this.ctx.storage.delete(SUBMISSION_FORCE_STABLE_TIMEOUT_KEY);
+      return false;
+    }
+    return super.waitUntilStable(options);
   }
 
   // Record every submission status transition so a test can assert the
@@ -1770,66 +1785,79 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     `;
   }
 
-  /** Report when a public submission has opened its durable response stream. */
-  @callable()
-  async hasOpenedSubmissionStream(submissionId: string): Promise<boolean> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_streams
-      WHERE tag = ${submissionId} AND state = 'streaming'
-    `;
-    return (rows[0]?.count ?? 0) === 1;
-  }
-
   /**
-   * Reproduce the durable state after recovery classification schedules a retry
-   * and the interrupted chat attempt disappears, immediately before the next
-   * startup reconciles the still-running submission.
+   * Seed an inert interrupted submission before any model attempt exists. The
+   * next startup runs real chat classification over its user leaf and empty
+   * opened stream, then production schedules the recovered retry.
    */
   @callable()
-  async stagePendingRecoveryRetry(submissionId: string): Promise<void> {
-    const submission = await this.inspectSubmission(submissionId);
-    const latestLeaf = await this.session.getLatestLeaf();
-    if (submission?.status !== "running" || latestLeaf?.role !== "user") {
-      throw new Error("Submission is not ready for pending retry staging");
-    }
-
-    const data = {
-      targetUserId: latestLeaf.id,
-      originalRequestId: submissionId,
-      recoveredRequestId: submissionId
-    };
-    const input = {
-      callback: "_chatRecoveryRetry" as const,
-      data,
-      delaySeconds: 5
-    };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
-
+  async seedRecoverableEmptySubmission(submissionId: string): Promise<void> {
+    await this.inspectSubmission(submissionId);
     const now = Date.now();
+    const userMessage: UIMessage = {
+      id: `user-${submissionId}`,
+      role: "user",
+      parts: [{ type: "text", text: "Recover this empty opened stream" }]
+    };
+    await this.session.appendMessage(userMessage);
     this.sql`
-      UPDATE cf_agents_streams
-      SET state = 'completed', updated_at = ${now}, closed_at = ${now}
-      WHERE tag = ${submissionId} AND state = 'streaming'
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      ) VALUES (
+        ${submissionId}, NULL, ${submissionId}, NULL, 'running',
+        ${JSON.stringify([userMessage])}, NULL, NULL, ${now},
+        ${now}, ${now}, NULL
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (
+        ${`stream-${submissionId}`}, 'streaming', ${submissionId},
+        ${JSON.stringify({ cfChat: 1 })}, 0, ${now}, ${now}, NULL
+      )
     `;
 
-    const interruptedRuns = this.sql<{ run_id: string }>`
-      SELECT run_id FROM cf_agents_task_runs
-      WHERE definition = ${ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME}
-        AND metadata = ${JSON.stringify({ requestId: submissionId })}
-    `;
-    for (const run of interruptedRuns) {
-      this.sql`DELETE FROM cf_agents_jobs WHERE id = ${`task:${run.run_id}`}`;
-      this.sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${run.run_id}`;
-      this.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
-    }
+    const snapshot = createChatFiberSnapshot({
+      kind: "think-chat-turn",
+      requestId: submissionId,
+      recoveryRootRequestId: submissionId,
+      continuation: false,
+      messages: [userMessage]
+    });
+    const wrapped = wrapChatFiberSnapshot(
+      "__cfThinkChatFiberSnapshot",
+      snapshot,
+      null
+    );
     this.sql`
-      DELETE FROM cf_agents_runs
-      WHERE name = ${`${ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME}:${submissionId}`}
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (
+        ${`fiber-${submissionId}`},
+        ${`${ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME}:${submissionId}`},
+        ${JSON.stringify(wrapped)},
+        ${now}
+      )
     `;
+    await this.ctx.storage.put(SUBMISSION_FORCE_STABLE_TIMEOUT_KEY, true);
+  }
+
+  /** Report a production-scheduled retry parked in its durable backoff. */
+  @callable()
+  async hasWaitingRecoveryRetry(submissionId: string): Promise<boolean> {
+    const runs = await this.tasks.list({
+      definition: CHAT_RECOVERY_TASK_NAME,
+      status: ["waiting"],
+      limit: Number.MAX_SAFE_INTEGER
+    });
+    return runs.some(
+      (run) =>
+        run.metadata?.callback === "_chatRecoveryRetry" &&
+        typeof run.metadata.incidentId === "string" &&
+        run.metadata.recoveredRequestId === submissionId
+    );
   }
 
   @callable()
