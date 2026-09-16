@@ -32,7 +32,7 @@
   "name": "hono-agents",
   "peerDependencies": {
     "agents": ">=0.17.1 <1.0.0",
-    "hono": "^4.13.5"
+    "hono": "^4.6.17"
   },
   "repository": {
     "directory": "packages/hono-agents",
