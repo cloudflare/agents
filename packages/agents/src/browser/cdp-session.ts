@@ -39,25 +39,31 @@ export class CdpSession {
   #debugLog: DebugEntry[] = [];
   #defaultTimeoutMs: number;
   #dispose?: () => void;
+  #disposed = false;
+  #onActivity?: () => void;
   readonly sessionId?: string;
 
   constructor(
     socket: WebSocket,
     defaultTimeoutMs = DEFAULT_TIMEOUT_MS,
     dispose?: () => void,
-    sessionId?: string
+    sessionId?: string,
+    onActivity?: () => void
   ) {
     this.#socket = socket;
     this.#defaultTimeoutMs = defaultTimeoutMs;
     this.#dispose = dispose;
     this.sessionId = sessionId;
+    this.#onActivity = onActivity;
 
     socket.addEventListener("message", (event) => this.#handleMessage(event));
     socket.addEventListener("error", () => {
       this.#rejectAll(new Error("CDP socket error"));
+      this.#runDispose();
     });
     socket.addEventListener("close", () => {
       this.#rejectAll(new Error("CDP connection closed"));
+      this.#runDispose();
     });
   }
 
@@ -66,6 +72,7 @@ export class CdpSession {
     params?: unknown,
     options: CdpSendOptions = {}
   ): Promise<unknown> {
+    this.#onActivity?.();
     const id = this.#nextId++;
     const timeoutMs = options.timeoutMs ?? this.#defaultTimeoutMs;
     const sessionId =
@@ -159,6 +166,16 @@ export class CdpSession {
 
   close(): void {
     this.disconnect();
+    this.#runDispose();
+  }
+
+  /**
+   * Run the dispose callback exactly once, on the first terminal event —
+   * an explicit {@link close}, peer closure, or a socket error.
+   */
+  #runDispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
     this.#dispose?.();
   }
 
