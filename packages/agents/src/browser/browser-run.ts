@@ -82,6 +82,17 @@ export class BrowserRenderingError extends Error {
   }
 }
 
+/**
+ * Whether an error means the platform session is gone: Browser Run uses 404
+ * for unknown ids and 410 after `keep_alive` expiry.
+ */
+export function isMissingBrowserSession(error: unknown): boolean {
+  return (
+    error instanceof BrowserRenderingError &&
+    (error.status === 404 || error.status === 410)
+  );
+}
+
 function browserSessionEndpoint(
   sessionId?: string,
   options?: {
