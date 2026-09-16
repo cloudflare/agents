@@ -9,6 +9,23 @@ export interface BrowserBinding {
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 }
 
+/**
+ * Browser Run [hostname guardrails](https://developers.cloudflare.com/browser-run/features/guardrails/):
+ * restrict which hostnames the session's HTTP/HTTPS requests may reach. Fixed
+ * at session launch for every connection to the session, including Live View.
+ * Not supported by Kitesurf.
+ */
+export interface BrowserSessionGuardrails {
+  /**
+   * Hostname patterns the browser may request — bare hostnames only (no
+   * protocol, port, or path). `*.example.com` matches subdomains; add
+   * `example.com` separately to allow the apex.
+   */
+  allowedDomains?: string[];
+  /** Named Cloudflare-maintained domain sets, e.g. `"common-cdns"`. */
+  allowedDomainSets?: string[];
+}
+
 export interface BrowserTargetInfo {
   id: string;
   type?: string;
@@ -128,11 +145,21 @@ export async function createBrowserSession(
     keepAliveMs?: number;
     includeTargets?: boolean;
     recording?: boolean;
+    guardrails?: BrowserSessionGuardrails;
   }
 ): Promise<BrowserSessionInfo> {
+  // Guardrails ride the acquire request's JSON body (the query string only
+  // carries scalar options).
+  const init: RequestInit = options?.guardrails
+    ? {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ guardrails: options.guardrails })
+      }
+    : { method: "POST" };
   const response = await browser.fetch(
     browserSessionEndpoint(undefined, options),
-    { method: "POST" }
+    init
   );
 
   if (!response.ok) {
@@ -299,14 +326,47 @@ export async function getBrowserRecording(options: {
   return recording as BrowserRecording;
 }
 
+export interface ConnectBrowserSessionOptions {
+  timeoutMs?: number;
+  /**
+   * Invoked once when the returned {@link CdpSession} reaches a terminal
+   * state — an explicit `close()`, peer closure, or a socket error. The
+   * session itself is never deleted on close — pass an `onClose` that
+   * deletes it for one-shot (create-and-close) semantics.
+   */
+  onClose?: () => void;
+  /**
+   * Invoked on every CDP command sent over the returned {@link CdpSession} —
+   * an activity signal for idle tracking. Keep it cheap and synchronous;
+   * throttle any I/O it triggers.
+   */
+  onActivity?: () => void;
+}
+
 /**
  * Connect to an existing Browser Rendering session without deleting it on close.
  */
 export async function connectBrowserSession(
   browser: BrowserBinding,
   sessionId: string,
+  options?: ConnectBrowserSessionOptions
+): Promise<CdpSession>;
+/**
+ * @deprecated Pass `{ timeoutMs }` instead of a bare number — the numeric
+ * form will be removed.
+ */
+export async function connectBrowserSession(
+  browser: BrowserBinding,
+  sessionId: string,
   timeoutMs?: number
+): Promise<CdpSession>;
+export async function connectBrowserSession(
+  browser: BrowserBinding,
+  sessionId: string,
+  options?: number | ConnectBrowserSessionOptions
 ): Promise<CdpSession> {
+  const normalized =
+    typeof options === "number" ? { timeoutMs: options } : (options ?? {});
   const response = await browser.fetch(browserSessionEndpoint(sessionId), {
     headers: { Upgrade: "websocket" }
   });
@@ -319,5 +379,11 @@ export async function connectBrowserSession(
   }
 
   ws.accept();
-  return new CdpSession(ws, timeoutMs, undefined, sessionId);
+  return new CdpSession(
+    ws,
+    normalized.timeoutMs,
+    normalized.onClose,
+    sessionId,
+    normalized.onActivity
+  );
 }
