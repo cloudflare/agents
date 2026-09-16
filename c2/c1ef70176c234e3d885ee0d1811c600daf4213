@@ -1,0 +1,37 @@
+.changeset/calm-tasks-listen.md
+  s_2f880b0d0c0228::t_ee5c4f20b8b512 1-11
+design/rfc-fibers.md
+  s_2f880b0d0c0228::t_b9d130b8f206d2 61-68,112-117,120-123,191-194
+design/tasks-event-mailbox.md
+  s_c7ee88e60679f4::t_5cb56a785a1cba 1-209
+packages/agents/src/tasks/errors.ts
+  s_c7ee88e60679f4::t_3d10065e39d339 109-148
+packages/agents/src/tests/capabilities/tasks.ts
+  s_2f880b0d0c0228::t_9ce623c3ac26d8 31-32,202-270
+packages/agents/src/tests/schema-and-state-optimization.test.ts
+  s_2f880b0d0c0228::t_61281586d0f27a 92-104,134-136,149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c2c1ef70176c234e3d885ee0d1811c600daf4213",
+  "prompts": {},
+  "sessions": {
+    "s_2f880b0d0c0228": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f604558c6ffeb8ntWStYnL73iy",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    },
+    "s_c7ee88e60679f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f60372b05ffeIpWNJ3GaQ16767",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}
