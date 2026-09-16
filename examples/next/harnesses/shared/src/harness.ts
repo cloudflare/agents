@@ -31,6 +31,7 @@ import type {
   HarnessRuntime,
   HarnessSettlement
 } from "./runtime";
+import { harnessTimeoutReply } from "./protocol";
 import {
   DEFAULT_SESSION_ID,
   HarnessBackpressureError,
@@ -1330,7 +1331,13 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
       options.operationId === undefined
         ? this.#runningOperation(sessionId)
         : this.#operationRow(options.operationId);
-    if (!active || active.status !== "running") {
+    // An explicit id is scoped to the caller's session: another session's
+    // operation is not this session's to interrupt.
+    if (
+      !active ||
+      active.session_id !== sessionId ||
+      active.status !== "running"
+    ) {
       return { operationId: null, newlyRequested: false, drained };
     }
     const key = `interrupt:${active.operation_id}`;
@@ -1416,7 +1423,7 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
   async #timeoutRequest(requestId: string): Promise<void> {
     const request = this.#requestRow(requestId);
     if (!request) return;
-    const timeout = timeoutReply(request.type);
+    const timeout = harnessTimeoutReply(request.type);
     if (!timeout) return;
     await this.#reply(request.session_id, requestId, timeout, "timeout");
   }
@@ -1432,7 +1439,7 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
       request.request_id
     );
     await this.lifecycle.jobs.cancel(`rt:${request.request_id}`);
-    const recorded = reply ?? timeoutReply(request.type);
+    const recorded = reply ?? harnessTimeoutReply(request.type);
     if (recorded) {
       const log =
         this.#operationLogs.get(request.operation_id) ??
@@ -2137,25 +2144,28 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
         type: "operation_started",
         delivery: delivery ?? row.delivery
       });
-      this.lifecycle.storage.transactionSync(() => {
-        this.lifecycle.storage.sql.exec(
-          `UPDATE cf_agents_harness_operations
-           SET status = 'running', started_at = ?, runtime_id = ?, first_seq = ?
-           WHERE operation_id = ? AND status = 'queued'`,
-          Date.now(),
-          this.#runtime.id,
-          firstSeq,
-          operationId
-        );
-        // The admission row is consumed by starting; replies and interrupts
-        // keyed to this operation stay for the runtime.
-        this.lifecycle.storage.sql.exec(
-          "DELETE FROM cf_agents_harness_inbox WHERE operation_id = ? AND key = ?",
-          operationId,
-          operationId
-        );
+      // The row turns running in the transaction that writes the frame, so
+      // no incarnation can find a running operation whose log never started.
+      log.flush({
+        commit: () => {
+          this.lifecycle.storage.sql.exec(
+            `UPDATE cf_agents_harness_operations
+             SET status = 'running', started_at = ?, runtime_id = ?, first_seq = ?
+             WHERE operation_id = ? AND status = 'queued'`,
+            Date.now(),
+            this.#runtime.id,
+            firstSeq,
+            operationId
+          );
+          // The admission row is consumed by starting; replies and interrupts
+          // keyed to this operation stay for the runtime.
+          this.lifecycle.storage.sql.exec(
+            "DELETE FROM cf_agents_harness_inbox WHERE operation_id = ? AND key = ?",
+            operationId,
+            operationId
+          );
+        }
       });
-      log.flush();
       this.#transport?.statusChanged(sessionId);
     }
     return log;
@@ -2178,7 +2188,7 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
     const openRequests = this.#requestRows(sessionId, operationId);
     for (const request of openRequests) {
       await this.lifecycle.jobs.cancel(`rt:${request.request_id}`);
-      const recorded = timeoutReply(request.type);
+      const recorded = harnessTimeoutReply(request.type);
       if (recorded) {
         log.append({
           type: "request_replied",
@@ -2351,28 +2361,6 @@ export class Harness<P extends HarnessProtocol = HarnessProtocol>
 }
 
 /** The answer the base writes when nobody else does. */
-function timeoutReply(type: string): HarnessReply | undefined {
-  switch (type) {
-    case "permission":
-      return { type: "permission", decision: "deny", message: "timed out" };
-    case "question":
-      return { type: "question", answers: null, message: "timed out" };
-    case "tool":
-      return {
-        type: "tool",
-        output: { error: "timed out" },
-        isError: true
-      };
-    case "extension":
-      return {
-        type: "extension",
-        kind: "timeout",
-        payload: { message: "timed out" }
-      };
-    default:
-      return undefined;
-  }
-}
 
 function parseSessionCursor(
   cursor: string | undefined

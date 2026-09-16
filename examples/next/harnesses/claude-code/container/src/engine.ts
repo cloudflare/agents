@@ -19,6 +19,7 @@ import type {
   JsonValue
 } from "../../../shared/src/types.ts";
 import type { HarnessWireControl } from "../../../shared/src/protocol.ts";
+import { harnessTimeoutReply } from "../../../shared/src/protocol.ts";
 
 /** Everything an engine may do to the outside world. */
 export type EngineContext = {
@@ -209,7 +210,10 @@ export class RequestRegistry {
       if (parked.expiresAt > now) continue;
       this.settle(
         requestId,
-        {
+        harnessTimeoutReply(
+          parked.draft.type,
+          "Timed out waiting for an answer"
+        ) ?? {
           type: "permission",
           decision: "deny",
           message: "Timed out waiting for an answer"
@@ -221,10 +225,14 @@ export class RequestRegistry {
 
   /** Fail everything still parked. Used at shutdown. */
   drain(message: string): void {
-    for (const requestId of [...this.#parked.keys()]) {
+    for (const [requestId, parked] of [...this.#parked]) {
       this.settle(
         requestId,
-        { type: "permission", decision: "deny", message },
+        harnessTimeoutReply(parked.draft.type, message) ?? {
+          type: "permission",
+          decision: "deny",
+          message
+        },
         "lost"
       );
     }

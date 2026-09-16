@@ -130,6 +130,29 @@ export const HARNESS_MAX_BATCH_FRAMES = 64;
 export const HARNESS_CLOSE_REPLACED = 4001;
 export const HARNESS_CLOSE_SHUTDOWN = 4002;
 
+/**
+ * The reply a request receives when nobody answers it in time, in the
+ * shape its consumer expects: a tool caller gets an error result, not a
+ * permission verdict. Undefined for an unknown request type.
+ */
+export function harnessTimeoutReply(
+  type: string,
+  message = "timed out"
+): HarnessReply | undefined {
+  switch (type) {
+    case "permission":
+      return { type: "permission", decision: "deny", message };
+    case "question":
+      return { type: "question", answers: null, message };
+    case "tool":
+      return { type: "tool", output: { error: message }, isError: true };
+    case "extension":
+      return { type: "extension", kind: "timeout", payload: { message } };
+    default:
+      return undefined;
+  }
+}
+
 /** Environment the runtime hands the container at launch. */
 export const HARNESS_ENV = {
   sessionId: "CF_HARNESS_SESSION_ID",

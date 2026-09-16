@@ -97,6 +97,14 @@ woke a fresh incarnation, and the transcript has the reply.
 something, kill it, then ask a follow-up that depends on the first answer:
 the next prompt launches a new container and the model answers it in context.
 
+None of this is authenticated. The socket, the demo routes and the doorbell
+name lookup are open to whoever can reach the Worker, because the example is
+a demonstration of the harness, not of a login. Before exposing it, gate
+`onRequest` and the WebSocket upgrade behind your own check (Cloudflare Access
+is the zero-code option; see below), and drop the restart and kill routes or
+gate them the same way. The doorbell itself is safe to leave open: a ring
+carries the session's secret and an object rejects any other.
+
 ## What survives a container death
 
 The harness log, the Sessions transcript and the engine's own transcript all

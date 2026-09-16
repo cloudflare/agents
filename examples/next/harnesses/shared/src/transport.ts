@@ -63,13 +63,47 @@ function sessionOf(connection: Connection): string {
   return tag ? tag.slice(TAG_PREFIX.length) : DEFAULT_SESSION_ID;
 }
 
-function isClientMessage(value: unknown): value is HarnessClientMessage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "type" in value &&
-    typeof value.type === "string"
-  );
+/**
+ * Why a value is not a client message, or undefined when it is one. Each
+ * type's fields are checked here so the handlers below can trust them.
+ */
+function clientMessageError(value: unknown): string | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof (value as { type?: unknown }).type !== "string"
+  ) {
+    return "Malformed harness message";
+  }
+  const message = value as Record<string, unknown>;
+  switch (message.type) {
+    case "snapshot":
+      return typeof message.id === "string"
+        ? undefined
+        : "snapshot needs a string id";
+    case "subscribe":
+      if (message.from !== undefined && typeof message.from !== "string") {
+        return "subscribe.from must be a cursor string";
+      }
+      if (
+        message.previews !== undefined &&
+        typeof message.previews !== "boolean"
+      ) {
+        return "subscribe.previews must be a boolean";
+      }
+      return undefined;
+    case "unsubscribe":
+      return undefined;
+    case "call":
+      if (typeof message.id !== "string") return "call needs a string id";
+      if (typeof message.method !== "string") {
+        return "call needs a string method";
+      }
+      if (!Array.isArray(message.args)) return "call.args must be an array";
+      return undefined;
+    default:
+      return `Unknown message type ${JSON.stringify(message.type)}`;
+  }
 }
 
 function errorBody(error: unknown): {
@@ -216,40 +250,30 @@ export class HarnessTransport<P extends HarnessProtocol> {
       });
       return;
     }
-    if (!isClientMessage(message)) {
+    const malformed = clientMessageError(message);
+    if (malformed !== undefined) {
       send(connection, {
         type: "error",
-        error: {
-          name: "Error",
-          code: "E_PROTOCOL",
-          message: "Malformed harness message"
-        }
+        error: { name: "Error", code: "E_PROTOCOL", message: malformed }
       });
       return;
     }
     const sessionId = sessionOf(connection);
-    switch (message.type) {
+    // SAFETY: clientMessageError checked the shape of every variant.
+    const parsed = message as HarnessClientMessage;
+    switch (parsed.type) {
       case "snapshot":
-        await this.#snapshot(connection, sessionId, message.id);
+        await this.#snapshot(connection, sessionId, parsed.id);
         return;
       case "subscribe":
-        void this.#tail(connection, sessionId, message.from, message.previews);
+        void this.#tail(connection, sessionId, parsed.from, parsed.previews);
         return;
       case "unsubscribe":
         this.#stopTail(connection);
         return;
       case "call":
-        await this.#call(connection, sessionId, message);
+        await this.#call(connection, sessionId, parsed);
         return;
-      default:
-        send(connection, {
-          type: "error",
-          error: {
-            name: "Error",
-            code: "E_PROTOCOL",
-            message: `Unknown message type ${JSON.stringify((message as { type: string }).type)}`
-          }
-        });
     }
   }
 

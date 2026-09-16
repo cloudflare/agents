@@ -31,6 +31,9 @@ export { HarnessTestObject, EchoRuntime } from "./worker";
 export class FakeContainer implements Container {
   running = false;
   startCount = 0;
+  /** Test knob: refuse this many dials before answering, like a cold port. */
+  failDials = 0;
+  failedDials = 0;
   inactivityTimeoutMs: number | undefined;
   lastEnv: Record<string, string> | undefined;
   lastEntrypoint: string[] | undefined;
@@ -109,6 +112,11 @@ function sidecarFor(id: string): Sidecar {
 
 /** Serve the daemon on one end of a pair and hand the other to the runtime. */
 function dialSidecar(sidecar: Sidecar, secret: string | undefined): WebSocket {
+  if (sidecar.container.failDials > 0) {
+    sidecar.container.failDials -= 1;
+    sidecar.container.failedDials += 1;
+    throw new Error("connection refused: the port is not listening yet");
+  }
   const pair = new WebSocketPair();
   const client = pair[0];
   const server = pair[1];
@@ -286,10 +294,15 @@ export class RemoteHarnessTestObject extends DurableObject<Env> {
     return { ...rest, engineJson: JSON.stringify(engine ?? null) };
   }
 
+  async refuseDials(count: number) {
+    this.#sidecar.container.failDials = count;
+  }
+
   async containerInfo() {
     return {
       running: this.#sidecar.container.running,
       startCount: this.#sidecar.container.startCount,
+      failedDials: this.#sidecar.container.failedDials,
       inactivityTimeoutMs: this.#sidecar.container.inactivityTimeoutMs,
       env: this.#sidecar.container.lastEnv ?? {}
     };

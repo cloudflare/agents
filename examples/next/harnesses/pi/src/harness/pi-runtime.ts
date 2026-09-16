@@ -517,14 +517,15 @@ export class PiRuntime<
         if (outcome.ok) return outcome.value;
         throw outcome.error;
       }
-      // Steered input must reach pi while its turn runs: wake on the next
-      // admitted inbox row, or when the turn settles.
+      // Steered input must reach pi while its turn runs. `wait()` only
+      // reports rows admitted after it is called, so anything already in
+      // the inbox goes first; then wake on the next row or on the turn.
+      if (await this.#deliverSteer(ctx, lane, context)) continue;
       const stop = new AbortController();
       await Promise.race([
         done.then(() => stop.abort()),
         ctx.inbox.wait(stop.signal)
       ]);
-      if (!outcome) await this.#deliverSteer(ctx, lane, context);
     }
   }
 

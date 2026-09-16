@@ -99,7 +99,14 @@ function stringField(value: JsonValue, key: string, label: string): string {
 function promptText(payload: JsonValue): string {
   // SAFETY: the base writes `HarnessPromptPayload` into every prompt row.
   const input = (payload as unknown as HarnessPromptPayload).input;
-  const text = typeof input === "string" ? input : (input?.text ?? "");
+  const text =
+    typeof input === "string"
+      ? input
+      : (input?.text ??
+        (input?.parts ?? [])
+          .filter((part) => part.type === "text")
+          .map((part) => part.text ?? "")
+          .join("\n"));
   if (text.trim() === "") {
     throw new SelfModifyingInputError("Turn prompt must not be empty");
   }

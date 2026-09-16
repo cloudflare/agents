@@ -74,6 +74,15 @@ type parameter: events as `{ type: "extension", body }`, submissions through
 | `@cloudflare/agents-next-harness/react`    | `useHarnessSession()`                                              |
 | `@cloudflare/agents-next-harness/remote`   | `ContainerHarnessRuntime`: a runtime in a Container over Cap'n Web |
 
+## What the base does not do
+
+It does not authenticate anyone. `harness.webSockets()` speaks to whoever the
+host lets connect, and every session in the object is reachable through the
+`?session=` query. A host decides who may open the socket, in its own
+`onRequest` or `WebSockets` handler, and maps its identity onto session ids
+itself. The examples in this directory skip that on purpose; their READMEs
+say so.
+
 ## Tests
 
 ```sh

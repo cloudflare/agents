@@ -231,6 +231,15 @@ export class HarnessTestObject extends DurableObject<Env> {
     };
   }
 
+  /** Interrupt by explicit id from a chosen session. */
+  async interruptOperation(operationId: string, sessionId?: string) {
+    await this.lifecycle.start();
+    const result = await this.harness
+      .session(sessionId)
+      .interrupt({ operationId, drain: false });
+    return { operationId: result.operationId };
+  }
+
   async requests() {
     await this.lifecycle.start();
     return (await this.harness.session().requests()).map((request) => ({

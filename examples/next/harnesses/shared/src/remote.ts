@@ -175,8 +175,21 @@ const PROBE_BUDGET_MS = 60_000;
 const DRAIN_TICK_MS = 2_000;
 /** How long a detach waits for the daemon to acknowledge a stream cancel. */
 const CANCEL_GRACE_MS = 100;
+/** Marks a handshake the runtime already settled, so `drive()` propagates it as is. */
+class HandshakeFailedError extends Error {
+  override readonly cause: unknown;
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "HandshakeFailedError";
+    this.cause = cause;
+  }
+}
+
+const MAX_DOORBELL_NAME_LENGTH = 256;
 const RECONNECT_MIN_MS = 250;
 const RECONNECT_MAX_MS = 5_000;
+/** Consecutive attach failures are retried for this long before the operation fails. */
+const ATTACH_GIVE_UP_MS = 5 * 60_000;
 /** Exit codes that mean the engine stopped on purpose. */
 const CLEAN_EXIT_CODES = new Set([0, 143]);
 /** Chunks one `configure()` carries; a longer restore is several calls. */
@@ -385,6 +398,8 @@ export class ContainerHarnessRuntime<
   /** True while `stop()` is closing the link on purpose. */
   #stopping = false;
   #reconnectMs = RECONNECT_MIN_MS;
+  /** When the current run of attach failures began, if one is under way. */
+  #attachFailingSince: number | undefined;
   /** Highest engine-log ordinal written; derived once per isolate. */
   #logOrdinal: number | undefined;
 
@@ -441,7 +456,15 @@ export class ContainerHarnessRuntime<
       await this.#idleStep(ctx);
       return;
     }
-    const link = await this.#attach(ctx);
+    let link: DaemonLink<P>;
+    try {
+      link = await this.#attach(ctx);
+    } catch (error) {
+      if (error instanceof HandshakeFailedError) throw error.cause;
+      await this.#attachFailed(ctx, error);
+      return;
+    }
+    this.#attachFailingSince = undefined;
     await this.#configure(ctx, link);
     // Subscribe before delivering: frames the daemon produces for a
     // delivery must land on a live subscription, or it rings the doorbell
@@ -642,14 +665,14 @@ export class ContainerHarnessRuntime<
       });
     } catch (error) {
       await this.#failHandshake(ctx, socket, error);
-      throw error;
+      throw new HandshakeFailedError(error);
     }
     if (hello.engineId !== this.#options.engine.id) {
       const mismatch = new HarnessDetachedError(
         `Container hosts engine ${hello.engineId}, not ${this.#options.engine.id}`
       );
       await this.#failHandshake(ctx, socket, mismatch);
-      throw mismatch;
+      throw new HandshakeFailedError(mismatch);
     }
     const link: DaemonLink<P> = {
       sessionId,
@@ -676,6 +699,32 @@ export class ContainerHarnessRuntime<
     this.#stopAt = undefined;
     this.#reconnectMs = RECONNECT_MIN_MS;
     return link;
+  }
+
+  /**
+   * The container could not be reached: it is still starting, the port is
+   * not listening yet, or the platform hiccupped. Nothing has been lost, so
+   * the operation stays running and the pass comes back with backoff. A
+   * container that never answers fails the operation after a bounded wait.
+   */
+  async #attachFailed(
+    ctx: HarnessDriveContext<P>,
+    error: unknown
+  ): Promise<void> {
+    if (this.#stopping) return;
+    const since = (this.#attachFailingSince ??= Date.now());
+    if (Date.now() - since >= ATTACH_GIVE_UP_MS) {
+      this.#attachFailingSince = undefined;
+      throw error;
+    }
+    if (ctx.signal.aborted) return;
+    ctx.wake(this.#reconnectMs);
+    this.#reconnectMs = Math.min(RECONNECT_MAX_MS, this.#reconnectMs * 2);
+    console.warn(
+      `Harness container for ${ctx.sessionId} is not reachable yet: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
 
   /** A handshake that cannot succeed settles what was running and propagates. */
@@ -1663,6 +1712,11 @@ export class HarnessDoorbell extends WorkerEntrypoint<
     const name = new URL(request.url).searchParams.get("name");
     if (name === null || name === "") {
       return new Response("Missing ?name", { status: 400 });
+    }
+    // Any name reaches an object: the secret check happens inside it. The
+    // bound keeps a stranger from minting objects with kilobyte names.
+    if (name.length > MAX_DOORBELL_NAME_LENGTH) {
+      return new Response("Name too long", { status: 400 });
     }
     const binding = this.env[this.ctx.props.namespace];
     if (!binding) {

@@ -4,6 +4,9 @@
  * the append transaction, a replay window is bounded by both budgets, and
  * pruning raises the floor rather than renumbering anything.
  */
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Outbox } from "../outbox.ts";
 
@@ -78,6 +81,32 @@ describe("Outbox", () => {
       4, 5
     ]);
     expect(box.highWaterSeq).toBe(5);
+  });
+
+  it("keeps counting from the high-water mark after a full prune and a reopen", () => {
+    const path = join(
+      mkdtempSync(join(tmpdir(), "harnessd-outbox-")),
+      "outbox.db"
+    );
+    const first = new Outbox({ session: "main", path });
+    first.append(
+      Array.from({ length: 3 }, () => ({
+        operationId: "op-1",
+        body: { type: "tick" } as const
+      }))
+    );
+    first.prune(3);
+    expect(first.replay(0, 10, 1_000_000)).toEqual([]);
+    first.close();
+
+    const reopened = new Outbox({ session: "main", path });
+    expect(reopened.highWaterSeq).toBe(3);
+    expect(reopened.floorSeq).toBe(4);
+    const [frame] = reopened.append([
+      { operationId: "op-2", body: { type: "tick" } as const }
+    ]);
+    expect(frame?.seq).toBe(4);
+    reopened.close();
   });
 
   it("raises the floor when the byte cap is passed", () => {

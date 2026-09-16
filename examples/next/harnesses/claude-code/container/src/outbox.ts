@@ -117,9 +117,22 @@ export class Outbox {
       .get(this.#session) as
       | { lo: number | null; hi: number | null; bytes: number | null }
       | undefined;
-    this.#highWaterSeq = Number(bounds?.hi ?? 0);
-    this.#floorSeq = Number(bounds?.lo ?? 0);
+    // The high-water mark outlives the frames: a fully pruned outbox must
+    // not hand a reopened daemon seq 1 again while the runtime id, and so
+    // the Durable Object's cursor, carry on from the old generation.
+    const remembered = Number(this.getMeta(this.#highWaterKey()) ?? 0);
+    this.#highWaterSeq = Math.max(Number(bounds?.hi ?? 0), remembered);
+    this.#floorSeq =
+      bounds?.lo === null || bounds?.lo === undefined
+        ? this.#highWaterSeq === 0
+          ? 0
+          : this.#highWaterSeq + 1
+        : Number(bounds.lo);
     this.#bytes = Number(bounds?.bytes ?? 0);
+  }
+
+  #highWaterKey(): string {
+    return `highWaterSeq:${this.#session}`;
   }
 
   get highWaterSeq(): number {
@@ -149,6 +162,9 @@ export class Outbox {
     const insert = this.#db.prepare(
       "INSERT INTO frames(session, seq, operation_id, body, at) VALUES(?, ?, ?, ?, ?)"
     );
+    const remember = this.#db.prepare(
+      "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)"
+    );
     const at = Date.now();
     const appended: OutboxFrame[] = [];
     let bytes = 0;
@@ -167,6 +183,7 @@ export class Outbox {
           body: entry.body
         });
       }
+      remember.run(this.#highWaterKey(), String(seq));
       this.#db.exec("COMMIT");
       // Accounting follows the commit, so a rolled-back batch counts nothing.
       this.#highWaterSeq = seq;

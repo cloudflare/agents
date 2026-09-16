@@ -161,6 +161,23 @@ describe("ContainerHarnessRuntime over the daemon wire", () => {
     expect(await stub.ring(secret)).toBe(204);
   });
 
+  it("keeps the operation running while the container's port is not up yet", async () => {
+    const stub = fresh();
+    // A cold container: the first dials are refused, then one answers.
+    await stub.refuseDials(2);
+    const receipt = await stub.prompt("hello");
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("completed");
+    expect((await stub.containerInfo()).failedDials).toBe(2);
+    expect(await stub.eventTypes()).toEqual([
+      "session_opened",
+      "operation_started",
+      "message_start",
+      "message_end",
+      "operation_settled"
+    ]);
+  });
+
   it("closes the socket when nothing is attached, leaving the container up", async () => {
     const stub = fresh();
     await stub.run("hello");

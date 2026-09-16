@@ -90,6 +90,22 @@ describe("shared Harness", () => {
     expect((await stub.status()).state).toBe("idle");
   });
 
+  it("scopes an interrupt by id to the caller's session", async () => {
+    const stub = fresh();
+    const slow = await stub.prompt("slow shared", undefined, "one");
+    for (let i = 0; i < 50; i++) {
+      if ((await stub.status("one")).state === "running") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // Another session naming this operation is told there is nothing to stop.
+    const other = await stub.interruptOperation(slow.operationId, "two");
+    expect(other.operationId).toBeNull();
+    expect((await stub.status("one")).state).toBe("running");
+    const own = await stub.interruptOperation(slow.operationId, "one");
+    expect(own.operationId).toBe(slow.operationId);
+    expect((await stub.wait(slow.operationId, "one")).status).toBe("aborted");
+  });
+
   it("raises a request, blocks, and continues on reply", async () => {
     const stub = fresh();
     const receipt = await stub.prompt("ask me");
