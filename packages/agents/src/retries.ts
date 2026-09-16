@@ -29,6 +29,18 @@ interface TryNOptions extends RetryOptions {
  * maxAttempts, and validates cross-field constraints after resolving against
  * defaults when provided.
  */
+/** Fill unset per-call retry options from a required set of defaults. */
+export function resolveRetryConfig(
+  retry: RetryOptions | undefined,
+  defaults: Required<RetryOptions>
+): Required<RetryOptions> {
+  return {
+    maxAttempts: retry?.maxAttempts ?? defaults.maxAttempts,
+    baseDelayMs: retry?.baseDelayMs ?? defaults.baseDelayMs,
+    maxDelayMs: retry?.maxDelayMs ?? defaults.maxDelayMs
+  };
+}
+
 export function validateRetryOptions(
   options: RetryOptions,
   defaults?: Required<RetryOptions>

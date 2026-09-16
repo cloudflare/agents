@@ -21,6 +21,9 @@ export type LifecycleRouteContext = {
   readonly payload: unknown;
 };
 
+/** Startup state of a Lifecycle. */
+export type LifecycleStatus = "zero" | "starting" | "started";
+
 /** Best-effort telemetry available to every Lifecycle capability. */
 export type LifecycleEvents = {
   /** Publish an event under this capability's stable identity. */
@@ -70,11 +73,19 @@ export type LifecycleSockets = {
  * @experimental The API surface may change before stabilizing.
  */
 export type LifecycleServices = {
+  /** The host's Durable Object name; see `Lifecycle.name`. */
+  readonly name: string;
+  /** The host class name, as exported from the Worker. */
+  readonly className: string;
   readonly storage: DurableObjectStorage;
   readonly sockets: LifecycleSockets;
   readonly ready: () => Promise<void>;
-  /** True while capability and host startup hooks are still running. */
-  readonly starting: () => boolean;
+  /**
+   * Startup state: `"zero"` before startup, `"starting"` while capability
+   * and host startup hooks run, `"started"` once `ready()` resolves without
+   * waiting.
+   */
+  readonly status: () => LifecycleStatus;
   /**
    * This capability's scoped access to the Lifecycle-owned work queue.
    * Pushed items are dispatched to `onJob` when due; every queue mutation
@@ -111,6 +122,9 @@ const installedServices = new WeakMap<object, LifecycleServices>();
  */
 export abstract class LifecycleCapability<Props extends object = object> {
   readonly capabilityId: string;
+
+  /** How this capability claims traffic; see {@link DurableObjectCapability.claims}. */
+  readonly claims: "selective" | "catch-all" = "selective";
 
   protected constructor(capabilityId: string) {
     if (capabilityId.trim() === "") {
