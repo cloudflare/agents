@@ -117,7 +117,7 @@ describe("x402 selected-payment cap", () => {
     expect(signTypedData).toHaveBeenCalledOnce();
   });
 
-  it.each(["1.5", "nope"])(
+  it.each(["-1", "1.5", "nope"])(
     "returns the original 402 result for malformed selected amount %s",
     async (amount) => {
       const { client, callTool, signTypedData } = setup([
