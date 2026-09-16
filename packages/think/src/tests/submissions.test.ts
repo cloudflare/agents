@@ -124,6 +124,12 @@ type ThinkSubmissionTestStub = {
     delayMs: number
   ): Promise<void>;
   scheduleRecoveredContinuationForTest(requestId: string): Promise<void>;
+  scheduleRecoveredRetryForTest(
+    requestId: string,
+    transport: "tasks" | "legacy-schedule"
+  ): Promise<void>;
+  markScheduledRecoveryTaskTerminalForTest(requestId: string): Promise<void>;
+  runScheduledRecoveryRetryForTest(): Promise<void>;
   insertSubmissionForTest(options: {
     submissionId: string;
     status?: ThinkSubmissionStatus;
@@ -1270,6 +1276,90 @@ describe("Think durable submissions", () => {
       agent.inspectSubmissionForTest("sub-chat-recovery-scheduled")
     ).resolves.toMatchObject({
       status: "running"
+    });
+  });
+
+  it.each(["tasks", "legacy-schedule"] as const)(
+    "does not error running submissions while a recovered retry is pending on %s",
+    async (transport) => {
+      const agent = await freshAgent();
+      const submissionId = `sub-chat-recovery-retry-${transport}`;
+      await agent.insertSubmissionForTest({
+        submissionId,
+        requestId: submissionId,
+        status: "running",
+        messagesAppliedAt: Date.now()
+      });
+      await agent.scheduleRecoveredRetryForTest(submissionId, transport);
+
+      await agent.recoverSubmissionsForTest();
+
+      await expect(
+        agent.inspectSubmissionForTest(submissionId)
+      ).resolves.toMatchObject({
+        status: "running"
+      });
+    }
+  );
+
+  it("does not let an unrelated recovered retry protect a running submission", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-unrelated-recovery-target",
+      requestId: "sub-unrelated-recovery-target",
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+    await agent.scheduleRecoveredRetryForTest(
+      "different-recovery-request",
+      "tasks"
+    );
+
+    await agent.recoverSubmissionsForTest();
+
+    await expect(
+      agent.inspectSubmissionForTest("sub-unrelated-recovery-target")
+    ).resolves.toMatchObject({ status: "error" });
+  });
+
+  it("does not let a terminal recovery Task protect a running submission", async () => {
+    const agent = await freshAgent();
+    const submissionId = "sub-terminal-recovery-task";
+    await agent.insertSubmissionForTest({
+      submissionId,
+      requestId: submissionId,
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+    await agent.scheduleRecoveredRetryForTest(submissionId, "tasks");
+    await agent.markScheduledRecoveryTaskTerminalForTest(submissionId);
+
+    await agent.recoverSubmissionsForTest();
+
+    await expect(
+      agent.inspectSubmissionForTest(submissionId)
+    ).resolves.toMatchObject({ status: "error" });
+  });
+
+  it("does not let a recovered retry overwrite cancellation before callback delivery", async () => {
+    const agent = await freshAgent();
+    const submissionId = "sub-chat-recovery-retry-cancel";
+    await agent.insertSubmissionForTest({
+      submissionId,
+      requestId: submissionId,
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+    await agent.scheduleRecoveredRetryForTest(submissionId, "tasks");
+    await agent.cancelSubmissionForTest(submissionId, "stop before retry");
+
+    await agent.runScheduledRecoveryRetryForTest();
+
+    await expect(
+      agent.inspectSubmissionForTest(submissionId)
+    ).resolves.toMatchObject({
+      status: "aborted",
+      error: "stop before retry"
     });
   });
 

@@ -11150,7 +11150,7 @@ export class Think<
         row.request_id &&
         ((this._hasRecoverableChatTurn(row.request_id) &&
           this._hasFreshRecoverableSubmissionEvidence(row)) ||
-          (await this._hasScheduledRecoveredContinuation(row.request_id)))
+          (await this._hasScheduledChatRecovery(row.request_id)))
       ) {
         continue;
       }
@@ -11247,9 +11247,12 @@ export class Think<
     return streamInfo ? streamInfo.createdAt >= cutoff : false;
   }
 
-  private async _hasScheduledRecoveredContinuation(
-    requestId: string
-  ): Promise<boolean> {
+  private async _hasScheduledChatRecovery(requestId: string): Promise<boolean> {
+    const isChatRecoveryCallback = (
+      callback: unknown
+    ): callback is ChatRecoveryScheduleCallback =>
+      callback === "_chatRecoveryContinue" || callback === "_chatRecoveryRetry";
+
     const recoveryRuns = await this.tasks.list({
       definition: CHAT_RECOVERY_TASK_NAME,
       status: ["pending", "running", "waiting"],
@@ -11258,17 +11261,17 @@ export class Think<
     if (
       recoveryRuns.some(
         (run) =>
-          run.metadata?.callback === "_chatRecoveryContinue" &&
+          isChatRecoveryCallback(run.metadata?.callback) &&
           run.metadata.recoveredRequestId === requestId
       )
     ) {
       return true;
     }
 
-    // Dynamic-agent recovery still uses root-owned routed schedules until
-    // Tasks can mirror a child run's wake to its alarm owner.
+    // Legacy scheduled recovery callbacks remain readable while durable rows
+    // created before the Tasks transport upgrade drain naturally.
     return (await this.listSchedules()).some((schedule) => {
-      if (schedule.callback !== "_chatRecoveryContinue") return false;
+      if (!isChatRecoveryCallback(schedule.callback)) return false;
       const payload: unknown = schedule.payload;
       return (
         payload !== null &&

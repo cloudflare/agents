@@ -8,6 +8,10 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { Agent, callable, routeAgentRequest } from "agents";
 import type { FiberContext } from "agents";
+import {
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions
+} from "agents/chat";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
@@ -37,6 +41,7 @@ import type {
   ChatErrorContext,
   ChatRecoveryContext,
   ChatRecoveryOptions,
+  ChatResponseResult,
   StreamCallback,
   ThinkSubmissionInspection,
   TurnConfig,
@@ -1677,6 +1682,7 @@ export class ThinkContextOverflowE2EAgent extends Think<Env> {
 // The recoverable case uses a genuine in-flight submission + mid-stream SIGKILL.
 
 const SUBMISSION_STATUS_LOG_KEY = "test:submission-status-log";
+const SUBMISSION_RESPONSE_LOG_KEY = "test:submission-response-log";
 
 export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
@@ -1703,6 +1709,13 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
       (await this.ctx.storage.get<string[]>(SUBMISSION_STATUS_LOG_KEY)) ?? [];
     log.push(`${submission.submissionId}:${submission.status}`);
     await this.ctx.storage.put(SUBMISSION_STATUS_LOG_KEY, log);
+  }
+
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+    const log =
+      (await this.ctx.storage.get<string[]>(SUBMISSION_RESPONSE_LOG_KEY)) ?? [];
+    log.push(result.requestId);
+    await this.ctx.storage.put(SUBMISSION_RESPONSE_LOG_KEY, log);
   }
 
   @callable()
@@ -1757,6 +1770,68 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     `;
   }
 
+  /** Report when a public submission has opened its durable response stream. */
+  @callable()
+  async hasOpenedSubmissionStream(submissionId: string): Promise<boolean> {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_streams
+      WHERE tag = ${submissionId} AND state = 'streaming'
+    `;
+    return (rows[0]?.count ?? 0) === 1;
+  }
+
+  /**
+   * Reproduce the durable state after recovery classification schedules a retry
+   * and the interrupted chat attempt disappears, immediately before the next
+   * startup reconciles the still-running submission.
+   */
+  @callable()
+  async stagePendingRecoveryRetry(submissionId: string): Promise<void> {
+    const submission = await this.inspectSubmission(submissionId);
+    const latestLeaf = await this.session.getLatestLeaf();
+    if (submission?.status !== "running" || latestLeaf?.role !== "user") {
+      throw new Error("Submission is not ready for pending retry staging");
+    }
+
+    const data = {
+      targetUserId: latestLeaf.id,
+      originalRequestId: submissionId,
+      recoveredRequestId: submissionId
+    };
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 5
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
+
+    const now = Date.now();
+    this.sql`
+      UPDATE cf_agents_streams
+      SET state = 'completed', updated_at = ${now}, closed_at = ${now}
+      WHERE tag = ${submissionId} AND state = 'streaming'
+    `;
+
+    const interruptedRuns = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
+      WHERE definition = ${ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME}
+        AND metadata = ${JSON.stringify({ requestId: submissionId })}
+    `;
+    for (const run of interruptedRuns) {
+      this.sql`DELETE FROM cf_agents_jobs WHERE id = ${`task:${run.run_id}`}`;
+      this.sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${run.run_id}`;
+      this.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${run.run_id}`;
+    }
+    this.sql`
+      DELETE FROM cf_agents_runs
+      WHERE name = ${`${ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME}:${submissionId}`}
+    `;
+  }
+
   @callable()
   async getSubmission(
     submissionId: string
@@ -1775,6 +1850,25 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   @callable()
   async getMessageCount(): Promise<number> {
     return this.messages.length;
+  }
+
+  @callable()
+  async getRecoveryOutcome(): Promise<{
+    userMessages: number;
+    assistantMessages: number;
+    responseCount: number;
+  }> {
+    const messages = await this.getMessages();
+    const responseLog =
+      (await this.ctx.storage.get<string[]>(SUBMISSION_RESPONSE_LOG_KEY)) ?? [];
+    return {
+      userMessages: messages.filter((message) => message.role === "user")
+        .length,
+      assistantMessages: messages.filter(
+        (message) => message.role === "assistant"
+      ).length,
+      responseCount: responseLog.length
+    };
   }
 
   @callable()

@@ -34,6 +34,11 @@ const PERSIST_DIR = path.join(
 );
 
 type SubmissionView = { status: string; error: string | null } | null;
+type RecoveryOutcome = {
+  userMessages: number;
+  assistantMessages: number;
+  responseCount: number;
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -270,6 +275,80 @@ describe("Think submission recovery e2e", () => {
 
     const log = (await callAgent(agent, "getStatusLog")) as string[];
     expect(log).toContain(`${submissionId}:error`);
+  });
+
+  it("preserves a pending retry across restart and completes once", async () => {
+    const agent = "submission-pending-retry";
+    const submissionId = "sub-pending-retry";
+
+    wrangler = startWrangler();
+    await waitForReady();
+
+    await expect(
+      callAgent(agent, "startSubmission", [
+        submissionId,
+        "Recover this pending retry"
+      ])
+    ).resolves.toBe(submissionId);
+
+    await pollUntil(
+      "submission running with fiber before retry staging",
+      async () => {
+        const view = (await callAgent(agent, "getSubmission", [
+          submissionId
+        ])) as SubmissionView;
+        const messageCount = (await callAgent(
+          agent,
+          "getMessageCount"
+        )) as number;
+        const hasFibers = (await callAgent(agent, "hasFiberRows")) as boolean;
+        const hasStream = (await callAgent(agent, "hasOpenedSubmissionStream", [
+          submissionId
+        ])) as boolean;
+        return {
+          status: view?.status ?? null,
+          messageCount,
+          hasFibers,
+          hasStream
+        };
+      },
+      (state) =>
+        state.status === "running" &&
+        state.messageCount > 0 &&
+        state.hasFibers &&
+        state.hasStream,
+      { attempts: 30, delayMs: 100 }
+    );
+
+    await callAgent(agent, "stagePendingRecoveryRetry", [submissionId]);
+    wrangler = await restartWrangler(wrangler);
+
+    const view = await pollUntil(
+      "empty-stream retry completion",
+      () =>
+        callAgent(agent, "getSubmission", [
+          submissionId
+        ]) as Promise<SubmissionView>,
+      (submission) =>
+        submission?.status === "completed" || submission?.status === "error",
+      { attempts: 40, delayMs: 500 }
+    );
+    expect(view?.status).toBe("completed");
+
+    const outcome = (await callAgent(
+      agent,
+      "getRecoveryOutcome"
+    )) as RecoveryOutcome;
+    expect(outcome).toEqual({
+      userMessages: 1,
+      assistantMessages: 1,
+      responseCount: 1
+    });
+
+    const log = (await callAgent(agent, "getStatusLog")) as string[];
+    expect(
+      log.filter((entry) => entry === `${submissionId}:completed`)
+    ).toHaveLength(1);
   });
 
   it("leaves a recoverable in-flight submission running and continues it to completion", async () => {

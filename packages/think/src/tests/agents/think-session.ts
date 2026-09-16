@@ -5951,6 +5951,47 @@ export class ThinkProgrammaticTestAgent extends Think {
     );
   }
 
+  /** Seed one pending recovered retry through the selected production transport. */
+  async scheduleRecoveredRetryForTest(
+    requestId: string,
+    transport: "tasks" | "legacy-schedule"
+  ): Promise<void> {
+    const data = { recoveredRequestId: requestId };
+    if (transport === "legacy-schedule") {
+      await this.schedule(60, "_chatRecoveryRetry", data, {
+        idempotent: true
+      });
+      return;
+    }
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
+  }
+
+  /** Mark matching Task attempts terminal without removing their metadata. */
+  async markScheduledRecoveryTaskTerminalForTest(
+    requestId: string
+  ): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_task_runs
+      SET state = 'completed', next_at = NULL
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND json_extract(metadata, '$.recoveredRequestId') = ${requestId}
+    `;
+  }
+
+  /** Deliver the pending retry through the production recovery callback. */
+  async runScheduledRecoveryRetryForTest(): Promise<void> {
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
+  }
+
   async insertSubmissionForTest(options: {
     submissionId: string;
     status?: ThinkSubmissionStatus;

@@ -3485,6 +3485,51 @@ describe("Think — onChatRecovery", () => {
     expect(await agent.getTurnBodies()).toEqual([{ mode: "snapshot" }]);
   });
 
+  it("retries an interrupted opened stream with no assistant content", async () => {
+    const agent = await freshRecoveryAgent(
+      `empty-opened-stream-retry-${crypto.randomUUID()}`
+    );
+
+    await agent.persistTestMessage({
+      id: "u-empty-opened-stream",
+      role: "user",
+      parts: [{ type: "text", text: "Retry after the empty opened stream" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-empty-opened",
+      "req-empty-opened",
+      []
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-empty-opened",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-empty-opened",
+          continuation: false,
+          latestMessageId: "u-empty-opened-stream",
+          latestMessageRole: "user",
+          latestUserMessageId: "u-empty-opened-stream",
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledRetryCount).toBe(1);
+    await agent.runScheduledRecoveryRetryForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(messages[0].id).toBe("u-empty-opened-stream");
+    expect(await agent.getTurnCallCount()).toBe(1);
+  });
+
   it("continues a partial stream with request context from the recovered snapshot", async () => {
     const agent = await freshRecoveryAgent(
       `partial-continue-context-${crypto.randomUUID()}`
