@@ -627,12 +627,14 @@ export class Tasks<
     context: MemoryLimitContext
   ): Promise<void> {
     if (context.sealed) {
-      await this.#settleFailed(runId, null, {
-        name: "TaskMemoryLimitSealed",
-        message:
-          "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
+      const row = this.#store.getRun(runId);
+      if (!row) return;
+      const error = new Error(
+        "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
           "consecutive Durable Object memory-limit resets."
-      });
+      );
+      error.name = "TaskMemoryLimitSealed";
+      await this.#failWithoutAttempt(row, error);
       return;
     }
     if (context.nextTime === undefined) return;
@@ -1065,8 +1067,16 @@ export class Tasks<
         : options.deadline instanceof Date
           ? options.deadline.getTime()
           : options.deadline;
-    if (deadlineAt !== null && !Number.isFinite(deadlineAt)) {
-      throw new Error("deadline must be a finite time when provided");
+    // A non-positive deadline would become a negative wake time the job
+    // queue refuses — after the row was inserted. Refuse it before anything
+    // durable happens.
+    if (
+      deadlineAt !== null &&
+      !(Number.isFinite(deadlineAt) && deadlineAt > 0)
+    ) {
+      throw new Error(
+        "deadline must be a finite time after the epoch when provided"
+      );
     }
 
     const inputJson = serializeTaskValue(
@@ -1295,6 +1305,18 @@ export class Tasks<
         output,
         `result of Task definition "${row.definition}"`
       );
+      // A cancel accepted mid-attempt wins over a result: a handler that
+      // caught `step.signal`, cleaned up, and returned normally has honoured
+      // the cancellation, and the run must not read as completed.
+      const current = this.#store.getRun(runId);
+      if (current?.cancel_requested === 1) {
+        await this.#settleCancelled(
+          runId,
+          generation,
+          current.cancel_reason ?? undefined
+        );
+        return;
+      }
       const settled = this.#store.fencedWrite(
         runId,
         generation,

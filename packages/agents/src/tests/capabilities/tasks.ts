@@ -164,6 +164,24 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         });
       },
 
+      /**
+       * Catches the attempt-wide abort, cleans up, and returns a result — a
+       * handler that honours cancellation cooperatively. The run must still
+       * settle cancelled, never completed with this result.
+       */
+      swallowsCancel: async (input: { label: string }, step: TaskStep) => {
+        this.signalWaits.push(input.label);
+        try {
+          await new Promise<never>((_resolve, reject) => {
+            const fail = () => reject(step.signal.reason);
+            if (step.signal.aborted) return fail();
+            step.signal.addEventListener("abort", fail, { once: true });
+          });
+        } catch {
+          return { stopped: true };
+        }
+      },
+
       /** Holds the handler body forever and ignores `step.signal`. */
       deaf: async (input: { label: string }, _step: TaskStep) => {
         this.signalWaits.push(input.label);

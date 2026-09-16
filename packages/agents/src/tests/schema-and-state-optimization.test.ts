@@ -101,6 +101,8 @@ const EXPECTED_SCHEMA_DDL = [
         idempotency_key TEXT UNIQUE,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER,
+        deadline_at INTEGER,
         generation TEXT,
         next_at INTEGER,
         wait_reason TEXT,

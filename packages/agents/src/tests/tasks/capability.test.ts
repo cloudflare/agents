@@ -1298,6 +1298,35 @@ describe("Tasks run budget", () => {
       await expect(
         instance.tasks.run("pipeline", { label: "x" }, { deadline: Number.NaN })
       ).rejects.toThrow(/deadline must be a finite time/);
+      // Refused before the row is inserted: a retry of the same id is a
+      // fresh acceptance, not a join onto a stranded row.
+      await expect(
+        instance.tasks.run(
+          "pipeline",
+          { label: "x" },
+          { runId: "pre-epoch", deadline: new Date(-1) }
+        )
+      ).rejects.toThrow(/after the epoch/);
+      expect(await instance.tasks.get("pre-epoch")).toBeNull();
+    });
+  });
+
+  it("settles cancelled, not completed, when the handler catches the cancellation and returns", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("swallowsCancel", {
+        label: "swallow"
+      });
+      await waitFor(() => instance.signalWaits.includes("swallow"));
+
+      expect(await instance.tasks.cancel(receipt.runId, "stop")).toBe(true);
+      const snapshot = await waitForState(instance.tasks, receipt.runId, [
+        "cancelled",
+        "completed"
+      ]);
+      expect(snapshot.state).toBe("cancelled");
+      if (snapshot.state !== "cancelled") throw new Error("unreachable");
+      expect(snapshot.reason).toBe("stop");
     });
   });
 });
