@@ -377,6 +377,7 @@ export function withX402Client<T extends CompatibleMcpClient>(
     } catch {
       throw new PaymentPassthroughError(); // malformed amount
     }
+    if (value < 0n) throw new PaymentPassthroughError();
     if (value > maxPaymentValue) {
       throw new PaymentCapError(
         `Payment exceeds client cap: ${value} > ${maxPaymentValue}`
