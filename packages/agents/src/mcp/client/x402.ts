@@ -446,8 +446,12 @@ export function withX402Client<T extends CompatibleMcpClient>(
       const confirmationCallback =
         x402ConfirmationCallback ?? x402Config.confirmationCallback;
 
-      // Use the confirmation callback if provided
-      if (confirmationCallback && !(await confirmationCallback(accepts))) {
+      // Use the confirmation callback if provided. It receives copies so a
+      // retained reference cannot alter what is cap-checked and signed.
+      if (
+        confirmationCallback &&
+        !(await confirmationCallback(accepts.map((req) => ({ ...req }))))
+      ) {
         return {
           isError: true,
           content: [{ type: "text", text: "User declined payment" }]
