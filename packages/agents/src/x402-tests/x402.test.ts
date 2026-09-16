@@ -15,6 +15,7 @@ const mockResourceServer = {
 };
 
 const mockPaymentClient = {
+  onBeforePaymentCreation: vi.fn(),
   registerPolicy: vi.fn(),
   createPaymentPayload: vi.fn()
 };
@@ -810,44 +811,22 @@ describe("withX402Client", () => {
     expect(decoded.scheme).toBe("exact");
   });
 
-  it("respects maxPaymentValue cap", async () => {
-    const client = createMockMcpClient();
-    const originalCallTool = client.callTool;
-
-    originalCallTool.mockResolvedValueOnce({
-      isError: true,
-      _meta: {
-        "x402/error": {
-          x402Version: 2,
-          error: "PAYMENT_REQUIRED",
-          resource: {
-            url: "x402://expensive",
-            description: "expensive",
-            mimeType: "application/json"
-          },
-          accepts: [
-            {
-              ...samplePaymentRequirements[0],
-              amount: "999999999" // Way over the default cap
-            }
-          ]
-        }
-      },
-      content: [{ type: "text", text: "payment required" }]
-    });
-
-    const augmented = withX402Client(client, {
+  it("registers a before-payment hook that enforces maxPaymentValue", async () => {
+    withX402Client(createMockMcpClient(), {
       account: mockSigner as unknown as X402ClientConfig["account"],
-      maxPaymentValue: BigInt(100000) // 0.10 USDC
+      maxPaymentValue: 100n
     });
-
-    const result = await augmented.callTool(null, { name: "expensive-tool" });
-
-    expect(result.isError).toBe(true);
-    const content = result.content as Array<{ text: string }>;
-    expect(content[0].text).toContain("Payment exceeds client cap");
-    // Should NOT have retried
-    expect(originalCallTool).toHaveBeenCalledOnce();
+    const [hook] =
+      mockPaymentClient.onBeforePaymentCreation.mock.calls.at(-1) ?? [];
+    expect(hook).toBeTypeOf("function");
+    const run = (amount: string) =>
+      hook({
+        selectedRequirements: { ...samplePaymentRequirements[0], amount }
+      });
+    await expect(run("100")).resolves.toBeUndefined();
+    await expect(run("101")).rejects.toThrow(
+      "Payment exceeds client cap: 101 > 100"
+    );
   });
 
   it("respects confirmation callback declining payment", async () => {

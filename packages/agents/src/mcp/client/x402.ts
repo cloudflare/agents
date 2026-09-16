@@ -346,6 +346,11 @@ export type X402ClientConfig = {
   confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
 };
 
+class PaymentCapError extends Error {}
+// Thrown when the selected requirement cannot be cap-checked; the caller
+// returns the server's original 402 result, as before the hook existed.
+class PaymentPassthroughError extends Error {}
+
 export function withX402Client<T extends CompatibleMcpClient>(
   client: T,
   x402Config: X402ClientConfig
@@ -358,6 +363,27 @@ export function withX402Client<T extends CompatibleMcpClient>(
   // Create v2 x402 payment client with EVM scheme support
   const paymentClient = new x402Client();
   registerClientEvmScheme(paymentClient, { signer: account });
+
+  // Selection applies scheme support and network preference before this hook.
+  // Enforce the cap on the requirement that will actually be signed. We throw
+  // rather than return `{ abort: true }` because @x402/core rewraps an abort in
+  // a plain Error, which would lose the typed errors the catch below relies on.
+  paymentClient.onBeforePaymentCreation(async ({ selectedRequirements }) => {
+    const { scheme, amount } = selectedRequirements;
+    if (scheme !== "exact") throw new PaymentPassthroughError();
+    let value: bigint;
+    try {
+      value = BigInt(amount);
+    } catch {
+      throw new PaymentPassthroughError(); // malformed amount
+    }
+    if (value < 0n) throw new PaymentPassthroughError();
+    if (value > maxPaymentValue) {
+      throw new PaymentCapError(
+        `Payment exceeds client cap: ${value} > ${maxPaymentValue}`
+      );
+    }
+  });
 
   // If a preferred network is specified, register a policy to prefer it
   if (x402Config.network) {
@@ -420,35 +446,20 @@ export function withX402Client<T extends CompatibleMcpClient>(
       const confirmationCallback =
         x402ConfirmationCallback ?? x402Config.confirmationCallback;
 
-      // Use the confirmation callback if provided
-      if (confirmationCallback && !(await confirmationCallback(accepts))) {
+      // Use the confirmation callback if provided. It receives copies so a
+      // retained reference cannot alter what is cap-checked and signed.
+      if (
+        confirmationCallback &&
+        !(await confirmationCallback(accepts.map((req) => ({ ...req }))))
+      ) {
         return {
           isError: true,
           content: [{ type: "text", text: "User declined payment" }]
         };
       }
 
-      // Check max payment value against the first requirement's amount
-      const selectedReq = accepts[0];
-      if (!selectedReq || selectedReq.scheme !== "exact") return res;
-
-      let amount: bigint;
-      try {
-        amount = BigInt(selectedReq.amount);
-      } catch {
-        return res; // malformed amount — return original error
-      }
-      if (amount > maxPaymentValue) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Payment exceeds client cap: ${amount} > ${maxPaymentValue}`
-            }
-          ]
-        };
-      }
+      // No signable requirement: return the original error, as before
+      if (!accepts.some((req) => req.scheme === "exact")) return res;
 
       // Reconstruct the PaymentRequired response for the v2 x402 client
       const paymentRequiredResponse: PaymentRequired = {
@@ -470,10 +481,19 @@ export function withX402Client<T extends CompatibleMcpClient>(
         paymentPayload = await paymentClient.createPaymentPayload(
           paymentRequiredResponse
         );
-      } catch {
+      } catch (error) {
+        if (error instanceof PaymentPassthroughError) return res;
         return {
           isError: true,
-          content: [{ type: "text", text: "Failed to create payment payload" }]
+          content: [
+            {
+              type: "text",
+              text:
+                error instanceof PaymentCapError
+                  ? error.message
+                  : "Failed to create payment payload"
+            }
+          ]
         };
       }
 
