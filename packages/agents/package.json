@@ -52,7 +52,7 @@
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "teleproto": "^1.228.5",
-    "valibot": "1.4.1",
+    "valibot": "1.4.2",
     "zod": "^4.5.4"
   },
   "peerDependencies": {
