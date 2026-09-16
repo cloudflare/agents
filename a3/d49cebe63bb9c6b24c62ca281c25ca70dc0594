@@ -1,0 +1,25 @@
+packages/agents/src/index.ts
+  s_f510ad52b05c4e::t_67a41447494091 965,1673,3974,3991,4004,4028,4045,4235,4250,5202,5362,5635,5659,5662-5664,5670-5691,5693-5701,5703-5713,10117
+packages/agents/src/tests/agents/run-fiber.ts
+  s_f510ad52b05c4e::t_a18261191cfc44 676,683,686
+packages/agents/src/tests/deferred-destroy.test.ts
+  s_f510ad52b05c4e::t_fad71c75e1dc9b 104,110,116-117,126,131,139,146
+packages/agents/src/tests/run-fiber.test.ts
+  s_f510ad52b05c4e::t_959155f2df57f1 408,422
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a3d49cebe63bb9c6b24c62ca281c25ca70dc0594",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

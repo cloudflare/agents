@@ -1,0 +1,63 @@
+.changeset/quiet-lifecycles-grow.md
+  s_48aa9e3e9ff5fd::t_55b3c9b91884f9 7
+docs/agents/callable-methods.md
+  s_48aa9e3e9ff5fd::t_10778be35f7373 156,158-161,164-169,173-177,181-182,186-195,293,295-296,299,305-307,591-612,614-616
+docs/agents/lifecycle.md
+  s_48aa9e3e9ff5fd::t_7427a854ae8bd3 179,181-184,198-202
+packages/agents/AGENTS.md
+  s_48aa9e3e9ff5fd::t_69b463210fccdc 49,245,256
+packages/agents/src/callable.ts
+  s_48aa9e3e9ff5fd::t_15eb09d72242e2 2-14,60-81,83-94,97-100,102-103,105-114,117,122-127,130-143,146-151,155-169,172-177,181-194,197,201-215,236,244,246,248-249,277-284,335-375,379-399
+packages/agents/src/index.ts
+  s_2f57991165bef8::t_09ff0f94a4eecb 2,63-64,188-190,208-210,341,1503-1556,2610,6813-6852,6876-6879,6892-6895,7204,7213,7349,7353-7355
+packages/agents/src/tests/lifecycle/lifecycle.test.ts
+  s_2f57991165bef8::t_63cb8da3fae771 3,63-73,82-83,92-129
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_48aa9e3e9ff5fd::t_021f67f85771b7 29,285-288
+packages/agents/src/lifecycle/index.ts
+  s_48aa9e3e9ff5fd::t_ae2b679a6121e6 16
+packages/agents/src/tests-d/typed-agent-client.test-d.ts
+  s_2f57991165bef8::t_40797d2139ce2c 76-83
+packages/agents/src/tests/client-timeout.test.ts
+  s_2f57991165bef8::t_1c63aa6aa1e9c2 2-13,16-17,20-23,26-32,34-40,42-50,53-71,73-78,80-101,103-117
+packages/agents/src/tests/mcp/connection-uri.test.ts
+  s_6bb29fd488cd7c::t_9d8e73f4632ea2 1-10,14,16-17,20-30,33,35,39-47
+packages/agents/src/tests/message-handling.test.ts
+  s_2f57991165bef8::t_314f54c019e876 4,6-12,15-16,18,29,31,45-46,48,55,62-70,73,75-76,82-86,90-97,105-112,121-137,139-140,144-154,156-159,161-165,167-168,170,173-177
+packages/agents/src/tests/protocol-messages.test.ts
+  s_2f57991165bef8::t_8a9b9624cf0962 2,5,25-52,127-134,136-137,141-147,150-152,157-174,584,637
+pnpm-lock.yaml
+  s_2f57991165bef8::t_5613a57a141d71 4034-4036,8093-8095,16136-16137
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c8fb784002853a27a9270ffa331081a4c85f25ec",
+  "prompts": {},
+  "sessions": {
+    "s_2f57991165bef8": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a03445-18f5-7751-955b-3ee72a2d1114",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_48aa9e3e9ff5fd": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a01a4e-a621-7718-bce5-38812f5c17b0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_6bb29fd488cd7c": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0383b-63da-7948-a869-1f4cc33b1181",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

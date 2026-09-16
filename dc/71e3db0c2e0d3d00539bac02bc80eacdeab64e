@@ -1,0 +1,21 @@
+packages/ai-chat/src/tests/worker.ts
+  s_f510ad52b05c4e::t_b03ff3df4e45bf 890-892,2688-2689,2705-2706,2755-2756
+packages/ai-chat/src/e2e-tests/worker.ts
+  s_f510ad52b05c4e::t_ca4b4e4feeba08 422-423
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "dc71e3db0c2e0d3d00539bac02bc80eacdeab64e",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

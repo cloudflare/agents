@@ -1,0 +1,19 @@
+examples/next/lifecycle/README.md
+  s_f510ad52b05c4e::t_d1c61f24328579 18-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b15a0294ba430f6e9cc7d485ada08550e2fda44a",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

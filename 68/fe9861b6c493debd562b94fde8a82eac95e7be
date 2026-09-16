@@ -1,0 +1,47 @@
+design/lifecycle-work-queue.md
+  s_f510ad52b05c4e::t_388b24ecc7f3a2 1,4-13,17,20,22-23,37-44,48-50,53,55-56,58,60-63,66-68,73,76-83,86-89,96-98,100-103,105,107-119,123-132,135,137,139-141,143,145,147-156
+docs/agents/lifecycle.md
+  s_f510ad52b05c4e::t_bd507c1bce8070 29,127,132,143,145-148,151-154,161-162,165-167,172-193,228
+examples/next/lifecycle/README.md
+  s_f510ad52b05c4e::t_87ae143cb78fd7 76-78
+packages/agents/src/lifecycle/capability-runner.ts
+  s_f510ad52b05c4e::t_d5909909ad46b5 4
+packages/agents/src/lifecycle/current-agent.ts
+  s_f510ad52b05c4e::t_e04d685f35245b 6
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_f510ad52b05c4e::t_e0ee14f25f4e09 924
+packages/agents/src/schedules/scheduler.ts
+  s_f510ad52b05c4e::t_bc63f031e32e9d 793,969
+packages/agents/src/tests/agents/schedule.ts
+  s_f510ad52b05c4e::t_a2814909dcf272 606-610
+packages/think/src/tests/agents/think-session.ts
+  s_f510ad52b05c4e::t_dbe2de4bf16210 1412-1413,1418-1419,1476-1477,1482-1483,1578-1579,4820,4827-4828,4870-4871,7623-7624,7639-7640,7719-7720,7799-7801,7815-7817,8071-8072
+.changeset/lifecycle-job-queue.md
+  s_f510ad52b05c4e::t_f2167d882d3f60 1-49
+design/alarm-coordination.md
+  s_f510ad52b05c4e::t_64cd48178f0c22 3-6,8-12,14,16-54,58-65
+docs/agents/agent-class.md
+  s_f510ad52b05c4e::t_d2d0a1f65f409f 85,281
+examples/next/lifecycle/src/index.ts
+  s_f510ad52b05c4e::t_c979a8e7d2ea97 5,7,21-24,27,42,47-57,60-61,66,91,129
+packages/agents/AGENTS.md
+  s_f510ad52b05c4e::t_916d5b7df38864 259-260
+packages/think/src/think.ts
+  s_f510ad52b05c4e::t_e4e38077d63de7 10628-10637
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "68fe9861b6c493debd562b94fde8a82eac95e7be",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

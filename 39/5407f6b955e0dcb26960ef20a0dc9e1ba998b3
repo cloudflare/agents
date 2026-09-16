@@ -1,0 +1,19 @@
+packages/agents/src/tests/agents/migration.ts
+  s_f510ad52b05c4e::t_737ba628cc0e95 137-143,145,153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "395407f6b955e0dcb26960ef20a0dc9e1ba998b3",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "unknown"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

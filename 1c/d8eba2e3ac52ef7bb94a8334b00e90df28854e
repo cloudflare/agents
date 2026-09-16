@@ -1,0 +1,19 @@
+packages/agents/src/tests/agents/retry.ts
+  s_f510ad52b05c4e::t_62723a5921342a 118-120,122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1cd8eba2e3ac52ef7bb94a8334b00e90df28854e",
+  "prompts": {},
+  "sessions": {
+    "s_f510ad52b05c4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad3a4c25-6901-4ed9-b6e0-f9fab2872677",
+        "model": "unknown"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

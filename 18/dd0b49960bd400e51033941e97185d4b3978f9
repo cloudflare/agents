@@ -1,0 +1,35 @@
+packages/agents/src/websockets/transport.ts
+  s_b3be5a835f928d::t_d399afd89cbd78 1-147
+packages/agents/src/tests/capnweb-transport.test.ts
+  s_b3be5a835f928d::t_071c961c694b72 1-309
+packages/agents/src/react-tests/useAgent-capnweb.test.tsx
+  s_b3be5a835f928d::t_ebf93dbf4e51f4 1-163
+packages/agents/src/websockets/transport-protocol.ts
+  s_b3be5a835f928d::t_22049ccb8a5829 1-29
+packages/agents/src/websockets/index.ts
+  s_b3be5a835f928d::t_6da709e2647bb6 2-4,21-25
+.changeset/capnweb-transport.md
+  s_b3be5a835f928d::t_0e7780f902dc98 1-22
+packages/agents/src/websockets/websockets.ts
+  s_b3be5a835f928d::t_bb6184bdca840a 2-6,22-30,72-76,101-112,132,146,158-160,226-227,230-237,240,242-245,291-417
+packages/agents/src/react.tsx
+  s_b3be5a835f928d::t_a62cde741609bd 22,40-59,155-305,328-335,520,523,580,589,597,849-882,885-886,888-889,891-906,908,910-916,918,920-921,923-947,950-955,959-961,965-967,969-973,975,977-999,1001,1003-1009,1011-1014,1017-1019,1022-1027,1029-1065,1088,1240-1247
+packages/agents/src/websockets/capnweb-client.ts
+  s_b3be5a835f928d::t_b90e1e40193a72 1-285
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "18dd0b49960bd400e51033941e97185d4b3978f9",
+  "prompts": {},
+  "sessions": {
+    "s_b3be5a835f928d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e60c15-51cf-4a50-b840-9e77737af7be",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

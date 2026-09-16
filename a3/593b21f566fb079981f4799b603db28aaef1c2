@@ -1,0 +1,47 @@
+docs/agents/client-sdk.md
+  s_48aa9e3e9ff5fd::t_0ab3d1bd86fdc2 267,271-272,275-284
+examples/playground/README.md
+  s_2f57991165bef8::t_82e46e3e693a39 27
+examples/playground/src/demos/core/callable-agent.ts
+  s_2f57991165bef8::t_0de36fba09adcf 1,38-41
+experimental/capnweb-do-poc/src/worker.ts
+  s_2f57991165bef8::t_fb11bab8047799 2-5,15-30,32-38,42-45,49-50,55-56,65,73-83,96-99,110,136-156,167,169,187,194,197-199,212
+experimental/session-memory/README.md
+  s_48aa9e3e9ff5fd::t_5c2724d1a1cdd1 10-11,40-51,66
+experimental/session-memory/src/client.tsx
+  s_48aa9e3e9ff5fd::t_d9824b3aa3e5e5 240-249,279-280
+experimental/session-multichat/src/client.tsx
+  s_48aa9e3e9ff5fd::t_86ca714df9e968 241-250,280-281
+openai-sdk/streaming-chat/src/client.tsx
+  s_48aa9e3e9ff5fd::t_edbac71d12ad96 246
+packages/agents/src/client.ts
+  s_48aa9e3e9ff5fd::t_3818f81d3681f7 187-192
+packages/agents/src/lifecycle-tests/lifecycle.test.ts
+  s_48aa9e3e9ff5fd::t_40ae2311415ae9 57-77
+packages/agents/src/serializable.ts
+  s_48aa9e3e9ff5fd::t_cbd2413cba83f9 96-99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a3593b21f566fb079981f4799b603db28aaef1c2",
+  "prompts": {},
+  "sessions": {
+    "s_2f57991165bef8": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a03445-18f5-7751-955b-3ee72a2d1114",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_48aa9e3e9ff5fd": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a01a4e-a621-7718-bce5-38812f5c17b0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

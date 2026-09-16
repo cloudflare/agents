@@ -1,0 +1,59 @@
+packages/agents/src/tests/capnweb-transport.test.ts
+  s_b3be5a835f928d::t_cadd5cdbe8284e 1-309
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_b3be5a835f928d::t_276c28b659b377 1
+  s_b3be5a835f928d::t_e116f6d050feb6 159-192
+  s_b3be5a835f928d::t_15867020199904 193,220-221
+packages/agents/src/react.tsx
+  s_b3be5a835f928d::t_1e0ab4d41ecdaa 22,40-59,155-305,328-335,520,523,580,589,597,849-882,885-886,888-889,891-906,908,910-916,918,920-921,923-947,950-955,959-961,965-967,969-973,975,977-999,1001,1003-1009,1011-1014,1017-1019,1022-1027,1029-1065,1088,1240-1247
+packages/agents/src/tests/agents/callable.ts
+  s_b3be5a835f928d::t_d9f5da4da58eee 1,5-17,25-32
+packages/agents/package.json
+  s_b3be5a835f928d::t_2a69d26dc5fd98 27,176-180
+packages/agents/scripts/build.ts
+  s_b3be5a835f928d::t_6e3ee9e8d400fd 27-28
+packages/agents/src/index.ts
+  s_b3be5a835f928d::t_75c0bda1c1b2ca 1576-1589,2382
+packages/agents/src/react-tests/useAgent-capnweb.test.tsx
+  s_b3be5a835f928d::t_27cf26c0eed74b 1-163
+packages/agents/src/react-tests/websockets-callables-client.test.ts
+  s_b3be5a835f928d::t_5318bda026a6f0 1-59
+packages/agents/src/tests/lifecycle/websockets-capability.test.ts
+  s_b3be5a835f928d::t_2887b3ff1d475c 1-171
+packages/agents/src/websockets/capnweb-client.ts
+  s_b3be5a835f928d::t_a9288b6fd28ce9 1-285
+packages/agents/src/websockets/client.ts
+  s_b3be5a835f928d::t_f556f62e503f1a 1-121
+packages/agents/src/websockets/index.ts
+  s_b3be5a835f928d::t_0dea272472ad84 2-4,14-25
+packages/agents/src/websockets/options.ts
+  s_b3be5a835f928d::t_a504aef53a2cb5 1,49-57
+packages/agents/src/websockets/protocol.ts
+  s_b3be5a835f928d::t_3fb60f087d4b79 1-31
+packages/agents/src/websockets/transport-protocol.ts
+  s_b3be5a835f928d::t_7150ad030190d0 1-29
+packages/agents/src/websockets/transport.ts
+  s_b3be5a835f928d::t_6bc8ab8562d76b 1-147
+packages/agents/src/websockets/types.ts
+  s_b3be5a835f928d::t_bb6d34c86276b8 1-28
+packages/agents/src/websockets/websockets.ts
+  s_b3be5a835f928d::t_60a7c1403a500c 1-6,21-30,58-76,82-85,94-95,101-118,125-126,133-135,140,143-150,152-154,205-206,209-216,219,221-224,269-466
+pnpm-lock.yaml
+  s_b3be5a835f928d::t_768316d750028a 4050-4052,8116-8118,16189-16190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "460ea53f9f3c197da44da8c7de96c8a75c9d8249",
+  "prompts": {},
+  "sessions": {
+    "s_b3be5a835f928d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e60c15-51cf-4a50-b840-9e77737af7be",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

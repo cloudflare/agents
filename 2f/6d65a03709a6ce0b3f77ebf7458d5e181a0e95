@@ -1,0 +1,37 @@
+packages/agents/package.json
+  s_b3be5a835f928d::t_560106336e0edc 171-180
+  s_b3be5a835f928d::t_23bc25041ce021 27
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_b3be5a835f928d::t_e116f6d050feb6 12,159-193,207-222
+  s_b3be5a835f928d::t_276c28b659b377 1,10,238
+packages/agents/scripts/build.ts
+  s_b3be5a835f928d::t_a540480777df27 26-27
+packages/agents/src/tests/agents/callable.ts
+  s_b3be5a835f928d::t_d9f5da4da58eee 1-2,4-17,26-39
+.changeset/websockets-capability.md
+  s_b3be5a835f928d::t_2d652ca0f35f92 1-30
+packages/agents/src/index.ts
+  s_b3be5a835f928d::t_3c3dad1c281dbb 2271-2273,2277-2278
+packages/agents/src/lifecycle/capability-runner.ts
+  s_b3be5a835f928d::t_ab99816a8bc7d0 44-49,73-109,195-260
+packages/agents/src/react-tests/websockets-callables-client.test.ts
+  s_b3be5a835f928d::t_aac7bdd1ce9863 1-59
+packages/agents/src/websockets/types.ts
+  s_b3be5a835f928d::t_140dd35ad6d068 1-28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2f6d65a03709a6ce0b3f77ebf7458d5e181a0e95",
+  "prompts": {},
+  "sessions": {
+    "s_b3be5a835f928d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e60c15-51cf-4a50-b840-9e77737af7be",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

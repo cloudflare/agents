@@ -1,0 +1,29 @@
+experimental/capnweb-do-poc/src/client-types.ts
+  s_48aa9e3e9ff5fd::t_7c4493185e9cc2 1-17
+pnpm-lock.yaml
+  s_2f57991165bef8::t_79f45f90a44369 3438-3446
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f248036cf7e285322ccabfbde3c43716a519e0de",
+  "prompts": {},
+  "sessions": {
+    "s_2f57991165bef8": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a03445-18f5-7751-955b-3ee72a2d1114",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    },
+    "s_48aa9e3e9ff5fd": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a01a4e-a621-7718-bce5-38812f5c17b0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}

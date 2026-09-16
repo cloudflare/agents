@@ -1,0 +1,49 @@
+design/AGENTS.md
+  s_0b3003d5997402::t_1ae55981984ae1 74-75
+design/README.md
+  s_0b3003d5997402::t_736676a182ea62 9-23
+design/codemode-rlm.md
+  s_0b3003d5997402::t_419889a71f18a4 4-6,16,32,37-41,52,54-55,67,98-112,117-124,138-144,191-194,205-206,231-234,242-243,247-248
+design/rfc-codemode-computer-rlm.md
+  s_0b3003d5997402::t_cdcc1c897fb1cc 1-424
+examples/codemode-rlm/RESEARCH.md
+  s_0b3003d5997402::t_3fc8d41ec31b70 1,3,16-19,22-45,99-102,108-110,180-187,231-242,246-257,270-275
+examples/codemode-rlm/SUGGESTED_SDK_CHANGES.md
+  s_0b3003d5997402::t_882cb1aa6d4434 7-15,140-142
+examples/codemode-rlm/eval/README.md
+  s_0b3003d5997402::t_8cd6502e2500d2 21-32,42-44,130-134,137-139,155-160
+examples/codemode-rlm/package.json
+  s_0b3003d5997402::t_f3aedaf38dfecb 3,18
+examples/codemode-rlm/src/client.tsx
+  s_0b3003d5997402::t_ad6122a14e914e 206-208,326-328,363
+examples/codemode-rlm/test/store-worker.ts
+  s_0b3003d5997402::t_a71166b8a771ac 1-5,9-32,40-41,46-56,63-106
+examples/codemode-rlm/test/store.test.ts
+  s_0b3003d5997402::t_2816c5f114576a 16-85
+packages/codemode/src/connectors/describe.ts
+  s_0b3003d5997402::t_92009cfa6dd874 26,32-35,90-94
+packages/codemode/src/executor.ts
+  s_0b3003d5997402::t_fbff4cfa396f06 303,305-307,426-438,445,449-453,455,526,537-550
+packages/codemode/src/tests/runtime-handle.test.ts
+  s_0b3003d5997402::t_9563f290452470 90-94,182-183,189-190
+packages/codemode/src/tests/toolset-connector.test.ts
+  s_0b3003d5997402::t_b4864c33990681 1,79-224
+pnpm-lock.yaml
+  s_0b3003d5997402::t_8ce5b034d94db1 1116-1118,5780-5793,13786-13797
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ff1d744efe43c3ab391110c0f5194cc31a5108a3",
+  "prompts": {},
+  "sessions": {
+    "s_0b3003d5997402": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fd6b0-e1c0-7b61-ba71-7591b8469662",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Matt Carey <mcarey@cloudflare.com>"
+    }
+  }
+}
