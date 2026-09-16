@@ -1,218 +1,31 @@
-# @cloudflare/voice
+# `@cloudflare/voice`
 
-Voice pipeline for [Cloudflare Agents](https://github.com/cloudflare/agents) -- continuous STT, TTS, streaming, and real-time audio over WebSocket.
+`@cloudflare/voice` is a deprecated compatibility package. Voice now ships from
+the [`agents`](../agents) package.
 
-The published package includes the complete Voice guide at `docs/index.md`.
+Existing imports continue to work through re-exports:
 
-> **Experimental.** This API is under active development and will break between releases. Pin your version and expect to rewrite when upgrading.
+| Previous import            | Replacement           |
+| -------------------------- | --------------------- |
+| `@cloudflare/voice`        | `agents/voice`        |
+| `@cloudflare/voice/client` | `agents/voice/client` |
+| `@cloudflare/voice/react`  | `agents/voice/react`  |
+| `@cloudflare/voice/errors` | `agents/voice/errors` |
 
-## Install
+New projects should install and import only `agents`:
 
-```bash
-npm install @cloudflare/voice
+```sh
+npm install agents
 ```
-
-## Exports
-
-| Export path                | What it provides                                                                                        |
-| -------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `@cloudflare/voice`        | Server-side mixins (`withVoice`, `withVoiceInput`), provider types, Workers AI providers, SFU utilities |
-| `@cloudflare/voice/react`  | React hooks (`useVoiceAgent`, `useVoiceInput`)                                                          |
-| `@cloudflare/voice/client` | Framework-agnostic `VoiceClient` class                                                                  |
-
-## Server: full voice agent (`withVoice`)
-
-Adds the complete voice pipeline: continuous STT, LLM turn handling, streaming TTS, interruption, and conversation persistence. When the transcriber reports speech start, the pipeline aborts active LLM/TTS work and tells the client to stop any queued playback so users can barge in before a final transcript is available.
 
 ```typescript
-import { Agent } from "agents";
-import {
-  withVoice,
-  WorkersAIFluxSTT,
-  WorkersAITTS,
-  type VoiceTurnContext
-} from "@cloudflare/voice";
-
-const VoiceAgent = withVoice(Agent);
-
-export class MyAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI);
-  tts = new WorkersAITTS(this.env.AI);
-
-  async onTurn(transcript: string, context: VoiceTurnContext) {
-    return "Hello! I heard you say: " + transcript;
-  }
-}
+import { withVoice, WorkersAIFluxSTT, WorkersAITTS } from "agents/voice";
+import { VoiceClient } from "agents/voice/client";
+import { useVoiceAgent } from "agents/voice/react";
 ```
 
-`onTurn()` can also return streaming text, including AI SDK `stream` values:
+The compatibility package preserves runtime and type identity. The Voice wire
+protocol, provider contracts, and SQLite table names have not changed. It will
+remain maintained throughout Agents 1.x.
 
-```typescript
-import { streamText } from "ai";
-
-async onTurn(transcript: string, context: VoiceTurnContext) {
-  const result = streamText({
-    model: myModel,
-    instructions: "You are a helpful voice assistant. Keep replies short.",
-    messages: [
-      ...context.messages,
-      { role: "user", content: transcript }
-    ]
-  });
-
-  return result.stream;
-}
-```
-
-`context.messages` contains completed conversation history before the current transcript. Append `transcript` exactly once when constructing the LLM request. The pipeline persists the transcript before `onTurn()` runs, so calling `getConversationHistory()` directly inside the hook returns stored history that includes the current transcript.
-
-### Provider properties
-
-| Property      | Type          | Required | Description                      |
-| ------------- | ------------- | -------- | -------------------------------- |
-| `transcriber` | `Transcriber` | Yes      | Continuous per-call STT provider |
-| `tts`         | `TTSProvider` | Yes      | Text-to-speech provider          |
-
-### Lifecycle hooks
-
-| Method                           | Description                                                                                                    |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `onTurn(transcript, context)`    | **Required.** Handle a user utterance. Return `string`, AI SDK `stream`, or `AsyncIterable<string>`.           |
-| `createTranscriber(connection)`  | Override to create a transcriber dynamically per connection.                                                   |
-| `onCallStart(connection)`        | Called when a voice call begins.                                                                               |
-| `onCallEnd(connection)`          | Called when a voice call ends.                                                                                 |
-| `onInterrupt(connection)`        | Called when user interrupts playback, either from client audio-level detection or model-detected speech start. |
-| `beforeCallStart(connection)`    | Return `false` to reject a call.                                                                               |
-| `onMessage(connection, message)` | Handle non-voice WebSocket messages (voice protocol is intercepted automatically).                             |
-
-### Pipeline hooks
-
-| Method                                     | Description                                          |
-| ------------------------------------------ | ---------------------------------------------------- |
-| `afterTranscribe(transcript, connection)`  | Process transcript after STT. Return `null` to skip. |
-| `beforeSynthesize(text, connection)`       | Process text before TTS. Return `null` to skip.      |
-| `afterSynthesize(audio, text, connection)` | Process audio after TTS. Return `null` to skip.      |
-
-### Convenience methods
-
-- `speak(connection, text)` -- synthesize and send audio to one connection
-- `speakAll(text)` -- synthesize and send audio to all connections
-- `forceEndCall(connection)` -- programmatically end a call
-- `saveMessage(role, content)` -- persist a message to conversation history
-- `getConversationHistory()` -- retrieve conversation history from SQLite
-
-## Server: voice input only (`withVoiceInput`)
-
-STT-only mixin -- no TTS, no LLM. Use when you only need speech-to-text (e.g., dictation, transcription).
-
-```typescript
-import { Agent } from "agents";
-import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
-
-const InputAgent = withVoiceInput(Agent);
-
-export class DictationAgent extends InputAgent<Env> {
-  transcriber = new WorkersAINova3STT(this.env.AI);
-
-  onTranscript(text: string, connection: Connection) {
-    console.log("User said:", text);
-  }
-}
-```
-
-## Client: React
-
-```tsx
-import { useVoiceAgent } from "@cloudflare/voice/react";
-
-function App() {
-  const selectedSpeakerId = "default";
-  const {
-    status, // "idle" | "listening" | "thinking" | "speaking"
-    transcript, // TranscriptMessage[]
-    interimTranscript, // string | null (real-time partial transcript)
-    turnMetrics, // VoiceTurnMetrics | null (latest stable terminal summary)
-    audioLevel, // number (0-1)
-    isMuted, // boolean
-    connected, // boolean
-    error, // string | null
-    outputDeviceError, // string | null
-    startCall, // () => Promise<void>
-    endCall, // () => void
-    toggleMute, // () => void
-    sendText, // (text: string) => void
-    sendJSON // (data: Record<string, unknown>) => void
-  } = useVoiceAgent({
-    agent: "my-agent",
-    // Route assistant playback to a selected audiooutput device when supported.
-    outputDeviceId: selectedSpeakerId,
-    // Set false to delay connecting until async prerequisites are ready.
-    enabled: true
-  });
-
-  return <div>Status: {status}</div>;
-}
-```
-
-When `enabled` is `false`, the hook does not create or connect a `VoiceClient`, returns the idle/disconnected state, and action callbacks such as `startCall()`, `sendText()`, and `sendJSON()` are safe no-ops. The first change from disabled to enabled connects with the current options without firing `onReconnect`; later connection identity changes while enabled do fire `onReconnect`.
-
-`outputDeviceId` accepts a `MediaDeviceInfo.deviceId` from an `audiooutput` device. Browsers without `HTMLMediaElement.setSinkId()` support continue playing through the default output and set `outputDeviceError` for non-default devices. Use `"default"` or `undefined` to return to the system default output. Device labels may be blank until the user grants microphone permission.
-
-For voice input only:
-
-```tsx
-import { useVoiceInput } from "@cloudflare/voice/react";
-
-const {
-  transcript,
-  interimTranscript,
-  turnMetrics,
-  isListening,
-  start,
-  stop,
-  clear
-} = useVoiceInput({ agent: "DictationAgent" });
-```
-
-## Client: vanilla JavaScript
-
-```typescript
-import { VoiceClient } from "@cloudflare/voice/client";
-
-const client = new VoiceClient({ agent: "my-agent" });
-const selectedSpeakerId = "default";
-
-client.addEventListener("statuschange", () => console.log(client.status));
-client.connect();
-await client.startCall();
-
-// Switch assistant playback without reconnecting the call.
-await client.setOutputDevice(selectedSpeakerId);
-```
-
-## Workers AI providers (built-in)
-
-All default providers use Workers AI bindings -- no API keys required:
-
-| Class               | Type           | Workers AI model      | Recommended for  |
-| ------------------- | -------------- | --------------------- | ---------------- |
-| `WorkersAIFluxSTT`  | Continuous STT | `@cf/deepgram/flux`   | `withVoice`      |
-| `WorkersAINova3STT` | Continuous STT | `@cf/deepgram/nova-3` | `withVoiceInput` |
-| `WorkersAITTS`      | TTS            | `@cf/deepgram/aura-1` | Both             |
-
-`WorkersAIFluxSTT` uses Flux `StartOfTurn` events for low-latency barge-in and `EndOfTurn` events for final utterances. Custom transcribers can provide the same behavior by calling `onSpeechStart` from `TranscriberSessionOptions` when user speech begins, then `onUtterance` when the turn is complete.
-
-## Third-party providers
-
-| Package                        | What it provides                                       |
-| ------------------------------ | ------------------------------------------------------ |
-| `@cloudflare/voice-assemblyai` | Continuous STT (AssemblyAI Universal 3.5 Pro Realtime) |
-| `@cloudflare/voice-deepgram`   | Continuous STT (Deepgram Nova)                         |
-| `@cloudflare/voice-elevenlabs` | Continuous STT and TTS (ElevenLabs)                    |
-| `@cloudflare/voice-telnyx`     | Continuous STT, TTS, and phone transport (Telnyx)      |
-| `@cloudflare/voice-twilio`     | Telephony adapter (Twilio Media Streams)               |
-
-## Related
-
-- [`examples/voice-agent`](../../examples/voice-agent) -- full voice agent example with provider toggles
-- [`examples/voice-input`](../../examples/voice-input) -- voice input (dictation) example
+See the [Voice reference](../../docs/agents/voice.md) for current usage.

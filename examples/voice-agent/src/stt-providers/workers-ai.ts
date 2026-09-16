@@ -2,7 +2,7 @@ import {
   WorkersAIFluxSTT,
   WorkersAINova3STT,
   type Transcriber
-} from "@cloudflare/voice";
+} from "agents/voice";
 import { getOptionalProviderKeyterms } from "./utils";
 
 export function createWorkersAITranscriber(

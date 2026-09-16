@@ -16,7 +16,7 @@ import {
   ShieldCheckIcon,
   XCircleIcon
 } from "@phosphor-icons/react";
-import type { ChannelMessageSurface } from "@cloudflare/channels";
+import type { ChannelMessageSurface } from "agents/channels";
 import type { ConversationPage, Message, SentMessage } from "../types";
 import { provider, ProviderAvatar, Timestamp, formatFullTime } from "./shared";
 

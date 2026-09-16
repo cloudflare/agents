@@ -241,6 +241,36 @@ type ParentStub = DurableObjectStub & {
     abortedAfter: boolean;
     childStatus: string | null;
   }>;
+  driveFacetRecoveryOomSealForTest(
+    executing: { childName: string; incidentId: string },
+    pending: { childName: string; incidentId: string }
+  ): Promise<string[]>;
+  facetRecoveryIncidentStatusForTest(
+    childName: string,
+    incidentId: string
+  ): Promise<string | null>;
+  rootHasRoutedTaskWakeForTest(runId: string): Promise<boolean>;
+  driveFacetRecoveryOomBackoffForTest(executing: {
+    childName: string;
+    incidentId: string;
+  }): Promise<string>;
+  facetRecoveryOomRunStateForTest(
+    childName: string,
+    runId: string
+  ): Promise<{
+    state: string;
+    generation: string | null;
+    next_at: number | null;
+  } | null>;
+  driveFacetRecoverySlowOomSealForTest(executing: {
+    childName: string;
+    incidentId: string;
+  }): Promise<string>;
+  driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
+    taskRunOnChild: number;
+    routedWakeOnRoot: number;
+    schedules: number;
+  }>;
 };
 
 function getParent(name = crypto.randomUUID()) {
@@ -251,6 +281,144 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
+  it("seals the executing facet's recovery incident when the root alarm breaker seals", async () => {
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-oom-${crypto.randomUUID()}`
+    };
+    const pending = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-pending-${crypto.randomUUID()}`
+    };
+
+    const [executingRunId, pendingRunId] =
+      await parent.driveFacetRecoveryOomSealForTest(executing, pending);
+    // The breaker resets the alarm-owning root after its writes settle. Read
+    // through a fresh stub so the assertion does not race the condemned RPC
+    // session.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const freshParent = await getParent(parentName);
+
+    // The struck run's wake mirror is gone and its incident sealed on the
+    // owning facet, through the routed memory-limit forwarding.
+    expect(await freshParent.rootHasRoutedTaskWakeForTest(executingRunId)).toBe(
+      false
+    );
+    expect(
+      await freshParent.facetRecoveryIncidentStatusForTest(
+        executing.childName,
+        executing.incidentId
+      )
+    ).toBe("exhausted");
+
+    // Tasks backs off per struck run instead of Scheduler's old blanket
+    // purge-on-seal: a pending incident that never came due this cycle
+    // keeps its wake and stays scheduled.
+    expect(await freshParent.rootHasRoutedTaskWakeForTest(pendingRunId)).toBe(
+      true
+    );
+    expect(
+      await freshParent.facetRecoveryIncidentStatusForTest(
+        pending.childName,
+        pending.incidentId
+      )
+    ).toBe("scheduled");
+  });
+
+  it("backs off a routed facet's own claim on a non-sealing strike, not just the root's mirror", async () => {
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-backoff-${crypto.randomUUID()}`
+    };
+
+    const runId = await parent.driveFacetRecoveryOomBackoffForTest(executing);
+    // Same deferred-reset caution as the sealing test above.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const freshParent = await getParent(parentName);
+
+    const runState = await freshParent.facetRecoveryOomRunStateForTest(
+      executing.childName,
+      runId
+    );
+    // The facet's own claim is cleared and its deadline backed off — not
+    // just the root's mirror job, which the platform breaker already
+    // backs off on its own. A claim left untouched here would let any
+    // facet startup before the backoff elapses read it as an interrupted
+    // attempt and reconcile it due again now, resurrecting the run through
+    // the breaker.
+    expect(runState?.state).toBe("running");
+    expect(runState?.generation).toBeNull();
+    expect(runState?.next_at).toBeGreaterThan(Date.now());
+  });
+
+  it("seals a routed run whose failure lands after root detaches at the dispatch budget", async () => {
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-slow-oom-${crypto.randomUUID()}`
+    };
+
+    // Root's own dispatch budget (5s) elapses well before the facet's
+    // ~6.5s delayed failure — this call returns once root detaches, not
+    // once the run actually fails.
+    await parent.driveFacetRecoverySlowOomSealForTest(executing);
+    // The failure that arrives after root detached must still be seen:
+    // this is exactly the gap a routed dispatch that discards its
+    // still-pending call (instead of tracking it) would miss entirely.
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    const freshParent = await getParent(parentName);
+
+    expect(
+      await freshParent.facetRecoveryIncidentStatusForTest(
+        executing.childName,
+        executing.incidentId
+      )
+    ).toBe("exhausted");
+  }, 20_000);
+
+  it("keeps a routed run's claim mirrored on root after root detaches at the dispatch budget", async () => {
+    const parent = await getParent();
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-slow-oom-mirror-${crypto.randomUUID()}`
+    };
+
+    // Returns once root's own budget wins (~5s), well before the facet's
+    // ~6.5s delayed failure. If root's own stale outcome deletes the
+    // mirror job here — instead of the facet's claim-time push already
+    // having overwritten it — a hung or interrupted attempt has no alarm
+    // left to resume it at all, regardless of whether this specific
+    // attempt eventually settles cleanly.
+    const runId = await parent.driveFacetRecoverySlowOomSealForTest(executing);
+
+    expect(await parent.rootHasRoutedTaskWakeForTest(runId)).toBe(true);
+  }, 10_000);
+
+  it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {
+    const parent = await getParent();
+    const childName = crypto.randomUUID();
+
+    const transport =
+      await parent.driveFacetChatRecoveryDetectionForTest(childName);
+
+    // Real fiber-interruption detection on a facet must reach
+    // `_enqueueChatRecovery`'s single Tasks transport — not just a test
+    // that seeds a schedule row directly and never exercises the path
+    // itself. The run and step journal stay on the child; only its wake
+    // mirrors to this root's queue, and the retired Scheduler bridge stays
+    // dead.
+    expect(transport).toEqual({
+      taskRunOnChild: 1,
+      routedWakeOnRoot: 1,
+      schedules: 0
+    });
+  });
+
   it("runs an AIChatAgent child and returns summary, output, events, and chunks", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();

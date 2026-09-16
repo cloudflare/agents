@@ -11,6 +11,7 @@ import {
   type LifecycleJobContext,
   type LifecycleJobPushOptions
 } from "../../lifecycle";
+import { State } from "../../state";
 import { WebSockets } from "../../websockets";
 
 type StartupProps = { label: string };
@@ -63,19 +64,53 @@ class StartupAlarmProbe extends LifecycleCapability<StartupProps> {
 class JobProbe extends LifecycleCapability {
   readonly ambientContexts: boolean[] = [];
   readonly #onExecute: (fn: string) => void;
+  /** When set, a `repush` job pushes itself to this time mid-dispatch. */
+  repushTime: number | undefined;
+  /** When set, a `retime-other` job pushes this job id to `repushTime`. */
+  retimeTargetId: string | undefined;
 
   constructor(onExecute: (fn: string) => void) {
     super("job-probe");
     this.#onExecute = onExecute;
   }
 
-  onJob({ job }: LifecycleJobContext): void {
+  async onJob({ job }: LifecycleJobContext): Promise<void> {
     this.ambientContexts.push(getCurrentAgent().agent !== undefined);
     this.#onExecute(job.fn);
+    if (job.fn === "repush" && this.repushTime !== undefined) {
+      // A same-id push made while this dispatch runs: the queue must let
+      // it survive the completion outcome this handler returns.
+      await this.lifecycle.jobs.push({
+        id: job.id,
+        fn: "tick",
+        time: this.repushTime
+      });
+    }
+    if (
+      job.fn === "retime-other" &&
+      this.retimeTargetId !== undefined &&
+      this.repushTime !== undefined
+    ) {
+      // Retime a LATER job in the same due batch: the drive loop must not
+      // dispatch that job's stale snapshot afterwards.
+      await this.lifecycle.jobs.push({
+        id: this.retimeTargetId,
+        fn: "tick",
+        time: this.repushTime
+      });
+    }
+    if (job.fn === "slow") {
+      // Long enough for a zero-threshold slow-dispatch watchdog to fire.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   }
 
   push(options: LifecycleJobPushOptions) {
     return this.lifecycle.jobs.push(options);
+  }
+
+  get(id: string) {
+    return this.lifecycle.jobs.get(id);
   }
 
   async clear(): Promise<void> {
@@ -208,6 +243,16 @@ class PlainHostCallables extends RpcTarget {
     return this.#greeting;
   }
 
+  /** An RpcTarget result: a live stub on Cap'n Web, unserializable as JSON. */
+  counter(): Counter {
+    return new Counter();
+  }
+
+  /** A value JSON cannot carry; the JSON wire must still settle the call. */
+  bigint(): { value: bigint } {
+    return { value: 1n };
+  }
+
   streamNumbers(): ReadableStream<number> {
     return new ReadableStream<number>({
       start(controller) {
@@ -217,6 +262,20 @@ class PlainHostCallables extends RpcTarget {
         controller.close();
       }
     });
+  }
+}
+
+/** Returned by reference over Cap'n Web: the caller gets a live stub. */
+class Counter extends RpcTarget {
+  #value = 0;
+
+  increment(by = 1): number {
+    this.#value += by;
+    return this.#value;
+  }
+
+  value(): number {
+    return this.#value;
   }
 }
 
@@ -246,6 +305,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       onClose: () => {
         this.#webSocketContexts.push(currentWebSocketContext("close"));
       }
+    },
+    // `?tags=N` asks for N user tags, to probe the shared tag policy.
+    getConnectionTags: (_connection, { request }) => {
+      const count = Number(new URL(request.url).searchParams.get("tags") ?? 0);
+      return Array.from({ length: count }, (_, i) => `t${i}`);
     },
     callables: new PlainHostCallables()
   });
@@ -285,6 +349,31 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
         this.#events.push("dispose:second");
       }
     });
+
+  /** Open connections on either wire, for transport tests. */
+  connectionCount(): number {
+    return [...this.#webSockets.getConnections()].length;
+  }
+
+  /** Tags of one connection, for transport tests. */
+  connectionTags(id: string): readonly string[] | undefined {
+    return this.#webSockets.getConnection(id)?.tags;
+  }
+
+  /**
+   * Close one connection from the host side. Returns the error message when
+   * `close()` throws (reserved code, oversize reason), else null.
+   */
+  closeConnection(id: string, code: number, reason: string): string | null {
+    const connection = this.#webSockets.getConnection(id);
+    if (!connection) return "no such connection";
+    try {
+      connection.close(code, reason);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
 
   onStart(props?: StartupProps): void {
     this.#hostContexts.push(currentLifecycleContext("start"));
@@ -345,6 +434,93 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   async pushDueProbeJob(fn: string): Promise<void> {
     await this.lifecycle.start();
     await this.#jobProbe.push({ fn, time: Date.now() - 1 });
+  }
+
+  /**
+   * Arm one due `repush` probe job whose dispatch pushes itself to
+   * `futureTime`; the mid-dispatch push must survive the drive outcome.
+   */
+  async armRepushProbeJob(futureTime: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#jobProbe.repushTime = futureTime;
+    await this.#jobProbe.push({
+      id: "repush-probe",
+      fn: "repush",
+      time: Date.now() - 1
+    });
+  }
+
+  /**
+   * Arm two due probe jobs where the first dispatch retimes the second to
+   * `futureTime`: the second's stale due snapshot must not dispatch.
+   */
+  async armStaleSnapshotProbe(futureTime: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#jobProbe.repushTime = futureTime;
+    this.#jobProbe.retimeTargetId = "victim";
+    // Push far-future first: a backdated push can auto-fire its alarm
+    // between two awaited arms. The synchronous backdate below then makes
+    // both jobs due in one breath — retimer first — with no window for the
+    // alarm to drive one alone.
+    const far = Date.now() + 3_600_000;
+    await this.#jobProbe.push({ id: "victim", fn: "tick", time: far });
+    await this.#jobProbe.push({ id: "retimer", fn: "retime-other", time: far });
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = 'retimer'",
+      now - 2
+    );
+    this.ctx.storage.sql.exec(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = 'victim'",
+      now - 1
+    );
+    await this.lifecycle.jobs.rearm();
+  }
+
+  /**
+   * Arm one due probe job with a zero hung timeout whose dispatch takes
+   * ~50ms, so the slow-dispatch watchdog observably fires.
+   */
+  async armSlowProbeJob(): Promise<void> {
+    await this.lifecycle.start();
+    await this.#jobProbe.push({
+      id: "slow-probe",
+      fn: "slow",
+      time: Date.now() - 1,
+      hungTimeoutSeconds: 0
+    });
+  }
+
+  getProbeJob(id: string): { fn: string; time: number } | null {
+    const job = this.#jobProbe.get(id);
+    return job ? { fn: job.fn, time: job.time } : null;
+  }
+
+  /** Try to claim another owner's job id; reports what happened. */
+  async pushForeignIdForTest(): Promise<{
+    error: string | null;
+    probeJobTime: number | null;
+  }> {
+    await this.lifecycle.start();
+    await this.#jobProbe.push({
+      id: "contested",
+      fn: "tick",
+      time: Date.now() + 60_000
+    });
+    let error: string | null = null;
+    try {
+      await this.lifecycle.jobs.push({
+        id: "contested",
+        fn: "tick",
+        time: Date.now() + 30_000
+      });
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+    }
+    return {
+      error,
+      probeJobTime: this.#jobProbe.get("contested")?.time ?? null
+    };
   }
 
   /** Push one backdated host job so the alarm event loop drives it. */
@@ -514,5 +690,74 @@ export class RetryableStartObject extends DurableObject<Cloudflare.Env> {
 
   getHostStarts(): number {
     return this.hostStarts;
+  }
+}
+
+/**
+ * A plain Durable Object composed with `State` and `WebSockets`, wired so
+ * the capability syncs state over connections. Used to prove `useAgent`'s
+ * state surface works against a non-Agent host.
+ */
+export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
+  readonly #state: State<{ count: number }> = new State<{ count: number }>({
+    initialState: { count: 0 },
+    validateStateChange: (next, source) => {
+      if (next.count < 0) throw new Error("count must not be negative");
+      // The ambient context names the connection the change came from,
+      // exactly as an Agent's validateStateChange sees it.
+      const ambient = getCurrentAgent().connection;
+      if (source !== "server" && ambient?.id !== source.id) {
+        throw new Error(
+          "validator ran outside the sending connection's context"
+        );
+      }
+    },
+    // The state owner decides who hears about a change: everyone but the
+    // connection it came from.
+    onChanged: (_next, source): void => {
+      this.#webSockets.broadcastState(source);
+    }
+  });
+
+  readonly #webSockets: WebSockets = new WebSockets({
+    state: this.#state,
+    // `?readonly=1` connections may not write; `?silent=1` connections get
+    // no protocol frames at all.
+    readonly: (_connection, { request }) =>
+      new URL(request.url).searchParams.has("readonly"),
+    protocol: (_connection, { request }) =>
+      !new URL(request.url).searchParams.has("silent"),
+    handlers: {
+      onMessage: (connection, message) => {
+        connection.send(`echo:${String(message)}`);
+      }
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.#state)
+    .use(this.#webSockets);
+
+  /** Host-side change; onChanged broadcasts it. */
+  async setCount(count: number): Promise<void> {
+    await this.lifecycle.start();
+    this.#state.set({ count });
+  }
+
+  async isReadonly(id: string): Promise<boolean | undefined> {
+    await this.lifecycle.start();
+    const connection = this.#webSockets.getConnection(id);
+    return connection ? this.#webSockets.isReadonly(connection) : undefined;
+  }
+
+  async setReadonly(id: string, readonly: boolean): Promise<void> {
+    await this.lifecycle.start();
+    const connection = this.#webSockets.getConnection(id);
+    if (connection) this.#webSockets.setReadonly(connection, readonly);
+  }
+
+  async getCount(): Promise<number | undefined> {
+    await this.lifecycle.start();
+    return this.#state.get()?.count;
   }
 }

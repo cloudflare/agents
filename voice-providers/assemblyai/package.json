@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/voice-assemblyai",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AssemblyAI Universal 3.5 Pro Realtime STT provider for Cloudflare Agents voice pipeline",
   "repository": {
     "directory": "voice-providers/assemblyai",
@@ -11,7 +11,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "peerDependencies": {
-    "@cloudflare/voice": ">=0.3.3 <1.0.0"
+    "agents": ">=0.23.0 <2.0.0"
   },
   "exports": {
     ".": {
@@ -42,5 +42,8 @@
   "type": "module",
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "agents": "workspace:*"
   }
 }

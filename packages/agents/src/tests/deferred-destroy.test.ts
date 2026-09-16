@@ -83,7 +83,6 @@ describe("deferred destroy (#1625)", () => {
         ) => unknown;
       };
       agent.sql`DROP TABLE IF EXISTS cf_agents_jobs`;
-      agent.sql`DROP TABLE IF EXISTS cf_agents_queues`;
       await ctx.storage.put(DESTROY_PENDING_KEY, true);
       await ctx.storage.setAlarm(Date.now() + 86_400_000);
     });

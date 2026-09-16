@@ -3,7 +3,7 @@ import type {
   ChannelIdentity,
   ChannelMessageSurface,
   UserIdentity
-} from "@cloudflare/channels";
+} from "agents/channels";
 import type { ConversationPage, DirectorySnapshot, UserPage } from "../types";
 
 /** The ingress path of the example's own support-form Channel. */

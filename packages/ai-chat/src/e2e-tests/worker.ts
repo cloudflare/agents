@@ -91,8 +91,12 @@ abstract class ExhaustionBaseAgent extends AIChatAgent<Env> {
 
   @callable()
   hasFiberRows(): boolean {
+    // Chat turns run on the Tasks capability (cf_agents_task_runs); facet
+    // turns remain on the legacy fiber engine (cf_agents_runs). An in-flight
+    // durable turn exists if either engine holds a row.
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as count
     `;
     return rows[0].count > 0;
   }
@@ -150,9 +154,9 @@ export class ChatAbortedExhaustAgent extends ExhaustionBaseAgent {
 /**
  * Exhausts recovery via `work_budget_exceeded`: `maxRecoveryWork: 0` seals the
  * incident as soon as the turn produces ANY recovery work. Unlike the base
- * agent, this one emits enough chunks to bump the durable progress/work meter
- * (a `text-start` past the flush threshold) BEFORE hanging, so each detection
- * sees work accrue beyond the baseline.
+ * agent, this one emits enough chunks to land one durable segment in the
+ * stream log BEFORE hanging, so each detection sees work accrue beyond the
+ * baseline.
  */
 export class ChatWorkBudgetExhaustAgent extends ExhaustionBaseAgent {
   override chatRecovery: ChatRecoveryConfig = {
@@ -166,15 +170,19 @@ export class ChatWorkBudgetExhaustAgent extends ExhaustionBaseAgent {
     _onFinish: unknown,
     _options?: OnChatMessageOptions
   ): Promise<Response> {
-    // Emit a single `text-start` then hang. `text-start` bumps the durable
-    // recovery work/progress meter at production time (independent of flush),
-    // so each interruption banks one unit of work. Staying below the 10-chunk
-    // flush threshold keeps the recoverable partial empty (the retry path),
-    // which avoids the continuation suppression that would swallow a re-emitted
-    // text-start on the continue path.
+    // The work meter is derived from the stream log: a chunk counts once its
+    // packed segment (ten chunks) is flushed, so a lone `text-start` banks
+    // nothing. Emit exactly one segment's worth of chunks — enough to flush —
+    // then hang, so each attempt banks one unit of work and the second
+    // interruption exceeds a zero budget.
     const chunks: Array<{ type: string; [k: string]: unknown }> = [
       { type: "start", messageId: `asst-${Date.now()}` },
-      { type: "text-start" }
+      { type: "text-start", id: "t1" },
+      ...Array.from({ length: 8 }, (_, i) => ({
+        type: "text-delta",
+        id: "t1",
+        delta: `work-${i} `
+      }))
     ];
     const encoder = new TextEncoder();
     let index = 0;
@@ -316,8 +324,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   @callable()
   hasFiberRows(): boolean {
+    // Chat turns run on the Tasks capability (cf_agents_task_runs); facet
+    // turns remain on the legacy fiber engine (cf_agents_runs). An in-flight
+    // durable turn exists if either engine holds a row.
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
+           + (SELECT COUNT(*) FROM cf_agents_task_runs) as count
     `;
     return rows[0].count > 0;
   }
@@ -364,12 +376,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 }
 
 /**
- * #1706 stream-buffer cleanup agent. Streams a SHORT turn that completes
- * quickly so a resumable-stream buffer (a `cf_ai_chat_stream_metadata` row plus
- * its packed `cf_ai_chat_stream_chunks` rows) and a `_cleanupStreamBuffers`
- * cleanup alarm both exist after a single turn. Exposes @callable inspectors so
- * the test can drive a DETERMINISTIC sweep with an injected far-future "now"
- * instead of waiting out the real 10-minute/1-hour retention windows.
+ * Stream-buffer lifecycle agent. Streams a SHORT turn that completes quickly
+ * so the test can assert that the cutover left no resumable-stream buffer (no
+ * chat-owned `cf_agents_streams` row, no `cf_agents_stream_blocks` rows) and
+ * armed no cleanup alarm. Exposes @callable inspectors.
  */
 export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
@@ -393,20 +403,25 @@ export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
     });
   }
 
-  /** Number of resumable-stream buffer rows (one per stream). */
+  /** Number of resumable-stream buffer rows (one per chat stream). */
   @callable()
   bufferRowCount(): number {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_ai_chat_stream_metadata
+      SELECT COUNT(*) as count FROM cf_agents_streams
+      WHERE json_extract(metadata, '$.cfChat') = 1
     `;
     return rows[0].count;
   }
 
-  /** Number of stored chunk (segment) rows across all streams. */
+  /** Number of stored chunk (segment) rows across all chat streams. */
   @callable()
   chunkRowCount(): number {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+      SELECT COUNT(*) as count FROM cf_agents_stream_blocks
+      WHERE stream_id IN (
+        SELECT stream_id FROM cf_agents_streams
+        WHERE json_extract(metadata, '$.cfChat') = 1
+      )
     `;
     return rows[0].count;
   }
@@ -431,14 +446,8 @@ export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
    * abandoned). Delegates to the same `cleanup(now)` the cleanup alarm uses.
    */
   @callable()
-  forceSweep(nowMs: number): void {
-    this._resumableStream.cleanup(nowMs);
-  }
-
-  /** Whether any stream rows remain — what the alarm uses to decide re-arming. */
-  @callable()
-  hasReclaimableStreams(): boolean {
-    return this._resumableStream.hasReclaimableStreams();
+  forceSweep(nowMs: number): number {
+    return this._resumableStream.reclaim(nowMs);
   }
 }
 

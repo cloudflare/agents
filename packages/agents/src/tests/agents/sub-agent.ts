@@ -112,6 +112,18 @@ export class CounterSubAgent extends Agent {
     `;
   }
 
+  /** Queue callback: logs like scheduledCallback so the same reader works. */
+  queuedCallback(
+    payload: { value: string },
+    item: { id: string; callback: string }
+  ): void {
+    this.scheduledCallback(payload, item);
+  }
+
+  async queueCallback(value: string): Promise<string> {
+    return this.queue("queuedCallback", { value });
+  }
+
   async scheduleDelayedCallback(
     delaySeconds: number,
     value: string,
@@ -1296,6 +1308,42 @@ export class TestSubAgentParent extends Agent {
     return child.get(counterId);
   }
 
+  // ── this.dynamicAgents facade (the new public capability surface) ──
+
+  async dynamicAgentsIncrement(
+    subAgentName: string,
+    counterId: string
+  ): Promise<number> {
+    const child = await this.dynamicAgents.get(CounterSubAgent, subAgentName);
+    return child.increment(counterId);
+  }
+
+  dynamicAgentsHas(subAgentName: string): { facade: boolean; legacy: boolean } {
+    return {
+      facade: this.dynamicAgents.has(CounterSubAgent, subAgentName),
+      legacy: this.hasSubAgent(CounterSubAgent, subAgentName)
+    };
+  }
+
+  dynamicAgentsListNames(): { facade: string[]; legacy: string[] } {
+    return {
+      facade: this.dynamicAgents.list(CounterSubAgent).map((e) => e.name),
+      legacy: this.listSubAgents(CounterSubAgent).map((e) => e.name)
+    };
+  }
+
+  dynamicAgentsAbort(subAgentName: string): void {
+    this.dynamicAgents.abort(
+      CounterSubAgent,
+      subAgentName,
+      new Error("test abort")
+    );
+  }
+
+  async dynamicAgentsDelete(subAgentName: string): Promise<void> {
+    await this.dynamicAgents.delete(CounterSubAgent, subAgentName);
+  }
+
   async subAgentAbort(subAgentName: string): Promise<void> {
     this.abortSubAgent(CounterSubAgent, subAgentName, new Error("test abort"));
   }
@@ -1312,6 +1360,50 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.scheduleDelayedCallback(delaySeconds, value, options);
+  }
+
+  async subAgentQueue(subAgentName: string, value: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.queueCallback(value);
+  }
+
+  /**
+   * Queue from a facet, park the item in the far future so the alarm cannot
+   * run it, then delete the facet. Returns the root queue rows after each
+   * step so a test can assert the deletion cleaned the routed item up.
+   */
+  async subAgentQueueThenDelete(subAgentName: string): Promise<{
+    beforeDelete: string[];
+    afterDelete: string[];
+  }> {
+    const itemId = await this.subAgentQueue(subAgentName, "orphan");
+    this
+      .sql`UPDATE cf_agents_jobs SET time = ${Date.now() + 86_400_000} WHERE id = ${itemId}`;
+    const beforeDelete = (await this.rootQueueRows()).map((row) => row.id);
+    await this.deleteSubAgent(CounterSubAgent, subAgentName);
+    const afterDelete = (await this.rootQueueRows()).map((row) => row.id);
+    return { beforeDelete, afterDelete };
+  }
+
+  async rootQueueRows(): Promise<
+    Array<{ id: string; callback: string; ownerPath: string | null }>
+  > {
+    return this.sql<{
+      id: string;
+      callback: string;
+      owner_path: string | null;
+    }>`
+      SELECT id,
+             fn AS callback,
+             json_extract(payload, '$.owner_path') AS owner_path
+      FROM cf_agents_jobs
+      WHERE capability = 'queue'
+      ORDER BY time
+    `.map((row) => ({
+      id: row.id,
+      callback: row.callback,
+      ownerPath: row.owner_path
+    }));
   }
 
   async subAgentScheduleInterval(

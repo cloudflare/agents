@@ -1,29 +1,36 @@
 import { RpcTarget } from "cloudflare:workers";
-import { newWorkersWebSocketRpcResponse } from "capnweb";
 import { nanoid } from "nanoid";
 import {
   LifecycleCapability,
   type CapabilityWebSocketUpgradeContext,
   type Connection,
+  type ConnectionContext,
   type ConnectionSetStateFn,
   type ConnectionState
 } from "../lifecycle";
+import { MessageType } from "../types";
+import { camelCaseToKebabCase } from "../utils";
 import {
   ConnectionManager,
   createConnection,
   isManagedWebSocket
 } from "./connection";
 import {
-  buildCallablesRoot,
-  exposableMethods,
-  type CallableInvoker
-} from "./callables-target";
+  ensureConnectionWrapped,
+  isConnectionProtocolEnabled,
+  isConnectionReadonly,
+  setConnectionProtocolEnabled,
+  setConnectionReadonly
+} from "./connection-flags";
+import { exposableMethods, type CallableInvoker } from "./callables-target";
 import type {
+  SyncedState,
   WebSocketHandlers,
   WebSocketMessage,
   WebSocketsOptions
 } from "./options";
-import { isCallablesRpcUpgrade } from "./protocol";
+import { openCapnWebSession, type CapnWebSession } from "./transport";
+import { isCapnWebTransportUpgrade } from "./transport-protocol";
 
 /**
  * Reserved close codes the runtime synthesizes when there was no real
@@ -51,23 +58,62 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
   }
 }
 
+/** The `rpc` request frame `useAgent().call` and `AgentClient.call` send. */
+type RpcRequest = {
+  readonly type: "rpc";
+  readonly id: string;
+  readonly method: string;
+  readonly args: unknown[];
+};
+
+type RpcResponse =
+  | { type: "rpc"; id: string; success: true; done: boolean; result: unknown }
+  | { type: "rpc"; id: string; success: false; error: string };
+
+/** The `cf_agent_state` frame a client sends to update host state. */
+type StateFrame = { readonly type: "cf_agent_state"; readonly state: unknown };
+
+function isStateFrame(value: unknown): value is StateFrame {
+  if (typeof value !== "object" || value === null) return false;
+  const frame = value as Record<string, unknown>;
+  return frame.type === MessageType.CF_AGENT_STATE && "state" in frame;
+}
+
+/** Parse a text frame; anything that is not JSON is `undefined`. */
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function isRpcRequest(value: unknown): value is RpcRequest {
+  if (typeof value !== "object" || value === null) return false;
+  const frame = value as Record<string, unknown>;
+  return (
+    frame.type === MessageType.RPC &&
+    typeof frame.id === "string" &&
+    typeof frame.method === "string" &&
+    Array.isArray(frame.args)
+  );
+}
+
 /**
  * Opt-in WebSocket support for Lifecycle Objects.
  *
  * Lifecycle itself does not model WebSockets — hosts that want them
  * install this capability, which owns the connection subsystem end to
- * end: it claims upgrades, accepts hibernating sockets, dispatches
- * `onConnect`/`onMessage`/`onClose` inside the host invocation
- * boundary, reciprocates close handshakes, and answers
- * `getConnections()`/`getConnection()`.
+ * end: it claims upgrades, dispatches `onConnect`/`onMessage`/`onClose`
+ * inside the host invocation boundary, reciprocates close handshakes,
+ * and answers `getConnections()`/`getConnection()`.
  *
  * ```ts
  * class Room extends DurableObject<Env> {
  *   readonly webSockets = new WebSockets({
  *     handlers: {
  *       onConnect: (connection) => connection.send("welcome"),
- *       onMessage: (connection, message) => { ... },
- *       onClose: (connection, code) => { ... }
+ *       onMessage: (connection, message) => { ... }
  *     },
  *     callables: new RoomCallables()
  *   });
@@ -75,51 +121,76 @@ function reciprocateClose(ws: WebSocket, code: number, reason: string): void {
  * }
  * ```
  *
- * `callables` exposes an `RpcTarget`'s prototype methods to remote
- * callers over a Cap'n Web session claimed from `?__agents_rpc=capnweb`
- * upgrades. Methods run through the host invocation boundary, may
- * return a `ReadableStream` to stream results, and emit
- * `rpc`/`rpc:error` capability events. Callable sessions are
- * non-hibernating: while a client holds one open, the Durable Object
- * stays pinned in memory.
+ * Connections arrive on one of two wires, chosen by the client:
  *
- * There is no separate browser client: against an `Agent`, the
- * `useAgent` hook's `stub`/`call` reach the same interface over the
- * protocol socket. A plain host's endpoint is reached with capnweb
- * directly — `newWebSocketRpcSession(new WebSocket(callablesRpcUrl(url)))`.
+ * - **cf-websocket** (default): accepted with the Hibernation API. Idle
+ *   clients stay connected while the Durable Object leaves memory.
+ * - **capnweb** (`?__agents_transport=capnweb`): protocol frames through
+ *   one pipe method on a Cap'n Web session whose root also carries the
+ *   host's callables natively. Non-hibernating — the object stays pinned
+ *   while the connection is open.
+ *
+ * Both wires dispatch the same handlers and appear in `getConnections()`.
+ * On both, the capability speaks the Agent protocol a plain host needs
+ * for `useAgent` and `AgentClient`: it sends the identity frame on
+ * connect, and it serves `callables` — as `rpc` JSON frames on the
+ * WebSocket wire, and natively on the Cap'n Web session root, where an
+ * `RpcTarget` result becomes a live stub and calls pipeline. `call()`
+ * and `stub` work against a plain Durable Object exactly as against an
+ * `Agent`. Pass a `State` capability as `state` and the hook's
+ * `state`/`setState` work too: the current value is pushed on connect
+ * and client updates are validated and applied; the state owner
+ * broadcasts changes with `broadcastState()`. Per-connection readonly
+ * and no-protocol flags live here as well, for every host.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export class WebSockets extends LifecycleCapability {
+  /** Claims every upgrade, so Lifecycle dispatches it after all others. */
+  override readonly claims = "catch-all";
+
   readonly #handlers: WebSocketHandlers | undefined;
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
-  readonly #callablesTarget: RpcTarget | undefined;
+  readonly #protocol: WebSocketsOptions["protocol"];
+  readonly #readonly: WebSocketsOptions["readonly"];
+  readonly #state: SyncedState | undefined;
+  /**
+   * Connections inside their connect sequence, before the state push.
+   * `broadcastState()` skips them: reading state for the push can seed the
+   * initial value, whose change broadcast would otherwise reach a
+   * connection that is about to receive the same value directly.
+   */
+  readonly #connecting = new Set<Connection>();
+  readonly #callables: ReadonlyMap<string, CallableInvoker>;
+  readonly #sessions = new Map<string, CapnWebSession>();
   #manager: ConnectionManager | undefined;
 
   constructor(options: WebSocketsOptions = {}) {
     super("websockets");
     this.#handlers = options.handlers;
     this.#getConnectionTags = options.getConnectionTags;
-    this.#callablesTarget = options.callables
-      ? this.#buildCallablesTarget(options.callables)
-      : undefined;
+    this.#protocol = options.protocol ?? true;
+    this.#readonly = options.readonly;
+    this.#state = options.state;
+    this.#callables = options.callables
+      ? exposableMethods(options.callables)
+      : new Map();
   }
 
   // ── Lifecycle capability hooks ─────────────────────────────────────────
 
-  /** Claim callables RPC upgrades and, with handlers, plain upgrades. */
+  /**
+   * Claim every upgrade, never declining: a Cap'n Web transport upgrade
+   * becomes a session, everything else a tracked hibernating connection,
+   * whether or not handlers or callables are configured. Handlers only add
+   * behavior on connect, message, close, and error.
+   */
   onWebSocketUpgrade({
     request
-  }: CapabilityWebSocketUpgradeContext):
-    | Promise<Response>
-    | Response
-    | undefined {
-    if (isCallablesRpcUpgrade(request)) {
-      if (!this.#callablesTarget) return undefined;
-      return newWorkersWebSocketRpcResponse(request, this.#callablesTarget);
-    }
-    if (!this.#handlers) return undefined;
-    return this.#acceptConnection(request);
+  }: CapabilityWebSocketUpgradeContext): Promise<Response> {
+    return isCapnWebTransportUpgrade(request)
+      ? this.#acceptCapnWebSession(request)
+      : this.#acceptConnection(request);
   }
 
   /** Dispatch a platform message wake for a capability-owned socket. */
@@ -128,11 +199,7 @@ export class WebSockets extends LifecycleCapability {
     message: WebSocketMessage
   ): Promise<boolean> {
     if (!isManagedWebSocket(ws)) return false;
-    const connection = createConnection(ws);
-    await this.lifecycle.runInHostContext(
-      () => this.#handlers?.onMessage?.(connection, message),
-      { connection }
-    );
+    await this.#message(createConnection(ws), message);
     return true;
   }
 
@@ -144,12 +211,8 @@ export class WebSockets extends LifecycleCapability {
     wasClean: boolean
   ): Promise<boolean> {
     if (!isManagedWebSocket(ws)) return false;
-    const connection = createConnection(ws);
     try {
-      await this.lifecycle.runInHostContext(
-        () => this.#handlers?.onClose?.(connection, code, reason, wasClean),
-        { connection }
-      );
+      await this.#close(createConnection(ws), code, reason, wasClean);
     } finally {
       reciprocateClose(ws, code, reason);
     }
@@ -159,11 +222,7 @@ export class WebSockets extends LifecycleCapability {
   /** Dispatch an error wake for an owned socket. */
   async onWebSocketError(ws: WebSocket, error: unknown): Promise<boolean> {
     if (!isManagedWebSocket(ws)) return false;
-    const connection = createConnection(ws);
-    await this.lifecycle.runInHostContext(
-      () => this.#handlers?.onError?.(connection, error),
-      { connection }
-    );
+    await this.#error(createConnection(ws), error);
     return true;
   }
 
@@ -184,15 +243,25 @@ export class WebSockets extends LifecycleCapability {
 
   // ── Connections ────────────────────────────────────────────────────────
 
-  /** Open connections accepted by this capability, optionally by tag. */
-  getConnections<TState = unknown>(
+  /** Open connections on either wire, optionally by tag. */
+  *getConnections<TState = unknown>(
     tag?: string
   ): IterableIterator<Connection<TState>> {
-    return this.#connectionManager.getConnections<TState>(tag);
+    for (const { connection } of this.#sessions.values()) {
+      if (connection.readyState !== WebSocket.OPEN) continue;
+      if (!tag || connection.tags.includes(tag)) {
+        yield connection as Connection<TState>;
+      }
+    }
+    yield* this.#connectionManager.getConnections<TState>(tag);
   }
 
-  /** One connection accepted by this capability, by id. */
+  /** One connection on either wire, by id. */
   getConnection<TState = unknown>(id: string): Connection<TState> | undefined {
+    const session = this.#sessions.get(id)?.connection;
+    if (session && session.readyState === WebSocket.OPEN) {
+      return session as Connection<TState>;
+    }
     return this.#connectionManager.getConnection<TState>(id);
   }
 
@@ -200,6 +269,93 @@ export class WebSockets extends LifecycleCapability {
     this.#manager ??= new ConnectionManager(this.lifecycle.sockets);
     return this.#manager;
   }
+
+  // ── Wire-independent protocol ──────────────────────────────────────────
+
+  async #connect(
+    connection: Connection,
+    ctx: ConnectionContext
+  ): Promise<void> {
+    ensureConnectionWrapped(connection);
+    // Flags first, so they are set before the client can respond.
+    if (this.#readonly?.(connection, ctx)) {
+      setConnectionReadonly(connection, true);
+    }
+    if (this.#protocol !== false) {
+      const enabled =
+        typeof this.#protocol === "function"
+          ? this.#protocol(connection, ctx)
+          : true;
+      if (enabled) {
+        this.#connecting.add(connection);
+        try {
+          this.sendIdentity(connection);
+          this.sendState(connection);
+        } finally {
+          this.#connecting.delete(connection);
+        }
+      } else {
+        setConnectionProtocolEnabled(connection, false);
+      }
+    }
+    await this.lifecycle.runInHostContext(
+      () => this.#handlers?.onConnect?.(connection, ctx),
+      { connection, request: ctx.request }
+    );
+  }
+
+  async #message(
+    connection: Connection,
+    message: WebSocketMessage
+  ): Promise<void> {
+    if (
+      this.#state &&
+      this.#protocol !== false &&
+      typeof message === "string"
+    ) {
+      const frame = parseJson(message);
+      if (isStateFrame(frame)) {
+        // Inside the host boundary, so the host's validator and change
+        // hook see the sending connection through the ambient context.
+        await this.lifecycle.runInHostContext(
+          () => this.applyStateFrame(connection, frame),
+          { connection }
+        );
+        return;
+      }
+    }
+    if (
+      this.#callables.size > 0 &&
+      (await this.#answerRpc(connection, message))
+    ) {
+      return;
+    }
+    await this.lifecycle.runInHostContext(
+      () => this.#handlers?.onMessage?.(connection, message),
+      { connection }
+    );
+  }
+
+  #close(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<unknown> {
+    return this.lifecycle.runInHostContext(
+      () => this.#handlers?.onClose?.(connection, code, reason, wasClean),
+      { connection }
+    );
+  }
+
+  #error(connection: Connection, error: unknown): Promise<unknown> {
+    return this.lifecycle.runInHostContext(
+      () => this.#handlers?.onError?.(connection, error),
+      { connection }
+    );
+  }
+
+  // ── Hibernating wire ───────────────────────────────────────────────────
 
   async #acceptConnection(request: Request): Promise<Response> {
     const { 0: clientWebSocket, 1: serverWebSocket } = new WebSocketPair();
@@ -233,40 +389,310 @@ export class WebSockets extends LifecycleCapability {
 
     // Hibernating WebSockets remain connected while the object is evicted.
     connection = this.#connectionManager.accept(connection, { tags });
-    await this.lifecycle.runInHostContext(
-      () => this.#handlers?.onConnect?.(connection, ctx),
-      { connection, request }
-    );
+    await this.#connect(connection, ctx);
 
     return new Response(null, { status: 101, webSocket: clientWebSocket });
+  }
+
+  // ── Cap'n Web wire ─────────────────────────────────────────────────────
+
+  async #acceptCapnWebSession(request: Request): Promise<Response> {
+    const connectionId =
+      new URL(request.url).searchParams.get("_pk") || nanoid();
+    // A reconnect reusing the id replaces the previous session.
+    this.#sessions.get(connectionId)?.dispose();
+
+    const { response } = await openCapnWebSession({
+      request,
+      connectionId,
+      tags: (connection, ctx) =>
+        this.#getConnectionTags?.(connection, ctx) ?? [],
+      onConnect: (connection, ctx) => this.#connect(connection, ctx),
+      onMessage: (connection, message) => this.#message(connection, message),
+      onClose: (connection, code, reason, wasClean) =>
+        this.#close(connection, code, reason, wasClean).then(() => undefined),
+      onError: (connection, error) =>
+        this.#error(connection, error).then(() => undefined),
+      callables: (connection) => this.#nativeCallables(connection),
+      onOpen: (session) => this.#sessions.set(connectionId, session),
+      onDispose: (ended) => {
+        if (this.#sessions.get(connectionId) === ended) {
+          this.#sessions.delete(connectionId);
+        }
+      }
+    });
+    return response;
+  }
+
+  // ── Protocol frames ────────────────────────────────────────────────────
+  //
+  // The Agent protocol a client (`useAgent`, `AgentClient`) speaks, owned
+  // here for every host. With `protocol: true` the capability drives the
+  // connect sequence and consumes state frames itself; with
+  // `protocol: false` the host calls these at the moments it chooses.
+
+  /**
+   * Send the identity frame, unless the connection is no-protocol. The
+   * defaults are the Durable Object's routed name and host class; a host
+   * whose public identity differs — an `Agent` facet, whose routed name
+   * is an internal encoding of its logical name — passes its own.
+   */
+  sendIdentity(
+    connection: Connection,
+    identity: { name: string; agent: string } = {
+      name: this.lifecycle.name,
+      agent: camelCaseToKebabCase(this.lifecycle.className)
+    }
+  ): void {
+    if (!isConnectionProtocolEnabled(connection)) return;
+    this.#sendFrame(connection, {
+      type: MessageType.CF_AGENT_IDENTITY,
+      name: identity.name,
+      agent: identity.agent
+    });
+  }
+
+  /**
+   * Send the current state to one connection, unless nothing is stored
+   * or the connection is no-protocol. Reading the state may seed the
+   * initial value; see `#connecting`.
+   */
+  sendState(connection: Connection): void {
+    if (!this.#state || !isConnectionProtocolEnabled(connection)) return;
+    const current = this.#state.get();
+    if (current === undefined) return;
+    this.#sendFrame(connection, {
+      type: MessageType.CF_AGENT_STATE,
+      state: current
+    });
+  }
+
+  /**
+   * Apply a parsed `cf_agent_state` frame from a client. A readonly
+   * connection is refused; a change the host's validator rejects is
+   * logged in full server-side and answered with a generic
+   * `cf_agent_state_error`. Broadcasting the accepted change is the state
+   * owner's call, through its `onChanged` hook. Callers that drive the
+   * protocol themselves call this inside their own invocation context;
+   * the capability's automatic path does so via `runInHostContext`.
+   *
+   * @returns Whether the frame was a state frame (handled either way).
+   */
+  applyStateFrame(connection: Connection, frame: unknown): boolean {
+    if (!this.#state || !isStateFrame(frame)) return false;
+    if (isConnectionReadonly(connection)) {
+      this.#sendFrame(connection, {
+        type: MessageType.CF_AGENT_STATE_ERROR,
+        error: "Connection is readonly"
+      });
+      return true;
+    }
+    try {
+      // `never` on the port keeps any `State<T>` assignable; the value
+      // came off the wire, so the host's validator is what checks it.
+      this.#state.set(frame.state as never, connection);
+    } catch (error) {
+      console.error("[WebSockets] State update rejected:", error);
+      this.#sendFrame(connection, {
+        type: MessageType.CF_AGENT_STATE_ERROR,
+        error: "State update rejected"
+      });
+    }
+    return true;
+  }
+
+  /**
+   * Push the current state to every protocol-enabled connection except
+   * the one a change came from, which already has the value it sent.
+   * Wire a `State`'s `onChanged` to this.
+   */
+  broadcastState(except?: Connection | "server"): void {
+    if (!this.#state) return;
+    const current = this.#state.get();
+    if (current === undefined) return;
+    const frame = { type: MessageType.CF_AGENT_STATE, state: current };
+    for (const connection of this.getConnections()) {
+      // Object identity, not id: `_pk` is client-supplied, so two live
+      // sockets can share an id, and excluding by id would starve the
+      // other one. `createConnection` returns one wrapper per socket.
+      if (connection === except) continue;
+      if (this.#connecting.has(connection)) continue;
+      if (!isConnectionProtocolEnabled(connection)) continue;
+      this.#sendFrame(connection, frame);
+    }
+  }
+
+  // ── Connection flags ───────────────────────────────────────────────────
+
+  /** Whether the connection may update host state over the wire. */
+  isReadonly(connection: Connection): boolean {
+    return isConnectionReadonly(connection);
+  }
+
+  /** Mark a connection readonly, or writable again. */
+  setReadonly(connection: Connection, readonly = true): void {
+    setConnectionReadonly(connection, readonly);
+  }
+
+  /** Whether protocol text frames reach the connection. */
+  isProtocolEnabled(connection: Connection): boolean {
+    return isConnectionProtocolEnabled(connection);
+  }
+
+  /** Enable or suppress protocol text frames for a connection. */
+  setProtocolEnabled(connection: Connection, enabled: boolean): void {
+    setConnectionProtocolEnabled(connection, enabled);
+  }
+
+  /**
+   * Send one protocol frame. Serialization is the caller's contract — every
+   * frame built here is plain JSON — while a send failure is tolerated: the
+   * peer may have disconnected between the wake and the send.
+   */
+  #sendFrame(connection: Connection, frame: Record<string, unknown>): void {
+    this.#send(connection, JSON.stringify(frame));
+  }
+
+  /** Write one already-serialized frame, tolerating a closed peer. */
+  #send(connection: Connection, text: string): void {
+    try {
+      connection.send(text);
+    } catch {
+      // The socket closed between the wake and the send.
+    }
   }
 
   // ── Callables ──────────────────────────────────────────────────────────
 
   /**
-   * Wrap a callables target for serving: every exposable method
-   * dispatches through the host invocation boundary and emits
-   * `rpc`/`rpc:error` events.
+   * The `callables` target as native Cap'n Web methods for one session:
+   * every method dispatches through the host boundary with this
+   * connection in scope and emits `rpc`/`rpc:error` events. Return values
+   * keep Cap'n Web semantics — an `RpcTarget` comes back as a live stub.
    */
-  #buildCallablesTarget(target: RpcTarget): RpcTarget {
-    const dispatching = new Map<string, CallableInvoker>();
-    for (const [name, invoke] of exposableMethods(target)) {
-      dispatching.set(name, (...args) =>
-        this.#dispatchCallable(name, () => invoke(...args))
+  #nativeCallables(
+    connection: Connection
+  ): ReadonlyMap<string, CallableInvoker> {
+    const methods = new Map<string, CallableInvoker>();
+    for (const [name, invoke] of this.#callables) {
+      methods.set(name, (...args) =>
+        this.#dispatchCallable(name, () => invoke(...args), connection)
       );
     }
-    return buildCallablesRoot(dispatching);
+    return methods;
+  }
+
+  /**
+   * Answer one `rpc` frame against `callables`. A `ReadableStream`
+   * result streams as `done: false` chunks followed by a final
+   * `done: true` frame, matching the client's stream callbacks.
+   *
+   * @returns Whether the message was an `rpc` frame (answered or not).
+   */
+  async #answerRpc(
+    connection: Connection,
+    raw: WebSocketMessage
+  ): Promise<boolean> {
+    if (typeof raw !== "string") return false;
+    let frame: unknown;
+    try {
+      frame = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    if (!isRpcRequest(frame)) return false;
+    const { id, method, args } = frame;
+
+    const invoke = this.#callables.get(method);
+    if (!invoke) {
+      this.#reply(connection, {
+        type: "rpc",
+        id,
+        success: false,
+        error: `Method ${method} does not exist`
+      });
+      return true;
+    }
+
+    try {
+      const result = await this.#dispatchCallable(
+        method,
+        () => invoke(...args),
+        connection
+      );
+      if (result instanceof RpcTarget) {
+        // By-reference results only exist on the Cap'n Web wire; a JSON
+        // frame would silently flatten the target to `{}`.
+        throw new Error(
+          `Method ${method} returns an RpcTarget, which only the capnweb transport can carry`
+        );
+      }
+      if (result instanceof ReadableStream) {
+        for await (const chunk of result) {
+          this.#reply(connection, {
+            type: "rpc",
+            id,
+            success: true,
+            done: false,
+            result: chunk
+          });
+        }
+        this.#reply(connection, {
+          type: "rpc",
+          id,
+          success: true,
+          done: true,
+          result: undefined
+        });
+      } else {
+        this.#reply(connection, {
+          type: "rpc",
+          id,
+          success: true,
+          done: true,
+          result
+        });
+      }
+    } catch (error) {
+      this.#reply(connection, {
+        type: "rpc",
+        id,
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    return true;
+  }
+
+  #reply(connection: Connection, response: RpcResponse): void {
+    let text: string;
+    try {
+      text = JSON.stringify(response);
+    } catch (error) {
+      // A result that JSON cannot carry (a BigInt, a cycle) must still
+      // settle the caller: answer with an error instead of silence.
+      text = JSON.stringify({
+        type: "rpc",
+        id: response.id,
+        success: false,
+        error: `Result is not JSON-serializable: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      } satisfies RpcResponse);
+    }
+    this.#send(connection, text);
   }
 
   async #dispatchCallable(
     name: string,
-    invoke: () => unknown
+    invoke: () => unknown,
+    connection: Connection
   ): Promise<unknown> {
     // Throws with installation guidance when the capability was never
     // installed with Lifecycle.use().
     const services = this.lifecycle;
     try {
-      const result = await services.runInHostContext(invoke);
+      const result = await services.runInHostContext(invoke, { connection });
       services.events.emit("rpc", {
         method: name,
         streaming: result instanceof ReadableStream

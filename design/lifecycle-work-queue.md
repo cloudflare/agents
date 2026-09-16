@@ -67,6 +67,9 @@ type LifecycleJobs = {
   list(): LifecycleJob[]; // sync SQL read
   rearm(): Promise<void>; // recover a lost alarm for existing jobs
 };
+
+// Available on Lifecycle and every capability's LifecycleServices:
+trackAlarmWork(work: Promise<unknown>): boolean; // current alarm only
 ```
 
 Every queue mutation re-arms the physical alarm automatically (deferred and
@@ -88,6 +91,49 @@ host invocation boundary; there is no host `onJobError` — a host job's
 terminal failure completes it, and the host re-derives its jobs from
 durable state); capability jobs dispatch outside ambient host context. Host `onAlarm()` survives: it runs once per alarm invocation after
 due jobs are driven. Host `getNextAlarm()` is removed.
+
+## The dispatch contract
+
+Four named rules define what a job owner can and cannot rely on:
+
+1. **Job ids are scoped to their owner.** Every queue verb — push
+   included — sees only the owner's own jobs. A same-id push replaces the
+   owner's job; a push whose id belongs to another owner throws instead
+   of clobbering. (Tasks additionally prefixes its wake jobs `task:` so
+   caller-selected run ids stay inside its own namespace.)
+2. **Dispatch must be bounded.** The event loop drives due jobs inline
+   and in order, so one long `onJob` delays every other job on the
+   object — this is the queue's biggest behavioral bet, learned the hard
+   way in the chat replatform. Detach unbounded work (start it, persist
+   durable evidence, return) rather than awaiting it in the hook. The
+   driver cannot safely abandon owner code, so the rule is enforced by
+   visibility: a dispatch that outlives the job's `hungTimeoutSeconds`
+   (default 30s) logs a warning and emits `job:slow_dispatch`. Work that must
+   continue after a bounded handoff registers its promise with
+   `trackAlarmWork()` so it remains part of the current alarm's breaker domain.
+3. **Newer pushes win over drive results.** Every dispatched job carries
+   a durable in-flight marker; a same-id `push()` or `reschedule()` made
+   while the job executes clears it, and `applyOutcome` only applies a
+   drive result to a still-marked job. The drive loop also refetches each
+   due job before claiming it, so a job replaced earlier in the same
+   alarm cycle dispatches with fresh data — or, if no longer due, is
+   skipped. An owner can therefore never lose a wake it explicitly
+   pushed mid-drive. Owners that both push and return outcomes for the
+   same job (Tasks) should derive both from the same durable state so
+   they always agree.
+4. **Platform failures abort the drive loop.** A platform-class failure
+   (superseded isolate, memory-limit reset, platform transient) preserves
+   the failing job and re-throws, deferring the _remaining_ due jobs to
+   the platform's alarm retry. This is deliberate: platform failures are
+   properties of the isolate, not the job, so later jobs would fail the
+   same way, and the retry runs on a fresh invocation.
+
+Everything else about drive order — in particular the interleaving of
+different owners' jobs within one alarm cycle — is unspecified. Owners may
+not depend on cross-owner ordering; lanes, fairness, or parallel dispatch
+of independent owners can arrive later without a contract change. At-least-once
+delivery is the only delivery guarantee: a crash between a job's side
+effects and its outcome re-runs the job, so `onJob` must be replay-safe.
 
 ## The event loop
 
@@ -115,12 +161,19 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
      complete);
    - the drive result is applied: delete, retime, or leave due.
 4. Run host `onAlarm()`.
-5. Re-arm the physical alarm from queue state.
+5. Clear the memory-limit strike counter, unless work registered through
+   `trackAlarmWork()` is still outstanding.
+6. Re-arm the physical alarm from queue state.
 
-Startup and steps 3–4 run inside the alarm memory-limit circuit breaker
+Startup and steps 3–5 run inside the alarm memory-limit circuit breaker
 (initialization included because a severe reset can be thrown during boot
 hydration, before any job runs — the original #1825 case), moved here from
-`Agent.alarm()`: the durable strike counter (`cf_agents:oom_alarm_strikes`)
+`Agent.alarm()`. Registered work extends that boundary past the alarm's
+return: a memory reset it reports records a strike against the job that
+registered it (one strike per reset, however many flows observe it), and the
+strike counter clears only once no registered work is outstanding and the last
+of it settled clean. The durable strike counter
+(`cf_agents:oom_alarm_strikes`)
 tolerates `maxAlarmMemoryLimitStrikes` consecutive resets (composition-root
 aperture; default 3), backs off the executing job, then seals — purging the
 executing job and invoking the host's `onAlarmMemoryLimit()` hook. After a

@@ -1,7 +1,7 @@
 /**
  * Telnyx TTS provider for the Cloudflare Agents SDK.
  *
- * Implements TTSProvider and StreamingTTSProvider from @cloudflare/voice,
+ * Implements TTSProvider and StreamingTTSProvider from agents/voice,
  * with two backend options:
  *
  * - **REST** (default): `POST /v2/text-to-speech/speech` — one HTTP request
@@ -17,12 +17,12 @@
  * regardless of format parameters.
  */
 
-import type { TTSProvider, StreamingTTSProvider } from "@cloudflare/voice";
+import type { TTSProvider, StreamingTTSProvider } from "agents/voice";
 import {
   logVoiceError,
   toVoiceError,
   VoiceProviderError
-} from "@cloudflare/voice/errors";
+} from "agents/voice/errors";
 import { TelnyxClient, type TelnyxClientConfig } from "../client.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ import {
   identityKey,
   type ChannelIdentity,
   type UserIdentity
-} from "@cloudflare/channels";
+} from "agents/channels";
 import type { ConversationPage, UserPage } from "../types";
 import { provider, ProviderAvatar, ProviderBadge, userLabel } from "./shared";
 

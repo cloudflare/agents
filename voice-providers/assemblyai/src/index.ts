@@ -8,12 +8,12 @@ import type {
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions
-} from "@cloudflare/voice";
+} from "agents/voice";
 import {
   logVoiceError,
   toVoiceError,
   VoiceProviderError
-} from "@cloudflare/voice/errors";
+} from "agents/voice/errors";
 
 /**
  * Latency/accuracy preset → `mode`. `balanced` (the server default) is best for
@@ -297,7 +297,7 @@ function assertValidOptions(opts: AssemblyAISTTOptions): void {
  * @example
  * ```ts
  * import { Agent } from "agents";
- * import { withVoice, WorkersAITTS } from "@cloudflare/voice";
+ * import { withVoice, WorkersAITTS } from "agents/voice";
  * import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
  *
  * const VoiceAgent = withVoice(Agent);

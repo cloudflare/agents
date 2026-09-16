@@ -5,10 +5,10 @@
  * without needing a real LLM provider.
  */
 
-import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
-import { Session } from "agents/experimental/memory/session";
+import type { Session } from "../../think";
 import type { ObservabilityEvent } from "agents/observability";
 import { Think } from "../../think";
 import type {
@@ -19,6 +19,8 @@ import type {
   ToolCallDecision,
   ToolCallResultContext,
   StepContext,
+  PrepareStepContext,
+  StepConfig,
   TurnContext
 } from "../../think";
 
@@ -112,7 +114,9 @@ function createMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
-function createMockToolModel(onCall?: () => void): LanguageModel {
+function createMockToolModel(
+  onCall?: (options: unknown) => void
+): LanguageModel {
   let toolCallCount = 0;
   return {
     specificationVersion: "v3",
@@ -123,7 +127,7 @@ function createMockToolModel(onCall?: () => void): LanguageModel {
       throw new Error("doGenerate not implemented in mock");
     },
     doStream(options: Record<string, unknown>) {
-      onCall?.();
+      onCall?.(options);
       toolCallCount++;
       const messages = (options as { prompt?: unknown[] }).prompt ?? [];
       const hasToolResult = messages.some(
@@ -432,6 +436,7 @@ function promptIncludesMarker(options: unknown): boolean {
  * actually substituted the recompacted head — not just that the turn finished.
  */
 function extractToolPairing(options: unknown): {
+  prompt: string;
   toolCalls: string[];
   toolResults: string[];
   hasSummary: boolean;
@@ -454,6 +459,7 @@ function extractToolPairing(options: unknown): {
   }
   const json = JSON.stringify(prompt);
   return {
+    prompt: json,
     toolCalls,
     toolResults,
     hasSummary: json.includes("compacted-summary"),
@@ -698,7 +704,9 @@ export class OverflowRecoveryTestAgent extends Think {
   modelCalls = 0;
   proactiveMode = false;
   proactiveMultiFire = false;
+  stepMessages?: "append" | ModelMessage[];
   compactionNoOp = false;
+  compactionThrows = false;
   alwaysOverflow = false;
   emitPartialBeforeOverflow = false;
   abortDuringRecovery = false;
@@ -712,6 +720,7 @@ export class OverflowRecoveryTestAgent extends Think {
   compactionEventPayloads: Array<Record<string, unknown>> = [];
   /** Tool-call/result pairing + recompacted-head presence per model step (multi-fire). */
   proactiveStepPrompts: Array<{
+    prompt: string;
     toolCalls: string[];
     toolResults: string[];
     hasSummary: boolean;
@@ -723,6 +732,22 @@ export class OverflowRecoveryTestAgent extends Think {
 
   override beforeTurn(ctx: TurnContext): void {
     this.beforeTurnContinuations.push(ctx.continuation);
+  }
+
+  override beforeStep(
+    ctx: PrepareStepContext
+  ): (StepConfig & { messages: ModelMessage[] }) | void {
+    if (this.stepMessages === "append") {
+      return {
+        messages: [
+          ...ctx.messages,
+          { role: "user", content: "Additional per-step context" }
+        ]
+      };
+    }
+    if (ctx.stepNumber > 0 && this.stepMessages) {
+      return { messages: this.stepMessages };
+    }
   }
 
   override _emit(
@@ -765,7 +790,7 @@ export class OverflowRecoveryTestAgent extends Think {
       // prompt (to assert compaction actually removed it on the retry).
       const onCall = (options?: unknown) => {
         this.modelCalls++;
-        if (this.proactiveMultiFire) {
+        if (this.proactiveMode) {
           // Capture the spliced prompt's tool pairing + recompacted-head
           // presence per step, so the multi-fire test can assert structural
           // integrity (not just a clean completion).
@@ -814,6 +839,7 @@ export class OverflowRecoveryTestAgent extends Think {
   override configureSession(session: Session): Session {
     return session.onCompaction(async (messages) => {
       this.compactionCount++;
+      if (this.compactionThrows) throw new Error("Test compaction failed");
       // `compactionNoOp` simulates a history that can't be shortened (e.g. one
       // tool result alone exceeds the window) so the reactive backstop must
       // fall through to a terminal error instead of looping.
@@ -997,6 +1023,7 @@ export class OverflowRecoveryTestAgent extends Think {
   /** Per-step tool pairing + recompacted-head presence (multi-fire proactive). */
   async getProactiveStepPrompts(): Promise<
     Array<{
+      prompt: string;
       toolCalls: string[];
       toolResults: string[];
       hasSummary: boolean;
@@ -1012,7 +1039,11 @@ export class OverflowRecoveryTestAgent extends Think {
    * mid-turn before the next step. Reactive backstop is left off to isolate the
    * proactive path.
    */
-  async testProactive(message: string): Promise<OverflowChatResult> {
+  async testProactive(
+    message: string,
+    stepMessages?: "append" | ModelMessage[]
+  ): Promise<OverflowChatResult> {
+    this.stepMessages = stepMessages;
     this.proactiveMode = true;
     this.compactionNoOp = false;
     this.compactionCount = 0;
@@ -1116,7 +1147,12 @@ export class OverflowRecoveryTestAgent extends Think {
    * that a persistent no-op cannot emit/compact on every step. The turn still
    * completes (proactive failure is best-effort; the step proceeds uncompacted).
    */
-  async testProactiveNoOp(message: string): Promise<OverflowChatResult> {
+  async testProactiveNoOp(
+    message: string,
+    compactionThrows = false
+  ): Promise<OverflowChatResult> {
+    this.stepMessages = "append";
+    this.compactionThrows = compactionThrows;
     this.proactiveMode = true;
     this.proactiveMultiFire = true;
     this.compactionNoOp = true;

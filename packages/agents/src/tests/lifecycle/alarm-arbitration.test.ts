@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
+import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 
 describe("Lifecycle job queue", () => {
   it("drives due capability and host jobs before the host alarm hook", async () => {
@@ -73,5 +74,86 @@ describe("Lifecycle job queue", () => {
     expect(alarm).not.toBeNull();
     expect(alarm as number).toBeGreaterThanOrEqual(before + 59_000);
     expect(alarm as number).toBeLessThanOrEqual(Date.now() + 61_000);
+  });
+
+  it("lets a same-id push made mid-dispatch survive the drive outcome", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    await stub.startFromRpc({ label: "rpc" });
+    const futureTime = Date.now() + 120_000;
+    await stub.armRepushProbeJob(futureTime);
+
+    await vi.waitFor(
+      async () => {
+        expect(await stub.getEvents()).toContain("capability:job:repush");
+      },
+      { timeout: 10_000 }
+    );
+
+    // The handler completed (outcome: delete), but its mid-dispatch push is
+    // newer durable intent — the job must survive at the pushed time.
+    const survivor = await stub.getProbeJob("repush-probe");
+    expect(survivor).toEqual({ fn: "tick", time: futureTime });
+  });
+
+  it("skips a due job's stale snapshot after an earlier dispatch retimed it", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    await stub.startFromRpc({ label: "rpc" });
+    const futureTime = Date.now() + 120_000;
+    await stub.armStaleSnapshotProbe(futureTime);
+
+    await vi.waitFor(
+      async () => {
+        expect(await stub.getEvents()).toContain("capability:job:retime-other");
+      },
+      { timeout: 10_000 }
+    );
+
+    // The victim was due in the same batch, but the retimer moved it to the
+    // future first: its stale snapshot must not have dispatched, and the
+    // retimed job must survive untouched.
+    expect(await stub.getEvents()).not.toContain("capability:job:tick");
+    expect(await stub.getProbeJob("victim")).toEqual({
+      fn: "tick",
+      time: futureTime
+    });
+  });
+
+  it("scopes job ids to their owner instead of clobbering across owners", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    await stub.startFromRpc({ label: "rpc" });
+
+    const { error, probeJobTime } = await stub.pushForeignIdForTest();
+    expect(error).toMatch(/already belongs to "job-probe"/);
+    // The contested job is untouched: still the first owner's, at its time.
+    expect(probeJobTime).not.toBeNull();
+    expect(probeJobTime as number).toBeGreaterThan(Date.now() + 30_000);
+  });
+
+  it("warns and emits telemetry when one dispatch runs long", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.PlainLifecycleObject.getByName(name);
+    const capture = captureDiagnosticsEvents("agents:lifecycle", name);
+    try {
+      await stub.startFromRpc({ label: "rpc" });
+      await stub.armSlowProbeJob();
+
+      await vi.waitFor(
+        async () => {
+          expect(await stub.getEvents()).toContain("capability:job:slow");
+          const slow = capture.events.find(
+            (event) => event.type === "job:slow_dispatch"
+          );
+          expect(slow).toBeDefined();
+          expect(slow?.payload).toMatchObject({
+            capability: "job-probe",
+            fn: "slow",
+            id: "slow-probe"
+          });
+        },
+        { timeout: 10_000 }
+      );
+    } finally {
+      capture.stop();
+    }
   });
 });

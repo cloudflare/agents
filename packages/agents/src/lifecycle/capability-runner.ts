@@ -1,7 +1,11 @@
 import { lifecycleCapabilityId } from "./capability";
 import type { LifecycleRouteContext } from "./capability";
 import type { WSMessage } from "./types";
-import type { LifecycleJobContext, LifecycleJobOutcome } from "./job-queue";
+import type {
+  LifecycleJob,
+  LifecycleJobContext,
+  LifecycleJobOutcome
+} from "./job-queue";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -39,6 +43,37 @@ export type CapabilityWebSocketUpgradeContext = {
 };
 
 /**
+ * Context supplied when the alarm memory-limit circuit breaker records a
+ * strike (#1825), to capabilities and the host alike.
+ */
+export type MemoryLimitContext = {
+  /** Whether the breaker hit its strike budget and sealed recovery work. */
+  readonly sealed: boolean;
+  /** The backoff wake time (epoch ms) armed for an unsealed strike. */
+  readonly nextTime?: number;
+  /**
+   * The queue job that was executing when the strike landed. Absent when the
+   * reset happened during startup or host alarm work. Lifecycle has already
+   * backed off or purged its row before invoking memory-limit policy.
+   *
+   * Capabilities whose durable state outlives their queue row use this to
+   * apply the same policy to the underlying work — Tasks routes a struck
+   * routed job's owner this way (see `setTaskRoutedMemoryLimitHandler`).
+   */
+  readonly executing?: LifecycleJob;
+  /**
+   * Recovery-loop jobs removed when this strike sealed the breaker. This is
+   * a pre-purge snapshot because the durable rows no longer exist when
+   * policy hooks run. No current capability reads this — Scheduler's own
+   * former use of it (routing a sealed strike to every purged row's owning
+   * dynamic agent) was retired once Tasks took over routed chat-recovery
+   * wakes — but it stays available for a capability whose routed rows can
+   * be purged as a pack, unlike Tasks' one-run-at-a-time model.
+   */
+  readonly purgedRecoveryLoopJobs?: ReadonlyArray<LifecycleJob>;
+};
+
+/**
  * A capability installed into a Durable Object lifecycle.
  *
  * Capabilities extending `LifecycleCapability` receive the standard storage,
@@ -55,9 +90,9 @@ export type CapabilityWebSocketUpgradeContext = {
  *
  * Dispatch contract, hook by hook:
  * - `onRequest` and `onWebSocketUpgrade` are offered in declaration
- *   order; the first capability to return a `Response` claims the
- *   request, and a claimed upgrade's socket belongs to that capability
- *   for its whole lifetime.
+ *   order, the catch-all last; the first capability to return a `Response`
+ *   claims the request, and a claimed upgrade's socket belongs to that
+ *   capability for its whole lifetime.
  * - `onWebSocketMessage`/`onWebSocketClose`/`onWebSocketError` are
  *   platform wakes, offered in declaration order; return `true` to
  *   consume one. Socket ownership is the capability's to determine —
@@ -70,6 +105,20 @@ export type CapabilityWebSocketUpgradeContext = {
  * @experimental The API surface may change before stabilizing.
  */
 export interface DurableObjectCapability<Props extends object = object> {
+  /**
+   * How this capability claims traffic. Default: `"selective"`.
+   *
+   * A `"selective"` capability answers only requests and upgrades it
+   * recognizes and declines the rest. A `"catch-all"` claims everything
+   * offered to the hooks it implements, so Lifecycle always places it
+   * last, whenever it was installed, and refuses a second catch-all for
+   * the same hook. Catch-alls for disjoint hooks coexist: `WebSockets`
+   * claims every upgrade and implements no `onRequest`, so an HTTP
+   * catch-all installs beside it. Selective HTTP capabilities target
+   * their own routes and run before either.
+   */
+  readonly claims?: "selective" | "catch-all";
+
   /** Initialize or recover the capability before the host handles work. */
   onStart?(context: CapabilityStartContext<Props>): MaybePromise<void>;
 
@@ -124,6 +173,12 @@ export interface DurableObjectCapability<Props extends object = object> {
    * Drive one due job this capability pushed into the Lifecycle queue.
    * Return an outcome to reschedule or retain the job; returning nothing
    * completes it.
+   *
+   * Dispatch must be bounded: the event loop awaits each job inline, so a
+   * long-running `onJob` delays every other job on this object. Detach
+   * unbounded work (start it, keep durable evidence, return) instead of
+   * awaiting it here; a dispatch that outlives the job's hung timeout
+   * logs a warning and emits `job:slow_dispatch`.
    */
   onJob?(
     context: LifecycleJobContext
@@ -138,6 +193,15 @@ export interface DurableObjectCapability<Props extends object = object> {
     context: LifecycleJobContext,
     error: unknown
   ): MaybePromise<LifecycleJobOutcome | void>;
+
+  /**
+   * Apply domain policy after the alarm memory-limit circuit breaker
+   * records a strike (#1825). Lifecycle has already handled the queue: the
+   * executing job and every `recoveryLoop`-flagged job are backed off (or
+   * purged when `sealed`). Runs at the outermost alarm frame, post-unwind,
+   * best-effort — the isolate resets right after, so keep writes small.
+   */
+  onMemoryLimit?(context: MemoryLimitContext): MaybePromise<void>;
 
   /** Handle one message routed to this capability identity. */
   onRoute?(context: LifecycleRouteContext): MaybePromise<unknown>;
@@ -308,6 +372,24 @@ export class CapabilityRunner<Props extends object = object> {
       );
     }
     return capability.onRoute(context);
+  }
+
+  /**
+   * Offer a memory-limit strike to every capability, best-effort.
+   *
+   * Deliberately not gated on startup: a strike can land while startup
+   * itself is the work that exceeded the memory limit, and the breaker's
+   * policy must still reach capabilities. One capability's failure does not
+   * stop the next — the isolate is about to reset either way.
+   */
+  async memoryLimit(context: MemoryLimitContext): Promise<void> {
+    for (const capability of this.#getCapabilities()) {
+      try {
+        await capability.onMemoryLimit?.(context);
+      } catch (error) {
+        console.error("Lifecycle capability memory-limit policy failed", error);
+      }
+    }
   }
 
   /** Dispose installed capabilities in reverse registration order. */

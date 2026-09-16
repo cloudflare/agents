@@ -21,7 +21,8 @@ import {
   LifecycleCapability,
   type LifecycleHostContextScope,
   type LifecycleRouteAddress,
-  type LifecycleServices
+  type LifecycleServices,
+  type LifecycleStatus
 } from "./capability";
 import {
   runInLifecycleHostContext,
@@ -36,7 +37,8 @@ export {
   type CapabilityWebSocketUpgradeContext,
   type LifecycleEvent,
   type CapabilityStartContext,
-  type DurableObjectCapability
+  type DurableObjectCapability,
+  type MemoryLimitContext
 } from "./capability-runner";
 export {
   type LifecycleJobContext,
@@ -139,19 +141,15 @@ export function setLifecycleEventSink<
   lifecycleEventSinks.set(lifecycle, sink);
 }
 
-const lifecycleMemoryLimitStrikeBudgets = new WeakMap<object, number>();
-
-/**
- * @internal Set the consecutive alarm memory-limit strikes tolerated before
- * the Lifecycle circuit breaker seals recovery work (#1825). Composition
- * roots (Agent) supply their configured budget; the default is 3.
- */
-export function setLifecycleAlarmMemoryLimitStrikes<
-  Env extends object,
-  Props extends Record<string, unknown>
->(lifecycle: Lifecycle<Env, Props>, maxStrikes: number): void {
-  lifecycleMemoryLimitStrikeBudgets.set(lifecycle, maxStrikes);
-}
+/** Configuration accepted when constructing a {@link Lifecycle}. */
+export type LifecycleOptions = {
+  /**
+   * Consecutive alarm invocations that may end in a Durable Object
+   * memory-limit reset before the circuit breaker (#1825) seals recovery
+   * work instead of backing it off. Default: 3.
+   */
+  readonly maxAlarmMemoryLimitStrikes?: number;
+};
 
 /**
  * Installs and coordinates the runtime lifecycle for a Durable Object.
@@ -162,6 +160,9 @@ export function setLifecycleAlarmMemoryLimitStrikes<
  *
  * @experimental The API surface may change before stabilizing.
  */
+/** The dispatch hooks a catch-all can monopolize; uniqueness is per hook. */
+const CATCH_ALL_HOOKS = ["onRequest", "onWebSocketUpgrade"] as const;
+
 export class Lifecycle<
   Env extends object = Cloudflare.Env,
   Props extends Record<string, unknown> = Record<string, unknown>
@@ -176,7 +177,7 @@ export class Lifecycle<
   readonly #jobQueue: JobQueue;
   readonly #jobDriver: JobDriver;
 
-  #status: "zero" | "starting" | "started" = "zero";
+  #status: LifecycleStatus = "zero";
   #alarmRearmQueue: Promise<void> = Promise.resolve();
   #rearmRequestedDuringStart = false;
   #pendingEvents: LifecycleEvent[] = [];
@@ -193,8 +194,11 @@ export class Lifecycle<
   static install<
     Env extends object,
     Props extends Record<string, unknown> = Record<string, unknown>
-  >(host: DurableObject<Env>): Lifecycle<Env, Props> {
-    const lifecycle = new Lifecycle<Env, Props>(host);
+  >(
+    host: DurableObject<Env>,
+    options?: LifecycleOptions
+  ): Lifecycle<Env, Props> {
+    const lifecycle = new Lifecycle<Env, Props>(host, options);
     lifecycle.installHandlers();
     return lifecycle;
   }
@@ -203,8 +207,9 @@ export class Lifecycle<
    * Bind a lifecycle to a Durable Object instance without mutating its handlers.
    *
    * @param host - The Durable Object whose runtime lifecycle this object owns.
+   * @param options - Policy configuration for this lifecycle.
    */
-  constructor(host: DurableObject<Env>) {
+  constructor(host: DurableObject<Env>, options?: LifecycleOptions) {
     // SAFETY: DurableObject exposes ctx as protected to subclasses. The
     // lifecycle is constructed by that subclass with `this`, so this boundary
     // accesses the same runtime-owned context without exposing it publicly.
@@ -217,11 +222,15 @@ export class Lifecycle<
       storage: this.#ctx.storage,
       disabled: () => this.#alarmsDisabled,
       resolveDispatch: (owner) => this.#resolveJobDispatch(owner),
-      maxMemoryLimitStrikes: () => lifecycleMemoryLimitStrikeBudgets.get(this),
-      onMemoryLimit: (context) =>
-        runInLifecycleHostContext({ host: this.#host }, () =>
+      maxMemoryLimitStrikes: () => options?.maxAlarmMemoryLimitStrikes,
+      onMemoryLimit: async (context) => {
+        // Capabilities first (each best-effort inside the runner), then the
+        // host hook — a failed capability policy must not silence the host's.
+        await this.#capabilityRunner.memoryLimit(context);
+        await runInLifecycleHostContext({ host: this.#host }, () =>
           this.#host.onAlarmMemoryLimit?.(context)
-        ),
+        );
+      },
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
       rearm: () => this.rearmAlarm(),
@@ -268,7 +277,14 @@ export class Lifecycle<
   /**
    * Add a reusable capability before this lifecycle starts.
    *
-   * @param capability - The capability to add in dispatch order.
+   * Capabilities dispatch in registration order, except that a capability
+   * declaring `claims: "catch-all"` always comes last, whenever it was
+   * installed. Catch-alls are unique per dispatch hook: two may coexist
+   * when they claim disjoint traffic (one `onRequest`, one
+   * `onWebSocketUpgrade`), but a second catch-all for the same hook could
+   * never be reached and is refused.
+   *
+   * @param capability - The capability to add.
    * @returns This lifecycle.
    */
   use(capability: DurableObjectCapability<Props>): this {
@@ -286,7 +302,33 @@ export class Lifecycle<
         `Lifecycle capability ${JSON.stringify(capabilityId)} is already installed`
       );
     }
-    this.#capabilities.push(capability);
+
+    const catchAllIndex = this.#capabilities.findIndex(
+      (candidate) => candidate.claims === "catch-all"
+    );
+    if (capability.claims === "catch-all") {
+      for (const hook of CATCH_ALL_HOOKS) {
+        if (!capability[hook]) continue;
+        const rival = this.#capabilities.find(
+          (candidate) => candidate.claims === "catch-all" && candidate[hook]
+        );
+        if (!rival) continue;
+        const installed = lifecycleCapabilityId(rival);
+        throw new Error(
+          `Lifecycle already has a catch-all for ${hook}${
+            installed ? ` (${JSON.stringify(installed)})` : ""
+          }; a second one could never be reached`
+        );
+      }
+      this.#capabilities.push(capability);
+    } else {
+      this.#capabilities.splice(
+        catchAllIndex === -1 ? this.#capabilities.length : catchAllIndex,
+        0,
+        capability
+      );
+    }
+
     if (capability instanceof LifecycleCapability) {
       bindLifecycleCapability(
         capability,
@@ -304,6 +346,10 @@ export class Lifecycle<
       payload
     });
     return Object.freeze({
+      get name() {
+        return lifecycle.name;
+      },
+      className: this.#parentClassName,
       storage: this.#ctx.storage,
       sockets: Object.freeze({
         accept: (ws: WebSocket, tags: string[]) =>
@@ -311,8 +357,10 @@ export class Lifecycle<
         get: (tag?: string) => this.#ctx.getWebSockets(tag)
       }),
       ready: () => this.#readyForCapabilityOperation(),
-      starting: () => this.#status === "starting",
+      status: () => this.#status,
       jobs: this.#jobsForOwner(capabilityId),
+      trackAlarmWork: (work: Promise<unknown>) =>
+        this.#jobDriver.trackAlarmWork(work),
       runInHostContext: async (
         fn: () => unknown,
         scope?: LifecycleHostContextScope
@@ -732,6 +780,17 @@ export class Lifecycle<
       });
     this.#alarmRearmQueue = next;
     await next;
+  }
+
+  /**
+   * Keep work a job handed off at a bounded return inside the current
+   * alarm's memory-limit breaker domain (#1825). Hosts call this where a
+   * queue-driven callback detaches long work and returns.
+   *
+   * @returns True when called during an alarm invocation; false otherwise.
+   */
+  trackAlarmWork(work: Promise<unknown>): boolean {
+    return this.#jobDriver.trackAlarmWork(work);
   }
 
   /** Dispose installed capabilities in reverse registration order. */

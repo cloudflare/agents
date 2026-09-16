@@ -19,7 +19,6 @@ export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
  */
 export { withInvocationScope as __DO_NOT_USE_WILL_BREAK__withInvocationScope } from "./observability/tracing/tracer";
 import {
-  SUB_PREFIX,
   parseSubAgentPath as _parseSubAgentPath,
   type AgentPathStep
 } from "./sub-routing";
@@ -36,6 +35,38 @@ export type {
   BuildAgentPathOptions,
   SubAgentPathMatch
 } from "./sub-routing";
+import {
+  isClosedWebSocketSendError,
+  registerFacetStreamingDelivery,
+  sendFacetRpcResponseIfOpen,
+  sendFacetStreamingResponse,
+  DynamicAgentConnectionBridge as SubAgentConnectionBridge,
+  dynamicAgentRpcReplyContext as subAgentRpcReplyContext,
+  waitForFacetStreamingResponseDeliveries
+} from "./dynamic-agents/bridges";
+import {
+  CF_SUB_AGENT_OUTER_URL_KEY,
+  CF_SUB_AGENT_TAGS_KEY,
+  SUB_AGENT_OUTER_URL_HEADER
+} from "./dynamic-agents/dynamic-agents";
+import { logicalNameFromPathV2Identity } from "./dynamic-agents/identity";
+import { DynamicAgentsInternal } from "./dynamic-agents/dynamic-agents";
+import { DynamicAgents as DynamicAgentsApi } from "./dynamic-agents/api";
+import type { DynamicAgentHostPort } from "./dynamic-agents/host";
+import type {
+  FacetCapableCtx,
+  RootFacetRpcSurface,
+  DynamicAgentClass as SubAgentClass,
+  DynamicAgentConnectionMeta as SubAgentConnectionMeta,
+  DynamicAgentPathInvokeEndpoint as SubAgentPathInvokeEndpoint,
+  DynamicAgentStub as SubAgentStub
+} from "./dynamic-agents/types";
+export type {
+  DynamicAgentClass,
+  DynamicAgentStub,
+  DynamicAgentClass as SubAgentClass,
+  DynamicAgentStub as SubAgentStub
+} from "./dynamic-agents/types";
 import { signAgentHeaders, type SendEmailOptions } from "./email";
 import { sendAgentEmail } from "./email-send";
 export type { EmailSendBinding, SendEmailOptions } from "./email";
@@ -48,11 +79,11 @@ import {
 } from "cloudflare:workers";
 import {
   type LifecycleJobContext,
+  type MemoryLimitContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
   type LifecycleJobOutcome,
-  setLifecycleAlarmMemoryLimitStrikes,
   setLifecycleEventSink,
   setLifecycleHostInvoker,
   setLifecycleRouteTransport,
@@ -66,7 +97,16 @@ import {
   type CurrentAgentContext
 } from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
-import { callablesFromDecorated, WebSockets } from "./websockets";
+import { WebSockets } from "./websockets";
+import {
+  ensureConnectionWrapped,
+  getConnectionFlag,
+  isConnectionProtocolEnabled as connectionProtocolEnabled,
+  isConnectionReadonly as connectionReadonly,
+  registerInternalConnectionKeys,
+  setConnectionFlag,
+  setConnectionReadonly as markConnectionReadonly
+} from "./websockets/connection-flags";
 export {
   getAgentByName,
   routeAgentRequest,
@@ -126,8 +166,26 @@ import { RPC_DO_PREFIX } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
-import type { Schedule, ScheduleCriteria } from "./schedules/types";
-export type { Schedule, ScheduleCriteria } from "./schedules/types";
+import { Queue, setQueueCallbackResolver } from "./queue/queue";
+import type { QueueItem } from "./queue/types";
+export type { QueueItem } from "./queue/types";
+import {
+  Tasks,
+  setTaskDefinitionResolver,
+  setTaskRoutedMemoryLimitHandler
+} from "./tasks/tasks";
+import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
+import type {
+  Schedule,
+  ScheduleCriteria,
+  ScheduleOptions
+} from "./schedules/types";
+export type {
+  Schedule,
+  ScheduleCriteria,
+  ScheduleOptions
+} from "./schedules/types";
+import { State } from "./state";
 export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
@@ -245,13 +303,6 @@ function runInInvocation<T>(
   return agentContext.run(store, () => withInvocationScope(body, options));
 }
 
-function isClosedWebSocketSendError(error: unknown): boolean {
-  return (
-    error instanceof TypeError &&
-    error.message.includes("WebSocket send() after close")
-  );
-}
-
 function sendRpcResponseIfOpen(
   connection: Connection,
   response: RPCResponse
@@ -262,92 +313,6 @@ function sendRpcResponseIfOpen(
   } catch (error) {
     if (isClosedWebSocketSendError(error)) return false;
     throw error;
-  }
-}
-
-type RPCReplyTarget = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
-};
-
-type FacetRPCResponseDelivery = {
-  sent: boolean;
-  completion: Promise<void>;
-};
-
-type SubAgentRpcReplyInvocationContext = {
-  bridge?: SubAgentConnectionBridge;
-};
-
-const subAgentRpcReplyContext =
-  new AsyncLocalStorage<SubAgentRpcReplyInvocationContext>();
-
-function sendFacetRpcResponseIfOpen(
-  target: RPCReplyTarget,
-  response: RPCResponse
-): FacetRPCResponseDelivery {
-  try {
-    const completion = Promise.resolve(
-      target.send(JSON.stringify(response))
-    ).catch((error: unknown) => {
-      if (!isClosedWebSocketSendError(error)) {
-        console.error("[Agent] Facet RPC response delivery failed:", error);
-      }
-    });
-    return { sent: true, completion };
-  } catch (error) {
-    if (isClosedWebSocketSendError(error)) {
-      return { sent: false, completion: Promise.resolve() };
-    }
-    throw error;
-  }
-}
-
-type FacetStreamingResponseDeliveryState = {
-  replyTarget: RPCReplyTarget;
-  pending: Set<Promise<void>>;
-};
-
-const facetStreamingResponseDeliveryStates = new WeakMap<
-  StreamingResponse,
-  FacetStreamingResponseDeliveryState
->();
-
-function createStreamingResponse(
-  connection: Connection,
-  id: string,
-  facetReplyTarget?: RPCReplyTarget
-): StreamingResponse {
-  const stream = new StreamingResponse(connection, id);
-  if (facetReplyTarget) {
-    facetStreamingResponseDeliveryStates.set(stream, {
-      replyTarget: facetReplyTarget,
-      pending: new Set()
-    });
-  }
-  return stream;
-}
-
-function trackFacetStreamingResponseDelivery(
-  stream: StreamingResponse,
-  completion: Promise<void>
-): void {
-  const state = facetStreamingResponseDeliveryStates.get(stream);
-  if (!state) return;
-
-  state.pending.add(completion);
-  void completion.finally(() => state.pending.delete(completion));
-}
-
-async function waitForFacetStreamingResponseDeliveries(
-  stream: StreamingResponse
-): Promise<void> {
-  const state = facetStreamingResponseDeliveryStates.get(stream);
-  if (!state) return;
-
-  try {
-    await Promise.all(state.pending);
-  } finally {
-    facetStreamingResponseDeliveryStates.delete(stream);
   }
 }
 
@@ -372,16 +337,6 @@ function isRPCRequest(msg: unknown): msg is RPCRequest {
 /**
  * Type guard for state update messages
  */
-function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === MessageType.CF_AGENT_STATE &&
-    "state" in msg
-  );
-}
-
 export {
   callable,
   unstable_callable,
@@ -396,220 +351,6 @@ import {
 } from "./callable-decorator";
 
 export { SqlError } from "./sql-error";
-
-// ── Sub-agent (facet) types ──────────────────────────────────────────
-
-/**
- * Internal narrowing of `DurableObjectState` to the parts the facet
- * bootstrap path uses. We only need this because `ctx.exports` in the
- * real types (`Cloudflare.Exports`) is keyed by the *consumer's*
- * worker MainModule, which is invisible from inside this library —
- * so we widen it to a generic Record indexed by class name.
- *
- * @internal
- */
-interface FacetCapableCtx {
-  facets: DurableObjectFacets;
-  /**
-   * Worker exports keyed by class export name. For facet creation, the
-   * runtime only needs the exported Durable Object class. Top-level
-   * Durable Object bindings may also expose namespace helpers here, but
-   * facet-only classes do not need to.
-   */
-  exports: Record<
-    string,
-    | (DurableObjectClass & Partial<Pick<DurableObjectNamespace, "idFromName">>)
-    | undefined
-  >;
-}
-
-type SubAgentPathInvokeEndpoint = {
-  _cf_invokeSubAgentPath(
-    path: ReadonlyArray<{ className: string; name: string }>,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown>;
-};
-
-type SubAgentConnectionMeta = {
-  id: string;
-  uri: string | null;
-  tags: string[];
-  state: unknown;
-  requestHeaders?: [string, string][];
-};
-
-type SubAgentConnectionBridgeLike = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
-  close(code?: number, reason?: string): void | Promise<void>;
-  setState(state: unknown): unknown | Promise<unknown>;
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void | Promise<void>;
-};
-
-type SubAgentConnectionOperationName = "send" | "setState" | "close";
-
-type StoredSubAgentConnection = {
-  meta: SubAgentConnectionMeta;
-  connection?: Connection;
-};
-
-type SubAgentBridgeInvocationContext = {
-  bridge?: SubAgentConnectionBridgeLike;
-  connectionId: string;
-};
-
-type SubAgentWebSocketEndpoint = {
-  _cf_handleSubAgentWebSocketConnect(
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
-  ): Promise<void>;
-  _cf_handleSubAgentWebSocketMessage(
-    message: WSMessage,
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta,
-    replyBridge?: SubAgentConnectionBridge
-  ): Promise<void>;
-  _cf_handleSubAgentWebSocketClose(
-    code: number,
-    reason: string,
-    wasClean: boolean,
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
-  ): Promise<void>;
-};
-
-class SubAgentConnectionBridge
-  extends RpcTarget
-  implements SubAgentConnectionBridgeLike
-{
-  #connection: Connection;
-  #broadcast?: (
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ) => void | Promise<void>;
-
-  constructor(
-    connection: Connection,
-    broadcast?: (
-      ownerPath: ReadonlyArray<{ className: string; name: string }>,
-      message: string | ArrayBuffer | ArrayBufferView,
-      without?: string[]
-    ) => void | Promise<void>
-  ) {
-    super();
-    this.#connection = connection;
-    this.#broadcast = broadcast;
-  }
-
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
-    this.#connection.send(message);
-  }
-
-  close(code?: number, reason?: string): void {
-    this.#connection.close(code, reason);
-  }
-
-  setState(state: unknown): unknown {
-    return this.#connection.setState(state);
-  }
-
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void | Promise<void> {
-    return this.#broadcast?.(ownerPath, message, without);
-  }
-}
-
-class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
-  #root: RootFacetRpcSurface;
-  #connectionId: string;
-
-  constructor(root: RootFacetRpcSurface, connectionId: string) {
-    this.#root = root;
-    this.#connectionId = connectionId;
-  }
-
-  send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
-    return this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
-  }
-
-  close(code?: number, reason?: string): Promise<void> {
-    return this.#root._cf_closeSubAgentConnection(
-      this.#connectionId,
-      code,
-      reason
-    );
-  }
-
-  setState(state: unknown): Promise<unknown> {
-    return this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
-  }
-
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void> {
-    return this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
-  }
-}
-
-/**
- * Constructor type for a sub-agent class.
- * Used by {@link Agent.subAgent} to reference the child class
- * via `ctx.exports`.
- *
- * The class name (`cls.name`) must match the export name in the
- * worker entry point — re-exports under a different name
- * (e.g. `export { Foo as Bar }`) are not supported.
- */
-export type SubAgentClass<T extends Agent = Agent> = {
-  new (ctx: DurableObjectState, env: never): T;
-};
-
-/**
- * Wraps `T` in a `Promise` unless it already is one.
- */
-type Promisify<T> = T extends Promise<unknown> ? T : Promise<T>;
-
-/**
- * A typed RPC stub for a sub-agent. Exposes all public instance methods
- * as callable RPC methods with Promise-wrapped return types.
- *
- * Methods owned by `Agent`, its lifecycle, or `DurableObject` internals
- * are excluded — only user-defined methods on the subclass are exposed.
- */
-export type SubAgentStub<T extends Agent> = {
-  [K in keyof T as K extends keyof Agent
-    ? never
-    : T[K] extends (...args: never[]) => unknown
-      ? K
-      : never]: T[K] extends (...args: infer A) => infer R
-    ? (...args: A) => Promisify<R>
-    : never;
-};
-
-export type QueueItem<T = string> = {
-  id: string;
-  payload: T;
-  callback: keyof Agent<Cloudflare.Env>;
-  created_at: number;
-  retry?: RetryOptions;
-};
-
-type FacetRunStorageRow = {
-  owner_path: string;
-  owner_path_key: string;
-  run_id: string;
-  created_at: number;
-};
 
 type AgentToolRunStorageRow = {
   run_id: string;
@@ -642,69 +383,6 @@ type AgentToolRunStorageRow = {
 
 type DeferredAgentToolFinish = () => Promise<void>;
 type DetachedReconcilePayload = { cadenceIndex?: number };
-
-function agentPathKey(
-  path: ReadonlyArray<AgentPathStep> | null
-): string | null {
-  if (!path) return null;
-  return path
-    .map(
-      (step) =>
-        `${encodeURIComponent(step.className)}:${encodeURIComponent(step.name)}`
-    )
-    .join("/");
-}
-
-/**
- * Internal RPC surface exposed by the root agent for facets to
- * delegate alarm-owning operations (schedules + facet teardown).
- * @internal
- */
-type RootFacetRpcSurface = {
-  _cf_routeLifecycle(
-    target: LifecycleRouteAddress | undefined,
-    envelope: LifecycleRouteEnvelope
-  ): Promise<unknown>;
-  _cf_cleanupFacetPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void>;
-  _cf_destroyDescendantFacet(
-    targetPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void>;
-  _cf_acquireFacetKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string>;
-  _cf_releaseFacetKeepAlive(token: string): Promise<void>;
-  _cf_registerFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
-  _cf_unregisterFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
-  _cf_broadcastToSubAgent(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void>;
-  _cf_subAgentConnectionMetas(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<SubAgentConnectionMeta[]>;
-  _cf_sendToSubAgentConnection(
-    connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
-  ): Promise<void>;
-  _cf_closeSubAgentConnection(
-    connectionId: string,
-    code?: number,
-    reason?: string
-  ): Promise<void>;
-  _cf_setSubAgentConnectionState(
-    connectionId: string,
-    state: unknown
-  ): Promise<unknown>;
-};
 
 /**
  * Context passed to the `runFiber` callback. Provides checkpoint
@@ -1056,14 +734,6 @@ const DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
 // receive `detached: { notify: true }` completions. Resolved by name so the
 // base Agent stays decoupled from the chat layer.
 const DETACHED_NOTIFY_CALLBACK = "_cfDetachedNotifyFinish";
-const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
-const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
-const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
-
-type SubAgentIdentityVersion =
-  | typeof SUB_AGENT_IDENTITY_VERSION_LEGACY
-  | typeof SUB_AGENT_IDENTITY_VERSION_PATH_V2;
-
 type AgentToolRecoveryInspection =
   | {
       status: "inspected";
@@ -1076,75 +746,22 @@ type AgentToolRecoveryInspection =
 /**
  * Schema version for the Agent's internal SQLite tables.
  * Bump this when adding new tables, columns, or migrations.
- * The constructor stores this as a row in cf_agents_state and checks it
- * on wake to skip DDL on established DOs.
+ * The constructor stores this under a namespaced KV key (the same convention
+ * every capability uses for its own schema version) and checks it on wake to
+ * skip DDL on established DOs.
  */
 const CURRENT_SCHEMA_VERSION = 11;
+const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
-const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
-const STATE_ROW_ID = "cf_state_row_id";
-// Legacy key — no longer written, but read for backward compatibility with
-// DOs that were created before the single-row state optimization.
-const STATE_WAS_CHANGED = "cf_state_was_changed";
+// Before the State capability owned `cf_agents_state`, Agent kept its schema
+// version as a row in that table. Read once for DOs created under that layout,
+// then moved to the KV key so the table has a single owner.
+const LEGACY_SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 
+// Sentinel for "no initial state provided" on the Agent's overridable
+// `initialState` field. The State capability owns state storage; this only
+// distinguishes an unset initialState when the `state` getter seeds it.
 const DEFAULT_STATE = {} as unknown;
-
-async function sha256Hex(value: string): Promise<string> {
-  const bytes = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function pathV2IdentityName(logicalName: string, digest: string): string {
-  return `${SUB_AGENT_IDENTITY_PATH_V2_PREFIX}${encodeURIComponent(logicalName)}:${digest}`;
-}
-
-function logicalNameFromPathV2Identity(identityName: string): string | null {
-  if (!identityName.startsWith(SUB_AGENT_IDENTITY_PATH_V2_PREFIX)) {
-    return null;
-  }
-  const rest = identityName.slice(SUB_AGENT_IDENTITY_PATH_V2_PREFIX.length);
-  const separator = rest.lastIndexOf(":");
-  if (separator === -1) return null;
-
-  try {
-    return decodeURIComponent(rest.slice(0, separator));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Validate that a stored `parentPath` has the expected shape. Used
- * when restoring from DO storage to guard against corrupted data.
- */
-function isValidParentPath(
-  value: unknown
-): value is Array<{ className: string; name: string }> {
-  if (!Array.isArray(value)) return false;
-  return value.every(
-    (entry) =>
-      entry != null &&
-      typeof entry === "object" &&
-      typeof (entry as { className?: unknown }).className === "string" &&
-      typeof (entry as { name?: unknown }).name === "string"
-  );
-}
-
-/**
- * Internal key used to store the readonly flag in connection state.
- * Prefixed with _cf_ to avoid collision with user state keys.
- */
-const CF_READONLY_KEY = "_cf_readonly";
-
-/**
- * Internal key used to store the no-protocol flag in connection state.
- * When set, protocol messages (identity, state sync, MCP servers) are not
- * sent to this connection — neither on connect nor via broadcasts.
- */
-const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
 
 /**
  * Internal key used to store voice call state in connection state.
@@ -1152,65 +769,14 @@ const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
  */
 const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
 
-/**
- * Internal key used to remember the outer `/sub/...` URL for a
- * WebSocket accepted by the parent on behalf of a child facet.
- * Hibernated events then wake the parent, which forwards frames to
- * the child over serializable RPC while keeping native WebSocket I/O
- * parent-owned.
- */
-const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
-const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
-
-const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
-
-/**
- * The set of all internal keys stored in connection state that must be
- * hidden from user code and preserved across setState calls.
- */
-const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
-  CF_READONLY_KEY,
-  CF_NO_PROTOCOL_KEY,
+// Agent's own per-connection flags ride the WebSockets capability's
+// connection-state namespace: hidden from `connection.state`, preserved
+// across user `setState`, and carried through hibernation.
+registerInternalConnectionKeys(
   CF_VOICE_IN_CALL_KEY,
   CF_SUB_AGENT_OUTER_URL_KEY,
   CF_SUB_AGENT_TAGS_KEY
-]);
-
-/** Check if a raw connection state object contains any internal keys. */
-function rawHasInternalKeys(raw: Record<string, unknown>): boolean {
-  for (const key of Object.keys(raw)) {
-    if (CF_INTERNAL_KEYS.has(key)) return true;
-  }
-  return false;
-}
-
-/** Return a copy of `raw` with all internal keys removed, or null if no user keys remain. */
-function stripInternalKeys(
-  raw: Record<string, unknown>
-): Record<string, unknown> | null {
-  const result: Record<string, unknown> = {};
-  let hasUserKeys = false;
-  for (const key of Object.keys(raw)) {
-    if (!CF_INTERNAL_KEYS.has(key)) {
-      result[key] = raw[key];
-      hasUserKeys = true;
-    }
-  }
-  return hasUserKeys ? result : null;
-}
-
-/** Return a copy containing only the internal keys present in `raw`. */
-function extractInternalFlags(
-  raw: Record<string, unknown>
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(raw)) {
-    if (CF_INTERNAL_KEYS.has(key)) {
-      result[key] = raw[key];
-    }
-  }
-  return result;
-}
+);
 
 /** Max length for error strings broadcast to clients. */
 const MAX_ERROR_STRING_LENGTH = 500;
@@ -1435,34 +1001,6 @@ export interface AgentStaticOptions {
   maxAlarmMemoryLimitStrikes?: number;
 }
 
-/**
- * Parse the raw `retry_options` TEXT column from a SQLite row into a
- * typed `RetryOptions` object, or `undefined` if not set.
- */
-function parseRetryOptions(
-  row: Record<string, unknown>
-): RetryOptions | undefined {
-  const raw = row.retry_options;
-  if (typeof raw !== "string") return undefined;
-  return JSON.parse(raw) as RetryOptions;
-}
-
-/**
- * Resolve per-task retry options against class-level defaults and call
- * `tryN`. This is the retry-execution path for queue flush; Scheduler owns
- * its own copy for schedule callbacks.
- */
-function resolveRetryConfig(
-  taskRetry: RetryOptions | undefined,
-  defaults: Required<RetryOptions>
-): { maxAttempts: number; baseDelayMs: number; maxDelayMs: number } {
-  return {
-    maxAttempts: taskRetry?.maxAttempts ?? defaults.maxAttempts,
-    baseDelayMs: taskRetry?.baseDelayMs ?? defaults.baseDelayMs,
-    maxDelayMs: taskRetry?.maxDelayMs ?? defaults.maxDelayMs
-  };
-}
-
 // `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` live in
 // ./retries and remain re-exported from the package root so higher layers
 // classify platform failures with the same matcher instead of drifting copies.
@@ -1526,11 +1064,11 @@ type WorkflowName<E> = WorkflowBinding<E> | (string & {});
 /**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
- * @template State State type to store within the Agent
+ * @template TState State type to store within the Agent
  */
 export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  State = unknown,
+  TState = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
   /**
@@ -1538,7 +1076,9 @@ export class Agent<
    *
    * @experimental The API surface may change before stabilizing.
    */
-  readonly lifecycle = Lifecycle.install<Env, Props>(this);
+  readonly lifecycle = Lifecycle.install<Env, Props>(this, {
+    maxAlarmMemoryLimitStrikes: this._resolvedOptions.maxAlarmMemoryLimitStrikes
+  });
 
   /**
    * WebSocket connection subsystem. Constructed as a field initializer
@@ -1550,6 +1090,22 @@ export class Agent<
    * from paths that do not pass through the capability (facet bridging,
    * direct calls).
    */
+  /**
+   * Durable state: the `cf_agents_state` row, lazy load, validated persistence.
+   * `initialState` stays on Agent (a subclass field, initialized after this
+   * one) and is seeded by the `state` getter. Typed `<unknown>` rather than
+   * `<TState>` because `TState` appears in both `get()` and `set()` positions,
+   * which would make `Agent`'s own `TState` parameter invariant and break
+   * `Subclass -> Agent<Env, unknown>` assignability; the typed boundary is
+   * re-established in `state` / `setState`.
+   */
+  readonly _state: State<unknown> = new State<unknown>({
+    validateStateChange: (nextState, source) =>
+      this.validateStateChange(nextState as TState, source),
+    onChanged: (nextState, source) =>
+      this._handleStateChanged(nextState as TState, source)
+  });
+
   private readonly _webSockets = new WebSockets({
     handlers: {
       onConnect: (connection, ctx) => this.onConnect(connection, ctx),
@@ -1558,12 +1114,13 @@ export class Agent<
         this.onClose(connection, code, reason, wasClean),
       onError: (connection, error) => this.onError(connection, error)
     },
-    // Agent's callable interface comes from its existing public
-    // surface — @callable()-decorated methods — served here over the
-    // Cap'n Web endpoint and, natively, over the legacy JSON RPC
-    // protocol: one interface on every wire, no new Agent members.
-    // Capability hosts pass an RpcTarget directly instead.
-    callables: callablesFromDecorated(this),
+    // Agent answers its own rpc frames in onMessage (facet bridging,
+    // StreamingResponse). It also drives the connect sequence itself —
+    // `sendIdentity`/`sendState` after deciding whether the connection
+    // belongs to a facet — so the capability provides the protocol but
+    // does not run it: `protocol: false`.
+    protocol: false,
+    state: this._state,
     getConnectionTags: (connection, ctx) =>
       this.getConnectionTags(connection, ctx)
   });
@@ -1609,7 +1166,6 @@ export class Agent<
     await this.lifecycle.start(props);
   }
 
-  private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
 
@@ -1618,13 +1174,6 @@ export class Agent<
    * Used by internal flag methods (readonly, no-protocol) to read/write
    * _cf_-prefixed keys without going through the user-facing state/setState.
    */
-  private _rawStateAccessors = new WeakMap<
-    Connection,
-    {
-      getRaw: () => Record<string, unknown> | null;
-      setRaw: (state: unknown) => unknown;
-    }
-  >();
 
   /**
    * Cached persistence-hook dispatch mode, computed once in the constructor.
@@ -1638,17 +1187,6 @@ export class Agent<
   private _isFacet = false;
 
   private _protocolBroadcastExcludeIds = new Set<string>();
-  private _cf_subAgentBridgeContext =
-    new AsyncLocalStorage<SubAgentBridgeInvocationContext>();
-  private _cf_virtualSubAgentConnections = new Map<
-    string,
-    StoredSubAgentConnection
-  >();
-  private _cf_subAgentConnectionOperationTails = new Map<
-    string,
-    Promise<void>
-  >();
-  private _cf_subAgentBroadcastOperationTail?: Promise<void>;
 
   /**
    * User-facing facet name. For legacy facets this is the same as
@@ -1678,13 +1216,43 @@ export class Agent<
    */
   _keepAliveRefs = 0;
 
+  /** @internal The extracted dynamic-agent (facet) machinery. */
+  private _dynamicAgentsInstance: DynamicAgentsInternal | undefined;
+
+  /** @internal */
+  private get _dynamicAgents(): DynamicAgentsInternal {
+    this._dynamicAgentsInstance ??= new DynamicAgentsInternal(
+      this as unknown as DynamicAgentHostPort
+    );
+    return this._dynamicAgentsInstance;
+  }
+
+  /** @internal */
+  private _dynamicAgentsApi: DynamicAgentsApi | undefined;
+
   /**
-   * In-memory tokens for keepAlive leases acquired by facets and held
-   * on the root alarm owner. Lost on eviction, like `_keepAliveRefs`,
-   * because the in-memory work those leases were protecting is also gone.
-   * @internal
+   * The dynamic-agents capability: facet-backed child agents that run
+   * in their own isolate with their own SQLite database, colocated
+   * with — and supervised by — this agent.
+   *
+   * Use dynamic agents for code whose class or lifecycle this agent
+   * owns: dynamically-loaded or AI-generated code, per-run tool
+   * agents, sandboxed components. For independent peers (for example
+   * one Durable Object per chat), use `getAgentByName` instead.
+   *
+   * ```ts
+   * const child = await this.dynamicAgents.get(Researcher, id);
+   * await child.doWork();
+   * this.dynamicAgents.abort(Researcher, id, reason);
+   * await this.dynamicAgents.delete(Researcher, id);
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
    */
-  private _facetKeepAliveTokens = new Set<string>();
+  get dynamicAgents(): DynamicAgentsApi {
+    this._dynamicAgentsApi ??= new DynamicAgentsApi(this._dynamicAgents);
+    return this._dynamicAgentsApi;
+  }
 
   /** @internal In-memory set of fiber IDs running in this process. */
   private _runFiberActiveFibers = new Set<string>();
@@ -1710,7 +1278,7 @@ export class Agent<
   /** @internal Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
 
-  private _ParentClass: typeof Agent<Env, State> =
+  private _ParentClass: typeof Agent<Env, TState> =
     Object.getPrototypeOf(this).constructor;
 
   /**
@@ -1722,13 +1290,48 @@ export class Agent<
    */
   readonly scheduler: Scheduler;
 
+  /**
+   * Durable background-work capability installed into this Agent's
+   * Lifecycle. Agent's queue()/dequeue()/dequeueAll()/dequeueAllByCallback()/
+   * getQueue()/getQueues() methods are its surface.
+   */
+  private readonly _queue: Queue;
+
+  /**
+   * Durable replayable execution capability installed into this Agent's
+   * Lifecycle. Declare definitions on the overridable
+   * {@link taskDefinitions} property and start runs with
+   * `this.tasks.run(name, input, options)`.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly tasks: Tasks;
+
+  /**
+   * Named Task definitions for this Agent, resolved lazily on every
+   * dispatch. Declare as a field so the map is rebuilt on every Durable
+   * Object wake — that is what lets in-flight runs resolve their persisted
+   * definition names after a restart:
+   *
+   * ```ts
+   * readonly taskDefinitions = {
+   *   "build-report@v1": async (input: ReportInput, step: TaskStep) => {
+   *     // ...
+   *   }
+   * } satisfies TaskHandlers;
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  declare readonly taskDefinitions?: TaskHandlers;
+
   readonly mcp: MCPClientManager;
 
   /**
    * Initial state for the Agent
    * Override to provide default state values
    */
-  initialState: State = DEFAULT_STATE as State;
+  initialState: TState = DEFAULT_STATE as TState;
 
   /**
    * Stable key for Workers AI session affinity (prefix-cache optimization).
@@ -1752,54 +1355,20 @@ export class Agent<
   }
 
   /**
-   * Current state of the Agent
+   * Current state of the Agent.
+   *
+   * Delegates to the State capability, which owns lazy load and the
+   * in-memory cache; Agent seeds `initialState` on first access.
    */
-  get state(): State {
-    if (this._state !== DEFAULT_STATE) {
-      // state was previously set, and populated internal state
-      return this._state;
-    }
-    // looks like this is the first time the state is being accessed
-    // check if the state was set in a previous life
-    const result = this.sql<{ state: State | undefined }>`
-      SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
-    `;
-
-    // Row existence is the signal that state was previously set.
-    // This handles all values including falsy ones (null, 0, false, "").
-    if (result.length > 0) {
-      const state = result[0].state as string;
-
-      try {
-        this._state = JSON.parse(state);
-      } catch (e) {
-        console.error(
-          "Failed to parse stored state, falling back to initialState:",
-          e
-        );
-        if (this.initialState !== DEFAULT_STATE) {
-          this._state = this.initialState;
-          // Persist the fixed state to prevent future parse errors
-          this._setStateInternal(this.initialState);
-        } else {
-          // No initialState defined - clear corrupted data to prevent infinite retry loop
-          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
-          return undefined as State;
-        }
-      }
-      return this._state;
-    }
-
-    // ok, this is the first time the state is being accessed
-    // and the state was not set in a previous life
-    // so we need to set the initial state (if provided)
-    if (this.initialState === DEFAULT_STATE) {
-      // no initial state provided, so we return undefined
-      return undefined as State;
-    }
-    // initial state provided, so we set the state,
-    // update db and return the initial state
-    this._setStateInternal(this.initialState);
+  get state(): TState {
+    const stored = this._state.get();
+    // `undefined` is not JSON-representable, so it uniquely means "no row":
+    // nothing stored yet, or a corrupt row the capability just cleared.
+    if (stored !== undefined) return stored as TState;
+    if (this.initialState === DEFAULT_STATE) return undefined as TState;
+    // First access with nothing stored: seed the initial state. Goes through
+    // set() so it persists, broadcasts, and runs the notification hook.
+    this._state.set(this.initialState, "server");
     return this.initialState;
   }
 
@@ -1987,35 +1556,15 @@ export class Agent<
    */
   protected _ensureSchema(): void {
     // Schema version gating: skip all DDL on established DOs whose schema
-    // is already up-to-date. We always create cf_agents_state first (cheap
-    // idempotent DDL) and store the version as a row inside it.
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_state (
-        id TEXT PRIMARY KEY NOT NULL,
-        state TEXT
-      )
-    `;
-
-    const versionRow = this.sql<{ state: string | null }>`
-      SELECT state FROM cf_agents_state WHERE id = ${SCHEMA_VERSION_ROW_ID}
-    `;
-    const schemaVersion =
-      versionRow.length > 0 ? Number(versionRow[0].state) : 0;
+    // is already up-to-date. `cf_agents_state` belongs to the State
+    // capability (state/index.ts), which creates and migrates it itself.
+    const schemaVersion = this._readSchemaVersion();
 
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
       ensureMcpServerTable(this.ctx.storage);
 
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_queues (
-          id TEXT PRIMARY KEY NOT NULL,
-          payload TEXT,
-          callback TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        )
-      `;
-
-      // Migration: add queue retry options for existing agents.
-      // Schedule schema and migrations are owned by Scheduler.
+      // Queue and schedule schema and migrations are owned by the Queue and
+      // Scheduler capabilities.
       const addColumnIfNotExists = (sql: string) => {
         try {
           this.ctx.storage.sql.exec(sql);
@@ -2027,10 +1576,6 @@ export class Agent<
           }
         }
       };
-
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
-      );
 
       // Workflow tracking table for Agent-Workflow integration
       this.sql`
@@ -2059,12 +1604,6 @@ export class Agent<
       this.sql`
         CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
       `;
-
-      // Clean up legacy STATE_WAS_CHANGED rows from the single-row state optimization
-      this.ctx.storage.sql.exec(
-        "DELETE FROM cf_agents_state WHERE id = ?",
-        STATE_WAS_CHANGED
-      );
 
       // v3: durable fibers table for runFiber
       this.sql`
@@ -2222,10 +1761,7 @@ export class Agent<
       );
 
       // Mark schema as up-to-date
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_state (id, state)
-        VALUES (${SCHEMA_VERSION_ROW_ID}, ${String(CURRENT_SCHEMA_VERSION)})
-      `;
+      this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
     }
 
     this._schemaInitialization = {
@@ -2233,6 +1769,42 @@ export class Agent<
       currentVersion: CURRENT_SCHEMA_VERSION,
       migrated: schemaVersion < CURRENT_SCHEMA_VERSION
     };
+  }
+
+  /**
+   * Read the Agent's schema version from its KV key. A DO created before the
+   * State capability owned `cf_agents_state` has the version as a row in that
+   * table instead: read it once, move it to the key, and delete the row so the
+   * table is left with a single owner. Synchronous (`storage.kv`) because the
+   * constructor gates DDL on it.
+   */
+  private _readSchemaVersion(): number {
+    const stored = this.ctx.storage.kv.get<number>(SCHEMA_VERSION_KEY);
+    if (stored !== undefined) return stored;
+
+    const hasStateTable =
+      this.ctx.storage.sql
+        .exec(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_state'"
+        )
+        .toArray().length > 0;
+    if (!hasStateTable) return 0;
+
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT state FROM cf_agents_state WHERE id = ?",
+        LEGACY_SCHEMA_VERSION_ROW_ID
+      )
+      .toArray() as { state: string | null }[];
+    if (rows.length === 0) return 0;
+
+    const version = Number(rows[0].state) || 0;
+    this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, version);
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = ?",
+      LEGACY_SCHEMA_VERSION_ROW_ID
+    );
+    return version;
   }
 
   constructor(ctx: AgentContext, env: Env) {
@@ -2276,11 +1848,6 @@ export class Agent<
       )
     );
 
-    setLifecycleAlarmMemoryLimitStrikes(
-      this.lifecycle,
-      this._resolvedOptions.maxAlarmMemoryLimitStrikes
-    );
-
     this.scheduler = new Scheduler({
       retry: this._resolvedOptions.retry,
       hungScheduleTimeoutSeconds:
@@ -2309,6 +1876,63 @@ export class Agent<
           method as (payload: unknown, schedule: Schedule<unknown>) => unknown
         ).call(this, payload, schedule);
     });
+
+    this._queue = new Queue({
+      retry: this._resolvedOptions.retry,
+      onError: (error: unknown) =>
+        runInInvocation(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          () => this.onError(error)
+        )
+    });
+
+    // Agent's historical name-based queue API: names resolve to methods on
+    // this Agent, run inside the Lifecycle host boundary.
+    setQueueCallbackResolver(this._queue, (name) => {
+      const method = this[name as keyof this];
+      if (typeof method !== "function") return undefined;
+      return (payload, item) =>
+        (
+          method as (payload: unknown, item: QueueItem<unknown>) => unknown
+        ).call(this, payload, item);
+    });
+
+    this.tasks = new Tasks({
+      onError: (error) => this.onError(error)
+    });
+
+    // Twin bridge for a routed Task run: the physical alarm lives on the
+    // root, but the run's storage and this hook live on the owning dynamic
+    // agent, whose own Lifecycle never observes the root's alarm directly.
+    setTaskRoutedMemoryLimitHandler(this.tasks, (context) => {
+      const hook = (
+        this as unknown as {
+          onAlarmMemoryLimit?: (value: typeof context) => void | Promise<void>;
+        }
+      ).onAlarmMemoryLimit;
+      return hook?.call(this, context);
+    });
+
+    // Framework-internal reserved (`__cf`-prefixed) definitions — chat
+    // turns, chat recovery, messenger replies — register eagerly through
+    // `this.tasks.register()` from each host subclass's own constructor
+    // (AIChatAgent, Think), which runs after `this.tasks` exists here.
+    // What remains for Agent to bridge is only the end user's own
+    // overridable `taskDefinitions` field, which cannot be read yet: a
+    // further-downstream subclass's field initializer runs only after
+    // every constructor body up this chain (this one included) returns.
+    // The resolver stays lazy for exactly that reason; nothing else needs
+    // it any more.
+    setTaskDefinitionResolver(
+      this.tasks,
+      (name) =>
+        this.taskDefinitions?.[name] as TaskCallbacks[string] | undefined
+    );
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -2352,7 +1976,16 @@ export class Agent<
     // Agent's WebSocket connections ride the WebSockets capability —
     // Lifecycle itself no longer models connections. The handlers call
     // through `this.*` so they always hit the framework-wrapped hooks.
-    this.lifecycle.use(this.scheduler).use(this.mcp).use(this._webSockets);
+    this.lifecycle
+      .use(this.scheduler)
+      .use(this._queue)
+      .use(this.mcp)
+      .use(this._state)
+      .use(this._webSockets)
+      .use(this.tasks)
+      // Registered for capability identity/services; its hot paths are
+      // wired directly (see the DynamicAgentsInternal class doc).
+      .use(this._dynamicAgents);
 
     // MCP starts before Agent restores facet routing state. Defer its initial
     // publication until broadcasts can be routed to the correct owner.
@@ -2448,7 +2081,7 @@ export class Agent<
       ) {
         return;
       }
-      this._ensureConnectionWrapped(connection);
+      ensureConnectionWrapped(connection);
       return runInInvocation(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
@@ -2464,31 +2097,10 @@ export class Agent<
             return this._tryCatch(() => _onMessage(connection, message));
           }
 
-          if (isStateUpdateMessage(parsed)) {
-            // Check if connection is readonly
-            if (this.isConnectionReadonly(connection)) {
-              // Send error response back to the connection
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "Connection is readonly"
-                })
-              );
-              return;
-            }
-            try {
-              this._setStateInternal(parsed.state as State, connection);
-            } catch (e) {
-              // validateStateChange (or another sync error) rejected the update.
-              // Log the full error server-side, send a generic message to the client.
-              console.error("[Agent] State update rejected:", e);
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "State update rejected"
-                })
-              );
-            }
+          // State frames: readonly check, validation, error replies — all
+          // the capability's. Root sockets never reach here with one (the
+          // capability consumed it); bridged facet connections do.
+          if (this._webSockets.applyStateFrame(connection, parsed)) {
             return;
           }
 
@@ -2510,11 +2122,10 @@ export class Agent<
 
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
-                const stream = createStreamingResponse(
-                  connection,
-                  id,
-                  replyBridge
-                );
+                const stream = new StreamingResponse(connection, id);
+                if (replyBridge) {
+                  registerFacetStreamingDelivery(stream, replyBridge);
+                }
 
                 this._emit("rpc", { method, streaming: true });
 
@@ -2586,7 +2197,7 @@ export class Agent<
 
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
-      this._ensureConnectionWrapped(connection);
+      ensureConnectionWrapped(connection);
       const subAgentOuterUrl = ctx.request.headers.get(
         SUB_AGENT_OUTER_URL_HEADER
       );
@@ -2653,18 +2264,17 @@ export class Agent<
                   );
                 }
               }
-              connection.send(
-                JSON.stringify({
-                  name: this.name,
-                  agent: camelCaseToKebabCase(this._ParentClass.name),
-                  type: MessageType.CF_AGENT_IDENTITY
-                })
-              );
+              // Agent's public identity: the logical name (a facet's routed
+              // name is an internal encoding of it) and the exported class.
+              this._webSockets.sendIdentity(connection, {
+                name: this.name,
+                agent: camelCaseToKebabCase(this._ParentClass.name)
+              });
             }
 
             const wasExcludedFromStateInitBroadcast =
               this._protocolBroadcastExcludeIds.has(connection.id);
-            let currentState: State | undefined;
+            let currentState: TState | undefined;
             this._protocolBroadcastExcludeIds.add(connection.id);
             try {
               currentState = this.state;
@@ -2675,12 +2285,7 @@ export class Agent<
             }
 
             if (currentState !== undefined) {
-              connection.send(
-                JSON.stringify({
-                  state: currentState,
-                  type: MessageType.CF_AGENT_STATE
-                })
-              );
+              this._webSockets.sendState(connection);
             }
 
             connection.send(
@@ -2690,7 +2295,7 @@ export class Agent<
               })
             );
           } else {
-            this._setConnectionNoProtocol(connection);
+            this._webSockets.setProtocolEnabled(connection, false);
           }
 
           this._emit("connect", { connectionId: connection.id });
@@ -2760,6 +2365,9 @@ export class Agent<
               async () => {
                 this._checkOrphanedWorkflows();
                 await this._checkRunFibers();
+                // Interrupted Task runs (including chat turns) recover via
+                // the Lifecycle job queue: their mirror jobs are overdue and
+                // re-fire on the post-startup alarm derivation.
                 return this._agentToolRunRecoveryRunIds();
               }
             );
@@ -2831,39 +2439,8 @@ export class Agent<
   }
 
   private async _restoreAgentFacetContext(): Promise<void> {
-    await this._withAgentSpan(
-      "restore_agent_state",
-      "startup",
-      {},
-      async () => {
-        // Facet identity and bridges belong to Agent, not to any capability.
-        const isFacet =
-          await this.ctx.storage.get<boolean>("cf_agents_is_facet");
-        if (isFacet) this._isFacet = true;
-
-        const storedFacetName = await this.ctx.storage.get<string>(
-          "cf_agents_facet_name"
-        );
-        if (typeof storedFacetName === "string") {
-          this._facetName = storedFacetName;
-        }
-
-        const storedParentPath = await this.ctx.storage.get<
-          Array<{ className: string; name: string }>
-        >("cf_agents_parent_path");
-        if (isValidParentPath(storedParentPath)) {
-          this._parentPath = storedParentPath;
-        }
-
-        try {
-          await this._cf_hydrateSubAgentConnectionsFromRoot();
-        } catch (error) {
-          console.warn(
-            "[Agent] Unable to hydrate sub-agent WebSocket connections:",
-            error
-          );
-        }
-      }
+    await this._withAgentSpan("restore_agent_state", "startup", {}, () =>
+      this._dynamicAgents.restoreFacetContext()
     );
   }
 
@@ -2934,21 +2511,17 @@ export class Agent<
     this.broadcast(msg, exclude);
   }
 
-  private _setStateInternal(
-    nextState: State,
-    source: Connection | "server" = "server"
+  /**
+   * React to a persisted state change from the State capability.
+   *
+   * Reproduces the pre-migration steps 3-4: broadcast the new state to
+   * protocol-enabled connections (excluding the originating connection) and
+   * run the notification hook off the invocation tail.
+   */
+  private _handleStateChanged(
+    nextState: TState,
+    source: Connection | "server"
   ): void {
-    // Validation/gating hook (sync only)
-    this.validateStateChange(nextState, source);
-
-    // Persist state — row existence in cf_agents_state is the signal that
-    // state was set (no separate wasChanged flag needed).
-    this._state = nextState;
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_state (id, state)
-      VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
-    `;
-
     // Broadcast state to protocol-enabled connections, excluding the source
     this._broadcastProtocol(
       JSON.stringify({
@@ -2991,114 +2564,13 @@ export class Agent<
    * @param state New state to set
    * @throws Error if called from a readonly connection context
    */
-  setState(state: State): void {
+  setState(state: TState): void {
     // Check if the current context has a readonly connection
     const store = agentContext.getStore();
     if (store?.connection && this.isConnectionReadonly(store.connection)) {
       throw new Error("Connection is readonly");
     }
-    this._setStateInternal(state, "server");
-  }
-
-  /**
-   * Wraps connection.state and connection.setState so that internal
-   * _cf_-prefixed flags (readonly, no-protocol) are hidden from user code
-   * and cannot be accidentally overwritten.
-   *
-   * Idempotent — safe to call multiple times on the same connection.
-   * After hibernation, the _rawStateAccessors WeakMap is empty but the
-   * connection's state getter still reads from the persisted WebSocket
-   * attachment. Calling this method re-captures the raw getter so that
-   * predicate methods (isConnectionReadonly, isConnectionProtocolEnabled)
-   * work correctly post-hibernation.
-   */
-  private _ensureConnectionWrapped(connection: Connection) {
-    if (this._rawStateAccessors.has(connection)) return;
-
-    // Hibernating lifecycle connections expose attachment-backed state as a
-    // configurable accessor. Virtual facet connections use a data property,
-    // so retain both projections below.
-    const descriptor = Object.getOwnPropertyDescriptor(connection, "state");
-
-    let getRaw: () => Record<string, unknown> | null;
-    let setRaw: (state: unknown) => unknown;
-
-    if (descriptor?.get) {
-      // Accessor property — bind the original getter directly.
-      // The getter reads from the serialized WebSocket attachment, so it
-      // always returns the latest value even after setState updates it.
-      getRaw = descriptor.get.bind(connection) as () => Record<
-        string,
-        unknown
-      > | null;
-      setRaw = connection.setState.bind(connection);
-    } else {
-      // Data property — track raw state in a closure variable.
-      // Reading `connection.state` after our override would call our filtered
-      // getter (circular), so we snapshot the value here and keep it in sync.
-      let rawState = (connection.state ?? null) as Record<
-        string,
-        unknown
-      > | null;
-      getRaw = () => rawState;
-      setRaw = (state: unknown) => {
-        rawState = state as Record<string, unknown> | null;
-        return rawState;
-      };
-    }
-
-    this._rawStateAccessors.set(connection, { getRaw, setRaw });
-
-    // Override state getter to hide all internal _cf_ flags from user code
-    Object.defineProperty(connection, "state", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        const raw = getRaw();
-        if (raw != null && typeof raw === "object" && rawHasInternalKeys(raw)) {
-          return stripInternalKeys(raw);
-        }
-        return raw;
-      }
-    });
-
-    // Override setState to preserve internal flags when user sets state
-    Object.defineProperty(connection, "setState", {
-      configurable: true,
-      writable: true,
-      value(stateOrFn: unknown | ((prev: unknown) => unknown)) {
-        const raw = getRaw();
-        const flags =
-          raw != null && typeof raw === "object"
-            ? extractInternalFlags(raw as Record<string, unknown>)
-            : {};
-        const hasFlags = Object.keys(flags).length > 0;
-
-        let newUserState: unknown;
-        if (typeof stateOrFn === "function") {
-          // Pass only the user-visible state (without internal flags) to the callback
-          const userVisible = hasFlags
-            ? stripInternalKeys(raw as Record<string, unknown>)
-            : raw;
-          newUserState = (stateOrFn as (prev: unknown) => unknown)(userVisible);
-        } else {
-          newUserState = stateOrFn;
-        }
-
-        // Merge back internal flags if any were set
-        if (hasFlags) {
-          if (newUserState != null && typeof newUserState === "object") {
-            return setRaw({
-              ...(newUserState as Record<string, unknown>),
-              ...flags
-            });
-          }
-          // User set null — store just the flags
-          return setRaw(flags);
-        }
-        return setRaw(newUserState);
-      }
-    });
+    this._state.set(state, "server");
   }
 
   /**
@@ -3107,17 +2579,7 @@ export class Agent<
    * @param readonly Whether the connection should be readonly (default: true)
    */
   setConnectionReadonly(connection: Connection, readonly = true) {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    if (readonly) {
-      accessors.setRaw({ ...raw, [CF_READONLY_KEY]: true });
-    } else {
-      // Remove the key entirely instead of storing false — avoids dead keys
-      // accumulating in the connection attachment.
-      const { [CF_READONLY_KEY]: _, ...rest } = raw;
-      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-    }
+    markConnectionReadonly(connection, readonly);
   }
 
   /**
@@ -3129,12 +2591,7 @@ export class Agent<
    * @returns True if the connection is readonly
    */
   isConnectionReadonly(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return !!raw?.[CF_READONLY_KEY];
+    return connectionReadonly(connection);
   }
 
   /**
@@ -3150,12 +2607,7 @@ export class Agent<
    * @internal
    */
   _unsafe_getConnectionFlag(connection: Connection, key: string): unknown {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return raw?.[key];
+    return getConnectionFlag(connection, key);
   }
 
   /**
@@ -3163,8 +2615,8 @@ export class Agent<
    *
    * Write an internal `_cf_`-prefixed flag to the raw connection state,
    * bypassing the user-facing state wrapper. The key must be registered
-   * in `CF_INTERNAL_KEYS` so it is preserved across user `setState` calls
-   * and hidden from `connection.state`.
+   * with `registerInternalConnectionKeys` so it is preserved across user
+   * `setState` calls and hidden from `connection.state`.
    *
    * @internal
    */
@@ -3173,15 +2625,7 @@ export class Agent<
     key: string,
     value: unknown
   ): void {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    if (value === undefined) {
-      const { [key]: _, ...rest } = raw;
-      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-    } else {
-      accessors.setRaw({ ...raw, [key]: value });
-    }
+    setConnectionFlag(connection, key, value);
   }
 
   /**
@@ -3231,23 +2675,7 @@ export class Agent<
    * @returns True if the connection receives protocol messages
    */
   isConnectionProtocolEnabled(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return !raw?.[CF_NO_PROTOCOL_KEY];
-  }
-
-  /**
-   * Mark a connection as having protocol messages disabled.
-   * Called internally when shouldSendProtocolMessages returns false.
-   */
-  private _setConnectionNoProtocol(connection: Connection) {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    accessors.setRaw({ ...raw, [CF_NO_PROTOCOL_KEY]: true });
+    return connectionProtocolEnabled(connection);
   }
 
   /**
@@ -3257,7 +2685,7 @@ export class Agent<
    * IMPORTANT: This hook must be synchronous.
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  validateStateChange(_nextState: State, _source: Connection | "server") {
+  validateStateChange(_nextState: TState, _source: Connection | "server") {
     // override this to validate state updates
   }
 
@@ -3270,7 +2698,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateChanged(_state: State | undefined, _source: Connection | "server") {
+  onStateChanged(_state: TState | undefined, _source: Connection | "server") {
     // override this to handle state updates after persist + broadcast
   }
 
@@ -3286,7 +2714,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
+  onStateUpdate(_state: TState | undefined, _source: Connection | "server") {
     // override this to handle state updates (deprecated — use onStateChanged)
   }
 
@@ -3295,7 +2723,7 @@ export class Agent<
    * cached in the constructor. No prototype walks at call time.
    */
   private async _callStatePersistenceHook(
-    state: State | undefined,
+    state: TState | undefined,
     source: Connection | "server"
   ): Promise<void> {
     switch (this._persistenceHookMode) {
@@ -3623,160 +3051,54 @@ export class Agent<
   }
 
   /**
-   * Queue a task to be executed in the future
+   * Queue a task to run in the background.
+   *
+   * The item is durable: it runs from the Lifecycle alarm event loop after
+   * this call returns, in push order, one at a time, with retries per
+   * `options.retry`, and survives the Durable Object leaving memory.
    * @param callback Name of the method to call
    * @param payload Payload to pass to the callback
    * @param options Options for the queued task
    * @param options.retry Retry options for the callback execution
+   * @param options.id Stable id; a push with an existing id replaces that item
    * @returns The ID of the queued task
    */
   async queue<T = unknown>(
     callback: keyof this,
     payload: T,
-    options?: { retry?: RetryOptions }
+    options?: { retry?: RetryOptions; id?: string }
   ): Promise<string> {
-    const id = nanoid(9);
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
     }
-
     if (typeof this[callback] !== "function") {
       throw new Error(`this.${callback} is not a function`);
     }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback, retry_options)
-      VALUES (${id}, ${JSON.stringify(payload)}, ${callback}, ${retryJson})
-    `;
-
-    this._emit("queue:create", { callback: callback as string, id });
-
-    void this._flushQueue().catch((e) => {
-      console.error("Error flushing queue:", e);
-    });
-
-    return id;
-  }
-
-  private _flushingQueue = false;
-
-  private async _flushQueue() {
-    if (this._flushingQueue) {
-      return;
-    }
-    this._flushingQueue = true;
-    try {
-      while (true) {
-        const result = this.sql<QueueItem<string>>`
-        SELECT * FROM cf_agents_queues
-        ORDER BY created_at ASC
-      `;
-
-        if (!result || result.length === 0) {
-          break;
-        }
-
-        for (const row of result || []) {
-          const callback = this[row.callback as keyof Agent<Env>];
-          if (!callback) {
-            console.error(`callback ${row.callback} not found`);
-            await this.dequeue(row.id);
-            continue;
-          }
-          const { connection, request, email } = agentContext.getStore() || {};
-          await runInInvocation(
-            {
-              agent: this,
-              connection,
-              request,
-              email
-            },
-            async () => {
-              const retryOpts = parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              );
-              const { maxAttempts, baseDelayMs, maxDelayMs } =
-                resolveRetryConfig(retryOpts, this._resolvedOptions.retry);
-              const parsedPayload = JSON.parse(row.payload as string);
-              try {
-                await tryN(
-                  maxAttempts,
-                  async (attempt) => {
-                    if (attempt > 1) {
-                      this._emit("queue:retry", {
-                        callback: row.callback,
-                        id: row.id,
-                        attempt,
-                        maxAttempts
-                      });
-                    }
-                    await (
-                      callback as (
-                        payload: unknown,
-                        queueItem: QueueItem<string>
-                      ) => Promise<void>
-                    ).bind(this)(parsedPayload, row);
-                  },
-                  { baseDelayMs, maxDelayMs }
-                );
-              } catch (e) {
-                console.error(
-                  `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
-                  e
-                );
-                this._emit("queue:error", {
-                  callback: row.callback,
-                  id: row.id,
-                  error: e instanceof Error ? e.message : String(e),
-                  attempts: maxAttempts
-                });
-                try {
-                  await this.onError(e);
-                } catch {
-                  // swallow onError errors
-                }
-              } finally {
-                this.dequeue(row.id);
-              }
-            },
-            // The drain loop is started with `void` and routinely outlives the
-            // handler that enqueued the item.
-            { detached: true }
-          );
-        }
-      }
-    } finally {
-      this._flushingQueue = false;
-    }
+    const item = await this._queue.push(callback, payload, options);
+    return item.id;
   }
 
   /**
    * Dequeue a task by ID
    * @param id ID of the task to dequeue
    */
-  dequeue(id: string) {
-    this.sql`DELETE FROM cf_agents_queues WHERE id = ${id}`;
+  dequeue(id: string): Promise<boolean> {
+    return this._queue.cancel(id);
   }
 
   /**
    * Dequeue all tasks
    */
-  dequeueAll() {
-    this.sql`DELETE FROM cf_agents_queues`;
+  dequeueAll(): Promise<number> {
+    return this._queue.cancelAll();
   }
 
   /**
    * Dequeue all tasks by callback
    * @param callback Name of the callback to dequeue
    */
-  dequeueAllByCallback(callback: string) {
-    this.sql`DELETE FROM cf_agents_queues WHERE callback = ${callback}`;
+  dequeueAllByCallback(callback: string): Promise<number> {
+    return this._queue.cancelAll(callback);
   }
 
   /**
@@ -3784,126 +3106,44 @@ export class Agent<
    * @param id ID of the task to get
    * @returns The task or undefined if not found
    */
-  getQueue(id: string): QueueItem<string> | undefined {
-    const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues WHERE id = ${id}
-    `;
-    if (!result || result.length === 0) return undefined;
-    const row = result[0];
-    return {
-      ...row,
-      payload: JSON.parse(row.payload as unknown as string),
-      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    };
+  getQueue<T = unknown>(id: string): Promise<QueueItem<T> | undefined> {
+    return this._queue.get<T>(id);
   }
 
   /**
-   * Get all queues by key and value
+   * Get all queued tasks whose payload has `key` equal to `value`
    * @param key Key to filter by
    * @param value Value to filter by
    * @returns Array of matching QueueItem objects
    */
-  getQueues(key: string, value: string): QueueItem<string>[] {
-    const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues
-    `;
-    return result
-      .filter(
-        (row) => JSON.parse(row.payload as unknown as string)[key] === value
-      )
-      .map((row) => ({
-        ...row,
-        payload: JSON.parse(row.payload as unknown as string),
-        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-      }));
-  }
-
-  private _facetRunRowsForPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): FacetRunStorageRow[] {
-    const rows = this.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-    `;
-    return rows.filter((row) => {
-      try {
-        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-        return this._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
-      } catch {
-        return false;
-      }
-    });
-  }
-
-  private _deleteFacetRunRowsForPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): void {
-    for (const row of this._facetRunRowsForPrefix(ownerPath)) {
-      this.sql`
-        DELETE FROM cf_agents_facet_runs
-        WHERE owner_path_key = ${row.owner_path_key}
-          AND run_id = ${row.run_id}
-      `;
-    }
-  }
-
-  private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
-    if (!this._isFacet) return undefined;
-    const key = agentPathKey(this.selfPath);
-    return key ? { key, data: JSON.stringify(this.selfPath) } : undefined;
-  }
-
-  private async _routeLifecycleToRoot(
-    envelope: LifecycleRouteEnvelope
-  ): Promise<unknown> {
-    if (!this._isFacet) return this.lifecycle.route(envelope);
-    return (await this._rootAlarmOwner())._cf_routeLifecycle(
-      undefined,
-      envelope
+  async getQueues<T = unknown>(
+    key: string,
+    value: string
+  ): Promise<QueueItem<T>[]> {
+    const items = await this._queue.list<T>();
+    return items.filter(
+      (item) =>
+        typeof item.payload === "object" &&
+        item.payload !== null &&
+        (item.payload as Record<string, unknown>)[key] === value
     );
   }
 
-  private async _routeLifecycleToTarget(
+  private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
+    return this._dynamicAgents.lifecycleRouteAddress();
+  }
+
+  private _routeLifecycleToRoot(
+    envelope: LifecycleRouteEnvelope
+  ): Promise<unknown> {
+    return this._dynamicAgents.routeLifecycleToRoot(envelope);
+  }
+
+  private _routeLifecycleToTarget(
     target: LifecycleRouteAddress,
     envelope: LifecycleRouteEnvelope
   ): Promise<unknown> {
-    let targetPath: AgentPathStep[];
-    try {
-      targetPath = JSON.parse(target.data) as AgentPathStep[];
-    } catch {
-      throw new Error("Lifecycle route target is not a valid Agent path");
-    }
-
-    const selfPath = this.selfPath;
-    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
-      throw new Error(
-        `Lifecycle route does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-    if (selfPath.length === targetPath.length) {
-      return this.lifecycle.route(envelope);
-    }
-
-    const next = targetPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      const stalePath = targetPath.slice(0, selfPath.length + 1);
-      if (this._isFacet) {
-        await (await this._rootAlarmOwner())._cf_cleanupFacetPrefix(stalePath);
-      } else {
-        await this._cf_cleanupFacetPrefix(stalePath);
-      }
-      return false;
-    }
-
-    const child = await this._cf_resolveSubAgent(next.className, next.name);
-    return (
-      child as unknown as {
-        _cf_routeLifecycle(
-          target: LifecycleRouteAddress,
-          envelope: LifecycleRouteEnvelope
-        ): Promise<unknown>;
-      }
-    )._cf_routeLifecycle(target, envelope);
+    return this._dynamicAgents.routeLifecycleToTarget(target, envelope);
   }
 
   /** Single native-RPC aperture for routed Lifecycle capabilities. */
@@ -3911,44 +3151,11 @@ export class Agent<
     target: LifecycleRouteAddress | undefined,
     envelope: LifecycleRouteEnvelope
   ): Promise<unknown> {
-    return target
-      ? this._routeLifecycleToTarget(target, envelope)
-      : this.lifecycle.route(envelope);
+    return this._dynamicAgents.routeLifecycle(target, envelope);
   }
 
-  private async _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
-    const root = this._parentPath[0];
-    if (!root) {
-      throw new Error("Facet routing requires a root parent.");
-    }
-
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const binding = ctx.exports?.[root.className] as
-      | DurableObjectNamespace
-      | undefined;
-    if (!binding) {
-      throw new Error(
-        `Unable to resolve root "${root.className}" for facet routing.`
-      );
-    }
-
-    return (await getAgentByName<Cloudflare.Env, Agent>(
-      binding as unknown as DurableObjectNamespace<Agent>,
-      root.name
-    )) as unknown as RootFacetRpcSurface;
-  }
-
-  private _cf_rootResolvesToSelf(): boolean {
-    const root = this._parentPath[0];
-    if (!root) return false;
-
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const binding = ctx.exports?.[root.className] as
-      | DurableObjectNamespace
-      | undefined;
-    if (!binding?.idFromName) return false;
-
-    return binding.idFromName(root.name).equals(this.ctx.id);
+  private _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
+    return this._dynamicAgents.rootAlarmOwner();
   }
 
   // ── Scheduling (delegates to agents/schedules) ─────────────────────────
@@ -3966,31 +3173,19 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const prefix = agentPathKey(ownerPath);
-    if (prefix) {
-      await this.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(prefix);
-    }
-    this._deleteFacetRunRowsForPrefix(ownerPath);
-    await this._syncHostJobs();
+    await this._dynamicAgents.cleanupPrefix(ownerPath);
   }
 
   /**
    * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
-   * Facets share the root isolate but cannot set their own physical
-   * alarm, so this lets facet work use the root alarm heartbeat.
+   * Facets run in separate colocated isolates but cannot set their own
+   * physical alarm, so this lets facet work use the root alarm heartbeat.
    * @internal
    */
-  async _cf_acquireFacetKeepAlive(
+  _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
-    const ownerPathKey = agentPathKey(ownerPath);
-    const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
-    this._facetKeepAliveTokens.add(token);
-    this._keepAliveRefs++;
-    if (this._keepAliveRefs === 1) {
-      await this._syncHostJobs();
-    }
-    return token;
+    return this._dynamicAgents.acquireKeepAlive(ownerPath);
   }
 
   /**
@@ -3998,10 +3193,8 @@ export class Agent<
    * Idempotent so disposer calls can safely race or run twice.
    * @internal
    */
-  async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
-    if (!this._facetKeepAliveTokens.delete(token)) return;
-    this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-    await this._syncHostJobs();
+  _cf_releaseFacetKeepAlive(token: string): Promise<void> {
+    return this._dynamicAgents.releaseKeepAlive(token);
   }
 
   /**
@@ -4010,39 +3203,22 @@ export class Agent<
    * The facet remains authoritative for snapshots and recovery hooks.
    * @internal
    */
-  async _cf_registerFacetRun(
+  _cf_registerFacetRun(
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    const ownerPathJson = JSON.stringify(ownerPath);
-    const ownerPathKey = agentPathKey(ownerPath);
-    if (!ownerPathKey) {
-      throw new Error("_cf_registerFacetRun requires a non-empty owner path.");
-    }
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_facet_runs
-        (owner_path, owner_path_key, run_id, created_at)
-      VALUES
-        (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
-    `;
-    await this._syncHostJobs();
+    return this._dynamicAgents.registerRun(ownerPath, runId);
   }
 
   /**
    * Remove a completed facet fiber from the root-side index.
    * @internal
    */
-  async _cf_unregisterFacetRun(
+  _cf_unregisterFacetRun(
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    const ownerPathKey = agentPathKey(ownerPath);
-    this.sql`
-      DELETE FROM cf_agents_facet_runs
-      WHERE owner_path_key IS ${ownerPathKey}
-        AND run_id = ${runId}
-    `;
-    await this._syncHostJobs();
+    return this._dynamicAgents.unregisterRun(ownerPath, runId);
   }
 
   /**
@@ -4071,7 +3247,7 @@ export class Agent<
     when: Date | string | number,
     callback: keyof this,
     payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
+    options?: ScheduleOptions
   ): Promise<Schedule<T>> {
     // SAFETY: Agent's historical generic promises Schedule<T>; the untyped
     // scheduler default carries Schedule<unknown> for name-based calls.
@@ -4827,7 +4003,7 @@ export class Agent<
     `;
   }
 
-  // ── Fibers: durable execution ───────────────────────────────────────
+  // ── Legacy fibers: durable execution (see agents/tasks for the new engine) ──
 
   /**
    * Run a function as a durable fiber. The fiber is registered in SQLite
@@ -5119,17 +4295,24 @@ export class Agent<
       }
     } finally {
       this._runFiberActiveFibers.delete(id);
-      this._withAgentSpan(
-        "finalize_fiber",
-        "fiber",
-        {
-          "cloudflare.agents.fiber.id": id,
-          "cloudflare.agents.fiber.name": name
-        },
-        () => {
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
-        }
-      );
+      try {
+        this._withAgentSpan(
+          "finalize_fiber",
+          "fiber",
+          {
+            "cloudflare.agents.fiber.id": id,
+            "cloudflare.agents.fiber.name": name
+          },
+          () => {
+            this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
+          }
+        );
+      } catch (error) {
+        console.error(
+          `[Agent] Failed to finalize fiber "${name}" (${id}); leaving run row for recovery:`,
+          error
+        );
+      }
       dispose();
       if (root && registeredFacetRun) {
         try {
@@ -5157,6 +4340,23 @@ export class Agent<
       throw new Error("stash() called outside a fiber");
     }
     ctx.stash(data);
+  }
+
+  /**
+   * Run `fn` inside the fiber stash context so `this.stash()` keeps working
+   * for turns executing on the `tasks` capability exactly as it does inside
+   * legacy `runFiber()` closures.
+   * @internal
+   */
+  protected _withFiberStash<T>(
+    context: {
+      id: string;
+      signal: AbortSignal;
+      stash: (data: unknown) => void;
+    },
+    fn: () => Promise<T>
+  ): Promise<T> {
+    return _fiberALS.run(context, fn);
   }
 
   /**
@@ -5394,55 +4594,8 @@ export class Agent<
    * recovery hooks live in each facet's own `cf_agents_runs` table.
    * @internal
    */
-  private async _checkFacetRunFibers(): Promise<void> {
-    // Only the root owns the physical alarm and facet-run index.
-    if (this._parentPath.length > 0) return;
-
-    const rows = this.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-      ORDER BY created_at ASC
-    `;
-    const firstRowByOwner = new Map<string, FacetRunStorageRow>();
-    for (const row of rows) {
-      if (!firstRowByOwner.has(row.owner_path_key)) {
-        firstRowByOwner.set(row.owner_path_key, row);
-      }
-    }
-
-    for (const row of firstRowByOwner.values()) {
-      let ownerPath: AgentPathStep[];
-      try {
-        ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-      } catch (e) {
-        console.warn(
-          `[Agent] Corrupted facet fiber owner path for ${row.owner_path_key}; pruning stale lease.`,
-          e
-        );
-        this.sql`
-          DELETE FROM cf_agents_facet_runs
-          WHERE owner_path_key = ${row.owner_path_key}
-        `;
-        continue;
-      }
-
-      try {
-        const remaining = await this._cf_checkRunFibersForFacet(ownerPath);
-        if (remaining === 0) {
-          this.sql`
-            DELETE FROM cf_agents_facet_runs
-            WHERE owner_path_key = ${row.owner_path_key}
-          `;
-        }
-      } catch (e) {
-        // Keep the lease so a transient failure (e.g. facet init error)
-        // gets retried on the next root heartbeat.
-        console.error(
-          `[Agent] Facet fiber recovery check failed for ${row.owner_path_key}:`,
-          e
-        );
-      }
-    }
+  private _checkFacetRunFibers(): Promise<void> {
+    return this._dynamicAgents.checkRunFibers();
   }
 
   /**
@@ -5451,39 +4604,10 @@ export class Agent<
    * rows on the target facet after recovery.
    * @internal
    */
-  async _cf_checkRunFibersForFacet(
+  _cf_checkRunFibersForFacet(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<number> {
-    const selfPath = this.selfPath;
-    if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
-      throw new Error(
-        `Facet fiber owner path does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-
-    if (selfPath.length === ownerPath.length) {
-      await this._checkRunFibers();
-      const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_agents_runs
-      `;
-      return rows[0]?.count ?? 0;
-    }
-
-    const next = ownerPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      // The facet was deleted or its registry was cleared. The root
-      // should prune the root-side lease; there is no remaining child
-      // storage to recover through the public registry path.
-      return 0;
-    }
-
-    const stub = await this._cf_resolveSubAgent(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_checkRunFibersForFacet(
-        ownerPath: ReadonlyArray<AgentPathStep>
-      ): Promise<number>;
-    };
-    return handle._cf_checkRunFibersForFacet(ownerPath);
+    return this._dynamicAgents.checkRunFibersAtPath(ownerPath);
   }
 
   /**
@@ -5492,61 +4616,12 @@ export class Agent<
    * `this.agent` calls back to the exact sub-agent that started a workflow.
    * @internal
    */
-  async _cf_invokeAgentPath(
+  _cf_invokeAgentPath(
     targetPath: ReadonlyArray<AgentPathStep>,
     method: string,
     args: unknown[]
   ): Promise<unknown> {
-    await this.__unsafe_ensureInitialized();
-
-    const selfPath = this.selfPath;
-    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
-      throw new Error(
-        `Workflow origin path does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-
-    if (selfPath.length === targetPath.length) {
-      // Match real DO-stub RPC semantics: refuse JS-internal probes
-      // (`constructor`, `toString`, symbol keys, thenable checks, …) and
-      // anything inherited from `Object.prototype` so a facet-origin workflow
-      // cannot reach a method surface a top-level workflow's stub would deny.
-      // The framework's own `_workflow_*` / `_cf_*` RPC methods and any
-      // user-defined Agent methods live on the subclass prototype, not
-      // `Object.prototype`, so they remain callable.
-      const target = this as unknown as Record<string, unknown>;
-      const fn = target[method];
-      if (
-        isInternalJsStubProp(method) ||
-        method in Object.prototype ||
-        typeof fn !== "function"
-      ) {
-        throw new Error(
-          `Workflow origin method "${method}" is not callable on ${this.constructor.name}.`
-        );
-      }
-      return await (fn as (...methodArgs: unknown[]) => unknown).apply(
-        this,
-        args
-      );
-    }
-
-    const next = targetPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      throw new Error(
-        `Workflow origin sub-agent ${next.className} "${next.name}" no longer exists.`
-      );
-    }
-
-    const stub = await this._cf_resolveSubAgent(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_invokeAgentPath(
-        path: ReadonlyArray<AgentPathStep>,
-        method: string,
-        args: unknown[]
-      ): Promise<unknown>;
-    };
-    return await handle._cf_invokeAgentPath(targetPath, method, args);
+    return this._dynamicAgents.invokeAgentPath(targetPath, method, args);
   }
 
   /**
@@ -5562,68 +4637,10 @@ export class Agent<
    * cleanup as `parent.deleteSubAgent(Cls, name)` from the parent.
    * @internal
    */
-  async _cf_destroyDescendantFacet(
+  _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const selfPath = this.selfPath;
-
-    if (targetPath.length === 0) {
-      throw new Error(
-        "_cf_destroyDescendantFacet: target path must not be empty."
-      );
-    }
-    if (selfPath.length >= targetPath.length) {
-      throw new Error(
-        "_cf_destroyDescendantFacet: target must be a strict descendant."
-      );
-    }
-    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
-      throw new Error(
-        "_cf_destroyDescendantFacet: target path does not descend from this agent."
-      );
-    }
-
-    // The root owns every schedule row; cancel the target's prefix
-    // upfront so we don't have to make an extra round trip back from
-    // each intermediate hop.
-    if (this._parentPath.length === 0) {
-      await this._cf_cleanupFacetPrefix(targetPath);
-    }
-
-    if (selfPath.length === targetPath.length - 1) {
-      // We are the immediate parent of the target — perform the local
-      // facet teardown the same way `deleteSubAgent` does.
-      const target = targetPath[targetPath.length - 1];
-      const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-      if (!ctx.facets) {
-        throw new Error(
-          "destroy() (delegated from facet) is not supported in this runtime — " +
-            "`ctx.facets` is unavailable. " +
-            "Update to the latest `compatibility_date` in your wrangler.jsonc."
-        );
-      }
-      try {
-        ctx.facets.delete(`${target.className}\0${target.name}`);
-      } catch {
-        // no-op — facet wasn't registered (already deleted / never spawned)
-      }
-      this._forgetSubAgent(target.className, target.name);
-      return;
-    }
-
-    // Recurse one step deeper.
-    const next = targetPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      // Already gone — schedules are cleared, nothing more to do.
-      return;
-    }
-    const stub = await this._cf_resolveSubAgent(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_destroyDescendantFacet(
-        targetPath: ReadonlyArray<AgentPathStep>
-      ): Promise<void>;
-    };
-    await handle._cf_destroyDescendantFacet(targetPath);
+    return this._dynamicAgents.destroyDescendant(targetPath);
   }
 
   /**
@@ -5795,42 +4812,36 @@ export class Agent<
   }
 
   /**
-   * Apply Agent's domain policy when the Lifecycle alarm memory-limit
-   * circuit breaker records a strike (#1825). Lifecycle already handled the
-   * item that was executing; this backs off or purges the recovery-loop
-   * schedules named by {@link _cf_recoveryAlarmCallbacks} and, at the strike
-   * budget, seals in-flight recovery via {@link _cf_sealMemoryLimitedRecovery}.
+   * Apply host policy after the alarm memory-limit breaker records a strike.
+   *
+   * New chat hosts override this hook directly. The sealed-only fallback keeps
+   * `agents` 0.23 compatible with already-published chat packages whose peer
+   * ranges accept it but which implement only the former
+   * `_cf_sealMemoryLimitedRecovery` template method. Queue membership remains
+   * job-row policy; this invokes terminalization only and can be removed once
+   * old chat releases no longer accept the current `agents` range.
+   *
    * @internal
    */
-  async onAlarmMemoryLimit(context: {
-    readonly sealed: boolean;
-    readonly nextTime?: number;
-  }): Promise<void> {
-    const callbacks = this._cf_recoveryAlarmCallbacks();
-    try {
-      await this.scheduler.applyMemoryLimitPolicy({
-        callbacks,
-        sealed: context.sealed,
-        nextTime: context.nextTime
-      });
-    } catch {
-      // best-effort at a host failure boundary
-    }
-    if (context.sealed) {
-      try {
-        await this._cf_sealMemoryLimitedRecovery();
-      } catch {
-        // best-effort terminalization; the purge above already broke the loop
+  protected async onAlarmMemoryLimit(
+    context: MemoryLimitContext
+  ): Promise<void> {
+    if (!context.sealed) return;
+    const legacySeal = (
+      this as unknown as {
+        _cf_sealMemoryLimitedRecovery?: () => void | Promise<void>;
       }
-    }
+    )._cf_sealMemoryLimitedRecovery;
+    await legacySeal?.call(this);
   }
 
   /**
    * Run Lifecycle's alarm event loop after the pending-destroy preamble.
    *
    * The alarm memory-limit circuit breaker (#1825) lives inside
-   * `Lifecycle.alarm()`; Agent contributes domain policy through
-   * {@link onAlarmMemoryLimit}.
+   * `Lifecycle.alarm()`; capabilities and hosts opt into extra domain
+   * policy via their `onMemoryLimit` / `onAlarmMemoryLimit` hooks and the
+   * `recoveryLoop` schedule option.
    *
    * @remarks Use `this.schedule()` for named Agent callbacks. Reusable durable
    * work belongs in a capability that pushes jobs and implements `onJob()`.
@@ -5851,26 +4862,6 @@ export class Agent<
     await this.lifecycle.alarm();
   }
 
-  /**
-   * The schedule-callback names whose jobs drive a recovery loop that can
-   * deterministically OOM. The base agent has none; chat hosts (`Think`,
-   * `AIChatAgent`) override this to return their recovery continuation callbacks
-   * so the circuit breaker can surgically back them off / purge them WITHOUT
-   * disturbing unrelated scheduled tasks. See {@link onAlarmMemoryLimit}.
-   */
-  protected _cf_recoveryAlarmCallbacks(): string[] {
-    return [];
-  }
-
-  /**
-   * Hook for a host to terminalize ("seal") any in-flight recovery work as an
-   * out-of-memory exhaustion when the alarm circuit breaker trips at its strike
-   * budget (#1825). Runs at the outermost alarm frame (post-unwind, so writes
-   * can land). Default: no-op. Chat hosts override to fire `onExhausted` + the
-   * terminal banner and persist the sealed incident.
-   */
-  protected async _cf_sealMemoryLimitedRecovery(): Promise<void> {}
-
   // ── Sub-agent routing (external addressability for facets) ──────────────
 
   /**
@@ -5881,9 +4872,9 @@ export class Agent<
    * Response, the framework resolves the facet and hands the
    * request off.
    *
-   * After a WebSocket upgrade completes, subsequent frames route
-   * directly to the child — the parent is only on the path for the
-   * initial request.
+   * The parent owns an upgraded WebSocket for its lifetime. Subsequent
+   * frames wake the root parent, which forwards them to the child over
+   * RPC and routes replies back to the native socket.
    *
    * @experimental The API surface may change before stabilizing.
    */
@@ -5923,33 +4914,33 @@ export class Agent<
     without?: string[]
   ): void {
     if (this._isFacet) {
-      void this._cf_broadcastToParentSubAgent(msg, without);
+      void this._dynamicAgents.broadcastToParent(msg, without);
       return;
     }
 
     for (const connection of this._webSockets.getConnections()) {
       if (without?.includes(connection.id)) continue;
-      if (this._cf_connectionHasSubAgentTarget(connection)) continue;
+      if (this._dynamicAgents.connectionHasChildTarget(connection)) continue;
       connection.send(msg);
     }
   }
 
   getConnection<TState = unknown>(id: string): Connection<TState> | undefined {
     if (this._isFacet) {
-      const stored = this._cf_virtualSubAgentConnections.get(id);
-      if (stored) {
-        return this._cf_createSubAgentBridgeConnection(
-          stored.meta
-        ) as Connection<TState>;
-      }
-      // Do not read lifecycle-owned root connections from a facet — that resolves
-      // to the host/root DO's hibernatable sockets and reading them from the
-      // facet's I/O context throws a cross-DO Native I/O error. See issue #1677.
-      return undefined;
+      // Do not read lifecycle-owned root connections from a facet — that
+      // resolves to the host/root DO's hibernatable sockets and reading them
+      // from the facet's I/O context throws a cross-DO Native I/O error. See
+      // issue #1677. Only virtual (bridged) connections are visible here.
+      return this._dynamicAgents.getVirtualConnection(id) as
+        | Connection<TState>
+        | undefined;
     }
 
     const connection = this._webSockets.getConnection<TState>(id);
-    if (!connection || this._cf_connectionHasSubAgentTarget(connection)) {
+    if (
+      !connection ||
+      this._dynamicAgents.connectionHasChildTarget(connection)
+    ) {
       return undefined;
     }
     return connection;
@@ -5966,151 +4957,16 @@ export class Agent<
       // from the facet's I/O context throws
       // "Cannot perform I/O on behalf of a different Durable Object (Native)".
       // See issue #1677.
-      for (const stored of this._cf_virtualSubAgentConnections.values()) {
-        if (!tag || stored.meta.tags.includes(tag)) {
-          yield this._cf_createSubAgentBridgeConnection(
-            stored.meta
-          ) as Connection<TState>;
-        }
-      }
+      yield* this._dynamicAgents.getVirtualConnections(tag) as Iterable<
+        Connection<TState>
+      >;
       return;
     }
 
     for (const connection of this._webSockets.getConnections<TState>(tag)) {
-      if (this._cf_connectionHasSubAgentTarget(connection)) continue;
+      if (this._dynamicAgents.connectionHasChildTarget(connection)) continue;
       yield connection;
     }
-  }
-
-  private _cf_activeSubAgentBridge(
-    connectionId?: string
-  ): SubAgentConnectionBridgeLike | undefined {
-    const context = this._cf_subAgentBridgeContext.getStore();
-    if (connectionId !== undefined && context?.connectionId !== connectionId) {
-      return undefined;
-    }
-    return context?.bridge;
-  }
-
-  /**
-   * Route a virtual sub-agent connection operation through its live frame
-   * bridge, or through the durable root Agent after that frame completes.
-   * All operations share one per-connection queue. Facet broadcasts wait for
-   * older queued operations; failures do not block later work.
-   */
-  private _cf_routeSubAgentConnectionOperation(
-    connectionId: string,
-    operationName: SubAgentConnectionOperationName,
-    operation: (bridge: SubAgentConnectionBridgeLike) => unknown
-  ): void {
-    const activeBridge = this._cf_activeSubAgentBridge(connectionId);
-    const previousConnectionOperation =
-      this._cf_subAgentConnectionOperationTails.get(connectionId);
-    let pending: Promise<void>;
-    if (activeBridge && !previousConnectionOperation) {
-      try {
-        pending = Promise.resolve(operation(activeBridge)).then(() => {});
-      } catch (error) {
-        pending = Promise.reject(error);
-      }
-    } else {
-      pending = (previousConnectionOperation ?? Promise.resolve()).then(
-        async () => {
-          const root = await this._rootAlarmOwner();
-          await operation(new RootSubAgentConnectionBridge(root, connectionId));
-        }
-      );
-    }
-    const completion = pending.catch((error: unknown) => {
-      this._cf_reportSubAgentConnectionOperationFailure(
-        connectionId,
-        operationName,
-        error
-      );
-    });
-
-    this._cf_subAgentConnectionOperationTails.set(connectionId, completion);
-    this.ctx.waitUntil(completion);
-    void completion.then(() => {
-      if (
-        this._cf_subAgentConnectionOperationTails.get(connectionId) ===
-        completion
-      ) {
-        this._cf_subAgentConnectionOperationTails.delete(connectionId);
-      }
-    });
-  }
-
-  /**
-   * Route a facet broadcast after every older connection operation.
-   *
-   * This barrier is intentionally one-way: facet startup can broadcast before
-   * a child connection has finished initializing its tags and protocol flags.
-   * Making those later connection operations wait would let the next frame
-   * observe stale root-owned metadata.
-   */
-  private async _cf_routeSubAgentBroadcast(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[],
-    upstreamBridge?: SubAgentConnectionBridgeLike
-  ): Promise<void> {
-    const activeBridge = upstreamBridge ?? this._cf_activeSubAgentBridge();
-    const previousOperations = new Set([
-      ...(this._cf_subAgentBroadcastOperationTail
-        ? [this._cf_subAgentBroadcastOperationTail]
-        : []),
-      ...this._cf_subAgentConnectionOperationTails.values()
-    ]);
-    let pending: Promise<void>;
-    if (activeBridge && previousOperations.size === 0) {
-      try {
-        pending = Promise.resolve(
-          activeBridge.broadcast(ownerPath, message, without)
-        );
-      } catch (error) {
-        pending = Promise.reject(error);
-      }
-    } else {
-      pending = Promise.all(previousOperations).then(async () => {
-        const root = await this._rootAlarmOwner();
-        await root._cf_broadcastToSubAgent(ownerPath, message, without);
-      });
-    }
-    const completion = pending.catch((error: unknown) => {
-      console.error("[Agent] Sub-agent broadcast operation failed:", {
-        operation: "broadcast",
-        error
-      });
-    });
-
-    this._cf_subAgentBroadcastOperationTail = completion;
-    this.ctx.waitUntil(completion);
-    void completion.then(() => {
-      if (this._cf_subAgentBroadcastOperationTail === completion) {
-        this._cf_subAgentBroadcastOperationTail = undefined;
-      }
-    });
-    await completion;
-  }
-
-  private _cf_reportSubAgentConnectionOperationFailure(
-    connectionId: string,
-    operation: SubAgentConnectionOperationName,
-    error: unknown
-  ): void {
-    console.error("[Agent] Sub-agent connection operation failed:", {
-      connectionId,
-      operation,
-      error
-    });
-  }
-
-  private async _cf_broadcastToParentSubAgent(
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void> {
-    await this._cf_routeSubAgentBroadcast(this.selfPath, message, without);
   }
 
   async _cf_broadcastToSubAgent(
@@ -6118,168 +4974,39 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._isFacet) {
-      await this._cf_routeSubAgentBroadcast(ownerPath, message, without);
-      return;
-    }
-
-    for (const connection of this._webSockets.getConnections()) {
-      if (without?.includes(connection.id)) continue;
-      const targetPath = this._cf_subAgentTargetPath(connection);
-      if (!targetPath) continue;
-      if (!this._isSameAgentPath(targetPath, ownerPath)) continue;
-      connection.send(message);
-    }
+    await this._dynamicAgents.broadcastToPath(ownerPath, message, without);
   }
 
-  async _cf_subAgentConnectionMetas(
+  _cf_subAgentConnectionMetas(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<SubAgentConnectionMeta[]> {
-    const metas: SubAgentConnectionMeta[] = [];
-    for (const connection of this._webSockets.getConnections()) {
-      const meta = this._cf_subAgentConnectionMetaForPath(
-        connection,
-        ownerPath
-      );
-      if (meta) metas.push(meta);
-    }
-    return metas;
+    return this._dynamicAgents.connectionMetas(ownerPath);
   }
 
-  async _cf_sendToSubAgentConnection(
+  _cf_sendToSubAgentConnection(
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
-    const connection = this._webSockets.getConnection(connectionId);
-    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
-      return;
-    }
-    connection.send(message);
+    return this._dynamicAgents.sendToConnection(connectionId, message);
   }
 
-  async _cf_closeSubAgentConnection(
+  _cf_closeSubAgentConnection(
     connectionId: string,
     code?: number,
     reason?: string
   ): Promise<void> {
-    const connection = this._webSockets.getConnection(connectionId);
-    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
-      return;
-    }
-    connection.close(code, reason);
+    return this._dynamicAgents.closeConnection(connectionId, code, reason);
   }
 
-  async _cf_setSubAgentConnectionState(
+  _cf_setSubAgentConnectionState(
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
-    const connection = this._webSockets.getConnection(connectionId);
-    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
-      return null;
-    }
-    this._ensureConnectionWrapped(connection);
-    connection.setState(state);
-    return this._cf_getForwardedSubAgentState(connection);
-  }
-
-  private _cf_subAgentConnectionMetaForPath(
-    connection: Connection,
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): SubAgentConnectionMeta | null {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
-      connection,
-      CF_SUB_AGENT_OUTER_URL_KEY
-    );
-    if (typeof outerUri !== "string") return null;
-
-    const target = this._cf_subAgentPathFromOuterUri(outerUri, ownerPath);
-    if (!target) return null;
-
-    const raw = this._cf_getRawConnectionState(connection);
-    const rawTags =
-      raw != null && typeof raw === "object"
-        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
-        : undefined;
-    const tags = Array.isArray(rawTags)
-      ? rawTags.filter((tag): tag is string => typeof tag === "string")
-      : [...connection.tags];
-    return {
-      id: connection.id,
-      uri: target.uri,
-      tags,
-      state: this._cf_getForwardedSubAgentState(connection)
-    };
-  }
-
-  private _cf_subAgentTargetPath(
-    connection: Connection
-  ): ReadonlyArray<AgentPathStep> | null {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
-      connection,
-      CF_SUB_AGENT_OUTER_URL_KEY
-    );
-    if (typeof outerUri !== "string") return null;
-
-    return this._cf_subAgentPathFromOuterUri(outerUri)?.path ?? null;
-  }
-
-  private _cf_subAgentPathFromOuterUri(
-    outerUri: string,
-    stopAt?: ReadonlyArray<AgentPathStep>
-  ): { path: ReadonlyArray<AgentPathStep>; uri: string } | null {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
-    const path: AgentPathStep[] = [...this.selfPath];
-    let currentUrl = outerUri;
-
-    while (true) {
-      const match = _parseSubAgentPath(currentUrl, { knownClasses });
-      if (!match) break;
-      path.push({ className: match.childClass, name: match.childName });
-      const rewritten = new URL(currentUrl);
-      rewritten.pathname = match.remainingPath;
-      currentUrl = rewritten.toString();
-      if (stopAt && this._isSameAgentPath(path, stopAt)) {
-        return { path, uri: currentUrl };
-      }
-    }
-
-    if (path.length === this.selfPath.length) return null;
-    if (stopAt) return null;
-    return { path, uri: currentUrl };
-  }
-
-  private _isSameAgentPath(
-    a: ReadonlyArray<AgentPathStep>,
-    b: ReadonlyArray<AgentPathStep>
-  ): boolean {
-    if (a.length !== b.length) return false;
-    return a.every(
-      (step, index) =>
-        step.className === b[index]?.className && step.name === b[index]?.name
-    );
-  }
-
-  private _cf_connectionHasSubAgentTarget(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    return (
-      typeof this._unsafe_getConnectionFlag(
-        connection,
-        CF_SUB_AGENT_OUTER_URL_KEY
-      ) === "string"
-    );
+    return this._dynamicAgents.setConnectionState(connectionId, state);
   }
 
   protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
-    if (!connection.uri) return false;
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    return (
-      _parseSubAgentPath(connection.uri, {
-        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-      }) !== null
-    );
+    return this._dynamicAgents.connectionTargetsChild(connection);
   }
 
   /**
@@ -6291,375 +5018,86 @@ export class Agent<
    * own protocol frames on sockets that are about to be forwarded to a child.
    */
   protected _cf_requestTargetsSubAgent(request: Request): boolean {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    return (
-      _parseSubAgentPath(request.url, {
-        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-      }) !== null
-    );
+    return this._dynamicAgents.requestTargetsChild(request);
   }
 
-  private async _cf_forwardSubAgentWebSocketConnect(
+  private _cf_forwardSubAgentWebSocketConnect(
     connection: Connection,
     request: Request,
     options: { gate: boolean }
   ): Promise<boolean> {
-    const routed = await this._cf_resolveSubAgentConnection(
+    return this._dynamicAgents.forwardWebSocketConnect(
       connection,
       request,
       options
     );
-    if (!routed) return false;
-
-    await routed.child._cf_handleSubAgentWebSocketConnect(
-      this._cf_createSubAgentConnectionBridge(connection),
-      routed.meta
-    );
-    return true;
   }
 
-  private _cf_createSubAgentConnectionBridge(
-    connection: Connection
-  ): SubAgentConnectionBridge {
-    // A child-to-parent RPC callback starts a fresh async context. Capture the
-    // upstream bridge explicitly while this forwarding frame is still active.
-    const upstreamBroadcastBridge = this._isFacet
-      ? this._cf_activeSubAgentBridge(connection.id)
-      : undefined;
-
-    return new SubAgentConnectionBridge(
-      connection,
-      (ownerPath, message, without) => {
-        if (upstreamBroadcastBridge) {
-          return this._cf_routeSubAgentBroadcast(
-            ownerPath,
-            message,
-            without,
-            upstreamBroadcastBridge
-          );
-        }
-        return this._cf_broadcastToSubAgent(ownerPath, message, without);
-      }
-    );
-  }
-
-  private async _cf_forwardSubAgentWebSocketMessage(
+  private _cf_forwardSubAgentWebSocketMessage(
     connection: Connection,
     message: WSMessage,
     replyBridge?: SubAgentConnectionBridge
   ): Promise<boolean> {
-    const routed = await this._cf_resolveSubAgentConnection(connection);
-    if (!routed) return false;
-
-    const bridge = this._cf_createSubAgentConnectionBridge(connection);
-    await routed.child._cf_handleSubAgentWebSocketMessage(
+    return this._dynamicAgents.forwardWebSocketMessage(
+      connection,
       message,
-      bridge,
-      routed.meta,
-      replyBridge ?? bridge
+      replyBridge
     );
-    return true;
   }
 
-  private async _cf_forwardSubAgentWebSocketClose(
+  private _cf_forwardSubAgentWebSocketClose(
     connection: Connection,
     code: number,
     reason: string,
     wasClean: boolean
   ): Promise<boolean> {
-    const routed = await this._cf_resolveSubAgentConnection(connection);
-    if (!routed) return false;
-
-    await routed.child._cf_handleSubAgentWebSocketClose(
+    return this._dynamicAgents.forwardWebSocketClose(
+      connection,
       code,
       reason,
-      wasClean,
-      this._cf_createSubAgentConnectionBridge(connection),
-      routed.meta
+      wasClean
     );
-    return true;
   }
 
-  private async _cf_resolveSubAgentConnection(
-    connection: Connection,
-    request?: Request,
-    options: { gate: boolean } = { gate: false }
-  ): Promise<{
-    child: SubAgentWebSocketEndpoint;
-    meta: SubAgentConnectionMeta;
-  } | null> {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
-      connection,
-      CF_SUB_AGENT_OUTER_URL_KEY
-    );
-    const uri = typeof outerUri === "string" ? outerUri : connection.uri;
-    if (!uri) return null;
-
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    let match = _parseSubAgentPath(uri, {
-      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-    });
-    if (!match) return null;
-    if (
-      this._ParentClass.name === match.childClass &&
-      this.name === match.childName
-    ) {
-      const tailUri = new URL(uri);
-      tailUri.pathname = match.remainingPath;
-      match = _parseSubAgentPath(tailUri.toString(), {
-        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-      });
-      if (!match) return null;
-    }
-
-    let forwardReq = request;
-    if (request && options.gate) {
-      const decision = await this.onBeforeSubAgent(request, {
-        className: match.childClass,
-        name: match.childName
-      });
-      if (decision instanceof Response) {
-        connection.close(1008, "Sub-agent connection rejected");
-        return null;
-      }
-      forwardReq = decision instanceof Request ? decision : request;
-    }
-
-    const child = (await this._cf_resolveSubAgent(
-      match.childClass,
-      match.childName
-    )) as SubAgentWebSocketEndpoint;
-
-    const childUri = new URL(forwardReq?.url ?? uri);
-    childUri.pathname = match.remainingPath;
-    const raw = this._cf_getRawConnectionState(connection);
-    const rawTags =
-      raw != null && typeof raw === "object"
-        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
-        : undefined;
-    const tags = Array.isArray(rawTags)
-      ? rawTags.filter((tag): tag is string => typeof tag === "string")
-      : [...connection.tags];
-
-    return {
-      child,
-      meta: {
-        id: connection.id,
-        uri: childUri.toString(),
-        tags,
-        state: this._cf_getForwardedSubAgentState(connection),
-        requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
-      }
-    };
-  }
-
-  async _cf_handleSubAgentWebSocketConnect(
+  _cf_handleSubAgentWebSocketConnect(
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    await this._cf_runWithSubAgentBridge(bridge, meta.id, async () => {
-      const connection = this._cf_createSubAgentBridgeConnection(meta);
-      const request = new Request(meta.uri ?? "http://placeholder/", {
-        headers: meta.requestHeaders
-      });
-      if (
-        await this._cf_forwardSubAgentWebSocketConnect(connection, request, {
-          gate: true
-        })
-      ) {
-        return;
-      }
-
-      if (this.shouldConnectionBeReadonly(connection, { request })) {
-        this.setConnectionReadonly(connection, true);
-      }
-      if (!this.shouldSendProtocolMessages(connection, { request })) {
-        this._setConnectionNoProtocol(connection);
-      }
-
-      const childTags = await this.getConnectionTags(connection, { request });
-      (connection as unknown as { tags: string[] }).tags = [
-        connection.id,
-        ...childTags.filter((tag) => tag !== connection.id)
-      ];
-      this._cf_storeVirtualSubAgentConnection(connection);
-      await this.onConnect(connection, { request });
-      this._cf_storeVirtualSubAgentConnection(connection);
-    });
+    return this._dynamicAgents.handleWebSocketConnect(bridge, meta);
   }
 
-  async _cf_handleSubAgentWebSocketMessage(
+  _cf_handleSubAgentWebSocketMessage(
     message: WSMessage,
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta,
     replyBridge: SubAgentConnectionBridge = bridge
   ): Promise<void> {
-    const connection = this._cf_createSubAgentBridgeConnection(meta);
-    this._cf_storeVirtualSubAgentConnection(connection);
-    const replyContext: SubAgentRpcReplyInvocationContext = {
-      bridge: replyBridge
-    };
-    try {
-      await subAgentRpcReplyContext.run(replyContext, () =>
-        this._cf_runWithSubAgentBridge(bridge, meta.id, () =>
-          this.onMessage(connection, message)
-        )
-      );
-    } finally {
-      replyContext.bridge = undefined;
-    }
+    return this._dynamicAgents.handleWebSocketMessage(
+      message,
+      bridge,
+      meta,
+      replyBridge
+    );
   }
 
-  async _cf_handleSubAgentWebSocketClose(
+  _cf_handleSubAgentWebSocketClose(
     code: number,
     reason: string,
     wasClean: boolean,
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    const connection = this._cf_createSubAgentBridgeConnection(meta);
-    this._cf_storeVirtualSubAgentConnection(connection);
-    await this._cf_runWithSubAgentBridge(bridge, meta.id, () =>
-      this.onClose(connection, code, reason, wasClean)
+    return this._dynamicAgents.handleWebSocketClose(
+      code,
+      reason,
+      wasClean,
+      bridge,
+      meta
     );
-    this._cf_virtualSubAgentConnections.delete(meta.id);
   }
 
-  private async _cf_runWithSubAgentBridge<T>(
-    bridge: SubAgentConnectionBridgeLike,
-    connectionId: string,
-    fn: () => Promise<T> | T
-  ): Promise<T> {
-    const context: SubAgentBridgeInvocationContext = { bridge, connectionId };
-    try {
-      return await this._cf_subAgentBridgeContext.run(context, fn);
-    } finally {
-      // Detached work inherits this context, but a forwarded RPC bridge is only
-      // valid until its originating connect, message, or close call completes.
-      context.bridge = undefined;
-    }
-  }
-
-  private _cf_createSubAgentBridgeConnection(
-    meta: SubAgentConnectionMeta
-  ): Connection {
-    let stored = this._cf_virtualSubAgentConnections.get(meta.id);
-    if (stored) {
-      stored.meta = meta;
-      if (stored.connection) {
-        (
-          stored.connection as unknown as {
-            uri: string | null;
-            tags: string[];
-          }
-        ).uri = meta.uri;
-        (
-          stored.connection as unknown as {
-            uri: string | null;
-            tags: string[];
-          }
-        ).tags = meta.tags;
-        return stored.connection;
-      }
-    } else {
-      stored = { meta };
-      this._cf_virtualSubAgentConnections.set(meta.id, stored);
-    }
-
-    const owner = this;
-    const getStored = () =>
-      this._cf_virtualSubAgentConnections.get(meta.id) ?? stored;
-    const updateStoredState = (nextState: unknown) => {
-      const current = this._cf_virtualSubAgentConnections.get(meta.id);
-      if (current) {
-        current.meta = { ...current.meta, state: nextState };
-      }
-    };
-
-    const connection = {
-      id: meta.id,
-      uri: meta.uri,
-      tags: meta.tags,
-      get state() {
-        return getStored().meta.state;
-      },
-      setState(next: unknown | ((prev: unknown) => unknown)) {
-        const currentState = getStored().meta.state;
-        const state = typeof next === "function" ? next(currentState) : next;
-        updateStoredState(state);
-        owner._cf_routeSubAgentConnectionOperation(
-          meta.id,
-          "setState",
-          (bridge) => bridge.setState(state)
-        );
-        return state;
-      },
-      send(message: string | ArrayBuffer | ArrayBufferView) {
-        owner._cf_routeSubAgentConnectionOperation(meta.id, "send", (bridge) =>
-          bridge.send(message)
-        );
-      },
-      close(code?: number, reason?: string) {
-        owner._cf_routeSubAgentConnectionOperation(meta.id, "close", (bridge) =>
-          bridge.close(code, reason)
-        );
-      },
-      addEventListener() {},
-      removeEventListener() {}
-    } as unknown as Connection;
-
-    stored.connection = connection;
-    this._ensureConnectionWrapped(connection);
-    return connection;
-  }
-
-  private _cf_storeVirtualSubAgentConnection(connection: Connection): void {
-    this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
-      ...connection.tags
-    ]);
-    const stored = this._cf_virtualSubAgentConnections.get(connection.id);
-    this._cf_virtualSubAgentConnections.set(connection.id, {
-      meta: {
-        id: connection.id,
-        uri: connection.uri,
-        tags: [...connection.tags],
-        state: this._cf_getRawConnectionState(connection)
-      },
-      connection: stored?.connection ?? connection
-    });
-  }
-
-  protected async _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
-    if (!this._isFacet || this._parentPath.length === 0) return;
-
-    if (this._cf_rootResolvesToSelf()) {
-      // The root stub would resolve back to this blocked Durable Object
-      // during startup. The facet view cannot see root-owned hibernated
-      // sockets locally, so preserve liveness and skip best-effort hydration.
-      return;
-    }
-
-    const root = await this._rootAlarmOwner();
-    const metas = await root._cf_subAgentConnectionMetas(this.selfPath);
-    for (const meta of metas) {
-      this._cf_virtualSubAgentConnections.set(meta.id, { meta });
-    }
-  }
-
-  private _cf_getRawConnectionState(connection: Connection): unknown {
-    this._ensureConnectionWrapped(connection);
-    return this._rawStateAccessors.get(connection)?.getRaw() ?? null;
-  }
-
-  private _cf_getForwardedSubAgentState(connection: Connection): unknown {
-    const raw = this._cf_getRawConnectionState(connection);
-    if (raw == null || typeof raw !== "object") return raw;
-    const { [CF_SUB_AGENT_OUTER_URL_KEY]: _, ...rest } = raw as Record<
-      string,
-      unknown
-    >;
-    return Object.keys(rest).length > 0 ? rest : null;
+  protected _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
+    return this._dynamicAgents.hydrateConnectionsFromRoot();
   }
 
   /**
@@ -6697,7 +5135,7 @@ export class Agent<
    * class Inbox extends Agent {
    *   override async onBeforeSubAgent(req, { className, name }) {
    *     // Strict registry gate
-   *     if (!this.hasSubAgent(className, name)) {
+   *     if (!this.dynamicAgents.has(className, name)) {
    *       return new Response("Not found", { status: 404 });
    *     }
    *   }
@@ -6719,7 +5157,7 @@ export class Agent<
    *
    * @internal
    */
-  private async _cf_forwardToFacet(
+  private _cf_forwardToFacet(
     req: Request,
     match: {
       childClass: string;
@@ -6727,46 +5165,7 @@ export class Agent<
       remainingPath: string;
     }
   ): Promise<Response> {
-    let fetcher: { fetch(r: Request): Promise<Response> };
-    try {
-      fetcher = (await this._cf_resolveSubAgent(
-        match.childClass,
-        match.childName
-      )) as { fetch(r: Request): Promise<Response> };
-    } catch (err) {
-      // Keep the wire response terse: don't leak the parent's view of
-      // exports or internal error text over HTTP. The full error is
-      // still available to developers via worker logs / `console.error`.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error("[agents] sub-agent route failed:", message);
-      if (/null character/i.test(message) || /reserved/i.test(message)) {
-        return new Response("Bad Request", { status: 400 });
-      }
-      return new Response("Not Found", { status: 404 });
-    }
-
-    // Rewrite the URL to strip the /sub/{class}/{name} prefix. The
-    // child's own fetch then processes either its own request (if
-    // no further /sub/... remains) or recurses into its own child.
-    const rewritten = new URL(req.url);
-    rewritten.pathname = match.remainingPath;
-    const forwardedHeaders = new Headers(req.headers);
-    const forwardedInit: RequestInit = {
-      method: req.method,
-      headers: forwardedHeaders
-    };
-    if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-      forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
-    }
-    // Hand the body through as a stream. Reading it here (e.g.
-    // `await req.arrayBuffer()`) materialises the entire body in the
-    // parent DO's isolate, ahead of any application-level intake limit,
-    // and re-materialises it once per `/sub/` hop — see #2015.
-    if (req.body && req.method !== "GET" && req.method !== "HEAD") {
-      forwardedInit.body = req.body;
-    }
-    const forwarded = new Request(rewritten, forwardedInit);
-    return fetcher.fetch(forwarded);
+    return this._dynamicAgents.forward(req, match);
   }
 
   /**
@@ -6776,14 +5175,13 @@ export class Agent<
    *
    * @internal
    */
-  async _cf_invokeSubAgent(
+  _cf_invokeSubAgent(
     className: string,
     name: string,
     method: string,
     args: unknown[]
   ): Promise<unknown> {
-    const stub = await this._cf_resolveSubAgent(className, name);
-    return await this._cf_invokeStubMethod(stub, className, method, args);
+    return this._dynamicAgents.invoke(className, name, method, args);
   }
 
   /**
@@ -6794,64 +5192,12 @@ export class Agent<
    *
    * @internal
    */
-  async _cf_invokeSubAgentPath(
+  _cf_invokeSubAgentPath(
     path: ReadonlyArray<{ className: string; name: string }>,
     method: string,
     args: unknown[]
   ): Promise<unknown> {
-    const [self, next, ...rest] = path;
-    if (!self) {
-      throw new Error(`Sub-agent path invocation requires a non-empty path.`);
-    }
-
-    const ownClassName = (this.constructor as { name: string }).name;
-    if (self.className !== ownClassName || self.name !== this.name) {
-      throw new Error(
-        `Sub-agent path invocation reached ${ownClassName}("${this.name}") ` +
-          `but expected ${self.className}("${self.name}").`
-      );
-    }
-
-    if (!next) {
-      return await this._cf_invokeStubMethod(
-        this,
-        this.constructor.name,
-        method,
-        args
-      );
-    }
-
-    const child = await this._cf_resolveSubAgent(next.className, next.name);
-    if (rest.length === 0) {
-      return await this._cf_invokeStubMethod(
-        child,
-        next.className,
-        method,
-        args
-      );
-    }
-
-    const bridge = child as SubAgentPathInvokeEndpoint;
-    return await bridge._cf_invokeSubAgentPath([next, ...rest], method, args);
-  }
-
-  private async _cf_invokeStubMethod(
-    stub: unknown,
-    className: string,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown> {
-    // Must call `handle[method](...)` in one expression — extracting
-    // via `const fn = handle[method]; fn.apply(handle, args)` breaks
-    // the workerd RpcProperty binding. (Confirmed by the spike.)
-    const handle = stub as unknown as Record<
-      string,
-      (...a: unknown[]) => Promise<unknown>
-    >;
-    if (typeof handle[method] !== "function") {
-      throw new Error(`Method "${method}" not found on ${className}.`);
-    }
-    return await handle[method](...args);
+    return this._dynamicAgents.invokePath(path, method, args);
   }
 
   // ── Sub-agent (facet) management ────────────────────────────────────────
@@ -6880,35 +5226,12 @@ export class Agent<
    *
    * @internal Called by {@link subAgent}.
    */
-  async _cf_initAsFacet(
+  _cf_initAsFacet(
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
     identityName = name
   ): Promise<void> {
-    const routedName = this.lifecycle.name;
-    if (routedName !== identityName) {
-      throw new Error(
-        `Facet bootstrap mismatch: expected routed identity "${identityName}" but got "${routedName}". ` +
-          `This usually means the parent passed the wrong id to ctx.facets.get(). ` +
-          `See _cf_resolveSubAgent.`
-      );
-    }
-
-    this._isFacet = true;
-    this._facetName = name;
-    this._parentPath = parentPath;
-    // Persist the agent-specific facet keys in parallel.
-    await Promise.all([
-      this.ctx.storage.put("cf_agents_is_facet", true),
-      this.ctx.storage.put("cf_agents_facet_name", name),
-      this.ctx.storage.put("cf_agents_parent_path", parentPath)
-    ]);
-    // Fire onStart() now since native RPC bypasses lifecycle fetch, which is the
-    // entry point that normally triggers it. Protocol broadcasts during this
-    // bootstrap window are safe: on a facet `getConnections()` returns only
-    // virtual sub-agent connections and `broadcast()` routes to the parent
-    // bridge, so neither touches the parent's own WebSocket handles (#1679).
-    await this.__unsafe_ensureInitialized();
+    return this._dynamicAgents.init(name, parentPath, identityName);
   }
 
   get name(): string {
@@ -7154,12 +5477,14 @@ export class Agent<
    * const searcher = await this.subAgent(SearchAgent, "main-search");
    * const results = await searcher.search("cloudflare agents");
    * ```
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.get()} instead.
    */
   async subAgent<T extends Agent>(
     cls: SubAgentClass<T>,
     name: string
   ): Promise<SubAgentStub<T>> {
-    return (await this._cf_resolveSubAgent(cls.name, name)) as SubAgentStub<T>;
+    return this.dynamicAgents.get(cls, name);
   }
 
   /** Maximum number of non-terminal agent-tool runs this parent may own at once. */
@@ -9639,140 +7964,29 @@ export class Agent<
    *
    * @internal
    */
-  private async _cf_resolveSubAgent(
+  private _cf_resolveSubAgent(
     className: string,
     name: string
   ): Promise<unknown> {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    if (!ctx.facets || !ctx.exports) {
-      throw new Error(
-        "subAgent() is not supported in this runtime — " +
-          "`ctx.facets` / `ctx.exports` are unavailable. " +
-          "Update to the latest `compatibility_date` in your wrangler.jsonc."
-      );
-    }
-    if (camelCaseToKebabCase(className) === SUB_PREFIX) {
-      // Any class whose kebab-cased name equals the `sub` URL
-      // separator would make `/agents/.../sub/sub/...` ambiguous.
-      // `Sub`, `SUB`, and `Sub_` all kebab-case to `"sub"` — catch
-      // them uniformly rather than listing each spelling.
-      throw new Error(
-        `Sub-agent class name "${className}" kebab-cases to "${SUB_PREFIX}", ` +
-          `which collides with the reserved URL separator — rename the ` +
-          `class (e.g. "SubThing" or "Subtask").`
-      );
-    }
-    const Cls = ctx.exports[className];
-    if (!Cls) {
-      throw new Error(
-        `Sub-agent class "${className}" not found in worker exports. ` +
-          `Make sure the class is exported from your worker entry point ` +
-          `and that the export name matches the class name.`
-      );
-    }
-    if (name.includes("\0")) {
-      // Null char is reserved for the facet composite key delimiter —
-      // letting it through would corrupt the `${class}\0${name}` key.
-      throw new Error(
-        `Sub-agent name contains null character (\\0), which is reserved.`
-      );
-    }
-    // Composite key: class name + NUL + facet name, so two different
-    // classes can share the same user-facing name.
-    const facetKey = `${className}\0${name}`;
+    return this._dynamicAgents.resolve(className, name);
+  }
 
-    // Derive the child's ancestor chain: our own `parentPath` +
-    // `{ class: this.constructor.name, name: this.name }`. Inductive
-    // across recursive nesting.
-    const childParentPath = this.selfPath;
-    const childPath = [...childParentPath, { className, name }];
-
-    // For nested facets, the immediate parent is itself facet-only
-    // and is not expected to expose namespace helpers. Use the root
-    // supervisor namespace instead; path-v2 identities are scoped to
-    // the full logical path while legacy rows continue using bare names.
-    const rootClassName =
-      this._parentPath[0]?.className ??
-      (this.constructor as { name: string }).name;
-    const rootNs = ctx.exports[rootClassName];
-    if (!rootNs?.idFromName) {
-      // Minification is the most common cause of this error in
-      // production builds: aggressive bundlers rewrite class
-      // identifiers to short ids, so `this.constructor.name`
-      // becomes something like `_a` and the ctx.exports lookup
-      // misses. Detect that case and append a hint, otherwise
-      // the message is mysterious.
-      //
-      // Heuristic: optional leading underscore(s), then 1–3
-      // lowercase letters/digits starting with a letter (e.g.
-      // `_a`, `_ab`, `_a1`, `__a`). Real class names like
-      // `MyAgent` or `_UnboundParent` start with an uppercase
-      // letter and won't match.
-      const looksMinified = /^_*[a-z][a-z0-9]{0,2}$/.test(rootClassName);
-      const minificationHint = looksMinified
-        ? ` The class name "${rootClassName}" looks minified — make sure your bundler preserves class names (e.g. esbuild's \`keepNames: true\`).`
-        : "";
-      throw new Error(
-        `Sub-agent bootstrap requires the root agent class "${rootClassName}" to be available as a Durable Object namespace, but ctx.exports["${rootClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the root agent class is exported under that class name and registered in your wrangler.jsonc durable_objects.bindings.`
-      );
-    }
-    const identity = await this._cf_subAgentIdentity(
-      className,
-      name,
-      childPath
+  /**
+   * Run `body` in a fresh invocation scope with no native request/
+   * connection context attached, so a child-facet RPC never sees
+   * parent-owned I/O handles.
+   * @internal
+   */
+  private _runFacetInitInvocation<T>(body: () => Promise<T>): Promise<T> {
+    return runInInvocation(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      body
     );
-    const facetId = rootNs.idFromName(identity.name);
-    const stub = ctx.facets.get(facetKey, () => ({
-      class: Cls as DurableObjectClass,
-      id: facetId
-    }));
-
-    // Record before initialization so a successfully-initialized facet is
-    // not left without identity metadata if the parent is interrupted after
-    // the child RPC returns. Roll back only rows this call created.
-    //
-    // A facet may start a workflow from onStart(); workflow callbacks route
-    // through the parent registry and must be able to find this in-flight
-    // child, so recording before the init RPC is also what lets those
-    // callbacks resolve.
-    this._recordSubAgent(className, name, identity);
-
-    // Initialize the child as a facet via a single RPC that runs
-    // inside the child's isolate. Avoids the cross-DO I/O error that
-    // the previous `stub.fetch(req)` path triggered by handing a
-    // parent-owned Request across the isolate boundary.
-    //
-    // The parent may be inside a WebSocket/message request context here.
-    // Clear native context handles before the child facet RPC so workerd
-    // never sees parent-owned I/O attached to child initialization.
-    try {
-      await runInInvocation(
-        {
-          agent: this,
-          connection: undefined,
-          request: undefined,
-          email: undefined
-        },
-        async () => {
-          await (
-            stub as unknown as {
-              _cf_initAsFacet(
-                name: string,
-                parentPath: ReadonlyArray<{ className: string; name: string }>,
-                identityName: string
-              ): Promise<void>;
-            }
-          )._cf_initAsFacet(name, childParentPath, identity.name);
-        }
-      );
-    } catch (error) {
-      if (!identity.existing) {
-        this._forgetSubAgent(className, name);
-      }
-      throw error;
-    }
-
-    return stub;
   }
 
   /**
@@ -9786,18 +8000,11 @@ export class Agent<
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to abort
    * @param reason Error thrown to pending/future RPC callers
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.abort()} instead.
    */
   abortSubAgent(cls: SubAgentClass, name: string, reason?: unknown): void {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    if (!ctx.facets) {
-      throw new Error(
-        "abortSubAgent() is not supported in this runtime — " +
-          "`ctx.facets` is unavailable. " +
-          "Update to the latest `compatibility_date` in your wrangler.jsonc."
-      );
-    }
-    const facetKey = `${cls.name}\0${name}`;
-    ctx.facets.abort(facetKey, reason);
+    this.dynamicAgents.abort(cls, name, reason);
   }
 
   /**
@@ -9808,163 +8015,14 @@ export class Agent<
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to delete
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.delete()} instead.
    */
-  async deleteSubAgent(cls: SubAgentClass, name: string): Promise<void> {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    if (!ctx.facets) {
-      throw new Error(
-        "deleteSubAgent() is not supported in this runtime — " +
-          "`ctx.facets` is unavailable. " +
-          "Update to the latest `compatibility_date` in your wrangler.jsonc."
-      );
-    }
-    const facetKey = `${cls.name}\0${name}`;
-    const childPath = [...this.selfPath, { className: cls.name, name }];
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      await root._cf_cleanupFacetPrefix(childPath);
-    } else {
-      await this._cf_cleanupFacetPrefix(childPath);
-    }
-
-    // Idempotent: make `ctx.facets.delete` tolerant of missing keys.
-    // workerd throws an opaque "internal error" when the key isn't
-    // registered; swallow that so double-delete and
-    // delete-never-spawned both succeed silently. The registry DELETE
-    // is already idempotent.
-    try {
-      ctx.facets.delete(facetKey);
-    } catch {
-      // no-op — facet wasn't registered (already deleted / never spawned)
-    }
-    this._forgetSubAgent(cls.name, name);
+  deleteSubAgent(cls: SubAgentClass, name: string): Promise<void> {
+    return this.dynamicAgents.delete(cls, name);
   }
 
   // ── Sub-agent registry (backs `hasSubAgent` / `listSubAgents`) ──────────
-
-  /** @internal */
-  private _subAgentRegistryReady = false;
-
-  private _addColumnIfNotExists(sql: string): void {
-    try {
-      this.ctx.storage.sql.exec(sql);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      if (!message.toLowerCase().includes("duplicate column")) {
-        throw e;
-      }
-    }
-  }
-
-  /** @internal */
-  private _ensureSubAgentRegistry(): void {
-    if (this._subAgentRegistryReady) return;
-    // This registry is lazy because older agents may never create sub-agents.
-    // Keep its additive column migrations here instead of the global schema
-    // gate so first sub-agent access upgrades legacy registry tables in place.
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_sub_agents (
-        class TEXT NOT NULL,
-        name TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        identity_version TEXT,
-        identity_name TEXT,
-        PRIMARY KEY (class, name)
-      )
-    `;
-    this._addColumnIfNotExists(
-      "ALTER TABLE cf_agents_sub_agents ADD COLUMN identity_version TEXT"
-    );
-    this._addColumnIfNotExists(
-      "ALTER TABLE cf_agents_sub_agents ADD COLUMN identity_name TEXT"
-    );
-    this._subAgentRegistryReady = true;
-  }
-
-  /** @internal */
-  private _recordSubAgent(
-    className: string,
-    name: string,
-    identity: { version: SubAgentIdentityVersion; name: string }
-  ): void {
-    this._ensureSubAgentRegistry();
-    this.sql`
-      INSERT OR IGNORE INTO cf_agents_sub_agents
-        (class, name, created_at, identity_version, identity_name)
-      VALUES
-        (${className}, ${name}, ${Date.now()}, ${identity.version}, ${identity.name})
-    `;
-  }
-
-  /** @internal */
-  private _subAgentRegistryRow(
-    className: string,
-    name: string
-  ): {
-    identity_version: string | null;
-    identity_name: string | null;
-  } | null {
-    this._ensureSubAgentRegistry();
-    const rows = this.sql<{
-      identity_version: string | null;
-      identity_name: string | null;
-    }>`
-      SELECT identity_version, identity_name
-      FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private async _cf_subAgentIdentity(
-    className: string,
-    name: string,
-    childPath: ReadonlyArray<AgentPathStep>
-  ): Promise<{
-    version: SubAgentIdentityVersion;
-    name: string;
-    existing: boolean;
-  }> {
-    const row = this._subAgentRegistryRow(className, name);
-    if (row) {
-      if (
-        row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
-        typeof row.identity_name === "string"
-      ) {
-        return {
-          version: SUB_AGENT_IDENTITY_VERSION_PATH_V2,
-          name: row.identity_name,
-          existing: true
-        };
-      }
-      return {
-        version: SUB_AGENT_IDENTITY_VERSION_LEGACY,
-        name,
-        existing: true
-      };
-    }
-
-    // Do not probe the legacy bare-name facet here. `ctx.facets.get()` is
-    // create-on-access, so probing would create or wake legacy storage as a
-    // side effect and could reintroduce old id collisions. Existing registry
-    // rows remain the compatibility signal; new rows use path-v2.
-    const digest = await sha256Hex(JSON.stringify(childPath));
-    return {
-      version: SUB_AGENT_IDENTITY_VERSION_PATH_V2,
-      name: pathV2IdentityName(name, digest),
-      existing: false
-    };
-  }
-
-  /** @internal */
-  private _forgetSubAgent(className: string, name: string): void {
-    this._ensureSubAgentRegistry();
-    this.sql`
-      DELETE FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-    `;
-  }
 
   /**
    * Whether this agent has previously spawned (and not deleted) a
@@ -9984,18 +8042,15 @@ export class Agent<
    *   }
    * }
    * ```
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.has()} instead.
    */
   hasSubAgent<T extends Agent>(cls: SubAgentClass<T>, name: string): boolean;
   hasSubAgent(className: string, name: string): boolean;
   hasSubAgent(classOrName: SubAgentClass | string, name: string): boolean {
-    const className =
-      typeof classOrName === "string" ? classOrName : classOrName.name;
-    this._ensureSubAgentRegistry();
-    const rows = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-    `;
-    return (rows[0]?.n ?? 0) > 0;
+    return typeof classOrName === "string"
+      ? this.dynamicAgents.has(classOrName, name)
+      : this.dynamicAgents.has(classOrName, name);
   }
 
   /**
@@ -10004,6 +8059,8 @@ export class Agent<
    * {@link deleteSubAgent}.
    *
    * @experimental The API surface may change before stabilizing.
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.list()} instead.
    */
   listSubAgents<T extends Agent>(
     cls: SubAgentClass<T>
@@ -10014,24 +8071,10 @@ export class Agent<
   listSubAgents(
     classOrName?: SubAgentClass | string
   ): Array<{ className: string; name: string; createdAt: number }> {
-    const className =
-      typeof classOrName === "string" ? classOrName : classOrName?.name;
-    this._ensureSubAgentRegistry();
-    const rows = className
-      ? this.sql<{ class: string; name: string; created_at: number }>`
-          SELECT class, name, created_at FROM cf_agents_sub_agents
-          WHERE class = ${className}
-          ORDER BY created_at ASC
-        `
-      : this.sql<{ class: string; name: string; created_at: number }>`
-          SELECT class, name, created_at FROM cf_agents_sub_agents
-          ORDER BY created_at ASC
-        `;
-    return rows.map((r) => ({
-      className: r.class,
-      name: r.name,
-      createdAt: r.created_at
-    }));
+    if (typeof classOrName === "string" || classOrName === undefined) {
+      return this.dynamicAgents.list(classOrName);
+    }
+    return this.dynamicAgents.list(classOrName);
   }
 
   /**
@@ -11282,13 +9325,13 @@ export class Agent<
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
     if (action === "set") {
-      this.setState(state as State);
+      this.setState(state as TState);
     } else if (action === "merge") {
-      const currentState = this.state ?? ({} as State);
+      const currentState = this.state ?? ({} as TState);
       this.setState({
         ...currentState,
         ...(state as Record<string, unknown>)
-      } as State);
+      } as TState);
     } else if (action === "reset") {
       this.setState(this.initialState);
     }
@@ -11977,14 +10020,9 @@ export class StreamingResponse {
   }
 
   private _send(response: RPCResponse): boolean {
-    const state = facetStreamingResponseDeliveryStates.get(this);
-    if (!state) {
-      return sendRpcResponseIfOpen(this._connection, response);
-    }
-
-    const delivery = sendFacetRpcResponseIfOpen(state.replyTarget, response);
-    trackFacetStreamingResponseDelivery(this, delivery.completion);
-    return delivery.sent;
+    const facetSent = sendFacetStreamingResponse(this, response);
+    if (facetSent !== null) return facetSent;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 
   /**

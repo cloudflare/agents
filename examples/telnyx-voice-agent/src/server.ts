@@ -1,5 +1,5 @@
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
+import { withVoice, type VoiceTurnContext } from "agents/voice";
 import { TelnyxJWTEndpoint } from "@cloudflare/voice-telnyx";
 import { TelnyxSTT } from "@cloudflare/voice-telnyx/stt";
 import { TelnyxTTS } from "@cloudflare/voice-telnyx/tts";

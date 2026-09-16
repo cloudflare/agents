@@ -4,7 +4,7 @@
  * Speaks the Cloudflare voice protocol directly over any VoiceTransport,
  * routing audio through a TelnyxCallBridge instead of browser speakers.
  * Provides the same detection, transcript, and event features as
- * VoiceClient from @cloudflare/voice/client — ported for phone use.
+ * VoiceClient from agents/voice/client — ported for phone use.
  *
  * **Why not VoiceClient?**
  * VoiceClient plays received audio through the browser's AudioContext.
@@ -17,7 +17,7 @@
  *
  * @example
  * ```typescript
- * import { WebSocketVoiceTransport } from "@cloudflare/voice/client";
+ * import { WebSocketVoiceTransport } from "agents/voice/client";
  * import { TelnyxPhoneClient, createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx/browser";
  *
  * const telnyx = await createTelnyxVoiceConfig({
@@ -45,7 +45,7 @@ import type {
   VoiceRole,
   TranscriptMessage,
   VoicePipelineMetrics
-} from "@cloudflare/voice/client";
+} from "agents/voice/client";
 import type { TelnyxCallBridge } from "./providers/call-bridge.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -506,7 +506,7 @@ export class TelnyxPhoneClient {
 
   // ─── Silence & Interrupt Detection ────────────────────────────────────
   //
-  // Ported from VoiceClient (@cloudflare/voice/client).
+  // Ported from VoiceClient (agents/voice/client).
   // Same thresholds, same logic, same protocol messages.
 
   private processAudioLevel(rms: number): void {

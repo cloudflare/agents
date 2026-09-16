@@ -6,12 +6,12 @@ This package includes:
 
 - **STT** — real-time speech-to-text via Telnyx's WebSocket transcription API.
 - **TTS** — text-to-speech via Telnyx REST and Workers WebSocket backends.
-- **Telephony** — Telnyx WebRTC/PSTN helpers for routing phone-call audio into a `@cloudflare/voice` agent.
+- **Telephony** — Telnyx WebRTC/PSTN helpers for routing phone-call audio into a `agents/voice` agent.
 
 ## Installation
 
 ```bash
-npm install @cloudflare/voice @cloudflare/voice-telnyx
+npm install agents @cloudflare/voice-telnyx
 ```
 
 ## Subpath imports
@@ -30,7 +30,7 @@ import { TelnyxCallBridge } from "@cloudflare/voice-telnyx/browser";
 
 ```ts
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
+import { withVoice, type VoiceTurnContext } from "agents/voice";
 import { TelnyxSTT } from "@cloudflare/voice-telnyx/stt";
 import { TelnyxTTS } from "@cloudflare/voice-telnyx/tts";
 
@@ -62,7 +62,7 @@ export default {
 
 ### `TelnyxSTT`
 
-Implements `Transcriber` from `@cloudflare/voice`.
+Implements `Transcriber` from `agents/voice`.
 
 ```ts
 const stt = new TelnyxSTT({
@@ -78,7 +78,7 @@ The Cloudflare voice pipeline feeds raw 16 kHz mono PCM16 audio. Telnyx STT expe
 
 ### `TelnyxTTS`
 
-Implements `TTSProvider` and `StreamingTTSProvider` from `@cloudflare/voice`.
+Implements `TTSProvider` and `StreamingTTSProvider` from `agents/voice`.
 
 ```ts
 const tts = new TelnyxTTS({
@@ -102,7 +102,7 @@ import {
   createTelnyxVoiceConfig,
   TelnyxPhoneClient
 } from "@cloudflare/voice-telnyx/browser";
-import { WebSocketVoiceTransport } from "@cloudflare/voice/client";
+import { WebSocketVoiceTransport } from "agents/voice/client";
 ```
 
 Create a server-side endpoint that keeps your Telnyx API key secret. The endpoint requires an `authorize` callback by default so a public route cannot mint Telnyx credentials for arbitrary clients:

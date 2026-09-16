@@ -1,7 +1,6 @@
 # Think Skills
 
-Status: implemented MVP; Git-backed sources and R2 write/delete helpers remain
-follow-ups
+Status: implemented; Git-backed sources and source-level R2 write/delete helpers remain follow-ups
 
 ## Problem
 
@@ -61,6 +60,31 @@ Once activated, a skill remains part of the conversation snapshot. If an
 application needs disposable/reclaimable context, it should use Session's
 lower-level loadable context providers rather than Think's first-class skills
 API.
+
+## Workspace projection
+
+Think projects resolved `SKILL.md` files into its operational workspace by
+default:
+
+- Computer uses `/workspace/.agents/skills/<name>/SKILL.md`.
+- legacy Shell uses `/.agents/skills/<name>/SKILL.md`.
+
+This is independent of Sessions message and attachment storage. Workspace is the
+place file tools read and edit skills; Sessions remains the conversation owner.
+
+Existing workspace files win by default. Activation parses the workspace
+`SKILL.md`, so edits affect later turns. Resource files are copied lazily on
+first read or script execution; startup does not issue one source or R2 read per
+resource. Later resource reads use the workspace copy and observe edits.
+
+Think records a separate durable projection fingerprint. On an unchanged cold
+wake, the registry attaches to the existing workspace paths without statting or
+rewriting every skill. A source fingerprint change reseeds instructions while
+preserving existing files unless replacement is explicitly configured.
+
+Custom callers can use `SkillRegistry.seedWorkspace()`. Think users can disable
+projection with `skillWorkspace = false` or set `skillWorkspace.root` for a
+proxy whose structural shape does not identify its Computer path.
 
 ## Bundled Skills
 

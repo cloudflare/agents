@@ -520,13 +520,9 @@ their cleanup and skipped continuations return immediately.
 
 #### Overriding the clear handler
 
-The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()`
-automatically. If your `onMessage` override intercepts `CF_AGENT_CHAT_CLEAR`
-and returns before the SDK sees the message — for example, to scope the delete
-to a specific workflow — the built-in handler never runs. The active stream
-continues and queued continuations persist into the newly-cleared conversation.
+The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()` and clears the default Sessions handle. If an `onMessage` override intercepts this frame and returns early, the built-in handler cannot stop the active stream or clear history.
 
-Call `this.resetTurnState()` before performing your scoped delete:
+Perform authorization or logging, then pass the frame to the original handler:
 
 ```typescript
 import { MessageType } from "@cloudflare/ai-chat/types";
@@ -536,18 +532,15 @@ this.onMessage = async (connection, message) => {
   if (typeof message === "string") {
     const data = JSON.parse(message);
     if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
-      this.resetTurnState();
-      this.sql`
-        DELETE FROM cf_ai_chat_agent_messages
-        WHERE workflow_id = ${this.workflowId}
-      `;
-      await this.saveMessages([]);
-      return;
+      await this.authorizeClear(connection);
+      console.log("clearing conversation");
     }
   }
   return _onMessage(connection, message);
 };
 ```
+
+Do not write directly to Sessions tables. Use `this.sessions.session().clearMessages()` when implementing a separate server-side history operation outside the chat protocol.
 
 ### Lifecycle Hooks
 

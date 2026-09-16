@@ -5,7 +5,7 @@
  * Usage:
  * ```typescript
  * import { createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx/browser";
- * import { VoiceClient } from "@cloudflare/voice/client";
+ * import { VoiceClient } from "agents/voice/client";
  *
  * const telnyx = await createTelnyxVoiceConfig({
  *   jwtEndpoint: "/api/telnyx-token",

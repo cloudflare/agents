@@ -74,10 +74,11 @@ describe("recovery × channels", () => {
       }
     );
 
-    await agent.triggerFiberRecovery();
-    expect(
-      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
-    ).toBe(1);
+    // Assert on the counts returned from inside the trigger RPC: the
+    // zero-delay recovery alarm may fire (and consume the job row) as soon as
+    // the RPC releases the DO, so a follow-up count read can race it.
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
     await agent.runScheduledRecoveryContinueForTest();
 
     // (a) The channel stamp survives recovery.
@@ -117,10 +118,8 @@ describe("recovery × channels", () => {
       user: null
     });
 
-    await agent.triggerFiberRecovery();
-    expect(
-      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryRetry")
-    ).toBe(1);
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledRetryCount).toBe(1);
     await agent.runScheduledRecoveryRetryForTest();
 
     // (a) The channel stamp survives recovery.

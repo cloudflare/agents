@@ -1,7 +1,4 @@
-import type {
-  ChannelIdentity,
-  ChannelMessageSurface
-} from "@cloudflare/channels";
+import type { ChannelIdentity, ChannelMessageSurface } from "agents/channels";
 import { directoryFor } from "./directory";
 
 /**

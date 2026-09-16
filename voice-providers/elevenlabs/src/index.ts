@@ -4,12 +4,12 @@ import type {
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions
-} from "@cloudflare/voice";
+} from "agents/voice";
 import {
   logVoiceError,
   toVoiceError,
   VoiceProviderError
-} from "@cloudflare/voice/errors";
+} from "agents/voice/errors";
 
 const DEFAULT_STT_MODEL_ID = "scribe_v2_realtime";
 const DEFAULT_STT_AUDIO_FORMAT = "pcm_16000";
@@ -81,7 +81,7 @@ const DEFAULT_OUTPUT_FORMAT = "mp3_44100_128";
  * @example
  * ```typescript
  * import { Agent } from "agents";
- * import { withVoice } from "@cloudflare/voice";
+ * import { withVoice } from "agents/voice";
  * import { ElevenLabsTTS } from "@cloudflare/voice-elevenlabs";
  *
  * const VoiceAgent = withVoice(Agent);

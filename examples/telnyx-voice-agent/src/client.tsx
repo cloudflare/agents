@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { WebSocketVoiceTransport } from "@cloudflare/voice/client";
+import { WebSocketVoiceTransport } from "agents/voice/client";
 import type {
   TranscriptMessage,
   VoicePipelineMetrics,
   VoiceStatus
-} from "@cloudflare/voice/client";
+} from "agents/voice/client";
 import {
   createTelnyxVoiceConfig,
   TelnyxPhoneClient

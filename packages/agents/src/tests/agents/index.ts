@@ -29,6 +29,7 @@ export {
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent
 } from "./schedule";
+export { TestTaskAgent } from "./tasks";
 export {
   TestWorkflowAgent,
   TestWorkflowOnStartSubAgent,
@@ -48,13 +49,10 @@ export { TestRaceAgent } from "./race";
 export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
 export { TestKeepAliveAgent } from "./keep-alive";
 export { TestMigrationAgent } from "./migration";
-export {
-  TestSessionAgent,
-  TestSessionAgentWithContext,
-  TestSearchAgent
-} from "./session";
-export { TestMultiSessionAgent } from "./multi-session";
+export { TestSessionAgent } from "./session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
+export { RoutingOwnerAgent, RoutedChatAgent } from "./routed-agents";
+export type { RoutedChatMetadata } from "./routed-agents";
 export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
 export {
   TestSubAgentParent,
