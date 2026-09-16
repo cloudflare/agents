@@ -3,8 +3,11 @@ import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
   Tasks,
   NonRetryableError,
+  TaskAttemptsExhaustedError,
+  TaskDeadlineExceededError,
   type Task,
   type TaskReceipt,
+  type TaskRetryConfig,
   type TaskRunSnapshot,
   type TaskStep,
   type TaskValue
@@ -37,6 +40,31 @@ object.tasks.run(
   { topic: "chips" },
   { idempotencyKey: "report:1", retain: false }
 ) satisfies Promise<TaskReceipt>;
+// A run bounds its own interruption replays and its wall-clock lifetime.
+object.tasks.run(
+  "report",
+  { topic: "chips" },
+  {
+    retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
+    deadline: Date.now() + 60_000
+  }
+) satisfies Promise<TaskReceipt>;
+object.tasks.run(
+  "report",
+  { topic: "chips" },
+  { deadline: new Date() }
+) satisfies Promise<TaskReceipt>;
+object.tasks.run(
+  "report",
+  { topic: "chips" },
+  {
+    // @ts-expect-error durations use second/minute/hour/day/week units.
+    retries: { delay: "5 parsecs" }
+  }
+);
+// One shape spans both sides, so a step config and a run policy cannot
+// drift apart.
+({ limit: 2, delay: 500, backoff: "linear" }) satisfies TaskRetryConfig;
 // @ts-expect-error the input shape is checked against the declared handler.
 object.tasks.run("report", { subject: "chips" });
 // @ts-expect-error missingDefinition is not a declared definition.
@@ -87,6 +115,9 @@ untypedTasks.run("anyDefinitionName", {
 // Step typing stands alone.
 declare const step: TaskStep;
 step.interrupted satisfies { name: string; attempt: number } | null;
+step.attempt satisfies number;
+// The attempt-wide signal, distinct from the per-callback one below.
+step.signal satisfies AbortSignal;
 step.do("typed", () => ({ a: 1 })) satisfies Promise<{ a: number }>;
 step.do(
   "configured",
@@ -106,3 +137,6 @@ step.sleep("bad", "5 parsecs");
 step.do("function-result", () => () => {});
 
 new NonRetryableError("stop") satisfies Error;
+new TaskAttemptsExhaustedError("task_x", 3) satisfies Error;
+new TaskAttemptsExhaustedError("task_x", 3).interruptions satisfies number;
+new TaskDeadlineExceededError("task_x", Date.now()) satisfies Error;

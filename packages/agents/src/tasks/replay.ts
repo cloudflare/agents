@@ -23,6 +23,7 @@ import {
 } from "./errors";
 import { deserializeTaskValue } from "./serialization";
 import type {
+  TaskRetryConfig,
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,
@@ -31,11 +32,19 @@ import type {
   TaskWaitReason
 } from "./types";
 
-/** Resolved per-step retry and timeout policy. */
-export type ResolvedStepPolicy = {
+/**
+ * Resolved retry and backoff policy. Steps resolve one per `step.do()`; a
+ * run resolves one for its interrupted attempts, which carries no timeout
+ * (a run's claim backstop, not a callback race, bounds an attempt).
+ */
+export type ResolvedRetryPolicy = {
   readonly retryLimit: number;
   readonly retryDelayMs: number;
   readonly backoff: "constant" | "linear" | "exponential";
+};
+
+/** Resolved per-step retry and timeout policy. */
+export type ResolvedStepPolicy = ResolvedRetryPolicy & {
   readonly timeoutMs: number;
 };
 
@@ -56,9 +65,11 @@ export const MAX_STEP_NAME_LENGTH = 256;
  */
 export class TaskSuspension {
   readonly wakeAt: number;
-  readonly reason: TaskWaitReason;
+  // An attempt only ever suspends itself; the 'interrupted' park is written
+  // over a lost attempt by the capability, never thrown from inside one.
+  readonly reason: Exclude<TaskWaitReason, "interrupted">;
 
-  constructor(wakeAt: number, reason: TaskWaitReason) {
+  constructor(wakeAt: number, reason: Exclude<TaskWaitReason, "interrupted">) {
     this.wakeAt = wakeAt;
     this.reason = reason;
   }
@@ -155,7 +166,7 @@ export interface TaskStepEngine {
 
 /** Compute the delay before the next attempt after `failedAttempt` failed. */
 export function computeRetryDelayMs(
-  policy: ResolvedStepPolicy,
+  policy: ResolvedRetryPolicy,
   failedAttempt: number
 ): number {
   const base = policy.retryDelayMs;
@@ -174,24 +185,40 @@ export function computeRetryDelayMs(
   return Math.min(delay, MAX_RETRY_DELAY_MS);
 }
 
-/** Resolve one `step.do()` config against the capability defaults. */
-export function resolveStepPolicy(
-  defaults: ResolvedStepPolicy,
-  config: TaskStepConfig | undefined
-): ResolvedStepPolicy {
-  const limit = config?.retries?.limit ?? defaults.retryLimit;
+/**
+ * Resolve one retry policy against defaults, validating as it goes.
+ *
+ * @param context - What is being resolved (`"step"`, `"run"`), used to name
+ * the offending option in validation errors.
+ */
+export function resolveRetryPolicy(
+  defaults: ResolvedRetryPolicy,
+  retries: TaskRetryConfig | undefined,
+  context: string
+): ResolvedRetryPolicy {
+  const limit = retries?.limit ?? defaults.retryLimit;
   if (!Number.isInteger(limit) || limit < 1) {
     throw new Error(
-      `Invalid step retries.limit: expected an integer >= 1, got ${limit}`
+      `Invalid ${context} retries.limit: expected an integer >= 1, got ${limit}`
     );
   }
   return {
     retryLimit: limit,
     retryDelayMs:
-      config?.retries?.delay !== undefined
-        ? parseTaskDuration(config.retries.delay, "step retries.delay")
+      retries?.delay !== undefined
+        ? parseTaskDuration(retries.delay, `${context} retries.delay`)
         : defaults.retryDelayMs,
-    backoff: config?.retries?.backoff ?? defaults.backoff,
+    backoff: retries?.backoff ?? defaults.backoff
+  };
+}
+
+/** Resolve one `step.do()` config against the capability defaults. */
+export function resolveStepPolicy(
+  defaults: ResolvedStepPolicy,
+  config: TaskStepConfig | undefined
+): ResolvedStepPolicy {
+  return {
+    ...resolveRetryPolicy(defaults, config?.retries, "step"),
     timeoutMs:
       config?.timeout !== undefined
         ? parseTaskDuration(config.timeout, "step timeout")
@@ -211,6 +238,7 @@ export class ReplayStep implements TaskStep {
   readonly #engine: TaskStepEngine;
   readonly #usedNames = new Set<string>();
   #live: boolean;
+  readonly attempt: number;
   readonly interrupted: {
     readonly name: string;
     readonly attempt: number;
@@ -220,12 +248,14 @@ export class ReplayStep implements TaskStep {
   constructor(
     engine: TaskStepEngine,
     options: {
+      attempt: number;
       startsLive: boolean;
       interrupted?: { name: string; attempt: number } | null;
     }
   ) {
     this.#engine = engine;
     this.#live = options.startsLive;
+    this.attempt = options.attempt;
     this.interrupted = options.interrupted ?? null;
     this.signal = engine.attemptSignal;
   }

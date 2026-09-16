@@ -95,24 +95,24 @@ export class MissingTaskDefinitionError extends Error {
 }
 
 /**
- * Recorded against a run that reached its `maxAttempts` budget: the last
- * permitted attempt ended without settling (its isolate died, or it parked),
- * and the run fails instead of being claimed again.
+ * Recorded against a run whose interruption retry budget is spent: as many
+ * consecutive attempts died mid-execution as the run's `retries.limit`
+ * allows in total, so the run fails instead of being replayed again.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export class TaskAttemptsExhaustedError extends Error {
   readonly runId: string;
-  /** Attempts consumed, equal to the run's `maxAttempts`. */
-  readonly attempts: number;
+  /** Consecutive attempts of this run lost to an unclean interruption. */
+  readonly interruptions: number;
 
-  constructor(runId: string, attempts: number) {
+  constructor(runId: string, interruptions: number) {
     super(
-      `Task run "${runId}" exhausted its ${attempts} permitted attempt${attempts === 1 ? "" : "s"} without settling.`
+      `Task run "${runId}" was interrupted ${interruptions} time${interruptions === 1 ? "" : "s"} and its retry budget is spent.`
     );
     this.name = "TaskAttemptsExhaustedError";
     this.runId = runId;
-    this.attempts = attempts;
+    this.interruptions = interruptions;
   }
 }
 

@@ -27,6 +27,7 @@ export type {
   TaskJson,
   TaskOutput,
   TaskReceipt,
+  TaskRetryConfig,
   TaskRunOptions,
   TaskRunSnapshot,
   TaskRunState,

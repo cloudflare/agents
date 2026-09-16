@@ -110,8 +110,9 @@ export class TaskStore {
         idempotency_key TEXT UNIQUE,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
-        max_attempts INTEGER,
         deadline_at INTEGER,
+        interruptions INTEGER NOT NULL DEFAULT 0,
+        retry_policy TEXT,
         generation TEXT,
         next_at INTEGER,
         wait_reason TEXT,
@@ -154,13 +155,18 @@ export class TaskStore {
   }
 
   /**
-   * Schema version 2: the per-run attempt budget and deadline columns. A
-   * fresh object gets them from `ensureTables`; an object created at version
-   * 1 adds them here. Adding an existing column is the only expected failure
-   * and means the table is already current.
+   * Schema version 2: the per-run deadline, interruption counter, and
+   * resolved interruption retry policy. A fresh object gets them from
+   * `ensureTables`; an object created at version 1 adds them here. Adding an
+   * existing column is the only expected failure and means the table is
+   * already current.
    */
   addRunBudgetColumns(): void {
-    for (const column of ["max_attempts INTEGER", "deadline_at INTEGER"]) {
+    for (const column of [
+      "deadline_at INTEGER",
+      "interruptions INTEGER NOT NULL DEFAULT 0",
+      "retry_policy TEXT"
+    ]) {
       const query = `ALTER TABLE cf_agents_task_runs ADD COLUMN ${column}`;
       try {
         this.#storage.sql.exec(query);

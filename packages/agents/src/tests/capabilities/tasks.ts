@@ -1,6 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
-import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
+import {
+  Tasks,
+  NonRetryableError,
+  TaskAttemptsExhaustedError,
+  type TaskStep
+} from "../../tasks";
 import { Scheduler } from "../../schedules";
 
 /**
@@ -26,6 +31,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     definition: string;
     name: string;
   }> = [];
+  /** Interruption counts carried by observed exhaustion failures. */
+  readonly runErrorInterruptions: number[] = [];
   /** Handler bodies that entered an await on `step.signal`, by input label. */
   readonly signalWaits: string[] = [];
   /** Abort reasons `step.signal` delivered to handler bodies. */
@@ -36,7 +43,10 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   platformFailuresRemaining = 0;
   /** Monotonic counter proving handlers re-ran from the top on replay. */
   statusCounter = 0;
-  /** Guarded handler entries, recorded as entry:input:interrupted-step. */
+  /**
+   * Guarded handler entries, recorded as
+   * `entry:input:interrupted-step:a<run attempt>`.
+   */
   readonly guardedEntries: string[] = [];
 
   readonly tasks = new Tasks({
@@ -197,6 +207,11 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         );
       },
 
+      /** Asks for an impossible step retry budget; the config is validated. */
+      badStepPolicy: async (_input: undefined, step: TaskStep) => {
+        await step.do("nope", { retries: { limit: 0 } }, () => "unreachable");
+      },
+
       /** Uses the same step name twice in one replay. */
       clash: async (_input: undefined, step: TaskStep) => {
         await step.do("same", () => 1);
@@ -210,7 +225,7 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
        */
       guarded: async (input: { label: string }, step: TaskStep) => {
         this.guardedEntries.push(
-          `entry:${input.label}:${step.interrupted?.name ?? "none"}`
+          `entry:${input.label}:${step.interrupted?.name ?? "none"}:a${step.attempt}`
         );
         const first = await step.do("g-first", () => {
           this.stepRuns.push("guarded:first");
@@ -229,6 +244,38 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           }
         );
         return `run-done:${first}`;
+      },
+
+      /**
+       * Two steps in flight at once. The fast one fails cleanly and parks
+       * the run on its step retry while the slow one is still `running` in
+       * the journal — a step row left mid-execution with no isolate lost,
+       * which the replay must not mistake for interruption evidence.
+       */
+      concurrent: async (input: { label: string }, step: TaskStep) => {
+        this.guardedEntries.push(
+          `entry:${input.label}:${step.interrupted?.name ?? "none"}:a${step.attempt}`
+        );
+        await Promise.all([
+          step.do("c-slow", async () => {
+            this.stepRuns.push("concurrent:slow");
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            return "slow";
+          }),
+          step.do(
+            "c-fast",
+            { retries: { limit: 2, delay: "1 minute" } },
+            () => {
+              this.stepRuns.push("concurrent:fast");
+              if (this.failuresBeforeSuccess > 0) {
+                this.failuresBeforeSuccess -= 1;
+                throw new Error("fast failed cleanly");
+              }
+              return "fast";
+            }
+          )
+        ]);
+        return `concurrent-done:${input.label}`;
       },
 
       /**
@@ -426,6 +473,9 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         definition: run.definition,
         name: error instanceof Error ? error.name : String(error)
       });
+      if (error instanceof TaskAttemptsExhaustedError) {
+        this.runErrorInterruptions.push(error.interruptions);
+      }
     }
   });
 
@@ -519,17 +569,22 @@ export function seedTaskRun(
     readonly nextAt: number;
     readonly retain?: boolean;
     readonly idempotencyKey?: string;
-    readonly maxAttempts?: number;
     readonly deadlineAt?: number;
+    readonly interruptions?: number;
+    readonly retryPolicy?: {
+      readonly limit: number;
+      readonly delayMs: number;
+      readonly backoff: "constant" | "linear" | "exponential";
+    };
   }
 ): void {
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_agents_task_runs
        (run_id, definition, input, state, generation, attempt, next_at,
-        idempotency_key, retain, max_attempts, deadline_at, cancel_requested,
-        created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        idempotency_key, retain, deadline_at, interruptions, retry_policy,
+        cancel_requested, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     options.runId,
     options.definition,
     options.input === undefined ? null : JSON.stringify(options.input),
@@ -539,8 +594,17 @@ export function seedTaskRun(
     options.nextAt,
     options.idempotencyKey ?? null,
     options.retain === false ? 0 : 1,
-    options.maxAttempts ?? null,
     options.deadlineAt ?? null,
+    options.interruptions ?? 0,
+    // Stored exactly as acceptance resolves it: the capability reads the
+    // policy back from this column, never from the run options.
+    options.retryPolicy === undefined
+      ? null
+      : JSON.stringify({
+          retryLimit: options.retryPolicy.limit,
+          retryDelayMs: options.retryPolicy.delayMs,
+          backoff: options.retryPolicy.backoff
+        }),
     now,
     now
   );
@@ -602,6 +666,35 @@ export function seedTaskStep(
     now,
     now,
     now
+  );
+}
+
+/**
+ * Put one accepted run into the shape an unclean interruption leaves: still
+ * `running` under a generation whose isolate is gone, and due now. Runs
+ * accepted through the public API reach the reclaim path this way, policy
+ * and all, without a test hand-writing the row.
+ */
+export function interruptTaskRun(
+  storage: DurableObjectStorage,
+  runId: string,
+  options: { readonly generation?: string | null } = {}
+): void {
+  const past = Date.now() - 1000;
+  storage.sql.exec(
+    `UPDATE cf_agents_task_runs
+     SET state = 'running', generation = ?, wait_reason = NULL, next_at = ?,
+         updated_at = ?
+     WHERE run_id = ?`,
+    options.generation === undefined ? "dead-generation" : options.generation,
+    past,
+    Date.now(),
+    runId
+  );
+  storage.sql.exec(
+    "UPDATE cf_agents_jobs SET time = ? WHERE id = ? AND capability = 'tasks'",
+    past,
+    `task:${runId}`
   );
 }
 

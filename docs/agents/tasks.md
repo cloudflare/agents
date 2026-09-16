@@ -106,18 +106,26 @@ the existing run instead of creating a second one; `accepted: false` on the
 receipt marks that join. Pass `metadata` to retain JSON alongside the run and
 `retain: false` to remove the record after terminal settlement.
 
-Two options bound a run. `maxAttempts` caps how many times it is claimed —
-the first attempt, each replay after an interruption, and each wake from a
-sleep or retry park all count — and once the last permitted attempt ends
-without settling, the run fails with `TaskAttemptsExhaustedError` instead of
-being claimed again. `deadline` (epoch milliseconds or a `Date`) is a
-wall-clock bound: a live attempt's `step.signal` aborts and the run fails
-with `TaskDeadlineExceededError`; a parked run is woken at the deadline and
-fails there. Both are unbounded when omitted.
+Two options bound a run. `retries` is the run's policy for _interrupted_
+attempts — an attempt whose isolate died mid-execution and is being
+reclaimed — and it takes the same `{ limit, delay, backoff }` shape as a
+step's, with the same meanings: `limit` is total attempts including the
+first, `delay` and `backoff` space the replays out durably, and fields left
+unset fall back to the capability's step `retries` defaults. The count is
+consecutive — an attempt that reaches a durable boundary under its own
+power clears it — so a run is failed only for dying repeatedly, never for
+having survived a deploy days ago. A wake from a sleep or a step retry park
+is not an attempt and costs nothing. The interruption that reaches `limit`
+fails the run with `TaskAttemptsExhaustedError` instead of replaying it
+again. Omitted, an interruption replays immediately, without bound.
+`deadline` (epoch milliseconds or a `Date`) is a wall-clock bound: a live
+attempt's `step.signal` aborts and the run fails with
+`TaskDeadlineExceededError`; a parked run is woken at the deadline and fails
+there.
 
 ```ts
 await this.tasks.run("build-report@v1", input, {
-  maxAttempts: 10,
+  retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
   deadline: Date.now() + 60 * 60 * 1000
 });
 ```
@@ -137,14 +145,15 @@ and at most 1 MiB serialized.
 
 ## The step API
 
-| Method                        | Behavior                                                                                                     |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `step.do(name, config?, cb)`  | Run a named step once; journaled results replay without re-executing. `config` sets `retries` and `timeout`. |
-| `step.sleep(name, duration)`  | Persist a wake deadline and suspend; no isolate stays resident while waiting.                                |
-| `step.sleepUntil(name, when)` | Sleep until a wall-clock time.                                                                               |
-| `step.status(message)`        | Update observable progress; replays stay silent over old ground.                                             |
-| `step.idempotencyKey(name)`   | The stable external deduplication key `step.do(name, …)` receives.                                           |
-| `step.signal`                 | Aborts for the whole attempt on `cancel()` and at the run's `deadline`, for work awaited outside a step.     |
+| Method                        | Behavior                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `step.do(name, config?, cb)`  | Run a named step once; journaled results replay without re-executing. `config` sets `retries` and `timeout`.        |
+| `step.sleep(name, duration)`  | Persist a wake deadline and suspend; no isolate stays resident while waiting.                                       |
+| `step.sleepUntil(name, when)` | Sleep until a wall-clock time.                                                                                      |
+| `step.status(message)`        | Update observable progress; replays stay silent over old ground.                                                    |
+| `step.idempotencyKey(name)`   | The stable external deduplication key `step.do(name, …)` receives.                                                  |
+| `step.signal`                 | Aborts for the whole attempt on `cancel()` and at the run's `deadline`, for work awaited outside a step.            |
+| `step.attempt`                | This execution's claim number: 1 on the first, one higher on every later claim — replay, sleep or retry wake alike. |
 
 Each `do` attempt receives `{ attempt, idempotencyKey, signal }`. The signal
 aborts on cancellation and on the attempt timeout (default 5 minutes); a
@@ -218,20 +227,25 @@ before re-entering irreversible work:
 }
 ```
 
-A step callback that throws is not an interruption; the retry policy owns
-it, with the run parked `waiting` between attempts. Interruptions also emit
-a `task:attempt:interrupted` event carrying the same step name.
+A step callback that throws is not an interruption; the step's retry policy
+owns it, with the run parked `waiting` between attempts. Interruptions also
+emit a `task:attempt:interrupted` event carrying the same step name.
 
-Replays are unbounded unless the run carries a `maxAttempts` budget. With
-one, a run whose attempts keep dying — a deterministic crash, a body that
-never settles — fails with `TaskAttemptsExhaustedError` at the reclaim after
-its last permitted attempt, and the handler is not run again.
+Replays are immediate and unbounded unless the run carries a `retries`
+policy. With one, each interruption parks the run `waiting` (reason
+`interrupted`) for its backoff before replaying, and a run whose attempts
+keep dying — a deterministic crash, a body that never settles — fails with
+`TaskAttemptsExhaustedError` at `limit`, without running the handler again.
+Only consecutive deaths spend that budget: an attempt that gets as far as a
+sleep or a step retry park clears the count. `step.attempt`, by contrast,
+counts every claim including those parks, so it is a replay counter rather
+than the budget.
 
 Every terminal failure reaches the constructor's `onError(error, run)`,
 including the ones Tasks records without running a handler: a missing
-definition, an exhausted attempt budget, a passed deadline. `run` names the
-`runId` and `definition`, so a host that keeps its own record of the work
-can settle it.
+definition, a spent interruption retry budget, a passed deadline. `run`
+names the `runId` and `definition`, so a host that keeps its own record of
+the work can settle it.
 
 ## Inspection and control
 
@@ -245,14 +259,14 @@ await this.tasks.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
 
 A snapshot is discriminated by `state`:
 
-| State       | Meaning                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `pending`   | Accepted, first attempt not yet claimed.                           |
-| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`). |
-| `waiting`   | Parked on a durable deadline (`reason`: `sleep` or `retry`).       |
-| `completed` | Settled with `result`.                                             |
-| `failed`    | Settled with a safe `error` projection.                            |
-| `cancelled` | Settled by cancellation, with its optional `reason`.               |
+| State       | Meaning                                                                      |
+| ----------- | ---------------------------------------------------------------------------- |
+| `pending`   | Accepted, first attempt not yet claimed.                                     |
+| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`).           |
+| `waiting`   | Parked on a durable deadline (`reason`: `sleep`, `retry`, or `interrupted`). |
+| `completed` | Settled with `result`.                                                       |
+| `failed`    | Settled with a safe `error` projection.                                      |
+| `cancelled` | Settled by cancellation, with its optional `reason`.                         |
 
 Cancellation is cooperative: a parked run settles immediately, a live attempt
 is aborted through its signal and settles at its next step boundary. An

@@ -7,6 +7,7 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   backdateTaskWake,
+  interruptTaskRun,
   seedTaskRun,
   seedTaskStep,
   type TaskHarnessObject,
@@ -50,6 +51,20 @@ async function waitForState(
     }
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/** The interruption budget one run has spent, read straight from its row. */
+function readInterruptions(
+  storage: DurableObjectStorage,
+  runId: string
+): number | undefined {
+  const rows = storage.sql
+    .exec(
+      "SELECT interruptions FROM cf_agents_task_runs WHERE run_id = ?",
+      runId
+    )
+    .toArray() as Array<{ interruptions: number }>;
+  return rows[0]?.interruptions;
 }
 
 /** Poll until a condition holds. */
@@ -1011,7 +1026,7 @@ describe("Tasks capability", () => {
         expect(instance.stepRuns).toEqual(["guarded:second"]);
         // The handler observed durable evidence of the interruption at
         // entry: the step the lost attempt left mid-execution.
-        expect(instance.guardedEntries).toEqual(["entry:ctx:g-second"]);
+        expect(instance.guardedEntries).toEqual(["entry:ctx:g-second:a2"]);
       });
       const types = capture.events.map((event) => event.type);
       expect(types).toContain("task:attempt:interrupted");
@@ -1051,7 +1066,10 @@ describe("Tasks capability", () => {
       expect(snapshot.result).toBe("run-done:g:r");
       // Both handler entries saw a clean journal — a retry park is not an
       // interruption, so no step was ever left mid-execution at entry.
-      expect(instance.guardedEntries).toEqual(["entry:r:none", "entry:r:none"]);
+      expect(instance.guardedEntries).toEqual([
+        "entry:r:none:a1",
+        "entry:r:none:a2"
+      ]);
     });
   });
 });
@@ -1075,20 +1093,22 @@ describe("Tasks run budget", () => {
     });
   });
 
-  it("fails a run whose last permitted attempt was interrupted instead of reclaiming it", async () => {
+  it("fails a run whose interruption retry budget is spent instead of reclaiming it", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
         await instance.lifecycle.start();
+        // `limit` is total attempts including the first, so a budget of one
+        // spends itself on this reclaim — the run's first interruption.
         seedTaskRun(state.storage, {
           runId: "spent-run",
           definition: "pipeline",
           input: { label: "spent" },
           state: "running",
           generation: "dead-generation",
-          attempt: 2,
-          maxAttempts: 2,
+          attempt: 1,
+          retryPolicy: { limit: 1, delayMs: 0, backoff: "constant" },
           nextAt: Date.now() - 1000
         });
         await instance.lifecycle.rearmAlarm();
@@ -1097,39 +1117,207 @@ describe("Tasks run budget", () => {
 
     await runDurableObjectAlarm(stub);
 
-    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      const snapshot = await waitForState(instance.tasks, "spent-run", [
-        "failed"
-      ]);
-      if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskAttemptsExhaustedError");
-      expect(snapshot.error.message).toMatch(/2 permitted attempts/);
-      expect(instance.stepRuns).toEqual([]);
-      await waitFor(() => instance.runErrorRuns.length > 0);
-      expect(instance.runErrorRuns).toEqual([
-        {
-          runId: "spent-run",
-          definition: "pipeline",
-          name: "TaskAttemptsExhaustedError"
-        }
-      ]);
-    });
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const snapshot = await waitForState(instance.tasks, "spent-run", [
+          "failed"
+        ]);
+        if (snapshot.state !== "failed") throw new Error("unreachable");
+        expect(snapshot.error.name).toBe("TaskAttemptsExhaustedError");
+        expect(snapshot.error.message).toMatch(/interrupted 1 time\b/);
+        expect(instance.stepRuns).toEqual([]);
+        await waitFor(() => instance.runErrorRuns.length > 0);
+        expect(instance.runErrorRuns).toEqual([
+          {
+            runId: "spent-run",
+            definition: "pipeline",
+            name: "TaskAttemptsExhaustedError"
+          }
+        ]);
+        // The failure is itself an interruption, and is counted like one:
+        // the error the host observes and the row agree.
+        expect(instance.runErrorInterruptions).toEqual([1]);
+        expect(readInterruptions(state.storage, "spent-run")).toBe(1);
+      }
+    );
   });
 
-  it("still replays the last permitted attempt", async () => {
+  it("parks an interrupted attempt on its retry backoff before replaying it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        // The long backoff keeps the park observable: imminent alarms auto
+        // fire in workerd, so the wake is forced by backdating it below.
+        seedTaskRun(state.storage, {
+          runId: "backoff-run",
+          definition: "guarded",
+          input: { label: "backoff" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          // Room for exactly one replay: this interruption parks, the next
+          // one would spend the budget.
+          retryPolicy: { limit: 2, delayMs: 60_000, backoff: "constant" },
+          nextAt: Date.now() - 1000
+        });
+        seedTaskStep(state.storage, {
+          runId: "backoff-run",
+          name: "g-first",
+          kind: "do",
+          state: "completed",
+          result: "g:JOURNAL"
+        });
+        seedTaskStep(state.storage, {
+          runId: "backoff-run",
+          name: "g-second",
+          kind: "do",
+          state: "running",
+          attempt: 1
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const parked = await waitForState(instance.tasks, "backoff-run", [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        // Its own wait reason, not a step's: the next claim reads this to
+        // tell a replay after an interruption from an ordinary retry wake.
+        expect(parked.reason).toBe("interrupted");
+        // The interruption was counted durably, and no handler ran.
+        expect(readInterruptions(state.storage, "backoff-run")).toBe(1);
+        expect(instance.guardedEntries).toEqual([]);
+        expect(instance.stepRuns).toEqual([]);
+
+        backdateTaskWake(state.storage, "backoff-run");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, "backoff-run", [
+        "completed"
+      ]);
+      if (snapshot.state !== "completed") throw new Error("unreachable");
+      expect(snapshot.result).toBe("run-done:g:JOURNAL");
+      // The replay after the backoff still carries the interruption
+      // evidence, on the run's second claim.
+      expect(instance.guardedEntries).toEqual(["entry:backoff:g-second:a2"]);
+      expect(instance.stepRuns).toEqual(["guarded:second"]);
+    });
+
+    await runInDurableObject(
+      stub,
+      async (_instance: TaskHarnessObject, state) => {
+        // The claim out of the backoff carried the count the park wrote:
+        // one interruption, counted exactly once.
+        expect(readInterruptions(state.storage, "backoff-run")).toBe(1);
+      }
+    );
+  });
+
+  it("counts a second interruption and lengthens the backoff", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        // One interruption already parked and replayed; this reclaim is the
+        // second, and a linear backoff spaces it twice as far out.
+        seedTaskRun(state.storage, {
+          runId: "second-strike-run",
+          definition: "pipeline",
+          input: { label: "second-strike" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 2,
+          interruptions: 1,
+          retryPolicy: { limit: 5, delayMs: 30_000, backoff: "linear" },
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const parked = await waitForState(instance.tasks, "second-strike-run", [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("interrupted");
+        expect(readInterruptions(state.storage, "second-strike-run")).toBe(2);
+        expect(parked.wakeAt - Date.now()).toBeGreaterThan(45_000);
+        expect(instance.stepRuns).toEqual([]);
+      }
+    );
+  });
+
+  it("parks an interruption whose claim was already cleared", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        // The shape the alarm memory-limit breaker leaves behind: still
+        // 'running', but with its generation already cleared.
+        seedTaskRun(state.storage, {
+          runId: "breaker-run",
+          definition: "guarded",
+          input: { label: "breaker" },
+          state: "running",
+          attempt: 1,
+          retryPolicy: { limit: 3, delayMs: 60_000, backoff: "constant" },
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const parked = await waitForState(instance.tasks, "breaker-run", [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("interrupted");
+        expect(readInterruptions(state.storage, "breaker-run")).toBe(1);
+        expect(instance.guardedEntries).toEqual([]);
+      }
+    );
+  });
+
+  it("cancels a run parked on its interruption backoff", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
         await instance.lifecycle.start();
         seedTaskRun(state.storage, {
-          runId: "last-chance",
-          definition: "pipeline",
-          input: { label: "last" },
+          runId: "cancel-parked-run",
+          definition: "guarded",
+          input: { label: "cancel-parked" },
           state: "running",
           generation: "dead-generation",
           attempt: 1,
-          maxAttempts: 2,
+          retryPolicy: { limit: 3, delayMs: 60_000, backoff: "constant" },
           nextAt: Date.now() - 1000
         });
         await instance.lifecycle.rearmAlarm();
@@ -1139,12 +1327,388 @@ describe("Tasks run budget", () => {
     await runDurableObjectAlarm(stub);
 
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      const snapshot = await waitForState(instance.tasks, "last-chance", [
-        "completed"
+      const parked = await waitForState(instance.tasks, "cancel-parked-run", [
+        "waiting"
       ]);
-      expect(snapshot.state).toBe("completed");
-      expect(instance.stepRuns).toEqual(["pipeline:first", "pipeline:second"]);
+      if (parked.state !== "waiting") throw new Error("unreachable");
+      expect(parked.reason).toBe("interrupted");
+
+      expect(await instance.tasks.cancel("cancel-parked-run", "enough")).toBe(
+        true
+      );
+      const snapshot = await waitForState(instance.tasks, "cancel-parked-run", [
+        "cancelled"
+      ]);
+      if (snapshot.state !== "cancelled") throw new Error("unreachable");
+      expect(snapshot.reason).toBe("enough");
+      // The replay the backoff was holding never happened.
+      expect(instance.guardedEntries).toEqual([]);
+      expect(instance.stepRuns).toEqual([]);
     });
+  });
+
+  it("fails a run whose deadline passes while it waits out an interruption backoff", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "deadline-parked-run",
+          definition: "guarded",
+          input: { label: "deadline-parked" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          deadlineAt: Date.now() + 3_600_000,
+          retryPolicy: { limit: 3, delayMs: 60_000, backoff: "constant" },
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const parked = await waitForState(
+          instance.tasks,
+          "deadline-parked-run",
+          ["waiting"]
+        );
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("interrupted");
+        // Move the deadline into the past under the parked run, then wake
+        // it: the deadline outranks the backoff it is waiting out.
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET deadline_at = ? WHERE run_id = ?",
+          Date.now() - 1,
+          "deadline-parked-run"
+        );
+        backdateTaskWake(state.storage, "deadline-parked-run");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(
+        instance.tasks,
+        "deadline-parked-run",
+        ["failed"]
+      );
+      if (snapshot.state !== "failed") throw new Error("unreachable");
+      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(instance.guardedEntries).toEqual([]);
+    });
+  });
+
+  it("replays a zero-delay interruption immediately and still counts it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "zero-delay-run",
+          definition: "guarded",
+          input: { label: "zero" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          retryPolicy: { limit: 3, delayMs: 0, backoff: "constant" },
+          nextAt: Date.now() - 1000
+        });
+        seedTaskStep(state.storage, {
+          runId: "zero-delay-run",
+          name: "g-first",
+          kind: "do",
+          state: "completed",
+          result: "g:JOURNAL"
+        });
+        seedTaskStep(state.storage, {
+          runId: "zero-delay-run",
+          name: "g-second",
+          kind: "do",
+          state: "running",
+          attempt: 1
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const snapshot = await waitForState(instance.tasks, "zero-delay-run", [
+          "completed"
+        ]);
+        expect(snapshot.state).toBe("completed");
+        expect(instance.guardedEntries).toEqual(["entry:zero:g-second:a2"]);
+        // A policy whose backoff computes zero replays at once, but the
+        // interruption is still counted against the budget.
+        expect(readInterruptions(state.storage, "zero-delay-run")).toBe(1);
+      }
+    );
+  });
+
+  it("clears the interruption count once an attempt reaches a durable park", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        instance.failuresBeforeSuccess = 1;
+        // One interruption already counted; the replay this reclaim starts
+        // gets as far as a step retry park, which is durable progress.
+        seedTaskRun(state.storage, {
+          runId: "recovered-run",
+          definition: "guarded",
+          input: { label: "reset" },
+          state: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          interruptions: 1,
+          retryPolicy: { limit: 3, delayMs: 0, backoff: "constant" },
+          nextAt: Date.now() - 1000
+        });
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const parked = await waitForState(instance.tasks, "recovered-run", [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("retry");
+        expect(readInterruptions(state.storage, "recovered-run")).toBe(2);
+
+        backdateTaskWake(state.storage, "recovered-run", "g-second");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const snapshot = await waitForState(instance.tasks, "recovered-run", [
+          "completed"
+        ]);
+        expect(snapshot.state).toBe("completed");
+        // The budget counts consecutive deaths: an attempt that parked
+        // under its own power clears what came before it, so a long-lived
+        // run is never failed for interruptions it already recovered from.
+        expect(readInterruptions(state.storage, "recovered-run")).toBe(0);
+        expect(instance.guardedEntries).toEqual([
+          "entry:reset:none:a2",
+          "entry:reset:none:a3"
+        ]);
+      }
+    );
+  });
+
+  it("reclaims an interruption under the policy the run was accepted with", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const runId = await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject) => {
+        const receipt = await instance.tasks.run(
+          "sleeper",
+          { ms: 60_000 },
+          { retries: { limit: 2, delay: "1 minute", backoff: "constant" } }
+        );
+        await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+        return receipt.runId;
+      }
+    );
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        // The isolate holding the attempt is gone: the row is still
+        // 'running' under a generation nothing will ever settle.
+        interruptTaskRun(state.storage, runId);
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const parked = await waitForState(instance.tasks, runId, ["waiting"]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        // The policy the public option was accepted with — persisted with
+        // the run, read back here — spaced this replay out.
+        expect(parked.reason).toBe("interrupted");
+        expect(parked.wakeAt - Date.now()).toBeGreaterThan(30_000);
+        expect(readInterruptions(state.storage, runId)).toBe(1);
+        expect(instance.stepRuns).toEqual(["sleeper:before"]);
+      }
+    );
+  });
+
+  it("spends no interruption budget on a sleep wake", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const runId = await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject) => {
+        // A budget of one: were a sleep wake an attempt, this run would
+        // never reach its second step.
+        const receipt = await instance.tasks.run(
+          "sleeper",
+          { ms: 60_000 },
+          { retries: { limit: 1, delay: "1 minute", backoff: "constant" } }
+        );
+        await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+        return receipt.runId;
+      }
+    );
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        backdateTaskWake(state.storage, runId, "nap");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const snapshot = await waitForState(instance.tasks, runId, [
+          "completed"
+        ]);
+        expect(snapshot.state).toBe("completed");
+        expect(instance.stepRuns).toEqual(["sleeper:before", "sleeper:after"]);
+        expect(readInterruptions(state.storage, runId)).toBe(0);
+      }
+    );
+  });
+
+  it("does not mistake a step left running by a concurrent retry park for an interruption", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const runId = await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject) => {
+        instance.failuresBeforeSuccess = 1;
+        const receipt = await instance.tasks.run(
+          "concurrent",
+          { label: "cc" },
+          { retries: { limit: 2, delay: "1 minute", backoff: "constant" } }
+        );
+        const parked = await waitForState(instance.tasks, receipt.runId, [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        // One step's clean failure parked the run while its sibling was
+        // still mid-execution in the journal.
+        expect(parked.reason).toBe("retry");
+        return receipt.runId;
+      }
+    );
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        expect(readInterruptions(state.storage, runId)).toBe(0);
+        backdateTaskWake(state.storage, runId, "c-fast");
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const snapshot = await waitForState(instance.tasks, runId, [
+          "completed"
+        ]);
+        expect(snapshot.state).toBe("completed");
+        // No isolate was lost, so neither entry saw interruption evidence
+        // and the run's interruption budget is untouched.
+        expect(instance.guardedEntries).toEqual([
+          "entry:cc:none:a1",
+          "entry:cc:none:a2"
+        ]);
+        expect(readInterruptions(state.storage, runId)).toBe(0);
+      }
+    );
+  });
+
+  it("replays an interruption immediately when the run carries no retry policy", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    const capture = captureTaskEvents(name);
+
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: TaskHarnessObject, state) => {
+          await instance.lifecycle.start();
+          seedTaskRun(state.storage, {
+            runId: "unbounded-run",
+            definition: "guarded",
+            input: { label: "unbounded" },
+            state: "running",
+            generation: "dead-generation",
+            attempt: 1,
+            nextAt: Date.now() - 1000
+          });
+          seedTaskStep(state.storage, {
+            runId: "unbounded-run",
+            name: "g-first",
+            kind: "do",
+            state: "completed",
+            result: "g:JOURNAL"
+          });
+          seedTaskStep(state.storage, {
+            runId: "unbounded-run",
+            name: "g-second",
+            kind: "do",
+            state: "running",
+            attempt: 1
+          });
+          await instance.lifecycle.rearmAlarm();
+        }
+      );
+
+      await runDurableObjectAlarm(stub);
+
+      await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+        const snapshot = await waitForState(instance.tasks, "unbounded-run", [
+          "completed"
+        ]);
+        expect(snapshot.state).toBe("completed");
+        expect(instance.guardedEntries).toEqual([
+          "entry:unbounded:g-second:a2"
+        ]);
+      });
+      const types = capture.events.map((event) => event.type);
+      // The capture is demonstrably recording this run's events, so the
+      // negative below means "no park", not "nothing observed".
+      expect(types).toContain("task:attempt:interrupted");
+      // No backoff park stood between the interruption and the replay.
+      expect(types).not.toContain("task:waiting");
+    } finally {
+      capture.stop();
+    }
   });
 
   it("fails a run whose deadline already passed without running it", async () => {
@@ -1273,10 +1837,23 @@ describe("Tasks run budget", () => {
         await state.storage.put("cf_agents:tasks_schema_version", 1);
         await instance.lifecycle.start();
 
+        const columns = (
+          state.storage.sql
+            .exec("PRAGMA table_info(cf_agents_task_runs)")
+            .toArray() as Array<{ name: string }>
+        ).map((column) => column.name);
+        expect(columns).toEqual(
+          expect.arrayContaining([
+            "deadline_at",
+            "interruptions",
+            "retry_policy"
+          ])
+        );
+
         const receipt = await instance.tasks.run(
           "pipeline",
           { label: "migrated" },
-          { deadline: Date.now() + 60_000, maxAttempts: 3 }
+          { deadline: Date.now() + 60_000, retries: { limit: 3 } }
         );
         const snapshot = await waitForState(instance.tasks, receipt.runId, [
           "completed"
@@ -1289,12 +1866,33 @@ describe("Tasks run budget", () => {
     );
   });
 
-  it("rejects an invalid attempt budget or deadline at acceptance", async () => {
+  it("rejects an invalid retry policy or deadline at acceptance", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       await expect(
-        instance.tasks.run("pipeline", { label: "x" }, { maxAttempts: 0 })
-      ).rejects.toThrow(/maxAttempts must be a positive integer/);
+        instance.tasks.run(
+          "pipeline",
+          { label: "x" },
+          { retries: { limit: 0 } }
+        )
+      ).rejects.toThrow(/run retries\.limit/);
+      await expect(
+        instance.tasks.run(
+          "pipeline",
+          { label: "x" },
+          // SAFETY: the duration is deliberately unparseable; the type only
+          // admits well-formed strings, and the runtime guard is the point.
+          { retries: { delay: "not a duration" as "1 second" } }
+        )
+      ).rejects.toThrow(/run retries\.delay/);
+      // The same validator names the step side of the option, so the two
+      // call sites cannot be swapped without a test noticing.
+      const stepPolicy = await instance.tasks.run("badStepPolicy");
+      const failed = await waitForState(instance.tasks, stepPolicy.runId, [
+        "failed"
+      ]);
+      if (failed.state !== "failed") throw new Error("unreachable");
+      expect(failed.error.message).toMatch(/step retries\.limit/);
       await expect(
         instance.tasks.run("pipeline", { label: "x" }, { deadline: Number.NaN })
       ).rejects.toThrow(/deadline must be a finite time/);
