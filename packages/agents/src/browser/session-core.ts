@@ -1,12 +1,12 @@
 import type { CdpSession } from "./cdp-session";
 import {
   type BrowserBinding,
-  BrowserRenderingError,
   type BrowserSessionGuardrails,
   connectBrowser,
   connectBrowserSession,
   createBrowserSession,
   deleteBrowserSession,
+  isMissingBrowserSession,
   listBrowserTargets
 } from "./browser-run";
 import {
@@ -144,14 +144,6 @@ export interface OneShotKitesurfSessionOptions {
 export type OneShotBrowserSessionOptions =
   | OneShotChromiumSessionOptions
   | OneShotKitesurfSessionOptions;
-
-function isMissingBrowserSession(error: unknown): boolean {
-  // Browser Run uses 404 for unknown ids and 410 after keep_alive expiry.
-  return (
-    error instanceof BrowserRenderingError &&
-    (error.status === 404 || error.status === 410)
-  );
-}
 
 /**
  * Provider-independent named browser sessions: the host wires names, models
@@ -331,15 +323,30 @@ export class NamedBrowserSessions {
     return true;
   }
 
+  /**
+   * Record activity for the named session beyond CDP traffic — e.g. a host
+   * minting a Live View link for a human. Refreshes the idle clock only
+   * while the same live session remains stored; a swapped, closed, or
+   * removed entry is never resurrected.
+   *
+   * @returns True when the same live session's clock was refreshed; false
+   * when a concurrent close, sweep, or replacement already retired it — the
+   * caller's knowledge of that session is definitively stale.
+   */
+  async touch(name: string, sessionId: string): Promise<boolean> {
+    return this.#touch(namedBrowserSessionKey(name), sessionId);
+  }
+
   /** Refresh `updatedAt` for an actively used session — never resurrects. */
-  async #touch(key: string, sessionId: string): Promise<void> {
+  async #touch(key: string, sessionId: string): Promise<boolean> {
     const lock = await this.#store.acquireLock(key);
     try {
       const current = await this.#store.get(key);
       if (current?.sessionId !== sessionId || current.closedAt !== undefined) {
-        return; // swapped, closed, or gone — activity no longer counts
+        return false; // swapped, closed, or gone — activity no longer counts
       }
       await this.#store.set(key, { ...current, updatedAt: Date.now() });
+      return true;
     } finally {
       await lock.release();
     }
