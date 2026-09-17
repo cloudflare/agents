@@ -5024,6 +5024,10 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   private _responseLog: ChatResponseResult[] = [];
   private _submissionLog: ThinkSubmissionInspection[] = [];
+  private _submissionSettlementRows = new Map<
+    string,
+    Record<string, string | number | null>
+  >();
   private _workflowEventLog: Array<{
     workflowName: string;
     workflowId: string;
@@ -5131,6 +5135,44 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
+    // Capture the real cutover, BEFORE the submission finalizer writes its
+    // ledger outcome. Tests restore exactly this durable crash-window row.
+    const row = this.sql<Record<string, string | number | null>>`
+      SELECT * FROM cf_think_submissions
+      WHERE request_id = ${result.requestId} AND status = 'running'
+    `[0];
+    if (row) this._submissionSettlementRows.set(result.requestId, row);
+  }
+
+  /** Abort the request (not cancelSubmission), after it starts streaming. */
+  async abortSubmissionRequestForTest(requestId: string): Promise<void> {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (this._resumableStream.latestActiveStreamInfoForRequest(requestId)) {
+        this.abortRequest(requestId);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("Submission request never started streaming");
+  }
+
+  /** Replay startup against the row captured before normal ledger settlement. */
+  async recoverSubmissionSettlementForTest(requestId: string): Promise<void> {
+    await this.drainSubmissionsForTest();
+    await this.drainWorkflowNotificationsForTest();
+    const row = this._submissionSettlementRows.get(requestId);
+    if (!row) throw new Error("Submission settlement snapshot missing");
+    const columns = Object.keys(row);
+    // Column names and values come only from SELECT * on our own SQLite table.
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_think_submissions (${columns.join(", ")})
+       VALUES (${columns.map(() => "?").join(", ")})`,
+      ...Object.values(row)
+    );
+    this._workflowEventLog = [];
+    this._submissionLog = [];
+    await this.recoverSubmissionsForTest();
+    await this.drainWorkflowNotificationsForTest();
   }
 
   override async sendWorkflowEvent(
@@ -5889,6 +5931,43 @@ export class ThinkProgrammaticTestAgent extends Think {
     await (
       this as unknown as { _recoverSubmissionsOnStart: () => Promise<void> }
     )._recoverSubmissionsOnStart();
+  }
+
+  /** Emulate an upgrade from the table definition without cutover columns. */
+  async useLegacySubmissionSchemaForTest(): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "ALTER TABLE cf_think_submissions DROP COLUMN result_status"
+    );
+    this.ctx.storage.sql.exec(
+      "ALTER TABLE cf_think_submissions DROP COLUMN output_json"
+    );
+    // SAFETY: startup's once-per-isolate DDL guard is reset to model a new isolate.
+    (
+      this as unknown as { _submissionTableEnsured: boolean }
+    )._submissionTableEnsured = false;
+  }
+
+  /** Seed legacy terminal evidence or an overflow attempt awaiting its retry. */
+  async seedSubmissionStreamForTest(
+    requestId: string,
+    status: "completed" | "error" | "retry"
+  ): Promise<void> {
+    const streamId = this._startResumableStream(requestId);
+    if (status === "error") this._errorResumableStream(streamId, requestId);
+    else this._completeResumableStream(streamId);
+    if (status === "retry") {
+      this
+        .sql`UPDATE cf_think_submissions SET result_status = 'retry' WHERE request_id = ${requestId}`;
+    }
+  }
+
+  /** Model an accepted retry that crashes before opening its successor stream. */
+  async moveSubmissionRequestForTest(
+    submissionId: string,
+    requestId: string
+  ): Promise<void> {
+    this
+      .sql`UPDATE cf_think_submissions SET request_id = ${requestId} WHERE submission_id = ${submissionId}`;
   }
 
   async resetTurnStateForTest(): Promise<void> {

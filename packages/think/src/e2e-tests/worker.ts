@@ -1690,9 +1690,14 @@ const SUBMISSION_FORCE_STABLE_TIMEOUT_KEY =
 
 export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
+  private _pauseSubmissionAtCutover = false;
+  private _submissionAtCutover = false;
+  private _structuredSubmission = false;
 
   override getModel(): LanguageModel {
-    return createSlowE2EMockModel();
+    return this._structuredSubmission
+      ? createStructuredGreetingModel(1)
+      : createSlowE2EMockModel();
   }
 
   override getSystemPrompt(): string {
@@ -1732,6 +1737,127 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
       (await this.ctx.storage.get<string[]>(SUBMISSION_RESPONSE_LOG_KEY)) ?? [];
     log.push(result.requestId);
     await this.ctx.storage.put(SUBMISSION_RESPONSE_LOG_KEY, log);
+    if (this._pauseSubmissionAtCutover) {
+      this._submissionAtCutover = true;
+      // Real turn cutover, before _executeSubmission receives its result.
+      // SIGKILL is the only release: no ledger write can race the test.
+      await new Promise<void>(() => {});
+    }
+  }
+
+  override async sendWorkflowEvent(
+    _workflowName: string & {},
+    _workflowId: string,
+    event: { type: string; payload?: unknown }
+  ): Promise<void> {
+    const events =
+      (await this.ctx.storage.get<unknown[]>(
+        "test:submission-workflow-events"
+      )) ?? [];
+    events.push(event.payload);
+    await this.ctx.storage.put("test:submission-workflow-events", events);
+  }
+
+  /** Run the actual submission cutover on either the root or a real facet. */
+  @callable()
+  async startSubmissionAtCutover(
+    submissionId: string,
+    mode: "abort" | "output",
+    facet = false
+  ): Promise<void> {
+    if (facet) {
+      const child = await this.subAgent(
+        ThinkSubmissionRecoveryE2EAgent,
+        "cutover-facet"
+      );
+      await child.startSubmissionAtCutover(submissionId, mode);
+      return;
+    }
+    this._pauseSubmissionAtCutover = true;
+    this._structuredSubmission = mode === "output";
+    await this.submitMessages(
+      [
+        {
+          id: `user-${submissionId}`,
+          role: "user",
+          parts: [{ type: "text", text: "Produce the terminal result" }]
+        }
+      ],
+      {
+        submissionId,
+        metadata: {
+          __thinkWorkflowPrompt: {
+            workflow: {
+              name: "TEST_WORKFLOW",
+              id: submissionId,
+              stepName: "result",
+              eventType: "result"
+            },
+            ...(mode === "output"
+              ? {
+                  output: {
+                    schema: {
+                      type: "object",
+                      properties: { greeting: { type: "string" } },
+                      required: ["greeting"],
+                      additionalProperties: false
+                    }
+                  }
+                }
+              : {})
+          }
+        }
+      }
+    );
+    if (mode === "abort") {
+      // Wait for actual streamed content so abort exercises message cutover,
+      // not only the no-parts settlement covered by the Workers regression.
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const stream =
+          this._resumableStream.latestActiveStreamInfoForRequest(submissionId);
+        if (
+          stream &&
+          this._resumableStream.getStreamChunks(stream.id).length > 2
+        ) {
+          this.abortRequest(submissionId);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(
+        "Submission cutover abort never reached streamed content"
+      );
+    }
+  }
+
+  @callable()
+  async inspectSubmissionCutover(
+    submissionId: string,
+    facet = false
+  ): Promise<{
+    paused: boolean;
+    status: string | null;
+    events: unknown[];
+    assistantMessages: number;
+  }> {
+    if (facet) {
+      const child = await this.subAgent(
+        ThinkSubmissionRecoveryE2EAgent,
+        "cutover-facet"
+      );
+      return child.inspectSubmissionCutover(submissionId);
+    }
+    return {
+      paused: this._submissionAtCutover,
+      status: (await this.inspectSubmission(submissionId))?.status ?? null,
+      events:
+        (await this.ctx.storage.get<unknown[]>(
+          "test:submission-workflow-events"
+        )) ?? [],
+      assistantMessages: (await this.getMessages()).filter(
+        (message) => message.role === "assistant"
+      ).length
+    };
   }
 
   @callable()

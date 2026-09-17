@@ -381,6 +381,65 @@ describe("Think submission recovery e2e", () => {
     });
   });
 
+  it.each([
+    { mode: "abort", facet: false },
+    { mode: "output", facet: false },
+    { mode: "abort", facet: true },
+    { mode: "output", facet: true }
+  ] as const)(
+    "recovers the recorded $mode outcome after cutover (facet: $facet)",
+    async ({ mode, facet }) => {
+      const agent = `submission-cutover-${mode}-${facet}`;
+      const submissionId = `sub-cutover-${mode}`;
+      type CutoverView = {
+        paused: boolean;
+        status: string | null;
+        events: unknown[];
+        assistantMessages: number;
+      };
+      const inspect = () =>
+        callAgent(agent, "inspectSubmissionCutover", [
+          submissionId,
+          facet
+        ]) as Promise<CutoverView>;
+      wrangler = startWrangler();
+      await waitForReady();
+      await callAgent(agent, "startSubmissionAtCutover", [
+        submissionId,
+        mode,
+        facet
+      ]);
+      const before = await pollUntil(
+        "turn cutover before ledger settlement",
+        inspect,
+        (view) => view.paused,
+        { delayMs: 100 }
+      );
+      expect(before.status).toBe("running");
+      expect(before.events).toEqual([]);
+      expect(before.assistantMessages).toBe(mode === "abort" ? 1 : 0);
+
+      wrangler = await restartWrangler(wrangler);
+      const after = await pollUntil(
+        "recorded outcome delivered after restart",
+        inspect,
+        (view) => view.events.length > 0,
+        { delayMs: 200 }
+      );
+      expect(after.status).toBe(mode === "abort" ? "aborted" : "completed");
+      expect(after.events).toEqual([
+        mode === "abort"
+          ? { submissionId, status: "aborted" }
+          : {
+              submissionId,
+              status: "completed",
+              output: { greeting: "hello from a recovered workflow turn" }
+            }
+      ]);
+      expect(after.assistantMessages).toBe(before.assistantMessages);
+    }
+  );
+
   it("leaves a recoverable in-flight submission running and continues it to completion", async () => {
     const agent = "submission-recoverable";
     const submissionId = "sub-recoverable";

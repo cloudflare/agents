@@ -112,6 +112,17 @@ type ThinkSubmissionTestStub = {
   }): Promise<number>;
   drainSubmissionsForTest(): Promise<void>;
   recoverSubmissionsForTest(): Promise<void>;
+  abortSubmissionRequestForTest(requestId: string): Promise<void>;
+  recoverSubmissionSettlementForTest(requestId: string): Promise<void>;
+  useLegacySubmissionSchemaForTest(): Promise<void>;
+  seedSubmissionStreamForTest(
+    requestId: string,
+    status: "completed" | "error" | "retry"
+  ): Promise<void>;
+  moveSubmissionRequestForTest(
+    submissionId: string,
+    requestId: string
+  ): Promise<void>;
   resetTurnStateForTest(): Promise<void>;
   recoverChatFiberForTest(requestId: string): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
@@ -907,6 +918,100 @@ describe("Think durable submissions", () => {
     });
   });
 
+  it("recovers a request-aborted submission as aborted, not completed", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["partial ", "answer"], 100);
+    const submissionId = "sub-request-aborted-cutover";
+    await agent.testSubmitMessages("stop this request", {
+      submissionId,
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-aborted-cutover",
+            stepName: "draft",
+            eventType: "think-prompt-aborted-cutover"
+          }
+        }
+      }
+    });
+    await agent.abortSubmissionRequestForTest(submissionId);
+    await waitForSubmission(
+      agent,
+      submissionId,
+      (row) => row.status === "aborted"
+    );
+
+    await agent.recoverSubmissionSettlementForTest(submissionId);
+
+    await expect(
+      agent.inspectSubmissionForTest(submissionId)
+    ).resolves.toMatchObject({
+      status: "aborted"
+    });
+    const events = await agent.getWorkflowEventsForTest();
+    expect(events).toHaveLength(1);
+    expect(events[0].event.payload).toEqual({
+      submissionId,
+      status: "aborted"
+    });
+  });
+
+  it("recovers the exact structured output recorded at stream settlement", async () => {
+    const agent = await freshAgent();
+    const output = { title: "Durable output", labels: ["ops", "review"] };
+    await agent.setFinalAnswerResponseForTest(output);
+    const submissionId = "sub-output-cutover";
+    await agent.testSubmitMessages("structured output", {
+      submissionId,
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-output-cutover",
+            stepName: "draft",
+            eventType: "think-prompt-output-cutover"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: {
+                title: { type: "string" },
+                labels: { type: "array", items: { type: "string" } }
+              },
+              required: ["title", "labels"],
+              additionalProperties: false
+            }
+          }
+        }
+      }
+    });
+    await waitForSubmission(
+      agent,
+      submissionId,
+      (row) => row.status === "completed"
+    );
+    await agent.recoverSubmissionSettlementForTest(submissionId);
+
+    await expect(
+      agent.inspectSubmissionForTest(submissionId)
+    ).resolves.toMatchObject({
+      status: "completed"
+    });
+    const events = await agent.getWorkflowEventsForTest();
+    expect(events).toHaveLength(1);
+    expect(events[0].event.payload).toEqual({
+      submissionId,
+      status: "completed",
+      output
+    });
+    expect(
+      (await agent.getStoredMessages()).every(
+        (message) => message.role !== "assistant"
+      )
+    ).toBe(true);
+  });
+
   it("does not persist the internal final-answer tool into the conversation", async () => {
     const agent = await freshAgent();
     await agent.setFinalAnswerResponseForTest({ title: "Hidden", labels: [] });
@@ -1202,6 +1307,74 @@ describe("Think durable submissions", () => {
       hasActiveStream: false,
       hasActiveRequestStream: false
     });
+  });
+
+  it.each(["completed", "error"] as const)(
+    "migrates legacy submission rows and preserves %s stream fallback",
+    async (status) => {
+      const agent = await freshAgent();
+      const submissionId = `sub-legacy-${status}`;
+      await agent.insertSubmissionForTest({
+        submissionId,
+        status: "running",
+        messagesAppliedAt: Date.now()
+      });
+      await agent.seedSubmissionStreamForTest(submissionId, status);
+      await agent.useLegacySubmissionSchemaForTest();
+      await agent.recoverSubmissionsForTest();
+      // A second startup exercises idempotent migration and terminal settlement.
+      await agent.recoverSubmissionsForTest();
+      await expect(
+        agent.inspectSubmissionForTest(submissionId)
+      ).resolves.toMatchObject({ status });
+      expect(
+        (await agent.getSubmissionLog()).filter((row) => row.status === status)
+      ).toHaveLength(1);
+    }
+  );
+
+  it.each([false, true])(
+    "does not complete an overflow segment when its retry crashes pre-stream (successor accepted: %s)",
+    async (successorAccepted) => {
+      const agent = await freshAgent();
+      const submissionId = "sub-overflow-pre-stream";
+      await agent.insertSubmissionForTest({
+        submissionId,
+        status: "running",
+        messagesAppliedAt: Date.now()
+      });
+      await agent.seedSubmissionStreamForTest(submissionId, "retry");
+      if (successorAccepted) {
+        await agent.moveSubmissionRequestForTest(
+          submissionId,
+          "retry-successor"
+        );
+      }
+      await agent.recoverSubmissionsForTest();
+      await expect(
+        agent.inspectSubmissionForTest(submissionId)
+      ).resolves.toMatchObject({
+        status: "error",
+        error: "Submission was interrupted after messages were applied."
+      });
+      expect(await agent.getStoredMessages()).toHaveLength(0);
+    }
+  );
+
+  it("leaves a retry stamp recoverable while a durable retry owns the submission", async () => {
+    const agent = await freshAgent();
+    const submissionId = "sub-overflow-recovery-owned";
+    await agent.insertSubmissionForTest({
+      submissionId,
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+    await agent.seedSubmissionStreamForTest(submissionId, "retry");
+    await agent.scheduleRecoveredRetryForTest(submissionId, "tasks");
+    await agent.recoverSubmissionsForTest();
+    await expect(
+      agent.inspectSubmissionForTest(submissionId)
+    ).resolves.toMatchObject({ status: "running" });
   });
 
   it("requeues stale running submissions when messages were not applied", async () => {
