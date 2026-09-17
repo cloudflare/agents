@@ -33,7 +33,7 @@ definition names — recovery is correct by construction. Runs start with
 
 The Tasks capability takes no wiring: storage, alarm coordination, the host
 invocation boundary, and events all come from the Lifecycle it is installed
-on. It owns its own `cf_agents_task_runs` and `cf_agents_task_steps` tables and
+on. It owns its own `cf_agents_task_runs` and `cf_agents_task_journal` tables and
 contributes its earliest run deadline to Lifecycle's shared physical alarm,
 so it composes with the Scheduler and other capabilities that also need
 wake-ups.

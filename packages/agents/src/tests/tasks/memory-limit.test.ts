@@ -4,11 +4,14 @@ import { describe, expect, it } from "vitest";
 import type { LifecycleJob } from "../../lifecycle/job-queue";
 import {
   backdateTaskWake,
+  seedTaskAsk,
+  seedTaskMailbox,
   seedTaskRun,
-  seedTaskStep,
+  seedTaskJournal,
   type TaskHarnessObject,
   type TaskSchedulerCoexistObject
 } from "../capabilities/tasks";
+import { childMailboxKey } from "../../tasks/machine";
 
 /**
  * Alarm memory-limit breaker (#1825) applied to Tasks runs.
@@ -511,12 +514,51 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
           retain: false,
           idempotencyKey: key
         });
-        seedTaskStep(state.storage, {
+        seedTaskJournal(state.storage, {
           runId,
+          turn: 0,
           name: "oom-step",
           kind: "do",
           state: "running",
           attempt: 1
+        });
+        // The rest of what a run owns, so the cascade is exercised rather
+        // than merely observed on empty tables: a queued mailbox item, an
+        // open ask, and the settlement note this run left in a parent's
+        // mailbox. The parent's own item must survive.
+        seedTaskMailbox(state.storage, {
+          runId,
+          key: "steer:1",
+          kind: "user",
+          payload: { text: "hi" }
+        });
+        seedTaskAsk(state.storage, {
+          askId: `${runId}#1`,
+          runId,
+          name: "approve"
+        });
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET parent_run_id = ? WHERE run_id = ?",
+          "oom-parent",
+          runId
+        );
+        seedTaskRun(state.storage, {
+          runId: "oom-parent",
+          definition: "oomStepLoop",
+          state: "waiting",
+          nextAt: Date.now() + 60_000
+        });
+        seedTaskMailbox(state.storage, {
+          runId: "oom-parent",
+          key: childMailboxKey(runId),
+          kind: "child",
+          type: "oomStepLoop"
+        });
+        seedTaskMailbox(state.storage, {
+          runId: "oom-parent",
+          key: "steer:own",
+          kind: "user",
+          seq: 1
         });
         await instance.tasks.onMemoryLimit({
           sealed: true,
@@ -531,16 +573,40 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
           .toArray();
         const steps = state.storage.sql
           .exec(
-            "SELECT run_id FROM cf_agents_task_steps WHERE run_id = ?",
+            "SELECT run_id FROM cf_agents_task_journal WHERE run_id = ?",
+            runId
+          )
+          .toArray();
+        // The delete cascade reaches every table a run owns, not just the
+        // journal: a sealing purge must leave no orphan mailbox or ask row.
+        const mailbox = state.storage.sql
+          .exec(
+            "SELECT run_id FROM cf_agents_task_mailbox WHERE run_id = ?",
+            runId
+          )
+          .toArray();
+        const asks = state.storage.sql
+          .exec(
+            "SELECT ask_id FROM cf_agents_task_asks WHERE run_id = ?",
             runId
           )
           .toArray();
         const wakes = state.storage.sql
           .exec("SELECT id FROM cf_agents_jobs WHERE id = ?", `task:${runId}`)
           .toArray();
+        const parentMailbox = state.storage.sql
+          .exec(
+            "SELECT key FROM cf_agents_task_mailbox WHERE run_id = ? ORDER BY seq",
+            "oom-parent"
+          )
+          .toArray();
         expect(runs).toEqual([]);
         expect(steps).toEqual([]);
+        expect(mailbox).toEqual([]);
+        expect(asks).toEqual([]);
         expect(wakes).toEqual([]);
+        // The child's note went with it; the parent's own item did not.
+        expect(parentMailbox).toEqual([{ key: "steer:own" }]);
         // A sealed strike is a terminal failure the host never saw a
         // handler for: it reaches onError with the run it belongs to.
         expect(instance.runErrorRuns).toEqual([

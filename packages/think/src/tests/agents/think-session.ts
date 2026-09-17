@@ -125,7 +125,7 @@ async function runQueuedRecoveryTaskForTest(
     WHERE run_id = ${runId}
   `;
   agent.sql`
-    UPDATE cf_agents_task_steps SET next_at = ${past}
+    UPDATE cf_agents_task_journal SET next_at = ${past}
     WHERE run_id = ${runId} AND kind = 'sleep'
   `;
   agent.sql`

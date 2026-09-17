@@ -1,7 +1,9 @@
 /**
  * Durable replayable execution for Lifecycle Objects. `Tasks` owns the
- * `cf_agents_task_runs` and `cf_agents_task_steps` tables, the definitions registry, run
- * acceptance, generation-fenced claiming, and due-run processing.
+ * `cf_agents_task_runs`, `cf_agents_task_journal`, `cf_agents_task_mailbox`,
+ * `cf_agents_task_asks` and `cf_agents_task_routes` tables, the definitions
+ * registry, run acceptance, generation-fenced claiming, and due-run
+ * processing.
  *
  * Tasks consumes only the standard capability services: storage, the job
  * queue, the host invocation boundary, events, and routing. A run's storage
@@ -26,8 +28,22 @@ import type {
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
-import { TaskStore } from "./store";
+import {
+  JOURNAL_REBUILD_BATCH,
+  JOURNAL_REBUILD_START,
+  JOURNAL_REBUILD_WARN_ROWS,
+  TaskStore,
+  type TaskJournalCursor
+} from "./store";
 import { createTaskStepEngine } from "./engine-port";
+import {
+  COMPILED_CHECKPOINT,
+  COMPILED_PHASE,
+  compileTaskFunction,
+  isTaskMachine,
+  parseDefinitionName,
+  readTaskTerminal
+} from "./machine";
 import { parseTaskDuration } from "./duration";
 import {
   MissingTaskDefinitionError,
@@ -50,16 +66,31 @@ import {
 } from "./replay";
 import { deserializeTaskValue, serializeTaskValue } from "./serialization";
 import type {
-  Task,
+  AskKind,
+  TaskAnswerReceipt,
+  TaskAskRecord,
+  TaskAskState,
   TaskCallbacks,
-  TaskHandlers,
+  TaskChange,
+  TaskDefinition,
+  TaskDefinitions,
+  TaskHandle,
   TaskInput,
+  TaskInternalHandle,
+  TaskJson,
   TaskOutput,
   TaskReceipt,
+  TaskRunHandle,
   TaskRunOptions,
   TaskRunRow,
   TaskRunSnapshot,
   TaskRunState,
+  TaskRunView,
+  TaskSendOptions,
+  TaskSendReceipt,
+  TaskStartMode,
+  TaskState,
+  TaskStep,
   TaskValue
 } from "./types";
 
@@ -71,7 +102,7 @@ import type {
  */
 export type TaskDefinitionResolver = (
   name: string
-) => TaskCallbacks[string] | undefined;
+) => TaskDefinition | undefined;
 
 const taskDefinitionResolvers = new WeakMap<object, TaskDefinitionResolver>();
 
@@ -109,9 +140,30 @@ export function setTaskRoutedMemoryLimitHandler(
   taskRoutedMemoryLimitHandlers.set(tasks, handler);
 }
 
+/** A durable function definition, as the engine holds one for dispatch. */
+type TaskFunctionDefinition = (
+  input: never,
+  step: TaskStep
+) => TaskValue | Promise<TaskValue>;
+
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
-/** 2: `deadline_at`, `interruptions`, and `retry_policy` on run rows. */
-const CURRENT_FIBER_SCHEMA_VERSION = 2;
+/**
+ * 3: the checkpoint and its turn, the derived definition identity, the
+ * progress and transition counters, the abort mark, the transition
+ * watchdog, the ownership tree and the stream identity on run rows; the
+ * turn-scoped journal replacing `cf_agents_task_steps`; and the mailbox,
+ * ask and routed-owner tables.
+ */
+const CURRENT_FIBER_SCHEMA_VERSION = 3;
+/**
+ * The intermediate version the batched journal rebuild runs under. Rows
+ * copy in bounded transactions, so a crash mid-rebuild resumes from the
+ * cursor rather than restarting — and no definition dispatches until the
+ * cursor completes, so a half-copied journal is never read by a replay.
+ */
+const JOURNAL_REBUILD_VERSION = 2.5;
+/** How far the journal rebuild has copied: a `[runId, name]` pair. */
+const JOURNAL_CURSOR_KEY = "cf_agents:tasks_journal_cursor";
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -173,6 +225,47 @@ type TaskWakeJobPayload = {
   readonly owner_path_key?: string | null;
 };
 
+/**
+ * A member this capability or one of its handle types declares whose engine
+ * lands with the machine dispatch loop. Calling one is a loud error rather
+ * than a silent no-op; on a function definition a handle's member is typed
+ * `never`, so typed code cannot reach it at all.
+ */
+function notImplementedYet(member: string): never {
+  throw new Error(
+    `tasks.${member} is declared but its engine is not wired up yet`
+  );
+}
+
+/** Where the journal rebuild left off, or the start when it has not run. */
+function readJournalCursor(storage: DurableObjectStorage): TaskJournalCursor {
+  const stored = storage.kv.get<string>(JOURNAL_CURSOR_KEY);
+  if (typeof stored !== "string") return JOURNAL_REBUILD_START;
+  // SAFETY: written by #rebuildJournal from a cursor of this shape.
+  return JSON.parse(stored) as TaskJournalCursor;
+}
+
+/** The three machine verbs a definition lens carries, pending that engine. */
+function machineVerbsPendingEngine() {
+  return {
+    send: () => notImplementedYet("handle().send"),
+    view: () => notImplementedYet("handle().view"),
+    watch: () => notImplementedYet("handle().watch")
+  };
+}
+
+/** The start mode one set of run options asks for, `warm` when unset. */
+function startMode(options: TaskRunOptions | undefined): TaskStartMode {
+  const start = options?.start;
+  if (start === undefined) return "warm";
+  if (start !== "warm" && start !== "queued" && start !== "attached") {
+    throw new Error(
+      `start must be "warm", "queued" or "attached", got "${String(start)}"`
+    );
+  }
+  return start;
+}
+
 function isTaskWakeJobPayload(value: unknown): value is TaskWakeJobPayload {
   return (
     typeof value === "object" &&
@@ -194,13 +287,6 @@ type TaskRouteMessage =
       readonly runId: string;
       readonly context: MemoryLimitContext;
     };
-
-/**
- * Who drives an accepted run's first attempt: `warm` starts it detached in
- * the caller's invocation (the public `run()` behaviour), `queued` leaves it
- * to the durable wake, and `attached` lets the caller drive and await it.
- */
-type TaskStartMode = "warm" | "queued" | "attached";
 
 /** One live execution attempt in this isolate. */
 type ActiveAttempt = {
@@ -237,12 +323,13 @@ export type TaskDeleteOptions = {
  * @experimental The API surface may change before stabilizing.
  */
 export class Tasks<
-  Handlers extends TaskHandlers = TaskCallbacks
+  Definitions extends TaskDefinitions = TaskCallbacks
 > extends LifecycleCapability {
-  readonly #definitions: TaskHandlers;
-  readonly #registered = new Map<string, TaskCallbacks[string]>();
+  readonly #definitions: TaskDefinitions;
+  readonly #registered = new Map<string, TaskDefinition>();
   readonly #active = new Map<string, ActiveAttempt>();
   #storeInstance: TaskStore | undefined;
+  #schemaVersionCache: number | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError:
     | ((error: unknown, run: TaskFailedRun) => void | Promise<void>)
@@ -257,7 +344,7 @@ export class Tasks<
    * handlers are declared and where runs start. Names outside the map are
    * rejected unless a composition-root resolver supplies them.
    */
-  constructor(options: TasksOptions<Handlers> = {}) {
+  constructor(options: TasksOptions<Definitions> = {}) {
     super("tasks");
     this.#definitions = options.definitions ?? {};
     this.#stepDefaults = {
@@ -285,19 +372,36 @@ export class Tasks<
     return this.#storeInstance;
   }
 
+  /** The persisted schema version, read once and kept for this isolate. */
+  #schemaVersion(): number {
+    this.#schemaVersionCache ??=
+      this.lifecycle.storage.kv.get<number>(FIBER_SCHEMA_VERSION_KEY) ?? 0;
+    return this.#schemaVersionCache;
+  }
+
+  async #setSchemaVersion(version: number): Promise<void> {
+    await this.lifecycle.storage.put(FIBER_SCHEMA_VERSION_KEY, version);
+    this.#schemaVersionCache = version;
+  }
+
+  /**
+   * True while storage is mid-migration. Nothing dispatches and no wake
+   * mirror moves until the journal rebuild's cursor completes, so a
+   * half-copied journal is never read by a replay.
+   */
+  #migrating(): boolean {
+    return this.#schemaVersion() < CURRENT_FIBER_SCHEMA_VERSION;
+  }
+
   // ── Definitions ──────────────────────────────────────────────────────────
 
-  /** Resolve a name to its declared or composition-root-supplied handler. */
-  #resolveDefinition(name: string): TaskCallbacks[string] | undefined {
-    // SAFETY: declared definitions are constrained with `never` parameters
-    // so concrete definition types satisfy the map under contravariance; the
-    // values passed at dispatch were parsed from rows this definition's name
-    // was persisted with.
-    return (this.#definitions[name] ??
+  /** Resolve a name to its declared or composition-root-supplied definition. */
+  #resolveDefinition(name: string): TaskDefinition | undefined {
+    return (
+      this.#definitions[name] ??
       this.#registered.get(name) ??
-      taskDefinitionResolvers.get(this)?.(name)) as
-      | TaskCallbacks[string]
-      | undefined;
+      taskDefinitionResolvers.get(this)?.(name)
+    );
   }
 
   /** True when a name resolves to a runnable definition. */
@@ -342,8 +446,11 @@ export class Tasks<
    * constructor's `definitions` map instead — or if `name` is already
    * registered, which is always a real conflict: this method runs exactly
    * once per name per Tasks construction.
+   *
+   * @returns The one handle that can start runs of this reserved name:
+   * public `run()` and `handle()` both refuse a `__cf` prefix.
    */
-  register(name: string, definition: TaskCallbacks[string]): void {
+  register(name: string, definition: TaskDefinition): TaskInternalHandle {
     if (typeof name !== "string" || name.length === 0) {
       throw new Error("Task definition names must be non-empty strings");
     }
@@ -363,6 +470,11 @@ export class Tasks<
       );
     }
     this.#registered.set(name, definition);
+    return {
+      name,
+      run: (input?: unknown, options?: TaskRunOptions) =>
+        this.#acceptReserved(name, input, options, startMode(options))
+    };
   }
 
   // ── Starting runs ────────────────────────────────────────────────────────
@@ -371,14 +483,19 @@ export class Tasks<
    * Durably accept one run of a declared definition and return a receipt
    * without waiting for terminal state. The same `idempotencyKey` or `runId`
    * joins the existing run (`accepted: false`) instead of creating a second.
+   *
+   * `options.start` chooses who drives the first attempt: `warm` (the
+   * default) begins it in this invocation without awaiting it, `queued`
+   * leaves it to the durable wake, and `attached` drives it here and
+   * resolves at its next durable boundary.
    */
-  async run<Name extends keyof Handlers & string>(
+  async run<Name extends keyof Definitions & string>(
     definition: Name,
-    input?: TaskInput<Handlers[Name]>,
+    input?: TaskInput<Definitions[Name]>,
     options?: TaskRunOptions
   ): Promise<TaskReceipt> {
     this.#validateDefinitionName(definition);
-    return this.#accept(definition, input, options);
+    return this.#start(definition, input, options, startMode(options));
   }
 
   /**
@@ -387,30 +504,134 @@ export class Tasks<
    * handle is a pure lens over this capability — it holds no state and may
    * be created at any time.
    */
-  handle<Name extends keyof Handlers & string>(
+  handle<Name extends keyof Definitions & string>(
     definition: Name
-  ): Task<TaskInput<Handlers[Name]>, TaskOutput<Handlers[Name]>> {
+  ): TaskHandle<
+    Definitions[Name],
+    TaskInput<Definitions[Name]>,
+    TaskState<Definitions[Name]>,
+    TaskOutput<Definitions[Name]>
+  > {
     this.#validateDefinitionName(definition);
-    return {
+    const lens = {
       name: definition,
-      run: (input, options) => this.run(definition, input, options),
-      get: (runId) => this.#snapshot(runId, definition),
-      getByIdempotencyKey: (idempotencyKey) =>
+      run: (input: TaskInput<Definitions[Name]>, options?: TaskRunOptions) =>
+        this.run(definition, input, options),
+      get: (runId: string) => this.#snapshot(runId, definition),
+      getByIdempotencyKey: (idempotencyKey: string) =>
         this.#snapshotByKey(idempotencyKey, definition),
-      cancel: (runId, reason) => this.#cancelScoped(runId, definition, reason)
+      cancel: (runId: string, reason?: string) =>
+        this.#cancelScoped(runId, definition, reason),
+      at: (runId: string) => this.at(definition, runId),
+      // `send`, `view` and `watch` are conditional on the definition type —
+      // `never`, and so uncallable, on a function definition. The engine
+      // behind them lands with the machine dispatch loop.
+      ...machineVerbsPendingEngine()
     };
+    // SAFETY: the three machine verbs are typed against `Definitions[Name]`,
+    // a type parameter here, so no concrete value satisfies them inside this
+    // body — the same reason `at()` casts.
+    return lens as unknown as TaskHandle<
+      Definitions[Name],
+      TaskInput<Definitions[Name]>,
+      TaskState<Definitions[Name]>,
+      TaskOutput<Definitions[Name]>
+    >;
+  }
+
+  /**
+   * A typed handle on ONE run. It does not replace `run()`'s receipt:
+   * `TaskReceipt.accepted` is the whole point of durable acceptance.
+   */
+  at<Name extends keyof Definitions & string>(
+    definition: Name,
+    runId: string
+  ): TaskRunHandle<Definitions[Name]> {
+    this.#validateDefinitionName(definition);
+    const handle = {
+      runId,
+      definition,
+      get: () => this.#snapshot(runId, definition),
+      cancel: (reason?: string, options?: { wait?: boolean }) =>
+        this.#cancelScoped(runId, definition, reason, options),
+      send: () => notImplementedYet("at().send"),
+      sendEvent: () => notImplementedYet("at().sendEvent"),
+      answer: () => notImplementedYet("at().answer"),
+      withdraw: () => notImplementedYet("at().withdraw"),
+      view: () => notImplementedYet("at().view"),
+      watch: () => notImplementedYet("at().watch"),
+      terminate: () => notImplementedYet("at().terminate")
+    };
+    // SAFETY: every member of `TaskRunHandle` is typed against the
+    // definition, which is a type parameter here, so the payload and output
+    // positions cannot be satisfied concretely inside this body.
+    return handle as unknown as TaskRunHandle<Definitions[Name]>;
   }
 
   /** Cancel through a handle: another definition's run is not visible. */
   async #cancelScoped(
     runId: string,
     definition: string,
-    reason?: string
+    reason?: string,
+    options?: { wait?: boolean }
   ): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
     if (!row || row.definition !== definition) return false;
-    return this.cancel(runId, reason);
+    return this.cancel(runId, reason, options);
+  }
+
+  // ── Mailbox and asks ─────────────────────────────────────────────────────
+
+  // Every member below is declared against its final type and throws until
+  // the machine dispatch loop lands: the engine they read and write — the
+  // mailbox, the ask ledger, the pause and terminate marks, the change
+  // stream — arrives with it. `at()` and `handle()` carry the same members
+  // over the same stubs, so the capability and its handles refuse
+  // identically rather than one compiling and the other not.
+
+  /** Append one item to a run's mailbox. `requestId` dedupes before any write. */
+  send(
+    _runId: string,
+    _payload: TaskJson,
+    _options?: TaskSendOptions
+  ): Promise<TaskSendReceipt> {
+    return notImplementedYet("send");
+  }
+
+  /** The Workflows spelling of `send(..., { kind: "event", type })`. */
+  sendEvent(
+    _runId: string,
+    _event: { type: string; payload: TaskJson; requestId?: string }
+  ): Promise<TaskSendReceipt> {
+    return notImplementedYet("sendEvent");
+  }
+
+  /** Remove a still-queued mailbox item. */
+  withdraw(_runId: string, _key: string): Promise<boolean> {
+    return notImplementedYet("withdraw");
+  }
+
+  /** Answer one ask from anywhere, with only its id. Typed by the kind. */
+  answer<Payload, Answer>(
+    _askId: string,
+    _kind: AskKind<Payload, Answer>,
+    _answer: Answer
+  ): Promise<TaskAnswerReceipt> {
+    return notImplementedYet("answer");
+  }
+
+  /** Withdraw an open ask; the row is kept for the UI. */
+  withdrawAsk(_askId: string): Promise<boolean> {
+    return notImplementedYet("withdrawAsk");
+  }
+
+  /** List asks, optionally for one run. */
+  asks(_options?: {
+    runId?: string;
+    state?: TaskAskState;
+  }): Promise<TaskAskRecord[]> {
+    return notImplementedYet("asks");
   }
 
   // ── Lifecycle capability hooks ───────────────────────────────────────────
@@ -419,7 +640,8 @@ export class Tasks<
   async onStart(): Promise<void> {
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
-    if (version < CURRENT_FIBER_SCHEMA_VERSION) {
+    this.#schemaVersionCache = version;
+    if (version < 2) {
       this.#store.ensureTables();
       // Unconditional, not guarded on version 1: adding an existing column
       // is already a no-op (see the store), and a narrower guard would
@@ -427,10 +649,88 @@ export class Tasks<
       // version key reads 0 — it would record itself migrated without ever
       // adding the columns every later acceptance names.
       this.#store.addRunBudgetColumns();
-      await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
+    if (version < JOURNAL_REBUILD_VERSION) {
+      this.#store.addMachineColumns();
+      this.#store.ensureMachineTables();
+      this.#store.backfillDefinitionIdentity();
+      // A cancellation already requested becomes the abort mark, which is
+      // the write barrier version 3 fences checkpoint writes on.
+      this.#store.backfillAbortMark();
+      // The intermediate version exists to make a rebuild resumable, so it
+      // is only stamped when there are rows to rebuild. A fresh object —
+      // whose tables `ensureTables` just created at the version 3 shape —
+      // goes straight to 3 and bills one schema write rather than two.
+      //
+      // Which arm is taken is decided on the TABLE, not on its rows: an
+      // object whose retained runs were all swept — by the very
+      // `tasks.delete({ settledBefore })` the rebuild's warning asks for
+      // before an upgrade — carries the old table with nothing in it, and
+      // stamping 3 without dropping it would leave the table behind on an
+      // object that reports itself fully migrated.
+      const legacy = this.#store.hasLegacyStepJournal();
+      if (legacy && this.#store.countLegacySteps() > 0) {
+        await this.#setSchemaVersion(JOURNAL_REBUILD_VERSION);
+      } else {
+        if (legacy) this.#store.dropLegacyStepJournal();
+        await this.#setSchemaVersion(CURRENT_FIBER_SCHEMA_VERSION);
+      }
+    }
+    if (this.#schemaVersion() < CURRENT_FIBER_SCHEMA_VERSION) {
+      await this.#rebuildJournal();
+    }
+    // Nothing dispatches and no mirror moves until the rebuild completes.
+    if (this.#migrating()) return;
     this.#reconcile();
     await this.#syncAllWakes();
+  }
+
+  /**
+   * Copy the pre-version-3 step journal into the turn-scoped journal at turn
+   * 0, in bounded batches under a durable cursor, each batch in its own
+   * transaction. A crash mid-rebuild leaves the intermediate version and the
+   * cursor, and the next start resumes from it rather than restarting.
+   *
+   * Skipped entirely — zero work, zero writes — when the old table is absent
+   * or empty, which is every fresh object.
+   */
+  async #rebuildJournal(): Promise<void> {
+    const store = this.#store;
+    const storage = this.lifecycle.storage;
+    const remaining = this.#legacyStepCount();
+    if (remaining > JOURNAL_REBUILD_WARN_ROWS) {
+      console.warn(
+        `Tasks is rebuilding ${remaining} retained step rows into the ` +
+          `turn-scoped journal. Call tasks.delete({ settledBefore }) before ` +
+          `upgrading to avoid copying rows you no longer read.`
+      );
+    }
+    if (remaining > 0) {
+      let cursor = readJournalCursor(storage);
+      for (;;) {
+        const moved = store.transactionSync(() => {
+          const next = store.rebuildJournalBatch(cursor, JOURNAL_REBUILD_BATCH);
+          if (next !== null) {
+            storage.kv.put(JOURNAL_CURSOR_KEY, JSON.stringify(next));
+          }
+          return next;
+        });
+        if (moved === null) break;
+        cursor = moved;
+      }
+    }
+    store.transactionSync(() => {
+      store.dropLegacyStepJournal();
+      storage.kv.delete(JOURNAL_CURSOR_KEY);
+    });
+    await this.#setSchemaVersion(CURRENT_FIBER_SCHEMA_VERSION);
+  }
+
+  /** Retained pre-version-3 step rows, or 0 when that table is long gone. */
+  #legacyStepCount(): number {
+    return this.#store.hasLegacyStepJournal()
+      ? this.#store.countLegacySteps()
+      : 0;
   }
 
   /** Drive one due run's wake dispatched by the Lifecycle event loop. */
@@ -674,14 +974,7 @@ export class Tasks<
     input: unknown,
     options?: TaskRunOptions
   ): Promise<TaskReceipt> {
-    const receipt = await this.#acceptReserved(
-      definition,
-      input,
-      options,
-      "attached"
-    );
-    if (receipt.accepted) await this.#executeRun(receipt.runId);
-    return receipt;
+    return this.#acceptReserved(definition, input, options, "attached");
   }
 
   /**
@@ -704,14 +997,35 @@ export class Tasks<
     definition: string,
     input: unknown,
     options: TaskRunOptions | undefined,
-    startMode: TaskStartMode
+    mode: TaskStartMode
   ): Promise<TaskReceipt> {
     if (!this.#hasDefinition(definition)) {
       throw new Error(
         `Unknown Task definition "${definition}": not declared on this Tasks`
       );
     }
-    return this.#accept(definition, input, options, startMode);
+    return this.#start(definition, input, options, mode);
+  }
+
+  /**
+   * The one start path every entry point shares. `warm` and `queued` are
+   * decided inside `#accept` — a warm start dispatches without awaiting,
+   * a queued one leaves the row to its durable wake. `attached` is the only
+   * mode that owes the caller more than acceptance: it drives that first
+   * attempt here and resolves when the attempt reaches its next durable
+   * boundary, so the run may already be terminal when this returns.
+   */
+  async #start(
+    definition: string,
+    input: unknown,
+    options: TaskRunOptions | undefined,
+    mode: TaskStartMode
+  ): Promise<TaskReceipt> {
+    const receipt = await this.#accept(definition, input, options, mode);
+    if (mode === "attached" && receipt.accepted) {
+      await this.#executeRun(receipt.runId);
+    }
+    return receipt;
   }
 
   /**
@@ -789,6 +1103,9 @@ export class Tasks<
    * nothing was written — a same-values upsert is still a billed row write.
    */
   async #syncWake(runId: string): Promise<boolean> {
+    // Mid-rebuild the mirror is left exactly as it stands: a wake that
+    // dispatched now would read a half-copied journal.
+    if (this.#migrating()) return false;
     const next = this.#nextWake(runId);
 
     if (this.lifecycle.routes.source) {
@@ -973,15 +1290,38 @@ export class Tasks<
     return (rows as TaskRunRow[]).map((row) => this.#store.rowToSnapshot(row));
   }
 
+  /** The deep read: checkpoint, mailbox, asks, children, streams, status. */
+  view(_runId: string): Promise<TaskRunView<TaskValue> | null> {
+    return notImplementedYet("view");
+  }
+
+  /** Subscribe to one run's changes. Returns an unsubscribe. */
+  watch(_runId: string, _listener: (change: TaskChange) => void): () => void {
+    return notImplementedYet("watch");
+  }
+
   /**
    * Request cooperative cancellation of one run.
    *
    * A live attempt is aborted and settles as cancelled at its next step
    * boundary; a parked run settles immediately.
    *
+   * `options.wait` asks to resolve on terminality rather than on
+   * acceptance: a parked run is already terminal when this resolves, and a
+   * live attempt is joined, bounded by the claim slack. The bound is what
+   * makes the option honest — an attempt that honours its signal settles
+   * well inside it, and a signal-deaf one would otherwise hold the caller
+   * for as long as it holds its isolate. Cancelling a run from inside its
+   * own attempt can therefore only wait the bound out, which is one reason
+   * `wait` is opt-in.
+   *
    * @returns True when a non-terminal run accepted the request.
    */
-  async cancel(runId: string, reason?: string): Promise<boolean> {
+  async cancel(
+    runId: string,
+    reason?: string,
+    options?: { wait?: boolean }
+  ): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return false;
@@ -989,22 +1329,68 @@ export class Tasks<
     const active = this.#active.get(runId);
     if (active) {
       const now = Date.now();
+      // The abort mark and the legacy request bits land in ONE update: the
+      // mark is the write barrier every checkpoint-advancing write is fenced
+      // on, and `cancel_requested` is what `rowToSnapshot`'s cancelled arm
+      // and every existing reader still see. Two columns, zero extra writes.
       this.#store.sql`
         UPDATE cf_agents_task_runs
         SET cancel_requested = 1, cancel_reason = ${reason ?? null},
+            abort_mark = 'cancel', abort_reason = ${reason ?? null},
             next_at = ${now}, updated_at = ${now}
         WHERE run_id = ${runId}
       `;
       active.controller.abort(new TaskCancellation(reason));
       await this.#syncWake(runId);
+      if (options?.wait === true) await this.#joinAttempt(active);
       return true;
     }
     // A parked run settles in one write: #settleCancelled's UPDATE records
-    // the request bits itself, so a separate request write would touch the
-    // same row twice in the same synchronous block (one durable commit
-    // either way — the split bought no crash evidence).
+    // the abort mark and the request bits itself, so a separate request
+    // write would touch the same row twice in the same synchronous block
+    // (one durable commit either way — the split bought no crash evidence).
     await this.#settleCancelled(runId, null, reason);
     return true;
+  }
+
+  /**
+   * Join one aborted attempt for `cancel({ wait: true })`, bounded by the
+   * claim slack — the same slack a claim is written ahead by, so waiting
+   * longer than it would mean waiting for an attempt the queue is already
+   * entitled to reclaim.
+   */
+  async #joinAttempt(active: ActiveAttempt): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, CLAIM_SLACK_MS);
+    });
+    try {
+      // The attempt's own rejection is its run's outcome, already persisted
+      // by the driver; the caller asked about terminality, not about it.
+      await Promise.race([active.promise.catch(() => {}), bound]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Force a run terminal without running `onCancel`. */
+  terminate(_runId: string, _reason?: string): Promise<boolean> {
+    return notImplementedYet("terminate");
+  }
+
+  /** Stop dispatching a run. A live transition is not interrupted. */
+  pause(_runId: string): Promise<boolean> {
+    return notImplementedYet("pause");
+  }
+
+  /** Resume a paused run. */
+  resume(_runId: string): Promise<boolean> {
+    return notImplementedYet("resume");
+  }
+
+  /** Re-resolve an orphaned run against the now-registered definition. */
+  reopen(_runId: string): Promise<boolean> {
+    return notImplementedYet("reopen");
   }
 
   /**
@@ -1090,6 +1476,14 @@ export class Tasks<
       );
     }
 
+    // Resolved once and persisted with the run, like the interruption
+    // policy: a later change to the capability's default must not re-bound
+    // a transition already in flight.
+    const turnTimeoutMs =
+      options.turnTimeout === undefined
+        ? null
+        : parseTaskDuration(options.turnTimeout, "turnTimeout");
+
     const inputJson = serializeTaskValue(
       input,
       `input for Task definition "${definition}"`
@@ -1148,17 +1542,27 @@ export class Tasks<
 
     const runId = options.runId ?? `task_${nanoid()}`;
     const now = Date.now();
+    // `definition_base` / `definition_version` are derived once, here, and
+    // never rewritten: that is what lets an index ride them later without
+    // paying a per-write tax.
+    const { base, version } = parseDefinitionName(definition);
+    // The checkpoint starts NULL. A function definition keeps it NULL for
+    // the life of the run, which is what pins its journal scope to turn 0;
+    // a machine's first transition writes its `initial` state over it.
     this.#store.sql`
       INSERT INTO cf_agents_task_runs
-        (run_id, definition, input, state, metadata, idempotency_key, retain,
-         attempt, deadline_at, interruptions, retry_policy, next_at,
-         cancel_requested, created_at, updated_at)
+        (run_id, definition, definition_base, definition_version, input, state,
+         metadata, idempotency_key, retain, attempt, deadline_at, interruptions,
+         retry_policy, turn_timeout_ms, next_at, cancel_requested, checkpoint,
+         checkpoint_turn, background, parent_notify, created_at, updated_at)
       VALUES
-        (${runId}, ${definition}, ${inputJson}, 'pending', ${metadataJson},
+        (${runId}, ${definition}, ${base}, ${version}, ${inputJson}, 'pending',
+         ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
          0, ${deadlineAt}, 0,
          ${retryPolicy === null ? null : JSON.stringify(retryPolicy)},
-         ${now}, 0, ${now}, ${now})
+         ${turnTimeoutMs}, ${now}, 0, NULL,
+         0, ${options.background === true ? 1 : 0}, 1, ${now}, ${now})
     `;
     await this.#syncWake(runId);
     this.#emit("task:accepted", { runId, definition, accepted: true });
@@ -1182,6 +1586,8 @@ export class Tasks<
 
   /** Claim and drive one due run to its next durable boundary. */
   async #executeRun(runId: string): Promise<void> {
+    // A half-copied journal must never be read by a replay.
+    if (this.#migrating()) return;
     if (this.#active.has(runId)) return;
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return;
@@ -1203,13 +1609,23 @@ export class Tasks<
     }
     if (row.next_at !== null && row.next_at > now) return;
 
-    const handler = this.#resolveDefinition(row.definition);
-    if (!handler) {
+    const definition = this.#resolveDefinition(row.definition);
+    if (!definition) {
       const error = new MissingTaskDefinitionError(row.definition);
       console.error(error.message);
       await this.#failWithoutAttempt(row, error);
       return;
     }
+    if (isTaskMachine(definition)) {
+      const error = new Error(
+        `Task definition "${row.definition}" is a state machine, and machine ` +
+          `dispatch is not wired up yet`
+      );
+      console.error(error.message);
+      await this.#failWithoutAttempt(row, error);
+      return;
+    }
+    const handler: TaskFunctionDefinition = definition;
 
     // A run found still 'running' was claimed by an isolate that is gone:
     // an unclean interruption, and the only thing the run's own `retries`
@@ -1225,7 +1641,9 @@ export class Tasks<
     // follows an interruption. A 'running' step row is not evidence on its
     // own: steps run concurrently under a `Promise.all`, so a step retry
     // park can leave a sibling mid-execution with no isolate lost at all.
-    const interrupted = afterInterruption ? this.#interruptedStep(runId) : null;
+    const interrupted = afterInterruption
+      ? this.#interruptedStep(runId, row.checkpoint_turn)
+      : null;
 
     // Consecutive interruptions, not lifetime ones: an attempt that reached
     // a durable boundary under its own power clears the count, so a healthy
@@ -1312,7 +1730,7 @@ export class Tasks<
   /** Run one claimed attempt and persist its outcome, generation-fenced. */
   async #runAttempt(
     row: TaskRunRow,
-    handler: TaskCallbacks[string],
+    handler: TaskFunctionDefinition,
     generation: string,
     attempt: number,
     controller: AbortController,
@@ -1326,20 +1744,39 @@ export class Tasks<
       row.definition,
       generation,
       controller,
-      claimedAtMs
+      claimedAtMs,
+      true
     );
     const step = new ReplayStep(engine, {
       attempt,
       startsLive: attempt === 1,
-      interrupted
+      interrupted,
+      turn: row.checkpoint_turn,
+      input
     });
+    // A function definition runs as the single-phase machine it compiles to:
+    // one handler, `ctx.complete(await f(ctx.input, ctx))`, on the same
+    // journal and the same claim path a machine transition uses. Its
+    // checkpoint stays the NULL singleton, so its turn never leaves 0.
+    const machine = compileTaskFunction(handler);
 
     try {
-      const output = await this.lifecycle.runInHostContext(() =>
-        handler(input, step)
+      const returned = await this.lifecycle.runInHostContext(() =>
+        machine.phases[COMPILED_PHASE](COMPILED_CHECKPOINT, step)
       );
+      const terminal = readTaskTerminal(returned);
+      if (terminal === undefined) {
+        // Unreachable by construction — the compiled phase IS
+        // `ctx.complete(await fn(input, ctx))` — and loud rather than
+        // silent on purpose: settling `completed` with a NULL result
+        // would turn a wrong terminal into data instead of a fault.
+        throw new Error(
+          `Task definition "${row.definition}" returned no terminal from its ` +
+            `compiled phase`
+        );
+      }
       const resultJson = serializeTaskValue(
-        output,
+        terminal.result,
         `result of Task definition "${row.definition}"`
       );
       // A cancel accepted mid-attempt wins over a result: a handler that
@@ -1533,7 +1970,8 @@ export class Tasks<
     definition: string,
     generation: string,
     controller: AbortController,
-    claimedAtMs: number
+    claimedAtMs: number,
+    compiled: boolean
   ): TaskStepEngine {
     return createTaskStepEngine({
       store: this.#store,
@@ -1543,23 +1981,31 @@ export class Tasks<
       claimTimeoutMs: () => this.#claimTimeoutMs(),
       claimedAtMs,
       claimRefreshAfterMs: CLAIM_SLACK_MS / 2,
+      compiled,
       defaults: this.#stepDefaults,
       emit: (type, payload) =>
         this.#emit(type as TaskEventType, { runId, definition, ...payload })
     });
   }
 
-  /** The step a lost attempt left mid-execution — replay-entry evidence. */
-  #interruptedStep(runId: string): { name: string; attempt: number } | null {
-    const rows = this.#store.sql<{ step_name: string; attempt: number }>`
-      SELECT step_name, attempt FROM cf_agents_task_steps
-      WHERE run_id = ${runId} AND state = 'running'
+  /**
+   * The step a lost attempt left mid-execution — replay-entry evidence,
+   * scoped to the run's committed turn. A sibling left running when the
+   * checkpoint changes retires with the rest of that turn's rows, so it can
+   * never be misread in a later turn.
+   */
+  #interruptedStep(
+    runId: string,
+    turn: number
+  ): { name: string; attempt: number } | null {
+    const rows = this.#store.sql<{ name: string; attempt: number }>`
+      SELECT name, attempt FROM cf_agents_task_journal
+      WHERE run_id = ${runId} AND turn = ${turn} AND state = 'running'
       ORDER BY started_at DESC
       LIMIT 1
     `;
-    return rows[0]
-      ? { name: rows[0].step_name, attempt: rows[0].attempt }
-      : null;
+    const row = rows[0];
+    return row ? { name: row.name, attempt: row.attempt } : null;
   }
 
   /**
@@ -1573,25 +2019,32 @@ export class Tasks<
   ): Promise<void> {
     const now = Date.now();
     let settled: boolean;
+    // The abort mark rides the same UPDATE as the legacy request bits — zero
+    // extra row writes, exactly as `cancel()`'s active branch does. It has
+    // to: the unfenced form below also matches a run another attempt is
+    // driving (the window between its claim write and `#active.set`), and
+    // the mark is what that attempt's step boundaries read to unwind.
     if (generation !== null) {
       settled = this.#store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
+             abort_mark = 'cancel', abort_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
            AND state = 'running'`,
-        [reason ?? null, now, now]
+        [reason ?? null, reason ?? null, now, now]
       );
     } else {
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
+             abort_mark = 'cancel', abort_reason = ?,
              generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
            AND state IN ('pending', 'waiting', 'running')`,
-        [reason ?? null, now, now, runId]
+        [reason ?? null, reason ?? null, now, now, runId]
       );
       settled = written > 0;
     }
@@ -1675,10 +2128,22 @@ export class Tasks<
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
       WHERE state = 'running' AND generation IS NOT NULL
     `;
-    // Non-terminal rows must always carry a deadline; repair any without one.
+    // A row that is SUPPOSED to carry a wake and does not is repaired here.
+    // The narrowing is the point: a run parked on the mailbox, an ask or a
+    // child carries a NULL `next_at` by design, and flooring it to now would
+    // bill one row write per parked run on every isolate start and dispatch
+    // a transition that can only re-park. `pending` is kept as its own half
+    // because a pending row's `wait_reason` is NULL, so it would fall out of
+    // the reason list. A WAITING row with no reason is repaired too, for the
+    // same reason `rowToSnapshot` reads one back as a sleep: nothing here
+    // writes one, but a row seeded by a host or left by an older build must
+    // not be stranded by a predicate that assumes it cannot exist.
     this.#store.sql`
       UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
-      WHERE state IN ('pending', 'waiting') AND next_at IS NULL
+      WHERE (state = 'pending' AND next_at IS NULL)
+         OR (state = 'waiting' AND next_at IS NULL
+             AND (wait_reason IS NULL
+                  OR wait_reason IN ('sleep', 'retry', 'interrupted')))
     `;
   }
 

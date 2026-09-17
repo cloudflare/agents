@@ -5,7 +5,7 @@ import type {
   StreamHarnessObject,
   TaskStreamComposeObject
 } from "../capabilities/streams";
-import { seedTaskRun, seedTaskStep } from "../capabilities/tasks";
+import { seedTaskRun, seedTaskJournal } from "../capabilities/tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 import { sseResponse, type StreamChunk } from "../../streams";
 
@@ -692,8 +692,9 @@ describe("Streams composed with Tasks", () => {
           attempt: 1,
           nextAt: Date.now() - 1000
         });
-        seedTaskStep(state.storage, {
+        seedTaskJournal(state.storage, {
           runId: "lost-producer",
+          turn: 0,
           name: "stream",
           kind: "do",
           state: "running",

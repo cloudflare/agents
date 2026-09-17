@@ -150,3 +150,229 @@ export class TaskSerializationError extends Error {
     this.name = "TaskSerializationError";
   }
 }
+
+/**
+ * Recorded against a run whose transition changed no checkpoint, parked on
+ * nothing, and credited no durable progress — progress rule A, the crash
+ * detector. A legitimate re-park is never faulted: parks are decided above
+ * this rule, so it needs no exemption list.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskNoProgressError extends Error {
+  readonly runId: string;
+  /** The phase whose handler made no progress. */
+  readonly phase: string;
+  /** Consecutive no-progress transitions tolerated before this failure. */
+  readonly stallLimit: number;
+
+  constructor(runId: string, phase: string, stallLimit: number) {
+    super(
+      `Task run "${runId}" made no progress in phase "${phase}" ` +
+        `${stallLimit} time${stallLimit === 1 ? "" : "s"} in a row: the ` +
+        `transition changed no checkpoint, parked on nothing, and wrote ` +
+        `nothing durable. Return a different checkpoint, park on a wait, or ` +
+        `settle the run.`
+    );
+    this.name = "TaskNoProgressError";
+    this.runId = runId;
+    this.phase = phase;
+    this.stallLimit = stallLimit;
+  }
+}
+
+/**
+ * Recorded against a run that took more transitions since its last park
+ * than `transitionBudget` allows — progress rule B, the liveness bound.
+ * Rule A cannot catch a loop whose checkpoint differs every time; this is
+ * that bound, and every iteration of such a loop bills one row write.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskTransitionBudgetError extends Error {
+  readonly runId: string;
+  /** Transitions taken since the last park. */
+  readonly transitions: number;
+  /** The last phases the run cycled through, oldest first. */
+  readonly phases: readonly string[];
+
+  constructor(runId: string, transitions: number, phases: readonly string[]) {
+    super(
+      `Task run "${runId}" took ${transitions} transitions without parking` +
+        (phases.length > 0 ? `, cycling ${phases.join(" -> ")}` : "") +
+        `. Park on a wait, or raise transitionBudget if the loop is intended.`
+    );
+    this.name = "TaskTransitionBudgetError";
+    this.runId = runId;
+    this.transitions = transitions;
+    this.phases = phases;
+  }
+}
+
+/**
+ * Recorded against a run whose per-transition watchdog fired: one
+ * transition produced nothing durable for a full `turnTimeout`. Distinct
+ * from the run's wall-clock `deadline`, which bounds the whole run.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskTurnDeadlineExceededError extends Error {
+  readonly runId: string;
+  /** The transition deadline, epoch milliseconds. */
+  readonly deadline: number;
+
+  constructor(runId: string, deadline: number) {
+    super(
+      `Task run "${runId}" exceeded its transition deadline of ` +
+        `${new Date(deadline).toISOString()}.`
+    );
+    this.name = "TaskTurnDeadlineExceededError";
+    this.runId = runId;
+    this.deadline = deadline;
+  }
+}
+
+/**
+ * Thrown when an `onCancel` transition calls a parking member. The cancel
+ * transition owns the run's outcome and must reach it in one invocation;
+ * anything it needs to wait for belongs in the checkpoint it returns.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskCancelCannotParkError extends Error {
+  /** The parking member that was called. */
+  readonly member: string;
+
+  constructor(member: string) {
+    super(
+      `onCancel cannot park: "${member}" suspends the run, and a cancel ` +
+        `transition must settle or return a checkpoint in one invocation.`
+    );
+    this.name = "TaskCancelCannotParkError";
+    this.member = member;
+  }
+}
+
+/**
+ * Thrown when a second parking member is awaited while one park is already
+ * pending. A park unwinds the whole invocation, so the engine cannot honour
+ * two — and failing loudly beats silently discarding one.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskConcurrentParkError extends Error {
+  /** The member already parking. */
+  readonly pending: string;
+  /** The member that tried to park beside it. */
+  readonly member: string;
+
+  constructor(pending: string, member: string) {
+    super(
+      `"${member}" cannot park while "${pending}" is already parking: a ` +
+        `transition parks on one wait at a time.`
+    );
+    this.name = "TaskConcurrentParkError";
+    this.pending = pending;
+    this.member = member;
+  }
+}
+
+/**
+ * Thrown from `step.waitForEvent()` when its `timeout` elapses, matching
+ * `cloudflare:workflows`. The machine layer's `within` waits return
+ * `ctx.timedOut` instead, because a thrown timeout composes badly with
+ * return-the-next-checkpoint.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskEventTimeoutError extends Error {
+  /** The step name the wait was journaled under. */
+  readonly stepName: string;
+  /** The event type the wait was matching. */
+  readonly eventType: string;
+
+  constructor(stepName: string, eventType: string) {
+    super(`Timed out waiting for event "${eventType}" at step "${stepName}".`);
+    this.name = "TaskEventTimeoutError";
+    this.stepName = stepName;
+    this.eventType = eventType;
+  }
+}
+
+/**
+ * Thrown by `send()` when a run's mailbox already holds `mailboxLimit`
+ * unconsumed items. The mailbox is bounded rather than growing without
+ * bound behind a handler that stopped reading it.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskMailboxFullError extends Error {
+  readonly runId: string;
+  /** Unconsumed items allowed per run. */
+  readonly limit: number;
+
+  constructor(runId: string, limit: number) {
+    super(
+      `Task run "${runId}" already holds ${limit} unconsumed mailbox items.`
+    );
+    this.name = "TaskMailboxFullError";
+    this.runId = runId;
+    this.limit = limit;
+  }
+}
+
+/**
+ * Thrown from the commit when a returned checkpoint exceeds the checkpoint
+ * ceiling. A subclass of {@link TaskSerializationError} so existing catches
+ * still match. Serialization runs before the fenced UPDATE, so the previous
+ * checkpoint survives intact.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskCheckpointTooLargeError extends TaskSerializationError {
+  /** The serialized size that was refused, in bytes. */
+  readonly bytes: number;
+  /** The ceiling, in bytes. */
+  readonly limit: number;
+
+  constructor(context: string, bytes: number, limit: number) {
+    super(
+      context,
+      `serialized checkpoint size ${bytes} bytes exceeds the ${limit}-byte ` +
+        `limit. A checkpoint is rewritten every transition: keep the phase ` +
+        `and its identifiers here and put bulk state in a stream, a Sessions ` +
+        `row, or your own table.`
+    );
+    this.name = "TaskCheckpointTooLargeError";
+    this.bytes = bytes;
+    this.limit = limit;
+  }
+}
+
+/**
+ * Recorded against a live run whose persisted `@vN` definition is unknown
+ * and unmigratable. The run settles `failed` with `outcome: "orphaned"` and
+ * its checkpoint, journal, mailbox and asks are preserved — `retain: false`
+ * is overridden — so `tasks.reopen(runId)` can bring it back once the
+ * definition is registered again.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskOrphanedDefinitionError extends Error {
+  /** The persisted definition name. */
+  readonly definition: string;
+  /** The persisted definition's version, or 0 when unversioned. */
+  readonly version: number;
+
+  constructor(definition: string, version: number, detail: string) {
+    super(
+      `Task definition "${definition}" cannot carry this run forward: ` +
+        `${detail}. The run is orphaned; its checkpoint is preserved. ` +
+        `Register a higher version of "${definition}" with a migrate() and ` +
+        `call tasks.reopen() to resume it.`
+    );
+    this.name = "TaskOrphanedDefinitionError";
+    this.definition = definition;
+    this.version = version;
+  }
+}

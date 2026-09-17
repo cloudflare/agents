@@ -1740,13 +1740,23 @@ index:**
 
 ```sql
 CREATE INDEX IF NOT EXISTS cf_agents_task_runs_parent
-ON cf_agents_task_runs (parent_run_id);
+ON cf_agents_task_runs (parent_run_id) WHERE parent_run_id IS NOT NULL;
 ```
 
 Justified by the store's own stated rule: an index is worth its per-write
 tax only when its columns never change after insert. `parent_run_id` is
 written once at insert and never again, exactly like `definition`.
 Without it, an abort cascade is a full-table scan on every cancel.
+
+**Partial, not plain.** SQLite indexes NULL keys too, so a plain index
+would be touched — and billed as a row written — by every top-level run's
+insert, to store nothing but padding; measured, that is 4 billed rows per
+accept instead of 3. `listChildren`'s `parent_run_id = ?` implies
+`parent_run_id IS NOT NULL`, so the partial index is still the one SQLite
+chooses (`EXPLAIN QUERY PLAN`: `SEARCH cf_agents_task_runs USING INDEX
+cf_agents_task_runs_parent (parent_run_id=?)`), and §4.6's arithmetic —
+"+1 `runs_parent` index when `parent_run_id` is set" — is true only in
+this form.
 
 ### 4.2 `cf_agents_task_journal` — replaces `cf_agents_task_steps`
 
@@ -1793,10 +1803,13 @@ CREATE TABLE IF NOT EXISTS cf_agents_task_mailbox (
 
 **PK `(run_id, key)` and no secondary index.** Dedupe becomes an
 `ON CONFLICT DO NOTHING`, i.e. one statement, zero reads, zero extra
-index writes. Ordering is `ORDER BY seq` over the run's own PK prefix
-range, whose size is bounded by `mailboxLimit` (default 1000); sorting a
-bounded range in memory costs zero row writes, which is exactly the trade
-`store.ts` already makes when it declines a `(state, next_at)` index.
+index writes. FIFO ordering is applied **in memory** over the run's own
+PK prefix range, whose size is bounded by `mailboxLimit` (default 1000) —
+not by `ORDER BY seq`, which would build a temp b-tree on top of that
+range, since `seq` is not part of the key. Sorting a bounded range in
+memory costs zero row writes, which is exactly the trade `store.ts`
+already makes when it declines a `(state, next_at)` index, and the same
+one `listAsks` makes below.
 
 `seq` is assigned `COALESCE(MAX(seq), -1) + 1` over that same range, read
 in the same synchronous block as the INSERT. A Durable Object runs one
@@ -1814,7 +1827,7 @@ surface loosens the spec, which had
 
 ```sql
 CREATE TABLE IF NOT EXISTS cf_agents_task_asks (
-  ask_id TEXT PRIMARY KEY,            -- '<runId>#<nanoid>' — the run id is the routing prefix
+  ask_id TEXT PRIMARY KEY,            -- '<runId>#<nanoid>' — the prefix is for legibility, NOT for routing
   run_id TEXT NOT NULL,
   turn INTEGER NOT NULL,
   name TEXT NOT NULL,
@@ -1830,10 +1843,22 @@ CREATE TABLE IF NOT EXISTS cf_agents_task_asks (
 
 `ask_id` as the sole PK is what makes `tasks.answer(askId, kind, value)`
 work from a WebSocket frame on a later isolate with nothing in memory —
-the caller has one string and the engine needs nothing else. Listing a
-run's asks is a prefix scan on `ask_id` (`runId + '#'`), so no `run_id`
-index is needed. `name` is the `AskKind`'s name, which is also what the
-typed `answer` checks against.
+the caller has one string and the engine needs nothing else. It resolves
+the owner by reading the ask row's own `run_id` (or the route table for a
+facet), never by splitting the id: the run-id prefix is there so a human
+reading a log can tell which run an ask belongs to. Every ask operation
+carries the owner predicate for the same reason — a forged or stale id
+must read nothing rather than another run's row. `name` is the
+`AskKind`'s name, which is also what the typed `answer` checks against.
+
+Listing a run's asks is a **scan filtered on `run_id`**, not the `ask_id`
+prefix scan an earlier draft assumed: a run id is caller-chosen and may
+itself contain `'#'`, so the prefix range `[runId + '#', …)` could reach
+another run's asks. No `run_id` index is added to avoid it — the index
+would tax every ask INSERT with an index row write to accelerate a delete
+path and the view read, and the set a run owns is bounded by the
+checkpoint cap. `listAsks` orders in memory rather than in SQL so the
+scan does not also build a temp b-tree.
 
 ### 4.5 `cf_agents_task_routes` — root-side owner index
 
@@ -1847,7 +1872,8 @@ CREATE TABLE IF NOT EXISTS cf_agents_task_routes (
   created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS cf_agents_task_routes_owner  ON cf_agents_task_routes (owner_path_key);
-CREATE INDEX IF NOT EXISTS cf_agents_task_routes_parent ON cf_agents_task_routes (parent_run_id);
+CREATE INDEX IF NOT EXISTS cf_agents_task_routes_parent ON cf_agents_task_routes (parent_run_id)
+  WHERE parent_run_id IS NOT NULL;
 ```
 
 **This table exists because the wake-mirror job cannot be the owner
@@ -1863,7 +1889,10 @@ the root, which is exactly where approvals arrive.
 
 The route row is written at accept and deleted at settle or subtree
 cleanup. It exists only for **routed** runs; a root-local run pays
-nothing. Both indexes are on columns written once at insert.
+nothing. Both indexes are on columns written once at insert, and the
+parent one is partial for the reason §4.1 gives: a route row for a
+top-level run carries a NULL parent, and an index entry for it would be
+one more billed row write per accept for nothing.
 
 ### 4.6 Row writes per operation
 
@@ -1932,8 +1961,10 @@ bills each touched index as a row written_ (`store.ts:126-131`).
 `retain:false` settle (`#finishTerminalSettlement`), `tasks.delete()`,
 the sealing purge, facet subtree teardown — removes, in one synchronous
 block: journal rows (`run_id` prefix), mailbox rows (`run_id` prefix),
-ask rows (`ask_id` prefix `runId + '#'`), the route row, the child
-mailbox rows this run wrote into a parent, and the run row.
+ask rows (filtered on `run_id`, per §4.4), the route row, the settlement
+note this run wrote into its parent's mailbox — a primary-key point
+delete on `(parentRunId, 'child:' + runId)`, which is why `deleteRun`
+reads the parent before it drops the run row — and the run row itself.
 `TaskStore.deleteRun` grows from two statements to six. A test asserts
 zero orphan rows in all five tables after each of the four paths.
 

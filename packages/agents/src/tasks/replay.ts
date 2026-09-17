@@ -21,13 +21,21 @@ import {
   TaskSerializationError,
   isNonRetryableError
 } from "./errors";
+import { asTaskTerminal, TaskTerminalSignal } from "./machine";
 import { deserializeTaskValue } from "./serialization";
 import type {
+  TaskAskRow,
+  TaskChildRef,
+  TaskJournalRow,
+  TaskJson,
+  TaskMailboxFilter,
+  TaskMailboxRow,
   TaskRetryConfig,
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,
-  TaskStepRow,
+  TaskStepEvent,
+  TaskTerminal,
   TaskValue,
   TaskWaitReason
 } from "./types";
@@ -118,29 +126,114 @@ export class AttemptSupersededError extends Error {
  * capability side.
  */
 export interface TaskStepEngine {
-  /** Read one step row of this run, or undefined for a journal miss. */
-  readStep(name: string): TaskStepRow | undefined;
+  /** Read one journal row of this turn, or undefined for a journal miss. */
+  readStep(turn: number, name: string): TaskJournalRow | undefined;
 
-  /** Number of step rows this run has journaled. */
-  countSteps(): number;
+  /** Number of journal rows this turn has written. */
+  countSteps(turn: number): number;
 
-  /** Insert a new step row claimed at attempt 1. */
-  insertStep(name: string, kind: "do" | "sleep", wakeAt: number | null): void;
+  /** Insert a new journal row claimed at attempt 1. */
+  insertStep(
+    turn: number,
+    name: string,
+    kind: "do" | "sleep" | "event",
+    wakeAt: number | null
+  ): void;
 
   /** Journal an already-elapsed sleep born-completed, in one row write. */
-  insertCompletedSleep(name: string): void;
+  insertCompletedSleep(turn: number, name: string): void;
 
   /** Claim the next attempt of an existing step. Returns the new attempt. */
-  claimStepAttempt(name: string): number;
+  claimStepAttempt(turn: number, name: string): number;
 
   /** Persist a completed step. Serializes and validates the result. */
-  completeStep(name: string, result: unknown): void;
+  completeStep(turn: number, name: string, result: unknown): void;
 
   /** Persist a terminally failed step. */
-  failStep(name: string, error: { name: string; message: string }): void;
+  failStep(
+    turn: number,
+    name: string,
+    error: { name: string; message: string }
+  ): void;
 
   /** Move a step into its retry wait. */
-  waitStep(name: string, wakeAt: number): void;
+  waitStep(turn: number, name: string, wakeAt: number): void;
+
+  /** Delete one retiring turn's journal rows. Run-scoped rows are untouched. */
+  retireJournal(turn: number): void;
+
+  /** Read one run-scoped memo, or undefined when it was never written. */
+  readMemo(name: string): TaskJournalRow | undefined;
+
+  /** Write one run-scoped memo. False when a first writer already won. */
+  writeMemo(name: string, value: string | null): boolean;
+
+  /** Visible mailbox rows matching a filter, in FIFO order across kinds. */
+  peekMailbox(
+    filter: TaskMailboxFilter | undefined,
+    now: number
+  ): TaskMailboxRow[];
+
+  /** Consume mailbox rows by key. Returns how many were still queued. */
+  consumeMailbox(keys: readonly string[]): number;
+
+  /** How many mailbox rows this run holds, consumed or not yet visible. */
+  countMailbox(): number;
+
+  /** The next FIFO sequence number for this run's mailbox. */
+  nextMailboxSeq(): number;
+
+  /** Append one mailbox row. False when its key was already present. */
+  appendMailbox(item: {
+    key: string;
+    seq: number;
+    kind: string;
+    type: string | null;
+    payload: string | null;
+    visibleAfter: number | null;
+  }): boolean;
+
+  /** Write one ask row. */
+  insertAsk(ask: {
+    askId: string;
+    turn: number;
+    name: string;
+    question: string | null;
+    expiresAt: number | null;
+    metadata: string | null;
+  }): void;
+
+  /** Read specific asks of this run by id. */
+  readAsks(askIds: readonly string[]): TaskAskRow[];
+
+  /** Settle one open ask. False when it was already answered or lapsed. */
+  settleAsk(
+    askId: string,
+    state: "answered" | "expired" | "withdrawn",
+    answer: string | null
+  ): boolean;
+
+  /** Mark every still-open ask of this run withdrawn. Returns the count. */
+  withdrawOpenAsks(): number;
+
+  /** The non-terminal children this run owns. */
+  listChildren(): TaskChildRef[];
+
+  /** The fenced write that commits one transition. False when fenced out. */
+  commitCheckpoint(commit: {
+    checkpoint: string | null;
+    turn: number;
+    retireTurn: number | null;
+    transitions: number;
+    stall: number;
+    progress: number;
+  }): boolean;
+
+  /** Credit durable work the chunk log cannot see. Writes nothing itself. */
+  creditProgress(units: number): void;
+
+  /** Work credited through {@link creditProgress} during this attempt. */
+  progressCredited(): number;
 
   /** Extend the run's claim deadline while a step attempt executes. */
   refreshClaim(): void;
@@ -157,8 +250,16 @@ export interface TaskStepEngine {
   /** Emit one capability event. */
   emit(type: string, payload: Record<string, unknown>): void;
 
-  /** Stable external deduplication key for one named step. */
-  stepIdempotencyKey(name: string): string;
+  /**
+   * Stable external deduplication key for one named step, scoped to the
+   * turn the caller is in — `turn` leads, as it does on every journal
+   * method, because the same name in two turns is two intended executions.
+   */
+  stepIdempotencyKey(
+    turn: number,
+    name: string,
+    scope?: "turn" | "run"
+  ): string;
 
   /** Default policy applied where a step config leaves fields unset. */
   readonly defaults: ResolvedStepPolicy;
@@ -245,12 +346,25 @@ export class ReplayStep implements TaskStep {
   } | null;
   readonly signal: AbortSignal;
 
+  /**
+   * The journal scope: the run's committed checkpoint turn. A function
+   * definition's checkpoint never changes, so its turn is 0 forever and its
+   * journal keys are `(run_id, 0, name)`. A park re-enters the SAME turn,
+   * which is what lets a `step.sleep` wake find every completed step intact.
+   */
+  readonly turn: number;
+
+  /** The run seed: the value a function definition receives as its input. */
+  readonly input: unknown;
+
   constructor(
     engine: TaskStepEngine,
     options: {
       attempt: number;
       startsLive: boolean;
       interrupted?: { name: string; attempt: number } | null;
+      turn?: number;
+      input?: unknown;
     }
   ) {
     this.#engine = engine;
@@ -258,6 +372,23 @@ export class ReplayStep implements TaskStep {
     this.attempt = options.attempt;
     this.interrupted = options.interrupted ?? null;
     this.signal = engine.attemptSignal;
+    this.turn = options.turn ?? 0;
+    this.input = options.input;
+  }
+
+  /** Settle this run with a result. */
+  complete(result: TaskValue): TaskTerminal<TaskValue> {
+    return asTaskTerminal(TaskTerminalSignal.complete(result));
+  }
+
+  /** Settle this run as failed. */
+  fail(error: unknown): TaskTerminal<TaskValue> {
+    return asTaskTerminal(TaskTerminalSignal.fail(error));
+  }
+
+  /** Settle this run as cancelled, carrying the abort mark's reason. */
+  aborted(reason?: string): TaskTerminal<TaskValue> {
+    return asTaskTerminal(TaskTerminalSignal.aborted(reason));
   }
 
   do<T extends TaskValue>(
@@ -286,16 +417,16 @@ export class ReplayStep implements TaskStep {
     const policy = resolveStepPolicy(this.#engine.defaults, config);
     this.#enterStep(name);
 
-    const row = this.#engine.readStep(name);
+    const row = this.#engine.readStep(this.turn, name);
     if (row === undefined) {
       this.#live = true;
-      if (this.#engine.countSteps() >= MAX_STEPS_PER_RUN) {
+      if (this.#engine.countSteps(this.turn) >= MAX_STEPS_PER_RUN) {
         throw new Error(
           `Run exceeded ${MAX_STEPS_PER_RUN} steps; split the work across ` +
             `multiple Task runs`
         );
       }
-      this.#engine.insertStep(name, "do", null);
+      this.#engine.insertStep(this.turn, name, "do", null);
       return this.#executeAttempt(name, 1, policy, callback);
     }
 
@@ -318,7 +449,7 @@ export class ReplayStep implements TaskStep {
         this.#live = true;
         const wakeAt = row.next_at ?? Date.now();
         if (Date.now() < wakeAt) throw new TaskSuspension(wakeAt, "retry");
-        const attempt = this.#engine.claimStepAttempt(name);
+        const attempt = this.#engine.claimStepAttempt(this.turn, name);
         this.#engine.emit("task:step:retry", { step: name, attempt });
         return this.#executeAttempt(name, attempt, policy, callback);
       }
@@ -326,7 +457,7 @@ export class ReplayStep implements TaskStep {
         // A previous attempt was interrupted mid-step. Default replay
         // semantics: run it again under a fresh claim.
         this.#live = true;
-        const attempt = this.#engine.claimStepAttempt(name);
+        const attempt = this.#engine.claimStepAttempt(this.turn, name);
         return this.#executeAttempt(name, attempt, policy, callback);
       }
     }
@@ -355,8 +486,19 @@ export class ReplayStep implements TaskStep {
     this.#engine.writeStatus(String(message));
   }
 
-  idempotencyKey(name: string): string {
-    return this.#engine.stepIdempotencyKey(name);
+  idempotencyKey(name: string, options?: { scope?: "turn" | "run" }): string {
+    return this.#engine.stepIdempotencyKey(this.turn, name, options?.scope);
+  }
+
+  async waitForEvent<Payload extends TaskJson>(
+    name: string,
+    options: { type: string; timeout?: number | TaskDurationString }
+  ): Promise<TaskStepEvent<Payload>> {
+    void name;
+    void options;
+    throw new Error(
+      "step.waitForEvent is declared but its mailbox is not wired up yet"
+    );
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────
@@ -387,15 +529,15 @@ export class ReplayStep implements TaskStep {
   async #sleepAt(name: string, wakeTime: () => number): Promise<void> {
     this.#enterStep(name);
 
-    const row = this.#engine.readStep(name);
+    const row = this.#engine.readStep(this.turn, name);
     if (row === undefined) {
       this.#live = true;
       const wakeAt = wakeTime();
       if (wakeAt <= Date.now()) {
-        this.#engine.insertCompletedSleep(name);
+        this.#engine.insertCompletedSleep(this.turn, name);
         return;
       }
-      this.#engine.insertStep(name, "sleep", wakeAt);
+      this.#engine.insertStep(this.turn, name, "sleep", wakeAt);
       throw new TaskSuspension(wakeAt, "sleep");
     }
 
@@ -411,7 +553,7 @@ export class ReplayStep implements TaskStep {
     this.#live = true;
     const wakeAt = row.next_at ?? 0;
     if (Date.now() < wakeAt) throw new TaskSuspension(wakeAt, "sleep");
-    this.#engine.completeStep(name, undefined);
+    this.#engine.completeStep(this.turn, name, undefined);
   }
 
   /** Execute one claimed attempt of a `do` step under timeout and retries. */
@@ -442,13 +584,13 @@ export class ReplayStep implements TaskStep {
         Promise.resolve(
           callback({
             attempt,
-            idempotencyKey: this.#engine.stepIdempotencyKey(name),
+            idempotencyKey: this.#engine.stepIdempotencyKey(this.turn, name),
             signal: timeout.signal
           })
         ),
         timeout.signal
       );
-      this.#engine.completeStep(name, result);
+      this.#engine.completeStep(this.turn, name, result);
       this.#engine.emit("task:step:completed", { step: name, attempt });
       return result;
     } catch (error) {
@@ -481,11 +623,11 @@ export class ReplayStep implements TaskStep {
         error instanceof TaskSerializationError ||
         attempt >= policy.retryLimit
       ) {
-        this.#engine.failStep(name, toErrorSummary(error));
+        this.#engine.failStep(this.turn, name, toErrorSummary(error));
         throw error;
       }
       const wakeAt = Date.now() + computeRetryDelayMs(policy, attempt);
-      this.#engine.waitStep(name, wakeAt);
+      this.#engine.waitStep(this.turn, name, wakeAt);
       throw new TaskSuspension(wakeAt, "retry");
     } finally {
       clearTimeout(timer);
@@ -518,7 +660,7 @@ export class ReplayStep implements TaskStep {
 }
 
 /** Rebuild a persisted terminal step error for rethrow. */
-function restoreStepError(row: TaskStepRow): Error {
+function restoreStepError(row: TaskJournalRow): Error {
   const error = new Error(row.error_message ?? "Step failed");
   error.name = row.error_name ?? "Error";
   return error;

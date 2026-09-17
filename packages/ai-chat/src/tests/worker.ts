@@ -2858,7 +2858,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       WHERE run_id = ${runId}
     `;
     this.sql`
-      UPDATE cf_agents_task_steps SET next_at = ${past}
+      UPDATE cf_agents_task_journal SET next_at = ${past}
       WHERE run_id = ${runId} AND kind = 'sleep'
     `;
     this.sql`
@@ -3553,8 +3553,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       UPDATE cf_agents_task_runs SET next_at = ${now} WHERE run_id = ${runId}
     `;
     this.sql`
-      UPDATE cf_agents_task_steps SET next_at = ${now}
-      WHERE run_id = ${runId} AND step_name = 'armed'
+      UPDATE cf_agents_task_journal SET next_at = ${now}
+      WHERE run_id = ${runId} AND name = 'armed'
     `;
   }
 
