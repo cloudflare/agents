@@ -33,6 +33,12 @@ function captureTaskEvents(name: string) {
   return captureDiagnosticsEvents("agents:task", name);
 }
 
+function routedWakeJobId(ownerKey: string, runId: string): string {
+  return `task-routed:${JSON.stringify([ownerKey, runId])}`;
+}
+
+const ROUTED_WAKE_MIGRATION_VERSION_KEY = "cf_agents:tasks_routed_wake_version";
+
 /** Poll one run until it reaches one of the given states. */
 async function waitForState(
   tasks: { get(runId: string): Promise<TaskRunSnapshot<TaskValue> | null> },
@@ -471,6 +477,275 @@ describe("Tasks capability", () => {
     );
   });
 
+  it("keeps local and routed wake IDs isolated", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const owner = {
+      key: "Parent:root/Child:alice",
+      data: JSON.stringify([
+        { className: "Parent", name: "root" },
+        { className: "Child", name: "alice" }
+      ])
+    };
+    const routedRunId = "approval";
+    const localRunId = `${owner.key}:${routedRunId}`;
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run(
+          "sleeper",
+          { ms: 60 * 60 * 1000 },
+          { runId: localRunId }
+        );
+        await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+
+        await instance.tasks.onRoute({
+          source: owner,
+          payload: {
+            type: "syncWake",
+            runId: routedRunId,
+            next: Date.now() + 30 * 60 * 1000
+          }
+        });
+
+        const localJobId = `task:${localRunId}`;
+        const routedJobId = routedWakeJobId(owner.key, routedRunId);
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT id FROM cf_agents_jobs WHERE id IN (?, ?) ORDER BY id",
+              localJobId,
+              routedJobId
+            )
+            .toArray()
+        ).toEqual([{ id: routedJobId }, { id: localJobId }]);
+
+        await instance.tasks.onRoute({
+          source: owner,
+          payload: { type: "syncWake", runId: routedRunId, next: null }
+        });
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = ?", localJobId)
+            .toArray()
+        ).toEqual([{ id: localJobId }]);
+        await instance.tasks.cancel(localRunId);
+      }
+    );
+  });
+
+  it("refreshes routed transport data without changing stable wake identity", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const path = [
+      { className: "Parent", name: "root" },
+      { className: "Child", name: "alice" }
+    ];
+    const owner = {
+      key: "Parent:root/Child:alice",
+      data: JSON.stringify(path)
+    };
+    const updatedOwner = {
+      key: owner.key,
+      data: JSON.stringify(
+        path.map(({ className, name }) => ({ name, className }))
+      )
+    };
+    const runId = "approval";
+    const wakeAt = Date.now() + 30 * 60 * 1000;
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        await instance.tasks.onRoute({
+          source: owner,
+          payload: { type: "syncWake", runId, next: wakeAt }
+        });
+        await expect(
+          instance.tasks.onRoute({
+            source: updatedOwner,
+            payload: { type: "syncWake", runId, next: wakeAt }
+          })
+        ).resolves.toBe(true);
+
+        const rows = state.storage.sql
+          .exec(
+            "SELECT payload FROM cf_agents_jobs WHERE id = ?",
+            routedWakeJobId(owner.key, runId)
+          )
+          .toArray() as Array<{ payload: string }>;
+        expect(JSON.parse(rows[0]?.payload ?? "null")).toMatchObject({
+          runId,
+          owner_path: updatedOwner.data,
+          owner_path_key: owner.key
+        });
+
+        await instance.tasks.onRoute({
+          source: updatedOwner,
+          payload: { type: "syncWake", runId, next: null }
+        });
+      }
+    );
+  });
+
+  it("migrates a legacy routed wake before repairing its aliased local wake", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    const owner = {
+      key: "Parent:root/Child:alice",
+      data: JSON.stringify([
+        { className: "Parent", name: "root" },
+        { className: "Child", name: "alice" }
+      ])
+    };
+    const routedRunId = "approval";
+    const localRunId = `${owner.key}:${routedRunId}`;
+    const legacyJobId = `task:${localRunId}`;
+    let wakeAt = 0;
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run(
+          "sleeper",
+          { ms: 60 * 60 * 1000 },
+          { runId: localRunId }
+        );
+        const parked = await waitForState(instance.tasks, receipt.runId, [
+          "waiting"
+        ]);
+        if (
+          parked.state !== "waiting" ||
+          !("wakeAt" in parked) ||
+          typeof parked.wakeAt !== "number"
+        ) {
+          throw new Error("expected timed wait");
+        }
+        wakeAt = parked.wakeAt;
+
+        // Simulate the legacy routed mirror replacing an aliased local row.
+        state.storage.sql.exec(
+          "UPDATE cf_agents_jobs SET payload = ? WHERE id = ?",
+          JSON.stringify({
+            runId: routedRunId,
+            owner_path: owner.data,
+            owner_path_key: owner.key
+          }),
+          legacyJobId
+        );
+        // More than one migration batch of local wakes proves startup scans
+        // only bounded ID pages before loading candidate payloads.
+        state.storage.sql.exec(
+          `WITH RECURSIVE numbers(value) AS (
+             SELECT 0
+             UNION ALL
+             SELECT value + 1 FROM numbers WHERE value < 100
+           )
+           INSERT INTO cf_agents_jobs
+             (id, capability, fn, time, payload, retry_options)
+           SELECT printf('task:%03d', value), 'tasks', 'wake', ?,
+                  json_object('runId', printf('scan-%03d', value)), ?
+           FROM numbers`,
+          wakeAt + 60 * 60 * 1000,
+          JSON.stringify({ maxAttempts: 1 })
+        );
+        await state.storage.delete(ROUTED_WAKE_MIGRATION_VERSION_KEY);
+        await state.storage.deleteAlarm();
+      }
+    );
+
+    await evictDurableObject(stub);
+    await runInDurableObject(
+      env.TaskHarnessObject.getByName(name),
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const routedJobId = routedWakeJobId(owner.key, routedRunId);
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT id FROM cf_agents_jobs WHERE id IN (?, ?) ORDER BY id",
+              legacyJobId,
+              routedJobId
+            )
+            .toArray()
+        ).toEqual([{ id: routedJobId }, { id: legacyJobId }]);
+        expect(await state.storage.getAlarm()).toBe(wakeAt);
+
+        await state.storage.deleteAlarm();
+        await instance.tasks.onRoute({
+          source: owner,
+          payload: { type: "syncWake", runId: routedRunId, next: wakeAt }
+        });
+        expect(await state.storage.getAlarm()).toBe(wakeAt);
+
+        await instance.tasks.onRoute({
+          source: owner,
+          payload: { type: "syncWake", runId: routedRunId, next: null }
+        });
+        await instance.tasks.cancel(localRunId);
+      }
+    );
+  });
+
+  it("finishes an interrupted routed wake migration idempotently", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    const owner = {
+      key: "Parent:root/Child:bob",
+      data: JSON.stringify([
+        { className: "Parent", name: "root" },
+        { className: "Child", name: "bob" }
+      ])
+    };
+    const runId = "review";
+    const wakeAt = Date.now() + 30 * 60 * 1000;
+    const jobId = routedWakeJobId(owner.key, runId);
+    const legacyJobId = `task:${owner.key}:${runId}`;
+
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        await instance.tasks.onRoute({
+          source: owner,
+          payload: { type: "syncWake", runId, next: wakeAt }
+        });
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_jobs
+             (id, capability, fn, time, payload, retry_options)
+           SELECT ?, capability, fn, time, payload, retry_options
+           FROM cf_agents_jobs WHERE id = ?`,
+          legacyJobId,
+          jobId
+        );
+        await state.storage.delete(ROUTED_WAKE_MIGRATION_VERSION_KEY);
+        await state.storage.deleteAlarm();
+      }
+    );
+
+    await evictDurableObject(stub);
+    await runInDurableObject(
+      env.TaskHarnessObject.getByName(name),
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT id FROM cf_agents_jobs WHERE id IN (?, ?)",
+              legacyJobId,
+              jobId
+            )
+            .toArray()
+        ).toEqual([{ id: jobId }]);
+        expect(await state.storage.getAlarm()).toBe(wakeAt);
+        await instance.tasks.onRoute({
+          source: owner,
+          payload: { type: "syncWake", runId, next: null }
+        });
+      }
+    );
+  });
+
   it("parks on a step retry and replays without re-executing completed steps", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
 
@@ -864,52 +1139,88 @@ describe("Tasks capability", () => {
     );
   });
 
-  it("repairs a missing wake when an event delivery is retried", async () => {
-    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(
-      stub,
-      async (instance: TaskHarnessObject, state) => {
-        const receipt = await instance.tasks.run("eventWaiter", {
-          type: "approval"
-        });
-        await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+  it("repairs a post-commit wake failure with an idempotent retry", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    const capture = captureTaskEvents(name);
+    try {
+      await runInDurableObject(
+        stub,
+        async (instance: TaskHarnessObject, state) => {
+          const receipt = await instance.tasks.run("eventWaiter", {
+            type: "approval"
+          });
+          await waitForState(instance.tasks, receipt.runId, ["waiting"]);
 
-        const event = {
-          eventId: "event_wake_repair",
-          type: "approval",
-          payload: { value: "yes" },
-          createdAt: Date.now()
-        };
-        state.storage.sql.exec(
-          `INSERT INTO cf_agents_task_events
-             (event_id, run_id, type, payload, serialized_size,
-              idempotency_key, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          event.eventId,
-          receipt.runId,
-          event.type,
-          JSON.stringify(event.payload),
-          new TextEncoder().encode(JSON.stringify(event)).byteLength,
-          "approval:repair",
-          event.createdAt
-        );
+          state.storage.sql.exec(`
+            CREATE TRIGGER fail_event_wake
+            BEFORE INSERT ON cf_agents_jobs
+            WHEN NEW.id = 'task:${receipt.runId}'
+            BEGIN
+              SELECT RAISE(ABORT, 'forced wake failure');
+            END
+          `);
+          await expect(
+            instance.tasks.sendEvent(
+              receipt.runId,
+              "approval",
+              { value: "yes" },
+              { idempotencyKey: "approval:repair" }
+            )
+          ).rejects.toThrow(/forced wake failure/);
 
-        const retried = await instance.tasks.sendEvent(
-          receipt.runId,
-          event.type,
-          event.payload,
-          { idempotencyKey: "approval:repair" }
-        );
-        expect(retried.accepted).toBe(false);
-        expect(retried.eventId).toBe(event.eventId);
+          const [event] = state.storage.sql
+            .exec(
+              `SELECT event_id, created_at FROM cf_agents_task_events
+               WHERE run_id = ?`,
+              receipt.runId
+            )
+            .toArray() as Array<{ event_id: string; created_at: number }>;
+          if (!event) throw new Error("event was not committed");
+          expect(
+            capture.events.filter(
+              (captured) => captured.type === "task:event:received"
+            )
+          ).toHaveLength(1);
+          state.storage.sql.exec("DROP TRIGGER fail_event_wake");
 
-        const completed = await waitForState(instance.tasks, receipt.runId, [
-          "completed"
-        ]);
-        if (completed.state !== "completed") throw new Error("unreachable");
-        expect(completed.result).toMatchObject({ eventId: event.eventId });
-      }
-    );
+          const retried = await instance.tasks.sendEvent(
+            receipt.runId,
+            "approval",
+            { value: "yes" },
+            { idempotencyKey: "approval:repair" }
+          );
+          expect(retried).toEqual({
+            eventId: event.event_id,
+            type: "approval",
+            payload: { value: "yes" },
+            createdAt: event.created_at,
+            accepted: false
+          });
+
+          const completed = await waitForState(instance.tasks, receipt.runId, [
+            "completed"
+          ]);
+          if (completed.state !== "completed") throw new Error("unreachable");
+          expect(completed.result).toMatchObject({ eventId: event.event_id });
+
+          const terminalRetry = await instance.tasks.sendEvent(
+            receipt.runId,
+            "approval",
+            { value: "yes" },
+            { idempotencyKey: "approval:repair" }
+          );
+          expect(terminalRetry).toEqual(retried);
+          expect(
+            capture.events.filter(
+              (captured) => captured.type === "task:event:received"
+            )
+          ).toHaveLength(1);
+        }
+      );
+    } finally {
+      capture.stop();
+    }
   });
 
   it("takes buffered events FIFO in bounded, consume-once batches", async () => {
@@ -1039,6 +1350,13 @@ describe("Tasks capability", () => {
       ).rejects.toMatchObject({ name: "TaskEventIdempotencyConflictError" });
 
       await instance.tasks.cancel(receipt.runId);
+      const terminalDuplicate = await instance.tasks.sendEvent(
+        receipt.runId,
+        "item",
+        { value: 1 },
+        { idempotencyKey: "delivery:1" }
+      );
+      expect(terminalDuplicate).toEqual({ ...first, accepted: false });
       await expect(
         instance.tasks.sendEvent(receipt.runId, "item", { value: 3 })
       ).rejects.toMatchObject({ name: "TaskRunTerminalError" });

@@ -113,25 +113,28 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
               `
             : deps.store.sql<TaskEventRow>`
                 WITH limited AS (
-                  SELECT *
+                  SELECT sequence, serialized_size
                   FROM cf_agents_task_events
                   WHERE run_id = ${runId} AND type = ${type}
                     AND consumed_at IS NULL
                   ORDER BY sequence ASC
                   LIMIT ${limit}
                 ), candidates AS (
-                  SELECT limited.*,
+                  SELECT sequence,
                     SUM(serialized_size + 1) OVER (
                       ORDER BY sequence ASC
                     ) AS cumulative_size
                   FROM limited
                 )
-                SELECT sequence, event_id, run_id, type, payload,
-                       serialized_size, idempotency_key, consumed_step_name,
-                       created_at, consumed_at
+                SELECT events.sequence, events.event_id, events.run_id,
+                       events.type, events.payload, events.serialized_size,
+                       events.idempotency_key, events.consumed_step_name,
+                       events.created_at, events.consumed_at
                 FROM candidates
-                WHERE cumulative_size <= ${MAX_SERIALIZED_BYTES - 1}
-                ORDER BY sequence ASC
+                JOIN cf_agents_task_events AS events
+                  ON events.sequence = candidates.sequence
+                WHERE candidates.cumulative_size <= ${MAX_SERIALIZED_BYTES - 1}
+                ORDER BY events.sequence ASC
               `;
         const rows =
           kind === "wait_event" && wakeAt !== null

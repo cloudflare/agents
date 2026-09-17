@@ -10,10 +10,10 @@ and hibernation: completed steps return journaled results, sleeps consult
 persisted deadlines, external events remain buffered until consumed, and
 execution continues from the first unfinished step.
 
-The capability never touches the Durable Object's physical alarm. Every
-non-terminal run's deadline is mirrored as one job in the Lifecycle work
-queue (a retime is a same-id replace), and Lifecycle derives the single
-physical alarm from queue state — so Tasks, the
+Tasks does not write the Durable Object's physical alarm directly. Every
+non-null run deadline is mirrored as one job in the Lifecycle work queue (a
+retime is a same-id replace), and Lifecycle derives the single physical alarm
+from all queued jobs — so Tasks, the
 [Scheduler](./scheduling.md), and other capabilities coexist on the same
 object.
 
@@ -117,8 +117,9 @@ const buildReport = this.tasks.handle("build-report@v1");
 const run = await buildReport.get(receipt.runId); // result typed by the map
 ```
 
-Inputs, step results, metadata, and final results must be JSON-serializable
-and at most 1 MiB serialized.
+Inputs, step results, metadata, and final results are persisted through a
+`JSON.stringify()`/`JSON.parse()` round trip and must be at most 1 MiB
+serialized.
 
 ## Sending and receiving events
 
@@ -134,11 +135,20 @@ await this.tasks.sendEvent(
 ```
 
 Events are scoped to one run, buffered before or during execution, and
-matched by exact, case-sensitive type. Payloads must be JSON-compatible. The
-optional idempotency key is limited to 256 characters and deduplicates an
-identical delivery. Reusing it with different content throws
-`TaskEventIdempotencyConflictError`. Sending to a missing or terminal run
-throws `TaskRunNotFoundError` or `TaskRunTerminalError`.
+matched by exact, case-sensitive type. Payloads use the JSON data model and
+are returned from their persisted representation. The optional idempotency
+key is limited to 256 characters and deduplicates the same event type and
+serialized payload. Reusing it with different content throws
+`TaskEventIdempotencyConflictError`. Sending a new event to a missing or
+terminal run throws `TaskRunNotFoundError` or `TaskRunTerminalError`.
+
+A `sendEvent()` rejection can be ambiguous: the event may have committed
+before wake synchronization failed. For retryable delivery, provide an
+`idempotencyKey` on the first attempt and retry the same run ID, type, payload,
+and key. While the run remains retained, an identical retry returns the
+original receipt with `accepted: false`, even after the run settles. A receipt
+confirms mailbox acceptance, not consumption. `retain: false` and
+`tasks.delete()` remove this deduplication evidence.
 
 Inside a definition, `waitForEvent()` consumes the oldest matching event or
 suspends the run:
@@ -150,8 +160,8 @@ const approval = await step.waitForEvent<{ approved: boolean }>(
 );
 ```
 
-The default wait is indefinite and creates no alarm. Add a timeout to receive
-`null` if no event arrives before the persisted deadline:
+The default wait is indefinite and keeps no per-run Lifecycle wake job. Add a
+timeout to receive `null` if no event arrives before the persisted deadline:
 
 ```ts
 const approval = await step.waitForEvent<{ approved: boolean }>(
@@ -300,8 +310,8 @@ external effect already accepted cannot be undone.
 ## Current limits
 
 The first release is deliberately narrow: no `waitForCompletion` mode on
-`run()`, and no runs on routed sub-agents (facet-hosted work stays on the
-legacy fiber engine until owner-path routed dispatch lands). The legacy
+`run()`, and user-defined runs on routed sub-agents remain unsupported.
+Framework-owned recovery Tasks may use the internal routed wake path. The legacy
 `runFiber()`/`startFiber()` APIs are released public API and remain
 unchanged, still recovered by their own scan. The design and its evolution
 are recorded in

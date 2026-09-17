@@ -1,7 +1,12 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { TestTaskAgent } from "../agents/tasks";
+import type { TestSubAgentParent } from "../agents/sub-agent";
 import { seedTaskRun, seedTaskStep } from "../capabilities/tasks";
 import type { TaskRunSnapshot, TaskValue } from "../../tasks";
 
@@ -126,6 +131,92 @@ describe("Agent tasks integration", () => {
       await instance.tasks.cancel(receipt.runId);
       expect(await state.storage.getAlarm()).toBe(schedule.time * 1000);
       expect(instance.stepRuns).toEqual(["napper:before"]);
+    });
+  });
+
+  it("restores facet routing before Tasks startup after eviction", async () => {
+    const rootName = crypto.randomUUID();
+    const rootStub = env.TestSubAgentParent.getByName(rootName);
+    await runInDurableObject(rootStub, async (instance: TestSubAgentParent) => {
+      await instance.lifecycle.start();
+    });
+
+    const childIdentity = crypto.randomUUID();
+    const childStub = env.TestTaskAgent.getByName(childIdentity);
+    const runId = `facet-task-${crypto.randomUUID()}`;
+    const wakeAt = Date.now() + 60 * 60 * 1000;
+    const parentPath = [{ className: "TestSubAgentParent", name: rootName }];
+    await runInDurableObject(
+      childStub,
+      async (instance: TestTaskAgent, state) => {
+        await instance.lifecycle.start();
+        // Persist exactly what facet initialization writes. A direct
+        // SQL-backed actor can then be evicted without serializing its stub.
+        await Promise.all([
+          state.storage.put("cf_agents_is_facet", true),
+          state.storage.put("cf_agents_facet_name", "task-child"),
+          state.storage.put("cf_agents_parent_path", parentPath)
+        ]);
+        seedTaskRun(state.storage, {
+          runId,
+          definition: "napper",
+          input: { ms: 60 * 60 * 1000 },
+          state: "waiting",
+          nextAt: wakeAt
+        });
+        state.storage.sql.exec(
+          "DELETE FROM cf_agents_jobs WHERE id = ?",
+          `task:${runId}`
+        );
+      }
+    );
+
+    await evictDurableObject(childStub);
+    const freshChild = env.TestTaskAgent.getByName(childIdentity);
+    const localWakeIds = await runInDurableObject(
+      freshChild,
+      async (instance: TestTaskAgent, state) => {
+        await instance.lifecycle.start();
+        return state.storage.sql
+          .exec(
+            "SELECT id FROM cf_agents_jobs WHERE capability = 'tasks' ORDER BY id"
+          )
+          .toArray();
+      }
+    );
+
+    const rootRows = await runInDurableObject(
+      rootStub,
+      async (_instance: TestSubAgentParent, state) =>
+        state.storage.sql
+          .exec(
+            `SELECT id, payload FROM cf_agents_jobs
+             WHERE capability = 'tasks'
+               AND json_extract(payload, '$.runId') = ?`,
+            runId
+          )
+          .toArray()
+    );
+    const ownerPath = [
+      ...parentPath,
+      { className: "TestTaskAgent", name: "task-child" }
+    ];
+    const ownerKey =
+      `TestSubAgentParent:${rootName}/` + "TestTaskAgent:task-child";
+    expect(localWakeIds).toEqual([]);
+    expect(rootRows).toEqual([
+      {
+        id: `task-routed:${JSON.stringify([ownerKey, runId])}`,
+        payload: JSON.stringify({
+          runId,
+          owner_path: JSON.stringify(ownerPath),
+          owner_path_key: ownerKey
+        })
+      }
+    ]);
+
+    await runInDurableObject(freshChild, async (instance: TestTaskAgent) => {
+      await instance.tasks.cancel(runId);
     });
   });
 });

@@ -1810,6 +1810,9 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    // Lifecycle starts capabilities before the host hook that hydrates facet
+    // connections, so restore the persisted route identity synchronously.
+    this._dynamicAgents.restoreFacetIdentity();
     const routeHost = this;
     setLifecycleRouteTransport(this.lifecycle, {
       get source() {

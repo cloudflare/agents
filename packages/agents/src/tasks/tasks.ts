@@ -21,6 +21,7 @@ import type {
 } from "../lifecycle/capability";
 import type { MemoryLimitContext } from "../lifecycle/capability-runner";
 import type {
+  LifecycleJob,
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
@@ -120,6 +121,8 @@ export function setTaskRoutedMemoryLimitHandler(
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
 const CURRENT_FIBER_SCHEMA_VERSION = 2;
+const ROUTED_WAKE_MIGRATION_VERSION_KEY = "cf_agents:tasks_routed_wake_version";
+const CURRENT_ROUTED_WAKE_MIGRATION_VERSION = 1;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -136,14 +139,15 @@ const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
 const CLAIM_SLACK_MS = 30_000;
 
 const DEFAULT_LIST_LIMIT = 100;
+const WAKE_JOB_SCAN_BATCH_SIZE = 100;
 const MAX_DEFINITION_NAME_LENGTH = 256;
 const MAX_EVENT_IDEMPOTENCY_KEY_LENGTH = 256;
 /**
- * Queue-job id prefix for run wakes. Run IDs are caller-selectable, so the
- * job id namespaces them instead of exposing them verbatim to the shared
- * job id space.
+ * Queue-job id prefix for local run wakes. Kept stable for persisted jobs.
  */
 const WAKE_JOB_PREFIX = "task:";
+/** Routed wakes are disjoint from caller-selected local run IDs. */
+const ROUTED_WAKE_JOB_PREFIX = "task-routed:";
 /** Normal Task deadline dispatch. */
 const WAKE_JOB_FN = "wake";
 /**
@@ -190,13 +194,72 @@ function isTaskWakeJobPayload(value: unknown): value is TaskWakeJobPayload {
   );
 }
 
+type RoutedWakeIdentity = {
+  readonly runId: string;
+  readonly ownerKey: string;
+  readonly ownerPath: string;
+};
+
+function localWakeJobId(runId: string): string {
+  return `${WAKE_JOB_PREFIX}${runId}`;
+}
+
+function routedWakeJobId(ownerKey: string, runId: string): string {
+  return `${ROUTED_WAKE_JOB_PREFIX}${JSON.stringify([ownerKey, runId])}`;
+}
+
+function legacyRoutedWakeJobId(ownerKey: string, runId: string): string {
+  return localWakeJobId(`${ownerKey}:${runId}`);
+}
+
+function routedWakeIdentity(
+  job: LifecycleJob | undefined
+): RoutedWakeIdentity | undefined {
+  if (!job || job.fn !== WAKE_JOB_FN) return undefined;
+  const timing = isTaskWakeJobPayload(job.payload) ? job.payload : undefined;
+  if (!timing || typeof timing.owner_path !== "string") return undefined;
+  const ownerKey = timing.owner_path_key ?? timing.owner_path;
+  if (typeof ownerKey !== "string") return undefined;
+  return {
+    runId: timing.runId,
+    ownerKey,
+    ownerPath: timing.owner_path
+  };
+}
+
+function isRoutedWakeFor(
+  job: LifecycleJob | undefined,
+  ownerKey: string,
+  runId: string
+): boolean {
+  const identity = routedWakeIdentity(job);
+  return identity?.ownerKey === ownerKey && identity.runId === runId;
+}
+
+function isLocalWakeFor(job: LifecycleJob | undefined, runId: string): boolean {
+  if (!job || job.fn !== WAKE_JOB_FN) return false;
+  const timing = isTaskWakeJobPayload(job.payload) ? job.payload : undefined;
+  // Payload-less wakes predate the current job policy and remain readable.
+  return timing
+    ? timing.runId === runId && !timing.owner_path
+    : job.id === localWakeJobId(runId);
+}
+
+function hasCurrentWakePolicy(job: LifecycleJob, next: number): boolean {
+  return (
+    job.time === next && job.retry?.maxAttempts === WAKE_JOB_RETRY.maxAttempts
+  );
+}
+
 /** Tasks protocol messages routed between a facet and the root Lifecycle. */
 type TaskRouteMessage =
   | {
       readonly type: "syncWake";
       readonly runId: string;
       readonly next: number | null;
+      readonly rearmIfUnchanged?: boolean;
     }
+  | { readonly type: "rearm" }
   | { readonly type: "dispatch"; readonly runId: string }
   | {
       readonly type: "memoryLimit";
@@ -388,7 +451,14 @@ export class Tasks<
     return this.#accept(definition, input, options);
   }
 
-  /** Durably buffer one event for a non-terminal run. */
+  /**
+   * Durably buffer a new event for a non-terminal run, or deduplicate a
+   * retained prior delivery.
+   *
+   * A rejection after validation can be ambiguous: the event transaction may
+   * have committed before wake synchronization failed. Callers that retry
+   * must supply the same idempotency key on every attempt.
+   */
   async sendEvent<Payload>(
     runId: string,
     type: string,
@@ -440,46 +510,46 @@ export class Tasks<
       const run = this.#store.getRun(runId);
       if (!run) throw new TaskRunNotFoundError(runId);
       definition = run.definition;
-      if (
-        run.state === "completed" ||
-        run.state === "failed" ||
-        run.state === "cancelled"
-      ) {
-        throw new TaskRunTerminalError(runId, run.state);
-      }
 
       let event: TaskEvent<Payload>;
       let accepted: boolean;
       let available: boolean;
+      let existing: TaskEventRow | undefined;
       if (options.idempotencyKey !== undefined) {
-        const existing = this.#store.sql<TaskEventRow>`
-          SELECT * FROM cf_agents_task_events
-          WHERE run_id = ${runId}
-            AND idempotency_key = ${options.idempotencyKey}
-        `[0];
-        if (existing) {
-          if (existing.type !== type || existing.payload !== payloadJson) {
-            throw new TaskEventIdempotencyConflictError(
-              runId,
-              options.idempotencyKey
-            );
-          }
-          event = this.#store.rowToEvent<Payload>(existing);
-          accepted = false;
-          available = existing.consumed_at === null;
-        } else {
-          event = this.#insertEvent(
-            runId,
-            type,
-            payloadJson,
-            persistedPayload,
-            options.idempotencyKey
-          );
-          accepted = true;
-          available = true;
+        const idempotencyKey = options.idempotencyKey;
+        existing = this.#store.sql<TaskEventRow>`
+            SELECT * FROM cf_agents_task_events
+            WHERE run_id = ${runId}
+              AND idempotency_key = ${idempotencyKey}
+          `[0];
+        if (
+          existing &&
+          (existing.type !== type || existing.payload !== payloadJson)
+        ) {
+          throw new TaskEventIdempotencyConflictError(runId, idempotencyKey);
         }
+      }
+      if (
+        !existing &&
+        (run.state === "completed" ||
+          run.state === "failed" ||
+          run.state === "cancelled")
+      ) {
+        throw new TaskRunTerminalError(runId, run.state);
+      }
+
+      if (existing) {
+        event = this.#store.rowToEvent<Payload>(existing);
+        accepted = false;
+        available = existing.consumed_at === null;
       } else {
-        event = this.#insertEvent(runId, type, payloadJson, persistedPayload);
+        event = this.#insertEvent(
+          runId,
+          type,
+          payloadJson,
+          persistedPayload,
+          options.idempotencyKey
+        );
         accepted = true;
         available = true;
       }
@@ -505,7 +575,6 @@ export class Tasks<
 
       return { ...event, accepted };
     });
-    if (wake) await this.#syncWake(runId);
     if (receipt.accepted) {
       this.#emit("task:event:received", {
         runId,
@@ -514,6 +583,7 @@ export class Tasks<
         eventId: receipt.eventId
       });
     }
+    if (wake) await this.#syncWake(runId);
     return receipt;
   }
 
@@ -598,7 +668,23 @@ export class Tasks<
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
     this.#reconcile();
+    const source = this.lifecycle.routes.source;
+    if (!source) {
+      const migrationVersion =
+        (await storage.get<number>(ROUTED_WAKE_MIGRATION_VERSION_KEY)) ?? 0;
+      if (migrationVersion < CURRENT_ROUTED_WAKE_MIGRATION_VERSION) {
+        await this.#migrateLegacyRoutedWakes();
+        await storage.put(
+          ROUTED_WAKE_MIGRATION_VERSION_KEY,
+          CURRENT_ROUTED_WAKE_MIGRATION_VERSION
+        );
+      }
+    }
     await this.#syncAllWakes();
+    // Root startup performs one alarm derivation after all local and legacy
+    // wake reconciliation, including roots that currently own only routed
+    // wakes. During startup Lifecycle coalesces this into one physical write.
+    if (!source) await this.lifecycle.jobs.rearm();
   }
 
   /** Drive one due run's wake dispatched by the Lifecycle event loop. */
@@ -893,16 +979,15 @@ export class Tasks<
 
   /**
    * Mirror one run's authoritative deadline into the Lifecycle job queue:
-   * a non-terminal run with a `next_at` gets one job (id = `task:` plus the
-   * run id, so a retime is a same-id replace); anything else cancels the
-   * mirror. The prefix keeps caller-selected run IDs inside Tasks' own job
-   * namespace. Every durable mutation of a run's deadline or state funnels
-   * through here.
+   * a non-terminal run with a `next_at` gets one job; anything else cancels
+   * the mirror. Local job IDs stay stable while routed wakes use a disjoint
+   * root-owned namespace. Every durable mutation of a run's deadline or state
+   * funnels through here.
    *
    * @returns False when the queue already carried exactly this wake and
    * nothing was written — a same-values upsert is still a billed row write.
    */
-  async #syncWake(runId: string): Promise<boolean> {
+  async #syncWake(runId: string, rearmIfUnchanged = true): Promise<boolean> {
     const rows = this.#store.sql<{ next_at: number | null }>`
       SELECT next_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
@@ -916,22 +1001,25 @@ export class Tasks<
       return (await this.lifecycle.routes.toRoot({
         type: "syncWake",
         runId,
-        next
+        next,
+        rearmIfUnchanged
       } satisfies TaskRouteMessage)) as boolean;
     }
 
-    const jobId = `${WAKE_JOB_PREFIX}${runId}`;
+    const jobId = localWakeJobId(runId);
+    const existing = this.lifecycle.jobs.get(jobId);
     if (next === null) {
-      if (!this.lifecycle.jobs.get(jobId)) return false;
+      if (!isLocalWakeFor(existing, runId)) return false;
       await this.lifecycle.jobs.cancel(jobId);
       return true;
     }
-    const existing = this.lifecycle.jobs.get(jobId);
-    if (
-      existing?.fn === WAKE_JOB_FN &&
-      existing.time === next &&
-      existing.retry?.maxAttempts === WAKE_JOB_RETRY.maxAttempts
-    ) {
+    if (existing && !isLocalWakeFor(existing, runId)) {
+      throw new Error(
+        `Task wake id ${JSON.stringify(jobId)} is already in use`
+      );
+    }
+    if (existing && hasCurrentWakePolicy(existing, next)) {
+      if (rearmIfUnchanged) await this.lifecycle.jobs.rearm();
       return false;
     }
     await this.lifecycle.jobs.push({
@@ -951,8 +1039,16 @@ export class Tasks<
       case "syncWake": {
         const owner = context.source;
         if (!owner) throw new Error("Routed Tasks message missing source");
-        return this.#syncRoutedWake(owner, message.runId, message.next);
+        return this.#syncRoutedWake(
+          owner,
+          message.runId,
+          message.next,
+          message.rearmIfUnchanged !== false
+        );
       }
+      case "rearm":
+        await this.lifecycle.jobs.rearm();
+        return true;
       case "dispatch":
         return this.#dispatchRoutedRun(message.runId);
       case "memoryLimit": {
@@ -976,34 +1072,133 @@ export class Tasks<
   async #syncRoutedWake(
     owner: LifecycleRouteAddress,
     runId: string,
-    next: number | null
+    next: number | null,
+    rearmIfUnchanged: boolean
   ): Promise<boolean> {
-    const jobId = `${WAKE_JOB_PREFIX}${owner.key}:${runId}`;
+    const jobId = routedWakeJobId(owner.key, runId);
+    const legacyJobId = legacyRoutedWakeJobId(owner.key, runId);
+    let changed = false;
+
     if (next === null) {
-      if (!this.lifecycle.jobs.get(jobId)) return false;
-      await this.lifecycle.jobs.cancel(jobId);
-      return true;
+      for (const id of [jobId, legacyJobId]) {
+        if (isRoutedWakeFor(this.lifecycle.jobs.get(id), owner.key, runId)) {
+          await this.lifecycle.jobs.cancel(id);
+          changed = true;
+        }
+      }
+      return changed;
     }
+
     const existing = this.lifecycle.jobs.get(jobId);
-    if (
-      existing?.fn === WAKE_JOB_FN &&
-      existing.time === next &&
-      existing.retry?.maxAttempts === WAKE_JOB_RETRY.maxAttempts
-    ) {
-      return false;
+    const existingIdentity = routedWakeIdentity(existing);
+    if (existing && !isRoutedWakeFor(existing, owner.key, runId)) {
+      throw new Error(
+        `Task wake id ${JSON.stringify(jobId)} is already in use`
+      );
     }
-    await this.lifecycle.jobs.push({
-      id: jobId,
-      fn: WAKE_JOB_FN,
-      time: next,
-      payload: {
-        runId,
-        owner_path: owner.data,
-        owner_path_key: owner.key
-      } satisfies TaskWakeJobPayload,
-      retry: WAKE_JOB_RETRY
-    });
-    return true;
+    if (
+      !existing ||
+      existingIdentity?.ownerPath !== owner.data ||
+      !hasCurrentWakePolicy(existing, next)
+    ) {
+      await this.lifecycle.jobs.push({
+        id: jobId,
+        fn: WAKE_JOB_FN,
+        time: next,
+        payload: {
+          runId,
+          owner_path: owner.data,
+          owner_path_key: owner.key
+        } satisfies TaskWakeJobPayload,
+        retry: WAKE_JOB_RETRY
+      });
+      changed = true;
+    }
+
+    if (
+      isRoutedWakeFor(this.lifecycle.jobs.get(legacyJobId), owner.key, runId)
+    ) {
+      await this.lifecycle.jobs.cancel(legacyJobId);
+      changed = true;
+    }
+
+    if (!changed && rearmIfUnchanged) await this.lifecycle.jobs.rearm();
+    return changed;
+  }
+
+  /** Read Tasks wake rows without materializing every job payload at once. */
+  *#wakeJobs(idPrefix = ""): IterableIterator<LifecycleJob> {
+    // JobQueue creates its shared table lazily; an empty scoped read ensures
+    // it exists before the payload-free paging query below reaches storage.
+    this.lifecycle.jobs.get("");
+    let after = "";
+    const pattern = `${idPrefix}%`;
+    while (true) {
+      const rows = this.#store.sql<{ id: string }>`
+        SELECT id FROM cf_agents_jobs
+        WHERE capability = ${this.capabilityId}
+          AND fn = ${WAKE_JOB_FN}
+          AND id > ${after}
+          AND id LIKE ${pattern}
+        ORDER BY id ASC
+        LIMIT ${WAKE_JOB_SCAN_BATCH_SIZE}
+      `;
+      if (rows.length === 0) return;
+      after = rows[rows.length - 1].id;
+      for (const { id } of rows) {
+        const job = this.lifecycle.jobs.get(id);
+        if (job) yield job;
+      }
+      if (rows.length < WAKE_JOB_SCAN_BATCH_SIZE) return;
+    }
+  }
+
+  /** Move surviving routed wake mirrors out of the local wake namespace. */
+  async #migrateLegacyRoutedWakes(): Promise<void> {
+    for (const job of this.#wakeJobs(WAKE_JOB_PREFIX)) {
+      const identity = routedWakeIdentity(job);
+      if (!identity) continue;
+
+      const jobId = routedWakeJobId(identity.ownerKey, identity.runId);
+      const legacyJobId = legacyRoutedWakeJobId(
+        identity.ownerKey,
+        identity.runId
+      );
+      if (job.id === jobId || job.id !== legacyJobId) continue;
+
+      const existing = this.lifecycle.jobs.get(jobId);
+      if (
+        existing &&
+        !isRoutedWakeFor(existing, identity.ownerKey, identity.runId)
+      ) {
+        throw new Error(
+          `Task wake id ${JSON.stringify(jobId)} is already in use`
+        );
+      }
+      if (!existing) {
+        await this.lifecycle.jobs.push({
+          id: jobId,
+          fn: WAKE_JOB_FN,
+          time: job.time,
+          payload: {
+            runId: identity.runId,
+            owner_path: identity.ownerPath,
+            owner_path_key: identity.ownerKey
+          } satisfies TaskWakeJobPayload,
+          retry: WAKE_JOB_RETRY
+        });
+      }
+
+      if (
+        isRoutedWakeFor(
+          this.lifecycle.jobs.get(legacyJobId),
+          identity.ownerKey,
+          identity.runId
+        )
+      ) {
+        await this.lifecycle.jobs.cancel(legacyJobId);
+      }
+    }
   }
 
   /**
@@ -1016,7 +1211,7 @@ export class Tasks<
   async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
     prefix: string
   ): Promise<void> {
-    for (const job of this.lifecycle.jobs.list()) {
+    for (const job of this.#wakeJobs()) {
       const timing = isTaskWakeJobPayload(job.payload)
         ? job.payload
         : undefined;
@@ -1043,12 +1238,16 @@ export class Tasks<
     let hasDeadline = false;
     for (const { run_id, next_at } of rows) {
       if (next_at !== null) hasDeadline = true;
-      if (await this.#syncWake(run_id)) wrote = true;
+      if (await this.#syncWake(run_id, false)) wrote = true;
     }
-    // Pushes re-arm the physical alarm as a side effect; a reconcile that
-    // wrote nothing must recover a lost alarm explicitly. Indefinite event
-    // waits intentionally have no alarm to recover.
-    if (hasDeadline && !wrote) await this.lifecycle.jobs.rearm();
+    // A routed owner whose mirrors all matched still asks its root for one
+    // alarm derivation. Changed mirrors already re-arm as a push side effect.
+    // Indefinite event waits intentionally have no Tasks wake to recover.
+    if (hasDeadline && !wrote && this.lifecycle.routes.source) {
+      await this.lifecycle.routes.toRoot({
+        type: "rearm"
+      } satisfies TaskRouteMessage);
+    }
   }
 
   // ── Inspection and control ───────────────────────────────────────────────
@@ -1225,12 +1424,6 @@ export class Tasks<
             `refusing to join it with conflicting key "${options.idempotencyKey}"`
         );
       }
-      // A prior accept can throw after already durably inserting this row —
-      // most likely here, on the wake mirror, rather than on the insert
-      // itself — so a caller retrying the same runId or idempotencyKey
-      // after a failure needs this join to repair a missing or stale
-      // mirror, not just report accepted:false against a row nothing will
-      // ever wake.
       // A prior accept can throw after already durably inserting this row —
       // most likely here, on the wake mirror, rather than on the insert
       // itself — so a caller retrying the same runId or idempotencyKey

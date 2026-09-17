@@ -59,6 +59,10 @@ export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
 /** Wire-frozen internal header carrying the outer URL on WS upgrades. */
 export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
 
+const FACET_MARKER_KEY = "cf_agents_is_facet";
+const FACET_NAME_KEY = "cf_agents_facet_name";
+const FACET_PARENT_PATH_KEY = "cf_agents_parent_path";
+
 /**
  * The facet-backed dynamic-agent machinery, extracted from the Agent
  * class. One instance per Agent, installed as a Lifecycle capability
@@ -72,8 +76,9 @@ export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
  * `lifecycle.fetch` (onRequest can only claim), forwarded WS frames run
  * inside the host's onMessage wrapper *after* the WebSockets capability
  * has claimed the wake, this module *implements* the lifecycle route
- * transport rather than consuming it, and facet-context restore has
- * load-bearing startup ordering inside the host's startup span.
+ * transport rather than consuming it, and persisted facet identity must be
+ * restored before capability startup while connection hydration remains in
+ * the host's startup span.
  *
  * Nothing here renames any wire- or storage-visible identifier: the
  * `cf_agents_facet_runs` table, `_cf_*` RPC method names, and route
@@ -1400,29 +1405,31 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   /**
-   * Restore the facet identity persisted by `init` (wake after
-   * hibernation), then best-effort hydrate the virtual connections
-   * from the root's WebSocket state.
+   * Restore the routing identity persisted by `init` synchronously. Agent
+   * calls this during construction so capability startup never mistakes a
+   * cold facet for an alarm-owning root.
    */
-  async restoreFacetContext(): Promise<void> {
-    const isFacet =
-      await this.#host.ctx.storage.get<boolean>("cf_agents_is_facet");
+  restoreFacetIdentity(): void {
+    const isFacet = this.#host.ctx.storage.kv.get<boolean>(FACET_MARKER_KEY);
     if (isFacet) this.#host._isFacet = true;
 
-    const storedFacetName = await this.#host.ctx.storage.get<string>(
-      "cf_agents_facet_name"
-    );
+    const storedFacetName =
+      this.#host.ctx.storage.kv.get<string>(FACET_NAME_KEY);
     if (typeof storedFacetName === "string") {
       this.#host._facetName = storedFacetName;
     }
 
-    const storedParentPath = await this.#host.ctx.storage.get<
+    const storedParentPath = this.#host.ctx.storage.kv.get<
       Array<{ className: string; name: string }>
-    >("cf_agents_parent_path");
+    >(FACET_PARENT_PATH_KEY);
     if (isValidParentPath(storedParentPath)) {
       this.#host._parentPath = storedParentPath;
     }
+  }
 
+  /** Best-effort hydrate virtual connections after identity is restored. */
+  async restoreFacetContext(): Promise<void> {
+    this.restoreFacetIdentity();
     try {
       await this.hydrateConnectionsFromRoot();
     } catch (error) {
@@ -1618,9 +1625,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     this.#host._parentPath = parentPath as AgentPathStep[];
     // Persist the agent-specific facet keys in parallel.
     await Promise.all([
-      this.#host.ctx.storage.put("cf_agents_is_facet", true),
-      this.#host.ctx.storage.put("cf_agents_facet_name", name),
-      this.#host.ctx.storage.put("cf_agents_parent_path", parentPath)
+      this.#host.ctx.storage.put(FACET_MARKER_KEY, true),
+      this.#host.ctx.storage.put(FACET_NAME_KEY, name),
+      this.#host.ctx.storage.put(FACET_PARENT_PATH_KEY, parentPath)
     ]);
     // Fire onStart() now since native RPC bypasses lifecycle fetch, which is the
     // entry point that normally triggers it. Protocol broadcasts during this

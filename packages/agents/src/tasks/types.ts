@@ -144,13 +144,17 @@ export type TaskEvent<Payload = TaskJson> = {
   readonly eventId: string;
   /** Exact, case-sensitive event type. */
   readonly type: string;
-  /** JSON payload supplied by the sender. */
+  /** Payload restored from its persisted JSON representation. */
   readonly payload: Payload;
   /** Wall-clock time when the event was durably accepted. */
   readonly createdAt: number;
 };
 
-/** Receipt returned after durably accepting or deduplicating an event. */
+/**
+ * Receipt returned after durably accepting or deduplicating an event.
+ * A rejected send may still have committed before wake synchronization
+ * failed; retry with the same idempotency key to recover the receipt.
+ */
 export type TaskEventReceipt<Payload = TaskJson> = TaskEvent<Payload> & {
   /** False when the idempotency key matched an existing identical event. */
   readonly accepted: boolean;
@@ -158,7 +162,7 @@ export type TaskEventReceipt<Payload = TaskJson> = TaskEvent<Payload> & {
 
 /** Options for sending one event to a Task run. */
 export interface TaskSendEventOptions {
-  /** Stable key, up to 256 characters, deduplicating delivery attempts. */
+  /** Stable key, up to 256 characters, reused across delivery attempts. */
   readonly idempotencyKey?: string;
 }
 
@@ -216,7 +220,7 @@ export interface TaskStep {
   /**
    * Wait durably for the next unconsumed event of an exact type. Events sent
    * before the wait remain buffered. Without a timeout this waits
-   * indefinitely and creates no alarm.
+   * indefinitely and keeps no per-run Lifecycle wake job.
    */
   waitForEvent<Payload = TaskJson>(
     name: TaskJsonEventStepName<Payload>,

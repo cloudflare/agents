@@ -93,11 +93,12 @@ retry policy owns it.
 
 ### Wake scheduling: one queue job per run
 
-Tasks never touches the physical alarm. Every non-terminal run's
-authoritative `next_at` deadline (acceptance, sleeps, retries, claim
-backstops all write it) is mirrored as one job in the Lifecycle work queue
-— `id = "task:" + the run id`, so a retime is a same-id push and
-caller-selected run IDs stay inside Tasks' own job namespace. Wakes dispatch through `onJob`, whose outcome is derived from the run row:
+Tasks never touches the physical alarm directly. Every non-null run
+`next_at` deadline (acceptance, sleeps, retries, and claim backstops write it)
+is mirrored as one job in the Lifecycle work queue. Local wakes retain
+`id = "task:" + the run id`; routed wakes use a separate internal namespace
+on the root alarm owner so caller-selected local run IDs cannot alias them.
+Wakes dispatch through `onJob`, whose outcome is derived from the run row:
 the row is the single source of truth for whether and when the run wakes
 again. Mirror maintenance lives inside the settle/park helpers so a state
 transition cannot forget its wake. Dispatch is bounded: a queue-driven
@@ -206,9 +207,9 @@ by using the API rather than reasoning about it:
 
 - `waitForCompletion` on `run()` — callers poll snapshots or settle
   through their own channel.
-- Runs on routed sub-agents (facets) — needs owner-path routed dispatch,
-  the pattern the Scheduler uses for facet schedules; facet chat turns
-  stay on the legacy fiber engine until then.
+- Public user-defined runs on routed sub-agents (facets). Framework-owned
+  recovery Tasks already use owner-path routed dispatch, but that internal
+  path is not yet a supported user-facing contract.
 - `runFiber()`/`startFiber()` deprecation — released public API; untouched
   until the facet migration lands and in-flight rows can drain.
 

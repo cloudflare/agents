@@ -11,9 +11,24 @@ This change adds durable, run-scoped external events to `agents/tasks`.
 | Buffered input    | No run mailbox existed.                         | Events sent before or during execution remain buffered until consumed.                    |
 | Batch consumption | Not available.                                  | `step.takeEvents()` consumes a bounded FIFO batch without waiting.                        |
 | Replay            | Replayed `do` and sleep steps.                  | Event results are journaled, so replay returns the same delivery without consuming again. |
-| Scheduling        | Every waiting run had a deadline and queue job. | Indefinite event waits have no deadline or alarm; matching events create the wake.        |
+| Scheduling        | Every waiting run had a deadline and queue job. | Indefinite event waits have no deadline or per-run wake job; matching events create one.  |
 | Storage           | Run and step tables.                            | Added an event table and expanded step journals with event kinds and types.               |
 | Schema            | Tasks schema version 1.                         | Tasks schema version 2 with a crash-safe v1-to-v2 migration.                              |
+
+## Existing Tasks behavior adjusted
+
+This change is primarily additive, but it also adjusts three internal paths:
+
+- Tasks storage upgrades from schema v1 to v2 while preserving existing runs
+  and step history.
+- Startup removes stale wake jobs left by indefinite event waits.
+- Routed Task wakes use a separate internal ID namespace. Surviving legacy
+  routed rows migrate by their stored owner identity, while local wake IDs
+  remain unchanged. Startup reconciles routed wakes before requesting one
+  coalesced root-alarm derivation.
+
+Existing `step.do()`, sleep, retry, cancellation, replay, and local wake
+behavior are unchanged.
 
 ## Input timing
 
@@ -38,13 +53,19 @@ await tasks.sendEvent(
 
 `sendEvent()`:
 
-- Accepts JSON payloads up to the existing 1 MiB serialization limit.
+- Accepts JSON payloads whose complete event envelope fits the existing 1 MiB
+  serialization limit.
 - Matches event types exactly and case-sensitively.
 - Buffers events for pending, running, or waiting runs.
 - Supports run-scoped idempotency keys up to 256 characters.
 - Rejects non-finite numbers instead of silently persisting them as `null`.
 - Returns `{ eventId, type, payload, createdAt, accepted }`.
-- Throws for missing or terminal runs.
+- Throws for a missing run or a new delivery to a terminal run.
+
+A failure after validation can be ambiguous because event insertion commits
+before wake synchronization. Retrying the same retained run, type, serialized
+payload, and idempotency key returns the original receipt, including after the
+run settles.
 
 ```ts
 const event = await step.waitForEvent<{ approved: boolean }>(
@@ -57,7 +78,7 @@ const event = await step.waitForEvent<{ approved: boolean }>(
 
 - Consumes the oldest unconsumed event of the requested type.
 - Waits indefinitely when options are omitted.
-- Creates no Lifecycle job or physical alarm for an indefinite wait.
+- Keeps no per-run Lifecycle wake job for an indefinite wait.
 - Accepts `{ timeout }`; a timed wait returns `null` on expiry.
 - Only consumes events accepted by the persisted timeout deadline.
 - Replays the original journaled event or timeout result.
@@ -95,9 +116,10 @@ created_at            durable acceptance time
 consumed_at           consumption time, or NULL while available
 ```
 
-`event_id` is globally unique. `(run_id, idempotency_key)` is unique when a
-key is provided. Available events are indexed by run, type, consumption state,
-and sequence.
+`event_id` is a stable, collision-resistant public ID, with uniqueness
+enforced in the owning Tasks capability. `(run_id, idempotency_key)` is unique
+when a key is provided. Available events are indexed by run, type, consumption
+state, and sequence.
 
 The existing `cf_agents_task_steps` table adds the `wait_event` and
 `take_events` kinds. Its new `event_type` column persists the exact type
@@ -119,8 +141,8 @@ Application
     |   +-- deduplicate or reject an idempotency conflict
     |   +-- insert event into cf_agents_task_events
     |   +-- if a matching event wait is parked, make the run due
-    +-- synchronize the Lifecycle wake job when needed
     +-- emit task:event:received
+    +-- synchronize the Lifecycle wake job when needed
 ```
 
 ## Wait flow
@@ -174,9 +196,11 @@ Consume event and journal result
 
 ## Correctness guarantees
 
-- Event insertion is durable before `sendEvent()` resolves.
+- Event insertion is durable before `sendEvent()` resolves, but a later wake
+  synchronization failure can reject after insertion committed.
 - Every accepted event is small enough to journal and replay.
-- Batch selection is bounded by serialized bytes before rows enter JavaScript memory.
+- Batch selection uses event IDs and sizes to choose the byte-bounded prefix
+  before loading payload rows into JavaScript memory.
 - Consumption and step journaling commit in one synchronous transaction.
 - Generation fencing prevents superseded executions from consuming events.
 - Event delivery is FIFO within an exact event type.
