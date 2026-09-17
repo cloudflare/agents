@@ -1567,6 +1567,14 @@ const admittedTurnContext = new AsyncLocalStorage<{
   generation?: number | undefined;
 }>();
 
+// Recovery acceptance belongs to the successor's async call chain, including
+// pre-admission awaits and time spent in the turn queue. Concurrent turns on
+// the same agent must not claim its handoff to a durable root chat Task.
+const recoveredTurnAcceptanceContext = new AsyncLocalStorage<{
+  agent: unknown;
+  onAccepted: (successorRequestId: string) => void;
+}>();
+
 // Drains the underlying model stream when a drain loop exits early (in-stream
 // error break, stall abort, user abort). The AI SDK tees its base stream, so
 // an abandoned tee branch would otherwise leave the tracing wrapper's
@@ -2802,14 +2810,6 @@ export class Think<
   // prior value once a continuation settles. If turns ever run concurrently,
   // this must move to per-incident storage.
   private _activeChatRecoveryRootRequestId: string | undefined;
-
-  // A recovery callback hands ownership to its successor only after the root
-  // chat Task has been durably accepted. The callback is scoped around one
-  // serialized recovered turn and captured by `_runChatRecoveryFiber`; facet
-  // turns stay on the legacy fiber path and deliberately do not consume it.
-  private _nextRecoveredTurnAccepted:
-    | ((successorRequestId: string) => void)
-    | undefined;
 
   private static readonly CONFIG_KEYS = [
     "_think_config",
@@ -5076,7 +5076,9 @@ export class Think<
     // connection/request), exactly as legacy inline fiber execution did: the
     // capability's host boundary intentionally carries no connection.
     const ambient = agentContext.getStore();
-    const onAccepted = this._nextRecoveredTurnAccepted;
+    const acceptance = recoveredTurnAcceptanceContext.getStore();
+    const onAccepted =
+      acceptance?.agent === this ? acceptance.onAccepted : undefined;
     const run = (): Promise<T> => {
       // Tasks accepts the run durably before invoking its live closure. Rebind
       // submission ownership before telling the recovery Task it may settle,
@@ -15728,7 +15730,6 @@ export class Think<
     onTurnStarted: (() => void) | undefined,
     run: () => Promise<T>
   ): Promise<T> {
-    const previous = this._nextRecoveredTurnAccepted;
     let signaled = false;
     const onAccepted = (successorRequestId: string): void => {
       if (signaled) return;
@@ -15743,14 +15744,7 @@ export class Think<
       }
       onTurnStarted?.();
     };
-    this._nextRecoveredTurnAccepted = onAccepted;
-    try {
-      return await run();
-    } finally {
-      if (this._nextRecoveredTurnAccepted === onAccepted) {
-        this._nextRecoveredTurnAccepted = previous;
-      }
-    }
+    return recoveredTurnAcceptanceContext.run({ agent: this, onAccepted }, run);
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {

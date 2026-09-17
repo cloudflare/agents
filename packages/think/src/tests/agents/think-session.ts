@@ -53,7 +53,7 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator
 } from "agents/chat";
-import type { ClientToolSchema } from "agents/chat";
+import type { ClientToolSchema, TurnQueue } from "agents/chat";
 import type { Schedule } from "agents";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
@@ -8140,7 +8140,8 @@ export class ThinkRecoveryTestAgent extends Think {
     pauseAt:
       | "before-acceptance"
       | "after-acceptance"
-      | "before-completion" = "before-acceptance",
+      | "before-completion"
+      | "after-foreign-turn" = "before-acceptance",
     streamOutcome: "completed" | "error" = "completed"
   ): Promise<{
     duringHandoff: string | null;
@@ -8152,6 +8153,18 @@ export class ThinkRecoveryTestAgent extends Think {
     terminalStatuses: string[];
     responseCount: number;
     error: string | null;
+    foreignTurn?: {
+      submissionId: string;
+      requestId: string;
+      status: string;
+      requestIdAfterForeignTurn: string | null;
+      recoverySettledAfterForeignTurn: boolean;
+      successorQueuedBehindBlocker: boolean;
+      requestIdAtSuccessorAcceptance: string | null;
+      completedRequestId: string | null;
+      responseRequestIds: string[];
+      terminalRequestIds: Array<string | null>;
+    };
   }> {
     const submissionId = `handoff-${recoveryKind}-${crypto.randomUUID()}`;
     const userMessage: UIMessage = {
@@ -8173,6 +8186,7 @@ export class ThinkRecoveryTestAgent extends Think {
     // SAFETY: this inert fixture reaches Think's private startup/bookkeeping
     // seams without exposing production test hooks. These are their signatures.
     const internals = this as unknown as {
+      _turnQueue: TurnQueue;
       _ensureSubmissionTable(): void;
       _updateChatRecoveryIncident(
         incidentId: string | undefined,
@@ -8223,6 +8237,10 @@ export class ThinkRecoveryTestAgent extends Think {
     const release = createGate();
     const terminal = createGate();
     const detachedFinished = createGate();
+    const successorQueued = createGate();
+    const releaseQueueBlocker = createGate();
+    const queue = internals._turnQueue;
+    const enqueue = queue.enqueue.bind(queue);
     const pause = async () => {
       paused.resolve();
       await release.promise;
@@ -8239,17 +8257,30 @@ export class ThinkRecoveryTestAgent extends Think {
     let handoffSignals = 0;
     let responseCount = 0;
     const terminalStatuses: string[] = [];
+    const responseRequestIds: string[] = [];
+    const terminalRequestIds: Array<string | null> = [];
+    let requestIdAtSuccessorAcceptance: string | null = null;
+    const readSubmissionRequestId = () =>
+      this.sql<{ request_id: string }>`
+        SELECT request_id FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0]?.request_id ?? null;
+    const beforeAcceptance =
+      pauseAt === "before-acceptance" || pauseAt === "after-foreign-turn";
     let latestLeafReads = 0;
     session.getLatestLeaf = async () => {
       const leaf = await getLatestLeaf();
       latestLeafReads++;
-      if (pauseAt === "before-acceptance" && latestLeafReads === 2) {
+      if (beforeAcceptance && latestLeafReads === 2) {
         await pause();
       }
       return leaf;
     };
     this.beforeStep = async (ctx) => {
       if (pauseAt === "after-acceptance") await pause();
+      if (pauseAt === "after-foreign-turn" && responseCount === 1) {
+        requestIdAtSuccessorAcceptance = readSubmissionRequestId();
+      }
       return beforeStep(ctx);
     };
     internals._updateChatRecoveryIncident = async (id, status, reason) => {
@@ -8271,11 +8302,13 @@ export class ThinkRecoveryTestAgent extends Think {
         submission.status !== "running"
       ) {
         terminalStatuses.push(submission.status);
+        terminalRequestIds.push(submission.requestId ?? null);
         terminal.resolve();
       }
     };
     this.onChatResponse = async (result) => {
       responseCount++;
+      responseRequestIds.push(result.requestId);
       await onChatResponse(result);
     };
     if (streamOutcome === "error") {
@@ -8302,13 +8335,35 @@ export class ThinkRecoveryTestAgent extends Think {
       }
     };
 
-    const recoveryWork = runQueuedRecoveryTaskForTest(this, callback);
+    let recoverySettled = false;
+    const recoveryWork = runQueuedRecoveryTaskForTest(this, callback).then(
+      (result) => {
+        recoverySettled = true;
+        return result;
+      }
+    );
     try {
       await paused.promise;
+      // This turn originates outside the paused successor's async context. Let
+      // it finish before resuming the successor's pre-admission leaf read.
+      const foreignResult =
+        pauseAt === "after-foreign-turn"
+          ? await this.saveMessages([
+              {
+                id: `foreign-${submissionId}`,
+                role: "user",
+                parts: [{ type: "text", text: "An unrelated turn" }]
+              }
+            ])
+          : undefined;
+      // On the broken implementation the foreign acceptance releases recovery;
+      // await its settlement explicitly rather than depending on microtask order.
+      if (foreignResult && handoffSignals > 0) await recoveryWork;
+      const recoverySettledAfterForeignTurn = recoverySettled;
       // Once accepted, explicitly wait for the predecessor to settle so the
       // successor alone must protect the row. Before acceptance the signal
       // count proves the predecessor has NOT been told to hand off.
-      if (pauseAt !== "before-acceptance") await recoveryWork;
+      if (!beforeAcceptance) await recoveryWork;
       const handoffSignalsAtPause = handoffSignals;
       const activeRecoveryTasks = recoveryWorkCountForTest(this, callback);
       const chatTasks = this.sql<{ count: number }>`
@@ -8325,7 +8380,29 @@ export class ThinkRecoveryTestAgent extends Think {
       await this.recoverSubmissionsOnStartForTest();
       const duringHandoff = await this.getSubmissionStatusForTest(submissionId);
 
+      // Occupy the real admission queue outside the successor's async context.
+      // Waiting behind this entry must preserve the successor's acceptance
+      // context, even though the predecessor releases it from a foreign context.
+      const blockerId = `queue-blocker-${submissionId}`;
+      const queueBlocker = foreignResult
+        ? enqueue(blockerId, () => releaseQueueBlocker.promise)
+        : undefined;
+      if (foreignResult) {
+        queue.enqueue = (requestId, fn, options) => {
+          const result = enqueue(requestId, fn, options);
+          successorQueued.resolve();
+          return result;
+        };
+      }
       release.resolve();
+      let successorQueuedBehindBlocker = false;
+      if (foreignResult) {
+        await successorQueued.promise;
+        successorQueuedBehindBlocker =
+          queue.activeRequestId === blockerId && queue.queuedCount() === 2;
+        releaseQueueBlocker.resolve();
+        await queueBlocker;
+      }
       await recoveryWork;
       await terminal.promise;
       await detachedFinished.promise;
@@ -8344,10 +8421,26 @@ export class ThinkRecoveryTestAgent extends Think {
         activeRecoveryTasks,
         terminalStatuses,
         responseCount,
-        error: completed?.error_message ?? null
+        error: completed?.error_message ?? null,
+        ...(foreignResult && {
+          foreignTurn: {
+            submissionId,
+            requestId: foreignResult.requestId,
+            status: foreignResult.status,
+            requestIdAfterForeignTurn: row?.request_id ?? null,
+            recoverySettledAfterForeignTurn,
+            successorQueuedBehindBlocker,
+            requestIdAtSuccessorAcceptance,
+            completedRequestId: readSubmissionRequestId(),
+            responseRequestIds,
+            terminalRequestIds
+          }
+        })
       };
     } finally {
       release.resolve();
+      releaseQueueBlocker.resolve();
+      queue.enqueue = enqueue;
       session.getLatestLeaf = getLatestLeaf;
       this.beforeStep = beforeStep;
       internals._updateChatRecoveryIncident = updateIncident;

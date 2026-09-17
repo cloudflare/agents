@@ -2387,6 +2387,47 @@ describe("Think — chatRecovery", () => {
   );
 
   it.each(["retry", "continue"] as const)(
+    "does not let a foreign turn claim the %s recovery handoff before successor admission",
+    async (recoveryKind) => {
+      const agent = await freshRecoveryAgent(
+        `submission-foreign-${recoveryKind}-${crypto.randomUUID()}`
+      );
+      const result = await agent.reproduceSubmissionRecoveryHandoffGapForTest(
+        recoveryKind,
+        "after-foreign-turn"
+      );
+
+      expect(result).toMatchObject({
+        duringHandoff: "running",
+        afterCompletion: "completed",
+        requestRebound: false,
+        handoffSignals: 0,
+        activeChatTasks: 0,
+        activeRecoveryTasks: 1,
+        terminalStatuses: ["completed"],
+        responseCount: 2,
+        error: null
+      });
+      const foreign = result.foreignTurn;
+      if (!foreign)
+        throw new Error("Missing foreign-turn handoff observations");
+      expect(foreign.status).toBe("completed");
+      expect(foreign.requestIdAfterForeignTurn).toBe(foreign.submissionId);
+      expect(foreign.recoverySettledAfterForeignTurn).toBe(false);
+      expect(foreign.successorQueuedBehindBlocker).toBe(true);
+      expect(foreign.responseRequestIds).toHaveLength(2);
+      expect(foreign.responseRequestIds[0]).toBe(foreign.requestId);
+      const successorRequestId = foreign.responseRequestIds[1];
+      expect(successorRequestId).toBeTruthy();
+      expect(successorRequestId).not.toBe(foreign.requestId);
+      expect(successorRequestId).not.toBe(foreign.submissionId);
+      expect(foreign.requestIdAtSuccessorAcceptance).toBe(successorRequestId);
+      expect(foreign.completedRequestId).toBe(successorRequestId);
+      expect(foreign.terminalRequestIds).toEqual([successorRequestId]);
+    }
+  );
+
+  it.each(["retry", "continue"] as const)(
     "keeps a submission recoverable after the %s successor is accepted",
     async (recoveryKind) => {
       const agent = await freshRecoveryAgent(
