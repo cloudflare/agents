@@ -1990,8 +1990,8 @@ export class Agent<
       // wired directly (see the DynamicAgentsInternal class doc).
       .use(this._dynamicAgents);
 
-    // MCP starts before Agent restores facet routing state. Defer its initial
-    // publication until broadcasts can be routed to the correct owner.
+    // MCP starts before Agent hydrates virtual facet connections. Defer its
+    // initial publication until broadcasts can reach the correct clients.
     let mcpBroadcastReady = false;
     this._disposables.add(
       this.mcp.onServerStateChanged(() => {
@@ -8155,17 +8155,11 @@ export class Agent<
    * callers don't need to swallow an abort error.
    */
   async _cf_scheduleDestroy(): Promise<void> {
-    // Hydrate facet state before deciding. `_isFacet` (and the `_parentPath`
-    // /`selfPath` the facet teardown path needs) is only populated by `onStart`
-    // /facet bootstrap, and `destroy()` below branches on the in-memory
-    // `_isFacet`. Without this, an RPC landing before init would see it as
-    // `false`, fall through to `destroy()`'s top-level path, and write the
-    // destroy marker on a facet — which the `alarm()`/`_syncHostJobs()`
-    // guards forbid (only top-level agents write it; facet teardown is
-    // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
-    // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`
-    // itself: the `alarm()` preamble calls `destroy()` precisely to avoid
-    // running `onStart` on a condemned agent.
+    // Native RPC bypasses Lifecycle handlers, so start before touching jobs.
+    // Cold facets restore identity during construction; fresh facets set it
+    // during bootstrap. Keep startup here rather than in `destroy()` because
+    // the alarm preamble calls `destroy()` specifically to skip `onStart` on a
+    // condemned agent.
     await this.__unsafe_ensureInitialized();
     if (this._isFacet) {
       // Facet teardown is coordinated by the root (`ctx.facets.delete` wipes
@@ -8190,8 +8184,7 @@ export class Agent<
 
   /**
    * Whether a (deferred or interrupted) destroy is pending. Reads the
-   * durable marker directly — the in-memory `_isFacet` flag may not be
-   * hydrated yet at the call sites, but facets never write the marker.
+   * durable marker directly; facets never write the marker.
    */
   private async _pendingDestroyAlarm(): Promise<number | null> {
     const pending = await this.ctx.storage.get<boolean | number>(

@@ -1411,7 +1411,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    */
   restoreFacetIdentity(): void {
     const isFacet = this.#host.ctx.storage.kv.get<boolean>(FACET_MARKER_KEY);
-    if (isFacet) this.#host._isFacet = true;
+    if (!isFacet) return;
+    this.#host._isFacet = true;
 
     const storedFacetName =
       this.#host.ctx.storage.kv.get<string>(FACET_NAME_KEY);
@@ -1429,7 +1430,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /** Best-effort hydrate virtual connections after identity is restored. */
   async restoreFacetContext(): Promise<void> {
-    this.restoreFacetIdentity();
     try {
       await this.hydrateConnectionsFromRoot();
     } catch (error) {

@@ -107,7 +107,11 @@ export class TaskSerializationError extends Error {
   }
 }
 
-/** Thrown when an event targets a Task run that does not exist. */
+/**
+ * Thrown when an event targets a Task run that does not exist.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
 export class TaskRunNotFoundError extends Error {
   readonly runId: string;
 
@@ -118,7 +122,11 @@ export class TaskRunNotFoundError extends Error {
   }
 }
 
-/** Thrown when an event targets a Task run that has already settled. */
+/**
+ * Thrown when an event targets a Task run that has already settled.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
 export class TaskRunTerminalError extends Error {
   readonly runId: string;
   readonly state: "completed" | "failed" | "cancelled";
@@ -131,7 +139,11 @@ export class TaskRunTerminalError extends Error {
   }
 }
 
-/** Thrown when one event idempotency key is reused for different content. */
+/**
+ * Thrown when one event idempotency key is reused for different content.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
 export class TaskEventIdempotencyConflictError extends Error {
   readonly runId: string;
   readonly idempotencyKey: string;
