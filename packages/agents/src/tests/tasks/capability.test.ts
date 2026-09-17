@@ -16,7 +16,6 @@ import {
   type TaskSchedulerCoexistObject
 } from "../capabilities/tasks";
 import { childMailboxKey } from "../../state-machine/machine";
-import { defineAsk } from "../../tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 import type { Tasks, TaskRunSnapshot, TaskValue } from "../../tasks";
 
@@ -36,9 +35,6 @@ import type { Tasks, TaskRunSnapshot, TaskValue } from "../../tasks";
 function captureTaskEvents(name: string) {
   return captureDiagnosticsEvents("agents:task", name);
 }
-
-/** An ask kind, for the typed `answer()` probes. */
-const Approve = defineAsk<{ toolCallId: string }, boolean>("tool-approval");
 
 /** Poll one run until it reaches one of the given states. */
 async function waitForState(
@@ -2461,58 +2457,6 @@ describe("Tasks#at", () => {
       expect(snapshot?.state).toBe("cancelled");
       if (snapshot?.state !== "cancelled") throw new Error("unreachable");
       expect(snapshot.reason).toBe("enough");
-    });
-  });
-
-  it("refuses the members whose engine has not landed yet", async () => {
-    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      // The machine definition, so the members typed against the mailbox
-      // and the state are reachable at their real types rather than
-      // `never` — which is what a function definition types them.
-      const run = instance.tasks.at("counter", "run_1");
-      // Declared now, implemented with the machine dispatch loop: loud
-      // rather than silently undefined until then. Every member is called,
-      // because all three handle shapes are returned through an
-      // `as unknown as` cast — a key dropped from one of those literals is
-      // invisible to the compiler and surfaces only here.
-      expect(() => run.send({ step: 1 })).toThrow(/not wired up yet/);
-      expect(() => run.sendEvent({ type: "approval", payload: {} })).toThrow(
-        /not wired up yet/
-      );
-      expect(() => run.answer("ask_1", Approve, true)).toThrow(
-        /not wired up yet/
-      );
-      expect(() => run.withdraw("steer:1")).toThrow(/not wired up yet/);
-      expect(() => run.view()).toThrow(/not wired up yet/);
-      expect(() => run.watch(() => {})).toThrow(/not wired up yet/);
-
-      // The definition lens carries the same verbs over the same stubs.
-      const lens = instance.tasks.handle("counter");
-      expect(() => lens.send("run_1", { step: 1 })).toThrow(/not wired up yet/);
-      expect(() => lens.view("run_1")).toThrow(/not wired up yet/);
-      expect(() => lens.watch("run_1", () => {})).toThrow(/not wired up yet/);
-
-      // And so does the capability itself: `tasks.send(id, …)` refuses the
-      // same way `tasks.at(name, id).send(…)` does rather than not
-      // existing, which is the asymmetry the two casts could hide.
-      const tasks = instance.tasks;
-      expect(() => tasks.send("run_1", { step: 1 })).toThrow(
-        /not wired up yet/
-      );
-      expect(() =>
-        tasks.sendEvent("run_1", { type: "approval", payload: {} })
-      ).toThrow(/not wired up yet/);
-      expect(() => tasks.withdraw("run_1", "steer:1")).toThrow(
-        /not wired up yet/
-      );
-      expect(() => tasks.answer("ask_1", Approve, true)).toThrow(
-        /not wired up yet/
-      );
-      expect(() => tasks.withdrawAsk("ask_1")).toThrow(/not wired up yet/);
-      expect(() => tasks.asks()).toThrow(/not wired up yet/);
-      expect(() => tasks.view("run_1")).toThrow(/not wired up yet/);
-      expect(() => tasks.watch("run_1", () => {})).toThrow(/not wired up yet/);
     });
   });
 

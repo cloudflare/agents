@@ -504,7 +504,7 @@ export interface StateMachineContext<
       within?: number | StateMachineDurationString;
       mode?: "all" | "any";
     }
-  ): Promise<Answer[] | StateMachineTimedOut>;
+  ): Promise<(Answer | undefined)[] | StateMachineTimedOut>;
 
   /** Read answers already durable, without parking. Mirrors peek/peekAll. */
   peekAnswers<Answer>(
@@ -1028,7 +1028,7 @@ export interface StateMachineSendOptions {
 export interface StateMachineSendReceipt {
   readonly accepted: boolean;
   readonly key: string;
-  readonly reason?: "duplicate" | "dropped" | "terminal" | "limit";
+  readonly reason?: "duplicate" | "dropped" | "terminal" | "limit" | "unknown";
 }
 
 /**

@@ -17,10 +17,12 @@ import {
 import { parseTaskDuration, type StateMachineDurationString } from "./duration";
 import {
   StateMachineDuplicateStepError,
+  StateMachineEventTimeoutError,
   StateMachineReplayDivergedError,
   StateMachineSerializationError,
   isNonRetryableError
 } from "./errors";
+import { nanoid } from "nanoid";
 import { asTaskTerminal, TaskTerminalSignal, TIMED_OUT } from "./machine";
 import { deserializeTaskValue, serializeTaskValue } from "./serialization";
 import type { StreamWriter } from "../streams/types";
@@ -64,6 +66,12 @@ export type ReplayRunFacts = {
   readonly progress: number;
   /** The abort mark when this context runs `onCancel`, else null. */
   readonly cancelling: StateMachineAbortMark | null;
+  /**
+   * The event-driven wait this dispatch woke from with its `within` passed
+   * — the first matching wait in the handler returns `timedOut` instead of
+   * parking again. Null for every other wake.
+   */
+  readonly expiredWait: StateMachineWaitReason | null;
 };
 
 const NO_FACTS: ReplayRunFacts = {
@@ -74,7 +82,8 @@ const NO_FACTS: ReplayRunFacts = {
   metadata: undefined,
   createdAt: 0,
   progress: 0,
-  cancelling: null
+  cancelling: null,
+  expiredWait: null
 };
 
 /**
@@ -109,13 +118,14 @@ export const MAX_STEP_NAME_LENGTH = 256;
  * it; the capability re-checks with {@link isTaskSuspension}.
  */
 export class TaskSuspension {
-  readonly wakeAt: number;
+  /** NULL for an event-driven park: no alarm, woken by a send or an answer. */
+  readonly wakeAt: number | null;
   // An attempt only ever suspends itself; the 'interrupted' park is written
   // over a lost attempt by the capability, never thrown from inside one.
   readonly reason: Exclude<StateMachineWaitReason, "interrupted">;
 
   constructor(
-    wakeAt: number,
+    wakeAt: number | null,
     reason: Exclude<StateMachineWaitReason, "interrupted">
   ) {
     this.wakeAt = wakeAt;
@@ -407,6 +417,7 @@ export class ReplayStep implements StateMachineContext<
   readonly cancelling: StateMachineAbortMark | null;
   readonly timedOut: StateMachineTimedOut = TIMED_OUT;
   readonly #progressBase: number;
+  #expiredWait: StateMachineWaitReason | null;
 
   constructor(
     engine: TaskStepEngine,
@@ -435,6 +446,22 @@ export class ReplayStep implements StateMachineContext<
     this.createdAt = facts.createdAt;
     this.cancelling = facts.cancelling;
     this.#progressBase = facts.progress;
+    this.#expiredWait = facts.expiredWait;
+  }
+
+  /** Consume the woken-from-expiry flag for one wait kind, once. */
+  #tookExpiry(reason: StateMachineWaitReason): boolean {
+    if (this.#expiredWait !== reason) return false;
+    this.#expiredWait = null;
+    return true;
+  }
+
+  /** The absolute deadline a `within` names, or null for none. */
+  #withinDeadline(
+    within: number | StateMachineDurationString | undefined
+  ): number | null {
+    if (within === undefined) return null;
+    return Date.now() + parseTaskDuration(within, "within");
   }
 
   /** Progress committed plus what this attempt has credited so far. */
@@ -483,63 +510,145 @@ export class ReplayStep implements StateMachineContext<
       : (deserializeTaskValue(written.result) as T);
   }
 
-  // ── mailbox, asks, children, streams: land with their engines ────────────
+  // ── mailbox ──────────────────────────────────────────────────────────────
 
-  receive(
-    _filter?: StateMachineMailboxFilter & {
+  async receive(
+    filter?: StateMachineMailboxFilter & {
       within?: number | StateMachineDurationString;
     }
   ): Promise<StateMachineMailboxItem<unknown> | StateMachineTimedOut> {
-    return Promise.reject(pendingEngine("receive"));
+    const { within, ...rest } = filter ?? {};
+    const rows = this.#engine.peekMailbox({ ...rest, limit: 1 }, Date.now());
+    const row = rows[0];
+    if (row !== undefined) {
+      this.#engine.consumeMailbox([row.key]);
+      return mailboxItem(row);
+    }
+    if (this.#tookExpiry("mailbox")) return TIMED_OUT;
+    throw new TaskSuspension(this.#withinDeadline(within), "mailbox");
   }
 
-  receiveAll(
-    _filter?: StateMachineMailboxFilter & {
+  async receiveAll(
+    filter?: StateMachineMailboxFilter & {
       within?: number | StateMachineDurationString;
     }
   ): Promise<StateMachineMailboxItem<unknown>[] | StateMachineTimedOut> {
-    return Promise.reject(pendingEngine("receiveAll"));
+    const { within, ...rest } = filter ?? {};
+    const rows = this.#engine.peekMailbox(rest, Date.now());
+    if (rows.length > 0) {
+      this.#engine.consumeMailbox(rows.map((row) => row.key));
+      return rows.map(mailboxItem);
+    }
+    if (this.#tookExpiry("mailbox")) return TIMED_OUT;
+    throw new TaskSuspension(this.#withinDeadline(within), "mailbox");
   }
 
   peek(
-    _filter?: StateMachineMailboxFilter
+    filter?: StateMachineMailboxFilter
   ): StateMachineMailboxItem<unknown> | undefined {
-    throw pendingEngine("peek");
+    const row = this.#engine.peekMailbox(
+      { ...filter, limit: 1 },
+      Date.now()
+    )[0];
+    return row === undefined ? undefined : mailboxItem(row);
   }
 
   peekAll(
-    _filter?: StateMachineMailboxFilter
+    filter?: StateMachineMailboxFilter
   ): StateMachineMailboxItem<unknown>[] {
-    throw pendingEngine("peekAll");
+    return this.#engine.peekMailbox(filter, Date.now()).map(mailboxItem);
   }
 
-  withdraw(_key: string): boolean {
-    throw pendingEngine("withdraw");
+  withdraw(key: string): boolean {
+    return this.#engine.consumeMailbox([key]) > 0;
   }
+
+  // ── asks ─────────────────────────────────────────────────────────────────
 
   ask<Payload, Answer>(
-    _kind: AskKind<Payload, Answer>,
-    _payloads: readonly Payload[],
-    _options?: StateMachineAskOptions
+    kind: AskKind<Payload, Answer>,
+    payloads: readonly Payload[],
+    options?: StateMachineAskOptions
   ): Pending<Answer>[] {
-    throw pendingEngine("ask");
+    const expiresAt =
+      options?.expiresIn === undefined
+        ? null
+        : Date.now() + parseTaskDuration(options.expiresIn, "expiresIn");
+    const metadata =
+      options?.metadata === undefined ? null : JSON.stringify(options.metadata);
+    return payloads.map((payload, index) => {
+      const askId = `${this.id}#${nanoid()}`;
+      this.#engine.insertAsk({
+        askId,
+        turn: this.turn,
+        name: kind.name,
+        question: serializeTaskValue(
+          payload as StateMachineValue,
+          `ask "${kind.name}" payload ${index}`
+        ),
+        expiresAt,
+        metadata
+      });
+      this.#engine.emit("task:ask", { askId, name: kind.name });
+      return { id: askId };
+    });
   }
 
-  answers<Answer>(
-    _pending: readonly Pending<Answer>[],
-    _options?: {
+  async answers<Answer>(
+    pending: readonly Pending<Answer>[],
+    options?: {
       within?: number | StateMachineDurationString;
       mode?: "all" | "any";
     }
-  ): Promise<Answer[] | StateMachineTimedOut> {
-    return Promise.reject(pendingEngine("answers"));
+  ): Promise<(Answer | undefined)[] | StateMachineTimedOut> {
+    const ids = pending.map((ask) => ask.id);
+    const now = Date.now();
+    const rows = this.#engine.readAsks(ids);
+    // An expiry that passed while the run was parked flips here, one
+    // conditional write per lapsed row, so the ledger is what the UI sees.
+    let lapsed = false;
+    for (const row of rows) {
+      if (
+        row.state === "open" &&
+        row.expires_at !== null &&
+        row.expires_at <= now &&
+        this.#engine.settleAsk(row.ask_id, "expired", null)
+      ) {
+        row.state = "expired";
+        lapsed = true;
+      }
+    }
+    const byId = new Map(rows.map((row) => [row.ask_id, row]));
+    const settled = ids.filter((id) => byId.get(id)?.state !== "open");
+    const done =
+      options?.mode === "any"
+        ? settled.length > 0
+        : settled.length === ids.length;
+    if (done) return ids.map((id) => answerOf<Answer>(byId.get(id)));
+    // A wake the expiry sweep explains is not the `within` deadline.
+    if (!lapsed && this.#tookExpiry("ask")) return TIMED_OUT;
+    const within = this.#withinDeadline(options?.within);
+    const expiries = rows
+      .filter((row) => row.state === "open" && row.expires_at !== null)
+      .map((row) => row.expires_at ?? Number.POSITIVE_INFINITY);
+    const candidates = [within, ...expiries].filter(
+      (at): at is number => at !== null && Number.isFinite(at)
+    );
+    throw new TaskSuspension(
+      candidates.length === 0 ? null : Math.min(...candidates),
+      "ask"
+    );
   }
 
   peekAnswers<Answer>(
-    _pending: readonly Pending<Answer>[]
+    pending: readonly Pending<Answer>[]
   ): (Answer | undefined)[] {
-    throw pendingEngine("peekAnswers");
+    const rows = this.#engine.readAsks(pending.map((ask) => ask.id));
+    const byId = new Map(rows.map((row) => [row.ask_id, row]));
+    return pending.map((ask) => answerOf<Answer>(byId.get(ask.id)));
   }
+
+  // ── children and streams: land with their engines ────────────────────────
 
   spawn(
     _definition: string,
@@ -683,11 +792,57 @@ export class ReplayStep implements StateMachineContext<
     name: string,
     options: { type: string; timeout?: number | StateMachineDurationString }
   ): Promise<StateMachineStepEvent<Payload>> {
-    void name;
-    void options;
-    throw new Error(
-      "step.waitForEvent is declared but its mailbox is not wired up yet"
-    );
+    if (typeof options?.type !== "string" || options.type.length === 0) {
+      throw new Error(`step.waitForEvent("${name}") requires an event type`);
+    }
+    this.#enterStep(name);
+    const row = this.#engine.readStep(this.turn, name);
+    let deadline: number | null;
+    if (row === undefined) {
+      this.#live = true;
+      deadline =
+        options.timeout === undefined
+          ? null
+          : Date.now() + parseTaskDuration(options.timeout, "timeout");
+      this.#engine.insertStep(this.turn, name, "event", deadline);
+    } else {
+      if (row.kind !== "event") {
+        throw new StateMachineReplayDivergedError(
+          name,
+          `journaled as a ${row.kind} step but replayed as an event wait`
+        );
+      }
+      if (row.state === "completed") {
+        return eventOf<Payload>(deserializeTaskValue(row.result));
+      }
+      if (row.state === "failed") throw restoreStepError(row);
+      this.#live = true;
+      deadline = row.next_at;
+    }
+    // One synchronous block: the oldest visible matching item is consumed
+    // and memoized as the step's result, so a replay never re-reads it.
+    const now = Date.now();
+    const matched = this.#engine.peekMailbox(
+      { kind: "event", type: options.type, limit: 1 },
+      now
+    )[0];
+    if (matched !== undefined) {
+      const journaled: JournaledEvent = {
+        type: options.type,
+        payload: deserializeTaskValue(matched.payload) as StateMachineJson,
+        receivedAt: now
+      };
+      this.#engine.consumeMailbox([matched.key]);
+      this.#engine.completeStep(this.turn, name, journaled);
+      this.#engine.emit("task:step:completed", { step: name, attempt: 1 });
+      return eventOf<Payload>(journaled);
+    }
+    if (deadline !== null && deadline <= now) {
+      const error = new StateMachineEventTimeoutError(name, options.type);
+      this.#engine.failStep(this.turn, name, toErrorSummary(error));
+      throw error;
+    }
+    throw new TaskSuspension(deadline, "event");
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────
@@ -849,6 +1004,43 @@ export class ReplayStep implements StateMachineContext<
 }
 
 /** Rebuild a persisted terminal step error for rethrow. */
+/** The JSON form an event wait journals; `timestamp` rehydrates as a Date. */
+type JournaledEvent = {
+  type: string;
+  payload: StateMachineJson;
+  receivedAt: number;
+};
+
+/** The Workflows-shaped event a completed wait returns. */
+function eventOf<Payload extends StateMachineJson>(
+  journaled: unknown
+): StateMachineStepEvent<Payload> {
+  const stored = journaled as JournaledEvent;
+  return {
+    type: stored.type,
+    payload: stored.payload as Payload,
+    timestamp: new Date(stored.receivedAt)
+  };
+}
+
+/** Project one mailbox row as the item a handler receives. */
+function mailboxItem(row: TaskMailboxRow): StateMachineMailboxItem<unknown> {
+  return {
+    key: row.key,
+    seq: row.seq,
+    kind: row.kind,
+    ...(row.type !== null ? { type: row.type } : {}),
+    payload: deserializeTaskValue(row.payload),
+    createdAt: row.created_at
+  };
+}
+
+/** The answer one settled ask row carries; undefined when it lapsed. */
+function answerOf<Answer>(row: TaskAskRow | undefined): Answer | undefined {
+  if (row === undefined || row.state !== "answered") return undefined;
+  return deserializeTaskValue(row.answer) as Answer;
+}
+
 function pendingEngine(member: string): Error {
   return new Error(
     `ctx.${member} is declared but its engine is not wired up yet`

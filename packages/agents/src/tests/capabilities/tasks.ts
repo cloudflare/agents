@@ -4,10 +4,14 @@ import {
   Tasks,
   NonRetryableError,
   TaskInterruptionsExhaustedError,
+  defineAsk,
   type TaskDefinition,
   type TaskMachine,
   type TaskStep
 } from "../../tasks";
+
+/** The ask kind the `approver` machine raises; answers are strings. */
+export const Approval = defineAsk<{ what: string }, string>("approval");
 import { setTaskDefinitionResolver } from "../../tasks/tasks";
 import { Scheduler } from "../../schedules";
 
@@ -21,6 +25,14 @@ type GuardState =
   | { phase: "released"; decline: boolean; releases: number };
 type HungState = { phase: "hang" };
 type MemoState = { phase: "work"; rounds: number };
+type InboxState = {
+  phase: "listen";
+  seen: string[];
+  within: number | undefined;
+};
+type ApproverState =
+  | { phase: "ask"; expiresIn: number | undefined }
+  | { phase: "wait"; pending: { id: string }[]; mode: "all" | "any" };
 export type VersionedState =
   | { phase: "one"; n: number }
   | { phase: "two"; n: number; migrated: boolean };
@@ -627,6 +639,82 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         initial: { phase: "hang" } as HungState,
         phases: { hang: () => new Promise<never>(() => {}) }
       } satisfies TaskMachine<HungState>,
+
+      /**
+       * Receives messages one at a time — buffered ones first — until a
+       * "stop", then completes with everything it saw. A `within` turns a
+       * silent mailbox into a "timed-out" completion.
+       */
+      inbox: {
+        initial: (seed: { within?: number }): InboxState => ({
+          phase: "listen",
+          seen: [],
+          within: seed.within
+        }),
+        phases: {
+          listen: async (state, ctx) => {
+            const item = await ctx.receive({
+              kind: "message",
+              ...(state.within !== undefined ? { within: state.within } : {})
+            });
+            if (item === ctx.timedOut) return ctx.complete("timed-out");
+            const text = String(item.payload);
+            if (text === "stop") return ctx.complete(state.seen.join(","));
+            return { ...state, seen: [...state.seen, text] };
+          }
+        }
+      } satisfies TaskMachine<InboxState, string, string, { within?: number }>,
+
+      /** Raises two asks, parks on their answers, completes with them. */
+      approver: {
+        initial: (seed: {
+          expiresIn?: number;
+          mode?: "all" | "any";
+        }): ApproverState => ({ phase: "ask", expiresIn: seed.expiresIn }),
+        phases: {
+          ask: async (state, ctx) => {
+            const pending = ctx.ask(
+              Approval,
+              [{ what: "first" }, { what: "second" }],
+              state.expiresIn !== undefined
+                ? { expiresIn: state.expiresIn }
+                : undefined
+            );
+            return {
+              phase: "wait",
+              pending: pending.map((ask) => ({ id: ask.id })),
+              mode: (ctx.input as { mode?: "all" | "any" }).mode ?? "all"
+            };
+          },
+          wait: async (state, ctx) => {
+            const answers = await ctx.answers(
+              state.pending.map((ask) => ask as { id: string }),
+              { mode: state.mode }
+            );
+            if (answers === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(
+              answers.map((answer) => answer ?? "lapsed").join("+")
+            );
+          }
+        }
+      } satisfies TaskMachine<
+        ApproverState,
+        never,
+        string,
+        { expiresIn?: number; mode?: "all" | "any" }
+      >,
+
+      /** A durable function that waits for one approval event. */
+      listener: async (
+        input: { timeout?: number },
+        step: TaskStep
+      ): Promise<string> => {
+        const event = await step.waitForEvent<{ ok: boolean }>("go", {
+          type: "approval",
+          ...(input.timeout !== undefined ? { timeout: input.timeout } : {})
+        });
+        return `${event.type}:${event.payload.ok}:${event.timestamp instanceof Date}`;
+      },
 
       /** Progress without a checkpoint change: a memo, then completion. */
       memoist: {

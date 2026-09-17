@@ -11,6 +11,7 @@ import { childMailboxKey } from "./machine";
 import { deserializeTaskValue } from "./serialization";
 import type {
   StateMachineAskRecord,
+  StateMachineAskState,
   TaskAskRow,
   StateMachineChildRef,
   StateMachineJson,
@@ -654,44 +655,45 @@ export class TaskStore {
    * and the set is bounded by the run's own asks.
    */
   listAsks(runId: string): StateMachineAskRecord[] {
-    const rows = this.sql<TaskAskRow>`
-      SELECT * FROM cf_agents_task_asks WHERE run_id = ${runId}
-    `;
+    return this.queryAsks({ runId });
+  }
+
+  /** Asks by run and/or state, oldest first, ties broken by id. */
+  queryAsks(filter: {
+    runId?: string;
+    state?: StateMachineAskState;
+  }): StateMachineAskRecord[] {
+    const clauses: string[] = [];
+    const params: (string | number | null)[] = [];
+    if (filter.runId !== undefined) {
+      clauses.push("run_id = ?");
+      params.push(filter.runId);
+    }
+    if (filter.state !== undefined) {
+      clauses.push("state = ?");
+      params.push(filter.state);
+    }
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    const rows = this.read<TaskAskRow>(
+      `SELECT * FROM cf_agents_task_asks${where}`,
+      params
+    );
     rows.sort(
       (left, right) =>
         left.created_at - right.created_at ||
         (left.ask_id < right.ask_id ? -1 : left.ask_id > right.ask_id ? 1 : 0)
     );
-    return rows.map((row) => ({
-      askId: row.ask_id,
-      runId: row.run_id,
-      name: row.name,
-      state: row.state,
-      ...(row.question !== null
-        ? { question: deserializeTaskValue(row.question) as StateMachineJson }
-        : {}),
-      ...(row.answer !== null
-        ? { answer: deserializeTaskValue(row.answer) as StateMachineJson }
-        : {}),
-      ...(row.metadata !== null
-        ? {
-            metadata: JSON.parse(row.metadata) as Record<
-              string,
-              StateMachineJson
-            >
-          }
-        : {}),
-      createdAt: row.created_at,
-      ...(row.expires_at !== null ? { expiresAt: row.expires_at } : {}),
-      ...(row.answered_at !== null ? { answeredAt: row.answered_at } : {})
-    }));
+    return rows.map(askRecord);
   }
 
-  /**
-   * The non-terminal children one run owns on THIS Lifecycle, read through
-   * the parent index. A child accepted on a facet is found through
-   * `cf_agents_task_routes` instead, which is why these carry no owner key.
-   */
+  /** One ask row by id, or undefined. */
+  getAsk(askId: string): TaskAskRow | undefined {
+    return this.read<TaskAskRow>(
+      "SELECT * FROM cf_agents_task_asks WHERE ask_id = ?",
+      [askId]
+    )[0];
+  }
+
   listChildren(runId: string): StateMachineChildRef[] {
     const rows = this.sql<{
       run_id: string;
@@ -710,4 +712,28 @@ export class TaskStore {
       background: row.background === 1
     }));
   }
+}
+
+/** Project one ask row as the record `asks()` and `view()` return. */
+function askRecord(row: TaskAskRow): StateMachineAskRecord {
+  return {
+    askId: row.ask_id,
+    runId: row.run_id,
+    name: row.name,
+    state: row.state,
+    ...(row.question !== null
+      ? { question: deserializeTaskValue(row.question) as StateMachineJson }
+      : {}),
+    ...(row.answer !== null
+      ? { answer: deserializeTaskValue(row.answer) as StateMachineJson }
+      : {}),
+    ...(row.metadata !== null
+      ? {
+          metadata: JSON.parse(row.metadata) as Record<string, StateMachineJson>
+        }
+      : {}),
+    createdAt: row.created_at,
+    ...(row.expires_at !== null ? { expiresAt: row.expires_at } : {}),
+    ...(row.answered_at !== null ? { answeredAt: row.answered_at } : {})
+  };
 }

@@ -816,7 +816,7 @@ export interface TaskContext<
   answers<A>(
     pending: readonly Pending<A>[],
     options?: { within?: number | TaskDurationString; mode?: "all" | "any" }
-  ): Promise<A[] | TaskTimedOut>;
+  ): Promise<(A | undefined)[] | TaskTimedOut>; // undefined where an ask lapsed
   /** Read answers already durable, without parking. Mirrors peek/peekAll. */
   peekAnswers<A>(pending: readonly Pending<A>[]): (A | undefined)[];
 

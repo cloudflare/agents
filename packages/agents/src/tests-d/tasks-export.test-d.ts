@@ -301,8 +301,9 @@ const chat = {
       if (decisions === ctx.timedOut) {
         return { phase: "idle", turnSeq: state.turnSeq };
       }
-      // The answer type travels with the ask KIND, not with the run.
-      decisions satisfies Decision[];
+      // The answer type travels with the ask KIND, not with the run; a
+      // lapsed ask reads as undefined beside the answers that landed.
+      decisions satisfies (Decision | undefined)[];
       return { phase: "turn", input: "again", turnSeq: state.turnSeq + 1 };
     }
   },
