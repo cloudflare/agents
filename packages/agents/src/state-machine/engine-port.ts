@@ -47,6 +47,11 @@ export type TaskStepEngineDeps = {
    * forever and its idempotency keys omit the turn segment.
    */
   compiled: boolean;
+  /**
+   * True for the invocation running `onCancel`: the abort mark is present by
+   * construction, so a step boundary must not read it as a cancellation.
+   */
+  cancelTransition: boolean;
   defaults: ResolvedStepPolicy;
   emit: (type: string, payload: Record<string, unknown>) => void;
 };
@@ -132,6 +137,8 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     },
     completeStep: (turn, name, result) => {
       assertCurrent();
+      // A completed journal row is durable progress (§5.4 rule 8).
+      creditedProgress += 1;
       const resultJson = serializeTaskValue(
         result,
         `result of step "${name}" in run "${runId}"`
@@ -187,7 +194,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       const now = Date.now();
       // First writer wins: a repeat is zero rows and zero index writes, which
       // is what makes a memo safe to re-derive on every replay.
-      return (
+      const written =
         deps.store.write(
           `INSERT INTO cf_agents_task_journal
              (run_id, turn, name, kind, state, result, attempt, created_at,
@@ -195,8 +202,10 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
            VALUES (?, ?, ?, 'memo', 'completed', ?, 0, ?, ?, ?)
            ON CONFLICT (run_id, turn, name) DO NOTHING`,
           [runId, RUN_SCOPED_TURN, name, value, now, now, now]
-        ) > 0
-      );
+        ) > 0;
+      // A first write is progress; a repeat is a read.
+      if (written) creditedProgress += 1;
+      return written;
     },
     peekMailbox: (filter, now) => {
       // FIFO order is applied in memory, not by `ORDER BY seq`: `seq` is not
@@ -214,11 +223,13 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       if (keys.length === 0) return 0;
       assertCurrent();
       const placeholders = keys.map(() => "?").join(", ");
-      return deps.store.write(
+      const consumed = deps.store.write(
         `DELETE FROM cf_agents_task_mailbox
          WHERE run_id = ? AND key IN (${placeholders})`,
         [runId, ...keys]
       );
+      creditedProgress += consumed;
+      return consumed;
     },
     countMailbox: () => {
       const rows = deps.store.sql<{ count: number }>`
@@ -290,14 +301,15 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       const now = Date.now();
       // Conditional on `open`, so two isolates racing one answer apply it
       // exactly once and the loser reads `{ accepted: false }`.
-      return (
+      const settled =
         deps.store.write(
           `UPDATE cf_agents_task_asks
            SET state = ?, answer = ?, answered_at = ?
            WHERE ask_id = ? AND run_id = ? AND state = 'open'`,
           [state, answer, now, askId, runId]
-        ) > 0
-      );
+        ) > 0;
+      if (settled && state === "answered") creditedProgress += 1;
+      return settled;
     },
     withdrawOpenAsks: () => {
       // Settlement marks open asks withdrawn rather than deleting them: the
@@ -347,12 +359,18 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     refreshClaim: () => {
       const now = Date.now();
       if (now - lastClaimWriteAt < deps.claimRefreshAfterMs) return;
+      // The heartbeat (§5.3): the claim backstop and the per-transition
+      // watchdog move together, so a transition that heartbeats never trips
+      // either.
       const written = deps.store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs SET next_at = ?, updated_at = ?
+        `UPDATE cf_agents_task_runs
+           SET next_at = ?, updated_at = ?,
+               turn_deadline_at = CASE WHEN turn_timeout_ms IS NULL THEN NULL
+                                       ELSE ? + turn_timeout_ms END
            WHERE run_id = ? AND generation = ? AND state = 'running'`,
-        [now + deps.claimTimeoutMs(), now]
+        [now + deps.claimTimeoutMs(), now, now]
       );
       if (written) lastClaimWriteAt = now;
     },
@@ -368,6 +386,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       if (written) lastStatusMessage = message;
     },
     cancellationRequested: () => {
+      if (deps.cancelTransition) return null;
       // The abort mark is the barrier every checkpoint-advancing write is
       // fenced on, so it is also what a step boundary asks about; the
       // legacy `cancel_reason` is still written beside it.

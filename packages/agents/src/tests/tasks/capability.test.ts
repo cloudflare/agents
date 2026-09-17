@@ -2462,33 +2462,6 @@ describe("Tasks#at", () => {
     });
   });
 
-  it("fails a machine run visibly until its dispatch loop lands", async () => {
-    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      // A machine declared in `definitions` is accepted durably — the map
-      // is a static property of the capability, not a per-run condition —
-      // and then fails on dispatch rather than hanging. Recording it here
-      // makes the engine's arrival a visible diff at this assertion.
-      const receipt = await instance.tasks.run("counter", { from: 0 });
-      expect(receipt.accepted).toBe(true);
-
-      const snapshot = await waitForState(instance.tasks, receipt.runId, [
-        "failed"
-      ]);
-      if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.message).toMatch(
-        /is a state machine, and machine dispatch is not wired up yet/
-      );
-      // It reaches the host's observer like any other terminal failure.
-      await waitFor(() =>
-        instance.runErrorRuns.some((seen) => seen.runId === receipt.runId)
-      );
-      expect(
-        instance.runErrorRuns.find((seen) => seen.runId === receipt.runId)
-      ).toMatchObject({ definition: "counter", name: "Error" });
-    });
-  });
-
   it("refuses the members whose engine has not landed yet", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
@@ -2511,7 +2484,6 @@ describe("Tasks#at", () => {
       expect(() => run.withdraw("steer:1")).toThrow(/not wired up yet/);
       expect(() => run.view()).toThrow(/not wired up yet/);
       expect(() => run.watch(() => {})).toThrow(/not wired up yet/);
-      expect(() => run.terminate()).toThrow(/not wired up yet/);
 
       // The definition lens carries the same verbs over the same stubs.
       const lens = instance.tasks.handle("counter");
@@ -2539,10 +2511,6 @@ describe("Tasks#at", () => {
       expect(() => tasks.asks()).toThrow(/not wired up yet/);
       expect(() => tasks.view("run_1")).toThrow(/not wired up yet/);
       expect(() => tasks.watch("run_1", () => {})).toThrow(/not wired up yet/);
-      expect(() => tasks.terminate("run_1")).toThrow(/not wired up yet/);
-      expect(() => tasks.pause("run_1")).toThrow(/not wired up yet/);
-      expect(() => tasks.resume("run_1")).toThrow(/not wired up yet/);
-      expect(() => tasks.reopen("run_1")).toThrow(/not wired up yet/);
     });
   });
 

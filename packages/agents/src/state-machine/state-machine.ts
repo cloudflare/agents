@@ -40,14 +40,21 @@ import {
   COMPILED_CHECKPOINT,
   COMPILED_PHASE,
   isCompiledCheckpoint,
+  phaseOf,
   parseDefinitionName,
-  readTaskTerminal
+  readTaskTerminal,
+  type TaskTerminalSignal
 } from "./machine";
 import { parseTaskDuration } from "./duration";
 import {
-  StateMachineMissingDefinitionError,
+  StateMachineCancelCannotParkError,
+  StateMachineDeadlineExceededError,
   StateMachineInterruptionsExhaustedError,
-  StateMachineDeadlineExceededError
+  StateMachineMissingDefinitionError,
+  StateMachineNoProgressError,
+  StateMachineOrphanedDefinitionError,
+  StateMachineTransitionBudgetError,
+  StateMachineTurnDeadlineExceededError
 } from "./errors";
 import type {
   StateMachineEventType,
@@ -67,10 +74,15 @@ import {
   type ResolvedRetryPolicy,
   type ResolvedStepPolicy
 } from "./replay";
-import { deserializeTaskValue, serializeTaskValue } from "./serialization";
+import {
+  deserializeTaskValue,
+  serializeTaskCheckpoint,
+  serializeTaskValue
+} from "./serialization";
 import type {
   AnyStateMachineDefinition,
   AskKind,
+  StateMachineAbortMark,
   StateMachineAnswerReceipt,
   StateMachineAskRecord,
   StateMachineAskState,
@@ -92,7 +104,8 @@ import type {
   StateMachineSendReceipt,
   StateMachineStartMode,
   StateMachineState,
-  StateMachineValue
+  StateMachineValue,
+  StateMachineWaitReason
 } from "./types";
 
 /**
@@ -105,10 +118,13 @@ export type StateMachineDefinitionResolver = (
   name: string
 ) => AnyStateMachineDefinition | undefined;
 
-const taskDefinitionResolvers = new WeakMap<
-  object,
-  StateMachineDefinitionResolver
->();
+/** A resolver plus the names it can currently resolve, for versioning. */
+type ResolverEntry = {
+  resolve: StateMachineDefinitionResolver;
+  names: () => Iterable<string>;
+};
+
+const taskDefinitionResolvers = new WeakMap<object, ResolverEntry>();
 
 /**
  * @internal Supply a composition-root fallback for definition names outside
@@ -120,9 +136,10 @@ const taskDefinitionResolvers = new WeakMap<
  */
 export function setStateMachineDefinitionResolver(
   tasks: LifecycleCapability,
-  resolver: StateMachineDefinitionResolver
+  resolver: StateMachineDefinitionResolver,
+  names: () => Iterable<string> = () => []
 ): void {
-  taskDefinitionResolvers.set(tasks, resolver);
+  taskDefinitionResolvers.set(tasks, { resolve: resolver, names });
 }
 
 const taskRoutedMemoryLimitHandlers = new WeakMap<
@@ -208,6 +225,19 @@ const WAKE_JOB_RETRY = { maxAttempts: 1 } as const;
  */
 const DISPATCH_BUDGET_MS = 5_000;
 
+/** Rule A: no-progress transitions tolerated before a run faults. */
+const DEFAULT_STALL_LIMIT = 1;
+/** Rule B: transitions since the last park before a run faults. */
+const DEFAULT_TRANSITION_BUDGET = 1000;
+/** The park a tolerated no-progress transition takes, per stall. */
+const STALL_BACKOFF_MS = 1_000;
+/** How many phases a transition-budget fault names. */
+const BUDGET_TRAIL = 8;
+/** The outcomes that keep a run row regardless of `retain`. */
+const PRESERVED_OUTCOMES = new Set(["faulted", "orphaned"]);
+/** Which abort-mark state a fenced write requires (§5.2). */
+type MarkPredicate = "null" | "set" | "any";
+
 const TERMINAL_STATES: ReadonlySet<StateMachineRunState> = new Set([
   "completed",
   "failed",
@@ -246,6 +276,26 @@ function readJournalCursor(storage: DurableObjectStorage): TaskJournalCursor {
 }
 
 /** The three machine verbs a definition lens carries, pending that engine. */
+/** The SQL fragment one mark predicate compiles to (§5.2). */
+function markClause(mark: MarkPredicate): string {
+  switch (mark) {
+    case "null":
+      return "abort_mark IS NULL";
+    case "set":
+      return "abort_mark IS NOT NULL";
+    case "any":
+      return "1 = 1";
+  }
+}
+
+/** True for a machine that opted into the fresh-invocation cancel. */
+function declaresOnCancel(definition: AnyStateMachineDefinition): boolean {
+  return (
+    typeof definition.onCancel === "function" &&
+    !isCompiledCheckpoint(definition.initial)
+  );
+}
+
 function machineVerbsPendingEngine() {
   return {
     send: () => notImplementedYet("handle().send"),
@@ -336,6 +386,9 @@ export class StateMachine<
   #storeInstance: TaskStore | undefined;
   #schemaVersionCache: number | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
+  readonly #stallLimit: number;
+  readonly #transitionBudget: number;
+  readonly #turnTimeoutMs: number | null;
   readonly #onError:
     | ((error: unknown, run: StateMachineFailedRun) => void | Promise<void>)
     | undefined;
@@ -365,6 +418,15 @@ export class StateMachine<
           : DEFAULT_STEP_POLICY.timeoutMs
     };
     this.#onError = options.onError;
+    this.#stallLimit = Math.max(1, options.stallLimit ?? DEFAULT_STALL_LIMIT);
+    this.#transitionBudget = Math.max(
+      1,
+      options.transitionBudget ?? DEFAULT_TRANSITION_BUDGET
+    );
+    this.#turnTimeoutMs =
+      options.turnTimeout === undefined
+        ? null
+        : parseTaskDuration(options.turnTimeout, "turnTimeout");
   }
 
   #claimTimeoutMs(): number {
@@ -405,7 +467,7 @@ export class StateMachine<
     return (
       this.#definitions[name] ??
       this.#registered.get(name) ??
-      taskDefinitionResolvers.get(this)?.(name)
+      taskDefinitionResolvers.get(this)?.resolve(name)
     );
   }
 
@@ -570,7 +632,7 @@ export class StateMachine<
       withdraw: () => notImplementedYet("at().withdraw"),
       view: () => notImplementedYet("at().view"),
       watch: () => notImplementedYet("at().watch"),
-      terminate: () => notImplementedYet("at().terminate")
+      terminate: (reason?: string) => this.terminate(runId, reason)
     };
     // SAFETY: every member of `StateMachineRunHandle` is typed against the
     // definition, which is a type parameter here, so the payload and output
@@ -825,6 +887,9 @@ export class StateMachine<
       if (await this.#enforceDeadline(runId, active)) {
         return this.#wakeOutcome(runId);
       }
+      if (await this.#enforceTurnDeadline(runId, active)) {
+        return this.#wakeOutcome(runId);
+      }
       this.#refreshClaim(runId);
       this.lifecycle.trackAlarmWork(active.promise);
       return this.#wakeOutcome(runId);
@@ -1052,36 +1117,32 @@ export class StateMachine<
   }
 
   /**
-   * When one non-terminal run must next wake: its `next_at` (claim backstop,
-   * sleep, or retry deadline) brought forward to its deadline, so a parked
-   * run and a held claim both wake to fail on time. `null` for a terminal or
-   * unknown run.
+   * The soonest instant this run needs a wake: its park or claim backstop,
+   * its deadline, and — while a transition is live — its turn watchdog.
    */
   #nextWake(runId: string): number | null {
     const rows = this.#store.sql<{
       next_at: number | null;
       deadline_at: number | null;
+      turn_deadline_at: number | null;
+      state: StateMachineRunState;
     }>`
-      SELECT next_at, deadline_at FROM cf_agents_task_runs
+      SELECT next_at, deadline_at, turn_deadline_at, state
+      FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
     `;
     const row = rows[0];
     if (!row) return null;
-    if (row.deadline_at === null) return row.next_at;
-    if (row.next_at === null) return row.deadline_at;
-    return Math.min(row.next_at, row.deadline_at);
+    const candidates = [
+      row.next_at,
+      row.deadline_at,
+      row.state === "running" ? row.turn_deadline_at : null
+    ].filter((at): at is number => at !== null);
+    return candidates.length === 0 ? null : Math.min(...candidates);
   }
 
-  /**
-   * Fail a live attempt whose run deadline has passed. The run settles
-   * failed under the attempt's generation first, so every later write the
-   * attempt makes is fenced out, then the attempt's signal aborts with the
-   * deadline error so cooperative work unwinds; a signal-deaf attempt simply
-   * runs on as a zombie until its isolate goes.
-   *
-   * @returns True when the deadline was enforced.
-   */
+  /** The run deadline against a live attempt: the mark, then the protocol. */
   async #enforceDeadline(
     runId: string,
     active: ActiveAttempt
@@ -1091,6 +1152,64 @@ export class StateMachine<
       return false;
     }
     const error = new StateMachineDeadlineExceededError(runId, row.deadline_at);
+    await this.#abortLive(row, active, "deadline", error);
+    return true;
+  }
+
+  /** The per-transition watchdog: the mark, then the protocol. */
+  async #enforceTurnDeadline(
+    runId: string,
+    active: ActiveAttempt
+  ): Promise<boolean> {
+    const row = this.#store.getRun(runId);
+    if (
+      !row ||
+      row.state !== "running" ||
+      row.generation !== active.generation ||
+      row.turn_deadline_at === null ||
+      row.turn_deadline_at > Date.now()
+    ) {
+      return false;
+    }
+    const error = new StateMachineTurnDeadlineExceededError(
+      runId,
+      row.turn_deadline_at
+    );
+    await this.#abortLive(row, active, "turn-deadline", error);
+    return true;
+  }
+
+  /**
+   * The abort protocol against a live attempt (§6.2): one write sets the
+   * mark, the invocation is signalled, and the run settles by its inline
+   * default at once — or, for a machine that declared `onCancel`, the live
+   * invocation is joined (bounded) and a fresh invocation runs the cancel
+   * transition, fenced against the old one by the mark.
+   */
+  async #abortLive(
+    row: TaskRunRow,
+    active: ActiveAttempt,
+    mark: StateMachineAbortMark,
+    error: Error
+  ): Promise<void> {
+    const runId = row.run_id;
+    const now = Date.now();
+    this.#store.sql`
+      UPDATE cf_agents_task_runs
+      SET abort_mark = coalesce(abort_mark, ${mark}),
+          abort_reason = coalesce(abort_reason, ${error.message}),
+          updated_at = ${now}
+      WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
+    `;
+    const definition = this.#resolveDefinition(row.definition);
+    if (definition !== undefined && declaresOnCancel(definition)) {
+      active.controller.abort(error);
+      await this.#joinAttempt(active);
+      const current = this.#store.getRun(runId);
+      if (!current || TERMINAL_STATES.has(current.state)) return;
+      await this.#runCancelTransition(current, definition);
+      return;
+    }
     const failed = await this.#settleFailed(
       runId,
       active.generation,
@@ -1098,7 +1217,6 @@ export class StateMachine<
     );
     active.controller.abort(error);
     if (failed) await this.#observeError(error, row);
-    return true;
   }
 
   /**
@@ -1317,21 +1435,10 @@ export class StateMachine<
   }
 
   /**
-   * Request cooperative cancellation of one run.
-   *
-   * A live attempt is aborted and settles as cancelled at its next step
-   * boundary; a parked run settles immediately.
-   *
-   * `options.wait` asks to resolve on terminality rather than on
-   * acceptance: a parked run is already terminal when this resolves, and a
-   * live attempt is joined, bounded by the claim slack. The bound is what
-   * makes the option honest — an attempt that honours its signal settles
-   * well inside it, and a signal-deaf one would otherwise hold the caller
-   * for as long as it holds its isolate. Cancelling a run from inside its
-   * own attempt can therefore only wait the bound out, which is one reason
-   * `wait` is opt-in.
-   *
-   * @returns True when a non-terminal run accepted the request.
+   * Request cooperative cancellation (§6.3). True when a non-terminal run
+   * took the mark. A definition without `onCancel` is terminal when this
+   * resolves; one with `onCancel` settles when its cancel transition does —
+   * pass `{ wait: true }` to await that.
    */
   async cancel(
     runId: string,
@@ -1342,31 +1449,64 @@ export class StateMachine<
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return false;
 
+    const definition = this.#resolveDefinition(row.definition);
+    const cancelTransition =
+      definition !== undefined &&
+      declaresOnCancel(definition) &&
+      row.checkpoint !== null;
+
     const active = this.#active.get(runId);
     if (active) {
       const now = Date.now();
-      // The abort mark and the legacy request bits land in ONE update: the
-      // mark is the write barrier every checkpoint-advancing write is fenced
-      // on, and `cancel_requested` is what `rowToSnapshot`'s cancelled arm
-      // and every existing reader still see. Two columns, zero extra writes.
+      // The mark and the legacy request bits land in ONE update: the mark
+      // is the write barrier every checkpoint-advancing write is fenced on.
       this.#store.sql`
         UPDATE cf_agents_task_runs
         SET cancel_requested = 1, cancel_reason = ${reason ?? null},
-            abort_mark = 'cancel', abort_reason = ${reason ?? null},
+            abort_mark = coalesce(abort_mark, 'cancel'),
+            abort_reason = coalesce(abort_reason, ${reason ?? null}),
             next_at = ${now}, updated_at = ${now}
         WHERE run_id = ${runId}
       `;
       active.controller.abort(new TaskCancellation(reason));
       await this.#syncWake(runId);
-      if (options?.wait === true) await this.#joinAttempt(active);
+      // The live attempt ends under the mark; #afterAttempt then runs the
+      // cancel transition or the inline default.
+      if (options?.wait === true) await this.#awaitSettled(runId, active);
       return true;
     }
-    // A parked run settles in one write: #settleCancelled's UPDATE records
-    // the abort mark and the request bits itself, so a separate request
-    // write would touch the same row twice in the same synchronous block
-    // (one durable commit either way — the split bought no crash evidence).
+    if (cancelTransition) {
+      const now = Date.now();
+      this.#store.sql`
+        UPDATE cf_agents_task_runs
+        SET cancel_requested = 1, cancel_reason = ${reason ?? null},
+            abort_mark = coalesce(abort_mark, 'cancel'),
+            abort_reason = coalesce(abort_reason, ${reason ?? null}),
+            updated_at = ${now}
+        WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
+      `;
+      const marked = this.#store.getRun(runId);
+      if (!marked || TERMINAL_STATES.has(marked.state)) return false;
+      const transition = this.#runCancelTransition(marked, definition);
+      if (options?.wait === true) await transition;
+      else void transition.catch(() => {});
+      return true;
+    }
     await this.#settleCancelled(runId, null, reason);
     return true;
+  }
+
+  /** Resolve once the run is terminal, or once the protocol gave up. */
+  async #awaitSettled(runId: string, active: ActiveAttempt): Promise<void> {
+    let joined = active;
+    for (;;) {
+      await this.#joinAttempt(joined);
+      const row = this.#store.getRun(runId);
+      if (!row || TERMINAL_STATES.has(row.state)) return;
+      const next = this.#active.get(runId);
+      if (!next || next === joined) return;
+      joined = next;
+    }
   }
 
   /**
@@ -1390,23 +1530,92 @@ export class StateMachine<
   }
 
   /** Force a run terminal without running `onCancel`. */
-  terminate(_runId: string, _reason?: string): Promise<boolean> {
-    return notImplementedYet("terminate");
+  async terminate(runId: string, reason?: string): Promise<boolean> {
+    await this.lifecycle.ready();
+    const row = this.#store.getRun(runId);
+    if (!row || TERMINAL_STATES.has(row.state)) return false;
+    const active = this.#active.get(runId);
+    active?.controller.abort(new TaskCancellation(reason));
+    await this.#settleCancelled(runId, null, reason);
+    return true;
   }
 
   /** Stop dispatching a run. A live transition is not interrupted. */
-  pause(_runId: string): Promise<boolean> {
-    return notImplementedYet("pause");
+  async pause(runId: string): Promise<boolean> {
+    await this.lifecycle.ready();
+    const row = this.#store.getRun(runId);
+    if (!row || TERMINAL_STATES.has(row.state) || row.paused === 1) {
+      return false;
+    }
+    const now = Date.now();
+    if (this.#active.has(runId)) {
+      // Takes effect at the transition boundary the loop reaches next.
+      this.#store.sql`
+        UPDATE cf_agents_task_runs SET paused = 1, updated_at = ${now}
+        WHERE run_id = ${runId}
+      `;
+      return true;
+    }
+    this.#store.sql`
+      UPDATE cf_agents_task_runs
+      SET paused = 1, state = 'waiting', wait_reason = 'paused', next_at = NULL,
+          generation = NULL, updated_at = ${now}
+      WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
+    `;
+    this.#emit("task:paused", { runId, definition: row.definition });
+    await this.#syncWake(runId);
+    return true;
   }
 
-  /** Resume a paused run. */
-  resume(_runId: string): Promise<boolean> {
-    return notImplementedYet("resume");
+  /** Resume a paused run. False when it was not paused. */
+  async resume(runId: string): Promise<boolean> {
+    await this.lifecycle.ready();
+    const row = this.#store.getRun(runId);
+    if (!row || TERMINAL_STATES.has(row.state) || row.paused !== 1) {
+      return false;
+    }
+    const now = Date.now();
+    this.#store.sql`
+      UPDATE cf_agents_task_runs
+      SET paused = 0,
+          next_at = CASE WHEN wait_reason = 'paused' THEN ${now} ELSE next_at END,
+          wait_reason = CASE WHEN wait_reason = 'paused' THEN NULL ELSE wait_reason END,
+          updated_at = ${now}
+      WHERE run_id = ${runId}
+    `;
+    this.#emit("task:resumed", { runId, definition: row.definition });
+    await this.#syncWake(runId);
+    return true;
   }
 
-  /** Re-resolve an orphaned run against the now-registered definition. */
-  reopen(_runId: string): Promise<boolean> {
-    return notImplementedYet("reopen");
+  /**
+   * Bring a `faulted` or `orphaned` run back: it re-enters `pending` at its
+   * preserved checkpoint and is re-resolved against the definitions now
+   * registered. False for any other run.
+   */
+  async reopen(runId: string): Promise<boolean> {
+    await this.lifecycle.ready();
+    const row = this.#store.getRun(runId);
+    if (
+      !row ||
+      row.state !== "failed" ||
+      row.outcome === null ||
+      !PRESERVED_OUTCOMES.has(row.outcome)
+    ) {
+      return false;
+    }
+    const now = Date.now();
+    this.#store.sql`
+      UPDATE cf_agents_task_runs
+      SET state = 'pending', outcome = NULL, error_name = NULL,
+          error_message = NULL, settled_at = NULL, stall = 0, transitions = 0,
+          generation = NULL, next_at = ${now}, wait_reason = NULL,
+          abort_mark = NULL, abort_reason = NULL, cancel_requested = 0,
+          cancel_reason = NULL, updated_at = ${now}
+      WHERE run_id = ${runId} AND state = 'failed'
+    `;
+    await this.#syncWake(runId);
+    return true;
   }
 
   /**
@@ -1497,7 +1706,7 @@ export class StateMachine<
     // a transition already in flight.
     const turnTimeoutMs =
       options.turnTimeout === undefined
-        ? null
+        ? this.#turnTimeoutMs
         : parseTaskDuration(options.turnTimeout, "turnTimeout");
 
     const inputJson = serializeTaskValue(
@@ -1609,8 +1818,8 @@ export class StateMachine<
     if (!row || TERMINAL_STATES.has(row.state)) return;
 
     const now = Date.now();
-    if (row.cancel_requested === 1) {
-      await this.#settleCancelled(runId, null, row.cancel_reason ?? undefined);
+    if (row.abort_mark !== null || row.cancel_requested === 1) {
+      await this.#resolveMark(row);
       return;
     }
     // The deadline check comes before the due gate: a deadline brings a
@@ -1623,66 +1832,47 @@ export class StateMachine<
       );
       return;
     }
+    if (row.paused === 1) return;
     if (row.next_at !== null && row.next_at > now) return;
 
-    const definition = this.#resolveDefinition(row.definition);
-    if (!definition) {
-      const error = new StateMachineMissingDefinitionError(row.definition);
-      console.error(error.message);
-      await this.#failWithoutAttempt(row, error);
-      return;
-    }
-    if (!isCompiledCheckpoint(definition.initial)) {
-      const error = new Error(
-        `Definition "${row.definition}" is a state machine, and machine ` +
-          `dispatch is not wired up yet`
-      );
-      console.error(error.message);
-      await this.#failWithoutAttempt(row, error);
-      return;
-    }
+    const resolved = await this.#resolveForRun(row);
+    if (resolved === null) return;
+    const { definition, row: current } = resolved;
 
     // A run found still 'running' was claimed by an isolate that is gone:
     // an unclean interruption, and the only thing the run's own `retries`
     // policy counts. A run parked 'interrupted' is the backoff between one
     // of those and its replay — counted already, at park time. A wake from
     // a sleep or a step retry park is neither, and costs nothing.
-    const interruption = row.state === "running";
+    const interruption = current.state === "running";
     const afterInterruption =
       interruption ||
-      (row.state === "waiting" && row.wait_reason === "interrupted");
+      (current.state === "waiting" && current.wait_reason === "interrupted");
 
     // The interrupted step is read from the journal only on a claim that
-    // follows an interruption. A 'running' step row is not evidence on its
-    // own: steps run concurrently under a `Promise.all`, so a step retry
-    // park can leave a sibling mid-execution with no isolate lost at all.
+    // follows an interruption; every other claim replays a clean journal.
     const interrupted = afterInterruption
-      ? this.#interruptedStep(runId, row.checkpoint_turn)
+      ? this.#interruptedStep(runId, current.checkpoint_turn)
       : null;
 
-    // Consecutive interruptions, not lifetime ones: an attempt that reached
-    // a durable boundary under its own power clears the count, so a healthy
-    // long-lived run is never failed for having survived enough deploys.
     const interruptions = interruption
-      ? row.interruptions + 1
+      ? current.interruptions + 1
       : afterInterruption
-        ? row.interruptions
+        ? current.interruptions
         : 0;
 
     if (interruption) {
       this.#emit("task:attempt:interrupted", {
         runId,
-        definition: row.definition,
-        attempt: row.attempt,
+        definition: current.definition,
+        attempt: current.attempt,
         step: interrupted?.name ?? null
       });
-      const policy = this.#runRetryPolicy(row);
+      const policy = this.#runRetryPolicy(current);
       if (policy) {
-        // `limit` is total attempts including the first, exactly as a
-        // step's is: the interruption that reaches it spends the budget.
         if (interruptions >= policy.retryLimit) {
           await this.#failWithoutAttempt(
-            row,
+            current,
             new StateMachineInterruptionsExhaustedError(runId, interruptions),
             interruptions
           );
@@ -1690,31 +1880,26 @@ export class StateMachine<
         }
         const delayMs = computeRetryDelayMs(policy, interruptions);
         if (delayMs > 0) {
-          // Park on a durable backoff instead of replaying now; the next
-          // wake finds a 'waiting' row and claims it normally.
-          await this.#parkInterruption(row, interruptions, now + delayMs);
+          await this.#parkInterruption(current, interruptions, now + delayMs);
           return;
         }
       }
     }
 
     const generation = nanoid();
-    const attempt = row.attempt + 1;
+    const attempt = current.attempt + 1;
+    const turnDeadline = this.#turnDeadline(current, now);
     this.#store.sql`
       UPDATE cf_agents_task_runs
       SET state = 'running', attempt = ${attempt}, generation = ${generation},
           interruptions = ${interruptions},
           started_at = coalesce(started_at, ${now}),
-          next_at = ${now + this.#claimTimeoutMs()}, wait_reason = NULL,
-          updated_at = ${now}
+          next_at = ${now + this.#claimTimeoutMs()},
+          turn_deadline_at = ${turnDeadline},
+          wait_reason = NULL, updated_at = ${now}
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
     `;
-    // Mirror the claim deadline before the handler runs, not after: a
-    // routed run's root has no other way to learn it, and a push here
-    // clears the queue row's in-flight marker, so it durably wins over a
-    // root dispatch that later returns a stale outcome past its own
-    // budget (job-queue's own "newer pushes win" guard on that marker).
     await this.#syncWake(runId);
 
     const controller = new AbortController();
@@ -1722,27 +1907,319 @@ export class StateMachine<
     // first await, so the first step event would otherwise precede this one.
     this.#emit("task:attempt:started", {
       runId,
-      definition: row.definition,
+      definition: current.definition,
       attempt
     });
     const promise = this.#runAttempt(
-      row,
+      current,
       definition,
       generation,
       attempt,
       controller,
       interrupted,
-      now
+      now,
+      null
     );
+    await this.#track(runId, generation, controller, promise);
+    await this.#afterAttempt(runId, generation);
+  }
+
+  /**
+   * Hold one invocation in `#active` for its lifetime. The delete is
+   * guarded by generation: a signal-deaf invocation that finally ends must
+   * not evict the cancel transition that has since taken its place.
+   */
+  async #track(
+    runId: string,
+    generation: string,
+    controller: AbortController,
+    promise: Promise<void>
+  ): Promise<void> {
     this.#active.set(runId, { generation, controller, promise });
     try {
       await promise;
     } finally {
-      this.#active.delete(runId);
+      if (this.#active.get(runId)?.generation === generation) {
+        this.#active.delete(runId);
+      }
     }
   }
 
-  /** Run one claimed attempt and persist its outcome, generation-fenced. */
+  /**
+   * An attempt that ended under a mark it could not settle itself — its
+   * checkpoint, park or result was refused by the fence — hands the run to
+   * the abort protocol here, in the same invocation.
+   */
+  async #afterAttempt(runId: string, generation: string): Promise<void> {
+    const after = this.#store.getRun(runId);
+    if (
+      !after ||
+      TERMINAL_STATES.has(after.state) ||
+      after.generation !== generation ||
+      (after.abort_mark === null && after.cancel_requested !== 1)
+    ) {
+      return;
+    }
+    await this.#resolveMark(after);
+  }
+
+  /** The turn watchdog deadline this claim carries, or NULL for none. */
+  #turnDeadline(row: TaskRunRow, now: number): number | null {
+    return row.turn_timeout_ms === null ? null : now + row.turn_timeout_ms;
+  }
+
+  /**
+   * Resolve the definition a run is dispatched against. An exact name wins.
+   * A name whose base is registered only at a newer version is adopted by
+   * that version's `migrate`, or — when it declares none — the run is
+   * `orphaned`: terminal `failed`, its checkpoint preserved even at
+   * `retain: false`, so `reopen()` has something to reopen once the
+   * definition is registered again. A base nobody registers at all is the
+   * plain missing-definition failure it always was.
+   */
+  async #resolveForRun(row: TaskRunRow): Promise<{
+    definition: AnyStateMachineDefinition;
+    row: TaskRunRow;
+  } | null> {
+    const exact = this.#resolveDefinition(row.definition);
+    if (exact !== undefined) return { definition: exact, row };
+    const base =
+      row.definition_base ?? parseDefinitionName(row.definition).base;
+    const successor = this.#newestSuccessor(base, row.definition_version);
+    if (successor === null) {
+      const error = new StateMachineMissingDefinitionError(row.definition);
+      console.error(error.message);
+      await this.#failWithoutAttempt(row, error);
+      return null;
+    }
+    const orphan = async (detail: string): Promise<null> => {
+      const error = new StateMachineOrphanedDefinitionError(
+        row.definition,
+        row.definition_version,
+        detail
+      );
+      await this.#settleOutcome(row, null, error, "orphaned");
+      return null;
+    };
+    // A run that never committed a checkpoint carries no shape to migrate:
+    // it starts under the successor as if declared there.
+    if (row.checkpoint !== null && successor.definition.migrate === undefined) {
+      return orphan(
+        `"${successor.name}" is registered but declares no migrate()`
+      );
+    }
+    let checkpoint = row.checkpoint;
+    let input = row.input;
+    if (row.checkpoint !== null && successor.definition.migrate !== undefined) {
+      try {
+        const migrated = successor.definition.migrate(
+          JSON.parse(row.checkpoint),
+          row.definition_version,
+          deserializeTaskValue(row.input) as StateMachineJson
+        );
+        checkpoint = serializeTaskCheckpoint(
+          migrated.state,
+          `checkpoint migrated by "${successor.name}"`
+        );
+        if (migrated.input !== undefined) {
+          input = serializeTaskValue(
+            migrated.input,
+            `input migrated by "${successor.name}"`
+          );
+        }
+      } catch (thrown) {
+        return orphan(
+          `migrate() threw: ${thrown instanceof Error ? thrown.message : String(thrown)}`
+        );
+      }
+    }
+    const now = Date.now();
+    this.#store.sql`
+      UPDATE cf_agents_task_runs
+      SET definition = ${successor.name},
+          definition_version = ${successor.version},
+          checkpoint = ${checkpoint}, input = ${input}, updated_at = ${now}
+      WHERE run_id = ${row.run_id}
+        AND state IN ('pending', 'waiting', 'running')
+    `;
+    const adopted = this.#store.getRun(row.run_id);
+    return adopted ? { definition: successor.definition, row: adopted } : null;
+  }
+
+  /** The highest registered version of a base above `version`, if any. */
+  #newestSuccessor(
+    base: string,
+    version: number
+  ): {
+    name: string;
+    version: number;
+    definition: AnyStateMachineDefinition;
+  } | null {
+    let best: {
+      name: string;
+      version: number;
+      definition: AnyStateMachineDefinition;
+    } | null = null;
+    const consider = (name: string, definition: AnyStateMachineDefinition) => {
+      const parsed = parseDefinitionName(name);
+      if (parsed.base !== base || parsed.version <= version) return;
+      if (best === null || parsed.version > best.version) {
+        best = { name, version: parsed.version, definition };
+      }
+    };
+    for (const [name, definition] of Object.entries(this.#definitions)) {
+      consider(name, definition);
+    }
+    for (const [name, definition] of this.#registered) {
+      consider(name, definition);
+    }
+    const resolver = taskDefinitionResolvers.get(this);
+    if (resolver !== undefined) {
+      for (const name of resolver.names()) {
+        const definition = resolver.resolve(name);
+        if (definition !== undefined) consider(name, definition);
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Apply an abort mark to a run with no live invocation: a machine that
+   * declared `onCancel` gets the cancel transition; everything else settles
+   * by the mark's inline default (§6.4).
+   */
+  async #resolveMark(row: TaskRunRow): Promise<void> {
+    const definition = this.#resolveDefinition(row.definition);
+    if (
+      definition !== undefined &&
+      declaresOnCancel(definition) &&
+      row.checkpoint !== null
+    ) {
+      await this.#runCancelTransition(row, definition);
+      return;
+    }
+    await this.#settleByMark(row, null);
+  }
+
+  /** The inline default for each mark (§6.4). */
+  async #settleByMark(
+    row: TaskRunRow,
+    generation: string | null
+  ): Promise<void> {
+    const runId = row.run_id;
+    const mark = row.abort_mark ?? "cancel";
+    const fail = async (error: Error): Promise<void> => {
+      if (await this.#settleFailed(runId, generation, toErrorSummary(error))) {
+        await this.#observeError(error, row);
+      }
+    };
+    switch (mark) {
+      case "cancel":
+        await this.#settleCancelled(
+          runId,
+          generation,
+          row.abort_reason ?? row.cancel_reason ?? undefined
+        );
+        return;
+      case "parent":
+        await this.#settleCancelled(runId, generation, "parent aborted");
+        return;
+      case "deadline":
+        await fail(
+          new StateMachineDeadlineExceededError(
+            runId,
+            row.deadline_at ?? Date.now()
+          )
+        );
+        return;
+      case "turn-deadline":
+        await fail(
+          new StateMachineTurnDeadlineExceededError(
+            runId,
+            row.turn_deadline_at ?? Date.now()
+          )
+        );
+        return;
+      case "seal": {
+        const error = new Error(
+          row.abort_reason ?? "sealed by the memory limit"
+        );
+        error.name = "TaskMemoryLimitSealed";
+        await fail(error);
+        return;
+      }
+    }
+  }
+
+  /**
+   * The cancel transition (§6.2 steps 4–5): a fresh claim, fenced against
+   * whatever invocation held the run by the mark itself, running `onCancel`
+   * with `ctx.cancelling` set. Non-reentrant: a second mark arriving while
+   * it runs is already recorded and does not re-dispatch it.
+   */
+  async #runCancelTransition(
+    row: TaskRunRow,
+    definition: AnyStateMachineDefinition
+  ): Promise<void> {
+    const runId = row.run_id;
+    const held = this.#active.get(runId);
+    if (held !== undefined && held.generation === row.generation) {
+      // Still live under the mark; #afterAttempt dispatches once it ends.
+      return;
+    }
+    const now = Date.now();
+    const generation = nanoid();
+    const attempt = row.attempt + 1;
+    const written = this.#store.write(
+      `UPDATE cf_agents_task_runs
+       SET state = 'running', attempt = ?, generation = ?,
+           started_at = coalesce(started_at, ?), next_at = ?,
+           turn_deadline_at = ?, wait_reason = NULL, updated_at = ?
+       WHERE run_id = ? AND state IN ('pending', 'waiting', 'running')
+         AND abort_mark IS NOT NULL`,
+      [
+        attempt,
+        generation,
+        now,
+        now + this.#claimTimeoutMs(),
+        this.#turnDeadline(row, now),
+        now,
+        runId
+      ]
+    );
+    if (written === 0) return;
+    await this.#syncWake(runId);
+    const claimed = this.#store.getRun(runId);
+    if (!claimed || claimed.abort_mark === null) return;
+    const controller = new AbortController();
+    this.#emit("task:attempt:started", {
+      runId,
+      definition: claimed.definition,
+      attempt,
+      cancelling: claimed.abort_mark
+    });
+    const promise = this.#runAttempt(
+      claimed,
+      definition,
+      generation,
+      attempt,
+      controller,
+      null,
+      now,
+      claimed.abort_mark
+    );
+    await this.#track(runId, generation, controller, promise);
+  }
+
+  /**
+   * One claimed invocation: the turn loop. A handler runs for the phase the
+   * checkpoint names, and the post-transition decision list (§5.4) chooses
+   * what its return means — a terminal settles, a changed checkpoint
+   * commits and dispatches the next phase here, progress without a new
+   * checkpoint re-dispatches the same phase, and nothing at all is a stall.
+   * Every write is fenced on the generation and the abort mark, so an
+   * invocation the protocol has moved past can commit nothing.
+   */
   async #runAttempt(
     row: TaskRunRow,
     machine: AnyStateMachineDefinition,
@@ -1750,159 +2227,478 @@ export class StateMachine<
     attempt: number,
     controller: AbortController,
     interrupted: { name: string; attempt: number } | null,
-    claimedAtMs: number
+    claimedAtMs: number,
+    cancelling: StateMachineAbortMark | null
   ): Promise<void> {
     const runId = row.run_id;
-    const input = deserializeTaskValue(row.input);
+    const compiled = isCompiledCheckpoint(machine.initial);
     const engine = this.#createEngine(
       runId,
       row.definition,
       generation,
       controller,
       claimedAtMs,
-      true
+      compiled,
+      cancelling !== null
     );
-    const step = new ReplayStep(engine, {
-      attempt,
-      startsLive: attempt === 1,
-      interrupted,
-      turn: row.checkpoint_turn,
-      input
-    });
-    // A compiled function definition runs as the single-phase machine it
-    // is: one handler, `ctx.complete(await f(ctx.input, ctx))`, on the same
-    // journal and the same claim path a machine transition uses. Its
-    // checkpoint stays the NULL singleton, so its turn never leaves 0.
+    const input = deserializeTaskValue(row.input);
+    let turn = row.checkpoint_turn;
+    let checkpointJson = row.checkpoint;
+    let transitions = row.transitions;
+    let stall = row.stall;
+    let progress = row.progress;
+    let credited = 0;
+    let interruptedStep = interrupted;
+    let mark = cancelling;
+    const trail: string[] = [];
 
+    let state: unknown;
     try {
-      const returned = await this.lifecycle.runInHostContext(() =>
-        // SAFETY: the compiled phase touches only the step surface plus
-        // `input` and `complete`, all of which ReplayStep provides; the full
-        // machine context lands with the machine dispatch loop. The engine's
-        // machine type admits every handler through `never` parameters, so
-        // invoking one is the one cast the engine makes.
-        machine.phases[COMPILED_PHASE]?.(
-          COMPILED_CHECKPOINT as never,
-          step as never
-        )
+      state = this.#loadState(machine, row, input, compiled);
+    } catch (thrown) {
+      await this.#settleThrown(row, generation, thrown, mark, false);
+      return;
+    }
+    if (!compiled && checkpointJson === null) {
+      // The first dispatch commits `initial` at turn 0 before any handler
+      // runs, so a park in the first phase — and `onCancel` after it — has
+      // a checkpoint to read. One row write, once per machine run.
+      let json: string | null;
+      try {
+        json = serializeTaskCheckpoint(
+          state,
+          `initial checkpoint of "${row.definition}"`
+        );
+      } catch (thrown) {
+        await this.#settleThrown(row, generation, thrown, mark, false);
+        return;
+      }
+      const committed = this.#store.fencedWrite(
+        runId,
+        generation,
+        `UPDATE cf_agents_task_runs SET checkpoint = ?, updated_at = ?
+         WHERE run_id = ? AND generation = ? AND state = 'running'
+           AND abort_mark IS NULL AND checkpoint IS NULL`,
+        [json, Date.now()]
       );
+      if (!committed) return;
+      checkpointJson = json;
+      this.#emit("task:checkpoint", {
+        runId,
+        definition: row.definition,
+        turn,
+        phase: phaseOf(state)
+      });
+    }
+
+    for (;;) {
+      const phase = compiled ? COMPILED_PHASE : phaseOf(state);
+      const handler = mark !== null ? machine.onCancel : machine.phases[phase];
+      if (handler === undefined) {
+        await this.#settleThrown(
+          row,
+          generation,
+          new Error(
+            `Definition "${row.definition}" has no handler for phase "${phase}"`
+          ),
+          mark,
+          false
+        );
+        return;
+      }
+      const ctx = new ReplayStep(engine, {
+        attempt,
+        startsLive: attempt === 1 || turn > row.checkpoint_turn,
+        interrupted: interruptedStep,
+        turn,
+        input,
+        facts: {
+          id: runId,
+          definition: row.definition,
+          version: row.definition_version,
+          background: row.background === 1,
+          metadata:
+            row.metadata === null
+              ? undefined
+              : (JSON.parse(row.metadata) as Record<string, StateMachineJson>),
+          createdAt: row.created_at,
+          progress,
+          cancelling: mark
+        }
+      });
+      interruptedStep = null;
+      if (!compiled) {
+        this.#emit("task:transition:started", {
+          runId,
+          definition: row.definition,
+          phase: mark !== null ? "onCancel" : phase,
+          turn
+        });
+        if (trail.push(phase) > BUDGET_TRAIL) trail.shift();
+      }
+
+      let returned: unknown;
+      try {
+        // SAFETY: the engine's machine type admits every handler through
+        // never-typed parameters; this is the one place one is invoked, with
+        // the checkpoint its phase declared and the context that implements
+        // the whole `ctx` surface.
+        returned = await this.lifecycle.runInHostContext(() =>
+          handler(state as never, ctx as never)
+        );
+      } catch (thrown) {
+        if (mark !== null && isTaskSuspension(thrown)) {
+          // `onCancel` may not park (§6.2).
+          await this.#settleOutcome(
+            row,
+            generation,
+            new StateMachineCancelCannotParkError(thrown.reason),
+            "faulted",
+            "set"
+          );
+          return;
+        }
+        await this.#settleThrown(
+          row,
+          generation,
+          thrown,
+          mark,
+          declaresOnCancel(machine)
+        );
+        return;
+      }
+
       const terminal = readTaskTerminal(returned);
-      if (terminal === undefined) {
+      if (terminal !== undefined) {
+        await this.#settleTerminal(row, generation, terminal, mark);
+        return;
+      }
+      if (compiled) {
         // Unreachable by construction — the compiled phase IS
         // `ctx.complete(await fn(input, ctx))` — and loud rather than
         // silent on purpose: settling `completed` with a NULL result
         // would turn a wrong terminal into data instead of a fault.
-        throw new Error(
-          `Task definition "${row.definition}" returned no terminal from its ` +
-            `compiled phase`
-        );
-      }
-      const resultJson = serializeTaskValue(
-        terminal.result,
-        `result of Task definition "${row.definition}"`
-      );
-      // A cancel accepted mid-attempt wins over a result: a handler that
-      // caught `step.signal`, cleaned up, and returned normally has honoured
-      // the cancellation, and the run must not read as completed.
-      const current = this.#store.getRun(runId);
-      if (current?.cancel_requested === 1) {
-        await this.#settleCancelled(
-          runId,
+        await this.#settleThrown(
+          row,
           generation,
-          current.cancel_reason ?? undefined
+          new Error(
+            `Task definition "${row.definition}" returned no terminal from its compiled phase`
+          ),
+          null,
+          false
         );
         return;
       }
-      const settled = this.#store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE cf_agents_task_runs
-         SET state = 'completed', result = ?, generation = NULL, next_at = NULL,
-             settled_at = ?, updated_at = ?
-         WHERE run_id = ? AND generation = ? AND state = 'running'`,
-        [resultJson, Date.now(), Date.now()]
-      );
-      if (settled) {
-        this.#emit("task:completed", { runId, definition: row.definition });
-        await this.#finishTerminalSettlement(runId, row);
+
+      let nextJson: string | null;
+      try {
+        nextJson = serializeTaskCheckpoint(
+          returned,
+          `checkpoint returned by "${row.definition}" phase "${phase}"`
+        );
+      } catch (thrown) {
+        await this.#settleThrown(row, generation, thrown, mark, false);
+        return;
       }
-      // Fence rejected: a newer generation owns the run, and every deadline
-      // mutation it makes funnels through its own #syncWake — a push here
-      // would be a redundant job-row write.
-    } catch (thrown) {
-      await this.#settleThrown(row, generation, thrown);
+      const delta = engine.progressCredited() - credited;
+      credited += delta;
+      const now = Date.now();
+
+      if (mark !== null) {
+        // `onCancel` returned a checkpoint: the machine declined the
+        // cancel. Clear the mark and resume from what it returned.
+        const resumed = this.#store.fencedWrite(
+          runId,
+          generation,
+          `UPDATE cf_agents_task_runs
+           SET checkpoint = ?, checkpoint_turn = ?, transitions = 0, stall = 0,
+               progress = ?, abort_mark = NULL, abort_reason = NULL,
+               cancel_requested = 0, cancel_reason = NULL, updated_at = ?
+           WHERE run_id = ? AND generation = ? AND state = 'running'
+             AND abort_mark IS NOT NULL`,
+          [nextJson, turn + 1, progress + delta, now]
+        );
+        if (!resumed) return;
+        engine.retireJournal(turn);
+        turn += 1;
+        checkpointJson = nextJson;
+        transitions = 0;
+        stall = 0;
+        progress += delta;
+        state = returned;
+        mark = null;
+        this.#emit("task:resumed", {
+          runId,
+          definition: row.definition,
+          turn,
+          declined: true
+        });
+        this.#emit("task:checkpoint", {
+          runId,
+          definition: row.definition,
+          turn,
+          phase: phaseOf(state)
+        });
+      } else if (nextJson !== checkpointJson) {
+        // Rule 7: the checkpoint changed.
+        transitions += 1;
+        if (transitions > this.#transitionBudget) {
+          await this.#settleOutcome(
+            row,
+            generation,
+            new StateMachineTransitionBudgetError(runId, transitions, [
+              ...trail
+            ]),
+            "faulted"
+          );
+          return;
+        }
+        const committed = engine.commitCheckpoint({
+          checkpoint: nextJson,
+          turn: turn + 1,
+          retireTurn: turn,
+          transitions,
+          stall: 0,
+          progress: progress + delta
+        });
+        if (!committed) return;
+        turn += 1;
+        checkpointJson = nextJson;
+        stall = 0;
+        progress += delta;
+        state = returned;
+        this.#emit("task:checkpoint", {
+          runId,
+          definition: row.definition,
+          turn,
+          phase: phaseOf(state)
+        });
+      } else if (delta > 0) {
+        // Rule 8: the same checkpoint, but durable progress was made.
+        const committed = engine.commitCheckpoint({
+          checkpoint: checkpointJson,
+          turn,
+          retireTurn: null,
+          transitions,
+          stall: 0,
+          progress: progress + delta
+        });
+        if (!committed) return;
+        stall = 0;
+        progress += delta;
+      } else {
+        // Rule 9: nothing changed, nothing parked, nothing credited.
+        stall += 1;
+        if (stall >= this.#stallLimit) {
+          await this.#settleOutcome(
+            row,
+            generation,
+            new StateMachineNoProgressError(runId, phase, this.#stallLimit),
+            "faulted"
+          );
+          return;
+        }
+        await this.#parkRun(
+          row,
+          generation,
+          "retry",
+          now + STALL_BACKOFF_MS * stall,
+          { stall }
+        );
+        return;
+      }
+
+      // Between transitions: a pause takes effect here. A mark is caught
+      // by the fence on the next write, and by #afterAttempt after it.
+      const current = this.#store.getRun(runId);
+      if (!current || current.generation !== generation) return;
+      if (current.paused === 1) {
+        await this.#parkRun(row, generation, "paused", null, {});
+        return;
+      }
     }
+  }
+
+  /**
+   * The checkpoint an invocation starts from: the sentinel for a compiled
+   * function, the committed checkpoint for a machine, or its `initial` —
+   * evaluated against the seed on the first dispatch, so a throwing
+   * `initial` is an application error on the run and not on `run()`.
+   */
+  #loadState(
+    machine: AnyStateMachineDefinition,
+    row: TaskRunRow,
+    input: unknown,
+    compiled: boolean
+  ): unknown {
+    if (compiled) return COMPILED_CHECKPOINT;
+    if (row.checkpoint !== null) return JSON.parse(row.checkpoint);
+    const initial = machine.initial;
+    const state =
+      typeof initial === "function"
+        ? (initial as (seed: unknown) => unknown)(input)
+        : initial;
+    phaseOf(state);
+    return state;
+  }
+
+  /** Rule 2: the handler returned a terminal. */
+  async #settleTerminal(
+    row: TaskRunRow,
+    generation: string,
+    terminal: TaskTerminalSignal,
+    cancelling: StateMachineAbortMark | null
+  ): Promise<void> {
+    const runId = row.run_id;
+    const mark: MarkPredicate = cancelling === null ? "null" : "set";
+    switch (terminal.kind) {
+      case "complete": {
+        const resultJson = serializeTaskValue(
+          terminal.result,
+          `result of Task definition "${row.definition}"`
+        );
+        const now = Date.now();
+        const settled = this.#store.fencedWrite(
+          runId,
+          generation,
+          `UPDATE cf_agents_task_runs
+           SET state = 'completed', result = ?, generation = NULL, next_at = NULL,
+               turn_deadline_at = NULL, settled_at = ?, updated_at = ?
+           WHERE run_id = ? AND generation = ? AND state = 'running'
+             AND ${markClause(mark)}`,
+          [resultJson, now, now]
+        );
+        if (settled) {
+          this.#emit("task:completed", { runId, definition: row.definition });
+          await this.#finishTerminalSettlement(
+            runId,
+            this.#store.getRun(runId)
+          );
+        }
+        // Fence rejected: a newer generation owns the run, or the mark
+        // landed under this one and #afterAttempt hands it to the protocol.
+        return;
+      }
+      case "fail": {
+        const summary = toErrorSummary(terminal.error);
+        const failed = await this.#settleFailed(
+          runId,
+          generation,
+          summary,
+          null,
+          { mark }
+        );
+        if (failed) await this.#observeError(terminal.error, row);
+        return;
+      }
+      case "aborted":
+        await this.#settleCancelled(runId, generation, terminal.reason, mark);
+        return;
+    }
+  }
+
+  /** Settle `failed` with an outcome that preserves the row (§6.6). */
+  async #settleOutcome(
+    row: TaskRunRow,
+    generation: string | null,
+    error: Error,
+    outcome: "faulted" | "orphaned",
+    mark: MarkPredicate = "any"
+  ): Promise<void> {
+    const settled = await this.#settleFailed(
+      row.run_id,
+      generation,
+      toErrorSummary(error),
+      null,
+      { outcome, mark }
+    );
+    if (!settled) return;
+    this.#emit(outcome === "faulted" ? "task:faulted" : "task:orphaned", {
+      runId: row.run_id,
+      definition: row.definition,
+      error: error.name
+    });
+    console.error(
+      `Task run "${row.run_id}" (definition "${row.definition}") ${outcome}: ${error.name}: ${error.message}`
+    );
+    await this.#observeError(error, row);
+  }
+
+  /** Park a live invocation: one fenced write, same turn, journal intact. */
+  async #parkRun(
+    row: TaskRunRow,
+    generation: string,
+    reason: StateMachineWaitReason,
+    wakeAt: number | null,
+    columns: { stall?: number }
+  ): Promise<void> {
+    const now = Date.now();
+    const parked = this.#store.fencedWrite(
+      row.run_id,
+      generation,
+      `UPDATE cf_agents_task_runs
+       SET state = 'waiting', wait_reason = ?, next_at = ?, generation = NULL,
+           turn_deadline_at = NULL, transitions = 0,
+           stall = coalesce(?, stall), updated_at = ?
+       WHERE run_id = ? AND generation = ? AND state = 'running'
+         AND abort_mark IS NULL`,
+      [reason, wakeAt, columns.stall ?? null, now]
+    );
+    if (!parked) return;
+    this.#emit(reason === "paused" ? "task:paused" : "task:waiting", {
+      runId: row.run_id,
+      definition: row.definition,
+      reason,
+      wakeAt
+    });
+    await this.#syncWake(row.run_id);
   }
 
   /** Persist a non-completed attempt outcome. */
   async #settleThrown(
     row: TaskRunRow,
     generation: string,
-    thrown: unknown
+    thrown: unknown,
+    cancelling: StateMachineAbortMark | null,
+    deferToProtocol: boolean
   ): Promise<void> {
     const runId = row.run_id;
 
+    // Rule 1: a superseded attempt unwinds and writes nothing.
     if (thrown instanceof AttemptSupersededError) {
-      // A newer attempt owns the run; this one unwinds without settling.
       return;
     }
 
+    // Rule 3: a platform failure rethrows; the claim backstop is the wake.
     if (isPlatformFailure(thrown)) {
-      // Platform-class failure (superseded isolate, memory-limit reset,
-      // storage transient): not an application outcome, so the run must not
-      // settle. Unwind and rethrow — the claim backstop written at claim
-      // time is the durable wake, and the next invocation reclaims and
-      // replays the run; a queue-driven dispatch defers through the
-      // driver's platform-failure path.
       throw thrown;
     }
 
     if (isTaskCancellation(thrown)) {
+      // A step boundary saw the mark. A machine with `onCancel` gets its
+      // cancel transition from #afterAttempt; everything else takes the
+      // inline default now.
+      if (deferToProtocol) return;
       await this.#settleCancelled(runId, generation, thrown.reason);
       return;
     }
 
     if (isTaskSuspension(thrown)) {
-      // A cancel requested mid-attempt wins over parking the run.
-      const current = this.#store.getRun(runId);
-      if (current?.cancel_requested === 1) {
-        await this.#settleCancelled(
-          runId,
-          generation,
-          current.cancel_reason ?? undefined
-        );
-        return;
-      }
-      const suspended = this.#store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE cf_agents_task_runs
-         SET state = 'waiting', wait_reason = ?, next_at = ?, generation = NULL,
-             updated_at = ?
-         WHERE run_id = ? AND generation = ? AND state = 'running'`,
-        [thrown.reason, thrown.wakeAt, Date.now()]
-      );
-      if (suspended) {
-        this.#emit("task:waiting", {
-          runId,
-          definition: row.definition,
-          reason: thrown.reason,
-          wakeAt: thrown.wakeAt
-        });
-        await this.#syncWake(runId);
-      }
+      // Rule 5, fenced on the mark: a park that races a mark is refused,
+      // and #afterAttempt hands the run to the protocol instead.
+      await this.#parkRun(row, generation, thrown.reason, thrown.wakeAt, {});
       return;
     }
 
+    // Rule 6: an application error settles `failed`.
     const summary = toErrorSummary(thrown);
-    const failed = await this.#settleFailed(runId, generation, summary);
+    const failed = await this.#settleFailed(runId, generation, summary, null, {
+      mark: cancelling === null ? "null" : "set"
+    });
     if (failed) {
       console.error(
         `Task run "${runId}" (definition "${row.definition}") failed: ${summary.name}: ${summary.message}`
       );
-      // A fence rejection here is not a terminal failure of the run: it was
-      // already settled from outside this attempt (its deadline was enforced
-      // over it), and that settlement was observed once, there.
       await this.#observeError(thrown, row);
     }
   }
@@ -1993,7 +2789,8 @@ export class StateMachine<
     generation: string,
     controller: AbortController,
     claimedAtMs: number,
-    compiled: boolean
+    compiled: boolean,
+    cancelTransition: boolean
   ): TaskStepEngine {
     return createTaskStepEngine({
       store: this.#store,
@@ -2004,6 +2801,7 @@ export class StateMachine<
       claimedAtMs,
       claimRefreshAfterMs: CLAIM_SLACK_MS / 2,
       compiled,
+      cancelTransition,
       defaults: this.#stepDefaults,
       emit: (type, payload) =>
         this.#emit(type as StateMachineEventType, {
@@ -2041,33 +2839,33 @@ export class StateMachine<
   async #settleCancelled(
     runId: string,
     generation: string | null,
-    reason: string | undefined
+    reason: string | undefined,
+    mark: MarkPredicate = "any"
   ): Promise<void> {
     const now = Date.now();
     let settled: boolean;
-    // The abort mark rides the same UPDATE as the legacy request bits — zero
-    // extra row writes, exactly as `cancel()`'s active branch does. It has
-    // to: the unfenced form below also matches a run another attempt is
-    // driving (the window between its claim write and `#active.set`), and
-    // the mark is what that attempt's step boundaries read to unwind.
     if (generation !== null) {
       settled = this.#store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
-             abort_mark = 'cancel', abort_reason = ?,
-             generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
+             abort_mark = coalesce(abort_mark, 'cancel'),
+             abort_reason = coalesce(abort_reason, ?),
+             generation = NULL, next_at = NULL, turn_deadline_at = NULL,
+             settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
-           AND state = 'running'`,
+           AND state = 'running' AND ${markClause(mark)}`,
         [reason ?? null, reason ?? null, now, now]
       );
     } else {
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
-             abort_mark = 'cancel', abort_reason = ?,
-             generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
+             abort_mark = coalesce(abort_mark, 'cancel'),
+             abort_reason = coalesce(abort_reason, ?),
+             generation = NULL, next_at = NULL, turn_deadline_at = NULL,
+             settled_at = ?, updated_at = ?
          WHERE run_id = ?
            AND state IN ('pending', 'waiting', 'running')`,
         [reason ?? null, reason ?? null, now, now, runId]
@@ -2097,30 +2895,37 @@ export class StateMachine<
     runId: string,
     generation: string | null,
     error: { name: string; message: string },
-    interruptions: number | null = null
+    interruptions: number | null = null,
+    options: {
+      outcome?: "faulted" | "orphaned";
+      mark?: MarkPredicate;
+    } = {}
   ): Promise<boolean> {
     const now = Date.now();
+    const outcome = options.outcome ?? null;
     let settled: boolean;
     if (generation !== null) {
       settled = this.#store.fencedWrite(
         runId,
         generation,
         `UPDATE cf_agents_task_runs
-         SET state = 'failed', error_name = ?, error_message = ?,
-             generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
+         SET state = 'failed', error_name = ?, error_message = ?, outcome = ?,
+             generation = NULL, next_at = NULL, turn_deadline_at = NULL,
+             settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
-           AND state = 'running'`,
-        [error.name, error.message, now, now]
+           AND state = 'running' AND ${markClause(options.mark ?? "any")}`,
+        [error.name, error.message, outcome, now, now]
       );
     } else {
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
-         SET state = 'failed', error_name = ?, error_message = ?,
+         SET state = 'failed', error_name = ?, error_message = ?, outcome = ?,
              interruptions = coalesce(?, interruptions),
-             generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?
+             generation = NULL, next_at = NULL, turn_deadline_at = NULL,
+             settled_at = ?, updated_at = ?
          WHERE run_id = ?
            AND state IN ('pending', 'waiting', 'running')`,
-        [error.name, error.message, interruptions, now, now, runId]
+        [error.name, error.message, outcome, interruptions, now, now, runId]
       );
       settled = written > 0;
     }
@@ -2136,12 +2941,18 @@ export class StateMachine<
     return settled;
   }
 
-  /** Apply terminal retention policy, then remove the run's wake mirror. */
   async #finishTerminalSettlement(
     runId: string,
     row: TaskRunRow | undefined
   ): Promise<void> {
-    if (row?.retain === 0) this.#store.deleteRun(runId);
+    // `faulted` and `orphaned` override `retain: false` (§6.6): never
+    // silently delete what `reopen()` needs.
+    if (
+      row?.retain === 0 &&
+      (row.outcome === null || !PRESERVED_OUTCOMES.has(row.outcome))
+    ) {
+      this.#store.deleteRun(runId);
+    }
     await this.#syncWake(runId);
   }
 

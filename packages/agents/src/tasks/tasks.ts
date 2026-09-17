@@ -39,14 +39,19 @@ export type TaskDefinitionResolver = (
  */
 export function setTaskDefinitionResolver(
   tasks: LifecycleCapability,
-  resolver: TaskDefinitionResolver
+  resolver: TaskDefinitionResolver,
+  names: () => Iterable<string> = () => []
 ): void {
-  setStateMachineDefinitionResolver(tasks, (name) => {
-    const definition = resolver(name);
-    return definition === undefined
-      ? undefined
-      : toStateMachineDefinition(definition);
-  });
+  setStateMachineDefinitionResolver(
+    tasks,
+    (name) => {
+      const definition = resolver(name);
+      return definition === undefined
+        ? undefined
+        : toStateMachineDefinition(definition);
+    },
+    names
+  );
 }
 
 /**

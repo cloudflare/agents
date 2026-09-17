@@ -1931,7 +1931,8 @@ export class Agent<
     setTaskDefinitionResolver(
       this.tasks,
       (name) =>
-        this.taskDefinitions?.[name] as TaskCallbacks[string] | undefined
+        this.taskDefinitions?.[name] as TaskCallbacks[string] | undefined,
+      () => Object.keys(this.taskDefinitions ?? {})
     );
 
     this.mcp = this._withAgentSpan(

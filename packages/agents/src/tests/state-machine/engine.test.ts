@@ -90,6 +90,7 @@ function portFor(
     claimedAtMs: Date.now(),
     claimRefreshAfterMs: 15_000,
     compiled: options.compiled,
+    cancelTransition: false,
     defaults: STEP_DEFAULTS,
     emit: () => {}
   });
@@ -800,9 +801,11 @@ describe("the port statements the machine engine will drive", () => {
         ]);
 
         // Progress credit is in-memory bookkeeping, not a row write.
-        expect(engine.progressCredited()).toBe(0);
+        // Journal completions and first memo writes credit progress too, so
+        // the explicit credit is measured against what the port already saw.
+        const credited = engine.progressCredited();
         engine.creditProgress(2);
-        expect(engine.progressCredited()).toBe(2);
+        expect(engine.progressCredited()).toBe(credited + 2);
 
         // The fenced commit, with a turn to retire.
         seedTaskJournal(state.storage, {

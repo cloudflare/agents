@@ -15,7 +15,41 @@
  * Everything here is pure: no storage, no clock, no capability.
  */
 
-import type { StateMachineTerminal, StateMachineValue } from "./types";
+import type {
+  StateMachinePhased,
+  StateMachineTerminal,
+  StateMachineTimedOut,
+  StateMachineValue
+} from "./types";
+
+/**
+ * The one value every `within` wait returns on expiry. A unique symbol at
+ * runtime — never JSON, so it cannot leak into a checkpoint — carried as
+ * the phantom unit type the context declares.
+ */
+// SAFETY: the type is a phantom `unique symbol`; this is its runtime carrier.
+export const TIMED_OUT: StateMachineTimedOut = Symbol(
+  "agents:state-machine:timed-out"
+) as unknown as StateMachineTimedOut;
+
+/**
+ * The phase a checkpoint names. Every machine checkpoint is an object with
+ * a string `phase`; anything else is a definition bug, reported as the
+ * application error it is rather than dispatched as a phase named
+ * `undefined`.
+ */
+export function phaseOf(checkpoint: unknown): string {
+  if (
+    typeof checkpoint === "object" &&
+    checkpoint !== null &&
+    typeof (checkpoint as Partial<StateMachinePhased>).phase === "string"
+  ) {
+    return (checkpoint as StateMachinePhased).phase;
+  }
+  throw new Error(
+    "A state machine checkpoint must be an object with a string `phase`"
+  );
+}
 
 /** The one phase every compiled function definition has. */
 export const COMPILED_PHASE = "run";

@@ -4,13 +4,41 @@ import {
   Tasks,
   NonRetryableError,
   TaskInterruptionsExhaustedError,
+  type TaskDefinition,
   type TaskMachine,
   type TaskStep
 } from "../../tasks";
+import { setTaskDefinitionResolver } from "../../tasks/tasks";
 import { Scheduler } from "../../schedules";
 
 /** The one phase the harness's machine definition declares. */
 type CounterState = { phase: "counting"; value: number };
+type StuckState = { phase: "idle" };
+type SpinnerState = { phase: "spin"; n: number };
+type NapperState = { phase: "nap"; ms: number } | { phase: "done" };
+type GuardState =
+  | { phase: "hold"; decline: boolean; releases: number }
+  | { phase: "released"; decline: boolean; releases: number };
+type HungState = { phase: "hang" };
+type MemoState = { phase: "work"; rounds: number };
+export type VersionedState =
+  | { phase: "one"; n: number }
+  | { phase: "two"; n: number; migrated: boolean };
+
+/**
+ * Version 1 of a versioned machine, supplied through the harness's dynamic
+ * resolver so a test can "redeploy" by swapping it for a version 2.
+ */
+export const versionedV1 = {
+  initial: { phase: "one", n: 1 } as VersionedState,
+  phases: {
+    one: async (state, ctx) => {
+      await ctx.sleep("wait", 60_000);
+      return ctx.complete(state.n);
+    },
+    two: async (state, ctx) => ctx.complete(state.n)
+  }
+} satisfies TaskMachine<VersionedState, never, number>;
 
 /**
  * Minimal real host for capability-level Tasks tests: a Durable Object
@@ -54,6 +82,21 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
    * `entry:input:interrupted-step:a<run attempt>`.
    */
   readonly guardedEntries: string[] = [];
+  /** `onCancel` entries, recorded as `phase:mark`. */
+  readonly cancelLog: string[] = [];
+  /** Definitions resolved lazily, so a test can swap versions in place. */
+  readonly dynamic: Record<string, TaskDefinition> = {
+    "versioned@v1": versionedV1
+  };
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    setTaskDefinitionResolver(
+      this.tasks,
+      (name) => this.dynamic[name],
+      () => Object.keys(this.dynamic)
+    );
+  }
 
   readonly tasks = new Tasks({
     definitions: {
@@ -521,7 +564,78 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         { step: number },
         number,
         { from: number }
-      >
+      >,
+
+      /** Rule A by construction: the same checkpoint, no park, no credit. */
+      stuck: {
+        initial: { phase: "idle" } as StuckState,
+        phases: { idle: async (state) => state }
+      } satisfies TaskMachine<StuckState>,
+
+      /** Rule B by construction: every transition changes the checkpoint. */
+      spinner: {
+        initial: { phase: "spin", n: 0 } as SpinnerState,
+        phases: {
+          spin: async (state) => ({ phase: "spin", n: state.n + 1 })
+        }
+      } satisfies TaskMachine<SpinnerState>,
+
+      /** Parks on a sleep in its first phase, then completes. */
+      napper: {
+        initial: (seed: { ms: number }): NapperState => ({
+          phase: "nap",
+          ms: seed.ms
+        }),
+        phases: {
+          nap: async (state, ctx) => {
+            await ctx.sleep("rest", state.ms);
+            return { phase: "done" };
+          },
+          done: async (_state, ctx) => ctx.complete("rested")
+        }
+      } satisfies TaskMachine<NapperState, never, string, { ms: number }>,
+
+      /** Declares `onCancel`: unwinds to a terminal, or declines the cancel. */
+      guardedMachine: {
+        initial: (seed: { decline: boolean }): GuardState => ({
+          phase: "hold",
+          decline: seed.decline,
+          releases: 0
+        }),
+        phases: {
+          hold: async (state, ctx) => {
+            await ctx.sleep("hold", 60_000);
+            return { ...state, phase: "released" };
+          },
+          released: async (state, ctx) => ctx.complete(state.releases)
+        },
+        onCancel: async (state, ctx) => {
+          this.cancelLog.push(`${state.phase}:${ctx.cancelling}`);
+          if (state.decline) {
+            return {
+              phase: "released",
+              decline: false,
+              releases: state.releases + 1
+            };
+          }
+          return ctx.aborted("unwound");
+        }
+      } satisfies TaskMachine<GuardState, never, number, { decline: boolean }>,
+
+      /** A transition that never returns and never heartbeats. */
+      hung: {
+        initial: { phase: "hang" } as HungState,
+        phases: { hang: () => new Promise<never>(() => {}) }
+      } satisfies TaskMachine<HungState>,
+
+      /** Progress without a checkpoint change: a memo, then completion. */
+      memoist: {
+        initial: { phase: "work", rounds: 0 } as MemoState,
+        phases: {
+          work: async (state, ctx) =>
+            ctx.complete(ctx.memo("token", `t-${state.rounds}`))
+        }
+      } satisfies TaskMachine<MemoState, never, string>
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },
     stepTimeout: 2_000,

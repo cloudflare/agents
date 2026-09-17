@@ -21,24 +21,61 @@ import {
   StateMachineSerializationError,
   isNonRetryableError
 } from "./errors";
-import { asTaskTerminal, TaskTerminalSignal } from "./machine";
-import { deserializeTaskValue } from "./serialization";
+import { asTaskTerminal, TaskTerminalSignal, TIMED_OUT } from "./machine";
+import { deserializeTaskValue, serializeTaskValue } from "./serialization";
+import type { StreamWriter } from "../streams/types";
 import type {
-  TaskAskRow,
+  AskKind,
+  Pending,
+  StateMachineAbortMark,
+  StateMachineAskOptions,
   StateMachineChildRef,
-  TaskJournalRow,
+  StateMachineChildResult,
+  StateMachineContext,
   StateMachineJson,
   StateMachineMailboxFilter,
-  TaskMailboxRow,
+  StateMachineMailboxItem,
+  StateMachinePhased,
+  StateMachineReceipt,
   StateMachineRetryConfig,
-  StateMachineStep,
+  StateMachineSpawnOptions,
   StateMachineStepAttempt,
   StateMachineStepConfig,
   StateMachineStepEvent,
+  StateMachineStreamOptions,
   StateMachineTerminal,
+  StateMachineTimedOut,
   StateMachineValue,
-  StateMachineWaitReason
+  StateMachineWaitReason,
+  TaskAskRow,
+  TaskJournalRow,
+  TaskMailboxRow
 } from "./types";
+
+/** The run facts one context carries, as of its attempt's claim. */
+export type ReplayRunFacts = {
+  readonly id: string;
+  readonly definition: string;
+  readonly version: number;
+  readonly background: boolean;
+  readonly metadata: Record<string, StateMachineJson> | undefined;
+  readonly createdAt: number;
+  /** Progress committed before this attempt; credits accrue on top. */
+  readonly progress: number;
+  /** The abort mark when this context runs `onCancel`, else null. */
+  readonly cancelling: StateMachineAbortMark | null;
+};
+
+const NO_FACTS: ReplayRunFacts = {
+  id: "",
+  definition: "",
+  version: 0,
+  background: false,
+  metadata: undefined,
+  createdAt: 0,
+  progress: 0,
+  cancelling: null
+};
 
 /**
  * Resolved retry and backoff policy. Steps resolve one per `step.do()`; a
@@ -338,7 +375,12 @@ export function resolveStepPolicy(
  * waiting or running — so replayed `status()` calls from completed ground
  * are suppressed instead of re-published as new progress.
  */
-export class ReplayStep implements StateMachineStep {
+export class ReplayStep implements StateMachineContext<
+  StateMachinePhased,
+  unknown,
+  StateMachineValue,
+  unknown
+> {
   readonly #engine: TaskStepEngine;
   readonly #usedNames = new Set<string>();
   #live: boolean;
@@ -349,16 +391,22 @@ export class ReplayStep implements StateMachineStep {
   } | null;
   readonly signal: AbortSignal;
 
-  /**
-   * The journal scope: the run's committed checkpoint turn. A function
-   * definition's checkpoint never changes, so its turn is 0 forever and its
-   * journal keys are `(run_id, 0, name)`. A park re-enters the SAME turn,
-   * which is what lets a `step.sleep` wake find every completed step intact.
-   */
+  /** The turn this invocation replays against; 0 for a compiled function. */
   readonly turn: number;
 
-  /** The run seed: the value a function definition receives as its input. */
+  /** The run's seed, as persisted at acceptance. */
   readonly input: unknown;
+
+  // ── run facts ────────────────────────────────────────────────────────────
+  readonly id: string;
+  readonly definition: string;
+  readonly version: number;
+  readonly background: boolean;
+  readonly metadata: Record<string, StateMachineJson> | undefined;
+  readonly createdAt: number;
+  readonly cancelling: StateMachineAbortMark | null;
+  readonly timedOut: StateMachineTimedOut = TIMED_OUT;
+  readonly #progressBase: number;
 
   constructor(
     engine: TaskStepEngine,
@@ -368,6 +416,7 @@ export class ReplayStep implements StateMachineStep {
       interrupted?: { name: string; attempt: number } | null;
       turn?: number;
       input?: unknown;
+      facts?: ReplayRunFacts;
     }
   ) {
     this.#engine = engine;
@@ -377,7 +426,144 @@ export class ReplayStep implements StateMachineStep {
     this.signal = engine.attemptSignal;
     this.turn = options.turn ?? 0;
     this.input = options.input;
+    const facts = options.facts ?? NO_FACTS;
+    this.id = facts.id;
+    this.definition = facts.definition;
+    this.version = facts.version;
+    this.background = facts.background;
+    this.metadata = facts.metadata;
+    this.createdAt = facts.createdAt;
+    this.cancelling = facts.cancelling;
+    this.#progressBase = facts.progress;
   }
+
+  /** Progress committed plus what this attempt has credited so far. */
+  get progress(): number {
+    return this.#progressBase + this.#engine.progressCredited();
+  }
+
+  /** The non-terminal children this run owns, read from the store. */
+  get children(): readonly StateMachineChildRef[] {
+    return this.#engine.listChildren();
+  }
+
+  // ── liveness and progress ────────────────────────────────────────────────
+
+  heartbeat(): void {
+    this.#engine.refreshClaim();
+  }
+
+  creditProgress(units = 1): void {
+    if (!Number.isFinite(units) || units <= 0) return;
+    this.#engine.creditProgress(units);
+  }
+
+  // ── run-scoped values ────────────────────────────────────────────────────
+
+  memo<T extends StateMachineJson>(name: string, candidate: T): T;
+  memo<T extends StateMachineJson>(name: string): T | undefined;
+  memo<T extends StateMachineJson>(
+    name: string,
+    ...rest: [candidate: T] | []
+  ): T | undefined {
+    if (typeof name !== "string" || name.length === 0) {
+      throw new Error("Memo names must be non-empty strings");
+    }
+    const durable = this.#engine.readMemo(name);
+    if (durable !== undefined) return deserializeTaskValue(durable.result) as T;
+    if (rest.length === 0) return undefined;
+    const [candidate] = rest;
+    const json = serializeTaskValue(candidate, `memo "${name}"`);
+    // First write wins; a fenced-out or repeated write returns false and the
+    // durable value is re-read, so every attempt of this run sees one value.
+    if (this.#engine.writeMemo(name, json)) return candidate;
+    const written = this.#engine.readMemo(name);
+    return written === undefined
+      ? candidate
+      : (deserializeTaskValue(written.result) as T);
+  }
+
+  // ── mailbox, asks, children, streams: land with their engines ────────────
+
+  receive(
+    _filter?: StateMachineMailboxFilter & {
+      within?: number | StateMachineDurationString;
+    }
+  ): Promise<StateMachineMailboxItem<unknown> | StateMachineTimedOut> {
+    return Promise.reject(pendingEngine("receive"));
+  }
+
+  receiveAll(
+    _filter?: StateMachineMailboxFilter & {
+      within?: number | StateMachineDurationString;
+    }
+  ): Promise<StateMachineMailboxItem<unknown>[] | StateMachineTimedOut> {
+    return Promise.reject(pendingEngine("receiveAll"));
+  }
+
+  peek(
+    _filter?: StateMachineMailboxFilter
+  ): StateMachineMailboxItem<unknown> | undefined {
+    throw pendingEngine("peek");
+  }
+
+  peekAll(
+    _filter?: StateMachineMailboxFilter
+  ): StateMachineMailboxItem<unknown>[] {
+    throw pendingEngine("peekAll");
+  }
+
+  withdraw(_key: string): boolean {
+    throw pendingEngine("withdraw");
+  }
+
+  ask<Payload, Answer>(
+    _kind: AskKind<Payload, Answer>,
+    _payloads: readonly Payload[],
+    _options?: StateMachineAskOptions
+  ): Pending<Answer>[] {
+    throw pendingEngine("ask");
+  }
+
+  answers<Answer>(
+    _pending: readonly Pending<Answer>[],
+    _options?: {
+      within?: number | StateMachineDurationString;
+      mode?: "all" | "any";
+    }
+  ): Promise<Answer[] | StateMachineTimedOut> {
+    return Promise.reject(pendingEngine("answers"));
+  }
+
+  peekAnswers<Answer>(
+    _pending: readonly Pending<Answer>[]
+  ): (Answer | undefined)[] {
+    throw pendingEngine("peekAnswers");
+  }
+
+  spawn(
+    _definition: string,
+    _input?: StateMachineJson,
+    _options?: StateMachineSpawnOptions
+  ): Promise<StateMachineReceipt> {
+    return Promise.reject(pendingEngine("spawn"));
+  }
+
+  join<Output extends StateMachineValue>(
+    _children: readonly (StateMachineChildRef | StateMachineReceipt | string)[],
+    _options?: { within?: number | StateMachineDurationString }
+  ): Promise<StateMachineChildResult<Output>[] | StateMachineTimedOut> {
+    return Promise.reject(pendingEngine("join"));
+  }
+
+  stream(
+    _name?: string,
+    _options?: StateMachineStreamOptions
+  ): Promise<StreamWriter> {
+    return Promise.reject(pendingEngine("stream"));
+  }
+
+  // ── terminals ────────────────────────────────────────────────────────────
 
   /** Settle this run with a result. */
   complete(result: StateMachineValue): StateMachineTerminal<StateMachineValue> {
@@ -663,6 +849,12 @@ export class ReplayStep implements StateMachineStep {
 }
 
 /** Rebuild a persisted terminal step error for rethrow. */
+function pendingEngine(member: string): Error {
+  return new Error(
+    `ctx.${member} is declared but its engine is not wired up yet`
+  );
+}
+
 function restoreStepError(row: TaskJournalRow): Error {
   const error = new Error(row.error_message ?? "Step failed");
   error.name = row.error_name ?? "Error";
