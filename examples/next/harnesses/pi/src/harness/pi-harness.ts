@@ -27,7 +27,7 @@ import {
   type LifecycleJobOutcome
 } from "agents/lifecycle";
 import type { Streams } from "agents/streams";
-import type { Tasks, TaskStep } from "agents/tasks";
+import type { TaskInternalHandle, Tasks, TaskStep } from "agents/tasks";
 import type { WebSocketsOptions } from "agents/websockets";
 import { DurableObjectPiDatabase, ensurePiSession } from "./do-sqlite";
 import {
@@ -304,6 +304,7 @@ export class PiHarness<
 > extends LifecycleCapability {
   readonly #config: PiHarnessConfig<ToolContext>;
   readonly #tasks: Tasks;
+  readonly #laneDriver: TaskInternalHandle;
   readonly #streams: Streams;
   readonly #defaultLane: string;
   #submissions: PiSubmissions | undefined;
@@ -323,8 +324,9 @@ export class PiHarness<
     this.#tasks = config.tasks;
     this.#streams = config.streams;
     this.#defaultLane = config.defaultLane ?? "main";
-    config.tasks.register(LANE_DRIVER_DEFINITION, (input, step) =>
-      this.#driveLane(parseLaneDriverInput(input), step)
+    this.#laneDriver = config.tasks.register(
+      LANE_DRIVER_DEFINITION,
+      (input, step) => this.#driveLane(parseLaneDriverInput(input), step)
     );
   }
 
@@ -821,11 +823,12 @@ export class PiHarness<
     });
     if (live.some((run) => run.metadata?.lane === lane)) return;
     const input: LaneDriverInput = { version: 1, lane };
-    await this.#tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      LANE_DRIVER_DEFINITION,
-      input,
-      { runId: `pi:${lane}:${uuidv7()}`, metadata: { lane }, retain: false }
-    );
+    await this.#laneDriver.run(input, {
+      runId: `pi:${lane}:${uuidv7()}`,
+      metadata: { lane },
+      retain: false,
+      start: "queued"
+    });
   }
 
   async #driveLane(

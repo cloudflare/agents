@@ -1035,38 +1035,6 @@ export class StateMachine<
     await this.#syncWake(runId);
   }
 
-  /**
-   * @internal Framework aperture: durably accept one run — reserved
-   * (`__cf`-prefixed) definition names included, which the public `run()`
-   * refuses so users cannot start framework runs — and drive its first
-   * attempt in the caller's invocation, resolving when that attempt reaches
-   * its next durable boundary. The receipt's run may already be terminal
-   * when this resolves; callers that need the outcome read it from their own
-   * channel (the run handler settles it) or from the snapshot.
-   */
-  async __DO_NOT_USE_WILL_BREAK__runAttached(
-    definition: string,
-    input: unknown,
-    options?: StateMachineRunOptions
-  ): Promise<StateMachineReceipt> {
-    return this.#acceptReserved(definition, input, options, "attached");
-  }
-
-  /**
-   * @internal Framework aperture: durably accept one run — reserved names
-   * included — and leave its first attempt to the durable queue wake instead
-   * of warm-starting it in the caller's invocation. Chat recovery uses this
-   * so a continuation always runs under an alarm, where `trackAlarmWork`
-   * keeps its model turn inside the memory-limit breaker domain.
-   */
-  async __DO_NOT_USE_WILL_BREAK__enqueue(
-    definition: string,
-    input: unknown,
-    options?: StateMachineRunOptions
-  ): Promise<StateMachineReceipt> {
-    return this.#acceptReserved(definition, input, options, "queued");
-  }
-
   /** Accept a run of any resolvable definition, reserved names included. */
   async #acceptReserved(
     definition: string,

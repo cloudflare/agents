@@ -204,11 +204,11 @@ describe("Tasks#register", () => {
   it("dispatches a registered reserved definition through the internal aperture", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      instance.tasks.register("__cf_test_registered", async () => "ran");
-      const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      const registered = instance.tasks.register(
         "__cf_test_registered",
-        undefined
+        async () => "ran"
       );
+      const receipt = await registered.run(undefined, { start: "attached" });
       expect(receipt.accepted).toBe(true);
       expect((await instance.tasks.get(receipt.runId))?.state).toBe(
         "completed"
@@ -406,9 +406,10 @@ describe("Tasks capability", () => {
   it("leaves internal enqueues to their durable wake instead of warm-starting", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      const receipt = await instance.tasks.run(
         "pipeline",
-        { label: "queued" }
+        { label: "queued" },
+        { start: "queued" }
       );
       expect((await instance.tasks.get(receipt.runId))?.state).toBe("pending");
       expect(instance.stepRuns).toEqual([]);
@@ -1209,9 +1210,10 @@ describe("Tasks capability", () => {
     const result = await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
-        const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+        const receipt = await instance.tasks.run(
           "exhaustedPlatformStep",
-          undefined
+          undefined,
+          { start: "queued" }
         );
         backdateTaskWake(state.storage, receipt.runId);
         await instance.lifecycle.rearmAlarm();

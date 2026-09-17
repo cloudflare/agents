@@ -189,11 +189,10 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         async (instance: TaskHarnessObject, state) => {
           await state.storage.put(OOM_STRIKES_KEY, 1);
           await state.storage.put("oomLoopRemaining", 1);
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            "twinLateOom",
-            undefined,
-            { runId }
-          );
+          await instance.tasks.run("twinLateOom", undefined, {
+            runId,
+            start: "queued"
+          });
           backdateTaskWake(state.storage, runId);
           await instance.lifecycle.rearmAlarm();
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -229,11 +228,10 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         stub,
         async (instance: TaskHarnessObject, state) => {
           await state.storage.put("oomLoopRemaining", 1);
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            "oomBeforeCleanSibling",
-            undefined,
-            { runId }
-          );
+          await instance.tasks.run("oomBeforeCleanSibling", undefined, {
+            runId,
+            start: "queued"
+          });
           backdateTaskWake(state.storage, runId);
           await instance.lifecycle.rearmAlarm();
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -277,11 +275,10 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         stub,
         async (instance: TaskHarnessObject, state) => {
           await state.storage.put("oomLoopRemaining", 1);
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            "lateOomStepLoop",
-            undefined,
-            { runId }
-          );
+          await instance.tasks.run("lateOomStepLoop", undefined, {
+            runId,
+            start: "queued"
+          });
           backdateTaskWake(state.storage, runId);
           await instance.lifecycle.rearmAlarm();
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -347,10 +344,9 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
       stub,
       async (instance: TaskHarnessObject, state) => {
         await state.storage.put(OOM_STRIKES_KEY, 2);
-        const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-          "lateSuccess",
-          undefined
-        );
+        const receipt = await instance.tasks.run("lateSuccess", undefined, {
+          start: "queued"
+        });
         backdateTaskWake(state.storage, receipt.runId);
         await instance.lifecycle.rearmAlarm();
         await (instance as unknown as { alarm(): Promise<void> }).alarm();
@@ -380,11 +376,10 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
           await instance.tasks.run("alarmSiblingSuccess", undefined, {
             runId: cleanRunId
           });
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            "lateOomStepLoop",
-            undefined,
-            { runId: doomedRunId }
-          );
+          await instance.tasks.run("lateOomStepLoop", undefined, {
+            runId: doomedRunId,
+            start: "queued"
+          });
           const past = Date.now() - 1_000;
           state.storage.sql.exec(
             `UPDATE cf_agents_jobs SET time = ? WHERE id = ?`,
@@ -669,9 +664,13 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
             instance as unknown as { alarm(): Promise<void> }
           ).alarm();
           await new Promise((resolve) => setTimeout(resolve, 100));
-          await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue("sleeper", {
-            ms: 1
-          });
+          await instance.tasks.run(
+            "sleeper",
+            {
+              ms: 1
+            },
+            { start: "queued" }
+          );
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
           await overlapping;
         }

@@ -9,7 +9,7 @@ import {
   type Sessions
 } from "agents/sessions";
 import { Streams, type StreamWriter } from "agents/streams";
-import { Tasks, type TaskStep } from "agents/tasks";
+import { Tasks, type TaskInternalHandle, type TaskStep } from "agents/tasks";
 import type { WebSocketsOptions } from "agents/websockets";
 import codexKernelModule from "../wasm-kernel/target/wasm32-unknown-unknown/release/codex_worker_kernel.wasm";
 import { DirectKernelRuntime } from "./kernel-runtime";
@@ -160,6 +160,8 @@ export class CodexHarness extends LifecycleCapability {
     }
   ];
 
+  readonly #driver: TaskInternalHandle;
+
   constructor(options: CodexHarnessOptions) {
     super("codex-harness");
     this.tasks = options.tasks;
@@ -183,7 +185,7 @@ export class CodexHarness extends LifecycleCapability {
         )
         .compactAfter(policy.afterTokens ?? DEFAULT_COMPACT_AFTER_TOKENS);
     }
-    options.tasks.register(DRIVER_DEFINITION, (input, step) =>
+    this.#driver = options.tasks.register(DRIVER_DEFINITION, (input, step) =>
       this.#drive(parseDriverInput(input), step)
     );
   }
@@ -254,10 +256,13 @@ export class CodexHarness extends LifecycleCapability {
 
   #enqueueDriver(operationId: string): Promise<unknown> {
     // Tasks dedupes on runId, so re-enqueueing an accepted operation is safe.
-    return this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      DRIVER_DEFINITION,
+    return this.#driver.run(
       { operationId },
-      { runId: `codex:${operationId}`, metadata: { operationId } }
+      {
+        runId: `codex:${operationId}`,
+        metadata: { operationId },
+        start: "queued"
+      }
     );
   }
 

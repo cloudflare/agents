@@ -2,7 +2,7 @@ import type { LanguageModelV4 } from "@ai-sdk/provider";
 import type { Workspace } from "@cloudflare/shell";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { Streams, StreamWriter } from "agents/streams";
-import type { Tasks, TaskStep } from "agents/tasks";
+import type { TaskInternalHandle, Tasks, TaskStep } from "agents/tasks";
 import type { WebSocketsOptions } from "agents/websockets";
 import {
   compileHarness,
@@ -130,6 +130,7 @@ function taskOutcome(value: TurnTaskOutcome): JsonValue {
  */
 export class SelfModifyingHarness extends LifecycleCapability {
   readonly #tasks: Tasks;
+  readonly #turnTask: TaskInternalHandle;
   readonly #streams: Streams;
   readonly #source: HarnessSource;
   readonly #loader: WorkerLoader;
@@ -146,7 +147,7 @@ export class SelfModifyingHarness extends LifecycleCapability {
     this.#source = new HarnessSource(options.workspace);
     this.#loader = options.loader;
     this.#model = options.model;
-    this.#tasks.register(TURN_TASK, (input, step) =>
+    this.#turnTask = this.#tasks.register(TURN_TASK, (input, step) =>
       this.#runTask(turnTaskInput(input), step)
     );
   }
@@ -389,18 +390,10 @@ export class SelfModifyingHarness extends LifecycleCapability {
       idempotencyKey: `self-modifying-turn:${turnId}`,
       metadata: { revisionId, streamId, promptHash }
     };
-    const receipt =
-      mode === "attached"
-        ? await this.#tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-            TURN_TASK,
-            input,
-            taskOptions
-          )
-        : await this.#tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-            TURN_TASK,
-            input,
-            taskOptions
-          );
+    const receipt = await this.#turnTask.run(input, {
+      ...taskOptions,
+      start: mode === "attached" ? "attached" : "queued"
+    });
     if (!this.#store.turn(turnId)) {
       this.#store.beginTurn(input);
       await this.#streams.open(streamId, {

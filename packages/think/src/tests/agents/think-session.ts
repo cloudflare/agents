@@ -48,7 +48,6 @@ import type {
 import {
   CHAT_MESSAGE_TYPES,
   CHAT_RECOVERY_TASK_NAME,
-  chatRecoveryTaskRunOptions,
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator
@@ -8177,16 +8176,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async preScheduleRecoveryRetryForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    const input = {
-      callback: "_chatRecoveryRetry" as const,
-      data,
-      delaySeconds: 60
-    };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this._enqueueChatRecovery("_chatRecoveryRetry", data, "redefer", 60);
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<{
@@ -8212,15 +8202,11 @@ export class ThinkRecoveryTestAgent extends Think {
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    const input = {
-      callback: "_chatRecoveryContinue" as const,
+    await this._enqueueChatRecovery(
+      "_chatRecoveryContinue",
       data,
-      delaySeconds: 60
-    };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
+      "redefer",
+      60
     );
   }
 
