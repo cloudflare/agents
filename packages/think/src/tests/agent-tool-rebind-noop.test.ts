@@ -11,27 +11,26 @@ async function freshRecoveryAgent(name: string) {
 }
 
 /**
- * Safety net for `_rebindAgentToolChildRunRequestId` (the re-attach budget fix):
+ * Safety net for `AgentToolsChild.rebindRequestId` (the re-attach budget fix):
  * it runs on EVERY recovery continuation, so it must be an unambiguous no-op
  * whenever this recovery is NOT for a live agent-tool child run. These lock the
  * three no-op cases the docstring promises, plus the defensive newest-row
  * selection for the (architecturally precluded) multi-row case.
  */
 describe("agent-tool rebind: no-op safety on non-child recovery", () => {
-  it("is a no-op when the facet never ran as an agent-tool child (no table)", async () => {
+  it("is a no-op when the facet never ran as an agent-tool child (no rows)", async () => {
     const agent = await freshRecoveryAgent(
       `rebind-noop-none-${crypto.randomUUID()}`
     );
 
-    // A pristine recovery facet has no child-run table at all.
-    expect(await agent.hasAgentToolChildRunTableForTest()).toBe(false);
+    // A pristine recovery facet has the capability's tables but no run rows.
+    expect(await agent.agentToolChildRunCountForTest()).toBe(0);
 
-    // The guarded SELECT throws on the missing table and is swallowed → the
-    // call does not throw and creates nothing.
+    // No active row to bind → the call does not throw and writes nothing.
     await expect(
       agent.rebindAgentToolChildRunRequestIdForTest("normal-turn-req")
     ).resolves.toBeUndefined();
-    expect(await agent.hasAgentToolChildRunTableForTest()).toBe(false);
+    expect(await agent.agentToolChildRunCountForTest()).toBe(0);
   });
 
   it("does not rewrite a SETTLED child-run row during an unrelated recovery", async () => {

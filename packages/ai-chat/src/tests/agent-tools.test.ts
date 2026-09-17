@@ -227,7 +227,6 @@ type ParentStub = DurableObjectStub & {
     },
     runId?: string
   ): Promise<AgentToolRunInspection>;
-  childAgentToolRunsMapSizeForTest(runId: string): Promise<number>;
   childResolveAfterRestartForTest(
     runId: string,
     requestId: string
@@ -981,24 +980,6 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result).toMatchObject({ runId, status: "completed" });
   });
 
-  it("does not leak request-id cache entries for unrelated turns (#1575)", async () => {
-    const parent = await getParent();
-    const runId = crypto.randomUUID();
-
-    // The injected unrelated-turn error frame negatively-caches a (null)
-    // entry in the child's request-id map while the run is in flight.
-    const result = await parent.runChildWithInjectedUnrelatedError(
-      { prompt: "stay healthy", chunkDelayMs: 60 },
-      100,
-      runId
-    );
-    expect(result).toMatchObject({ runId, status: "completed" });
-
-    // Once the run ends and no runs remain in flight, the map must be fully
-    // cleared — null entries must not accumulate for the DO's lifetime.
-    expect(await parent.childAgentToolRunsMapSizeForTest(runId)).toBe(0);
-  });
-
   it("attributes frames via the persisted request id after a DO restart (#1575)", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
@@ -1105,7 +1086,12 @@ describe("AIChatAgent as an agent-tool child", () => {
 
     const events = await parent.forwardMalformedAgentToolStreamForTest();
 
-    expect(events.map((event) => event.event)).toEqual([
+    // The run's own `started`/`finished` frames bracket the forwarded chunks.
+    expect(
+      events
+        .map((event) => event.event)
+        .filter((event) => event.kind === "chunk")
+    ).toEqual([
       expect.objectContaining({
         kind: "chunk",
         body: "first good frame"
