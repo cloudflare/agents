@@ -1,0 +1,19 @@
+packages/agents/src/tests/tasks/capability.test.ts
+  s_c7ee88e60679f4::t_b2e44a637dad4a 212-274,600-661,1117-1146,1173-1251,1460-1583,1585-1587,1589-1658,2102-2134,2165-2208
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bdb4ac5d1d7b280268714ea1481d96741493e6f0",
+  "prompts": {},
+  "sessions": {
+    "s_c7ee88e60679f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f60372b05ffeIpWNJ3GaQ16767",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}
