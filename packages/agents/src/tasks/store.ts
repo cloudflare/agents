@@ -1,13 +1,20 @@
 /**
- * Storage layer for the Tasks capability: owns the `cf_agents_task_runs` and
- * `cf_agents_task_steps` tables — DDL, row access, generation-fenced writes,
- * and the snapshot projection. The engine in `tasks.ts` holds the state
- * machine; every byte that touches SQLite goes through here.
+ * Storage layer for the Tasks capability: owns its run, step, and event
+ * tables — DDL, row access, generation-fenced writes, and snapshot
+ * projection. The engine in `tasks.ts` holds the state machine; every byte
+ * that touches SQLite goes through here.
  */
 
 import { SqlError } from "../sql-error";
 import { deserializeTaskValue } from "./serialization";
-import type { TaskJson, TaskRunRow, TaskRunSnapshot, TaskValue } from "./types";
+import type {
+  TaskEvent,
+  TaskEventRow,
+  TaskJson,
+  TaskRunRow,
+  TaskRunSnapshot,
+  TaskValue
+} from "./types";
 
 /** @internal SQL-backed store for one Tasks capability instance. */
 export class TaskStore {
@@ -81,8 +88,14 @@ export class TaskStore {
   }
 
   deleteRun(runId: string): void {
+    this.sql`DELETE FROM cf_agents_task_events WHERE run_id = ${runId}`;
     this.sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${runId}`;
     this.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${runId}`;
+  }
+
+  /** Run crash-atomic synchronous SQLite work. */
+  transaction<T>(callback: () => T): T {
+    return this.#storage.transactionSync(callback);
   }
 
   ensureTables(): void {
@@ -134,7 +147,9 @@ export class TaskStore {
       CREATE TABLE IF NOT EXISTS cf_agents_task_steps (
         run_id TEXT NOT NULL,
         step_name TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
+        kind TEXT NOT NULL CHECK (kind IN (
+          'do', 'sleep', 'wait_event', 'take_events'
+        )),
         state TEXT NOT NULL CHECK (state IN (
           'running', 'waiting', 'completed', 'failed'
         )),
@@ -147,8 +162,81 @@ export class TaskStore {
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
+        event_type TEXT,
         PRIMARY KEY (run_id, step_name)
       ) WITHOUT ROWID`);
+    rawSql(`
+      CREATE TABLE IF NOT EXISTS cf_agents_task_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        serialized_size INTEGER NOT NULL,
+        idempotency_key TEXT,
+        consumed_step_name TEXT,
+        created_at INTEGER NOT NULL,
+        consumed_at INTEGER,
+        UNIQUE (run_id, idempotency_key)
+      )`);
+    rawSql(`
+      CREATE INDEX IF NOT EXISTS cf_agents_task_events_available
+      ON cf_agents_task_events (run_id, type, consumed_at, sequence)
+    `);
+  }
+
+  /** Detect the durable step schema independently of the KV version marker. */
+  stepSchemaVersion(): 0 | 1 | 2 {
+    const table = this.sql<{ present: number }>`
+      SELECT 1 AS present FROM sqlite_master
+      WHERE type = 'table' AND name = 'cf_agents_task_steps'
+    `;
+    if (table.length === 0) return 0;
+    const columns = this.sql<{ name: string }>`
+      PRAGMA table_info(cf_agents_task_steps)
+    `;
+    return columns.some((column) => column.name === "event_type") ? 2 : 1;
+  }
+
+  /** Upgrade the v1 step-kind constraint without changing journal rows. */
+  migrateV1ToV2(): void {
+    this.transaction(() => {
+      this.sql`
+        CREATE TABLE cf_agents_task_steps_v2 (
+          run_id TEXT NOT NULL,
+          step_name TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN (
+            'do', 'sleep', 'wait_event', 'take_events'
+          )),
+          state TEXT NOT NULL CHECK (state IN (
+            'running', 'waiting', 'completed', 'failed'
+          )),
+          result TEXT,
+          error_name TEXT,
+          error_message TEXT,
+          attempt INTEGER NOT NULL DEFAULT 0,
+          next_at INTEGER,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          updated_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          event_type TEXT,
+          PRIMARY KEY (run_id, step_name)
+        ) WITHOUT ROWID
+      `;
+      this.sql`
+        INSERT INTO cf_agents_task_steps_v2
+          (run_id, step_name, kind, state, result, error_name, error_message,
+           attempt, next_at, created_at, started_at, updated_at, completed_at)
+        SELECT run_id, step_name, kind, state, result, error_name, error_message,
+               attempt, next_at, created_at, started_at, updated_at, completed_at
+        FROM cf_agents_task_steps
+      `;
+      this.sql`DROP TABLE cf_agents_task_steps`;
+      this
+        .sql`ALTER TABLE cf_agents_task_steps_v2 RENAME TO cf_agents_task_steps`;
+    });
+    this.ensureTables();
   }
 
   rowToSnapshot<Output extends TaskValue>(
@@ -178,10 +266,21 @@ export class TaskStore {
             : {})
         };
       case "waiting":
+        if (row.wait_reason === "event") {
+          return {
+            ...base,
+            state: "waiting",
+            reason: "event",
+            ...(row.next_at !== null ? { wakeAt: row.next_at } : {}),
+            ...(row.status_message !== null
+              ? { statusMessage: row.status_message }
+              : {})
+          };
+        }
         return {
           ...base,
           state: "waiting",
-          reason: row.wait_reason ?? "sleep",
+          reason: row.wait_reason === "retry" ? "retry" : "sleep",
           wakeAt: row.next_at ?? row.updated_at,
           ...(row.status_message !== null
             ? { statusMessage: row.status_message }
@@ -212,5 +311,14 @@ export class TaskStore {
           settledAt: row.settled_at ?? row.updated_at
         };
     }
+  }
+
+  rowToEvent<Payload = TaskJson>(row: TaskEventRow): TaskEvent<Payload> {
+    return {
+      eventId: row.event_id,
+      type: row.type,
+      payload: deserializeTaskValue(row.payload) as Payload,
+      createdAt: row.created_at
+    };
   }
 }

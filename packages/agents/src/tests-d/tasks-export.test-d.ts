@@ -4,6 +4,8 @@ import {
   Tasks,
   NonRetryableError,
   type Task,
+  type TaskEvent,
+  type TaskEventReceipt,
   type TaskReceipt,
   type TaskRunSnapshot,
   type TaskStep,
@@ -55,6 +57,31 @@ object.tasks.handle("unknownDefinition");
 // Manager-level reads span definitions and widen the output.
 object.tasks.get("task_x") satisfies Promise<TaskRunSnapshot<TaskValue> | null>;
 object.tasks.cancel("task_x", "done") satisfies Promise<boolean>;
+object.tasks.sendEvent(
+  "task_x",
+  "approval",
+  { approved: true },
+  { idempotencyKey: "approval:1" }
+) satisfies Promise<TaskEventReceipt<{ approved: boolean }>>;
+interface NamedEventPayload {
+  approved: boolean;
+}
+declare const namedEventPayload: NamedEventPayload;
+object.tasks.sendEvent(
+  "task_x",
+  "approval",
+  namedEventPayload
+) satisfies Promise<TaskEventReceipt<NamedEventPayload>>;
+const readonlyTuple = ["yes", 1] as const;
+object.tasks.sendEvent("task_x", "tuple", readonlyTuple) satisfies Promise<
+  TaskEventReceipt<readonly ["yes", 1]>
+>;
+// @ts-expect-error event payloads must be JSON-serializable.
+object.tasks.sendEvent("task_x", "bad", new Date());
+declare const eventSymbol: unique symbol;
+declare const symbolPayload: { value: string; [eventSymbol]: string };
+// @ts-expect-error JSON would silently discard symbol-keyed properties.
+object.tasks.sendEvent("task_x", "bad-symbol", symbolPayload);
 
 // Handlers with idempotent external writes carry replay safety themselves.
 const guarded = new Tasks({
@@ -100,6 +127,27 @@ step.do(
 ) satisfies Promise<null>;
 step.sleep("nap", "5 minutes") satisfies Promise<void>;
 step.sleepUntil("deadline", new Date()) satisfies Promise<void>;
+step.waitForEvent<{ approved: boolean }>(
+  "approval",
+  "approval"
+) satisfies Promise<TaskEvent<{ approved: boolean }>>;
+const approvalEvent = await step.waitForEvent<NamedEventPayload>(
+  "named-approval",
+  "approval"
+);
+approvalEvent.payload satisfies NamedEventPayload;
+// @ts-expect-error event envelopes have no arbitrary properties.
+approvalEvent.notDeclared;
+// @ts-expect-error receive payloads must describe JSON-compatible values.
+step.waitForEvent<Date>("bad-date", "approval");
+// @ts-expect-error receive payloads must describe JSON-compatible values.
+step.takeEvents<() => void>("bad-function", "approval");
+step.waitForEvent<{ approved: boolean }>("timed", "approval", {
+  timeout: "1 hour"
+}) satisfies Promise<TaskEvent<{ approved: boolean }> | null>;
+step.takeEvents<{ message: string }>("messages", "message", {
+  limit: 20
+}) satisfies Promise<TaskEvent<{ message: string }>[]>;
 // @ts-expect-error durations use second/minute/hour/day/week units.
 step.sleep("bad", "5 parsecs");
 // @ts-expect-error step results must be JSON-serializable values.

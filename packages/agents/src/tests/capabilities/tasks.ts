@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
 import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
+import { isTaskSuspension } from "../../tasks/replay";
 import { Scheduler } from "../../schedules";
 
 /**
@@ -28,6 +29,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   statusCounter = 0;
   /** Guarded handler entries, recorded as entry:input:interrupted-step. */
   readonly guardedEntries: string[] = [];
+  /** Releases the controlled step used to buffer an event during execution. */
+  releaseEventWork: (() => void) | undefined;
 
   readonly tasks = new Tasks({
     definitions: {
@@ -199,6 +202,90 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         return "fin";
       },
 
+      /** Waits without an alarm until an external event arrives. */
+      eventWaiter: async (input: { type: string }, step: TaskStep) => {
+        return step.waitForEvent<{ value: string }>("incoming", input.type);
+      },
+
+      /** Does not observe a buffered event until the next step boundary. */
+      eventDuringWork: async (_input: undefined, step: TaskStep) => {
+        await step.do("work", () => {
+          this.stepRuns.push("eventDuringWork:work");
+          return new Promise<void>((resolve) => {
+            this.releaseEventWork = resolve;
+          });
+        });
+        return step.waitForEvent<{ value: string }>("incoming", "approval");
+      },
+
+      /** Delivers an event after the empty scan but before the run parks. */
+      eventBeforePark: async (input: { runId: string }, step: TaskStep) => {
+        try {
+          return await step.waitForEvent<{ value: string }>(
+            "incoming",
+            "approval"
+          );
+        } catch (error) {
+          if (isTaskSuspension(error)) {
+            await this.sendEventBeforePark(input.runId);
+          }
+          throw error;
+        }
+      },
+
+      /** Timed event wait used to prove durable timeout replay. */
+      eventTimeout: async (_input: undefined, step: TaskStep) => {
+        return step.waitForEvent<{ value: string }>("incoming", "approval", {
+          timeout: "1 minute"
+        });
+      },
+
+      /** Buffers events behind a sleep, then drains them in bounded batches. */
+      eventDrain: async (_input: undefined, step: TaskStep) => {
+        await step.sleep("gate", "1 minute");
+        const first = await step.takeEvents<{ value: number }>(
+          "first-batch",
+          "item",
+          { limit: 2 }
+        );
+        const second = await step.takeEvents<{ value: number }>(
+          "second-batch",
+          "item"
+        );
+        return { first, second };
+      },
+
+      /** Drains one journal-size-bounded event batch. */
+      eventSizedDrain: async (_input: undefined, step: TaskStep) => {
+        await step.sleep("gate", "1 minute");
+        const events = await step.takeEvents<string>("batch", "chunk", {
+          limit: 2
+        });
+        return events.map((event) => event.payload.length);
+      },
+
+      /** Replays a consumed event batch across a later retry boundary. */
+      eventReplay: async (_input: undefined, step: TaskStep) => {
+        await step.sleep("gate", "1 minute");
+        const events = await step.takeEvents<{ value: number }>(
+          "batch",
+          "item"
+        );
+        await step.do(
+          "after-events",
+          { retries: { limit: 2, delay: "1 minute" } },
+          () => {
+            this.stepRuns.push("eventReplay:after-events");
+            if (this.failuresBeforeSuccess > 0) {
+              this.failuresBeforeSuccess -= 1;
+              throw new Error("retry after events");
+            }
+            return "done";
+          }
+        );
+        return events;
+      },
+
       /**
        * Deterministically exhausts memory while a durable countdown remains
        * (#1825): the counter survives the breaker's isolate resets, so every
@@ -368,6 +455,10 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   });
 
   readonly lifecycle = Lifecycle.install(this).use(this.tasks);
+
+  private async sendEventBeforePark(runId: string): Promise<void> {
+    await this.tasks.sendEvent(runId, "approval", { value: "accepted" });
+  }
 }
 
 /**

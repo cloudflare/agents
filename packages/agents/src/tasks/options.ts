@@ -9,6 +9,8 @@ export type TaskEventType =
   | "task:step:started"
   | "task:step:retry"
   | "task:step:completed"
+  | "task:event:received"
+  | "task:event:consumed"
   | "task:waiting"
   | "task:completed"
   | "task:failed"

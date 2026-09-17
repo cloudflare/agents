@@ -29,6 +29,11 @@ Failures stop the phase and propagate. Failed startup remains retryable. Native
 RPC methods explicitly call `lifecycle.start()` because native Durable Object
 RPC bypasses Lifecycle handlers.
 
+Agent restores persisted facet routing identity synchronously during
+construction, before these capability hooks run. Its host startup phase then
+hydrates facet connection state without changing the route identity capabilities
+already observed.
+
 ## Alarm ownership and scheduling
 
 Lifecycle owns the one physical Durable Object alarm. A capability can return

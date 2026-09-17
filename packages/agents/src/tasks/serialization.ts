@@ -20,19 +20,28 @@ const utf8 = new TextEncoder();
  * @param value - The value to persist.
  * @param context - What is being serialized, for error messages
  * (e.g. `input for definition "report"`, `result of step "fetch"`).
+ * @param options - Additional validation for a specific storage boundary.
  * @returns JSON text, or `null` when the value is `undefined`.
  * @throws TaskSerializationError when the value is not JSON-serializable or
  * its serialized form exceeds {@link MAX_SERIALIZED_BYTES}.
  */
 export function serializeTaskValue(
   value: unknown,
-  context: string
+  context: string,
+  options: { rejectNonFiniteNumbers?: boolean } = {}
 ): string | null {
   if (value === undefined) return null;
 
   let json: string | undefined;
   try {
-    json = JSON.stringify(value);
+    json = options.rejectNonFiniteNumbers
+      ? JSON.stringify(value, (_key, nested) => {
+          if (typeof nested === "number" && !Number.isFinite(nested)) {
+            throw new Error("non-finite numbers are not valid JSON values");
+          }
+          return nested;
+        })
+      : JSON.stringify(value);
   } catch (error) {
     throw new TaskSerializationError(
       context,

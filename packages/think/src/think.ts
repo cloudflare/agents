@@ -5042,8 +5042,7 @@ export class Think<
     const wrap = (data: unknown) =>
       wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, data);
 
-    // Facet-hosted turns stay on the legacy fiber engine: the Tasks
-    // capability does not accept runs on routed sub-agents yet, and facet
+    // Facet-hosted turns intentionally stay on the legacy fiber engine; their
     // recovery routes through the root's facet-run index.
     if (this.parentPath.length > 0) {
       return this._runFiberWithStashWrapper(
