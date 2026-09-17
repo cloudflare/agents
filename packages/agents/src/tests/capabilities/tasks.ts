@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
 import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
+import { isTaskSuspension } from "../../tasks/replay";
 import { Scheduler } from "../../schedules";
 
 /**
@@ -215,6 +216,21 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           });
         });
         return step.waitForEvent<{ value: string }>("incoming", "approval");
+      },
+
+      /** Delivers an event after the empty scan but before the run parks. */
+      eventBeforePark: async (input: { runId: string }, step: TaskStep) => {
+        try {
+          return await step.waitForEvent<{ value: string }>(
+            "incoming",
+            "approval"
+          );
+        } catch (error) {
+          if (isTaskSuspension(error)) {
+            await this.sendEventBeforePark(input.runId);
+          }
+          throw error;
+        }
       },
 
       /** Timed event wait used to prove durable timeout replay. */
@@ -439,6 +455,10 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   });
 
   readonly lifecycle = Lifecycle.install(this).use(this.tasks);
+
+  private async sendEventBeforePark(runId: string): Promise<void> {
+    await this.tasks.sendEvent(runId, "approval", { value: "accepted" });
+  }
 }
 
 /**

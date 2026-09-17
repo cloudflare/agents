@@ -1,5 +1,10 @@
 import { Agent, getCurrentAgent } from "../../index";
-import type { TaskHandlers, TaskStep } from "../../tasks";
+import type {
+  TaskHandlers,
+  TaskRunSnapshot,
+  TaskStep,
+  TaskValue
+} from "../../tasks";
 
 /**
  * Agent fixture for the `tasks` capability: subclass definitions declared on
@@ -40,4 +45,38 @@ export class TestTaskAgent extends Agent<Cloudflare.Env> {
       return "rested";
     }
   } satisfies TaskHandlers;
+
+  async prepareDueNapper(runId: string): Promise<void> {
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      "napper",
+      { ms: 60_000 },
+      { runId }
+    );
+    await this.tasks.onRoute({
+      source: undefined,
+      payload: { type: "dispatch", runId }
+    });
+
+    const snapshot = await this.tasks.get(runId);
+    if (snapshot?.state !== "waiting") {
+      throw new Error(
+        `Task ${runId} did not reach waiting state: ${snapshot?.state}`
+      );
+    }
+    const past = Date.now() - 1_000;
+    this
+      .sql`UPDATE cf_agents_task_runs SET next_at = ${past} WHERE run_id = ${runId}`;
+    this
+      .sql`UPDATE cf_agents_task_steps SET next_at = ${past} WHERE run_id = ${runId}`;
+  }
+
+  async inspectTask(runId: string): Promise<{
+    snapshot: TaskRunSnapshot<TaskValue> | null;
+    stepRuns: string[];
+  }> {
+    return {
+      snapshot: await this.tasks.get(runId),
+      stepRuns: [...this.stepRuns]
+    };
+  }
 }

@@ -5,7 +5,7 @@ import {
   runInDurableObject
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { TestTaskAgent } from "../agents/tasks";
+import { TestTaskAgent } from "../agents/tasks";
 import type { TestSubAgentParent } from "../agents/sub-agent";
 import { seedTaskRun, seedTaskStep } from "../capabilities/tasks";
 import type { TaskRunSnapshot, TaskValue } from "../../tasks";
@@ -218,5 +218,154 @@ describe("Agent tasks integration", () => {
     await runInDurableObject(freshChild, async (instance: TestTaskAgent) => {
       await instance.tasks.cancel(runId);
     });
+  });
+
+  it("runs a due task through the root alarm after its facet is aborted", async () => {
+    const rootName = crypto.randomUUID();
+    const childName = `task-child-${crypto.randomUUID()}`;
+    const runId = `cold-facet-task-${crypto.randomUUID()}`;
+    const rootStub = env.TestSubAgentParent.getByName(rootName);
+    const ownerKey =
+      `TestSubAgentParent:${rootName}/` + `TestTaskAgent:${childName}`;
+    const jobId = `task-routed:${JSON.stringify([ownerKey, runId])}`;
+
+    await runInDurableObject(
+      rootStub,
+      async (instance: TestSubAgentParent, state) => {
+        await instance.lifecycle.start();
+        const child = await instance.dynamicAgents.get(
+          TestTaskAgent,
+          childName
+        );
+        await child.prepareDueNapper(runId);
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = ?", jobId)
+            .toArray()
+        ).toEqual([{ id: jobId }]);
+
+        // Leave only durable child state behind, then make the root-owned
+        // mirror due. Dispatch must reconstruct facet identity before Tasks
+        // startup so completion can cancel this same root job.
+        instance.dynamicAgents.abort(TestTaskAgent, childName);
+        const past = Date.now() - 1_000;
+        state.storage.sql.exec(
+          "UPDATE cf_agents_jobs SET time = ? WHERE id = ?",
+          past,
+          jobId
+        );
+        await instance.lifecycle.rearmAlarm();
+      }
+    );
+
+    await runDurableObjectAlarm(rootStub);
+    await runInDurableObject(
+      rootStub,
+      async (instance: TestSubAgentParent, state) => {
+        const child = await instance.dynamicAgents.get(
+          TestTaskAgent,
+          childName
+        );
+        const deadline = Date.now() + 5_000;
+        let observation = await child.inspectTask(runId);
+        while (observation.snapshot?.state !== "completed") {
+          if (Date.now() > deadline) {
+            throw new Error(
+              `Cold facet task stuck in ${observation.snapshot?.state}`
+            );
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          observation = await child.inspectTask(runId);
+        }
+
+        expect(observation.snapshot.result).toBe("rested");
+        expect(observation.stepRuns).toEqual(["napper:after"]);
+        const cleanupDeadline = Date.now() + 5_000;
+        for (;;) {
+          const rows = state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = ?", jobId)
+            .toArray();
+          if (rows.length === 0) break;
+          if (Date.now() > cleanupDeadline) {
+            throw new Error(`Root wake ${jobId} was not removed`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+    );
+  });
+
+  it("deleting a facet cleans its routed wakes but preserves siblings", async () => {
+    const rootName = crypto.randomUUID();
+    const victimName = `victim-${crypto.randomUUID()}`;
+    const siblingName = `sibling-${crypto.randomUUID()}`;
+    const rootStub = env.TestSubAgentParent.getByName(rootName);
+    const victim = {
+      key: `TestSubAgentParent:${rootName}/TestTaskAgent:${victimName}`,
+      data: JSON.stringify([
+        { className: "TestSubAgentParent", name: rootName },
+        { className: "TestTaskAgent", name: victimName }
+      ])
+    };
+    const descendant = {
+      key: `${victim.key}/TestTaskAgent:descendant`,
+      data: JSON.stringify([
+        { className: "TestSubAgentParent", name: rootName },
+        { className: "TestTaskAgent", name: victimName },
+        { className: "TestTaskAgent", name: "descendant" }
+      ])
+    };
+    const sibling = {
+      key: `TestSubAgentParent:${rootName}/TestTaskAgent:${siblingName}`,
+      data: JSON.stringify([
+        { className: "TestSubAgentParent", name: rootName },
+        { className: "TestTaskAgent", name: siblingName }
+      ])
+    };
+
+    await runInDurableObject(
+      rootStub,
+      async (instance: TestSubAgentParent, state) => {
+        await instance.lifecycle.start();
+        await instance.dynamicAgents.get(TestTaskAgent, victimName);
+        await instance.dynamicAgents.get(TestTaskAgent, siblingName);
+        for (const [source, runId] of [
+          [victim, "victim-run"],
+          [descendant, "descendant-run"],
+          [sibling, "sibling-run"]
+        ] as const) {
+          await instance.tasks.onRoute({
+            source,
+            payload: {
+              type: "syncWake",
+              runId,
+              next: Date.now() + 60_000
+            }
+          });
+        }
+
+        await instance.dynamicAgents.delete(TestTaskAgent, victimName);
+        const siblingJobId = `task-routed:${JSON.stringify([
+          sibling.key,
+          "sibling-run"
+        ])}`;
+        expect(
+          state.storage.sql
+            .exec(
+              `SELECT id FROM cf_agents_jobs
+                WHERE capability = 'tasks'
+                ORDER BY id`
+            )
+            .toArray()
+        ).toEqual([{ id: siblingJobId }]);
+
+        await instance.dynamicAgents.delete(TestTaskAgent, siblingName);
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE capability = 'tasks'")
+            .toArray()
+        ).toEqual([]);
+      }
+    );
   });
 });
