@@ -228,8 +228,17 @@ function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
   };
 }
 
-function createMockModel(
-  response: string,
+/** Typed model-call subset used by prompt-sensitive test models. */
+export type MockModelCallOptions = {
+  prompt?: Array<{
+    role?: string;
+    content?: string | Array<{ type?: string; text?: string }>;
+  }>;
+};
+
+/** Create a streaming text model with static or prompt-derived output. */
+export function createMockModel(
+  response: string | ((callOptions: MockModelCallOptions) => string),
   options: MockModelOptions = {}
 ): LanguageModel {
   return {
@@ -240,8 +249,10 @@ function createMockModel(
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream(callOptions: unknown) {
+    doStream(callOptions: MockModelCallOptions) {
       options.onCall?.(captureModelCallSettings(callOptions));
+      const responseText =
+        typeof response === "function" ? response(callOptions) : response;
       _mockCallCount++;
       const callId = _mockCallCount;
       const stream = new ReadableStream({
@@ -251,7 +262,7 @@ function createMockModel(
           controller.enqueue({
             type: "text-delta",
             id: `t-${callId}`,
-            delta: response
+            delta: responseText
           });
           controller.enqueue({ type: "text-end", id: `t-${callId}` });
           controller.enqueue({
@@ -3676,7 +3687,8 @@ export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
 // Extends Think with tools configured for tool integration testing.
 // Uses a mock model that calls the "echo" tool on first invocation.
 
-function createToolCallingMockModel(
+/** Create a two-step model that calls `echo` before its final text answer. */
+export function createToolCallingMockModel(
   toolInput = JSON.stringify({ message: "hello" })
 ): LanguageModel {
   let callCount = 0;
@@ -5080,7 +5092,12 @@ export class ThinkProgrammaticTestAgent extends Think {
         cause: new Error(message)
       });
     }
-    return super.continueLastTurn(body, options);
+    const result = await super.continueLastTurn(body, options);
+    return {
+      requestId: result.requestId,
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error })
+    };
   }
 
   override getModel(): LanguageModel {

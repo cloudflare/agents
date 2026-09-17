@@ -1,10 +1,21 @@
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
-import type { UIMessage } from "ai";
+import { tool, type UIMessage } from "ai";
 import { subscribe } from "agents/observability";
-import type { ThinkProgrammaticTestAgent } from "./agents/think-session";
-import type { SubmitMessagesResult, TurnResult } from "../think";
+import {
+  createMockModel,
+  createToolCallingMockModel,
+  type MockModelCallOptions,
+  type ThinkProgrammaticTestAgent
+} from "./agents/think-session";
+import type {
+  ChatResponseResult,
+  SubmitMessagesResult,
+  TurnResult
+} from "../think";
+import { z } from "zod";
 
 function textPart(message: { parts?: Array<{ type: string; text?: string }> }) {
   return message.parts?.find((part) => part.type === "text");
@@ -15,6 +26,60 @@ async function freshProgrammaticAgent(name: string) {
     env.ThinkProgrammaticTestAgent as unknown as DurableObjectNamespace<ThinkProgrammaticTestAgent>,
     `${name}-${crypto.randomUUID()}`
   );
+}
+
+async function runInProgrammaticAgent<T>(
+  name: string,
+  callback: (instance: ThinkProgrammaticTestAgent) => Promise<T>
+): Promise<T> {
+  const stub = await freshProgrammaticAgent(name);
+  return runInDurableObject(stub, callback);
+}
+
+async function withOwnOverrides<T>(
+  target: object,
+  overrides: Readonly<Record<string, unknown>>,
+  callback: () => Promise<T>
+): Promise<T> {
+  const originals = Object.keys(overrides).map((key) => ({
+    key,
+    descriptor: Object.getOwnPropertyDescriptor(target, key)
+  }));
+  for (const { key } of originals) {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      writable: true,
+      value: overrides[key]
+    });
+  }
+  try {
+    return await callback();
+  } finally {
+    for (const { key, descriptor } of originals.reverse()) {
+      if (descriptor) {
+        Object.defineProperty(target, key, descriptor);
+      } else {
+        Reflect.deleteProperty(target, key);
+      }
+    }
+  }
+}
+
+function lastUserPromptText(options: MockModelCallOptions): string {
+  const prompt = options.prompt ?? [];
+  for (let index = prompt.length - 1; index >= 0; index--) {
+    const item = prompt[index];
+    if (item?.role !== "user") continue;
+    if (typeof item.content === "string") return item.content;
+    return (item.content ?? [])
+      .filter(
+        (part): part is { type?: string; text: string } =>
+          part.type === "text" && typeof part.text === "string"
+      )
+      .map((part) => part.text)
+      .join("");
+  }
+  return "";
 }
 
 async function waitFor(
@@ -307,6 +372,10 @@ describe("Think — runTurn", () => {
       "Function input"
     )) as TurnResult;
     expect(fnResult.status).toBe("completed");
+    expect(textPart(fnResult.message ?? {})).toMatchObject({
+      type: "text",
+      text: "Function reply"
+    });
 
     const messages = (await agent.getStoredMessages()) as UIMessage[];
     expect(messages).toHaveLength(4);
@@ -344,6 +413,7 @@ describe("Think — runTurn", () => {
 
     const emptyArray = await agent.testSaveMessages([]);
     expect(emptyArray.status).toBe("completed");
+    expect(Object.hasOwn(emptyArray, "messageId")).toBe(false);
     expect((await agent.getStoredMessages()) as UIMessage[]).toHaveLength(3);
 
     await agent.setProgrammaticResponseForTest("Empty function reply");
@@ -376,6 +446,21 @@ describe("Think — runTurn", () => {
     ]);
   });
 
+  it("returns the continuation message through a compatible legacy override", async () => {
+    const agent = await freshProgrammaticAgent("runturn-continuation-override");
+    await agent.setProgrammaticResponseForTest("Seed answer");
+    await agent.testRunTurnWaitString("Seed question");
+    await agent.setProgrammaticResponseForTest("Override continuation");
+
+    const result = (await agent.testRunTurnContinuation()) as TurnResult;
+
+    expect(result.status).toBe("completed");
+    expect(textPart(result.message ?? {})).toMatchObject({
+      type: "text",
+      text: "Override continuation"
+    });
+  });
+
   it("continuation skips when latest leaf is not assistant", async () => {
     const agent = await freshProgrammaticAgent("runturn-continuation-skip");
     const result = (await agent.testRunTurnContinuation()) as TurnResult;
@@ -385,6 +470,204 @@ describe("Think — runTurn", () => {
       continuation: true
     });
     expect(result.message).toBeUndefined();
+  });
+
+  it("returns a queued continuation's own message before a follow-up turn", async () => {
+    await runInProgrammaticAgent(
+      "runturn-queued-continuation",
+      async (instance) => {
+        await instance.setProgrammaticResponseForTest("Seed answer");
+        await instance.runTurn({ mode: "wait", input: "Seed question" });
+
+        const baseBeforeTurn = instance.beforeTurn.bind(instance);
+        const responses = ["Continuation answer", "Follow-up answer"];
+        let responseIndex = 0;
+        let markStarted = () => {};
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        let releaseTurn = () => {};
+        const release = new Promise<void>((resolve) => {
+          releaseTurn = resolve;
+        });
+        let blockNextTurn = true;
+        const getModel: ThinkProgrammaticTestAgent["getModel"] = () =>
+          createMockModel(responses[responseIndex++] ?? "Unexpected answer");
+        const beforeTurn: ThinkProgrammaticTestAgent["beforeTurn"] = async (
+          context
+        ) => {
+          await baseBeforeTurn(context);
+          if (!blockNextTurn) return;
+          blockNextTurn = false;
+          markStarted();
+          await release;
+        };
+        await withOwnOverrides(instance, { getModel, beforeTurn }, async () => {
+          try {
+            const continuationPromise = instance.runTurn({
+              mode: "wait",
+              continuation: true
+            });
+            await started;
+            const followUpPromise = instance.runTurn({
+              mode: "wait",
+              input: "Follow-up question"
+            });
+            releaseTurn();
+            const [continuation, followUp] = await Promise.all([
+              continuationPromise,
+              followUpPromise
+            ]);
+
+            expect(continuation).toMatchObject({
+              status: "completed",
+              continuation: true
+            });
+            expect(textPart(continuation.message ?? {})).toMatchObject({
+              type: "text",
+              text: "Continuation answer"
+            });
+            expect(followUp).toMatchObject({
+              status: "completed",
+              continuation: false
+            });
+            expect(textPart(followUp.message ?? {})).toMatchObject({
+              type: "text",
+              text: "Follow-up answer"
+            });
+          } finally {
+            releaseTurn();
+          }
+        });
+      }
+    );
+  });
+
+  it("returns persisted content when the response hook mutates history", async () => {
+    await runInProgrammaticAgent(
+      "runturn-response-hook-history",
+      async (instance) => {
+        const getModel: ThinkProgrammaticTestAgent["getModel"] = () =>
+          createMockModel("Persisted answer");
+        const onChatResponse: ThinkProgrammaticTestAgent["onChatResponse"] =
+          async (response) => {
+            const text = response.message.parts.find(
+              (part) => part.type === "text"
+            );
+            if (text?.type === "text") text.text = "Mutated by response hook";
+            await instance.addMessages([
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: "Hook follow-up" }]
+              }
+            ]);
+          };
+        await withOwnOverrides(
+          instance,
+          { getModel, onChatResponse },
+          async () => {
+            const result = await instance.runTurn({
+              mode: "wait",
+              input: "Hook question"
+            });
+
+            expect(result.status).toBe("completed");
+            expect(textPart(result.message ?? {})).toMatchObject({
+              type: "text",
+              text: "Persisted answer"
+            });
+            const messages = await instance.getStoredMessages();
+            expect(textPart(messages.at(-1) ?? {})).toMatchObject({
+              type: "text",
+              text: "Hook follow-up"
+            });
+          }
+        );
+      }
+    );
+  });
+
+  it("returns stored tool output with toJSON without suppressing the response hook", async () => {
+    await runInProgrammaticAgent("runturn-to-json-output", async (instance) => {
+      let responseHookCalls = 0;
+      const getModel: ThinkProgrammaticTestAgent["getModel"] = () =>
+        createToolCallingMockModel();
+      const getTools: ThinkProgrammaticTestAgent["getTools"] = () => ({
+        echo: tool({
+          description: "Return an object serialized through its own toJSON",
+          inputSchema: z.object({ message: z.string() }),
+          execute: () => ({
+            answer: 42,
+            toJSON() {
+              return { answer: 42 };
+            }
+          }),
+          toModelOutput: ({ output }) => ({
+            type: "text",
+            value: JSON.stringify(output)
+          })
+        })
+      });
+      const onChatResponse: (result: ChatResponseResult) => void = () => {
+        responseHookCalls++;
+      };
+      await withOwnOverrides(
+        instance,
+        { getModel, getTools, onChatResponse },
+        async () => {
+          const result = await instance.runTurn({
+            mode: "wait",
+            input: "Run the serialization tool"
+          });
+          const output = result.message?.parts.find((part) =>
+            part.type.startsWith("tool-")
+          )?.output;
+
+          expect(result.status).toBe("completed");
+          expect(textPart(result.message ?? {})).toMatchObject({
+            type: "text",
+            text: "Done with tools"
+          });
+          expect(output).toEqual({ answer: 42 });
+          expect(responseHookCalls).toBe(1);
+        }
+      );
+    });
+  });
+
+  it("does not borrow an old assistant when a continuation persists no content", async () => {
+    const agent = await freshProgrammaticAgent("runturn-stripped-answer");
+    await agent.setProgrammaticResponseForTest("Seed answer");
+    await agent.testRunTurnWaitString("Seed question");
+    await agent.setFinalAnswerResponseForTest({ answer: "Structured only" });
+
+    const result = (await agent.testRunTurnContinuation()) as TurnResult;
+
+    expect(result.status).toBe("completed");
+    expect(result.message).toBeUndefined();
+    expect((await agent.getStoredMessages()) as UIMessage[]).toHaveLength(2);
+  });
+
+  it("omits a persisted partial message from an aborted turn result", async () => {
+    await runInProgrammaticAgent("runturn-aborted-result", async (instance) => {
+      await instance.setDelayedChunkResponse(["Partial", " answer"], 40);
+      const controller = new AbortController();
+      setTimeout(
+        () => controller.abort(new Error("mid-stream runTurn abort")),
+        60
+      );
+
+      const result = await instance.runTurn({
+        mode: "wait",
+        input: "Abort me",
+        signal: controller.signal
+      });
+
+      expect(result.status).toBe("aborted");
+      expect(result.message).toBeUndefined();
+      expect(await instance.getStoredMessages()).toHaveLength(2);
+    });
   });
 
   it("submit mode returns SubmitMessagesResult equivalent to submitMessages", async () => {
@@ -664,6 +947,43 @@ describe("Think — runTurn", () => {
 
     const fnSubmit = await agent.testRunTurnSubmitWithFunction();
     expect(fnSubmit?.message).toContain("function input");
+  });
+
+  it("returns each queued wait turn's own assistant message", async () => {
+    await runInProgrammaticAgent("runturn-queued-results", async (instance) => {
+      const getModel: ThinkProgrammaticTestAgent["getModel"] = () =>
+        createMockModel((options) => {
+          const prompt = lastUserPromptText(options);
+          if (prompt === "First question") return "First answer";
+          if (prompt === "Second question") return "Second answer";
+          throw new Error(`Unexpected final user prompt: ${prompt}`);
+        });
+      await withOwnOverrides(instance, { getModel }, async () => {
+        const [first, second] = await Promise.all([
+          instance.runTurn({ mode: "wait", input: "First question" }),
+          instance.runTurn({ mode: "wait", input: "Second question" })
+        ]);
+
+        expect(first.status).toBe("completed");
+        expect(textPart(first.message ?? {})).toMatchObject({
+          type: "text",
+          text: "First answer"
+        });
+        expect(second.status).toBe("completed");
+        expect(textPart(second.message ?? {})).toMatchObject({
+          type: "text",
+          text: "Second answer"
+        });
+        expect(first.message?.id).not.toBe(second.message?.id);
+
+        const storedAssistantIds = (await instance.getStoredMessages())
+          .filter((message) => message.role === "assistant")
+          .map((message) => message.id);
+        expect(storedAssistantIds).toHaveLength(2);
+        expect(storedAssistantIds).toContain(first.message?.id);
+        expect(storedAssistantIds).toContain(second.message?.id);
+      });
+    });
   });
 
   it("concurrent non-nested wait enqueues behind an active turn", async () => {

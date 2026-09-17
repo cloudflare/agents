@@ -1329,6 +1329,7 @@ export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
 
 /** Result of {@link Think.runTurn} in `mode: "wait"`. */
 export type TurnResult = SaveMessagesResult & {
+  /** Persisted assistant produced by this completed turn; absent otherwise. */
   message?: SessionMessage;
   continuation: boolean;
 };
@@ -1565,6 +1566,11 @@ const admittedTurnContext = new AsyncLocalStorage<{
   channel?: string | undefined;
   continuation?: boolean | undefined;
   generation?: number | undefined;
+}>();
+
+const waitTurnResultContext = new AsyncLocalStorage<{
+  agent: unknown;
+  messageId?: string;
 }>();
 
 // Drains the underlying model stream when a drain loop exits early (in-stream
@@ -8301,52 +8307,60 @@ export class Think<
     result: SaveMessagesResult,
     continuation: boolean
   ): Promise<TurnResult> {
-    let message: SessionMessage | undefined;
-    if (result.status === "completed") {
-      const leaf = await this.session.getLatestLeaf();
-      if (leaf?.role === "assistant") {
-        message = leaf;
-      }
-    }
-    return { ...result, continuation, message };
+    const capture = waitTurnResultContext.getStore();
+    const message =
+      result.status === "completed" &&
+      capture?.agent === this &&
+      capture.messageId !== undefined
+        ? await this.session.getMessage(capture.messageId)
+        : null;
+    return {
+      ...result,
+      continuation,
+      ...(message !== null && { message })
+    };
   }
 
   private async _runTurnWait(options: RunTurnWait): Promise<TurnResult> {
     this._validateRunTurnAdmission(options, "wait");
 
-    if (options.continuation === true) {
-      const result = await this.continueLastTurn(options.body, {
-        signal: options.signal,
-        channel: options.channel
-      });
-      return this._enrichTurnResult(result, true);
-    }
+    return waitTurnResultContext.run({ agent: this }, async () => {
+      if (options.continuation === true) {
+        const result = await this.continueLastTurn(options.body, {
+          signal: options.signal,
+          channel: options.channel
+        });
+        return this._enrichTurnResult(result, true);
+      }
 
-    const input = options.input;
-    if (input === undefined) {
-      throw new TypeError("runTurn: supply either input or continuation: true");
-    }
+      const input = options.input;
+      if (input === undefined) {
+        throw new TypeError(
+          "runTurn: supply either input or continuation: true"
+        );
+      }
 
-    if (typeof input === "function") {
+      if (typeof input === "function") {
+        const result = await this._runProgrammaticMessagesTurn(
+          crypto.randomUUID(),
+          input,
+          { signal: options.signal, channel: options.channel }
+        );
+        return this._enrichTurnResult(result, false);
+      }
+
+      const messages = this._normalizeRunTurnMessages(input);
+      if (messages.length === 0) {
+        return { requestId: "", status: "skipped", continuation: false };
+      }
+
       const result = await this._runProgrammaticMessagesTurn(
         crypto.randomUUID(),
-        input,
+        messages,
         { signal: options.signal, channel: options.channel }
       );
       return this._enrichTurnResult(result, false);
-    }
-
-    const messages = this._normalizeRunTurnMessages(input);
-    if (messages.length === 0) {
-      return { requestId: "", status: "skipped", continuation: false };
-    }
-
-    const result = await this._runProgrammaticMessagesTurn(
-      crypto.randomUUID(),
-      messages,
-      { signal: options.signal, channel: options.channel }
-    );
-    return this._enrichTurnResult(result, false);
+    });
   }
 
   private async _runTurnSubmit(
@@ -13482,12 +13496,17 @@ export class Think<
         const assistantMsg = accumulator.toMessage();
 
         if (accumulator.parts.length > 0) {
-          await this._persistAssistantMessageWithCutover(
-            streamId,
-            assistantMsg,
-            parentId,
-            { discard: this._discardStreamAtCutover(requestId) }
-          );
+          const storedMessageId =
+            await this._persistAssistantMessageWithCutover(
+              streamId,
+              assistantMsg,
+              parentId,
+              { discard: this._discardStreamAtCutover(requestId) }
+            );
+          if (!streamError && !streamAborted && storedMessageId !== undefined) {
+            const capture = waitTurnResultContext.getStore();
+            if (capture?.agent === this) capture.messageId = storedMessageId;
+          }
           this._broadcastMessages();
         }
         // Nothing to persist (or the persist threw): settle the finished
@@ -13566,24 +13585,26 @@ export class Think<
     msg: UIMessage,
     parentId?: string,
     options: { discard?: boolean } = {}
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const toPersist = this._strippedForPersist(msg);
-    if (toPersist === null) return;
+    if (toPersist === null) return undefined;
     if (this._resumableStream.pendingCutoverId !== streamId) {
       // The stream was settled by another path (a stall, an error): plain persist.
-      await this._upsertMessageInHistory(toPersist, parentId);
-      return;
+      return (await this._upsertMessageInHistory(toPersist, parentId)).id;
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
+    let storedMessageId: string | undefined;
     let after: (() => Promise<void>) | undefined;
     try {
       this._resumableStream.cutover(
         streamId,
         () => {
-          after = sync.upsert(toPersist as SessionMessage, {
+          const write = sync.upsert(toPersist as SessionMessage, {
             parentId,
             source: "server"
-          }).after;
+          });
+          storedMessageId = write.result.message.id;
+          after = write.after;
         },
         { discard: options.discard ?? true }
       );
@@ -13594,6 +13615,7 @@ export class Think<
       throw error;
     }
     await after?.();
+    return storedMessageId;
   }
 
   /**
