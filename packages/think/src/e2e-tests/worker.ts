@@ -13,6 +13,7 @@ import {
   createChatFiberSnapshot,
   wrapChatFiberSnapshot
 } from "agents/chat";
+import type { ResumableStream } from "agents/chat";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
@@ -1842,6 +1843,88 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
       )
     `;
     await this.ctx.storage.put(SUBMISSION_FORCE_STABLE_TIMEOUT_KEY, true);
+  }
+
+  private _submissionBookkeepingPaused = false;
+
+  /** Start a real recovery Task and park only its post-turn incident write. */
+  @callable()
+  async startRecoveryAtLedgerGap(submissionId: string): Promise<void> {
+    await this.seedRunningSubmission(submissionId, submissionId, true);
+    const userMessage: UIMessage = {
+      id: `user-${submissionId}`,
+      role: "user",
+      parts: [{ type: "text", text: "Recover before the ledger settles" }]
+    };
+    await this.session.appendMessage(userMessage);
+    const incidentId = `incident-${submissionId}`;
+    // SAFETY: this inert e2e fixture intercepts the existing bookkeeping seam;
+    // Tasks, inference, cutover, submission settlement, and restart stay real.
+    const internals = this as unknown as {
+      _updateChatRecoveryIncident(
+        id: string | undefined,
+        status: string,
+        reason?: string
+      ): Promise<void>;
+      _enqueueChatRecovery(
+        callback: "_chatRecoveryRetry",
+        data: Record<string, unknown>,
+        reason: "initial",
+        delay: number
+      ): Promise<void>;
+    };
+    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
+    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+      if (id === incidentId && status === "completed") {
+        this._submissionBookkeepingPaused = true;
+        // The test kills this process at the barrier; there is no live release.
+        await new Promise<void>(() => {});
+      }
+      return updateIncident(id, status, reason);
+    };
+    await internals._enqueueChatRecovery(
+      "_chatRecoveryRetry",
+      {
+        incidentId,
+        originalRequestId: submissionId,
+        recoveredRequestId: submissionId,
+        targetUserId: userMessage.id
+      },
+      "initial",
+      0
+    );
+  }
+
+  /** Observe the barrier only once both predecessor and successor Tasks are gone. */
+  @callable()
+  async isRecoveryAtLedgerGap(): Promise<boolean> {
+    const runs = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN (${CHAT_RECOVERY_TASK_NAME}, ${ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME})
+    `;
+    return this._submissionBookkeepingPaused && runs[0]?.count === 0;
+  }
+
+  /** Starting a foreign stream runs real reclaim before inspecting the evidence. */
+  @callable()
+  async reclaimDuringSubmissionGap(submissionId: string): Promise<{
+    streamStatus: string | null;
+    retained: number;
+  }> {
+    const submission = await this.inspectSubmission(submissionId);
+    // SAFETY: the fixture uses the host's existing adapter, not synthetic SQL cleanup.
+    const { _resumableStream: stream } = this as unknown as {
+      _resumableStream: ResumableStream;
+    };
+    const foreign = stream.start(crypto.randomUUID());
+    stream.complete(foreign);
+    return {
+      streamStatus: submission?.requestId
+        ? (stream.latestStreamInfoForRequest(submission.requestId)?.status ??
+          null)
+        : null,
+      retained: stream.listRetained().length
+    };
   }
 
   /** Report a production-scheduled retry parked in its durable backoff. */

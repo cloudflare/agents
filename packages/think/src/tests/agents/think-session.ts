@@ -53,7 +53,7 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator
 } from "agents/chat";
-import type { ClientToolSchema, TurnQueue } from "agents/chat";
+import type { ClientToolSchema, ResumableStream, TurnQueue } from "agents/chat";
 import type { Schedule } from "agents";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
@@ -8141,6 +8141,7 @@ export class ThinkRecoveryTestAgent extends Think {
       | "before-acceptance"
       | "after-acceptance"
       | "before-completion"
+      | "after-terminal-foreign-stream"
       | "after-foreign-turn" = "before-acceptance",
     streamOutcome: "completed" | "error" = "completed"
   ): Promise<{
@@ -8287,7 +8288,8 @@ export class ThinkRecoveryTestAgent extends Think {
       // The successor Task has been removed, but ledger completion has not
       // started. This is the exact terminal-stream / ledger handoff window.
       if (
-        pauseAt === "before-completion" &&
+        (pauseAt === "before-completion" ||
+          pauseAt === "after-terminal-foreign-stream") &&
         id === data.incidentId &&
         (status === "completed" || status === "failed")
       ) {
@@ -8375,6 +8377,16 @@ export class ThinkRecoveryTestAgent extends Think {
         SELECT request_id FROM cf_think_submissions
         WHERE submission_id = ${submissionId}
       `[0];
+      if (pauseAt === "after-terminal-foreign-stream") {
+        // A foreign producer invokes reclaim after the successor's cutover,
+        // while the recovery callback is still paused before ledger settlement.
+        // SAFETY: the fixture accesses the existing private stream adapter.
+        const { _resumableStream } = this as unknown as {
+          _resumableStream: ResumableStream;
+        };
+        const foreignStream = _resumableStream.start("foreign-terminal-gap");
+        _resumableStream.complete(foreignStream);
+      }
       await this.recoverSubmissionsOnStartForTest();
       // Repeated reconciliation must not duplicate terminal notifications.
       await this.recoverSubmissionsOnStartForTest();
@@ -8452,6 +8464,102 @@ export class ThinkRecoveryTestAgent extends Think {
     }
   }
 
+  /** Reconcile a pin abandoned after settlement, then exercise start's reclaim. */
+  async staleSubmissionRetentionForTest(
+    outcome:
+      | "completed"
+      | "error"
+      | "aborted"
+      | "skipped"
+      | "missing"
+      | "cancel"
+      | "interrupted"
+  ): Promise<{ retained: number; reclaimed: boolean }> {
+    const requestId = crypto.randomUUID();
+    await this.seedRunningSubmissionForTest(requestId);
+    // SAFETY: the fixture uses the real adapter and terminalization seam.
+    const internals = this as unknown as {
+      _resumableStream: ResumableStream;
+      _markRecoveredSubmissionInterrupted(
+        id: string,
+        message: string
+      ): Promise<void>;
+    };
+    const stream = internals._resumableStream;
+    const id = stream.start(requestId);
+    stream.cutover(id, () => {}, { retain: true });
+    if (outcome === "cancel") {
+      await this.cancelSubmission(requestId);
+    } else if (outcome === "interrupted") {
+      await internals._markRecoveredSubmissionInterrupted(
+        requestId,
+        "interrupted"
+      );
+    } else {
+      // Simulate the durable state left by a crash before release (or removal
+      // of an already-settled submission). Startup must self-heal every pin.
+      if (outcome === "missing") {
+        this
+          .sql`DELETE FROM cf_think_submissions WHERE submission_id = ${requestId}`;
+      } else {
+        this
+          .sql`UPDATE cf_think_submissions SET status = ${outcome} WHERE submission_id = ${requestId}`;
+      }
+      await this.recoverSubmissionsOnStartForTest();
+    }
+    const retained = stream.listRetained().length;
+    const next = stream.start("foreign-after-release");
+    stream.complete(next);
+    return { retained, reclaimed: stream.getStreamMetadata(id) === null };
+  }
+
+  /** Exercise the facet legacy-fiber branch without requiring facet routing. */
+  async facetRecoveryAcceptanceForTest(): Promise<{
+    acceptedBeforeCompletion: boolean;
+    durableAtAcceptance: boolean;
+  }> {
+    // SAFETY: these private methods are the real acceptance and fiber seams;
+    // overriding only the path selects the facet engine in this inert fixture.
+    const internals = this as unknown as {
+      _runRecoveredTurnAfterAcceptance<T>(
+        row: null,
+        onAccepted: () => void,
+        run: () => Promise<T>
+      ): Promise<T>;
+      _runChatRecoveryFiber<T>(
+        requestId: string,
+        continuation: boolean,
+        run: () => Promise<T>
+      ): Promise<T>;
+    };
+    Object.defineProperty(this, "parentPath", {
+      configurable: true,
+      value: [{ className: "ThinkRecoveryTestAgent", name: "parent" }]
+    });
+    let accepted = false;
+    let durableAtAcceptance = false;
+    const requestId = crypto.randomUUID();
+    try {
+      return await internals._runRecoveredTurnAfterAcceptance(
+        null,
+        () => {
+          accepted = true;
+          durableAtAcceptance = this.sql<{ snapshot: string | null }>`
+            SELECT snapshot FROM cf_agents_runs
+            WHERE name = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME + ":" + requestId}
+          `.some((row) => row.snapshot !== null);
+        },
+        () =>
+          internals._runChatRecoveryFiber(requestId, false, async () => ({
+            acceptedBeforeCompletion: accepted,
+            durableAtAcceptance
+          }))
+      );
+    } finally {
+      Reflect.deleteProperty(this, "parentPath");
+    }
+  }
+
   /** A subclass can settle recovery without accepting a successor Task. */
   async recoverSubmissionWithoutSuccessorForTest(): Promise<{
     status: string | null;
@@ -8479,8 +8587,11 @@ export class ThinkRecoveryTestAgent extends Think {
     }
   }
 
-  /** Seed a `running` durable submission keyed by `requestId` (== submission id). */
-  async seedRunningSubmissionForTest(requestId: string): Promise<void> {
+  /** Seed a running submission, optionally already rebound to a successor. */
+  async seedRunningSubmissionForTest(
+    requestId: string,
+    submissionId = requestId
+  ): Promise<void> {
     (
       this as unknown as { _ensureSubmissionTable(): void }
     )._ensureSubmissionTable();
@@ -8491,7 +8602,7 @@ export class ThinkRecoveryTestAgent extends Think {
         messages_json, metadata_json, error_message, created_at,
         messages_applied_at, started_at, completed_at
       ) VALUES (
-        ${requestId}, NULL, ${requestId}, NULL, 'running',
+        ${submissionId}, NULL, ${requestId}, NULL, 'running',
         '[]', NULL, NULL, ${now}, ${now}, ${now}, NULL
       )
     `;

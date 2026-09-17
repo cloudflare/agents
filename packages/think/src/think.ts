@@ -5050,13 +5050,22 @@ export class Think<
     const wrap = (data: unknown) =>
       wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, data);
 
+    const acceptance = recoveredTurnAcceptanceContext.getStore();
+    const onAccepted =
+      acceptance?.agent === this ? acceptance.onAccepted : undefined;
+
     // Facet-hosted turns stay on the legacy fiber engine: the Tasks
     // capability does not accept runs on routed sub-agents yet, and facet
     // recovery routes through the root's facet-run index.
     if (this.parentPath.length > 0) {
       return this._runFiberWithStashWrapper(
         `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-        async () => fn(),
+        async () => {
+          // The legacy engine has persisted the successor fiber and snapshot
+          // (and registered the facet run) before entering this closure.
+          onAccepted?.(requestId);
+          return fn();
+        },
         { initialSnapshot: wrap(null), wrapStash: wrap }
       );
     }
@@ -5076,9 +5085,6 @@ export class Think<
     // connection/request), exactly as legacy inline fiber execution did: the
     // capability's host boundary intentionally carries no connection.
     const ambient = agentContext.getStore();
-    const acceptance = recoveredTurnAcceptanceContext.getStore();
-    const onAccepted =
-      acceptance?.agent === this ? acceptance.onAccepted : undefined;
     const run = (): Promise<T> => {
       // Tasks accepts the run durably before invoking its live closure. Rebind
       // submission ownership before telling the recovery Task it may settle,
@@ -10784,6 +10790,7 @@ export class Think<
         AND status IN ('pending', 'running')
     `;
 
+    this._releaseSettledSubmissionStreams();
     const updated = this._readSubmission(submissionId);
     if (updated?.status === "aborted") {
       this._enqueueTerminalWorkflowNotification(updated);
@@ -11046,6 +11053,7 @@ export class Think<
         }
       });
     } finally {
+      this._releaseSettledSubmissionStreams();
       this._programmaticStreamErrors.delete(requestId);
       this._submissionAbortControllers.delete(row.submission_id);
       const updated = this._readSubmission(row.submission_id);
@@ -11104,6 +11112,8 @@ export class Think<
 
   private async _recoverSubmissionsOnStart(): Promise<void> {
     this._ensureSubmissionTable();
+    // A crash after ledger settlement but before release must not leak pins.
+    this._releaseSettledSubmissionStreams();
 
     const running = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
@@ -11210,6 +11220,7 @@ export class Think<
       }
     }
 
+    this._releaseSettledSubmissionStreams();
     // Rows still pending (reverted above, or accepted before their run
     // item existed) get their run queued; queued ones keep their slot.
     await this._queuePendingSubmissionRuns();
@@ -11295,8 +11306,9 @@ export class Think<
     ): callback is ChatRecoveryScheduleCallback =>
       callback === "_chatRecoveryContinue" || callback === "_chatRecoveryRetry";
     const matchesSubmission = (recoveredRequestId: unknown): boolean =>
-      recoveredRequestId === submission.submission_id ||
-      recoveredRequestId === submission.request_id;
+      typeof recoveredRequestId === "string" &&
+      this._readRunningSubmissionForRecovery(recoveredRequestId)
+        ?.submission_id === submission.submission_id;
 
     const recoveryRuns = await this.tasks.list({
       definition: CHAT_RECOVERY_TASK_NAME,
@@ -12932,7 +12944,7 @@ export class Think<
       }
 
       if (streamError) {
-        this._errorResumableStream(streamId);
+        this._errorResumableStream(streamId, requestId);
       } else {
         this._finishResumableStream(streamId);
       }
@@ -12951,12 +12963,14 @@ export class Think<
           streamId,
           assistantMsg,
           undefined,
-          { discard: this._discardStreamAtCutover(requestId) }
+          this._streamCutoverOptions(requestId)
         );
         this._broadcastMessages();
       }
       // Nothing to persist (or the persist threw): settle the finished stream.
-      this._resumableStream.finalizePending();
+      this._resumableStream.finalizePending(
+        this._streamCutoverOptions(requestId)
+      );
 
       if (streamError) {
         await this._fireResponseHook({
@@ -13029,7 +13043,7 @@ export class Think<
           // Finalize the stream and return WITHOUT the generic terminal path,
           // which would otherwise re-broadcast the raw stall error.
           if (!streamFinalized) {
-            this._errorResumableStream(streamId);
+            this._errorResumableStream(streamId, requestId);
             streamFinalized = true;
           }
           doneSent = true;
@@ -13043,7 +13057,7 @@ export class Think<
         }
       }
       if (!streamFinalized) {
-        this._errorResumableStream(streamId);
+        this._errorResumableStream(streamId, requestId);
         streamFinalized = true;
       }
       if (!doneSent) {
@@ -13404,7 +13418,7 @@ export class Think<
       }
 
       if (streamError) {
-        this._errorResumableStream(streamId);
+        this._errorResumableStream(streamId, requestId);
       } else {
         this._finishResumableStream(streamId);
       }
@@ -13471,7 +13485,7 @@ export class Think<
           // submission interrupted), identical to deploy-recovery exhaustion.
           // Finalize the stream and report `aborted` (not `error`) so the caller
           // does not re-run the generic terminal path on top of it.
-          this._errorResumableStream(streamId);
+          this._errorResumableStream(streamId, requestId);
           this._pendingResumeConnections.clear();
           doneSent = true;
           this._streamingAssistant = null;
@@ -13482,7 +13496,7 @@ export class Think<
       if (options?.captureProgrammaticStreamError) {
         this._programmaticStreamErrors.set(requestId, streamError);
       }
-      this._errorResumableStream(streamId);
+      this._errorResumableStream(streamId, requestId);
       this._pendingResumeConnections.clear();
       if (!doneSent) {
         this._broadcastChat({
@@ -13497,7 +13511,7 @@ export class Think<
       }
     } finally {
       if (!doneSent) {
-        this._errorResumableStream(streamId);
+        this._errorResumableStream(streamId, requestId);
         this._pendingResumeConnections.clear();
         this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
@@ -13535,13 +13549,15 @@ export class Think<
             streamId,
             assistantMsg,
             parentId,
-            { discard: this._discardStreamAtCutover(requestId) }
+            this._streamCutoverOptions(requestId)
           );
           this._broadcastMessages();
         }
         // Nothing to persist (or the persist threw): settle the finished
         // stream so it is not mistaken for an interrupted turn.
-        this._resumableStream.finalizePending();
+        this._resumableStream.finalizePending(
+          this._streamCutoverOptions(requestId)
+        );
 
         await this._fireResponseHook({
           message: assistantMsg,
@@ -13558,7 +13574,9 @@ export class Think<
         console.error("Failed to persist assistant message:", e);
       }
     }
-    this._resumableStream.finalizePending();
+    this._resumableStream.finalizePending(
+      this._streamCutoverOptions(requestId)
+    );
 
     // The message is now persisted (or the turn was cleared), so subsequent
     // tool results resolve against storage; stop exposing the accumulator and
@@ -13614,7 +13632,7 @@ export class Think<
     streamId: string,
     msg: UIMessage,
     parentId?: string,
-    options: { discard?: boolean } = {}
+    options: { discard?: boolean; retain?: boolean } = {}
   ): Promise<void> {
     const toPersist = this._strippedForPersist(msg);
     if (toPersist === null) return;
@@ -13634,7 +13652,7 @@ export class Think<
             source: "server"
           }).after;
         },
-        { discard: options.discard ?? true }
+        options
       );
     } catch (error) {
       // The settle transaction rolled back: the row never landed, but the
@@ -13650,18 +13668,36 @@ export class Think<
    * child turn keeps them: the parent tails the stored chunks after the
    * child completes (`getAgentToolChunks`). A running submission also keeps
    * terminal stream evidence until its ledger settles: its non-retained chat
-   * Task may disappear first. Completed streams are not resumable/active and
-   * are reclaimed by the next `start()`, as for agent-tool children.
+   * Task may disappear first. Pin that evidence until ledger settlement;
+   * unlike unretained child rows, foreign turns must not reclaim it.
    */
-  private _discardStreamAtCutover(requestId: string): boolean {
-    if (this._agentToolRunsByRequestId.get(requestId)) return false;
+  private _streamCutoverOptions(requestId: string): {
+    discard: boolean;
+    retain?: boolean;
+  } {
+    if (this._agentToolRunsByRequestId.get(requestId))
+      return { discard: false };
     this._ensureSubmissionTable();
     const running = this.sql<{ submission_id: string }>`
       SELECT submission_id FROM cf_think_submissions
       WHERE request_id = ${requestId} AND status = 'running'
       LIMIT 1
     `;
-    return running.length === 0;
+    return running.length === 0
+      ? { discard: true }
+      : { discard: false, retain: true };
+  }
+
+  /** Release pins once no running submission owns their exact request. */
+  private _releaseSettledSubmissionStreams(): void {
+    for (const stream of this._resumableStream.listRetained()) {
+      const running = this.sql<{ submission_id: string }>`
+        SELECT submission_id FROM cf_think_submissions
+        WHERE request_id = ${stream.requestId} AND status = 'running'
+        LIMIT 1
+      `;
+      if (running.length === 0) this._resumableStream.release(stream.id);
+    }
   }
 
   /**
@@ -15069,9 +15105,9 @@ export class Think<
     }
     // If a durable submission is running for this turn, the continuation must
     // complete it (otherwise the submission hangs) — same as deploy recovery.
-    const recoveredRequestId = this._hasRunningSubmission(recoveryRootRequestId)
-      ? recoveryRootRequestId
-      : undefined;
+    const recoveredRequestId = this._readRunningSubmissionForRecovery(
+      recoveryRootRequestId
+    )?.submission_id;
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
       recoveryKind: "continue",
@@ -15249,11 +15285,11 @@ export class Think<
     // Keep recovery payloads linked to the stable submission/root identity;
     // request_id now follows the accepted successor for startup evidence.
     // The recovery lookup accepts either identity, including released payloads.
-    const hasRunningSubmission = this._hasRunningSubmission(
+    const recoveredSubmission = this._readRunningSubmissionForRecovery(
       recoveryRootRequestId
     );
 
-    if (streamIsTerminal && hasRunningSubmission) {
+    if (streamIsTerminal && recoveredSubmission) {
       await this._completeRecoveredSubmission(
         recoveryRootRequestId,
         streamStatus === "completed" ? "completed" : "error",
@@ -15265,8 +15301,8 @@ export class Think<
     }
 
     const recoveredRequestId =
-      (canContinue || shouldRetry) && hasRunningSubmission
-        ? recoveryRootRequestId
+      (canContinue || shouldRetry) && recoveredSubmission
+        ? recoveredSubmission.submission_id
         : undefined;
 
     if (shouldRetry) {
@@ -15719,7 +15755,7 @@ export class Think<
   }
 
   /**
-   * Keep the recovery callback as owner until a root chat Task is durably
+   * Keep the recovery callback as owner until a chat Task or facet fiber is durably
    * accepted. At acceptance, move the running submission to the successor's
    * request identity before signaling handoff. If an override never starts a
    * durable successor, the signal stays inert and the callback owns the work
@@ -15913,14 +15949,12 @@ export class Think<
     }
   }
 
-  private _hasRunningSubmission(requestId: string): boolean {
-    return this._readRunningSubmissionForRecovery(requestId) !== null;
-  }
-
   /**
    * Recovery payloads retain the original submission/root identity while
    * request_id follows the accepted successor. Match both so released payloads,
    * redeferred callbacks, and exhaustion can still locate the running row.
+   * Exact submission identity wins even when terminal: a redelivery must not
+   * fall through to another submission whose successor request collides.
    */
   private _readRunningSubmissionForRecovery(
     recoveredRequestId: string
@@ -15931,11 +15965,12 @@ export class Think<
              messages_json, metadata_json, error_message, created_at,
              messages_applied_at, started_at, completed_at
       FROM cf_think_submissions
-      WHERE (submission_id = ${recoveredRequestId} OR request_id = ${recoveredRequestId})
-        AND status = 'running'
+      WHERE submission_id = ${recoveredRequestId}
+         OR (request_id = ${recoveredRequestId} AND status = 'running')
+      ORDER BY (submission_id = ${recoveredRequestId}) DESC
       LIMIT 1
     `;
-    return rows[0] ?? null;
+    return rows[0]?.status === "running" ? rows[0] : null;
   }
 
   private async _markRecoveredSubmissionInterrupted(
@@ -15952,6 +15987,7 @@ export class Think<
       WHERE submission_id = ${row.submission_id}
         AND status = 'running'
     `;
+    this._releaseSettledSubmissionStreams();
     const updated = this._readSubmission(row.submission_id);
     if (updated?.status === "error") {
       this._enqueueTerminalWorkflowNotification(updated);
@@ -15987,6 +16023,7 @@ export class Think<
       WHERE submission_id = ${row.submission_id}
         AND status = 'running'
     `;
+    this._releaseSettledSubmissionStreams();
     const updated = this._readSubmission(row.submission_id);
     if (updated && this._isTerminalSubmissionStatus(updated.status)) {
       this._enqueueTerminalWorkflowNotification(updated);
@@ -16740,8 +16777,11 @@ export class Think<
   }
 
   /** Mark a resumable stream errored. */
-  protected _errorResumableStream(streamId: string): void {
-    this._resumableStream.markError(streamId);
+  protected _errorResumableStream(streamId: string, requestId?: string): void {
+    this._resumableStream.markError(
+      streamId,
+      requestId ? this._streamCutoverOptions(requestId) : undefined
+    );
   }
 
   /**

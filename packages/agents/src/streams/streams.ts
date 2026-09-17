@@ -83,6 +83,8 @@ export interface StreamsSyncInternal {
     tag: string | null,
     metadata: Record<string, StreamJson> | undefined
   ): void;
+  /** Replace metadata without changing the stream's lifecycle or timestamps. */
+  updateMetadata(streamId: string, metadata: Record<string, StreamJson>): void;
   /** The read-fenced append: one chunk insert at the log tail, reader wakeup. */
   append(streamId: string, chunk: StreamJson): number;
   /**
@@ -451,6 +453,16 @@ export class Streams extends LifecycleCapability {
           const index = this.#deleteHooks.indexOf(hook);
           if (index !== -1) this.#deleteHooks.splice(index, 1);
         };
+      },
+      updateMetadata: (streamId, metadata) => {
+        const metadataJson = this.#serialize(
+          metadata,
+          `metadata for stream "${streamId}"`
+        );
+        this.#sqlWrite(
+          "UPDATE cf_agents_streams SET metadata = ? WHERE stream_id = ?",
+          [metadataJson, streamId]
+        );
       },
       settle: (streamId, state, reason, options) =>
         this.#settle(streamId, state, reason, options),

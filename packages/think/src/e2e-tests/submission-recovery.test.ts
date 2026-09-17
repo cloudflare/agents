@@ -332,6 +332,55 @@ describe("Think submission recovery e2e", () => {
     ).toHaveLength(1);
   });
 
+  it("preserves completed successor evidence through foreign reclaim and a crash before ledger settlement", async () => {
+    const agent = "submission-terminal-reclaim";
+    const submissionId = "sub-terminal-reclaim";
+    wrangler = startWrangler();
+    await waitForReady();
+    await callAgent(agent, "startRecoveryAtLedgerGap", [submissionId]);
+    await pollUntil(
+      "successor completed before ledger settlement",
+      () => callAgent(agent, "isRecoveryAtLedgerGap") as Promise<boolean>,
+      (paused) => paused,
+      { attempts: 60, delayMs: 500 }
+    );
+    await expect(
+      callAgent(agent, "getSubmission", [submissionId])
+    ).resolves.toMatchObject({ status: "running" });
+    await expect(
+      callAgent(agent, "reclaimDuringSubmissionGap", [submissionId])
+    ).resolves.toEqual({
+      streamStatus: "completed",
+      retained: 1
+    });
+
+    wrangler = await restartWrangler(wrangler);
+    const settled = await pollUntil(
+      "startup terminal-stream settlement",
+      () =>
+        callAgent(agent, "getSubmission", [
+          submissionId
+        ]) as Promise<SubmissionView>,
+      (submission) => submission?.status !== "running"
+    );
+    expect(settled).toEqual({ status: "completed", error: null });
+    await expect(callAgent(agent, "getRecoveryOutcome")).resolves.toEqual({
+      userMessages: 1,
+      assistantMessages: 1,
+      responseCount: 1
+    });
+    await expect(callAgent(agent, "getStatusLog")).resolves.toEqual([
+      `${submissionId}:completed`
+    ]);
+    // Startup settled the ledger and released its pin. Nothing leaks forever.
+    await expect(
+      callAgent(agent, "reclaimDuringSubmissionGap", [submissionId])
+    ).resolves.toEqual({
+      streamStatus: null,
+      retained: 0
+    });
+  });
+
   it("leaves a recoverable in-flight submission running and continues it to completion", async () => {
     const agent = "submission-recoverable";
     const submissionId = "sub-recoverable";

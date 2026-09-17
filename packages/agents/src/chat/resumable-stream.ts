@@ -57,8 +57,9 @@ const REPLAY_PAGE_SEGMENTS = 10;
  * the newest chunk's timestamp for rows past it — so a long but still-active
  * stream is never reclaimed mid-flight. Terminal rows carry no such window:
  * a stream that finished is redundant with its persisted message, and the
- * cutover deletes it in the same transaction; anything a crash left behind
- * is reclaimed by the next {@link ResumableStream.start}.
+ * cutover deletes it in the same transaction; unretained leftovers are
+ * reclaimed by the next {@link ResumableStream.start}. Explicitly retained
+ * terminal evidence survives until {@link ResumableStream.release}.
  */
 const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
@@ -106,6 +107,8 @@ type ChatStreamMetadata = {
    * and drops the parts streamed before the continuation.
    */
   isContinuation?: 1;
+  /** Terminal evidence pinned until its consumer durably settles and releases it. */
+  retained?: 1;
 };
 
 /** Public status vocabulary predates the Streams state names. */
@@ -570,40 +573,81 @@ export class ResumableStream {
    * crash leaves either the live stream or the finished message, never
    * neither; nothing is left to sweep. `discard: false` keeps the settled
    * rows (an agent-tool child whose parent still tails them); they are
-   * reclaimed by the next {@link start}.
+   * reclaimed by the next {@link start}. `retain: true` instead pins terminal
+   * evidence durably until {@link release}, overriding `discard`. The pin,
+   * settlement, and `persist` writes commit or roll back together.
    */
   cutover(
     streamId: string,
     persist: () => void,
-    options: { discard?: boolean } = {}
-  ) {
+    options: { discard?: boolean; retain?: boolean } = {}
+  ): void {
     this.flushBuffer();
-    const discard = options.discard ?? true;
+    const discard = options.retain ? false : (options.discard ?? true);
+    const commit = () => {
+      if (options.retain) this._setRetained(streamId, true);
+      persist();
+    };
     // The discard deletes the rows inside the settle transaction, and the
     // deletion hook retires their segments there, so the marker moves with
     // the commit or not at all.
     const settled = this.ops.settle(streamId, "completed", null, {
-      commit: persist,
+      commit,
       discard
     });
     if (settled && discard) this._notifyProgress();
     // The stream was settled (or deleted) by another path first, so the
     // settle was a no-op and `persist` did not run: the message must still
     // land, just not atomically with a settlement that already happened.
-    if (!settled) persist();
+    if (!settled) commit();
     if (this._pendingCutover === streamId) this._pendingCutover = null;
     this._clearActive();
   }
 
   /**
+   * Release retained terminal evidence after its consumer durably settles.
+   * Idempotent; does not delete the row. The next {@link reclaim} may delete it.
+   */
+  release(streamId: string): void {
+    this._setRetained(streamId, false);
+  }
+
+  /** List pinned terminal streams so consumers can reconcile abandoned retention. */
+  listRetained(): Array<{ id: string; requestId: string }> {
+    return this._chatRows()
+      .filter((row) => row.state !== "streaming" && row.chat.retained === 1)
+      .map((row) => ({ id: row.stream_id, requestId: row.tag ?? "" }));
+  }
+
+  private _setRetained(streamId: string, retained: boolean): void {
+    const row = this.ops.getStream(streamId);
+    if (!row || row.state === "streaming") return;
+    const metadata = parseChatMetadata(row);
+    if (!metadata || (metadata.retained === 1) === retained) return;
+    if (retained) metadata.retained = 1;
+    else delete metadata.retained;
+    this.ops.updateMetadata(streamId, metadata);
+  }
+
+  /**
    * Settle a {@link finish}ed stream that had nothing to persist (no parts,
    * a persist that threw). Idempotent; a no-op when nothing is pending.
+   * `retain: true` keeps completion evidence until {@link release}.
    */
-  finalizePending() {
+  finalizePending(options: { retain?: boolean } = {}): void {
     const streamId = this._pendingCutover;
     if (streamId === null) return;
     this._pendingCutover = null;
-    this.ops.settle(streamId, "completed", null);
+    this.ops.settle(
+      streamId,
+      "completed",
+      null,
+      options.retain
+        ? {
+            commit: () => this._setRetained(streamId, true)
+          }
+        : undefined
+    );
   }
 
   private _clearActive() {
@@ -615,11 +659,21 @@ export class ResumableStream {
 
   /**
    * Mark a stream as errored and clean up state.
+   * `retain: true` atomically pins error evidence until {@link release}.
    * @param streamId - The stream to mark as errored
    */
-  markError(streamId: string) {
+  markError(streamId: string, options: { retain?: boolean } = {}): void {
     this.flushBuffer();
-    this.ops.settle(streamId, "errored", null);
+    this.ops.settle(
+      streamId,
+      "errored",
+      null,
+      options.retain
+        ? {
+            commit: () => this._setRetained(streamId, true)
+          }
+        : undefined
+    );
     if (this._pendingCutover === streamId) this._pendingCutover = null;
     this._clearActive();
   }
@@ -956,8 +1010,9 @@ export class ResumableStream {
    * in-flight rows abandoned past {@link ABANDONED_STREAM_RETENTION_MS} by
    * last chunk activity. Runs on every {@link start}, so nothing needs an
    * alarm to be reclaimed; a Durable Object that never starts another turn
-   * keeps at most one turn's rows. Streams other producers opened on the
-   * same object are untouched.
+   * keeps at most one unretained turn's rows. Explicitly retained terminal
+   * evidence is skipped until {@link release}. Streams other producers opened
+   * on the same object are untouched.
    * @returns How many rows were reclaimed.
    */
   reclaim(now: number = Date.now()): number {
@@ -968,7 +1023,7 @@ export class ResumableStream {
           row.updated_at < abandonedCutoff &&
           (this.ops.lastChunkAt(row.stream_id) ?? row.updated_at) <
             abandonedCutoff
-        : true
+        : row.chat.retained !== 1
     );
     this._deleteRetiring(reclaimable);
     return reclaimable.length;
