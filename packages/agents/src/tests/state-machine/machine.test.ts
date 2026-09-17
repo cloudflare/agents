@@ -4,25 +4,31 @@ import {
   COMPILED_CHECKPOINT,
   COMPILED_PHASE,
   childMailboxKey,
-  compileTaskFunction,
   isCompiledCheckpoint,
-  isTaskMachine,
   parseDefinitionName,
   readTaskTerminal,
-  taskIdempotencyKey,
+  taskIdempotencyKey
+} from "../../state-machine/machine";
+import {
+  compileTaskFunction,
+  isTaskFunction,
   type CompiledTaskContext
-} from "../../tasks/machine";
+} from "../../tasks/compile";
 import {
   MAX_CHECKPOINT_BYTES,
   MAX_SERIALIZED_BYTES,
   serializeTaskCheckpoint
-} from "../../tasks/serialization";
+} from "../../state-machine/serialization";
 import {
-  TaskCheckpointTooLargeError,
-  TaskSerializationError
-} from "../../tasks/errors";
-import { defineAsk } from "../../tasks/asks";
-import type { TaskMachine, TaskStep, TaskValue } from "../../tasks";
+  StateMachineCheckpointTooLargeError,
+  StateMachineSerializationError
+} from "../../state-machine/errors";
+import { defineAsk } from "../../state-machine/asks";
+import type {
+  StateMachineDefinition,
+  StateMachineStep,
+  StateMachineValue
+} from "../../state-machine";
 
 /**
  * The function-to-machine compiler and the two naming rules both definition
@@ -42,11 +48,11 @@ function stubContext(input: unknown): CompiledTaskContext {
     status: () => Promise.resolve(),
     idempotencyKey: (name: string) => name,
     waitForEvent: () => Promise.reject(new Error("unused"))
-  } satisfies TaskStep;
+  } satisfies StateMachineStep;
   return {
     ...step,
     input,
-    complete: (result: TaskValue) =>
+    complete: (result: StateMachineValue) =>
       // SAFETY: mirrors what `ReplayStep.complete` produces; the test reads
       // it back through the module's own `readTaskTerminal`.
       ({ kind: "complete", result }) as never
@@ -69,7 +75,7 @@ describe("the function-to-machine compiler", () => {
   it("runs the function with the run seed and settles on its return", async () => {
     const seen: unknown[] = [];
     const machine = compileTaskFunction(
-      async (input: never, step: TaskStep) => {
+      async (input: never, step: StateMachineStep) => {
         seen.push(input);
         seen.push(step.attempt);
         return { ok: true };
@@ -96,10 +102,10 @@ describe("the function-to-machine compiler", () => {
     const machine = {
       initial: { phase: "idle" } as { phase: "idle" },
       phases: { idle: async (state: { phase: "idle" }) => state }
-    } satisfies TaskMachine<{ phase: "idle" }>;
+    } satisfies StateMachineDefinition<{ phase: "idle" }>;
 
-    expect(isTaskMachine(machine)).toBe(true);
-    expect(isTaskMachine(async () => "x")).toBe(false);
+    expect(isTaskFunction(machine)).toBe(false);
+    expect(isTaskFunction(async () => "x")).toBe(true);
   });
 
   it("reads a terminal back only from a terminal signal", async () => {
@@ -203,7 +209,7 @@ describe("checkpoint serialization", () => {
 
     const oversized = { phase: "idle", blob: "a".repeat(MAX_CHECKPOINT_BYTES) };
     expect(() => serializeTaskCheckpoint(oversized, "probe")).toThrow(
-      TaskCheckpointTooLargeError
+      StateMachineCheckpointTooLargeError
     );
     // The cap is deliberately tighter than the one-shot value cap: a
     // checkpoint is rewritten every transition.
@@ -221,13 +227,13 @@ describe("checkpoint serialization", () => {
       thrown = error;
     }
     // The subclass relationship is the contract: a host catching
-    // `TaskSerializationError` already handles an oversized checkpoint.
-    expect(thrown).toBeInstanceOf(TaskCheckpointTooLargeError);
-    expect(thrown).toBeInstanceOf(TaskSerializationError);
-    if (!(thrown instanceof TaskCheckpointTooLargeError)) {
+    // `StateMachineSerializationError` already handles an oversized checkpoint.
+    expect(thrown).toBeInstanceOf(StateMachineCheckpointTooLargeError);
+    expect(thrown).toBeInstanceOf(StateMachineSerializationError);
+    if (!(thrown instanceof StateMachineCheckpointTooLargeError)) {
       throw new Error("unreachable");
     }
-    expect(thrown.name).toBe("TaskCheckpointTooLargeError");
+    expect(thrown.name).toBe("StateMachineCheckpointTooLargeError");
     expect(thrown.limit).toBe(MAX_CHECKPOINT_BYTES);
     expect(thrown.bytes).toBeGreaterThan(MAX_CHECKPOINT_BYTES);
     expect(thrown.message).toContain('checkpoint for definition "chat@v1"');
@@ -262,7 +268,7 @@ describe("checkpoint serialization", () => {
         { phase: "idle", at: new Date(0) },
         'checkpoint for definition "chat@v1"'
       )
-    ).toThrow(TaskSerializationError);
+    ).toThrow(StateMachineSerializationError);
   });
 
   it("refuses a cycle rather than letting the stringify throw name nothing", () => {

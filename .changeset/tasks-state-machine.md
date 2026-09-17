@@ -2,7 +2,9 @@
 "agents": minor
 ---
 
-`agents/tasks` becomes one durable state-machine engine with two APIs.
+`agents/tasks` becomes one durable state-machine engine with two APIs, and the engine ships as its own entry point, `agents/state-machine`.
+
+`agents/state-machine` exports `StateMachine`, the Lifecycle capability that owns the run tables, the wake stream and routed dispatch, registering machine definitions only, under a `StateMachine`-prefixed vocabulary (`StateMachineDefinition`, `StateMachineContext`, `StateMachineRunHandle`, `StateMachineOptions`, `StateMachine*Error`, plus `defineAsk`). `Tasks` now extends `StateMachine` — same tables, same handles, one capability instance — adding the durable-function form, compiled onto the engine as it is registered, and keeping every `Task*` name as an alias of its `StateMachine*` type (each `Task*Error` is the same class). `Agent` still installs only `this.tasks`; a machine registers through `taskDefinitions` or `this.tasks.register()`. Storage tables and event types keep the `task` namespace. One observable change: the engine errors' runtime `name` (as persisted in a failed run's `error.name` and seen in `onError`) now reads `StateMachine…` rather than `Task…`; `instanceof` under either alias is unchanged.
 
 The Workflows-shaped step API is unchanged — `(input, step) => result`, replay from the first line, `step.do`/`sleep`/`sleepUntil`/`status`/`idempotencyKey`/`signal`/`attempt`/`interrupted`, `NonRetryableError`, run `deadline` and `interruptions`. A step definition is compiled onto the engine as a single-phase machine whose one handler replays the function, on the same journal, with byte-identical step idempotency keys: there is no second journal, no second claim path, and no second abort protocol.
 

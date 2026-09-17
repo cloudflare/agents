@@ -2,7 +2,10 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import type { TaskHarnessObject } from "../capabilities/tasks";
-import type { TaskRunSnapshot, TaskValue } from "../../tasks";
+import type {
+  StateMachineRunSnapshot,
+  StateMachineValue
+} from "../../state-machine";
 
 /**
  * Storage migration onto schema version 3: the machine columns, the four
@@ -252,11 +255,15 @@ function watchCursorWrites(storage: DurableObjectStorage): {
 
 /** Poll one run until it reaches one of the given states. */
 async function waitForState(
-  tasks: { get(runId: string): Promise<TaskRunSnapshot<TaskValue> | null> },
+  tasks: {
+    get(
+      runId: string
+    ): Promise<StateMachineRunSnapshot<StateMachineValue> | null>;
+  },
   runId: string,
-  states: ReadonlyArray<TaskRunSnapshot<TaskValue>["state"]>,
+  states: ReadonlyArray<StateMachineRunSnapshot<StateMachineValue>["state"]>,
   timeoutMs = 5_000
-): Promise<TaskRunSnapshot<TaskValue>> {
+): Promise<StateMachineRunSnapshot<StateMachineValue>> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const snapshot = await tasks.get(runId);
@@ -270,7 +277,7 @@ async function waitForState(
   }
 }
 
-describe("Tasks schema version 3 migration", () => {
+describe("StateMachine schema version 3 migration", () => {
   it("creates the version 3 schema on a fresh object and records nothing to rebuild", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
@@ -531,7 +538,7 @@ describe("Tasks schema version 3 migration", () => {
         await waitForState(instance.tasks, runId, ["completed"]);
 
         // No turn segment: a function definition is a single-checkpoint
-        // machine whose turn is always 0, and its key form is the one Tasks
+        // machine whose turn is always 0, and its key form is the one StateMachine
         // has always written.
         expect(instance.stepKeys).toEqual([`${runId}:keyed-step`]);
       }

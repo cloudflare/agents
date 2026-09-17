@@ -1,25 +1,21 @@
 /**
- * The compiler from a Workflows-shaped function definition onto the state
- * machine engine, plus the naming rules the two forms share: the
- * turn-scoped idempotency key, the `base@vN` definition name, and the
- * mailbox key a child's settlement note takes in its parent's mailbox.
+ * The naming rules every definition shares — the turn-scoped idempotency
+ * key, the `base@vN` definition name, the mailbox key a child's settlement
+ * note takes in its parent's mailbox — plus the terminal signal a
+ * transition returns and the single-turn checkpoint sentinel.
  *
- * A function definition is not a second engine. It is a machine with one
- * phase whose handler replays the function and settles on its return, and
- * whose checkpoint is a singleton persisted as SQL `NULL` — so its
- * `checkpoint_turn` is 0 forever, its journal keys are today's keys, and
- * its idempotency keys are byte-identical to the ones Tasks has shipped.
+ * A durable function (`agents/tasks`) is not a second engine. It compiles to
+ * a machine with one phase whose handler replays the function and settles
+ * on its return, and whose checkpoint is the sentinel below, persisted as
+ * SQL `NULL` — so its `checkpoint_turn` is 0 forever, its journal keys are
+ * today's keys, and its idempotency keys are byte-identical to the ones
+ * Tasks has shipped. The compiler itself lives beside `Tasks`; the engine
+ * only recognises the sentinel.
  *
  * Everything here is pure: no storage, no clock, no capability.
  */
 
-import type {
-  TaskDefinition,
-  TaskMachine,
-  TaskStep,
-  TaskTerminal,
-  TaskValue
-} from "./types";
+import type { StateMachineTerminal, StateMachineValue } from "./types";
 
 /** The one phase every compiled function definition has. */
 export const COMPILED_PHASE = "run";
@@ -45,19 +41,19 @@ export function isCompiledCheckpoint(checkpoint: unknown): boolean {
 export type TaskTerminalKind = "complete" | "fail" | "aborted";
 
 /**
- * @internal The runtime carrier behind {@link TaskTerminal}. The public type
+ * @internal The runtime carrier behind {@link StateMachineTerminal}. The public type
  * is branded with an unexported symbol, so only `ctx.complete` / `fail` /
  * `aborted` can produce one and a forged `{ done: true }` fails to compile.
  */
 export class TaskTerminalSignal {
   readonly kind: TaskTerminalKind;
-  readonly result: TaskValue;
+  readonly result: StateMachineValue;
   readonly error: unknown;
   readonly reason: string | undefined;
 
   private constructor(
     kind: TaskTerminalKind,
-    parts: { result?: TaskValue; error?: unknown; reason?: string }
+    parts: { result?: StateMachineValue; error?: unknown; reason?: string }
   ) {
     this.kind = kind;
     this.result = parts.result;
@@ -65,7 +61,7 @@ export class TaskTerminalSignal {
     this.reason = parts.reason;
   }
 
-  static complete(result: TaskValue): TaskTerminalSignal {
+  static complete(result: StateMachineValue): TaskTerminalSignal {
     return new TaskTerminalSignal("complete", { result });
   }
 
@@ -85,88 +81,13 @@ export function readTaskTerminal(
   return returned instanceof TaskTerminalSignal ? returned : undefined;
 }
 
-/** Brand one terminal signal as the opaque {@link TaskTerminal} it is. */
-export function asTaskTerminal<Result extends TaskValue>(
+/** Brand one terminal signal as the opaque {@link StateMachineTerminal} it is. */
+export function asTaskTerminal<Result extends StateMachineValue>(
   signal: TaskTerminalSignal
-): TaskTerminal<Result> {
-  // SAFETY: `TaskTerminal` is a phantom brand with no runtime shape; the
+): StateMachineTerminal<Result> {
+  // SAFETY: `StateMachineTerminal` is a phantom brand with no runtime shape; the
   // signal is the only value the engine ever reads back out of it.
-  return signal as unknown as TaskTerminal<Result>;
-}
-
-/**
- * A machine as the engine reads one: `any`-parameterised for the same
- * reason `TaskDefinition`'s machine arm is — every narrower constraint
- * rejects every concrete machine, because a handler's state parameter is
- * contravariant and its return is the state union.
- */
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- see above
-export type AnyTaskMachine = TaskMachine<any, any, any, any>;
-
-/** True when a definition is a machine rather than a durable function. */
-export function isTaskMachine(
-  definition: TaskDefinition
-): definition is AnyTaskMachine {
-  return (
-    typeof definition === "object" &&
-    definition !== null &&
-    "phases" in definition
-  );
-}
-
-/**
- * What the compiled phase touches on its runtime: the step surface, the run
- * seed, and one terminal. Naming it keeps the compiled path castless — a
- * `TaskContext` is assignable to it, so the compiled machine still satisfies
- * `TaskMachine`, and the engine can hand the phase the same `ReplayStep` the
- * function itself receives.
- */
-export type CompiledTaskContext = TaskStep & {
-  readonly input: unknown;
-  complete(result: TaskValue): TaskTerminal<TaskValue>;
-};
-
-/** The compiled form of a function definition. Satisfies `TaskMachine`. */
-export type CompiledTaskFunction = {
-  readonly initial: TaskFnState;
-  readonly phases: {
-    readonly [COMPILED_PHASE]: (
-      state: TaskFnState,
-      ctx: CompiledTaskContext
-    ) => Promise<TaskTerminal<TaskValue>>;
-  };
-};
-
-/** Compiled machines, keyed by the function they wrap. */
-const compiled = new WeakMap<object, CompiledTaskFunction>();
-
-/**
- * Compile one function definition into the single-phase machine the engine
- * runs. The handler is `ctx.complete(await f(ctx.input, ctx))` — `ctx` IS
- * the `step` the function receives, so there is one journal, one claim path
- * and one abort protocol.
- */
-export function compileTaskFunction(
-  fn: (input: never, step: TaskStep) => TaskValue | Promise<TaskValue>
-): CompiledTaskFunction {
-  const existing = compiled.get(fn);
-  if (existing) return existing;
-  const machine: CompiledTaskFunction = {
-    initial: COMPILED_CHECKPOINT,
-    phases: {
-      [COMPILED_PHASE]: async (_state, ctx) =>
-        // SAFETY: the function's declared input is erased to `never` by the
-        // definitions constraint so concrete definitions satisfy it under
-        // contravariance; the value came from the row this definition's own
-        // name was persisted with.
-        ctx.complete(await fn(ctx.input as never, ctx))
-    }
-    // No `onCancel`: a function definition gets the inline default cancel,
-    // which is what keeps `cancel()` settling synchronously.
-    // No `migrate`: a function definition's checkpoint carries no shape.
-  };
-  compiled.set(fn, machine);
-  return machine;
+  return signal as unknown as StateMachineTerminal<Result>;
 }
 
 /**
@@ -174,7 +95,7 @@ export function compileTaskFunction(
  *
  * A function definition is a single-checkpoint machine whose turn is always
  * 0, and its key form omits the turn segment so it is byte-identical to the
- * key Tasks has always produced. A machine's `do("charge")` in turn 1 and in
+ * key StateMachine has always produced. A machine's `do("charge")` in turn 1 and in
  * turn 7 are two engine-intended executions, so their keys differ; a machine
  * that genuinely wants one key across turns asks for `scope: "run"` and gets
  * the string the function form would have produced.

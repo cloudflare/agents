@@ -1,5 +1,5 @@
 /**
- * Error classes for the Tasks capability. Each carries a stable `name` so
+ * Error classes for the StateMachine capability. Each carries a stable `name` so
  * hosts and tests can classify failures without depending on message text.
  */
 
@@ -33,7 +33,7 @@ export function isNonRetryableError(error: unknown): boolean {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class DuplicateTaskStepError extends Error {
+export class StateMachineDuplicateStepError extends Error {
   /** The step name used more than once. */
   readonly stepName: string;
 
@@ -43,7 +43,7 @@ export class DuplicateTaskStepError extends Error {
         `durable journal keys; suffix loop steps with a stable index, e.g. ` +
         `"${stepName}:0".`
     );
-    this.name = "DuplicateTaskStepError";
+    this.name = "StateMachineDuplicateStepError";
     this.stepName = stepName;
   }
 }
@@ -56,7 +56,7 @@ export class DuplicateTaskStepError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskReplayDivergedError extends Error {
+export class StateMachineReplayDivergedError extends Error {
   /** The step name where replay diverged from the journal. */
   readonly stepName: string;
 
@@ -66,7 +66,7 @@ export class TaskReplayDivergedError extends Error {
         `Version the definition name (e.g. "name@v2") instead of changing ` +
         `the step layout of in-flight runs.`
     );
-    this.name = "TaskReplayDivergedError";
+    this.name = "StateMachineReplayDivergedError";
     this.stepName = stepName;
   }
 }
@@ -78,7 +78,7 @@ export class TaskReplayDivergedError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class MissingTaskDefinitionError extends Error {
+export class StateMachineMissingDefinitionError extends Error {
   /** The persisted definition name that no longer resolves. */
   readonly definition: string;
 
@@ -89,7 +89,7 @@ export class MissingTaskDefinitionError extends Error {
         `definition (or a versioned successor with the same name) to let the ` +
         `run finish.`
     );
-    this.name = "MissingTaskDefinitionError";
+    this.name = "StateMachineMissingDefinitionError";
     this.definition = definition;
   }
 }
@@ -101,7 +101,7 @@ export class MissingTaskDefinitionError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskInterruptionsExhaustedError extends Error {
+export class StateMachineInterruptionsExhaustedError extends Error {
   readonly runId: string;
   /** Consecutive attempts of this run lost to an unclean interruption. */
   readonly interruptions: number;
@@ -110,7 +110,7 @@ export class TaskInterruptionsExhaustedError extends Error {
     super(
       `Task run "${runId}" was interrupted ${interruptions} time${interruptions === 1 ? "" : "s"} and its retry budget is spent.`
     );
-    this.name = "TaskInterruptionsExhaustedError";
+    this.name = "StateMachineInterruptionsExhaustedError";
     this.runId = runId;
     this.interruptions = interruptions;
   }
@@ -123,7 +123,7 @@ export class TaskInterruptionsExhaustedError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskDeadlineExceededError extends Error {
+export class StateMachineDeadlineExceededError extends Error {
   readonly runId: string;
   /** The deadline, epoch milliseconds. */
   readonly deadline: number;
@@ -132,7 +132,7 @@ export class TaskDeadlineExceededError extends Error {
     super(
       `Task run "${runId}" exceeded its deadline of ${new Date(deadline).toISOString()}.`
     );
-    this.name = "TaskDeadlineExceededError";
+    this.name = "StateMachineDeadlineExceededError";
     this.runId = runId;
     this.deadline = deadline;
   }
@@ -144,10 +144,10 @@ export class TaskDeadlineExceededError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskSerializationError extends Error {
+export class StateMachineSerializationError extends Error {
   constructor(context: string, detail: string) {
     super(`Cannot serialize ${context}: ${detail}`);
-    this.name = "TaskSerializationError";
+    this.name = "StateMachineSerializationError";
   }
 }
 
@@ -159,7 +159,7 @@ export class TaskSerializationError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskNoProgressError extends Error {
+export class StateMachineNoProgressError extends Error {
   readonly runId: string;
   /** The phase whose handler made no progress. */
   readonly phase: string;
@@ -174,7 +174,7 @@ export class TaskNoProgressError extends Error {
         `nothing durable. Return a different checkpoint, park on a wait, or ` +
         `settle the run.`
     );
-    this.name = "TaskNoProgressError";
+    this.name = "StateMachineNoProgressError";
     this.runId = runId;
     this.phase = phase;
     this.stallLimit = stallLimit;
@@ -189,7 +189,7 @@ export class TaskNoProgressError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskTransitionBudgetError extends Error {
+export class StateMachineTransitionBudgetError extends Error {
   readonly runId: string;
   /** Transitions taken since the last park. */
   readonly transitions: number;
@@ -202,7 +202,7 @@ export class TaskTransitionBudgetError extends Error {
         (phases.length > 0 ? `, cycling ${phases.join(" -> ")}` : "") +
         `. Park on a wait, or raise transitionBudget if the loop is intended.`
     );
-    this.name = "TaskTransitionBudgetError";
+    this.name = "StateMachineTransitionBudgetError";
     this.runId = runId;
     this.transitions = transitions;
     this.phases = phases;
@@ -216,7 +216,7 @@ export class TaskTransitionBudgetError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskTurnDeadlineExceededError extends Error {
+export class StateMachineTurnDeadlineExceededError extends Error {
   readonly runId: string;
   /** The transition deadline, epoch milliseconds. */
   readonly deadline: number;
@@ -226,7 +226,7 @@ export class TaskTurnDeadlineExceededError extends Error {
       `Task run "${runId}" exceeded its transition deadline of ` +
         `${new Date(deadline).toISOString()}.`
     );
-    this.name = "TaskTurnDeadlineExceededError";
+    this.name = "StateMachineTurnDeadlineExceededError";
     this.runId = runId;
     this.deadline = deadline;
   }
@@ -239,7 +239,7 @@ export class TaskTurnDeadlineExceededError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskCancelCannotParkError extends Error {
+export class StateMachineCancelCannotParkError extends Error {
   /** The parking member that was called. */
   readonly member: string;
 
@@ -248,7 +248,7 @@ export class TaskCancelCannotParkError extends Error {
       `onCancel cannot park: "${member}" suspends the run, and a cancel ` +
         `transition must settle or return a checkpoint in one invocation.`
     );
-    this.name = "TaskCancelCannotParkError";
+    this.name = "StateMachineCancelCannotParkError";
     this.member = member;
   }
 }
@@ -260,7 +260,7 @@ export class TaskCancelCannotParkError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskConcurrentParkError extends Error {
+export class StateMachineConcurrentParkError extends Error {
   /** The member already parking. */
   readonly pending: string;
   /** The member that tried to park beside it. */
@@ -271,7 +271,7 @@ export class TaskConcurrentParkError extends Error {
       `"${member}" cannot park while "${pending}" is already parking: a ` +
         `transition parks on one wait at a time.`
     );
-    this.name = "TaskConcurrentParkError";
+    this.name = "StateMachineConcurrentParkError";
     this.pending = pending;
     this.member = member;
   }
@@ -285,7 +285,7 @@ export class TaskConcurrentParkError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskEventTimeoutError extends Error {
+export class StateMachineEventTimeoutError extends Error {
   /** The step name the wait was journaled under. */
   readonly stepName: string;
   /** The event type the wait was matching. */
@@ -293,7 +293,7 @@ export class TaskEventTimeoutError extends Error {
 
   constructor(stepName: string, eventType: string) {
     super(`Timed out waiting for event "${eventType}" at step "${stepName}".`);
-    this.name = "TaskEventTimeoutError";
+    this.name = "StateMachineEventTimeoutError";
     this.stepName = stepName;
     this.eventType = eventType;
   }
@@ -306,7 +306,7 @@ export class TaskEventTimeoutError extends Error {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskMailboxFullError extends Error {
+export class StateMachineMailboxFullError extends Error {
   readonly runId: string;
   /** Unconsumed items allowed per run. */
   readonly limit: number;
@@ -315,7 +315,7 @@ export class TaskMailboxFullError extends Error {
     super(
       `Task run "${runId}" already holds ${limit} unconsumed mailbox items.`
     );
-    this.name = "TaskMailboxFullError";
+    this.name = "StateMachineMailboxFullError";
     this.runId = runId;
     this.limit = limit;
   }
@@ -323,13 +323,13 @@ export class TaskMailboxFullError extends Error {
 
 /**
  * Thrown from the commit when a returned checkpoint exceeds the checkpoint
- * ceiling. A subclass of {@link TaskSerializationError} so existing catches
+ * ceiling. A subclass of {@link StateMachineSerializationError} so existing catches
  * still match. Serialization runs before the fenced UPDATE, so the previous
  * checkpoint survives intact.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskCheckpointTooLargeError extends TaskSerializationError {
+export class StateMachineCheckpointTooLargeError extends StateMachineSerializationError {
   /** The serialized size that was refused, in bytes. */
   readonly bytes: number;
   /** The ceiling, in bytes. */
@@ -343,7 +343,7 @@ export class TaskCheckpointTooLargeError extends TaskSerializationError {
         `and its identifiers here and put bulk state in a stream, a Sessions ` +
         `row, or your own table.`
     );
-    this.name = "TaskCheckpointTooLargeError";
+    this.name = "StateMachineCheckpointTooLargeError";
     this.bytes = bytes;
     this.limit = limit;
   }
@@ -358,7 +358,7 @@ export class TaskCheckpointTooLargeError extends TaskSerializationError {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export class TaskOrphanedDefinitionError extends Error {
+export class StateMachineOrphanedDefinitionError extends Error {
   /** The persisted definition name. */
   readonly definition: string;
   /** The persisted definition's version, or 0 when unversioned. */
@@ -371,7 +371,7 @@ export class TaskOrphanedDefinitionError extends Error {
         `Register a higher version of "${definition}" with a migrate() and ` +
         `call tasks.reopen() to resume it.`
     );
-    this.name = "TaskOrphanedDefinitionError";
+    this.name = "StateMachineOrphanedDefinitionError";
     this.definition = definition;
     this.version = version;
   }

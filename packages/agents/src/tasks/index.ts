@@ -1,33 +1,36 @@
 /**
- * Durable replayable execution for Lifecycle Objects.
+ * Durable replayable execution for Lifecycle Objects: durable functions and
+ * durable state machines on one engine. The engine itself is
+ * `agents/state-machine`; this module is its durable-function layer, under
+ * the `Task` vocabulary it shipped with.
  *
  * @experimental The whole `agents/tasks` surface may change before
  * stabilizing.
  */
 export { Tasks } from "./tasks";
-export type { TaskDeleteOptions, TaskListOptions } from "./tasks";
-export type { TaskEventType, TaskFailedRun, TasksOptions } from "./options";
-export type { TaskDurationString, TaskDurationUnit } from "./duration";
-export { defineAsk } from "./asks";
+export { defineAsk } from "../state-machine/asks";
 export {
-  DuplicateTaskStepError,
-  TaskReplayDivergedError,
-  TaskSerializationError,
-  MissingTaskDefinitionError,
   NonRetryableError,
-  TaskInterruptionsExhaustedError,
-  TaskDeadlineExceededError,
-  TaskNoProgressError,
-  TaskTransitionBudgetError,
-  TaskTurnDeadlineExceededError,
-  TaskCancelCannotParkError,
-  TaskConcurrentParkError,
-  TaskEventTimeoutError,
-  TaskMailboxFullError,
-  TaskCheckpointTooLargeError,
-  TaskOrphanedDefinitionError
-} from "./errors";
-export { MAX_CHECKPOINT_BYTES, MAX_SERIALIZED_BYTES } from "./serialization";
+  StateMachineDuplicateStepError as DuplicateTaskStepError,
+  StateMachineReplayDivergedError as TaskReplayDivergedError,
+  StateMachineSerializationError as TaskSerializationError,
+  StateMachineMissingDefinitionError as MissingTaskDefinitionError,
+  StateMachineInterruptionsExhaustedError as TaskInterruptionsExhaustedError,
+  StateMachineDeadlineExceededError as TaskDeadlineExceededError,
+  StateMachineNoProgressError as TaskNoProgressError,
+  StateMachineTransitionBudgetError as TaskTransitionBudgetError,
+  StateMachineTurnDeadlineExceededError as TaskTurnDeadlineExceededError,
+  StateMachineCancelCannotParkError as TaskCancelCannotParkError,
+  StateMachineConcurrentParkError as TaskConcurrentParkError,
+  StateMachineEventTimeoutError as TaskEventTimeoutError,
+  StateMachineMailboxFullError as TaskMailboxFullError,
+  StateMachineCheckpointTooLargeError as TaskCheckpointTooLargeError,
+  StateMachineOrphanedDefinitionError as TaskOrphanedDefinitionError
+} from "../state-machine/errors";
+export {
+  MAX_CHECKPOINT_BYTES,
+  MAX_SERIALIZED_BYTES
+} from "../state-machine/serialization";
 export type {
   AskKind,
   AssertJson,
@@ -46,12 +49,19 @@ export type {
   TaskContext,
   TaskDefinition,
   TaskDefinitions,
+  TaskDeleteOptions,
+  TaskDurationString,
+  TaskDurationUnit,
   TaskError,
+  TaskEventType,
+  TaskFailedRun,
+  TaskFunction,
   TaskHandle,
   TaskHandlers,
   TaskInput,
   TaskInternalHandle,
   TaskJson,
+  TaskListOptions,
   TaskMachine,
   TaskMailbox,
   TaskMailboxFilter,
@@ -68,6 +78,7 @@ export type {
   TaskRunView,
   TaskSendOptions,
   TaskSendReceipt,
+  TasksOptions,
   TaskSpawnOptions,
   TaskStartMode,
   TaskState,

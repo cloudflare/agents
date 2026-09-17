@@ -1,13 +1,13 @@
-import type { TaskDurationString } from "./duration";
-import type { TaskCallbacks, TaskDefinitions, TaskRetryConfig } from "./types";
+import type { StateMachineDurationString } from "./duration";
+import type { StateMachineDefinitions, StateMachineRetryConfig } from "./types";
 
 /**
- * Events emitted while Tasks accepts, executes, retries, or settles runs.
+ * Events emitted while StateMachine accepts, executes, retries, or settles runs.
  *
  * The first eleven are the complete set a function definition emits, in the
  * order the engine emits them; the rest are machine-only.
  */
-export type TaskEventType =
+export type StateMachineEventType =
   | "task:accepted"
   | "task:attempt:started"
   | "task:attempt:interrupted"
@@ -31,12 +31,12 @@ export type TaskEventType =
   | "task:resumed";
 
 /**
- * Definitions and policy for a Tasks capability.
+ * Definitions and policy for a StateMachine capability.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface TasksOptions<
-  Definitions extends TaskDefinitions = TaskCallbacks
+export interface StateMachineOptions<
+  Definitions extends Record<string, unknown> = StateMachineDefinitions
 > {
   /**
    * Named Task definitions this capability can run — a Workflows-shaped
@@ -46,16 +46,16 @@ export interface TasksOptions<
    * in-flight runs is correct by construction. Names outside this map are
    * rejected unless a composition-root resolver supplies them.
    */
-  readonly definitions?: Definitions;
+  readonly definitions?: Definitions & StateMachineDefinitions;
 
   /** Default step retry policy, overridable per `step.do()`. */
-  readonly retries?: TaskRetryConfig;
+  readonly retries?: StateMachineRetryConfig;
 
   /** Default timeout of one step callback attempt. Default: 5 minutes. */
-  readonly stepTimeout?: number | TaskDurationString;
+  readonly stepTimeout?: number | StateMachineDurationString;
 
   /** Default per-transition watchdog. Defaults to `stepTimeout`. */
-  readonly turnTimeout?: number | TaskDurationString;
+  readonly turnTimeout?: number | StateMachineDurationString;
 
   /**
    * Progress rule A: consecutive transitions tolerated that change no
@@ -65,7 +65,7 @@ export interface TasksOptions<
 
   /**
    * Progress rule B: transitions allowed since the last park. Exceeding it
-   * fails the run with `TaskTransitionBudgetError`. Default 1000.
+   * fails the run with `StateMachineTransitionBudgetError`. Default 1000.
    */
   readonly transitionBudget?: number;
 
@@ -73,18 +73,18 @@ export interface TasksOptions<
   readonly mailboxLimit?: number;
 
   /**
-   * Observe terminal run failures, including those Tasks records without
+   * Observe terminal run failures, including those StateMachine records without
    * running the handler (a missing definition, a spent interruption retry
    * budget, a passed deadline). Runs inside the host invocation context.
    */
   readonly onError?: (
     error: unknown,
-    run: TaskFailedRun
+    run: StateMachineFailedRun
   ) => void | Promise<void>;
 }
 
 /** The run an `onError` observation belongs to. */
-export interface TaskFailedRun {
+export interface StateMachineFailedRun {
   readonly runId: string;
   readonly definition: string;
 }

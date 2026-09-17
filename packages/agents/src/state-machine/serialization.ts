@@ -1,5 +1,5 @@
 /**
- * Value serialization for the Tasks capability.
+ * Value serialization for the StateMachine capability.
  *
  * Task inputs, step results, metadata, and final results persist as JSON
  * text in SQLite. `undefined` (and a `void` handler result) is represented
@@ -7,7 +7,10 @@
  * plain: `"null"` is JSON `null`, column `NULL` is `undefined`.
  */
 
-import { TaskCheckpointTooLargeError, TaskSerializationError } from "./errors";
+import {
+  StateMachineCheckpointTooLargeError,
+  StateMachineSerializationError
+} from "./errors";
 import { isCompiledCheckpoint } from "./machine";
 
 /** Default ceiling for one serialized value (1 MiB). */
@@ -31,7 +34,7 @@ const utf8 = new TextEncoder();
  * @param context - What is being serialized, for error messages
  * (e.g. `input for definition "report"`, `result of step "fetch"`).
  * @returns JSON text, or `null` when the value is `undefined`.
- * @throws TaskSerializationError when the value is not JSON-serializable or
+ * @throws StateMachineSerializationError when the value is not JSON-serializable or
  * its serialized form exceeds {@link MAX_SERIALIZED_BYTES}.
  */
 export function serializeTaskValue(
@@ -44,13 +47,13 @@ export function serializeTaskValue(
   try {
     json = JSON.stringify(value);
   } catch (error) {
-    throw new TaskSerializationError(
+    throw new StateMachineSerializationError(
       context,
       error instanceof Error ? error.message : String(error)
     );
   }
   if (json === undefined) {
-    throw new TaskSerializationError(
+    throw new StateMachineSerializationError(
       context,
       `value of type ${typeof value} has no JSON representation`
     );
@@ -58,7 +61,7 @@ export function serializeTaskValue(
 
   const bytes = utf8.encode(json).byteLength;
   if (bytes > MAX_SERIALIZED_BYTES) {
-    throw new TaskSerializationError(
+    throw new StateMachineSerializationError(
       context,
       `serialized size ${bytes} bytes exceeds the ${MAX_SERIALIZED_BYTES}-byte limit`
     );
@@ -133,14 +136,14 @@ function assertJsonStructure(
     case "object":
       break;
     default:
-      throw new TaskSerializationError(
+      throw new StateMachineSerializationError(
         context,
         refusal(path, `of type ${typeof value} has no JSON representation`)
       );
   }
   const object = value as object;
   if (seen.has(object)) {
-    throw new TaskSerializationError(
+    throw new StateMachineSerializationError(
       context,
       refusal(path, "is a circular reference and has no JSON representation")
     );
@@ -153,7 +156,7 @@ function assertJsonStructure(
   } else {
     const prototype = Object.getPrototypeOf(object);
     if (prototype !== Object.prototype && prototype !== null) {
-      throw new TaskSerializationError(
+      throw new StateMachineSerializationError(
         context,
         refusal(
           path,
@@ -185,8 +188,8 @@ function assertJsonStructure(
  * @param context - What is being serialized, for error messages.
  * @returns JSON text, or `null` for the compiled function definition's
  * singleton checkpoint and for no checkpoint at all.
- * @throws TaskCheckpointTooLargeError when the checkpoint exceeds
- * {@link MAX_CHECKPOINT_BYTES}, and {@link TaskSerializationError}, naming
+ * @throws StateMachineCheckpointTooLargeError when the checkpoint exceeds
+ * {@link MAX_CHECKPOINT_BYTES}, and {@link StateMachineSerializationError}, naming
  * the offending key path, when a member has no JSON representation.
  */
 export function serializeTaskCheckpoint(
@@ -204,7 +207,7 @@ export function serializeTaskCheckpoint(
   try {
     json = JSON.stringify(checkpoint);
   } catch (error) {
-    throw new TaskSerializationError(
+    throw new StateMachineSerializationError(
       context,
       error instanceof Error ? error.message : String(error)
     );
@@ -212,7 +215,11 @@ export function serializeTaskCheckpoint(
 
   const bytes = utf8.encode(json).byteLength;
   if (bytes > MAX_CHECKPOINT_BYTES) {
-    throw new TaskCheckpointTooLargeError(context, bytes, MAX_CHECKPOINT_BYTES);
+    throw new StateMachineCheckpointTooLargeError(
+      context,
+      bytes,
+      MAX_CHECKPOINT_BYTES
+    );
   }
   return json;
 }

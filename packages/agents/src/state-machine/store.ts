@@ -1,5 +1,5 @@
 /**
- * Storage layer for the Tasks capability: owns the `cf_agents_task_runs`,
+ * Storage layer for the StateMachine capability: owns the `cf_agents_task_runs`,
  * `cf_agents_task_journal`, `cf_agents_task_mailbox`, `cf_agents_task_asks`
  * and `cf_agents_task_routes` tables — DDL, row access, generation-fenced
  * writes, and the snapshot and view projections. The engine in `tasks.ts`
@@ -10,16 +10,16 @@ import { SqlError } from "../sql-error";
 import { childMailboxKey } from "./machine";
 import { deserializeTaskValue } from "./serialization";
 import type {
-  TaskAskRecord,
+  StateMachineAskRecord,
   TaskAskRow,
-  TaskChildRef,
-  TaskJson,
-  TaskMailboxItem,
+  StateMachineChildRef,
+  StateMachineJson,
+  StateMachineMailboxItem,
   TaskMailboxRow,
   TaskRunRow,
-  TaskRunSnapshot,
-  TaskRunView,
-  TaskValue
+  StateMachineRunSnapshot,
+  StateMachineRunView,
+  StateMachineValue
 } from "./types";
 
 /** Rows one journal-rebuild transaction copies. */
@@ -54,7 +54,7 @@ const VERSIONED_DEFINITION = `
   AND length(rtrim(definition, '0123456789')) > 2
   AND CAST(substr(definition, length(rtrim(definition, '0123456789')) + 1) AS INTEGER) > 0`;
 
-/** @internal SQL-backed store for one Tasks capability instance. */
+/** @internal SQL-backed store for one StateMachine capability instance. */
 export class TaskStore {
   readonly #storage: DurableObjectStorage;
 
@@ -72,7 +72,7 @@ export class TaskStore {
       ""
     );
     try {
-      // SAFETY: Tasks queries select from its own schema; T describes the
+      // SAFETY: StateMachine queries select from its own schema; T describes the
       // projected columns of the accompanying query text.
       return [...this.#storage.sql.exec(query, ...values)] as T[];
     } catch (cause) {
@@ -83,7 +83,7 @@ export class TaskStore {
   /** Read with positional parameters, where a template literal will not do. */
   read<T>(query: string, params: (string | number | null)[]): T[] {
     try {
-      // SAFETY: Tasks queries select from its own schema; T describes the
+      // SAFETY: StateMachine queries select from its own schema; T describes the
       // projected columns of the accompanying query text.
       return [...this.#storage.sql.exec(query, ...params)] as T[];
     } catch (cause) {
@@ -524,12 +524,12 @@ export class TaskStore {
     this.#rawSql("DROP TABLE IF EXISTS cf_agents_task_steps");
   }
 
-  rowToSnapshot<Output extends TaskValue>(
+  rowToSnapshot<Output extends StateMachineValue>(
     row: TaskRunRow
-  ): TaskRunSnapshot<Output> {
+  ): StateMachineRunSnapshot<Output> {
     const metadata =
       row.metadata !== null
-        ? (JSON.parse(row.metadata) as Record<string, TaskJson>)
+        ? (JSON.parse(row.metadata) as Record<string, StateMachineJson>)
         : undefined;
     const base = {
       runId: row.run_id,
@@ -611,9 +611,9 @@ export class TaskStore {
    * The deep read: the snapshot plus the checkpoint and everything the run
    * owns. Four bounded prefix reads and no writes.
    */
-  rowToView<Output extends TaskValue, State>(
+  rowToView<Output extends StateMachineValue, State>(
     row: TaskRunRow
-  ): TaskRunView<Output, State> {
+  ): StateMachineRunView<Output, State> {
     return {
       snapshot: this.rowToSnapshot<Output>(row),
       checkpoint: deserializeTaskValue(row.checkpoint) as State,
@@ -632,7 +632,7 @@ export class TaskStore {
    * part of the (run_id, key) key, so an `ORDER BY` would add a temp b-tree
    * to a prefix range `mailboxLimit` already bounds.
    */
-  listMailbox(runId: string): TaskMailboxItem[] {
+  listMailbox(runId: string): StateMachineMailboxItem[] {
     const rows = this.sql<TaskMailboxRow>`
       SELECT * FROM cf_agents_task_mailbox WHERE run_id = ${runId}
     `;
@@ -642,7 +642,7 @@ export class TaskStore {
       seq: row.seq,
       kind: row.kind,
       ...(row.type !== null ? { type: row.type } : {}),
-      payload: deserializeTaskValue(row.payload) as TaskJson,
+      payload: deserializeTaskValue(row.payload) as StateMachineJson,
       createdAt: row.created_at
     }));
   }
@@ -653,7 +653,7 @@ export class TaskStore {
    * temp b-tree on top of the scan the `run_id` predicate already costs,
    * and the set is bounded by the run's own asks.
    */
-  listAsks(runId: string): TaskAskRecord[] {
+  listAsks(runId: string): StateMachineAskRecord[] {
     const rows = this.sql<TaskAskRow>`
       SELECT * FROM cf_agents_task_asks WHERE run_id = ${runId}
     `;
@@ -668,14 +668,17 @@ export class TaskStore {
       name: row.name,
       state: row.state,
       ...(row.question !== null
-        ? { question: deserializeTaskValue(row.question) as TaskJson }
+        ? { question: deserializeTaskValue(row.question) as StateMachineJson }
         : {}),
       ...(row.answer !== null
-        ? { answer: deserializeTaskValue(row.answer) as TaskJson }
+        ? { answer: deserializeTaskValue(row.answer) as StateMachineJson }
         : {}),
       ...(row.metadata !== null
         ? {
-            metadata: JSON.parse(row.metadata) as Record<string, TaskJson>
+            metadata: JSON.parse(row.metadata) as Record<
+              string,
+              StateMachineJson
+            >
           }
         : {}),
       createdAt: row.created_at,
@@ -689,7 +692,7 @@ export class TaskStore {
    * the parent index. A child accepted on a facet is found through
    * `cf_agents_task_routes` instead, which is why these carry no owner key.
    */
-  listChildren(runId: string): TaskChildRef[] {
+  listChildren(runId: string): StateMachineChildRef[] {
     const rows = this.sql<{
       run_id: string;
       definition: string;

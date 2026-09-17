@@ -11,7 +11,7 @@ import {
   type TaskHarnessObject,
   type TaskSchedulerCoexistObject
 } from "../capabilities/tasks";
-import { childMailboxKey } from "../../tasks/machine";
+import { childMailboxKey } from "../../state-machine/machine";
 
 /**
  * Alarm memory-limit breaker (#1825) applied to Tasks runs.

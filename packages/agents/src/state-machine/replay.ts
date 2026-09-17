@@ -1,11 +1,11 @@
 /**
- * Replay step engine for the Tasks capability.
+ * Replay step engine for the StateMachine capability.
  *
- * `ReplayStep` implements the `TaskStep` surface one handler attempt
+ * `ReplayStep` implements the `StateMachineStep` surface one handler attempt
  * receives. It owns replay semantics — journal hits, journal misses, retry
  * policy, durable sleeps, the status live gate, and duplicate/divergence
  * detection — while all SQL stays behind the narrow {@link TaskStepEngine}
- * port implemented by the `Tasks` capability, the single owner of the
+ * port implemented by the `StateMachine` capability, the single owner of the
  * schema.
  */
 
@@ -14,30 +14,30 @@ import {
   isDurableObjectMemoryLimitReset,
   isPlatformFailure
 } from "../retries";
-import { parseTaskDuration, type TaskDurationString } from "./duration";
+import { parseTaskDuration, type StateMachineDurationString } from "./duration";
 import {
-  DuplicateTaskStepError,
-  TaskReplayDivergedError,
-  TaskSerializationError,
+  StateMachineDuplicateStepError,
+  StateMachineReplayDivergedError,
+  StateMachineSerializationError,
   isNonRetryableError
 } from "./errors";
 import { asTaskTerminal, TaskTerminalSignal } from "./machine";
 import { deserializeTaskValue } from "./serialization";
 import type {
   TaskAskRow,
-  TaskChildRef,
+  StateMachineChildRef,
   TaskJournalRow,
-  TaskJson,
-  TaskMailboxFilter,
+  StateMachineJson,
+  StateMachineMailboxFilter,
   TaskMailboxRow,
-  TaskRetryConfig,
-  TaskStep,
-  TaskStepAttempt,
-  TaskStepConfig,
-  TaskStepEvent,
-  TaskTerminal,
-  TaskValue,
-  TaskWaitReason
+  StateMachineRetryConfig,
+  StateMachineStep,
+  StateMachineStepAttempt,
+  StateMachineStepConfig,
+  StateMachineStepEvent,
+  StateMachineTerminal,
+  StateMachineValue,
+  StateMachineWaitReason
 } from "./types";
 
 /**
@@ -75,9 +75,12 @@ export class TaskSuspension {
   readonly wakeAt: number;
   // An attempt only ever suspends itself; the 'interrupted' park is written
   // over a lost attempt by the capability, never thrown from inside one.
-  readonly reason: Exclude<TaskWaitReason, "interrupted">;
+  readonly reason: Exclude<StateMachineWaitReason, "interrupted">;
 
-  constructor(wakeAt: number, reason: Exclude<TaskWaitReason, "interrupted">) {
+  constructor(
+    wakeAt: number,
+    reason: Exclude<StateMachineWaitReason, "interrupted">
+  ) {
     this.wakeAt = wakeAt;
     this.reason = reason;
   }
@@ -121,7 +124,7 @@ export class AttemptSupersededError extends Error {
 }
 
 /**
- * Storage and policy port the `Tasks` capability supplies to one attempt's
+ * Storage and policy port the `StateMachine` capability supplies to one attempt's
  * `ReplayStep`. Every mutation is fenced by the attempt's generation on the
  * capability side.
  */
@@ -170,7 +173,7 @@ export interface TaskStepEngine {
 
   /** Visible mailbox rows matching a filter, in FIFO order across kinds. */
   peekMailbox(
-    filter: TaskMailboxFilter | undefined,
+    filter: StateMachineMailboxFilter | undefined,
     now: number
   ): TaskMailboxRow[];
 
@@ -217,7 +220,7 @@ export interface TaskStepEngine {
   withdrawOpenAsks(): number;
 
   /** The non-terminal children this run owns. */
-  listChildren(): TaskChildRef[];
+  listChildren(): StateMachineChildRef[];
 
   /** The fenced write that commits one transition. False when fenced out. */
   commitCheckpoint(commit: {
@@ -294,7 +297,7 @@ export function computeRetryDelayMs(
  */
 export function resolveRetryPolicy(
   defaults: ResolvedRetryPolicy,
-  retries: TaskRetryConfig | undefined,
+  retries: StateMachineRetryConfig | undefined,
   context: string
 ): ResolvedRetryPolicy {
   const limit = retries?.limit ?? defaults.retryLimit;
@@ -316,7 +319,7 @@ export function resolveRetryPolicy(
 /** Resolve one `step.do()` config against the capability defaults. */
 export function resolveStepPolicy(
   defaults: ResolvedStepPolicy,
-  config: TaskStepConfig | undefined
+  config: StateMachineStepConfig | undefined
 ): ResolvedStepPolicy {
   return {
     ...resolveRetryPolicy(defaults, config?.retries, "step retries"),
@@ -328,14 +331,14 @@ export function resolveStepPolicy(
 }
 
 /**
- * The `TaskStep` implementation for one execution attempt.
+ * The `StateMachineStep` implementation for one execution attempt.
  *
  * Attempt 1 starts live. A later attempt starts silent and becomes live at
  * the frontier of new ground — the first journal miss, or a step still
  * waiting or running — so replayed `status()` calls from completed ground
  * are suppressed instead of re-published as new progress.
  */
-export class ReplayStep implements TaskStep {
+export class ReplayStep implements StateMachineStep {
   readonly #engine: TaskStepEngine;
   readonly #usedNames = new Set<string>();
   #live: boolean;
@@ -377,35 +380,35 @@ export class ReplayStep implements TaskStep {
   }
 
   /** Settle this run with a result. */
-  complete(result: TaskValue): TaskTerminal<TaskValue> {
+  complete(result: StateMachineValue): StateMachineTerminal<StateMachineValue> {
     return asTaskTerminal(TaskTerminalSignal.complete(result));
   }
 
   /** Settle this run as failed. */
-  fail(error: unknown): TaskTerminal<TaskValue> {
+  fail(error: unknown): StateMachineTerminal<StateMachineValue> {
     return asTaskTerminal(TaskTerminalSignal.fail(error));
   }
 
   /** Settle this run as cancelled, carrying the abort mark's reason. */
-  aborted(reason?: string): TaskTerminal<TaskValue> {
+  aborted(reason?: string): StateMachineTerminal<StateMachineValue> {
     return asTaskTerminal(TaskTerminalSignal.aborted(reason));
   }
 
-  do<T extends TaskValue>(
+  do<T extends StateMachineValue>(
     name: string,
-    callback: (attempt: TaskStepAttempt) => T | Promise<T>
+    callback: (attempt: StateMachineStepAttempt) => T | Promise<T>
   ): Promise<T>;
-  do<T extends TaskValue>(
+  do<T extends StateMachineValue>(
     name: string,
-    config: TaskStepConfig,
-    callback: (attempt: TaskStepAttempt) => T | Promise<T>
+    config: StateMachineStepConfig,
+    callback: (attempt: StateMachineStepAttempt) => T | Promise<T>
   ): Promise<T>;
-  async do<T extends TaskValue>(
+  async do<T extends StateMachineValue>(
     name: string,
     configOrCallback:
-      | TaskStepConfig
-      | ((attempt: TaskStepAttempt) => T | Promise<T>),
-    maybeCallback?: (attempt: TaskStepAttempt) => T | Promise<T>
+      | StateMachineStepConfig
+      | ((attempt: StateMachineStepAttempt) => T | Promise<T>),
+    maybeCallback?: (attempt: StateMachineStepAttempt) => T | Promise<T>
   ): Promise<T> {
     const config =
       typeof configOrCallback === "function" ? undefined : configOrCallback;
@@ -431,7 +434,7 @@ export class ReplayStep implements TaskStep {
     }
 
     if (row.kind !== "do") {
-      throw new TaskReplayDivergedError(
+      throw new StateMachineReplayDivergedError(
         name,
         `journaled as a ${row.kind} step but replayed as a do step`
       );
@@ -465,7 +468,7 @@ export class ReplayStep implements TaskStep {
 
   async sleep(
     name: string,
-    duration: number | TaskDurationString
+    duration: number | StateMachineDurationString
   ): Promise<void> {
     const durationMs = parseTaskDuration(duration, "sleep duration");
     return this.#sleepAt(name, () => Date.now() + durationMs);
@@ -490,10 +493,10 @@ export class ReplayStep implements TaskStep {
     return this.#engine.stepIdempotencyKey(this.turn, name, options?.scope);
   }
 
-  async waitForEvent<Payload extends TaskJson>(
+  async waitForEvent<Payload extends StateMachineJson>(
     name: string,
-    options: { type: string; timeout?: number | TaskDurationString }
-  ): Promise<TaskStepEvent<Payload>> {
+    options: { type: string; timeout?: number | StateMachineDurationString }
+  ): Promise<StateMachineStepEvent<Payload>> {
     void name;
     void options;
     throw new Error(
@@ -517,7 +520,7 @@ export class ReplayStep implements TaskStep {
       throw new Error(`Step names must not use the reserved "__cf" prefix`);
     }
     if (this.#usedNames.has(name)) {
-      throw new DuplicateTaskStepError(name);
+      throw new StateMachineDuplicateStepError(name);
     }
     this.#usedNames.add(name);
 
@@ -542,7 +545,7 @@ export class ReplayStep implements TaskStep {
     }
 
     if (row.kind !== "sleep") {
-      throw new TaskReplayDivergedError(
+      throw new StateMachineReplayDivergedError(
         name,
         `journaled as a ${row.kind} step but replayed as a sleep step`
       );
@@ -557,11 +560,11 @@ export class ReplayStep implements TaskStep {
   }
 
   /** Execute one claimed attempt of a `do` step under timeout and retries. */
-  async #executeAttempt<T extends TaskValue>(
+  async #executeAttempt<T extends StateMachineValue>(
     name: string,
     attempt: number,
     policy: ResolvedStepPolicy,
-    callback: (attempt: TaskStepAttempt) => T | Promise<T>
+    callback: (attempt: StateMachineStepAttempt) => T | Promise<T>
   ): Promise<T> {
     this.#engine.refreshClaim();
     this.#engine.emit("task:step:started", { step: name, attempt });
@@ -620,7 +623,7 @@ export class ReplayStep implements TaskStep {
       if (isPlatformFailure(error) && attempt >= policy.retryLimit) throw error;
       if (
         isNonRetryableError(error) ||
-        error instanceof TaskSerializationError ||
+        error instanceof StateMachineSerializationError ||
         attempt >= policy.retryLimit
       ) {
         this.#engine.failStep(this.turn, name, toErrorSummary(error));

@@ -510,6 +510,17 @@ Section numbers are the design panel's, kept so `§n.m` cross-references
 resolve. Where the spec and the API survey disagreed and the decisions
 above do not settle it, the spec wins and the line says so.
 
+## Packaging: `agents/state-machine` and `agents/tasks`
+
+The engine and the durable-function layer are two entry points on one implementation.
+
+- **`agents/state-machine`** exports `StateMachine`, the Lifecycle capability that owns the tables, the wake stream and the routed dispatch. It registers machine definitions only — `{ initial, phases, onCancel?, migrate? }` — and its vocabulary is prefixed `StateMachine`: `StateMachineDefinition` (the machine form), `StateMachineContext` (the per-handler runtime, `ctx`), `StateMachineStep` (the step surface `ctx` extends), `StateMachineRunHandle`, `StateMachineReceipt`, `StateMachineRunSnapshot`, `StateMachineOptions`, `StateMachineCheckpointTooLargeError`, and so on, with `defineAsk`, `AskKind`, `Pending` and `AssertJson` unprefixed.
+- **`agents/tasks`** exports `Tasks`, which **extends** `StateMachine`: same tables, same wake stream, same handles, one capability instance. What it adds is the durable-function form — `(input, step) => result` — compiled onto the engine at `register()` time, and the `Task` vocabulary this document is written in: every `Task*` name is the `StateMachine*` type under the name Tasks shipped with (`TaskMachine` = `StateMachineDefinition`, `TaskContext` = `StateMachineContext`, `TaskStep` = `StateMachineStep`, `TaskRunHandle` = `StateMachineRunHandle`, each `Task*Error` the same class as its `StateMachine*Error`), plus `TaskFunction`, `TaskHandlers` and `TaskCallbacks`, which only this layer knows.
+- **`Agent`** installs one capability, `this.tasks`. Because a `Tasks` is a `StateMachine`, `this.tasks.register(name, machine)` and a machine entry in `taskDefinitions` both reach the engine directly; there is no second field on `Agent`.
+- **Storage and events keep the `task` namespace.** The tables stay `cf_agents_task_*` and the event types stay `task:*`: a task run and a state-machine run are the same row, and renaming the wire-level names would be a migration and an observability break for no semantic gain.
+
+The compiler lives beside `Tasks` (`tasks/compile.ts`); the engine recognises only the single-turn checkpoint sentinel a compiled function carries (§3.1). Nothing below changes under either name — read `Task*` as `StateMachine*` when working against the engine directly.
+
 ## 1. Vocabulary and invariants
 
 1. **Task definition** — one named, versioned durable program. Two forms,

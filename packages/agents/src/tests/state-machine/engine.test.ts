@@ -8,10 +8,13 @@ import {
   seedTaskRun,
   type TaskHarnessObject
 } from "../capabilities/tasks";
-import { createTaskStepEngine, RUN_SCOPED_TURN } from "../../tasks/engine-port";
-import { childMailboxKey } from "../../tasks/machine";
-import { AttemptSupersededError, ReplayStep } from "../../tasks/replay";
-import { JOURNAL_REBUILD_START, TaskStore } from "../../tasks/store";
+import {
+  createTaskStepEngine,
+  RUN_SCOPED_TURN
+} from "../../state-machine/engine-port";
+import { childMailboxKey } from "../../state-machine/machine";
+import { AttemptSupersededError, ReplayStep } from "../../state-machine/replay";
+import { JOURNAL_REBUILD_START, TaskStore } from "../../state-machine/store";
 
 /**
  * The storage seams one claimed attempt drives, tested against real Durable
@@ -31,7 +34,7 @@ const STEP_DEFAULTS = {
   timeoutMs: 30_000
 };
 
-/** The `sql` text SQLite stored for one of Tasks' own indexes. */
+/** The `sql` text SQLite stored for one of StateMachine' own indexes. */
 function indexDdl(storage: DurableObjectStorage, name: string): string {
   const rows = storage.sql
     .exec(

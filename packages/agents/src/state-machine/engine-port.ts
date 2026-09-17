@@ -16,7 +16,7 @@ import { serializeTaskValue } from "./serialization";
 import type {
   TaskAskRow,
   TaskJournalRow,
-  TaskMailboxFilter,
+  StateMachineMailboxFilter,
   TaskMailboxRow
 } from "./types";
 import type { TaskStore } from "./store";
@@ -390,7 +390,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
 /** Apply one mailbox filter to a run's visible rows, in FIFO order. */
 function matchMailbox(
   rows: readonly TaskMailboxRow[],
-  filter: TaskMailboxFilter | undefined
+  filter: StateMachineMailboxFilter | undefined
 ): TaskMailboxRow[] {
   const matches = (row: TaskMailboxRow): boolean =>
     matchesOne(row.kind, filter?.kind) &&

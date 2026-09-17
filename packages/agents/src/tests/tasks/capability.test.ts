@@ -15,7 +15,7 @@ import {
   type TaskHarnessObject,
   type TaskSchedulerCoexistObject
 } from "../capabilities/tasks";
-import { childMailboxKey } from "../../tasks/machine";
+import { childMailboxKey } from "../../state-machine/machine";
 import { defineAsk } from "../../tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 import type { Tasks, TaskRunSnapshot, TaskValue } from "../../tasks";
@@ -1074,7 +1074,7 @@ describe("Tasks capability", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("DuplicateTaskStepError");
+      expect(snapshot.error.name).toBe("StateMachineDuplicateStepError");
     });
   });
 
@@ -1111,7 +1111,7 @@ describe("Tasks capability", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskReplayDivergedError");
+      expect(snapshot.error.name).toBe("StateMachineReplayDivergedError");
       expect(instance.stepRuns).toEqual([]);
     });
   });
@@ -1139,7 +1139,7 @@ describe("Tasks capability", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("MissingTaskDefinitionError");
+      expect(snapshot.error.name).toBe("StateMachineMissingDefinitionError");
       expect(snapshot.error.message).toContain('"ghost"');
     });
   });
@@ -1597,7 +1597,9 @@ describe("Tasks run budget", () => {
           "failed"
         ]);
         if (snapshot.state !== "failed") throw new Error("unreachable");
-        expect(snapshot.error.name).toBe("TaskInterruptionsExhaustedError");
+        expect(snapshot.error.name).toBe(
+          "StateMachineInterruptionsExhaustedError"
+        );
         expect(snapshot.error.message).toMatch(/interrupted 1 time\b/);
         expect(instance.stepRuns).toEqual([]);
         await waitFor(() => instance.runErrorRuns.length > 0);
@@ -1605,7 +1607,7 @@ describe("Tasks run budget", () => {
           {
             runId: "spent-run",
             definition: "pipeline",
-            name: "TaskInterruptionsExhaustedError"
+            name: "StateMachineInterruptionsExhaustedError"
           }
         ]);
         // The failure is itself an interruption, and is counted like one:
@@ -1878,7 +1880,7 @@ describe("Tasks run budget", () => {
         ["failed"]
       );
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       expect(instance.guardedEntries).toEqual([]);
     });
   });
@@ -2211,7 +2213,7 @@ describe("Tasks run budget", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       expect(instance.stepRuns).toEqual([]);
       await waitFor(() => instance.runErrorRuns.length > 0);
       expect(instance.runErrorRuns.map((run) => run.runId)).toEqual([
@@ -2235,7 +2237,7 @@ describe("Tasks run budget", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       expect(instance.stepRuns).toEqual(["sleeper:before"]);
     });
   });
@@ -2254,13 +2256,13 @@ describe("Tasks run budget", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       await waitFor(() => instance.runErrorRuns.length > 0);
       expect(instance.runErrorRuns).toEqual([
         {
           runId: receipt.runId,
           definition: "deaf",
-          name: "TaskDeadlineExceededError"
+          name: "StateMachineDeadlineExceededError"
         }
       ]);
     });
@@ -2280,9 +2282,11 @@ describe("Tasks run budget", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       await waitFor(() => instance.signalReasons.length > 0);
-      expect(instance.signalReasons).toEqual(["TaskDeadlineExceededError"]);
+      expect(instance.signalReasons).toEqual([
+        "StateMachineDeadlineExceededError"
+      ]);
       // The attempt's own unwinding hit the fence; the enforcement already
       // observed the failure, so onError saw this run exactly once.
       await new Promise((resolve) => setTimeout(resolve, 50));
