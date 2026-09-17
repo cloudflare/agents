@@ -1,4 +1,5 @@
 import type { StateMachineDurationString } from "./duration";
+import type { Streams } from "../streams/streams";
 import type { StateMachineDefinitions, StateMachineRetryConfig } from "./types";
 
 /**
@@ -71,6 +72,13 @@ export interface StateMachineOptions<
 
   /** Max unconsumed mailbox rows per run before `send` throws. Default 1000. */
   readonly mailboxLimit?: number;
+
+  /**
+   * The Streams capability engine-owned streams are written through
+   * (`ctx.stream()`). Install it on the same Lifecycle; without it,
+   * `ctx.stream()` throws.
+   */
+  readonly streams?: Streams;
 
   /**
    * Observe terminal run failures, including those StateMachine records without

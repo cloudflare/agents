@@ -27,6 +27,9 @@ import type {
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
+import type { Streams } from "../streams/streams";
+import type { StreamState, StreamWriter } from "../streams/types";
+import { StreamClosedError } from "../streams/errors";
 import { SqlError } from "../sql-error";
 import {
   JOURNAL_REBUILD_BATCH,
@@ -37,6 +40,8 @@ import {
 } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import {
+  CHILD_MAILBOX_KIND,
+  childMailboxKey,
   COMPILED_CHECKPOINT,
   COMPILED_PHASE,
   isCompiledCheckpoint,
@@ -104,6 +109,8 @@ import type {
   StateMachineRunView,
   StateMachineSendOptions,
   StateMachineSendReceipt,
+  StateMachineSpawnOptions,
+  StateMachineStreamOptions,
   StateMachineStartMode,
   StateMachineState,
   StateMachineValue,
@@ -293,6 +300,24 @@ function readJournalCursor(storage: DurableObjectStorage): TaskJournalCursor {
 }
 
 /** The three machine verbs a definition lens carries, pending that engine. */
+/** The names a run has streamed under, recorded on its row. */
+function streamNames(row: TaskRunRow): string[] {
+  if (row.stream_tag === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.stream_tag);
+    return Array.isArray(parsed)
+      ? parsed.filter((name): name is string => typeof name === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The id of one engine-owned stream: run, name, epoch (§9.1). */
+function engineStreamId(runId: string, name: string, epoch: number): string {
+  return `${runId}:${name}#${epoch}`;
+}
+
 /** True for a machine that opted into the fresh-invocation cancel. */
 function declaresOnCancel(definition: AnyStateMachineDefinition): boolean {
   return (
@@ -399,6 +424,7 @@ export class StateMachine<
   readonly #transitionBudget: number;
   readonly #turnTimeoutMs: number | null;
   readonly #mailboxLimit: number;
+  readonly #streams: Streams | undefined;
   readonly #watchers = new Map<
     string,
     Set<(change: StateMachineChange) => void>
@@ -445,6 +471,7 @@ export class StateMachine<
       1,
       options.mailboxLimit ?? DEFAULT_MAILBOX_LIMIT
     );
+    this.#streams = options.streams;
   }
 
   #claimTimeoutMs(): number {
@@ -937,6 +964,292 @@ export class StateMachine<
     await this.#syncWake(runId, at);
   }
 
+  // ── Children and streams ─────────────────────────────────────────────────
+
+  /**
+   * Accept one child of `parentId` (§10.1). A background child is detached:
+   * outside the cancel cascade, and silent unless `notify` is asked for.
+   * Cross-facet ownership (`options.owner`) is not wired in this release.
+   */
+  async #spawn(
+    parentId: string,
+    definition: string,
+    input: unknown,
+    options: StateMachineSpawnOptions | undefined
+  ): Promise<StateMachineReceipt> {
+    if (options?.owner !== undefined) {
+      throw new Error(
+        "ctx.spawn(..., { owner }) is not supported yet: children run on the parent's Lifecycle"
+      );
+    }
+    this.#validateDefinitionName(definition);
+    const { notify, owner: _owner, ...runOptions } = options ?? {};
+    void _owner;
+    const background = runOptions.background === true;
+    return this.#accept(definition, input, runOptions, startMode(runOptions), {
+      runId: parentId,
+      notify: notify ?? !background
+    });
+  }
+
+  #requireStreams(): Streams {
+    if (this.#streams === undefined) {
+      throw new Error(
+        "ctx.stream() needs the Streams capability: pass `streams` in the Tasks options and install it on the same Lifecycle"
+      );
+    }
+    return this.#streams;
+  }
+
+  /**
+   * Open this run's engine-owned stream `name` at the current epoch (§9.1),
+   * rotating to the next epoch when that id has already settled — a
+   * previous transition's commit closed it — so a stream is always live
+   * when a handler holds it. The names a run has streamed are recorded on
+   * the row, which is what lets a reclaim seal every live epoch.
+   */
+  async #openStream(
+    runId: string,
+    name: string,
+    options: StateMachineStreamOptions | undefined
+  ): Promise<StreamWriter> {
+    const streams = this.#requireStreams();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const row = this.#store.getRun(runId);
+      if (!row || TERMINAL_STATES.has(row.state)) {
+        throw new AttemptSupersededError(runId);
+      }
+      const names = streamNames(row);
+      if (!names.includes(name)) {
+        this.#store.write(
+          "UPDATE cf_agents_task_runs SET stream_tag = ? WHERE run_id = ?",
+          [JSON.stringify([...names, name]), runId]
+        );
+      }
+      const streamId = engineStreamId(runId, name, row.stream_epoch);
+      try {
+        return await streams.open(streamId, {
+          tag: options?.tag ?? `${runId}:${name}`,
+          ...(options?.metadata !== undefined
+            ? { metadata: options.metadata }
+            : {})
+        });
+      } catch (error) {
+        if (!(error instanceof StreamClosedError) || attempt === 1) throw error;
+        // The epoch's stream settled with an earlier commit: fold its
+        // cursor into the retired total and move every name to the next
+        // epoch.
+        const settled = await streams.status(streamId);
+        this.#store.write(
+          `UPDATE cf_agents_task_runs
+           SET stream_epoch = stream_epoch + 1,
+               stream_retired = stream_retired + ?
+           WHERE run_id = ? AND stream_epoch = ?`,
+          [settled?.cursor ?? 0, runId, row.stream_epoch]
+        );
+      }
+    }
+    throw new AttemptSupersededError(runId);
+  }
+
+  /**
+   * A reclaim after an interruption seals every live engine-owned stream of
+   * the lost attempt and rotates the epoch (§9.1): the replayed transition
+   * opens the next one, and a UI following the tag sees continuous output.
+   */
+  async #rotateStreams(row: TaskRunRow): Promise<void> {
+    const streams = this.#streams;
+    const names = streamNames(row);
+    if (streams === undefined || names.length === 0) return;
+    let retired = 0;
+    let rotated = false;
+    for (const name of names) {
+      const streamId = engineStreamId(row.run_id, name, row.stream_epoch);
+      const status = await streams.status(streamId);
+      if (status === null) continue;
+      rotated = true;
+      if (status.state === "streaming") {
+        const writer = await streams.open(streamId);
+        writer.error(`superseded by epoch ${row.stream_epoch + 1}`);
+      }
+      retired += (await streams.status(streamId))?.cursor ?? status.cursor;
+    }
+    if (!rotated) return;
+    this.#store.write(
+      `UPDATE cf_agents_task_runs
+       SET stream_epoch = stream_epoch + 1, stream_retired = stream_retired + ?
+       WHERE run_id = ? AND stream_epoch = ?`,
+      [retired, row.run_id, row.stream_epoch]
+    );
+  }
+
+  /** The engine-owned streams of one run, for `view()`. */
+  async #streamViews(
+    row: TaskRunRow
+  ): Promise<NonNullable<StateMachineRunView<StateMachineValue>["streams"]>> {
+    const streams = this.#streams;
+    if (streams === undefined) return [];
+    const views: {
+      name: string;
+      tag: string;
+      streamId: string;
+      epoch: number;
+      cursor: number;
+      state: StreamState;
+    }[] = [];
+    for (const name of streamNames(row)) {
+      const streamId = engineStreamId(row.run_id, name, row.stream_epoch);
+      const status = await streams.status(streamId);
+      if (status === null) continue;
+      views.push({
+        name,
+        tag: status.tag ?? `${row.run_id}:${name}`,
+        streamId,
+        epoch: row.stream_epoch,
+        cursor: status.cursor,
+        state: status.state
+      });
+    }
+    return views;
+  }
+
+  /**
+   * Deliver a settled child's note to its parent's mailbox (§10.2) and wake
+   * the parent if it is parked on it. A terminal parent takes nothing.
+   */
+  async #notifyParent(child: TaskRunRow): Promise<void> {
+    const parentId = child.parent_run_id;
+    if (parentId === null || child.parent_notify !== 1) return;
+    const parent = this.#store.getRun(parentId);
+    if (!parent || TERMINAL_STATES.has(parent.state)) return;
+    const now = Date.now();
+    const seq =
+      this.#store.read<{ next: number }>(
+        "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM cf_agents_task_mailbox WHERE run_id = ?",
+        [parentId]
+      )[0]?.next ?? 0;
+    const note = {
+      runId: child.run_id,
+      definition: child.definition,
+      state: child.state,
+      ...(child.result !== null
+        ? { result: deserializeTaskValue(child.result) as StateMachineJson }
+        : {}),
+      ...(child.error_name !== null
+        ? {
+            error: {
+              name: child.error_name,
+              message: child.error_message ?? ""
+            }
+          }
+        : {}),
+      ...(child.state === "cancelled" && child.cancel_reason !== null
+        ? { reason: child.cancel_reason }
+        : {}),
+      ...(child.outcome !== null ? { outcome: child.outcome } : {})
+    };
+    const written = this.#store.write(
+      `INSERT INTO cf_agents_task_mailbox
+         (run_id, key, seq, kind, type, payload, visible_after, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+       ON CONFLICT (run_id, key) DO NOTHING`,
+      [
+        parentId,
+        childMailboxKey(child.run_id),
+        seq,
+        CHILD_MAILBOX_KIND,
+        child.definition,
+        JSON.stringify(note),
+        now
+      ]
+    );
+    if (written === 0) return;
+    this.#emit("task:child", {
+      runId: parentId,
+      definition: parent.definition,
+      child: child.run_id,
+      state: child.state
+    });
+    await this.#wakeParked(parentId, ["child", "mailbox"], now);
+  }
+
+  /**
+   * The cancel cascade (§10.3): every in-tree child of `parentId` takes the
+   * same mark, in the same synchronous block as its parent. Background
+   * children are detached and run on.
+   */
+  async #cascadeAbort(
+    parentId: string,
+    mark: StateMachineAbortMark,
+    reason: string | undefined
+  ): Promise<void> {
+    const children = this.#store.read<TaskRunRow>(
+      `SELECT * FROM cf_agents_task_runs
+       WHERE parent_run_id = ? AND background = 0
+         AND state IN ('pending', 'waiting', 'running')`,
+      [parentId]
+    );
+    for (const child of children) {
+      await this.#requestAbort(child, mark, reason, false);
+    }
+  }
+
+  /**
+   * Set one mark on a run and drive the protocol from wherever the run is:
+   * a live attempt is signalled and settles through #afterAttempt; a parked
+   * machine with `onCancel` gets its cancel transition; everything else
+   * takes the mark's inline default now.
+   */
+  async #requestAbort(
+    row: TaskRunRow,
+    mark: StateMachineAbortMark,
+    reason: string | undefined,
+    wait: boolean
+  ): Promise<void> {
+    const runId = row.run_id;
+    const now = Date.now();
+    if (mark === "cancel") {
+      this.#store.sql`
+        UPDATE cf_agents_task_runs
+        SET cancel_requested = 1, cancel_reason = ${reason ?? null},
+            abort_mark = coalesce(abort_mark, 'cancel'),
+            abort_reason = coalesce(abort_reason, ${reason ?? null}),
+            updated_at = ${now}
+        WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
+      `;
+    } else {
+      this.#store.sql`
+        UPDATE cf_agents_task_runs
+        SET abort_mark = coalesce(abort_mark, ${mark}),
+            abort_reason = coalesce(abort_reason, ${reason ?? null}),
+            updated_at = ${now}
+        WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
+      `;
+    }
+    await this.#cascadeAbort(runId, "parent", "parent aborted");
+    const active = this.#active.get(runId);
+    if (active) {
+      active.controller.abort(new TaskCancellation(reason));
+      await this.#syncWake(runId, now);
+      if (wait) await this.#awaitSettled(runId, active);
+      return;
+    }
+    const marked = this.#store.getRun(runId);
+    if (!marked || TERMINAL_STATES.has(marked.state)) return;
+    const definition = this.#resolveDefinition(marked.definition);
+    if (
+      definition !== undefined &&
+      declaresOnCancel(definition) &&
+      marked.checkpoint !== null
+    ) {
+      const transition = this.#runCancelTransition(marked, definition);
+      if (wait) await transition;
+      else void transition.catch(() => {});
+      return;
+    }
+    await this.#settleByMark(marked, null);
+  }
+
   // ── Lifecycle capability hooks ───────────────────────────────────────────
 
   /** Migrate storage and reconcile run deadlines during Lifecycle startup. */
@@ -1400,6 +1713,7 @@ export class StateMachine<
           updated_at = ${now}
       WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
     `;
+    await this.#cascadeAbort(runId, "parent", "parent aborted");
     const definition = this.#resolveDefinition(row.definition);
     if (definition !== undefined && declaresOnCancel(definition)) {
       active.controller.abort(error);
@@ -1560,6 +1874,12 @@ export class StateMachine<
       if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
       await this.lifecycle.jobs.cancel(job.id);
     }
+    // The owner index rows under the prefix go with the facets (§10.4).
+    this.#store.write(
+      `DELETE FROM cf_agents_task_routes
+       WHERE owner_path_key = ? OR owner_path_key LIKE ?`,
+      [prefix, `${prefix}/%`]
+    );
   }
 
   /** Mirror every non-terminal run into the queue (startup reconcile). */
@@ -1635,7 +1955,10 @@ export class StateMachine<
   ): Promise<StateMachineRunView<StateMachineValue> | null> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    return row ? this.#store.rowToView(row) : null;
+    if (!row) return null;
+    const view = this.#store.rowToView(row);
+    const streams = await this.#streamViews(row);
+    return streams.length === 0 ? view : { ...view, streams };
   }
 
   /**
@@ -1674,51 +1997,7 @@ export class StateMachine<
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATES.has(row.state)) return false;
-
-    const definition = this.#resolveDefinition(row.definition);
-    const cancelTransition =
-      definition !== undefined &&
-      declaresOnCancel(definition) &&
-      row.checkpoint !== null;
-
-    const active = this.#active.get(runId);
-    if (active) {
-      const now = Date.now();
-      // The mark and the legacy request bits land in ONE update: the mark
-      // is the write barrier every checkpoint-advancing write is fenced on.
-      this.#store.sql`
-        UPDATE cf_agents_task_runs
-        SET cancel_requested = 1, cancel_reason = ${reason ?? null},
-            abort_mark = coalesce(abort_mark, 'cancel'),
-            abort_reason = coalesce(abort_reason, ${reason ?? null}),
-            next_at = ${now}, updated_at = ${now}
-        WHERE run_id = ${runId}
-      `;
-      active.controller.abort(new TaskCancellation(reason));
-      await this.#syncWake(runId);
-      // The live attempt ends under the mark; #afterAttempt then runs the
-      // cancel transition or the inline default.
-      if (options?.wait === true) await this.#awaitSettled(runId, active);
-      return true;
-    }
-    if (cancelTransition) {
-      const now = Date.now();
-      this.#store.sql`
-        UPDATE cf_agents_task_runs
-        SET cancel_requested = 1, cancel_reason = ${reason ?? null},
-            abort_mark = coalesce(abort_mark, 'cancel'),
-            abort_reason = coalesce(abort_reason, ${reason ?? null}),
-            updated_at = ${now}
-        WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
-      `;
-      const marked = this.#store.getRun(runId);
-      if (!marked || TERMINAL_STATES.has(marked.state)) return false;
-      const transition = this.#runCancelTransition(marked, definition);
-      if (options?.wait === true) await transition;
-      else void transition.catch(() => {});
-      return true;
-    }
-    await this.#settleCancelled(runId, null, reason);
+    await this.#requestAbort(row, "cancel", reason, options?.wait === true);
     return true;
   }
 
@@ -1763,6 +2042,13 @@ export class StateMachine<
     const active = this.#active.get(runId);
     active?.controller.abort(new TaskCancellation(reason));
     await this.#settleCancelled(runId, null, reason);
+    const children = this.#store.read<{ run_id: string }>(
+      `SELECT run_id FROM cf_agents_task_runs
+       WHERE parent_run_id = ? AND background = 0
+         AND state IN ('pending', 'waiting', 'running')`,
+      [runId]
+    );
+    for (const child of children) await this.terminate(child.run_id, reason);
     return true;
   }
 
@@ -1883,9 +2169,15 @@ export class StateMachine<
     definition: string,
     input: unknown,
     options: StateMachineRunOptions = {},
-    startMode: StateMachineStartMode = "warm"
+    startMode: StateMachineStartMode = "warm",
+    parent: { runId: string; notify: boolean } | null = null
   ): Promise<StateMachineReceipt> {
     await this.lifecycle.ready();
+    if ("parent" in options && options.parent !== undefined) {
+      throw new Error(
+        "run() does not accept `parent`; a child is started with ctx.spawn()"
+      );
+    }
     if (options.runId !== undefined && options.runId.length === 0) {
       throw new Error("runId must be a non-empty string when provided");
     }
@@ -2005,7 +2297,8 @@ export class StateMachine<
         (run_id, definition, definition_base, definition_version, input, state,
          metadata, idempotency_key, retain, attempt, deadline_at, interruptions,
          retry_policy, turn_timeout_ms, next_at, cancel_requested, checkpoint,
-         checkpoint_turn, background, parent_notify, created_at, updated_at)
+         checkpoint_turn, background, parent_run_id, parent_notify,
+         created_at, updated_at)
       VALUES
         (${runId}, ${definition}, ${base}, ${version}, ${inputJson}, 'pending',
          ${metadataJson},
@@ -2013,7 +2306,9 @@ export class StateMachine<
          0, ${deadlineAt}, 0,
          ${retryPolicy === null ? null : JSON.stringify(retryPolicy)},
          ${turnTimeoutMs}, ${now}, 0, NULL,
-         0, ${options.background === true ? 1 : 0}, 1, ${now}, ${now})
+         0, ${options.background === true ? 1 : 0},
+         ${parent?.runId ?? null}, ${parent === null || parent.notify ? 1 : 0},
+         ${now}, ${now})
     `;
     await this.#syncWake(runId);
     this.#emit("task:accepted", { runId, definition, accepted: true });
@@ -2130,6 +2425,7 @@ export class StateMachine<
       }
     }
 
+    if (interruption) await this.#rotateStreams(current);
     const generation = nanoid();
     const attempt = current.attempt + 1;
     const turnDeadline = this.#turnDeadline(current, now);
@@ -2618,6 +2914,12 @@ export class StateMachine<
 
       const terminal = readTaskTerminal(returned);
       if (terminal !== undefined) {
+        ctx.settleStreams(
+          terminal.kind === "complete" ? "completed" : "errored",
+          terminal.kind === "aborted"
+            ? (terminal.reason ?? "aborted")
+            : "failed"
+        );
         await this.#settleTerminal(row, generation, terminal, mark);
         return;
       }
@@ -2648,6 +2950,7 @@ export class StateMachine<
         await this.#settleThrown(row, generation, thrown, mark, false);
         return;
       }
+      engine.creditProgress(ctx.takeStreamProgress());
       const delta = engine.progressCredited() - credited;
       credited += delta;
       const now = Date.now();
@@ -2701,14 +3004,36 @@ export class StateMachine<
           );
           return;
         }
-        const committed = engine.commitCheckpoint({
-          checkpoint: nextJson,
-          turn: turn + 1,
-          retireTurn: turn,
-          transitions,
-          stall: 0,
-          progress: progress + delta
-        });
+        // The atomic cutover (§9.2): a live engine-owned stream settles in
+        // the same transaction as the checkpoint, through the settle's
+        // `commit` hook. A commit the fence refuses throws inside it, which
+        // rolls the settle back and leaves the stream live for whoever now
+        // owns the run.
+        let committed = false;
+        const commit = () => {
+          committed = engine.commitCheckpoint({
+            checkpoint: nextJson,
+            turn: turn + 1,
+            retireTurn: turn,
+            transitions,
+            stall: 0,
+            progress: progress + delta
+          });
+          if (!committed) throw new AttemptSupersededError(runId);
+        };
+        if (ctx.openStreams().length === 0) {
+          try {
+            commit();
+          } catch (thrown) {
+            if (!(thrown instanceof AttemptSupersededError)) throw thrown;
+          }
+        } else {
+          try {
+            ctx.settleStreams("completed", undefined, commit);
+          } catch (thrown) {
+            if (!(thrown instanceof AttemptSupersededError)) throw thrown;
+          }
+        }
         if (!committed) return;
         turn += 1;
         checkpointJson = nextJson;
@@ -3050,6 +3375,16 @@ export class StateMachine<
       claimRefreshAfterMs: CLAIM_SLACK_MS / 2,
       compiled,
       cancelTransition,
+      spawn: (child, input, options) =>
+        this.#spawn(runId, child, input, options),
+      openStream: (name, options) => this.#openStream(runId, name, options),
+      openExternalStream: (streamId, options) =>
+        this.#requireStreams().open(streamId, {
+          ...(options.tag !== undefined ? { tag: options.tag } : {}),
+          ...(options.metadata !== undefined
+            ? { metadata: options.metadata }
+            : {})
+        }),
       defaults: this.#stepDefaults,
       emit: (type, payload) =>
         this.#emit(type as StateMachineEventType, {
@@ -3193,6 +3528,7 @@ export class StateMachine<
     runId: string,
     row: TaskRunRow | undefined
   ): Promise<void> {
+    if (row !== undefined) await this.#notifyParent(row);
     // `faulted` and `orphaned` override `retain: false` (§6.6): never
     // silently delete what `reopen()` needs.
     if (

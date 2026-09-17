@@ -91,6 +91,10 @@ function portFor(
     claimRefreshAfterMs: 15_000,
     compiled: options.compiled,
     cancelTransition: false,
+    spawn: () => Promise.reject(new Error("no spawn in the port probe")),
+    openStream: () => Promise.reject(new Error("no streams in the port probe")),
+    openExternalStream: () =>
+      Promise.reject(new Error("no streams in the port probe")),
     defaults: STEP_DEFAULTS,
     emit: () => {}
   });

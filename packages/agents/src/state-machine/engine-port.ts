@@ -14,11 +14,15 @@ import {
 import { taskIdempotencyKey } from "./machine";
 import { serializeTaskValue } from "./serialization";
 import type {
+  StateMachineMailboxFilter,
+  StateMachineReceipt,
+  StateMachineSpawnOptions,
+  StateMachineStreamOptions,
   TaskAskRow,
   TaskJournalRow,
-  StateMachineMailboxFilter,
   TaskMailboxRow
 } from "./types";
+import type { StreamWriter } from "../streams/types";
 import type { TaskStore } from "./store";
 
 /** Where run-scoped journal rows live; turn retirement never touches it. */
@@ -53,6 +57,22 @@ export type TaskStepEngineDeps = {
    */
   cancelTransition: boolean;
   defaults: ResolvedStepPolicy;
+  /** Accept a child of this run (§10.1). */
+  spawn: (
+    definition: string,
+    input: unknown,
+    options: StateMachineSpawnOptions | undefined
+  ) => Promise<StateMachineReceipt>;
+  /** Open (or resume) this run's engine-owned stream `name` (§9.1). */
+  openStream: (
+    name: string,
+    options: StateMachineStreamOptions | undefined
+  ) => Promise<StreamWriter>;
+  /** Open a caller-identified stream the engine does not own. */
+  openExternalStream: (
+    streamId: string,
+    options: StateMachineStreamOptions
+  ) => Promise<StreamWriter>;
   emit: (type: string, payload: Record<string, unknown>) => void;
 };
 
@@ -396,6 +416,9 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     },
     attemptSignal: deps.signal,
     emit: deps.emit,
+    spawn: deps.spawn,
+    openStream: deps.openStream,
+    openExternalStream: deps.openExternalStream,
     stepIdempotencyKey: (turn, name, scope) =>
       taskIdempotencyKey(runId, name, {
         turn,

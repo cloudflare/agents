@@ -23,7 +23,13 @@ import {
   isNonRetryableError
 } from "./errors";
 import { nanoid } from "nanoid";
-import { asTaskTerminal, TaskTerminalSignal, TIMED_OUT } from "./machine";
+import {
+  asTaskTerminal,
+  CHILD_MAILBOX_KIND,
+  childMailboxKey,
+  TaskTerminalSignal,
+  TIMED_OUT
+} from "./machine";
 import { deserializeTaskValue, serializeTaskValue } from "./serialization";
 import type { StreamWriter } from "../streams/types";
 import type {
@@ -297,6 +303,25 @@ export interface TaskStepEngine {
   /** Abort signal for the whole attempt (cancellation or supersession). */
   readonly attemptSignal: AbortSignal;
 
+  /** Accept a child of this run. */
+  spawn(
+    definition: string,
+    input: unknown,
+    options: StateMachineSpawnOptions | undefined
+  ): Promise<StateMachineReceipt>;
+
+  /** Open or resume this run's engine-owned stream `name`. */
+  openStream(
+    name: string,
+    options: StateMachineStreamOptions | undefined
+  ): Promise<StreamWriter>;
+
+  /** Open a caller-identified stream the engine does not own. */
+  openExternalStream(
+    streamId: string,
+    options: StateMachineStreamOptions
+  ): Promise<StreamWriter>;
+
   /** Emit one capability event. */
   emit(type: string, payload: Record<string, unknown>): void;
 
@@ -418,6 +443,11 @@ export class ReplayStep implements StateMachineContext<
   readonly timedOut: StateMachineTimedOut = TIMED_OUT;
   readonly #progressBase: number;
   #expiredWait: StateMachineWaitReason | null;
+  /** Engine-owned streams this invocation opened, by name. */
+  readonly #streams = new Map<
+    string,
+    { writer: StreamWriter; openedCursor: number }
+  >();
 
   constructor(
     engine: TaskStepEngine,
@@ -648,28 +678,115 @@ export class ReplayStep implements StateMachineContext<
     return pending.map((ask) => answerOf<Answer>(byId.get(ask.id)));
   }
 
-  // ── children and streams: land with their engines ────────────────────────
+  // ── children ─────────────────────────────────────────────────────────────
 
   spawn(
-    _definition: string,
-    _input?: StateMachineJson,
-    _options?: StateMachineSpawnOptions
+    definition: string,
+    input?: StateMachineJson,
+    options?: StateMachineSpawnOptions
   ): Promise<StateMachineReceipt> {
-    return Promise.reject(pendingEngine("spawn"));
+    return this.#engine.spawn(definition, input, options);
   }
 
-  join<Output extends StateMachineValue>(
-    _children: readonly (StateMachineChildRef | StateMachineReceipt | string)[],
-    _options?: { within?: number | StateMachineDurationString }
+  /**
+   * Sugar over `receive({ kind: "child" })`: waits until every named child
+   * has settled, then consumes their notes in one block. Nothing is consumed
+   * before all have arrived, so a wait that parks and re-enters sees them
+   * all again.
+   */
+  async join<Output extends StateMachineValue>(
+    children: readonly (StateMachineChildRef | StateMachineReceipt | string)[],
+    options?: { within?: number | StateMachineDurationString }
   ): Promise<StateMachineChildResult<Output>[] | StateMachineTimedOut> {
-    return Promise.reject(pendingEngine("join"));
+    const ids = children.map((child) =>
+      typeof child === "string" ? child : child.runId
+    );
+    const wanted = new Map(ids.map((id) => [childMailboxKey(id), id]));
+    const rows = this.#engine
+      .peekMailbox({ kind: CHILD_MAILBOX_KIND }, Date.now())
+      .filter((row) => wanted.has(row.key));
+    if (rows.length >= wanted.size) {
+      const byKey = new Map(rows.map((row) => [row.key, row]));
+      this.#engine.consumeMailbox([...wanted.keys()]);
+      return ids.map((id) =>
+        childResult<Output>(id, byKey.get(childMailboxKey(id)))
+      );
+    }
+    if (this.#tookExpiry("child")) return TIMED_OUT;
+    throw new TaskSuspension(this.#withinDeadline(options?.within), "child");
   }
 
-  stream(
-    _name?: string,
-    _options?: StateMachineStreamOptions
+  // ── streams ──────────────────────────────────────────────────────────────
+
+  /**
+   * Open this run's engine-owned stream `name` (default `"main"`), or resume
+   * it. Appends heartbeat the claim; the stream settles with the next
+   * checkpoint commit (§9.2), and its cursor advance is progress (§9.3).
+   * `options.streamId` opts out of ownership: the writer is returned as is.
+   */
+  async stream(
+    name = "main",
+    options?: StateMachineStreamOptions
   ): Promise<StreamWriter> {
-    return Promise.reject(pendingEngine("stream"));
+    if (options?.streamId !== undefined) {
+      return this.#engine.openExternalStream(options.streamId, options);
+    }
+    if (typeof name !== "string" || name.length === 0) {
+      throw new Error("Stream names must be non-empty strings");
+    }
+    const open = this.#streams.get(name);
+    if (open !== undefined) return open.writer;
+    const inner = await this.#engine.openStream(name, options);
+    const engine = this.#engine;
+    const writer: StreamWriter = {
+      streamId: inner.streamId,
+      get cursor() {
+        return inner.cursor;
+      },
+      append: (chunk) => {
+        engine.refreshClaim();
+        return inner.append(chunk);
+      },
+      close: (settle) => inner.close(settle),
+      error: (reason, settle) => inner.error(reason, settle),
+      onCommit: (fn) => inner.onCommit(fn)
+    };
+    this.#streams.set(name, { writer: inner, openedCursor: inner.cursor });
+    return writer;
+  }
+
+  /** @internal The engine-owned writers still open in this invocation. */
+  openStreams(): StreamWriter[] {
+    return [...this.#streams.values()].map((entry) => entry.writer);
+  }
+
+  /** @internal Cursor advance since open (or since last taken), as progress. */
+  takeStreamProgress(): number {
+    let credited = 0;
+    for (const entry of this.#streams.values()) {
+      const advance = entry.writer.cursor - entry.openedCursor;
+      if (advance > 0) {
+        credited += advance;
+        entry.openedCursor = entry.writer.cursor;
+      }
+    }
+    return credited;
+  }
+
+  /** @internal Settle every open engine-owned stream; the last one may commit. */
+  settleStreams(
+    state: "completed" | "errored",
+    reason: string | undefined,
+    commit?: () => void
+  ): void {
+    const entries = [...this.#streams.values()];
+    this.#streams.clear();
+    entries.forEach((entry, index) => {
+      const last = index === entries.length - 1;
+      const options = last && commit !== undefined ? { commit } : undefined;
+      if (state === "completed") entry.writer.close(options);
+      else entry.writer.error(reason, options);
+    });
   }
 
   // ── terminals ────────────────────────────────────────────────────────────
@@ -1035,16 +1152,36 @@ function mailboxItem(row: TaskMailboxRow): StateMachineMailboxItem<unknown> {
   };
 }
 
+/** One child's settlement note as the join result it stands for. */
+function childResult<Output extends StateMachineValue>(
+  runId: string,
+  row: TaskMailboxRow | undefined
+): StateMachineChildResult<Output> {
+  const note = (
+    row === undefined ? {} : (deserializeTaskValue(row.payload) ?? {})
+  ) as {
+    state?: string;
+    result?: Output;
+    error?: { name: string; message: string };
+    reason?: string;
+  };
+  if (note.state === "completed") {
+    return { ok: true, runId, output: note.result as Output };
+  }
+  return {
+    ok: false,
+    runId,
+    error: note.error ?? {
+      name: note.state === "cancelled" ? "TaskCancelled" : "TaskUnsettled",
+      message: note.reason ?? `child ${runId} did not complete`
+    }
+  };
+}
+
 /** The answer one settled ask row carries; undefined when it lapsed. */
 function answerOf<Answer>(row: TaskAskRow | undefined): Answer | undefined {
   if (row === undefined || row.state !== "answered") return undefined;
   return deserializeTaskValue(row.answer) as Answer;
-}
-
-function pendingEngine(member: string): Error {
-  return new Error(
-    `ctx.${member} is declared but its engine is not wired up yet`
-  );
 }
 
 function restoreStepError(row: TaskJournalRow): Error {

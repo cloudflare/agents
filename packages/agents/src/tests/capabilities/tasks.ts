@@ -14,6 +14,7 @@ import {
 export const Approval = defineAsk<{ what: string }, string>("approval");
 import { setTaskDefinitionResolver } from "../../tasks/tasks";
 import { Scheduler } from "../../schedules";
+import { Streams } from "../../streams";
 
 /** The one phase the harness's machine definition declares. */
 type CounterState = { phase: "counting"; value: number };
@@ -25,6 +26,14 @@ type GuardState =
   | { phase: "released"; decline: boolean; releases: number };
 type HungState = { phase: "hang" };
 type MemoState = { phase: "work"; rounds: number };
+type ParentState =
+  | { phase: "spawn"; background: boolean }
+  | { phase: "join"; children: string[] };
+type GuardianState =
+  | { phase: "spawn"; background: boolean }
+  | { phase: "wait"; child: string };
+type StreamerState = { phase: "first" } | { phase: "second" };
+type NapStreamerState = { phase: "stream" };
 type InboxState = {
   phase: "listen";
   seen: string[];
@@ -110,7 +119,11 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
+  /** Engine-owned streams are written through this sibling capability. */
+  readonly streams = new Streams();
+
   readonly tasks = new Tasks({
+    streams: this.streams,
     definitions: {
       /** Two journaled steps, then a host-context probe in the return value. */
       pipeline: async (input: { label: string }, step: TaskStep) => {
@@ -716,6 +729,111 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         return `${event.type}:${event.payload.ok}:${event.timestamp instanceof Date}`;
       },
 
+      /** Spawns two children, joins them, completes with their outputs. */
+      parent: {
+        initial: (seed: { background?: boolean }): ParentState => ({
+          phase: "spawn",
+          background: seed.background === true
+        }),
+        phases: {
+          spawn: async (state, ctx) => {
+            const first = await ctx.spawn(
+              "pipeline",
+              { label: "kid" },
+              { runId: `${ctx.id}:kid-1` }
+            );
+            const second = await ctx.spawn(
+              "counter",
+              { from: 1 },
+              {
+                runId: `${ctx.id}:kid-2`,
+                background: state.background,
+                ...(state.background ? { notify: true } : {})
+              }
+            );
+            return { phase: "join", children: [first.runId, second.runId] };
+          },
+          join: async (state, ctx) => {
+            const results = await ctx.join(state.children, { within: 60_000 });
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(
+              results
+                .map((result) =>
+                  result.ok
+                    ? JSON.stringify(result.output)
+                    : `error:${result.error.name}`
+                )
+                .join("|")
+            );
+          }
+        }
+      } satisfies TaskMachine<
+        ParentState,
+        never,
+        string,
+        { background?: boolean }
+      >,
+
+      /** Spawns one long-parked child and waits on it: the cascade probe. */
+      guardian: {
+        initial: (seed: { background: boolean }): GuardianState => ({
+          phase: "spawn",
+          background: seed.background
+        }),
+        phases: {
+          spawn: async (state, ctx) => {
+            const child = await ctx.spawn(
+              "napper",
+              { ms: 60_000 },
+              { runId: `${ctx.id}:ward`, background: state.background }
+            );
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(results[0]?.ok ? "child-done" : "child-failed");
+          }
+        }
+      } satisfies TaskMachine<
+        GuardianState,
+        never,
+        string,
+        { background: boolean }
+      >,
+
+      /** Streams across two phases: the first stream settles with the commit. */
+      streamer: {
+        initial: { phase: "first" } as StreamerState,
+        phases: {
+          first: async (_state, ctx) => {
+            const writer = await ctx.stream();
+            writer.append("a");
+            writer.append("b");
+            return { phase: "second" };
+          },
+          second: async (_state, ctx) => {
+            const writer = await ctx.stream();
+            writer.append("c");
+            return ctx.complete(writer.streamId);
+          }
+        }
+      } satisfies TaskMachine<StreamerState, never, string>,
+
+      /** Streams, then parks on a sleep with the stream still live. */
+      napStreamer: {
+        initial: { phase: "stream" } as NapStreamerState,
+        phases: {
+          stream: async (_state, ctx) => {
+            const writer = await ctx.stream("out");
+            writer.append("x");
+            writer.append("y");
+            await ctx.sleep("nap", 60_000);
+            return ctx.complete(writer.streamId);
+          }
+        }
+      } satisfies TaskMachine<NapStreamerState, never, string>,
+
       /** Progress without a checkpoint change: a memo, then completion. */
       memoist: {
         initial: { phase: "work", rounds: 0 } as MemoState,
@@ -742,7 +860,9 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     }
   });
 
-  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.streams)
+    .use(this.tasks);
 }
 
 /**
