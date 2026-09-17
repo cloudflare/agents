@@ -2,7 +2,11 @@
 
 Status: shipped as `agents/tasks` (originally proposed under the working
 name "Fibers"; this document records the shipped design and how it evolved
-during implementation).
+during implementation). Its execution half — the replay engine, the step
+journal, the claim and wake rules — is superseded by
+[`rfc-tasks-state-machine.md`](./rfc-tasks-state-machine.md), which
+rebuilds it as one state-machine engine with the step API compiled on top;
+the "deferred: facets" line below was already stale by then.
 
 ## The problem
 
