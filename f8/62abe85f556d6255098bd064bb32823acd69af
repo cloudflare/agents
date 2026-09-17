@@ -1,0 +1,55 @@
+.changeset/calm-tasks-listen.md
+  s_2f880b0d0c0228::t_6b16eeff705ade 11-17
+design/alarm-coordination.md
+  s_2f880b0d0c0228::t_d9a34641fb7a19 27-29,77-82
+design/chat-shared-layer.md
+  s_2f880b0d0c0228::t_00c9541683ed97 180-181,187-189,195-197
+design/durable-object-lifecycle.md
+  s_2f880b0d0c0228::t_6364228a9f5fb6 32-36
+design/rfc-fibers.md
+  s_2f880b0d0c0228::t_0f37247802baa7 96-101,210-212
+design/tasks-event-mailbox.md
+  s_2f880b0d0c0228::t_b7a78588f15d45 14,18-32,56-57,63-68,81,119-122,145,199-200,202-203
+docs/agents/tasks.md
+  s_2f880b0d0c0228::t_3b7d5f41610a6c 13-16,120-122,138-151,163-164,313-314
+packages/agents/src/dynamic-agents/dynamic-agents.ts
+  s_2f880b0d0c0228::t_4eb50073281da3 62-65,79-81,1408-1410,1412-1413,1416-1417,1422,1424,1428,1430-1432,1628-1630
+packages/agents/src/index.ts
+  s_2f880b0d0c0228::t_67a763a222450e 1813-1815
+packages/agents/src/tasks/engine-port.ts
+  s_2f880b0d0c0228::t_cef23e9a9257ec 116,123,129-132,134-137
+packages/agents/src/tasks/tasks.ts
+  s_c7ee88e60679f4::t_3d2c0e6fe6fa5e 24,124-125,142,146,149-150,197-253,260,262,454-461,517,519-529,531-544,546-552,586,671-682,684-687,982-985,990,1004-1005,1009-1010,1012,1016-1022,1042-1047,1049-1051,1075-1076,1078-1081,1083-1089,1091,1093-1098,1100-1102,1104-1200,1214,1241-1249
+packages/agents/src/tasks/types.ts
+  s_2f880b0d0c0228::t_f5580831103a3c 147,153-157,165,223
+packages/agents/src/tests/tasks/capability.test.ts
+  s_c7ee88e60679f4::t_386f6314fda161 36-41,480-748,1142-1170,1172-1199,1201-1223,1353-1359
+packages/ai-chat/src/index.ts
+  s_2f880b0d0c0228::t_e7ad71e6774984 808
+packages/think/src/think.ts
+  s_2f880b0d0c0228::t_48b27e4e9c1bd0 5045
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f862abe85f556d6255098bd064bb32823acd69af",
+  "prompts": {},
+  "sessions": {
+    "s_2f880b0d0c0228": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f604558c6ffeb8ntWStYnL73iy",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    },
+    "s_c7ee88e60679f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f60372b05ffeIpWNJ3GaQ16767",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}
