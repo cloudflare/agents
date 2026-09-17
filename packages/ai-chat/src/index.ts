@@ -1,4 +1,3 @@
-import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 import type {
   UIMessage,
   GenerateTextOnFinishCallback,
@@ -6,6 +5,7 @@ import type {
   ToolSet,
   UIMessageChunk
 } from "ai";
+import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 import {
   Agent,
   isDurableObjectMemoryLimitReset,
@@ -702,11 +702,6 @@ export class AIChatAgent<
     }
   >();
 
-  /**
-   * Register the shared chat-turn Task definition (see
-   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
-   * host wires its protected internals through the hooks.
-   */
   /** Handles for the reserved (`__cf`-prefixed) definitions this host registers. */
   private readonly _reservedTasks = new Map<string, TaskInternalHandle>();
 
@@ -728,6 +723,11 @@ export class AIChatAgent<
     return handle;
   }
 
+  /**
+   * Register the shared chat-turn Task definition (see
+   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
+   * host wires its protected internals through the hooks.
+   */
   private _registerChatTurnTaskDefinition(): void {
     const chatFiberName = (this.constructor as typeof AIChatAgent)
       .CHAT_FIBER_NAME;

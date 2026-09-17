@@ -124,6 +124,34 @@ describe("children", () => {
     );
   });
 
+  it("cascades into a child that declares onCancel through its cancel transition", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const tree = await instance.tasks.run("guardianOfGuarded");
+      await waitForState(instance.tasks, `${tree.runId}:ward`, ["waiting"]);
+      expect(
+        await instance.tasks.cancel(tree.runId, "stop", { wait: true })
+      ).toBe(true);
+      const ward = await waitForState(instance.tasks, `${tree.runId}:ward`, [
+        "cancelled"
+      ]);
+      expect(ward.state).toBe("cancelled");
+      expect(instance.cancelLog).toEqual(["hold:parent"]);
+    });
+  });
+
+  it("join reports a faulted child as data rather than throwing", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("parentOfStuck");
+      const done = await waitForState(instance.tasks, receipt.runId, [
+        "completed"
+      ]);
+      if (done.state !== "completed") throw new Error("unreachable");
+      expect(done.result).toBe("error:StateMachineNoProgressError");
+    });
+  });
+
   it("terminate takes the children with it", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
@@ -160,7 +188,7 @@ describe("engine-owned streams", () => {
         expect(columns.stream_epoch).toBe(1);
         expect(columns.stream_retired).toBe(2);
         // The first stream's two chunks were credited at the commit.
-        expect(columns.progress).toBeGreaterThanOrEqual(2);
+        expect(columns.progress).toBe(2);
         const view = await instance.tasks.view(receipt.runId);
         expect(view?.streams).toEqual([
           {

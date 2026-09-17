@@ -33,6 +33,7 @@ type GuardianState =
   | { phase: "spawn"; background: boolean }
   | { phase: "wait"; child: string };
 type StreamerState = { phase: "first" } | { phase: "second" };
+type WardenState = { phase: "spawn" } | { phase: "wait"; child: string };
 type NapStreamerState = { phase: "stream" };
 type InboxState = {
   phase: "listen";
@@ -801,6 +802,47 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         string,
         { background: boolean }
       >,
+
+      /** Spawns a child that declares onCancel and waits on it. */
+      guardianOfGuarded: {
+        initial: { phase: "spawn" } as WardenState,
+        phases: {
+          spawn: async (_state, ctx) => {
+            const child = await ctx.spawn(
+              "guardedMachine",
+              { decline: false },
+              { runId: `${ctx.id}:ward` }
+            );
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(results[0]?.ok ? "child-done" : "child-failed");
+          }
+        }
+      } satisfies TaskMachine<WardenState, never, string>,
+
+      /** Spawns a child that faults, and joins it. */
+      parentOfStuck: {
+        initial: { phase: "spawn" } as WardenState,
+        phases: {
+          spawn: async (_state, ctx) => {
+            const child = await ctx.spawn("stuck", undefined, {
+              runId: `${ctx.id}:stuck`
+            });
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            const [result] = results;
+            return ctx.complete(
+              result?.ok ? "child-done" : `error:${result?.error.name}`
+            );
+          }
+        }
+      } satisfies TaskMachine<WardenState, never, string>,
 
       /** Streams across two phases: the first stream settles with the commit. */
       streamer: {

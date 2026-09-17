@@ -2183,7 +2183,7 @@ engine keeps the option instead of the WeakMap setter — same end state.)
 Three changes:
 
 - **Sealed:** unchanged — `#failWithoutAttempt` with
-  `TaskMemoryLimitSealed`, now also writing `outcome:'faulted'`, plus the
+  `TaskMemoryLimitSealed`, without an `outcome` — a sealed run keeps the plain `retain` rule, so a non-retained recovery run is released and its idempotency key is free for the recovery that follows — plus the
   delete cascade of §4.6. The `memory-limit.test.ts:497` assertions all
   still hold.
 - **Non-sealed strike:** the `next_at` floor is applied to

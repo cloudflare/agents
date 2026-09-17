@@ -174,7 +174,7 @@ import {
   setTaskDefinitionResolver,
   setTaskRoutedMemoryLimitHandler
 } from "./tasks/tasks";
-import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
+import type { TaskDefinition, TaskDefinitions } from "./tasks/types";
 import type {
   Schedule,
   ScheduleCriteria,
@@ -1318,12 +1318,12 @@ export class Agent<
    *   "build-report@v1": async (input: ReportInput, step: TaskStep) => {
    *     // ...
    *   }
-   * } satisfies TaskHandlers;
+   * } satisfies TaskDefinitions;
    * ```
    *
    * @experimental The API surface may change before stabilizing.
    */
-  declare readonly taskDefinitions?: TaskHandlers;
+  declare readonly taskDefinitions?: TaskDefinitions;
 
   readonly mcp: MCPClientManager;
 
@@ -1930,8 +1930,7 @@ export class Agent<
     // it any more.
     setTaskDefinitionResolver(
       this.tasks,
-      (name) =>
-        this.taskDefinitions?.[name] as TaskCallbacks[string] | undefined,
+      (name) => this.taskDefinitions?.[name] as TaskDefinition | undefined,
       () => Object.keys(this.taskDefinitions ?? {})
     );
 

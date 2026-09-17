@@ -1,4 +1,3 @@
-import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 /**
  * Think — an opinionated chat agent base class.
  *
@@ -88,6 +87,7 @@ import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 import * as aiSdk from "ai";
 import type {
   FlexibleSchema,
@@ -4841,11 +4841,6 @@ export class Think<
     }
   >();
 
-  /**
-   * Register the shared chat-turn Task definition (see
-   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
-   * host wires its protected internals through the hooks.
-   */
   /** Handles for the reserved (`__cf`-prefixed) definitions this host registers. */
   private readonly _reservedTasks = new Map<string, TaskInternalHandle>();
 
@@ -4867,6 +4862,11 @@ export class Think<
     return handle;
   }
 
+  /**
+   * Register the shared chat-turn Task definition (see
+   * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
+   * host wires its protected internals through the hooks.
+   */
   private _registerChatTurnTaskDefinition(): void {
     const chatFiberName = (this.constructor as typeof Think).CHAT_FIBER_NAME;
     this._registerReserved(

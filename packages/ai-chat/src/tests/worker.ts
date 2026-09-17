@@ -1,10 +1,10 @@
-import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 import {
   AIChatAgent,
   type ChatResponseResult,
   type OnChatMessageOptions,
   type SaveMessagesResult
 } from "../";
+import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 import type {
   UIMessage as ChatMessage,
   GenerateTextOnFinishCallback,
@@ -3486,6 +3486,12 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     );
   }
 
+  private readonly _facetTasks = new Map<string, TaskInternalHandle>();
+
+  private _registerFacetTask(name: string, definition: TaskDefinition): void {
+    this._facetTasks.set(name, this.tasks.register(name, definition));
+  }
+
   /**
    * Seed one active incident and its routed recovery Task run, mirrored as
    * one wake job on the root's queue, and wait for its natural first
@@ -3493,12 +3499,6 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
    * Returns the run ID so the caller can locate that mirror on the root's
    * own queue and force it due again to arm the OOM throw.
    */
-  private readonly _facetTasks = new Map<string, TaskInternalHandle>();
-
-  private _registerFacetTask(name: string, definition: TaskDefinition): void {
-    this._facetTasks.set(name, this.tasks.register(name, definition));
-  }
-
   async seedFacetRecoveryOomForTest(
     incidentId: string,
     definition: string = FACET_OOM_TEST_TASK_NAME

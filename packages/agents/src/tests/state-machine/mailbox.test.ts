@@ -128,6 +128,65 @@ describe("the mailbox", () => {
     );
   });
 
+  it("debounces the same requestId and delivers it once the window passes", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run(
+          "inbox",
+          {},
+          { start: "queued" }
+        );
+        await expect(
+          instance.tasks.send(receipt.runId, "x", { policy: "debounce" })
+        ).rejects.toThrow(/requestId/);
+        for (const text of ["draft-1", "draft-2", "draft-3"]) {
+          expect(
+            (
+              await instance.tasks.send(receipt.runId, text, {
+                policy: "debounce",
+                requestId: "typing",
+                debounceMs: 60_000
+              })
+            ).accepted
+          ).toBe(true);
+        }
+        // One hidden row, holding the latest payload at the first seq.
+        const rows = state.storage.sql
+          .exec<{ payload: string; seq: number; visible_after: number }>(
+            "SELECT payload, seq, visible_after FROM cf_agents_task_mailbox WHERE run_id = ?",
+            receipt.runId
+          )
+          .toArray();
+        expect(rows).toHaveLength(1);
+        expect(JSON.parse(rows[0]?.payload ?? "null")).toBe("draft-3");
+        expect(rows[0]?.seq).toBe(0);
+        expect(rows[0]?.visible_after).toBeGreaterThan(Date.now());
+        // Not yet visible: the handler parks past it.
+        backdateTaskWake(state.storage, receipt.runId);
+        await instance.lifecycle.rearmAlarm();
+        const parked = await waitForState(instance.tasks, receipt.runId, [
+          "waiting"
+        ]);
+        if (parked.state !== "waiting") throw new Error("unreachable");
+        expect(parked.reason).toBe("mailbox");
+        // The window passes: the debounced item is delivered.
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_mailbox SET visible_after = ? WHERE run_id = ?",
+          Date.now() - 1,
+          receipt.runId
+        );
+        await instance.tasks.send(receipt.runId, "stop");
+        const done = await waitForState(instance.tasks, receipt.runId, [
+          "completed"
+        ]);
+        if (done.state !== "completed") throw new Error("unreachable");
+        expect(done.result).toBe("draft-3");
+      }
+    );
+  });
+
   it("refuses past the mailbox limit", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
@@ -205,10 +264,17 @@ describe("event waits on a durable function", () => {
       ]);
       if (parked.state !== "waiting") throw new Error("unreachable");
       expect(parked.reason).toBe("event");
-      // A message of another type does not satisfy the wait.
+      // A message of another type does not satisfy the wait: the run is
+      // re-dispatched and parks again on the same event.
       await instance.tasks.send(receipt.runId, "noise");
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      expect((await instance.tasks.get(receipt.runId))?.state).toBe("waiting");
+      const still = await waitForState(instance.tasks, receipt.runId, [
+        "waiting"
+      ]);
+      if (still.state !== "waiting") throw new Error("unreachable");
+      expect(still.reason).toBe("event");
+      expect((await instance.tasks.view(receipt.runId))?.mailbox).toHaveLength(
+        1
+      );
       expect(
         (
           await instance.tasks.sendEvent(receipt.runId, {
@@ -277,9 +343,15 @@ describe("asks", () => {
       expect(
         await instance.tasks.answer(first.askId, Approval, "again")
       ).toEqual({ accepted: false, reason: "duplicate" });
-      // One of two answered: `all` keeps waiting.
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      expect((await instance.tasks.get(receipt.runId))?.state).toBe("waiting");
+      // One of two answered: `all` re-reads and parks again.
+      const still = await waitForState(instance.tasks, receipt.runId, [
+        "waiting"
+      ]);
+      if (still.state !== "waiting") throw new Error("unreachable");
+      expect(still.reason).toBe("ask");
+      expect(
+        await instance.tasks.asks({ runId: receipt.runId, state: "open" })
+      ).toHaveLength(1);
       expect(await instance.tasks.withdrawAsk(second.askId)).toBe(true);
       const done = await waitForState(instance.tasks, receipt.runId, [
         "completed"

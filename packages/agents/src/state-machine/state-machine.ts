@@ -262,6 +262,7 @@ const CHANGE_OF: Record<string, StateMachineChangeType> = {
   "task:accepted": "accepted",
   "task:attempt:started": "claimed",
   "task:checkpoint": "checkpoint",
+  "task:resumed": "checkpoint",
   "task:step:completed": "progress",
   "task:mailbox": "mailbox",
   "task:ask": "ask",
@@ -677,23 +678,46 @@ export class StateMachine<
       get: () => this.#snapshot(runId, definition),
       cancel: (reason?: string, options?: { wait?: boolean }) =>
         this.#cancelScoped(runId, definition, reason, options),
-      send: (payload: StateMachineJson, options?: StateMachineSendOptions) =>
-        this.send(runId, payload, options),
-      sendEvent: (event: {
+      // Every verb is scoped: a run of another definition reads as absent.
+      send: async (
+        payload: StateMachineJson,
+        options?: StateMachineSendOptions
+      ) =>
+        this.#owns(runId, definition)
+          ? this.send(runId, payload, options)
+          : {
+              accepted: false,
+              key: options?.requestId ?? "",
+              reason: "unknown" as const
+            },
+      sendEvent: async (event: {
         type: string;
         payload: StateMachineJson;
         requestId?: string;
-      }) => this.sendEvent(runId, event),
-      answer: <Payload, Answer>(
+      }) =>
+        this.#owns(runId, definition)
+          ? this.sendEvent(runId, event)
+          : {
+              accepted: false,
+              key: event.requestId ?? "",
+              reason: "unknown" as const
+            },
+      answer: async <Payload, Answer>(
         askId: string,
         kind: AskKind<Payload, Answer>,
         answer: Answer
-      ) => this.answer(askId, kind, answer),
-      withdraw: (key: string) => this.withdraw(runId, key),
-      view: () => this.view(runId),
+      ) =>
+        this.#owns(runId, definition) && askId.startsWith(`${runId}#`)
+          ? this.answer(askId, kind, answer)
+          : { accepted: false, reason: "unknown" as const },
+      withdraw: async (key: string) =>
+        this.#owns(runId, definition) ? this.withdraw(runId, key) : false,
+      view: async () =>
+        this.#owns(runId, definition) ? this.view(runId) : null,
       watch: (listener: (change: StateMachineChange) => void) =>
         this.watch(runId, listener),
-      terminate: (reason?: string) => this.terminate(runId, reason)
+      terminate: async (reason?: string) =>
+        this.#owns(runId, definition) ? this.terminate(runId, reason) : false
     };
     // SAFETY: every member of `StateMachineRunHandle` is typed against the
     // definition, which is a type parameter here, so the payload and output
@@ -770,7 +794,12 @@ export class StateMachine<
         );
         break;
       case "debounce": {
-        visibleAfter = now + Math.max(0, options?.debounceMs ?? 0);
+        if (options?.requestId === undefined) {
+          throw new Error(
+            'send({ policy: "debounce" }) needs a requestId: the key is what a later send re-hides'
+          );
+        }
+        visibleAfter = now + Math.max(0, options.debounceMs ?? 0);
         // The same key keeps its place: an upsert re-hides it without
         // moving its seq, so a debounced item is delivered in first-send
         // order.
@@ -923,6 +952,21 @@ export class StateMachine<
   }): Promise<StateMachineAskRecord[]> {
     await this.lifecycle.ready();
     return this.#store.queryAsks(options ?? {});
+  }
+
+  /** True when `runId` exists and belongs to `definition`. */
+  #owns(runId: string, definition: string): boolean {
+    return this.#store.getRun(runId)?.definition === definition;
+  }
+
+  #deleteMailbox(runId: string, keys: readonly string[]): number {
+    if (keys.length === 0) return 0;
+    const placeholders = keys.map(() => "?").join(", ");
+    return this.#store.write(
+      `DELETE FROM cf_agents_task_mailbox
+       WHERE run_id = ? AND key IN (${placeholders})`,
+      [runId, ...keys]
+    );
   }
 
   /** One conditional write on `open`: the loser of a race reads false. */
@@ -1559,15 +1603,22 @@ export class StateMachine<
           "consecutive Durable Object memory-limit resets."
       );
       error.name = "TaskMemoryLimitSealed";
+      // A seal settles the run plainly: a non-retained run is released so
+      // its idempotency key is free for the recovery that follows.
       await this.#failWithoutAttempt(row, error);
       return;
     }
     if (context.nextTime === undefined) return;
     const now = Date.now();
+    // An event-driven park keeps its NULL wake: flooring it would read as
+    // a `within` deadline that passed.
     this.#store.write(
       `UPDATE cf_agents_task_runs
        SET generation = NULL,
            next_at = CASE
+             WHEN state = 'waiting'
+                  AND wait_reason IN ('mailbox', 'event', 'ask', 'child', 'paused')
+               THEN next_at
              WHEN next_at IS NULL OR next_at < ? THEN ?
              ELSE next_at
            END,
@@ -2096,7 +2147,13 @@ export class StateMachine<
       WHERE run_id = ${runId}
     `;
     this.#emit("task:resumed", { runId, definition: row.definition });
-    await this.#syncWake(runId);
+    // A run that parked on an event-driven wait while paused holds no wake
+    // and refused every send's: dispatch it now so it re-reads its mailbox.
+    const eventDriven =
+      row.state === "waiting" &&
+      row.wait_reason !== null &&
+      EVENT_DRIVEN_PARKS.has(row.wait_reason);
+    await (eventDriven ? this.#syncWake(runId, now) : this.#syncWake(runId));
     return true;
   }
 
@@ -2391,13 +2448,21 @@ export class StateMachine<
 
     // An event-driven park woken by its own `within`: the first matching
     // wait in the re-dispatched handler returns `timedOut` (§5.8).
-    const expiredWait =
+    const parkedEventDriven =
       current.state === "waiting" &&
       current.wait_reason !== null &&
-      EVENT_DRIVEN_PARKS.has(current.wait_reason) &&
-      current.next_at !== null &&
-      current.next_at <= now
+      EVENT_DRIVEN_PARKS.has(current.wait_reason);
+    const expiredWait =
+      parkedEventDriven && current.next_at !== null && current.next_at <= now
         ? current.wait_reason
+        : null;
+    // Woken early with the `within` still ahead: the wait keeps its deadline.
+    const carriedWait =
+      parkedEventDriven &&
+      current.wait_reason !== null &&
+      current.next_at !== null &&
+      current.next_at > now
+        ? { reason: current.wait_reason, deadline: current.next_at }
         : null;
 
     if (interruption) {
@@ -2459,7 +2524,8 @@ export class StateMachine<
       interrupted,
       now,
       null,
-      expiredWait
+      expiredWait,
+      carriedWait
     );
     await this.#track(runId, generation, controller, promise);
     await this.#afterAttempt(runId, generation);
@@ -2750,6 +2816,18 @@ export class StateMachine<
       claimed.abort_mark
     );
     await this.#track(runId, generation, controller, promise);
+    // A mark still standing after onCancel ran — a newer mark landed while
+    // it ran, or its own write was fenced — is applied by the next wake,
+    // never by re-entering here: the transition is non-reentrant (§6.2).
+    const after = this.#store.getRun(runId);
+    if (
+      after &&
+      !TERMINAL_STATES.has(after.state) &&
+      after.generation === generation &&
+      after.abort_mark !== null
+    ) {
+      await this.#syncWake(runId, Date.now());
+    }
   }
 
   /**
@@ -2770,7 +2848,11 @@ export class StateMachine<
     interrupted: { name: string; attempt: number } | null,
     claimedAtMs: number,
     cancelling: StateMachineAbortMark | null,
-    expiredWait: StateMachineWaitReason | null = null
+    expiredWait: StateMachineWaitReason | null = null,
+    carriedWait: {
+      reason: StateMachineWaitReason;
+      deadline: number;
+    } | null = null
   ): Promise<void> {
     const runId = row.run_id;
     const compiled = isCompiledCheckpoint(machine.initial);
@@ -2866,11 +2948,13 @@ export class StateMachine<
           createdAt: row.created_at,
           progress,
           cancelling: mark,
-          expiredWait
+          expiredWait,
+          carriedWait
         }
       });
       interruptedStep = null;
       expiredWait = null;
+      carriedWait = null;
       if (!compiled) {
         this.#emit("task:transition:started", {
           runId,
@@ -2907,7 +2991,8 @@ export class StateMachine<
           generation,
           thrown,
           mark,
-          declaresOnCancel(machine)
+          declaresOnCancel(machine),
+          ctx.takeConsumed()
         );
         return;
       }
@@ -2920,7 +3005,13 @@ export class StateMachine<
             ? (terminal.reason ?? "aborted")
             : "failed"
         );
-        await this.#settleTerminal(row, generation, terminal, mark);
+        await this.#settleTerminal(
+          row,
+          generation,
+          terminal,
+          mark,
+          ctx.takeConsumed()
+        );
         return;
       }
       if (compiled) {
@@ -2965,11 +3056,12 @@ export class StateMachine<
            SET checkpoint = ?, checkpoint_turn = ?, transitions = 0, stall = 0,
                progress = ?, abort_mark = NULL, abort_reason = NULL,
                cancel_requested = 0, cancel_reason = NULL, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'running'
-             AND abort_mark IS NOT NULL`,
-          [nextJson, turn + 1, progress + delta, now]
+           WHERE abort_mark = ? AND state = 'running'
+             AND run_id = ? AND generation = ?`,
+          [nextJson, turn + 1, progress + delta, now, mark]
         );
         if (!resumed) return;
+        engine.deleteMailbox(ctx.takeConsumed());
         engine.retireJournal(turn);
         turn += 1;
         checkpointJson = nextJson;
@@ -3010,6 +3102,7 @@ export class StateMachine<
         // rolls the settle back and leaves the stream live for whoever now
         // owns the run.
         let committed = false;
+        const consume = ctx.takeConsumed();
         const commit = () => {
           committed = engine.commitCheckpoint({
             checkpoint: nextJson,
@@ -3017,7 +3110,8 @@ export class StateMachine<
             retireTurn: turn,
             transitions,
             stall: 0,
-            progress: progress + delta
+            progress: progress + delta,
+            consume
           });
           if (!committed) throw new AttemptSupersededError(runId);
         };
@@ -3054,7 +3148,8 @@ export class StateMachine<
           retireTurn: null,
           transitions,
           stall: 0,
-          progress: progress + delta
+          progress: progress + delta,
+          consume: ctx.takeConsumed()
         });
         if (!committed) return;
         stall = 0;
@@ -3076,7 +3171,7 @@ export class StateMachine<
           generation,
           "retry",
           now + STALL_BACKOFF_MS * stall,
-          { stall }
+          { stall, consume: ctx.takeConsumed() }
         );
         return;
       }
@@ -3085,6 +3180,8 @@ export class StateMachine<
       // by the fence on the next write, and by #afterAttempt after it.
       const current = this.#store.getRun(runId);
       if (!current || current.generation !== generation) return;
+      // A mark that landed ends the loop here; #afterAttempt applies it.
+      if (current.abort_mark !== null) return;
       if (current.paused === 1) {
         await this.#parkRun(row, generation, "paused", null, {});
         return;
@@ -3120,10 +3217,14 @@ export class StateMachine<
     row: TaskRunRow,
     generation: string,
     terminal: TaskTerminalSignal,
-    cancelling: StateMachineAbortMark | null
+    cancelling: StateMachineAbortMark | null,
+    consume: readonly string[] = []
   ): Promise<void> {
     const runId = row.run_id;
     const mark: MarkPredicate = cancelling === null ? "null" : "set";
+    // A terminal makes the transition's consumption durable; a retained
+    // run's mailbox keeps only what it never took.
+    if (consume.length > 0) this.#deleteMailbox(runId, consume);
     switch (terminal.kind) {
       case "complete": {
         const resultJson = serializeTaskValue(
@@ -3203,9 +3304,12 @@ export class StateMachine<
     generation: string,
     reason: StateMachineWaitReason,
     wakeAt: number | null,
-    columns: { stall?: number }
+    columns: { stall?: number; consume?: readonly string[] }
   ): Promise<void> {
     const now = Date.now();
+    const consume = columns.consume ?? [];
+    // The park write and the consumed items land in one synchronous block:
+    // Durable Object storage persists both or neither.
     const parked = this.#store.fencedWrite(
       row.run_id,
       generation,
@@ -3217,6 +3321,7 @@ export class StateMachine<
          AND abort_mark IS NULL`,
       [reason, wakeAt, columns.stall ?? null, now]
     );
+    if (parked && consume.length > 0) this.#deleteMailbox(row.run_id, consume);
     if (!parked) return;
     this.#emit(reason === "paused" ? "task:paused" : "task:waiting", {
       runId: row.run_id,
@@ -3233,7 +3338,8 @@ export class StateMachine<
     generation: string,
     thrown: unknown,
     cancelling: StateMachineAbortMark | null,
-    deferToProtocol: boolean
+    deferToProtocol: boolean,
+    consume: readonly string[] = []
   ): Promise<void> {
     const runId = row.run_id;
 
@@ -3259,7 +3365,9 @@ export class StateMachine<
     if (isTaskSuspension(thrown)) {
       // Rule 5, fenced on the mark: a park that races a mark is refused,
       // and #afterAttempt hands the run to the protocol instead.
-      await this.#parkRun(row, generation, thrown.reason, thrown.wakeAt, {});
+      await this.#parkRun(row, generation, thrown.reason, thrown.wakeAt, {
+        consume
+      });
       return;
     }
 
@@ -3529,6 +3637,13 @@ export class StateMachine<
     row: TaskRunRow | undefined
   ): Promise<void> {
     if (row !== undefined) await this.#notifyParent(row);
+    // Nobody can answer a settled run's questions: mark them withdrawn, and
+    // keep them for the UI (§8.3).
+    this.#store.write(
+      `UPDATE cf_agents_task_asks SET state = 'withdrawn', answered_at = ?
+       WHERE run_id = ? AND state = 'open'`,
+      [Date.now(), runId]
+    );
     // `faulted` and `orphaned` override `retain: false` (§6.6): never
     // silently delete what `reopen()` needs.
     if (

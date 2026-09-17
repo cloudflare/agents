@@ -98,8 +98,9 @@ export class ReportAgent extends Agent<Env> {
 }
 ```
 
-A machine declared on `taskDefinitions` (type it `satisfies TaskDefinitions`
-instead) reaches the engine the same way. Task wakes share the Agent's
+`taskDefinitions` is typed `TaskDefinitions`, so a machine declared on it
+(type the map `satisfies TaskDefinitions` when it mixes both forms) reaches
+the engine the same way. Task wakes share the Agent's
 physical alarm with schedules, keep-alive, and the rest of the Agent's
 durable work through the Lifecycle job queue. Internally, Agent's own chat
 frameworks (Think, AIChatAgent, and Think's messenger replies) run their
@@ -322,8 +323,8 @@ export const order = {
       return { ...state, phase: "approving", ask: { id: ask?.id ?? "" } };
     },
     approving: async (state, ctx) => {
-      const [approved] = await ctx.answers([state.ask], { within: "2 days" });
-      if (approved === ctx.timedOut || approved !== true) {
+      const answers = await ctx.answers([state.ask], { within: "2 days" });
+      if (answers === ctx.timedOut || answers[0] !== true) {
         return ctx.fail(new Error("not approved"));
       }
       return { phase: "charged", charge: await charge(state) };

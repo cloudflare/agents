@@ -78,6 +78,16 @@ export type ReplayRunFacts = {
    * parking again. Null for every other wake.
    */
   readonly expiredWait: StateMachineWaitReason | null;
+  /**
+   * The event-driven wait this dispatch woke from early, with its `within`
+   * still ahead: the first matching wait keeps that deadline instead of
+   * re-arming a fresh one, so a trickle of unrelated sends cannot postpone
+   * it forever.
+   */
+  readonly carriedWait: {
+    reason: StateMachineWaitReason;
+    deadline: number;
+  } | null;
 };
 
 const NO_FACTS: ReplayRunFacts = {
@@ -89,7 +99,8 @@ const NO_FACTS: ReplayRunFacts = {
   createdAt: 0,
   progress: 0,
   cancelling: null,
-  expiredWait: null
+  expiredWait: null,
+  carriedWait: null
 };
 
 /**
@@ -283,7 +294,12 @@ export interface TaskStepEngine {
     transitions: number;
     stall: number;
     progress: number;
+    /** Mailbox keys consumed by this transition; deleted with the commit. */
+    consume: readonly string[];
   }): boolean;
+
+  /** Delete mailbox items by key, unfenced: for the capability's own boundary writes. */
+  deleteMailbox(keys: readonly string[]): number;
 
   /** Credit durable work the chunk log cannot see. Writes nothing itself. */
   creditProgress(units: number): void;
@@ -443,6 +459,14 @@ export class ReplayStep implements StateMachineContext<
   readonly timedOut: StateMachineTimedOut = TIMED_OUT;
   readonly #progressBase: number;
   #expiredWait: StateMachineWaitReason | null;
+  #carriedWait: { reason: StateMachineWaitReason; deadline: number } | null;
+  /**
+   * Mailbox keys this transition has taken. They are deleted with the next
+   * durable boundary — commit, park or settle — inside its fence, so a
+   * transition the abort mark or a newer generation cuts off consumes
+   * nothing; until then they are hidden from every read here.
+   */
+  readonly #consumed = new Set<string>();
   /** Engine-owned streams this invocation opened, by name. */
   readonly #streams = new Map<
     string,
@@ -477,6 +501,25 @@ export class ReplayStep implements StateMachineContext<
     this.cancelling = facts.cancelling;
     this.#progressBase = facts.progress;
     this.#expiredWait = facts.expiredWait;
+    this.#carriedWait = facts.carriedWait;
+  }
+
+  /** @internal The mailbox keys taken this transition, handed to the boundary. */
+  takeConsumed(): string[] {
+    const keys = [...this.#consumed];
+    this.#consumed.clear();
+    return keys;
+  }
+
+  /** Mailbox rows not already taken this transition. */
+  #unconsumed(rows: TaskMailboxRow[]): TaskMailboxRow[] {
+    return rows.filter((row) => !this.#consumed.has(row.key));
+  }
+
+  /** Take rows: hidden from later reads here, deleted at the boundary. */
+  #take(rows: readonly TaskMailboxRow[]): void {
+    for (const row of rows) this.#consumed.add(row.key);
+    this.#engine.creditProgress(rows.length);
   }
 
   /** Consume the woken-from-expiry flag for one wait kind, once. */
@@ -486,10 +529,19 @@ export class ReplayStep implements StateMachineContext<
     return true;
   }
 
-  /** The absolute deadline a `within` names, or null for none. */
+  /**
+   * The absolute deadline a `within` names, or null for none. A wait this
+   * dispatch was woken into early keeps the deadline it parked with.
+   */
   #withinDeadline(
-    within: number | StateMachineDurationString | undefined
+    within: number | StateMachineDurationString | undefined,
+    reason: StateMachineWaitReason
   ): number | null {
+    const carried = this.#carriedWait;
+    if (carried !== null && carried.reason === reason) {
+      this.#carriedWait = null;
+      return carried.deadline;
+    }
     if (within === undefined) return null;
     return Date.now() + parseTaskDuration(within, "within");
   }
@@ -548,14 +600,16 @@ export class ReplayStep implements StateMachineContext<
     }
   ): Promise<StateMachineMailboxItem<unknown> | StateMachineTimedOut> {
     const { within, ...rest } = filter ?? {};
-    const rows = this.#engine.peekMailbox({ ...rest, limit: 1 }, Date.now());
-    const row = rows[0];
+    const row = this.#unconsumed(this.#engine.peekMailbox(rest, Date.now()))[0];
     if (row !== undefined) {
-      this.#engine.consumeMailbox([row.key]);
+      this.#take([row]);
       return mailboxItem(row);
     }
     if (this.#tookExpiry("mailbox")) return TIMED_OUT;
-    throw new TaskSuspension(this.#withinDeadline(within), "mailbox");
+    throw new TaskSuspension(
+      this.#withinDeadline(within, "mailbox"),
+      "mailbox"
+    );
   }
 
   async receiveAll(
@@ -564,21 +618,23 @@ export class ReplayStep implements StateMachineContext<
     }
   ): Promise<StateMachineMailboxItem<unknown>[] | StateMachineTimedOut> {
     const { within, ...rest } = filter ?? {};
-    const rows = this.#engine.peekMailbox(rest, Date.now());
+    const rows = this.#unconsumed(this.#engine.peekMailbox(rest, Date.now()));
     if (rows.length > 0) {
-      this.#engine.consumeMailbox(rows.map((row) => row.key));
+      this.#take(rows);
       return rows.map(mailboxItem);
     }
     if (this.#tookExpiry("mailbox")) return TIMED_OUT;
-    throw new TaskSuspension(this.#withinDeadline(within), "mailbox");
+    throw new TaskSuspension(
+      this.#withinDeadline(within, "mailbox"),
+      "mailbox"
+    );
   }
 
   peek(
     filter?: StateMachineMailboxFilter
   ): StateMachineMailboxItem<unknown> | undefined {
-    const row = this.#engine.peekMailbox(
-      { ...filter, limit: 1 },
-      Date.now()
+    const row = this.#unconsumed(
+      this.#engine.peekMailbox(filter, Date.now())
     )[0];
     return row === undefined ? undefined : mailboxItem(row);
   }
@@ -586,11 +642,18 @@ export class ReplayStep implements StateMachineContext<
   peekAll(
     filter?: StateMachineMailboxFilter
   ): StateMachineMailboxItem<unknown>[] {
-    return this.#engine.peekMailbox(filter, Date.now()).map(mailboxItem);
+    return this.#unconsumed(this.#engine.peekMailbox(filter, Date.now())).map(
+      mailboxItem
+    );
   }
 
   withdraw(key: string): boolean {
-    return this.#engine.consumeMailbox([key]) > 0;
+    const row = this.#unconsumed(
+      this.#engine.peekMailbox({ key }, Date.now())
+    )[0];
+    if (row === undefined) return false;
+    this.#take([row]);
+    return true;
   }
 
   // ── asks ─────────────────────────────────────────────────────────────────
@@ -606,8 +669,11 @@ export class ReplayStep implements StateMachineContext<
         : Date.now() + parseTaskDuration(options.expiresIn, "expiresIn");
     const metadata =
       options?.metadata === undefined ? null : JSON.stringify(options.metadata);
+    // Ids sort in batch order under `(created_at, ask_id)`: a time prefix,
+    // the index within the batch, then entropy.
+    const stamp = Date.now().toString(36).padStart(9, "0");
     return payloads.map((payload, index) => {
-      const askId = `${this.id}#${nanoid()}`;
+      const askId = `${this.id}#${stamp}${String(index).padStart(3, "0")}${nanoid(10)}`;
       this.#engine.insertAsk({
         askId,
         turn: this.turn,
@@ -657,7 +723,7 @@ export class ReplayStep implements StateMachineContext<
     if (done) return ids.map((id) => answerOf<Answer>(byId.get(id)));
     // A wake the expiry sweep explains is not the `within` deadline.
     if (!lapsed && this.#tookExpiry("ask")) return TIMED_OUT;
-    const within = this.#withinDeadline(options?.within);
+    const within = this.#withinDeadline(options?.within, "ask");
     const expiries = rows
       .filter((row) => row.state === "open" && row.expires_at !== null)
       .map((row) => row.expires_at ?? Number.POSITIVE_INFINITY);
@@ -702,18 +768,21 @@ export class ReplayStep implements StateMachineContext<
       typeof child === "string" ? child : child.runId
     );
     const wanted = new Map(ids.map((id) => [childMailboxKey(id), id]));
-    const rows = this.#engine
-      .peekMailbox({ kind: CHILD_MAILBOX_KIND }, Date.now())
-      .filter((row) => wanted.has(row.key));
+    const rows = this.#unconsumed(
+      this.#engine.peekMailbox({ kind: CHILD_MAILBOX_KIND }, Date.now())
+    ).filter((row) => wanted.has(row.key));
     if (rows.length >= wanted.size) {
       const byKey = new Map(rows.map((row) => [row.key, row]));
-      this.#engine.consumeMailbox([...wanted.keys()]);
+      this.#take(rows);
       return ids.map((id) =>
         childResult<Output>(id, byKey.get(childMailboxKey(id)))
       );
     }
     if (this.#tookExpiry("child")) return TIMED_OUT;
-    throw new TaskSuspension(this.#withinDeadline(options?.within), "child");
+    throw new TaskSuspension(
+      this.#withinDeadline(options?.within, "child"),
+      "child"
+    );
   }
 
   // ── streams ──────────────────────────────────────────────────────────────
@@ -751,7 +820,7 @@ export class ReplayStep implements StateMachineContext<
       error: (reason, settle) => inner.error(reason, settle),
       onCommit: (fn) => inner.onCommit(fn)
     };
-    this.#streams.set(name, { writer: inner, openedCursor: inner.cursor });
+    this.#streams.set(name, { writer, openedCursor: inner.cursor });
     return writer;
   }
 

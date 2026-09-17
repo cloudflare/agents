@@ -808,6 +808,7 @@ describe("the port statements the machine engine will drive", () => {
         // Journal completions and first memo writes credit progress too, so
         // the explicit credit is measured against what the port already saw.
         const credited = engine.progressCredited();
+        expect(credited).toBeGreaterThan(0);
         engine.creditProgress(2);
         expect(engine.progressCredited()).toBe(credited + 2);
 
@@ -826,7 +827,8 @@ describe("the port statements the machine engine will drive", () => {
             retireTurn: 0,
             transitions: 1,
             stall: 0,
-            progress: 2
+            progress: 2,
+            consume: []
           })
         ).toBe(true);
         const committed = (
@@ -892,7 +894,8 @@ describe("the port statements the machine engine will drive", () => {
             retireTurn: 0,
             transitions: 1,
             stall: 0,
-            progress: 0
+            progress: 0,
+            consume: []
           })
         ).toBe(false);
         expect(() => stale.retireJournal(0)).toThrow(AttemptSupersededError);
@@ -933,7 +936,8 @@ describe("the port statements the machine engine will drive", () => {
             retireTurn: null,
             transitions: 1,
             stall: 0,
-            progress: 0
+            progress: 0,
+            consume: []
           })
         ).toBe(false);
       }
@@ -970,7 +974,8 @@ describe("the port statements the machine engine will drive", () => {
             retireTurn: RUN_SCOPED_TURN,
             transitions: 1,
             stall: 0,
-            progress: 0
+            progress: 0,
+            consume: []
           })
         ).toBe(true);
         expect(engine.readMemo("seed")?.result).toBe('"abc"');

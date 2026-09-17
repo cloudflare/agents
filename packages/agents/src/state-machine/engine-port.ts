@@ -89,6 +89,15 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
   // Work the chunk log cannot see, credited in memory and stamped into the
   // next write that was happening anyway: nothing is written per credit.
   let creditedProgress = 0;
+  const deleteMailbox = (keys: readonly string[]): number => {
+    if (keys.length === 0) return 0;
+    const placeholders = keys.map(() => "?").join(", ");
+    return deps.store.write(
+      `DELETE FROM cf_agents_task_mailbox
+       WHERE run_id = ? AND key IN (${placeholders})`,
+      [runId, ...keys]
+    );
+  };
   const assertCurrent = (): void => {
     const row = deps.store.getRun(runId);
     if (!row || row.generation !== generation) {
@@ -342,6 +351,13 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     },
     listChildren: () => deps.store.listChildren(runId),
     commitCheckpoint: (commit) => {
+      // The fenced checkpoint write, the retired turn, and the mailbox items
+      // this transition consumed land in one synchronous block, which
+      // Durable Object storage persists together — and inside a stream's
+      // settle transaction when the cutover calls this from its commit hook,
+      // so no transaction is opened here. A commit the mark or the
+      // generation refuses leaves every item in the mailbox for the
+      // invocation that now owns the run (§6.8).
       const now = Date.now();
       const written = deps.store.fencedWrite(
         runId,
@@ -361,17 +377,16 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
         ]
       );
       if (!written) return false;
-      // Retirement is turn-scoped by construction: the run scope holds the
-      // memos a later turn still reads, so it is excluded here rather than
-      // trusted to never be passed.
       if (commit.retireTurn !== null && commit.retireTurn !== RUN_SCOPED_TURN) {
         deps.store.sql`
             DELETE FROM cf_agents_task_journal
             WHERE run_id = ${runId} AND turn = ${commit.retireTurn}
           `;
       }
+      deleteMailbox(commit.consume);
       return true;
     },
+    deleteMailbox: (keys) => deleteMailbox(keys),
     creditProgress: (units) => {
       creditedProgress += units;
     },
