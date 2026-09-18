@@ -116,7 +116,13 @@ export type WebChatIngressPayload =
 export type WebChannelOptions = {
   /** @deprecated Configure `ChannelHost.resolveMessages` instead. */
   resolveMessages?: ChannelMessageResolver;
-  /** Resolve the same stable identities for upgrades and `/get-messages`. */
+  /**
+   * Resolve the same stable identities for upgrades and `/get-messages`.
+   *
+   * Required for objects serving more than one conversation or participant:
+   * without it every connection to this object shares one conversation and one
+   * participant, because request-supplied identities are not authenticated.
+   */
   resolveIdentity?: (
     request: Request
   ) => WebConnectionIdentity | Promise<WebConnectionIdentity>;
@@ -153,6 +159,11 @@ type ClientToolCall = {
   toolName: string;
 };
 
+type PendingApproval = {
+  connectionId: string;
+  participantId: string;
+};
+
 type PendingResponseReplay = {
   streamId: string;
   status: StreamStatus;
@@ -164,6 +175,14 @@ type WebResponseMetadata = {
   clientToolNames: ReadonlySet<string>;
   continuation: boolean;
 };
+
+const DEFAULT_IDENTITY: WebConnectionIdentity = {
+  conversationId: "default-conversation",
+  participantId: "default-conversation"
+};
+
+const RESPONSE_REPLAY_PAGE_SIZE = 20;
+const RESPONSE_REPLAY_MAX_SCAN = 500;
 
 const CONVERSATION_TAG_PREFIX = "cf-web-conversation:";
 const PARTICIPANT_TAG_PREFIX = "cf-web-participant:";
@@ -262,15 +281,16 @@ function conversationMessageToUIMessage(
     isVisibleToParticipant(chunk, participantId)
   );
   const converter = newUIConverterState();
-  const parts: unknown[] = [];
+  const projection = newMessageProjection();
   for (const chunk of content) {
     for (const output of channelChunkToUIChunks(chunk, converter)) {
-      parts.push(...uiChunkToMessageParts(output));
+      projectUIChunk(output, projection);
     }
   }
   for (const output of finishUIConversion(converter)) {
-    parts.push(...uiChunkToMessageParts(output));
+    projectUIChunk(output, projection);
   }
+  const parts = projection.parts;
   return {
     id: message.id,
     role:
@@ -291,51 +311,160 @@ function projectConversationMessage(
   return projected.parts.length > 0 ? projected : null;
 }
 
-function uiChunkToMessageParts(chunk: UIMessageChunk): unknown[] {
+type MessagePart = Record<string, unknown>;
+
+type MessageProjection = {
+  parts: MessagePart[];
+  /** One evolving UI part per tool call, keyed by its tool-call ID. */
+  toolParts: Map<string, MessagePart>;
+  toolCallIdsByApproval: Map<string, string>;
+};
+
+function newMessageProjection(): MessageProjection {
+  return {
+    parts: [],
+    toolParts: new Map(),
+    toolCallIdsByApproval: new Map()
+  };
+}
+
+/** Reuse the part opened for a tool call, keeping the name from its input. */
+function toolPartFor(
+  projection: MessageProjection,
+  toolCallId: string,
+  toolName?: string
+): MessagePart {
+  const existing = projection.toolParts.get(toolCallId);
+  if (existing) {
+    if (toolName !== undefined && existing.type === "dynamic-tool") {
+      existing.toolName = toolName;
+    }
+    return existing;
+  }
+  const part: MessagePart =
+    toolName === undefined
+      ? { type: "dynamic-tool", toolName: "tool", toolCallId }
+      : { type: `tool-${toolName}`, toolCallId };
+  projection.toolParts.set(toolCallId, part);
+  projection.parts.push(part);
+  return part;
+}
+
+function projectUIChunk(
+  chunk: UIMessageChunk,
+  projection: MessageProjection
+): void {
   switch (chunk.type) {
     case "text-delta":
-      return [{ type: "text", text: chunk.delta }];
+      projection.parts.push({ type: "text", text: chunk.delta });
+      return;
     case "reasoning-delta":
-      return [{ type: "reasoning", text: chunk.delta }];
-    case "tool-input-available":
-      return [
-        {
-          type: `tool-${chunk.toolName}`,
-          toolCallId: chunk.toolCallId,
-          state: "input-available",
-          input: chunk.input,
-          ...(chunk.providerExecuted !== undefined && {
-            providerExecuted: chunk.providerExecuted
-          })
-        }
-      ];
-    case "tool-output-available":
-      return [
-        {
-          type: "dynamic-tool",
-          toolCallId: chunk.toolCallId,
-          toolName: "tool",
-          state: "output-available",
-          output: chunk.output,
-          ...(chunk.providerExecuted !== undefined && {
-            providerExecuted: chunk.providerExecuted
-          })
-        }
-      ];
+      projection.parts.push({ type: "reasoning", text: chunk.delta });
+      return;
+    case "tool-input-start": {
+      const part = toolPartFor(projection, chunk.toolCallId, chunk.toolName);
+      part.state = "input-streaming";
+      if (chunk.providerExecuted !== undefined) {
+        part.providerExecuted = chunk.providerExecuted;
+      }
+      return;
+    }
+    case "tool-input-available": {
+      const part = toolPartFor(projection, chunk.toolCallId, chunk.toolName);
+      part.state = "input-available";
+      part.input = chunk.input;
+      if (chunk.providerExecuted !== undefined) {
+        part.providerExecuted = chunk.providerExecuted;
+      }
+      return;
+    }
+    case "tool-input-error": {
+      const part = toolPartFor(projection, chunk.toolCallId, chunk.toolName);
+      part.state = "output-error";
+      part.input = chunk.input;
+      part.errorText = chunk.errorText;
+      if (chunk.providerExecuted !== undefined) {
+        part.providerExecuted = chunk.providerExecuted;
+      }
+      return;
+    }
+    case "tool-output-available": {
+      const part = toolPartFor(projection, chunk.toolCallId);
+      part.state = "output-available";
+      part.output = chunk.output;
+      delete part.errorText;
+      if (chunk.providerExecuted !== undefined) {
+        part.providerExecuted = chunk.providerExecuted;
+      }
+      return;
+    }
+    case "tool-output-error": {
+      const part = toolPartFor(projection, chunk.toolCallId);
+      part.state = "output-error";
+      part.errorText = chunk.errorText;
+      delete part.output;
+      if (chunk.providerExecuted !== undefined) {
+        part.providerExecuted = chunk.providerExecuted;
+      }
+      return;
+    }
+    case "tool-output-denied": {
+      const part = toolPartFor(projection, chunk.toolCallId);
+      part.state = "output-denied";
+      const approvalId = approvalIdOf(projection, chunk.toolCallId);
+      if (approvalId !== undefined) {
+        part.approval = { id: approvalId, approved: false };
+      }
+      delete part.output;
+      return;
+    }
+    case "tool-approval-request": {
+      projection.toolCallIdsByApproval.set(chunk.approvalId, chunk.toolCallId);
+      const part = toolPartFor(projection, chunk.toolCallId);
+      part.state = "approval-requested";
+      part.approval = { id: chunk.approvalId };
+      return;
+    }
+    case "tool-approval-response": {
+      const toolCallId = projection.toolCallIdsByApproval.get(chunk.approvalId);
+      if (toolCallId === undefined) return;
+      const part = toolPartFor(projection, toolCallId);
+      part.state = "approval-responded";
+      part.approval = {
+        id: chunk.approvalId,
+        approved: chunk.approved,
+        ...(chunk.reason !== undefined && { reason: chunk.reason })
+      };
+      return;
+    }
     case "source-url":
-      return [
-        {
-          type: "source-url",
-          sourceId: chunk.sourceId,
-          url: chunk.url,
-          ...(chunk.title !== undefined && { title: chunk.title })
-        }
-      ];
+      projection.parts.push({
+        type: "source-url",
+        sourceId: chunk.sourceId,
+        url: chunk.url,
+        ...(chunk.title !== undefined && { title: chunk.title })
+      });
+      return;
     case "file":
-      return [{ type: "file", url: chunk.url, mediaType: chunk.mediaType }];
+      projection.parts.push({
+        type: "file",
+        url: chunk.url,
+        mediaType: chunk.mediaType
+      });
+      return;
     default:
-      return [];
+      return;
   }
+}
+
+function approvalIdOf(
+  projection: MessageProjection,
+  toolCallId: string
+): string | undefined {
+  for (const [approvalId, candidate] of projection.toolCallIdsByApproval) {
+    if (candidate === toolCallId) return approvalId;
+  }
+  return undefined;
 }
 
 function isVisibleToParticipant(
@@ -390,6 +519,7 @@ class ConfiguredWebChannel
     string,
     PendingToolContinuation
   >();
+  readonly #pendingApprovals = new Map<string, PendingApproval>();
   readonly #clientToolCalls = new Map<string, ClientToolCall>();
   readonly #clientToolNamesByRequest = new Map<string, ReadonlySet<string>>();
   readonly #cancelledOperations = new Set<string>();
@@ -407,18 +537,10 @@ class ConfiguredWebChannel
   constructor(options: WebChannelOptions) {
     this.route = options.route;
     this.#resolveMessages = options.resolveMessages;
-    this.#resolveIdentity = async (request) => {
-      if (options.resolveIdentity) return options.resolveIdentity(request);
-      const url = new URL(request.url);
-      const conversationId =
-        url.searchParams.get("conversationId") ??
-        url.searchParams.get("name") ??
-        "default-conversation";
-      return {
-        conversationId,
-        participantId: url.searchParams.get("participantId") ?? conversationId
-      };
-    };
+    const resolveIdentity = options.resolveIdentity;
+    this.#resolveIdentity = resolveIdentity
+      ? async (request) => resolveIdentity(request)
+      : async () => DEFAULT_IDENTITY;
     this.ingress = {
       receive: async (request) => {
         const response = await this.#initialMessagesResponse(request);
@@ -582,6 +704,11 @@ class ConfiguredWebChannel
         sent = true;
       }
       owner.send(responseFrame(address.requestId, "", { done: true }));
+      this.#pendingApprovals.set(interactionId, {
+        connectionId: owner.id,
+        participantId:
+          address.participantId ?? this.#identityOf(owner).participantId
+      });
       return { status: "delivered", reference };
     } catch (error) {
       return sent
@@ -644,10 +771,7 @@ class ConfiguredWebChannel
       ...this.webSockets.getConnections(conversationTag(address.conversationId))
     ];
     const durablyRecorded = Boolean(this.#responseStreams && options.response);
-    if (
-      (!owner || conversationConnections().length === 0) &&
-      !durablyRecorded
-    ) {
+    if (conversationConnections().length === 0 && !durablyRecorded) {
       await chunks.cancel().catch(() => {});
       return {
         status: "failed",
@@ -833,7 +957,19 @@ class ConfiguredWebChannel
               for (const connection of conversationConnections()) {
                 if (!this.#replayingConnections.has(connection.id)) {
                   connection.send(frame);
+                  sent = true;
                 }
+              }
+              if (!sent) {
+                return {
+                  status: "uncertain",
+                  reference,
+                  error: {
+                    code: "WEB_CHAT_RECORDED_WITHOUT_READER",
+                    message:
+                      "The response was recorded for replay without reaching a browser connection"
+                  }
+                };
               }
               return { status: "delivered", reference };
             } catch (error) {
@@ -925,6 +1061,40 @@ class ConfiguredWebChannel
       );
       return projected ? [projected] : [];
     });
+  }
+
+  /** Send every conversation member the history it is allowed to see. */
+  async #broadcastConversationSnapshot(
+    conversationId: string,
+    exceptConnectionId?: string
+  ): Promise<void> {
+    const recipients = [
+      ...this.webSockets.getConnections(conversationTag(conversationId))
+    ].filter(
+      (connection) =>
+        connection.id !== exceptConnectionId &&
+        !this.#replayingConnections.has(connection.id)
+    );
+    if (recipients.length === 0) return;
+    const resolved = this.#resolveMessages
+      ? (await this.#resolveMessages({ conversationId })).messages
+      : [];
+    const messages = this.#mergeAdmitted(conversationId, resolved);
+    for (const connection of recipients) {
+      const participantId = this.#identityOf(connection).participantId;
+      connection.send(
+        JSON.stringify({
+          type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
+          messages: messages.flatMap((message) => {
+            const projected = projectConversationMessage(
+              message,
+              participantId
+            );
+            return projected ? [projected] : [];
+          })
+        })
+      );
+    }
   }
 
   async #hydrateConnection(connection: Connection): Promise<void> {
@@ -1069,45 +1239,7 @@ class ConfiguredWebChannel
         },
         content: [{ type: "text", text: normalized.message.text }]
       };
-      this.#admittedMessages(identity.conversationId).set(
-        admittedMessage.id,
-        admittedMessage
-      );
       this.#dispatchingOperations.add(requestKey);
-      const resolvedMessages = this.#resolveMessages
-        ? (
-            await this.#resolveMessages({
-              conversationId: identity.conversationId
-            })
-          ).messages
-        : [];
-      const canonicalMessages = this.#mergeAdmitted(
-        identity.conversationId,
-        resolvedMessages
-      );
-      const messages = canonicalMessages.flatMap((message) => {
-        const projected = projectConversationMessage(
-          message,
-          identity.participantId
-        );
-        return projected ? [projected] : [];
-      });
-      if (!messages.some((message) => message.id === normalized.message.id)) {
-        messages.push({
-          id: normalized.message.id,
-          role: "user",
-          parts: [{ type: "text", text: normalized.message.text }]
-        });
-      }
-      const messageFrame = JSON.stringify({
-        type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
-        messages
-      });
-      for (const member of this.webSockets.getConnections(
-        conversationTag(identity.conversationId)
-      )) {
-        if (member.id !== connection.id) member.send(messageFrame);
-      }
 
       const raw = {
         type: "chat-request",
@@ -1116,8 +1248,19 @@ class ConfiguredWebChannel
         body: normalized.body
       } satisfies WebChatIngressPayload;
       try {
-        await this.#dispatch({
+        const outcome = await this.#dispatch({
           raw,
+          onRouted: async (routed) => {
+            if (!routed) return;
+            this.#admittedMessages(identity.conversationId).set(
+              admittedMessage.id,
+              admittedMessage
+            );
+            await this.#broadcastConversationSnapshot(
+              identity.conversationId,
+              connection.id
+            );
+          },
           event: {
             type: "message",
             eventId: `web:${connection.id}:request:${requestId}`,
@@ -1142,6 +1285,9 @@ class ConfiguredWebChannel
             message: normalized.message
           }
         });
+        if (outcome === "ignored") {
+          this.#clientToolNamesByRequest.delete(requestKey);
+        }
       } finally {
         this.#dispatchingOperations.delete(requestKey);
         this.#cancelledOperations.delete(requestKey);
@@ -1149,6 +1295,7 @@ class ConfiguredWebChannel
     } catch (error) {
       this.#dispatchingOperations.delete(requestKey);
       this.#cancelledOperations.delete(requestKey);
+      this.#clientToolNamesByRequest.delete(requestKey);
       connection.send(
         responseFrame(requestId, errorMessage(error), {
           done: true,
@@ -1290,6 +1437,9 @@ class ConfiguredWebChannel
     }
 
     const identity = this.#identityOf(connection);
+    const pending = this.#pendingApprovals.get(event.toolCallId);
+    if (!pending || pending.participantId !== identity.participantId) return;
+    this.#pendingApprovals.delete(event.toolCallId);
     const raw = {
       type: "approval-response",
       toolCallId: event.toolCallId,
@@ -1315,21 +1465,24 @@ class ConfiguredWebChannel
       return;
     }
 
-    const pending = pendingToolContinuation(connection.id, event.toolCallId);
-    const pendingKey = this.#requestKey(connection.id, pending.requestId);
-    this.#pendingToolContinuations.set(pendingKey, pending);
+    const continuation = pendingToolContinuation(
+      connection.id,
+      event.toolCallId
+    );
+    const pendingKey = this.#requestKey(connection.id, continuation.requestId);
+    this.#pendingToolContinuations.set(pendingKey, continuation);
     try {
       const outcome = await this.#dispatch({
         raw,
         event: {
           ...approval,
-          operationId: pending.requestId,
+          operationId: continuation.requestId,
           replySurface: {
             version: 1,
             address: {
               conversationId: identity.conversationId,
               ownerConnectionId: connection.id,
-              requestId: pending.requestId,
+              requestId: continuation.requestId,
               participantId: identity.participantId,
               continuation: true
             },
@@ -1338,12 +1491,12 @@ class ConfiguredWebChannel
         }
       });
       if (outcome === "ignored") {
-        pending.settle(false);
+        continuation.settle(false);
         this.#pendingToolContinuations.delete(pendingKey);
       }
     } catch (error) {
-      pending.settle(false);
-      if (this.#pendingToolContinuations.get(pendingKey) === pending) {
+      continuation.settle(false);
+      if (this.#pendingToolContinuations.get(pendingKey) === continuation) {
         this.#pendingToolContinuations.delete(pendingKey);
       }
       throw error;
@@ -1368,12 +1521,8 @@ class ConfiguredWebChannel
       return true;
     }
     const identity = this.#identityOf(connection);
-    const statuses = await streams.list({
-      tag: identity.conversationId,
-      limit: 20
-    });
-    const candidates = statuses.filter(
-      (candidate) => this.#webResponseMetadata(candidate) !== null
+    const candidates = await this.#webResponseCandidates(
+      identity.conversationId
     );
     let status = candidates.find(
       (candidate) => candidate.state === "streaming"
@@ -1413,6 +1562,33 @@ class ConfiguredWebChannel
       })
     );
     return true;
+  }
+
+  /**
+   * Page the conversation's streams until this Channel's responses appear.
+   * Streams from other Channels share the conversation tag, so a single page
+   * can hold none of them.
+   */
+  async #webResponseCandidates(
+    conversationId: string
+  ): Promise<StreamStatus[]> {
+    const streams = this.#responseStreams;
+    if (!streams) return [];
+    let limit = RESPONSE_REPLAY_PAGE_SIZE;
+    for (;;) {
+      const statuses = await streams.list({ tag: conversationId, limit });
+      const candidates = statuses.filter(
+        (candidate) => this.#webResponseMetadata(candidate) !== null
+      );
+      if (
+        candidates.length > 0 ||
+        statuses.length < limit ||
+        limit >= RESPONSE_REPLAY_MAX_SCAN
+      ) {
+        return candidates;
+      }
+      limit = Math.min(limit * 4, RESPONSE_REPLAY_MAX_SCAN);
+    }
   }
 
   async #resumeResponseReplay(
@@ -1731,6 +1907,11 @@ class ConfiguredWebChannel
       }
       for (const key of this.#clientToolNamesByRequest.keys()) {
         if (key.startsWith(prefix)) this.#clientToolNamesByRequest.delete(key);
+      }
+      for (const [interactionId, pending] of this.#pendingApprovals) {
+        if (pending.connectionId === connection.id) {
+          this.#pendingApprovals.delete(interactionId);
+        }
       }
     }
   }

@@ -172,6 +172,51 @@ describe("AI SDK UI stream converter", () => {
     });
   });
 
+  it("closes implicit parts before an explicit start of the same kind", async () => {
+    const ui = await collect(
+      toUIMessageStream(
+        new ReadableStream<ChannelChunk>({
+          start(controller) {
+            controller.enqueue({ type: "text", text: "implicit" });
+            controller.enqueue({ type: "text-start", id: "text-1" });
+            controller.enqueue({
+              type: "text",
+              id: "text-1",
+              text: "explicit"
+            });
+            controller.enqueue({ type: "text-end", id: "text-1" });
+            controller.enqueue({ type: "reasoning", text: "implicit" });
+            controller.enqueue({ type: "reasoning-start", id: "reason-1" });
+            controller.enqueue({
+              type: "reasoning",
+              id: "reason-1",
+              text: "explicit"
+            });
+            controller.enqueue({ type: "reasoning-end", id: "reason-1" });
+            controller.close();
+          }
+        })
+      )
+    );
+
+    expect(ui.map((chunk) => chunk.type)).toEqual([
+      "text-start",
+      "text-delta",
+      "text-end",
+      "text-start",
+      "text-delta",
+      "text-end",
+      "reasoning-start",
+      "reasoning-delta",
+      "reasoning-end",
+      "reasoning-start",
+      "reasoning-delta",
+      "reasoning-end"
+    ]);
+    expect(ui[3]).toMatchObject({ type: "text-start", id: "text-1" });
+    expect(ui[9]).toMatchObject({ type: "reasoning-start", id: "reason-1" });
+  });
+
   it("rejects malformed explicit boundaries and deltas", async () => {
     const cases: ChannelChunk[][] = [
       [{ type: "text", id: "missing", text: "bad" }],

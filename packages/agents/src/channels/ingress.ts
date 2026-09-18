@@ -189,6 +189,12 @@ export type ChannelIngressEventInput =
 export type ChannelIngressEnvelope<TRaw = unknown> = {
   event: ChannelIngressEventInput;
   raw: TRaw;
+  /**
+   * Called once the Host resolves routing and before the application handles
+   * the event, so an adapter can commit or discard transient state that only
+   * a routed event may leave behind.
+   */
+  onRouted?: (routed: boolean) => void | Promise<void>;
 };
 
 /** The normalized envelopes and provider acknowledgement produced by ingress. */

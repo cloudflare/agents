@@ -209,6 +209,66 @@ describe("web Channel", () => {
     ]);
   });
 
+  it("does not admit a browser turn that application routing ignored", async () => {
+    const resolveMessages = vi.fn().mockResolvedValue({ messages: [] });
+    const channel = web({ route: () => null });
+    const capability = capabilityOf(channel);
+    const memberSend = vi.fn();
+    const owner = {
+      id: "browser-1",
+      tags: connectionTags("browser-1", "conversation-1", "user-1"),
+      send: vi.fn()
+    };
+    capability.connections.set(owner.id, owner);
+    capability.connections.set("browser-2", {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "conversation-1", "user-2"),
+      send: memberSend
+    });
+    const onMessage = vi.fn();
+    new ChannelHost({
+      channels: { browser: channel },
+      resolveMessages,
+      onMessage
+    });
+
+    await capability.handlers.onMessage!(
+      owner as never,
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: "turn-1",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: "ignored-message",
+                role: "user",
+                parts: [{ type: "text", text: "Never routed" }]
+              }
+            ]
+          })
+        }
+      }) as never
+    );
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(protocolFrames(memberSend)).toEqual([]);
+
+    const laterSend = vi.fn();
+    await capability.handlers.onConnect!(
+      {
+        id: "browser-3",
+        tags: connectionTags("browser-3", "conversation-1", "user-3"),
+        send: laterSend
+      } as never,
+      {} as never
+    );
+    expect(protocolFrames(laterSend)).toEqual([
+      { type: "cf_agent_chat_messages", messages: [] }
+    ]);
+  });
+
   it("upserts an admitted message already present in canonical history", async () => {
     const resolveMessages = vi.fn().mockResolvedValue({
       messages: [
@@ -434,14 +494,24 @@ describe("web Channel", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("uses the same fallback identity for socket and HTTP history", async () => {
+  it("ignores request-supplied identities without resolveIdentity", async () => {
     const resolveMessages = vi.fn().mockResolvedValue({
       messages: [
         {
+          id: "shared-assistant",
+          author: { type: "agent" },
+          content: [{ type: "text", text: "Shared answer" }]
+        },
+        {
           id: "private-assistant",
           author: { type: "agent" },
-          scope: { type: "participant", participantId: "user-1" },
-          content: [{ type: "text", text: "Private answer" }]
+          content: [
+            {
+              type: "text",
+              text: "Private answer",
+              audience: { type: "participant", participantId: "user-1" }
+            }
+          ]
         }
       ]
     });
@@ -454,7 +524,7 @@ describe("web Channel", () => {
     });
     const response = await host.handleRequest(
       new Request(
-        "https://example.com/chat/get-messages?name=room-1&participantId=user-1"
+        "https://example.com/chat/get-messages?name=room-1&conversationId=room-1&participantId=user-1"
       )
     );
     const tags = await capability.getConnectionTags!(
@@ -473,18 +543,21 @@ describe("web Channel", () => {
 
     const expected = [
       {
-        id: "private-assistant",
+        id: "shared-assistant",
         role: "assistant",
-        parts: [{ type: "text", text: "Private answer" }]
+        parts: [{ type: "text", text: "Shared answer" }]
       }
     ];
+    expect(resolveMessages).toHaveBeenCalledWith({
+      conversationId: "default-conversation"
+    });
     await expect(response?.json()).resolves.toEqual(expected);
     expect(protocolFrames(send)).toEqual([
       { type: "cf_agent_chat_messages", messages: expected }
     ]);
     expect(tags).toEqual([
-      "cf-web-conversation:room-1",
-      "cf-web-participant:user-1"
+      "cf-web-conversation:default-conversation",
+      "cf-web-participant:default-conversation"
     ]);
   });
 
@@ -933,6 +1006,95 @@ describe("web Channel", () => {
     ]);
   });
 
+  it("keeps rich tool state on one canonical part per tool call", async () => {
+    const channel = web({
+      resolveMessages: vi.fn().mockResolvedValue({
+        messages: [
+          {
+            id: "assistant-1",
+            author: { type: "agent" },
+            content: [
+              {
+                type: "tool-input-available",
+                toolCallId: "server-tool-1",
+                toolName: "search",
+                input: { query: "Channels" }
+              },
+              {
+                type: "tool-output-available",
+                toolCallId: "server-tool-1",
+                output: { matches: 1 }
+              },
+              {
+                type: "tool-input-available",
+                toolCallId: "server-tool-2",
+                toolName: "deploy",
+                input: { environment: "production" }
+              },
+              {
+                type: "tool-output-error",
+                toolCallId: "server-tool-2",
+                errorText: "deploy failed"
+              },
+              {
+                type: "tool-input-available",
+                toolCallId: "server-tool-3",
+                toolName: "purge",
+                input: {}
+              },
+              { type: "tool-output-denied", toolCallId: "server-tool-3" }
+            ]
+          }
+        ]
+      })
+    });
+    const capability = capabilityOf(channel);
+    const send = vi.fn();
+
+    await capability.handlers.onConnect!(
+      {
+        id: "browser-2",
+        tags: connectionTags("browser-2", "conversation-1", "user-2"),
+        send
+      } as never,
+      {} as never
+    );
+
+    expect(protocolFrames(send)).toEqual([
+      {
+        type: "cf_agent_chat_messages",
+        messages: [
+          {
+            id: "assistant-1",
+            role: "assistant",
+            parts: [
+              {
+                type: "tool-search",
+                toolCallId: "server-tool-1",
+                state: "output-available",
+                input: { query: "Channels" },
+                output: { matches: 1 }
+              },
+              {
+                type: "tool-deploy",
+                toolCallId: "server-tool-2",
+                state: "output-error",
+                input: { environment: "production" },
+                errorText: "deploy failed"
+              },
+              {
+                type: "tool-purge",
+                toolCallId: "server-tool-3",
+                state: "output-denied",
+                input: {}
+              }
+            ]
+          }
+        ]
+      }
+    ]);
+  });
+
   it("omits a canonical message that only contains another participant's content", async () => {
     const channel = web({
       resolveMessages: vi.fn().mockResolvedValue({
@@ -1067,6 +1229,159 @@ describe("web Channel", () => {
       { type: "text-start", id: "assistant-1:part:1" },
       { type: "text", id: "assistant-1:part:1", text: "Hello" },
       { type: "text-end", id: "assistant-1:part:1" }
+    ]);
+  });
+
+  it("reports a durable-only response as uncertain rather than delivered", async () => {
+    const open = vi.fn().mockResolvedValue({
+      streamId: "response-1",
+      cursor: 0,
+      append: vi.fn().mockReturnValue(0),
+      close: vi.fn(),
+      error: vi.fn()
+    });
+    const streams = {
+      open,
+      list: vi.fn().mockResolvedValue([]),
+      status: vi.fn().mockResolvedValue(null),
+      async *read() {}
+    };
+    const channel = web();
+    const host = new ChannelHost({
+      channels: { browser: channel },
+      streams: streams as never,
+      onMessage: vi.fn()
+    });
+
+    await expect(
+      host.stream(surface, streamOf([{ type: "text", text: "Hello" }]), {
+        response: {
+          id: "response-1",
+          conversationId: "browser-1",
+          messageId: "assistant-1"
+        }
+      })
+    ).resolves.toEqual({
+      status: "uncertain",
+      reference: "web:browser-1:request:turn-1",
+      error: {
+        code: "WEB_CHAT_RECORDED_WITHOUT_READER",
+        message:
+          "The response was recorded for replay without reaching a browser connection"
+      }
+    });
+  });
+
+  it("delivers conversation output after the initiating owner disconnects", async () => {
+    const channel = web();
+    const capability = capabilityOf(channel);
+    const memberSend = vi.fn();
+    capability.connections.set("browser-2", {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "conversation-1", "user-2"),
+      send: memberSend
+    });
+    const host = new ChannelHost({
+      channels: { browser: channel },
+      onMessage: vi.fn()
+    });
+
+    await expect(
+      host.stream(
+        {
+          channelKey: "browser",
+          version: 1,
+          address: {
+            conversationId: "conversation-1",
+            ownerConnectionId: "browser-1",
+            requestId: "turn-1",
+            participantId: "user-1"
+          },
+          label: "Web chat"
+        },
+        streamOf([{ type: "text", text: "Shared answer" }])
+      )
+    ).resolves.toMatchObject({ status: "delivered" });
+    expect(responseChunks(memberSend)).toContainEqual(
+      expect.objectContaining({ type: "text-delta", delta: "Shared answer" })
+    );
+  });
+
+  it("pages past newer streams from other Channels to find a Web response", async () => {
+    const streamStatus = {
+      streamId: "response-1",
+      state: "completed" as const,
+      cursor: 3,
+      tag: "conversation-1",
+      metadata: {
+        owner: "channels",
+        channelType: "web",
+        channelKey: "browser",
+        conversationId: "conversation-1",
+        messageId: "assistant-1",
+        webRequestId: "request-1",
+        webOwnerParticipantId: "user-1",
+        webClientToolNames: []
+      },
+      createdAt: 1,
+      updatedAt: 2,
+      closedAt: 2
+    };
+    const otherChannelStreams = Array.from({ length: 20 }, (_, index) => ({
+      streamId: `slack-${index}`,
+      state: "completed" as const,
+      cursor: 1,
+      tag: "conversation-1",
+      metadata: {
+        owner: "channels",
+        channelType: "slack",
+        channelKey: "slack",
+        conversationId: "conversation-1"
+      },
+      createdAt: 3,
+      updatedAt: 4,
+      closedAt: 4
+    }));
+    const streams = {
+      list: vi.fn(async ({ limit }: { limit: number }) =>
+        [...otherChannelStreams, streamStatus].slice(0, limit)
+      ),
+      status: vi.fn().mockResolvedValue(streamStatus),
+      async *read() {
+        yield { seq: 0, chunk: { type: "message-start", messageId: "a-1" } };
+      }
+    };
+    const channel = web();
+    const capability = capabilityOf(channel);
+    const send = vi.fn();
+    const connection = {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "conversation-1", "user-2"),
+      send
+    };
+    capability.connections.set(connection.id, connection);
+    new ChannelHost({
+      channels: { browser: channel },
+      streams: streams as never,
+      resolveMessages: vi.fn().mockResolvedValue({ messages: [] }),
+      onMessage: vi.fn()
+    });
+
+    await capability.handlers.onMessage!(
+      connection as never,
+      JSON.stringify({
+        type: "cf_agent_stream_resume_request",
+        probeId: "probe-1"
+      }) as never
+    );
+
+    expect(streams.list.mock.calls.length).toBeGreaterThan(1);
+    expect(protocolFrames(send)).toEqual([
+      {
+        type: "cf_agent_stream_resuming",
+        id: "request-1",
+        probeId: "probe-1"
+      }
     ]);
   });
 
@@ -2433,10 +2748,73 @@ describe("web Channel", () => {
         autoContinue: false
       }) as never
     );
-    expect(onApprovalResponse.mock.calls[1]![0].response).toMatchObject({
-      interactionId: "deploy-call-2",
-      decision: "reject"
+    expect(onApprovalResponse).toHaveBeenCalledOnce();
+  });
+
+  it("drops approvals that no pending request issued to the participant", async () => {
+    const channel = web();
+    const capability = capabilityOf(channel);
+    const owner = {
+      id: "browser-1",
+      tags: connectionTags("browser-1"),
+      send: vi.fn()
+    };
+    const bystander = {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "browser-1", "intruder"),
+      send: vi.fn()
+    };
+    capability.connections.set(owner.id, owner);
+    capability.connections.set(bystander.id, bystander);
+    const onApprovalResponse = vi.fn();
+    const host = new ChannelHost({
+      channels: { browser: channel },
+      onApprovalResponse
     });
+
+    await capability.handlers.onMessage!(
+      owner as never,
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId: "never-requested",
+        approved: true
+      }) as never
+    );
+    expect(onApprovalResponse).not.toHaveBeenCalled();
+
+    await host.requestApproval(surface, {
+      interactionId: "deploy-call-1",
+      request: { summary: "Approve?", input: {} }
+    });
+    await capability.handlers.onMessage!(
+      bystander as never,
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId: "deploy-call-1",
+        approved: true
+      }) as never
+    );
+    expect(onApprovalResponse).not.toHaveBeenCalled();
+
+    await capability.handlers.onMessage!(
+      owner as never,
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId: "deploy-call-1",
+        approved: true
+      }) as never
+    );
+    expect(onApprovalResponse).toHaveBeenCalledOnce();
+
+    await capability.handlers.onMessage!(
+      owner as never,
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId: "deploy-call-1",
+        approved: false
+      }) as never
+    );
+    expect(onApprovalResponse).toHaveBeenCalledOnce();
   });
 
   it("keeps an approval continuation pending while the application waits", async () => {
@@ -2454,10 +2832,15 @@ describe("web Channel", () => {
       finishApplication = resolve;
     });
     const onApprovalResponse = vi.fn(() => application);
-    new ChannelHost({
+    const host = new ChannelHost({
       channels: { browser: channel },
       onApprovalResponse
     });
+    await host.requestApproval(surface, {
+      interactionId: "approval-without-stream",
+      request: { summary: "Approve?", input: {} }
+    });
+    send.mockClear();
 
     const applyingApproval = capability.handlers.onMessage!(
       connection as never,
@@ -2500,10 +2883,15 @@ describe("web Channel", () => {
     };
     capability.connections.set(connection.id, connection);
     const onApprovalResponse = vi.fn();
-    new ChannelHost({
+    const host = new ChannelHost({
       channels: { browser: channel },
       onApprovalResponse
     });
+    await host.requestApproval(surface, {
+      interactionId: "ignored-approval",
+      request: { summary: "Approve?", input: {} }
+    });
+    send.mockClear();
 
     await capability.handlers.onMessage!(
       connection as never,
@@ -2579,6 +2967,11 @@ describe("web Channel", () => {
       channels: { browser: channel },
       onApprovalResponse
     });
+    await host.requestApproval(surface, {
+      interactionId: "deploy-call-1",
+      request: { summary: "Approve?", input: {} }
+    });
+    send.mockClear();
 
     const applyingApproval = capability.handlers.onMessage!(
       connection as never,
@@ -2903,6 +3296,11 @@ describe("web Channel", () => {
       send
     };
     capability.connections.set(connection.id, connection);
+    capability.connections.set("browser-2", {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "browser-1", "user-2"),
+      send: vi.fn()
+    });
     let streamResult: DeliveryResult | undefined;
     let host!: ChannelHost;
     const onMessage = vi.fn(async ({ message }) => {

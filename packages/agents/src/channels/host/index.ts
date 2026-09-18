@@ -402,6 +402,7 @@ export class ChannelHost {
     const route = await this.#route(channelKey, channel, event, envelope.raw);
     const dispatchId = await createDispatchId(channelKey, event.eventId);
     await this.#onRoute?.({ channelKey, event, route, dispatchId });
+    await envelope.onRouted?.(route !== null);
     if (route === null) return "ignored";
 
     switch (event.type) {

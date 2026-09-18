@@ -186,12 +186,14 @@ export function channelChunkToUIChunks(
       return [...closeImplicitParts(state), { type: "start-step" }];
     case "step-finish":
       return [...closeImplicitParts(state), { type: "finish-step" }];
-    case "text-start":
+    case "text-start": {
       if (state.activeTextIds.has(chunk.id)) {
         throw new Error(`Duplicate text-start for ${chunk.id}`);
       }
+      const prefix = closeImplicitParts(state);
       state.activeTextIds.add(chunk.id);
-      return [...closeOtherImplicitPart(state, "text"), copyDefined(chunk)];
+      return [...prefix, copyDefined(chunk)];
+    }
     case "text-end":
       if (!state.activeTextIds.delete(chunk.id)) {
         throw new Error(`Text end ${chunk.id} has no matching text-start`);
@@ -224,15 +226,14 @@ export function channelChunkToUIChunks(
         { type: "text-delta", id: state.implicitTextId, delta: chunk.text }
       ];
     }
-    case "reasoning-start":
+    case "reasoning-start": {
       if (state.activeReasoningIds.has(chunk.id)) {
         throw new Error(`Duplicate reasoning-start for ${chunk.id}`);
       }
+      const prefix = closeImplicitParts(state);
       state.activeReasoningIds.add(chunk.id);
-      return [
-        ...closeOtherImplicitPart(state, "reasoning"),
-        copyDefined(chunk)
-      ];
+      return [...prefix, copyDefined(chunk)];
+    }
     case "reasoning-end":
       if (!state.activeReasoningIds.delete(chunk.id)) {
         throw new Error(
