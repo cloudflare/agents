@@ -5,7 +5,7 @@ import {
   STREAM_RESUME_NONE_REASONS
 } from "../../chat/protocol";
 import { parseProtocolMessage } from "../../chat/parse-protocol";
-import type { StreamStatus, Streams } from "../../streams";
+import type { StreamListCursor, StreamStatus, Streams } from "../../streams";
 import { WebSockets, type WebSocketsOptions } from "../../websockets";
 import {
   channelChunkToUIChunks,
@@ -161,6 +161,7 @@ type ClientToolCall = {
 
 type PendingApproval = {
   connectionId: string;
+  conversationId: string;
   participantId: string;
 };
 
@@ -200,6 +201,14 @@ function approvalReference(
   interactionId: string
 ): string {
   return `web:${conversationId}:approval:${interactionId}`;
+}
+
+/**
+ * Interaction IDs are unique to the surface that issued them, not to the
+ * object, so a pending approval belongs to its conversation.
+ */
+function approvalKey(conversationId: string, interactionId: string): string {
+  return `${conversationId}\u0000${interactionId}`;
 }
 
 function hasToolCallId(
@@ -445,6 +454,15 @@ function projectUIChunk(
         ...(chunk.title !== undefined && { title: chunk.title })
       });
       return;
+    case "source-document":
+      projection.parts.push({
+        type: "source-document",
+        sourceId: chunk.sourceId,
+        mediaType: chunk.mediaType,
+        title: chunk.title,
+        ...(chunk.filename !== undefined && { filename: chunk.filename })
+      });
+      return;
     case "file":
       projection.parts.push({
         type: "file",
@@ -452,9 +470,31 @@ function projectUIChunk(
         mediaType: chunk.mediaType
       });
       return;
+    case "reasoning-file":
+      projection.parts.push({
+        type: "reasoning-file",
+        url: chunk.url,
+        mediaType: chunk.mediaType
+      });
+      return;
     default:
+      // Typed data parts persist; transient ones exist only for the live
+      // stream, and `custom` chunks carry no UI message part at all.
+      if (isDataChunk(chunk) && chunk.transient !== true) {
+        projection.parts.push({
+          type: chunk.type,
+          data: chunk.data,
+          ...(chunk.id !== undefined && { id: chunk.id })
+        });
+      }
       return;
   }
+}
+
+function isDataChunk(
+  chunk: UIMessageChunk
+): chunk is Extract<UIMessageChunk, { type: `data-${string}` }> {
+  return chunk.type.startsWith("data-") && "data" in chunk;
 }
 
 function approvalIdOf(
@@ -704,11 +744,15 @@ class ConfiguredWebChannel
         sent = true;
       }
       owner.send(responseFrame(address.requestId, "", { done: true }));
-      this.#pendingApprovals.set(interactionId, {
-        connectionId: owner.id,
-        participantId:
-          address.participantId ?? this.#identityOf(owner).participantId
-      });
+      this.#pendingApprovals.set(
+        approvalKey(address.conversationId, interactionId),
+        {
+          connectionId: owner.id,
+          conversationId: address.conversationId,
+          participantId:
+            address.participantId ?? this.#identityOf(owner).participantId
+        }
+      );
       return { status: "delivered", reference };
     } catch (error) {
       return sent
@@ -1437,9 +1481,10 @@ class ConfiguredWebChannel
     }
 
     const identity = this.#identityOf(connection);
-    const pending = this.#pendingApprovals.get(event.toolCallId);
+    const key = approvalKey(identity.conversationId, event.toolCallId);
+    const pending = this.#pendingApprovals.get(key);
     if (!pending || pending.participantId !== identity.participantId) return;
-    this.#pendingApprovals.delete(event.toolCallId);
+    this.#pendingApprovals.delete(key);
     const raw = {
       type: "approval-response",
       toolCallId: event.toolCallId,
@@ -1574,21 +1619,25 @@ class ConfiguredWebChannel
   ): Promise<StreamStatus[]> {
     const streams = this.#responseStreams;
     if (!streams) return [];
-    let limit = RESPONSE_REPLAY_PAGE_SIZE;
-    for (;;) {
-      const statuses = await streams.list({ tag: conversationId, limit });
+    let after: StreamListCursor | undefined;
+    let scanned = 0;
+    while (scanned < RESPONSE_REPLAY_MAX_SCAN) {
+      const statuses = await streams.list({
+        tag: conversationId,
+        limit: RESPONSE_REPLAY_PAGE_SIZE,
+        ...(after !== undefined && { after })
+      });
+      if (statuses.length === 0) return [];
+      scanned += statuses.length;
       const candidates = statuses.filter(
         (candidate) => this.#webResponseMetadata(candidate) !== null
       );
-      if (
-        candidates.length > 0 ||
-        statuses.length < limit ||
-        limit >= RESPONSE_REPLAY_MAX_SCAN
-      ) {
-        return candidates;
-      }
-      limit = Math.min(limit * 4, RESPONSE_REPLAY_MAX_SCAN);
+      if (candidates.length > 0) return candidates;
+      if (statuses.length < RESPONSE_REPLAY_PAGE_SIZE) return [];
+      const oldest = statuses[statuses.length - 1];
+      after = { createdAt: oldest.createdAt, streamId: oldest.streamId };
     }
+    return [];
   }
 
   async #resumeResponseReplay(
@@ -1908,9 +1957,9 @@ class ConfiguredWebChannel
       for (const key of this.#clientToolNamesByRequest.keys()) {
         if (key.startsWith(prefix)) this.#clientToolNamesByRequest.delete(key);
       }
-      for (const [interactionId, pending] of this.#pendingApprovals) {
+      for (const [key, pending] of this.#pendingApprovals) {
         if (pending.connectionId === connection.id) {
-          this.#pendingApprovals.delete(interactionId);
+          this.#pendingApprovals.delete(key);
         }
       }
     }

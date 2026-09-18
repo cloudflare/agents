@@ -379,6 +379,14 @@ export class Streams extends LifecycleCapability {
       query += " AND tag = ?";
       params.push(options.tag);
     }
+    if (options.after !== undefined) {
+      query += " AND (created_at < ? OR (created_at = ? AND stream_id < ?))";
+      params.push(
+        options.after.createdAt,
+        options.after.createdAt,
+        options.after.streamId
+      );
+    }
     query += " ORDER BY created_at DESC, stream_id DESC LIMIT ?";
     params.push(options.limit ?? DEFAULT_LIST_LIMIT);
     let rows: unknown[];

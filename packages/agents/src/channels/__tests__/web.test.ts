@@ -1006,6 +1006,88 @@ describe("web Channel", () => {
     ]);
   });
 
+  it("projects source documents, files, and persisted data into snapshots", async () => {
+    const channel = web({
+      resolveMessages: vi.fn().mockResolvedValue({
+        messages: [
+          {
+            id: "assistant-1",
+            author: { type: "agent" },
+            content: [
+              {
+                type: "source-document",
+                id: "report",
+                mediaType: "application/pdf",
+                title: "Quarterly report",
+                filename: "q3.pdf"
+              },
+              {
+                type: "file",
+                url: "https://example.com/chart.png",
+                mediaType: "image/png"
+              },
+              {
+                type: "reasoning-file",
+                url: "https://example.com/trace.txt",
+                mediaType: "text/plain"
+              },
+              { type: "data", name: "progress", id: "progress-1", data: 100 },
+              {
+                type: "data",
+                name: "typing",
+                data: true,
+                transient: true
+              }
+            ]
+          }
+        ]
+      })
+    });
+    const capability = capabilityOf(channel);
+    const send = vi.fn();
+
+    await capability.handlers.onConnect!(
+      {
+        id: "browser-2",
+        tags: connectionTags("browser-2", "conversation-1", "user-2"),
+        send
+      } as never,
+      {} as never
+    );
+
+    expect(protocolFrames(send)).toEqual([
+      {
+        type: "cf_agent_chat_messages",
+        messages: [
+          {
+            id: "assistant-1",
+            role: "assistant",
+            parts: [
+              {
+                type: "source-document",
+                sourceId: "report",
+                mediaType: "application/pdf",
+                title: "Quarterly report",
+                filename: "q3.pdf"
+              },
+              {
+                type: "file",
+                url: "https://example.com/chart.png",
+                mediaType: "image/png"
+              },
+              {
+                type: "reasoning-file",
+                url: "https://example.com/trace.txt",
+                mediaType: "text/plain"
+              },
+              { type: "data-progress", data: 100, id: "progress-1" }
+            ]
+          }
+        ]
+      }
+    ]);
+  });
+
   it("keeps rich tool state on one canonical part per tool call", async () => {
     const channel = web({
       resolveMessages: vi.fn().mockResolvedValue({
@@ -1342,9 +1424,28 @@ describe("web Channel", () => {
       updatedAt: 4,
       closedAt: 4
     }));
+    const ordered = [...otherChannelStreams, streamStatus].sort(
+      (left, right) =>
+        right.createdAt - left.createdAt ||
+        (left.streamId < right.streamId ? 1 : -1)
+    );
     const streams = {
-      list: vi.fn(async ({ limit }: { limit: number }) =>
-        [...otherChannelStreams, streamStatus].slice(0, limit)
+      list: vi.fn(
+        async ({
+          limit,
+          after
+        }: {
+          limit: number;
+          after?: { createdAt: number; streamId: string };
+        }) => {
+          const start =
+            after === undefined
+              ? 0
+              : ordered.findIndex(
+                  (status) => status.streamId === after.streamId
+                ) + 1;
+          return ordered.slice(start, start + limit);
+        }
       ),
       status: vi.fn().mockResolvedValue(streamStatus),
       async *read() {
@@ -2815,6 +2916,77 @@ describe("web Channel", () => {
       }) as never
     );
     expect(onApprovalResponse).toHaveBeenCalledOnce();
+  });
+
+  it("keeps approvals sharing an interaction id per conversation", async () => {
+    const channel = web();
+    const capability = capabilityOf(channel);
+    const first = {
+      id: "browser-1",
+      tags: connectionTags("browser-1", "conversation-a", "user-1"),
+      send: vi.fn()
+    };
+    const second = {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "conversation-b", "user-1"),
+      send: vi.fn()
+    };
+    capability.connections.set(first.id, first);
+    capability.connections.set(second.id, second);
+    const onApprovalResponse = vi.fn();
+    const host = new ChannelHost({
+      channels: { browser: channel },
+      onApprovalResponse
+    });
+    for (const [conversationId, connectionId] of [
+      ["conversation-a", "browser-1"],
+      ["conversation-b", "browser-2"]
+    ]) {
+      await host.requestApproval(
+        {
+          channelKey: "browser",
+          version: 1,
+          address: {
+            conversationId,
+            ownerConnectionId: connectionId,
+            requestId: `turn-${conversationId}`,
+            participantId: "user-1"
+          },
+          label: "Web chat"
+        },
+        {
+          interactionId: "deploy-1",
+          request: { summary: "Approve?", input: {} }
+        }
+      );
+    }
+
+    await capability.handlers.onMessage!(
+      first as never,
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId: "deploy-1",
+        approved: true
+      }) as never
+    );
+    await capability.handlers.onMessage!(
+      second as never,
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId: "deploy-1",
+        approved: false
+      }) as never
+    );
+
+    expect(
+      onApprovalResponse.mock.calls.map(([call]) => ({
+        conversationId: call.response.thread.id,
+        decision: call.response.decision
+      }))
+    ).toEqual([
+      { conversationId: "conversation-a", decision: "approve" },
+      { conversationId: "conversation-b", decision: "reject" }
+    ]);
   });
 
   it("keeps an approval continuation pending while the application waits", async () => {
