@@ -1,0 +1,19 @@
+examples/next/task-events/README.md
+  s_c7ee88e60679f4::t_8839ce24b142de 3-6,15,20-26,28-29,32-35,55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b7d53bbc9323cf09c40ef476cba7a38de0757b97",
+  "prompts": {},
+  "sessions": {
+    "s_c7ee88e60679f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f60372b05ffeIpWNJ3GaQ16767",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}
