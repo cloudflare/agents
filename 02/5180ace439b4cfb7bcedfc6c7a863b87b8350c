@@ -1,0 +1,63 @@
+examples/next/README.md
+  s_c7ee88e60679f4::t_4d8a8bb1584bdb 14
+examples/next/task-events/env.d.ts
+  s_c7ee88e60679f4::t_4b0111c1e6f413 1-15
+examples/next/task-events/index.html
+  s_fb8af37629c200::t_2ff6ab464d1a2b 1-21
+examples/next/task-events/package.json
+  s_fb8af37629c200::t_4fc34da7fb2175 1-36
+examples/next/task-events/src/styles.css
+  s_fb8af37629c200::t_b59a8ed55a934c 1-17
+examples/next/task-events/src/tests/env.d.ts
+  s_c7ee88e60679f4::t_1cc3f04e2d0128 1-15
+examples/next/task-events/src/tests/setup.ts
+  s_fb8af37629c200::t_fdd58990d1006f 1-8
+examples/next/task-events/src/tests/tsconfig.json
+  s_fb8af37629c200::t_9bda7ad1b0715c 1-4
+examples/next/task-events/src/tests/vitest.config.ts
+  s_fb8af37629c200::t_c638c3fe552050 1-26
+examples/next/task-events/src/tests/worker.ts
+  s_fb8af37629c200::t_1b24802e7c0da5 1-3
+examples/next/task-events/src/tests/wrangler.jsonc
+  s_fb8af37629c200::t_01a9bf966c702b 1-28
+examples/next/task-events/tsconfig.json
+  s_fb8af37629c200::t_af688ab493d34f 1-4
+examples/next/task-events/vite.config.ts
+  s_fb8af37629c200::t_bea33264e1a72e 1-9
+examples/next/task-events/wrangler.jsonc
+  s_fb8af37629c200::t_32cb55bf3e6728 1-28
+pnpm-lock.yaml
+  s_2dd8e0f1f22144::t_bd05b2f0ab6c27 2574-2628
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "025180ace439b4cfb7bcedfc6c7a863b87b8350c",
+  "prompts": {},
+  "sessions": {
+    "s_2dd8e0f1f22144": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4b8333d2ffepHKV2rcceIdhMj",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    },
+    "s_c7ee88e60679f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f60372b05ffeIpWNJ3GaQ16767",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    },
+    "s_fb8af37629c200": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bebd367ffeMHdZCppB21Ok0g",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}
