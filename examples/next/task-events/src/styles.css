@@ -1,0 +1,17 @@
+@import "tailwindcss";
+@import "@cloudflare/kumo/styles/tailwind";
+
+/* Tailwind ignores node_modules by default, so source Kumo explicitly. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+
+html,
+body,
+#root {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+}

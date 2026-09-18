@@ -11,6 +11,7 @@ lands.
 | [`schedules`](./schedules)                               | Available | `Scheduler` installed as a reusable lifecycle capability                                                                                       |
 | [`queue`](./queue)                                       | This PR   | Durable background work: `Queue` installed as a reusable lifecycle capability                                                                  |
 | [`tasks`](./tasks)                                       | This PR   | Durable replayable `Tasks` installed as a reusable lifecycle capability                                                                        |
+| [`task-events`](./task-events)                           | This PR   | A visual Agent demo for buffered run-scoped events, idempotent delivery, `waitForEvent()`, and FIFO `takeEvents()`                             |
 | [`streams`](./streams)                                   | This PR   | Durable `Streams` composed with `Tasks`, served over SSE                                                                                       |
 | [`sessions`](./sessions)                                 | This PR   | Durable message trees, streamed reads, and Sessions-owned attachments                                                                          |
 | [`websockets`](./websockets)                             | This PR   | One plain `DurableObject`, `useAgent` over the WebSocket or Cap'n Web transport, callables on every wire, hibernating connections and tags     |
