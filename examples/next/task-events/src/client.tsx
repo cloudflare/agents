@@ -28,7 +28,7 @@ import { useAgent } from "agents/react";
 import type { AudienceReceipt, BriefRun, NoteReceipt } from "./server";
 import "./styles.css";
 
-const STORAGE_KEY = "next-task-events-session-v1";
+const STORAGE_KEY = "next-task-events-session-v2";
 const MAX_NOTES = 10;
 const NOTE_PRESETS = [
   "Lead with the mailbox guarantee.",
@@ -50,6 +50,7 @@ type NoteAttempt = {
 
 type AudienceAttempt = {
   audience: string;
+  decision: string;
 };
 
 type StartAttempt = {
@@ -58,7 +59,7 @@ type StartAttempt = {
 };
 
 type StoredSession = {
-  version: 1;
+  version: 2;
   instanceName: string;
   activeRunId: string | null;
   queuedNotes: QueuedNote[];
@@ -81,7 +82,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function freshSession(): StoredSession {
   return {
-    version: 1,
+    version: 2,
     instanceName: crypto.randomUUID(),
     activeRunId: null,
     queuedNotes: [],
@@ -105,7 +106,7 @@ function loadSession(): StoredSession {
     );
     if (
       !isRecord(parsed) ||
-      parsed.version !== 1 ||
+      parsed.version !== 2 ||
       typeof parsed.instanceName !== "string"
     ) {
       return resetStoredSession();
@@ -150,13 +151,17 @@ function loadSession(): StoredSession {
         : null
       : null;
     const pendingAudience = isRecord(parsed.pendingAudience)
-      ? typeof parsed.pendingAudience.audience === "string"
-        ? { audience: parsed.pendingAudience.audience }
+      ? typeof parsed.pendingAudience.audience === "string" &&
+        typeof parsed.pendingAudience.decision === "string"
+        ? {
+            audience: parsed.pendingAudience.audience,
+            decision: parsed.pendingAudience.decision
+          }
         : null
       : null;
 
     return {
-      version: 1,
+      version: 2,
       instanceName: parsed.instanceName,
       activeRunId:
         typeof parsed.activeRunId === "string" ? parsed.activeRunId : null,
@@ -315,6 +320,9 @@ function App() {
   const [audience, setAudience] = useState(
     session.pendingAudience?.audience ?? "engineering leaders"
   );
+  const [decision, setDecision] = useState(
+    session.pendingAudience?.decision ?? "whether to adopt this pattern"
+  );
   const [operation, setOperation] = useState<Operation>(null);
   const [loadingRun, setLoadingRun] = useState(session.activeRunId !== null);
   const [error, setError] = useState<UiError>();
@@ -459,7 +467,7 @@ function App() {
       }));
       setNotice(
         receipt.accepted
-          ? "Brief accepted. Add notes while research is running."
+          ? "Briefing started. Add editor notes while the Task drafts."
           : "Retry joined the already accepted brief."
       );
       await refreshRun(receipt.runId, true);
@@ -525,13 +533,16 @@ function App() {
     }
   };
 
-  const answerQuestion = async (event: FormEvent<HTMLFormElement>) => {
+  const deliverReaderContext = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const runId = session.activeRunId;
     if (!agent.identified || !runId || operation) return;
 
-    const attempt = session.pendingAudience ?? { audience: audience.trim() };
-    if (!attempt.audience) return;
+    const attempt = session.pendingAudience ?? {
+      audience: audience.trim(),
+      decision: decision.trim()
+    };
+    if (!attempt.audience || !attempt.decision) return;
     saveSession((current) => ({ ...current, pendingAudience: attempt }));
     setOperation("audience");
     setError(undefined);
@@ -539,7 +550,8 @@ function App() {
     try {
       const receipt = await agent.call<AudienceReceipt>("answerAudience", [
         runId,
-        attempt.audience
+        attempt.audience,
+        attempt.decision
       ]);
       saveSession((current) => ({
         ...current,
@@ -548,8 +560,8 @@ function App() {
       }));
       setNotice(
         receipt.accepted
-          ? "Audience accepted. The task is reviewing buffered notes."
-          : "Retry matched the audience answer already delivered."
+          ? "Reader context accepted for the final outline."
+          : "Retry matched the reader context already delivered."
       );
       await refreshRun(runId);
     } catch (cause) {
@@ -606,7 +618,7 @@ function App() {
             <div>
               <h1 className="text-lg font-semibold">Task event desk</h1>
               <p className="text-xs text-kumo-subtle">
-                Durable input for work already in motion
+                Durable input for an active briefing Task
               </p>
             </div>
           </div>
@@ -630,13 +642,13 @@ function App() {
             />
             <div>
               <Text size="sm" bold>
-                Watch one Task receive input at two different points
+                Agent job: prepare a technical briefing outline
               </Text>
               <span className="mt-1 block">
                 <Text size="xs" variant="secondary">
-                  Send notes during the active research step. The Task keeps
-                  working, later waits for an audience, then drains the notes
-                  from its durable mailbox in FIFO order.
+                  Give the Agent a topic. Its Task drafts three core sections
+                  while editor notes arrive, then pauses for reader context,
+                  tailors every section, and reviews the notes in FIFO order.
                 </Text>
               </span>
             </div>
@@ -650,7 +662,7 @@ function App() {
           >
             <label htmlFor="brief-topic">
               <span className="mb-1 block text-xs font-medium text-kumo-subtle">
-                Brief topic
+                Technical briefing topic
               </span>
               <Input
                 id="brief-topic"
@@ -658,7 +670,7 @@ function App() {
                 maxLength={120}
                 disabled={!canStart || session.pendingStart !== null}
                 onChange={(event) => setTopic(event.currentTarget.value)}
-                placeholder="What should the Task research?"
+                placeholder="What should the briefing explain?"
                 required
               />
             </label>
@@ -682,7 +694,7 @@ function App() {
           </form>
           {run && !terminal ? (
             <p className="mt-3 text-xs text-kumo-subtle">
-              Finish or cancel the current run before starting another.
+              Finish or cancel the current briefing before starting another.
             </p>
           ) : null}
         </Surface>
@@ -720,7 +732,7 @@ function App() {
             <div className="mb-5 flex items-center justify-between gap-3">
               <div>
                 <Text size="sm" bold>
-                  Task run
+                  Technical briefing Task
                 </Text>
                 <p className="mt-1 text-xs text-kumo-subtle">
                   The snapshot below is read from durable Task state.
@@ -751,8 +763,8 @@ function App() {
             ) : !run ? (
               <Empty
                 icon={<ClockIcon size={24} />}
-                title="No active brief"
-                description="Start a brief to see the Task move through research, input, and review."
+                title="No briefing in progress"
+                description="Start a briefing to watch the Task draft, collect input, and tailor its outline."
               />
             ) : (
               <div className="space-y-5">
@@ -789,29 +801,29 @@ function App() {
                   <ol aria-label="Task progress">
                     <PhaseRow
                       number={1}
-                      title="Research"
-                      description="An active step runs for eight seconds while note events arrive."
+                      title="Draft core outline"
+                      description="The Task works for eight seconds while editor note events arrive."
                       phase={0}
                       current={phase}
                     />
                     <PhaseRow
                       number={2}
-                      title="Ask for audience"
-                      description="waitForEvent() parks the run until an answer arrives."
+                      title="Add reader context"
+                      description="waitForEvent() pauses until the Task knows who will read the brief and what they need to decide."
                       phase={1}
                       current={phase}
                     />
                     <PhaseRow
                       number={3}
-                      title="Review mailbox"
+                      title="Review editor notes"
                       description="takeEvents() consumes the buffered notes in FIFO order."
                       phase={2}
                       current={phase}
                     />
                     <PhaseRow
                       number={4}
-                      title="Complete brief"
-                      description="The retained result includes every consumed event envelope."
+                      title="Finalize briefing"
+                      description="Every section uses the reader context, and the result retains each consumed event."
                       phase={3}
                       current={phase}
                     />
@@ -826,38 +838,53 @@ function App() {
                         weight="fill"
                         className="text-kumo-success"
                       />
-                      <h3 className="font-semibold">Completed brief</h3>
+                      <h3 className="font-semibold">
+                        Technical briefing outline
+                      </h3>
                     </div>
                     <p className="break-words text-sm">{run.result.summary}</p>
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-wide text-kumo-subtle">
-                        Research outline
+                        Reader and decision context
                       </p>
-                      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
+                      <div className="mt-2 rounded-lg border border-kumo-line p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <UsersIcon size={16} className="text-kumo-accent" />
+                          <span className="break-words text-sm font-medium">
+                            {run.result.audience.payload.audience}
+                          </span>
+                          <time
+                            className="text-xs text-kumo-subtle"
+                            dateTime={new Date(
+                              run.result.audience.createdAt
+                            ).toISOString()}
+                          >
+                            received {formatTime(run.result.audience.createdAt)}
+                          </time>
+                        </div>
+                        <p className="mt-2 break-words text-sm text-kumo-subtle">
+                          <span className="font-medium text-kumo-default">
+                            Decision to support:
+                          </span>{" "}
+                          {run.result.audience.payload.decision}
+                        </p>
+                      </div>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-kumo-subtle">
+                        Audience-tailored sections
+                      </p>
+                      <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">
                         {run.result.research.map((item) => (
                           <li key={item} className="break-words">
                             {item}
                           </li>
                         ))}
-                      </ul>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <UsersIcon size={16} className="text-kumo-accent" />
-                      <span className="break-words text-sm font-medium">
-                        {run.result.audience.payload.audience}
-                      </span>
-                      <time
-                        className="text-xs text-kumo-subtle"
-                        dateTime={new Date(
-                          run.result.audience.createdAt
-                        ).toISOString()}
-                      >
-                        received {formatTime(run.result.audience.createdAt)}
-                      </time>
+                      </ol>
                     </div>
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-wide text-kumo-subtle">
-                        Notes reviewed later
+                        Editor notes reviewed later
                       </p>
                       {run.result.notes.length === 0 ? (
                         <p className="mt-2 text-sm text-kumo-subtle">
@@ -939,7 +966,7 @@ function App() {
               <Empty
                 icon={<TrayIcon size={24} />}
                 title="Mailbox not open"
-                description="Start a brief, then send notes while research is running."
+                description="Start a briefing, then send editor notes while the Task drafts."
               />
             ) : (
               <div className="space-y-5">
@@ -975,7 +1002,7 @@ function App() {
                   </fieldset>
                   <label htmlFor="mailbox-note">
                     <span className="mb-1 block text-xs font-medium text-kumo-subtle">
-                      Note for later review
+                      Editor note for later review
                     </span>
                     <Textarea
                       id="mailbox-note"
@@ -1068,7 +1095,7 @@ function App() {
                 <div className="border-t border-kumo-line pt-5">
                   <div className="mb-3 flex items-center gap-2">
                     <UsersIcon size={16} className="text-kumo-accent" />
-                    <p className="text-sm font-semibold">Audience question</p>
+                    <p className="text-sm font-semibold">Reader context</p>
                     {waitingForAudience ? (
                       <Badge variant="primary">Answer needed</Badge>
                     ) : null}
@@ -1080,28 +1107,59 @@ function App() {
                         weight="fill"
                         className="text-kumo-success"
                       />
-                      Audience delivered. The Task can resume.
+                      Reader context delivered for the final outline.
                     </div>
                   ) : waitingForAudience || session.pendingAudience ? (
-                    <form onSubmit={(event) => void answerQuestion(event)}>
-                      <label htmlFor="brief-audience">
-                        <span className="mb-1 block text-xs text-kumo-subtle">
-                          Who should this brief target?
-                        </span>
-                        <Input
-                          id="brief-audience"
-                          value={audience}
-                          maxLength={80}
-                          disabled={
-                            session.pendingAudience !== null ||
-                            operation !== null
-                          }
-                          onChange={(event) =>
-                            setAudience(event.currentTarget.value)
-                          }
-                          required
-                        />
-                      </label>
+                    <form
+                      onSubmit={(event) => void deliverReaderContext(event)}
+                    >
+                      <div className="space-y-3">
+                        <label htmlFor="brief-audience">
+                          <span className="mb-1 block text-xs text-kumo-subtle">
+                            Who will read this brief?
+                          </span>
+                          <Input
+                            id="brief-audience"
+                            value={audience}
+                            maxLength={80}
+                            aria-describedby="brief-audience-help"
+                            disabled={
+                              session.pendingAudience !== null ||
+                              operation !== null
+                            }
+                            onChange={(event) =>
+                              setAudience(event.currentTarget.value)
+                            }
+                            required
+                          />
+                        </label>
+                        <label htmlFor="brief-decision">
+                          <span className="mb-1 block text-xs text-kumo-subtle">
+                            What decision are they making?
+                          </span>
+                          <Input
+                            id="brief-decision"
+                            value={decision}
+                            maxLength={120}
+                            aria-describedby="brief-audience-help"
+                            disabled={
+                              session.pendingAudience !== null ||
+                              operation !== null
+                            }
+                            onChange={(event) =>
+                              setDecision(event.currentTarget.value)
+                            }
+                            required
+                          />
+                        </label>
+                      </div>
+                      <p
+                        id="brief-audience-help"
+                        className="mt-2 text-xs text-kumo-subtle"
+                      >
+                        These answers set the lens for the opening, relevance,
+                        and decision-support sections.
+                      </p>
                       <Button
                         className="mt-3 w-full"
                         type="submit"
@@ -1110,25 +1168,27 @@ function App() {
                           !agent.identified ||
                           operation !== null ||
                           session.pendingNote !== null ||
-                          (!session.pendingAudience && audience.trim() === "")
+                          (!session.pendingAudience &&
+                            (audience.trim() === "" || decision.trim() === ""))
                         }
                         icon={<UsersIcon size={15} />}
                       >
                         {operation === "audience"
                           ? "Delivering..."
                           : session.pendingAudience
-                            ? "Retry audience"
-                            : "Deliver audience"}
+                            ? "Retry context"
+                            : "Deliver context"}
                       </Button>
                       <p className="mt-2 text-xs text-kumo-subtle">
-                        This browser closes note intake before delivering the
-                        answer, then the Task drains the mailbox.
+                        Note intake closes before this event is delivered, then
+                        the Task drains the mailbox.
                       </p>
                     </form>
                   ) : (
                     <p className="rounded-lg border border-dashed border-kumo-line p-4 text-xs text-kumo-subtle">
                       This form appears when the run reaches waitForEvent(). You
-                      can keep adding notes until then.
+                      can add editor notes until then; the answer will shape the
+                      completed outline.
                     </p>
                   )}
                 </div>

@@ -25,6 +25,7 @@ export type NotePayload = {
 
 export type AudiencePayload = {
   audience: string;
+  decision: string;
 };
 
 export type BriefResult = {
@@ -45,41 +46,47 @@ const taskDefinitions = {
     step: TaskStep
   ): Promise<BriefResult> => {
     await step.status(
-      "Researching for 8 seconds. Notes are buffered while this step runs."
+      "Drafting a technical briefing for 8 seconds. Editor notes are buffered while this step runs."
     );
-    const research = await step.do(
+    const draft = await step.do(
       "research",
       { timeout: "30 seconds" },
       async ({ signal }) => {
         await scheduler.wait(RESEARCH_DELAY_MS, { signal });
         return [
           `Define ${input.topic} in one sentence.`,
-          `Explain why ${input.topic} matters now.`,
-          `Name the next signal to watch for ${input.topic}.`
+          `Explain the current relevance of ${input.topic}.`,
+          `Identify one concrete signal to watch for ${input.topic}.`
         ];
       }
     );
 
     await step.status(
-      "Audience needed. Add any final notes, then answer the question."
+      "Reader context needed. Add any final notes, then describe who will read the brief and what decision they face."
     );
     const audience = await step.waitForEvent<AudiencePayload>(
       "wait-for-audience",
       AUDIENCE_EVENT
     );
 
-    await step.status("Reviewing buffered notes.");
+    await step.status("Reviewing editor notes and tailoring the outline.");
     const notes = await step.takeEvents<NotePayload>(
       "review-notes",
       NOTE_EVENT,
       { limit: NOTE_LIMIT }
     );
 
+    const readerContext = `${audience.payload.audience} (decision: ${audience.payload.decision})`;
+    const outline = [
+      `Opening for ${readerContext}: ${draft[0]}`,
+      `Relevance for ${readerContext}: ${draft[1]}`,
+      `Decision support for ${readerContext}: ${draft[2]}`
+    ];
     const noteLabel = notes.length === 1 ? "note" : "notes";
     return {
       topic: input.topic,
-      summary: `${input.topic}: a concise brief for ${audience.payload.audience}, shaped by ${notes.length} editor ${noteLabel}.`,
-      research,
+      summary: `A three-part technical briefing outline about ${input.topic} for ${audience.payload.audience}. Decision to support: ${audience.payload.decision}. The Task reviewed ${notes.length} editor ${noteLabel} from the durable mailbox.`,
+      research: outline,
       audience,
       notes
     };
@@ -184,14 +191,16 @@ export class TaskEventsAgent extends Agent<Env> {
   @callable()
   async answerAudience(
     runId: string,
-    audience: string
+    audience: string,
+    decision: string
   ): Promise<AudienceReceipt> {
     const id = await this.#assertBriefRun(runId);
-    const cleanAudience = requiredText(audience, "Audience", 80);
+    const cleanAudience = requiredText(audience, "Reader", 80);
+    const cleanDecision = requiredText(decision, "Decision context", 120);
     return this.tasks.sendEvent(
       id,
       AUDIENCE_EVENT,
-      { audience: cleanAudience },
+      { audience: cleanAudience, decision: cleanDecision },
       { idempotencyKey: "audience:v1" }
     );
   }
