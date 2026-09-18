@@ -2525,27 +2525,6 @@ describe("Think — chatRecovery", () => {
     }
   );
 
-  it.each([
-    "completed",
-    "error",
-    "aborted",
-    "skipped",
-    "missing",
-    "cancel",
-    "interrupted"
-  ] as const)(
-    "releases %s submission pins so the next stream reclaims them",
-    async (outcome) => {
-      const agent = await freshRecoveryAgent(crypto.randomUUID());
-      await expect(
-        agent.staleSubmissionRetentionForTest(outcome)
-      ).resolves.toEqual({
-        retained: 0,
-        reclaimed: true
-      });
-    }
-  );
-
   it("gives exact submission identity precedence over another row's successor request", async () => {
     const agent = await freshRecoveryAgent(crypto.randomUUID());
     await agent.seedRunningSubmissionForTest("collision", "submission-A");

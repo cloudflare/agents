@@ -184,8 +184,9 @@ type ThinkSubmissionTestStub = {
   >;
   getResponseLog(): Promise<Array<{ status: string; requestId: string }>>;
   getSubmissionLog(): Promise<ThinkSubmissionInspection[]>;
-  inspectRetainedSubmissionStreamForTest(requestId: string): Promise<{
+  inspectSubmissionStreamEvidenceForTest(requestId: string): Promise<{
     streamStatus: string | null;
+    resultStatus: string | null;
     hasActiveStream: boolean;
     hasActiveRequestStream: boolean;
     resumeFrames: Array<{ type: string; reason?: string }>;
@@ -1266,7 +1267,7 @@ describe("Think durable submissions", () => {
     await expect(agent.getStoredMessages()).resolves.toHaveLength(0);
   });
 
-  it("keeps completed submission evidence idle and reclaims it on the next stream", async () => {
+  it("leaves no stream evidence or outcome stamp after a submission settles", async () => {
     const agent = await freshAgent();
     const first = await agent.testSubmitMessages("First submission");
     const completed = await waitForSubmission(
@@ -1276,10 +1277,13 @@ describe("Think durable submissions", () => {
     );
     expect(completed.requestId).toBeTruthy();
     const requestId = completed.requestId ?? first.submissionId;
+    // The cutover discarded the stream rows (the durable outcome stamp is the
+    // evidence), and ledger settlement cleared the stamp in turn.
     await expect(
-      agent.inspectRetainedSubmissionStreamForTest(requestId)
+      agent.inspectSubmissionStreamEvidenceForTest(requestId)
     ).resolves.toEqual({
-      streamStatus: "completed",
+      streamStatus: null,
+      resultStatus: null,
       hasActiveStream: false,
       hasActiveRequestStream: false,
       resumeFrames: [{ type: "cf_agent_stream_resume_none", reason: "idle" }]
@@ -1293,20 +1297,6 @@ describe("Think durable submissions", () => {
           entry.status === "completed"
       )
     ).toHaveLength(1);
-
-    const second = await agent.testSubmitMessages("Next submission");
-    await waitForSubmission(
-      agent,
-      second.submissionId,
-      (submission) => submission.status === "completed"
-    );
-    await expect(
-      agent.inspectRetainedSubmissionStreamForTest(requestId)
-    ).resolves.toMatchObject({
-      streamStatus: null,
-      hasActiveStream: false,
-      hasActiveRequestStream: false
-    });
   });
 
   it.each(["completed", "error"] as const)(
@@ -1869,7 +1859,7 @@ describe("Think durable submissions", () => {
     expect(failed.error).toBe("submission in-band failure");
   });
 
-  it("does not retain stream error records for non-submission callers", async () => {
+  it("ignores stream errors from non-submission callers", async () => {
     const agent = await freshAgent();
 
     await agent.runNonSubmissionStreamFailureForTest(

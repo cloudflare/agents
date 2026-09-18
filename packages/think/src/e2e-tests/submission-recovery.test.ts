@@ -347,11 +347,13 @@ describe("Think submission recovery e2e", () => {
     await expect(
       callAgent(agent, "getSubmission", [submissionId])
     ).resolves.toMatchObject({ status: "running" });
+    // The cutover discarded the stream rows and stamped the durable outcome;
+    // a foreign producer's reclaim cannot erase that fact.
     await expect(
       callAgent(agent, "reclaimDuringSubmissionGap", [submissionId])
     ).resolves.toEqual({
-      streamStatus: "completed",
-      retained: 1
+      streamStatus: null,
+      resultStatus: "completed"
     });
 
     wrangler = await restartWrangler(wrangler);
@@ -372,12 +374,12 @@ describe("Think submission recovery e2e", () => {
     await expect(callAgent(agent, "getStatusLog")).resolves.toEqual([
       `${submissionId}:completed`
     ]);
-    // Startup settled the ledger and released its pin. Nothing leaks forever.
+    // Startup settled the ledger and cleared the stamp. Nothing leaks forever.
     await expect(
       callAgent(agent, "reclaimDuringSubmissionGap", [submissionId])
     ).resolves.toEqual({
       streamStatus: null,
-      retained: 0
+      resultStatus: null
     });
   });
 

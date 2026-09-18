@@ -6371,16 +6371,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.getMessages();
   }
 
-  /** Inspect retained submission evidence through the real resume handshake. */
-  async inspectRetainedSubmissionStreamForTest(requestId: string): Promise<{
+  /** Inspect a submission's stream evidence through the real resume handshake. */
+  async inspectSubmissionStreamEvidenceForTest(requestId: string): Promise<{
     streamStatus: string | null;
+    resultStatus: string | null;
     hasActiveStream: boolean;
     hasActiveRequestStream: boolean;
     resumeFrames: Array<{ type: string; reason?: string }>;
   }> {
     const resumeFrames: Array<{ type: string; reason?: string }> = [];
     const connection = {
-      id: "submission-retention-probe",
+      id: "submission-evidence-probe",
       readyState: WebSocket.OPEN,
       send(message: string) {
         resumeFrames.push(JSON.parse(message));
@@ -6396,6 +6397,12 @@ export class ThinkProgrammaticTestAgent extends Think {
       streamStatus:
         this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
         null,
+      resultStatus:
+        this.sql<{ result_status: string | null }>`
+          SELECT result_status FROM cf_think_submissions
+          WHERE request_id = ${requestId}
+          LIMIT 1
+        `[0]?.result_status ?? null,
       hasActiveStream: this._resumableStream.hasActiveStream(),
       hasActiveRequestStream:
         this._resumableStream.latestActiveStreamInfoForRequest(requestId) !==
@@ -8541,55 +8548,6 @@ export class ThinkRecoveryTestAgent extends Think {
       this._chatRecoveryRetryDetached = retryDetached;
       this._chatRecoveryContinueDetached = continueDetached;
     }
-  }
-
-  /** Reconcile a pin abandoned after settlement, then exercise start's reclaim. */
-  async staleSubmissionRetentionForTest(
-    outcome:
-      | "completed"
-      | "error"
-      | "aborted"
-      | "skipped"
-      | "missing"
-      | "cancel"
-      | "interrupted"
-  ): Promise<{ retained: number; reclaimed: boolean }> {
-    const requestId = crypto.randomUUID();
-    await this.seedRunningSubmissionForTest(requestId);
-    // SAFETY: the fixture uses the real adapter and terminalization seam.
-    const internals = this as unknown as {
-      _resumableStream: ResumableStream;
-      _markRecoveredSubmissionInterrupted(
-        id: string,
-        message: string
-      ): Promise<void>;
-    };
-    const stream = internals._resumableStream;
-    const id = stream.start(requestId);
-    stream.cutover(id, () => {}, { retain: true });
-    if (outcome === "cancel") {
-      await this.cancelSubmission(requestId);
-    } else if (outcome === "interrupted") {
-      await internals._markRecoveredSubmissionInterrupted(
-        requestId,
-        "interrupted"
-      );
-    } else {
-      // Simulate the durable state left by a crash before release (or removal
-      // of an already-settled submission). Startup must self-heal every pin.
-      if (outcome === "missing") {
-        this
-          .sql`DELETE FROM cf_think_submissions WHERE submission_id = ${requestId}`;
-      } else {
-        this
-          .sql`UPDATE cf_think_submissions SET status = ${outcome} WHERE submission_id = ${requestId}`;
-      }
-      await this.recoverSubmissionsOnStartForTest();
-    }
-    const retained = stream.listRetained().length;
-    const next = stream.start("foreign-after-release");
-    stream.complete(next);
-    return { retained, reclaimed: stream.getStreamMetadata(id) === null };
   }
 
   /** Exercise the facet legacy-fiber branch without requiring facet routing. */

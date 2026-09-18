@@ -2035,7 +2035,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   @callable()
   async reclaimDuringSubmissionGap(submissionId: string): Promise<{
     streamStatus: string | null;
-    retained: number;
+    resultStatus: string | null;
   }> {
     const submission = await this.inspectSubmission(submissionId);
     // SAFETY: the fixture uses the host's existing adapter, not synthetic SQL cleanup.
@@ -2049,7 +2049,12 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
         ? (stream.latestStreamInfoForRequest(submission.requestId)?.status ??
           null)
         : null,
-      retained: stream.listRetained().length
+      resultStatus:
+        this.sql<{ result_status: string | null }>`
+          SELECT result_status FROM cf_think_submissions
+          WHERE submission_id = ${submissionId}
+          LIMIT 1
+        `[0]?.result_status ?? null
     };
   }
 

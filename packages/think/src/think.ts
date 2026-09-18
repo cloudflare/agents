@@ -2128,7 +2128,7 @@ export type DeleteSubmissionsOptions = {
 /** A turn's durable cutover fact, not the stream transport's lifecycle. */
 type SubmissionTurnResult =
   | { status: "completed"; output?: unknown }
-  | { status: "aborted" | "retry" };
+  | { status: "aborted" | "retry" | "error" };
 
 type ThinkSubmissionRow = {
   submission_id: string;
@@ -10809,12 +10809,13 @@ export class Think<
       UPDATE cf_think_submissions
       SET status = 'aborted',
           error_message = ${errorMessage},
-          completed_at = ${completedAt}
+          completed_at = ${completedAt},
+          result_status = NULL,
+          output_json = NULL
       WHERE submission_id = ${submissionId}
         AND status IN ('pending', 'running')
     `;
 
-    this._releaseSettledSubmissionStreams();
     const updated = this._readSubmission(submissionId);
     if (updated?.status === "aborted") {
       this._enqueueTerminalWorkflowNotification(updated);
@@ -11081,7 +11082,6 @@ export class Think<
         }
       });
     } finally {
-      this._releaseSettledSubmissionStreams();
       this._programmaticStreamErrors.delete(requestId);
       this._submissionAbortControllers.delete(row.submission_id);
       const updated = this._readSubmission(row.submission_id);
@@ -11140,8 +11140,6 @@ export class Think<
 
   private async _recoverSubmissionsOnStart(): Promise<void> {
     this._ensureSubmissionTable();
-    // A crash after ledger settlement but before release must not leak pins.
-    this._releaseSettledSubmissionStreams();
 
     const running = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
@@ -11226,25 +11224,27 @@ export class Think<
         continue;
       }
 
-      // Legacy rows have no cutover fact; retain their exact-stream fallback.
-      // An overflow segment deliberately discarded its partial for a retry,
-      // so its completed stream is NOT an answer. Pending recovery above still
-      // takes priority, otherwise a retry stamp falls through to interruption.
+      // An error stamp survives its stream rows being reclaimed by a later
+      // turn; pending recovery above still takes priority, so it settles the
+      // ledger only once no retry remains. Legacy rows have no cutover fact;
+      // keep their exact-stream fallback. An overflow segment deliberately
+      // discarded its partial for a retry, so its completed stream is NOT an
+      // answer — without recovery a retry stamp falls through to interruption.
       const terminalStream = row.request_id
         ? this._resumableStream.latestStreamInfoForRequest(row.request_id)
         : null;
+      const errored =
+        row.result_status === "error" || terminalStream?.status === "error";
       if (
+        errored ||
         (terminalStream?.status === "completed" &&
-          row.result_status !== "retry") ||
-        terminalStream?.status === "error"
+          row.result_status !== "retry")
       ) {
         await this._completeRecoveredSubmission(
           row,
-          terminalStream.status === "completed" ? "completed" : "error",
+          errored ? "error" : "completed",
           row.request_id,
-          terminalStream.status === "completed"
-            ? null
-            : "Recovered chat stream had already errored."
+          errored ? "Recovered chat stream had already errored." : null
         );
         continue;
       }
@@ -11264,7 +11264,6 @@ export class Think<
       }
     }
 
-    this._releaseSettledSubmissionStreams();
     // Rows still pending (reverted above, or accepted before their run
     // item existed) get their run queued; queued ones keep their slot.
     await this._queuePendingSubmissionRuns();
@@ -13683,7 +13682,7 @@ export class Think<
     streamId: string,
     msg: UIMessage,
     parentId?: string,
-    options: { discard?: boolean; retain?: boolean } = {},
+    options: { discard?: boolean } = {},
     submission?: { requestId: string; result: SubmissionTurnResult }
   ): Promise<void> {
     const toPersist = this._strippedForPersist(msg);
@@ -13724,39 +13723,26 @@ export class Think<
   /**
    * Whether this turn's stream rows can go with its cutover. An agent-tool
    * child turn keeps them: the parent tails the stored chunks after the
-   * child completes (`getAgentToolChunks`). A running submission also keeps
-   * terminal stream evidence until its ledger settles: its non-retained chat
-   * Task may disappear first. Pin that evidence until ledger settlement;
-   * unlike unretained child rows, foreign turns must not reclaim it.
+   * child completes (`getAgentToolChunks`), so the rows are reclaimed by
+   * the child's next `start()` instead, as `AIChatAgent` does. A running
+   * submission needs no stream evidence: its durable outcome stamp commits
+   * in the same transaction as this cutover.
    */
-  private _streamCutoverOptions(requestId: string): {
-    discard: boolean;
-    retain?: boolean;
-  } {
-    if (this._agentToolRunsByRequestId.get(requestId))
-      return { discard: false };
-    this._ensureSubmissionTable();
-    const running = this.sql<{ submission_id: string }>`
-      SELECT submission_id FROM cf_think_submissions
-      WHERE request_id = ${requestId} AND status = 'running'
-      LIMIT 1
-    `;
-    return running.length === 0
-      ? { discard: true }
-      : { discard: false, retain: true };
+  private _streamCutoverOptions(requestId: string): { discard: boolean } {
+    return { discard: !this._agentToolRunsByRequestId.get(requestId) };
   }
 
   /** Write only inside the transaction that settles this exact request's stream. */
   private _recordSubmissionTurnResult(
     requestId: string,
-    result: SubmissionTurnResult | null
+    result: SubmissionTurnResult
   ): void {
     const row = this._readRunningSubmissionForRecovery(requestId);
     if (!row || row.request_id !== requestId) return;
     this.sql`
       UPDATE cf_think_submissions
-      SET result_status = ${result?.status ?? null},
-          output_json = ${result?.status === "completed" && result.output !== undefined ? JSON.stringify(result.output) : null}
+      SET result_status = ${result.status},
+          output_json = ${result.status === "completed" && result.output !== undefined ? JSON.stringify(result.output) : null}
       WHERE submission_id = ${row.submission_id} AND status = 'running'
     `;
   }
@@ -13768,9 +13754,7 @@ export class Think<
   ): void {
     if (this._resumableStream.pendingCutoverId === null) return;
     this.ctx.storage.transactionSync(() => {
-      this._resumableStream.finalizePending(
-        this._streamCutoverOptions(requestId)
-      );
+      this._resumableStream.finalizePending();
       this._recordSubmissionTurnResult(requestId, result);
     });
   }
@@ -13784,18 +13768,6 @@ export class Think<
       this._completeResumableStream(streamId);
       this._recordSubmissionTurnResult(requestId, { status: "retry" });
     });
-  }
-
-  /** Release pins once no running submission owns their exact request. */
-  private _releaseSettledSubmissionStreams(): void {
-    for (const stream of this._resumableStream.listRetained()) {
-      const running = this.sql<{ submission_id: string }>`
-        SELECT submission_id FROM cf_think_submissions
-        WHERE request_id = ${stream.requestId} AND status = 'running'
-        LIMIT 1
-      `;
-      if (running.length === 0) this._resumableStream.release(stream.id);
-    }
   }
 
   /**
@@ -16081,11 +16053,12 @@ export class Think<
       UPDATE cf_think_submissions
       SET status = 'error',
           error_message = ${message},
-          completed_at = ${Date.now()}
+          completed_at = ${Date.now()},
+          result_status = NULL,
+          output_json = NULL
       WHERE submission_id = ${row.submission_id}
         AND status = 'running'
     `;
-    this._releaseSettledSubmissionStreams();
     const updated = this._readSubmission(row.submission_id);
     if (updated?.status === "error") {
       this._enqueueTerminalWorkflowNotification(updated);
@@ -16113,6 +16086,11 @@ export class Think<
       if (status === "completed" && row.output_json !== null) {
         output = JSON.parse(row.output_json);
       }
+    } else if (row.result_status === "error" && status === "completed") {
+      // A stamped stream error contradicts inferred success: no later cutover
+      // replaced the stamp, so the turn never durably produced an answer.
+      status = "error";
+      errorMessage = "Recovered chat stream had already errored.";
     } else if (row.result_status === "retry" && status === "completed") {
       // A retry segment is not a terminal result. If durable recovery still
       // owns the work leave it running; otherwise use the interruption path.
@@ -16152,7 +16130,6 @@ export class Think<
         output
       );
     });
-    this._releaseSettledSubmissionStreams();
     const updated = this._readSubmission(row.submission_id);
     if (updated && this._isTerminalSubmissionStatus(updated.status)) {
       await this._emitSubmissionStatus(updated);
@@ -16907,13 +16884,14 @@ export class Think<
   /** Mark a resumable stream errored. */
   protected _errorResumableStream(streamId: string, requestId?: string): void {
     this.ctx.storage.transactionSync(() => {
-      this._resumableStream.markError(
-        streamId,
-        requestId ? this._streamCutoverOptions(requestId) : undefined
-      );
-      // Errored streams retain their existing recovery path, never a completed
-      // stamp from an earlier segment. An error also supersedes a retry stamp.
-      if (requestId) this._recordSubmissionTurnResult(requestId, null);
+      this._resumableStream.markError(streamId);
+      // An error stamp is not necessarily terminal — recovery may retry the
+      // turn (startup gives pending recovery priority). It supersedes any
+      // completed or retry stamp from an earlier segment, and it survives
+      // this errored stream's rows being reclaimed by a later turn.
+      if (requestId) {
+        this._recordSubmissionTurnResult(requestId, { status: "error" });
+      }
     });
   }
 
