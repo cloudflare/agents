@@ -8,6 +8,12 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { Agent, callable, routeAgentRequest } from "agents";
 import type { FiberContext } from "agents";
+import {
+  CHAT_RECOVERY_TASK_NAME,
+  createChatFiberSnapshot,
+  wrapChatFiberSnapshot
+} from "agents/chat";
+import type { ResumableStream } from "agents/chat";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
@@ -37,6 +43,7 @@ import type {
   ChatErrorContext,
   ChatRecoveryContext,
   ChatRecoveryOptions,
+  ChatResponseResult,
   StreamCallback,
   ThinkSubmissionInspection,
   TurnConfig,
@@ -1677,12 +1684,20 @@ export class ThinkContextOverflowE2EAgent extends Think<Env> {
 // The recoverable case uses a genuine in-flight submission + mid-stream SIGKILL.
 
 const SUBMISSION_STATUS_LOG_KEY = "test:submission-status-log";
+const SUBMISSION_RESPONSE_LOG_KEY = "test:submission-response-log";
+const SUBMISSION_FORCE_STABLE_TIMEOUT_KEY =
+  "test:submission-force-stable-timeout";
 
 export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
+  private _pauseSubmissionAtCutover = false;
+  private _submissionAtCutover = false;
+  private _structuredSubmission = false;
 
   override getModel(): LanguageModel {
-    return createSlowE2EMockModel();
+    return this._structuredSubmission
+      ? createStructuredGreetingModel(1)
+      : createSlowE2EMockModel();
   }
 
   override getSystemPrompt(): string {
@@ -1694,6 +1709,18 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     return { continue: true };
   }
 
+  protected override async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    if (
+      await this.ctx.storage.get<boolean>(SUBMISSION_FORCE_STABLE_TIMEOUT_KEY)
+    ) {
+      await this.ctx.storage.delete(SUBMISSION_FORCE_STABLE_TIMEOUT_KEY);
+      return false;
+    }
+    return super.waitUntilStable(options);
+  }
+
   // Record every submission status transition so a test can assert the
   // recovery transition even if a later drain advances the row again.
   override async onSubmissionStatus(
@@ -1703,6 +1730,134 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
       (await this.ctx.storage.get<string[]>(SUBMISSION_STATUS_LOG_KEY)) ?? [];
     log.push(`${submission.submissionId}:${submission.status}`);
     await this.ctx.storage.put(SUBMISSION_STATUS_LOG_KEY, log);
+  }
+
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+    const log =
+      (await this.ctx.storage.get<string[]>(SUBMISSION_RESPONSE_LOG_KEY)) ?? [];
+    log.push(result.requestId);
+    await this.ctx.storage.put(SUBMISSION_RESPONSE_LOG_KEY, log);
+    if (this._pauseSubmissionAtCutover) {
+      this._submissionAtCutover = true;
+      // Real turn cutover, before _executeSubmission receives its result.
+      // SIGKILL is the only release: no ledger write can race the test.
+      await new Promise<void>(() => {});
+    }
+  }
+
+  override async sendWorkflowEvent(
+    _workflowName: string & {},
+    _workflowId: string,
+    event: { type: string; payload?: unknown }
+  ): Promise<void> {
+    const events =
+      (await this.ctx.storage.get<unknown[]>(
+        "test:submission-workflow-events"
+      )) ?? [];
+    events.push(event.payload);
+    await this.ctx.storage.put("test:submission-workflow-events", events);
+  }
+
+  /** Run the actual submission cutover on either the root or a real facet. */
+  @callable()
+  async startSubmissionAtCutover(
+    submissionId: string,
+    mode: "abort" | "output",
+    facet = false
+  ): Promise<void> {
+    if (facet) {
+      const child = await this.subAgent(
+        ThinkSubmissionRecoveryE2EAgent,
+        "cutover-facet"
+      );
+      await child.startSubmissionAtCutover(submissionId, mode);
+      return;
+    }
+    this._pauseSubmissionAtCutover = true;
+    this._structuredSubmission = mode === "output";
+    await this.submitMessages(
+      [
+        {
+          id: `user-${submissionId}`,
+          role: "user",
+          parts: [{ type: "text", text: "Produce the terminal result" }]
+        }
+      ],
+      {
+        submissionId,
+        metadata: {
+          __thinkWorkflowPrompt: {
+            workflow: {
+              name: "TEST_WORKFLOW",
+              id: submissionId,
+              stepName: "result",
+              eventType: "result"
+            },
+            ...(mode === "output"
+              ? {
+                  output: {
+                    schema: {
+                      type: "object",
+                      properties: { greeting: { type: "string" } },
+                      required: ["greeting"],
+                      additionalProperties: false
+                    }
+                  }
+                }
+              : {})
+          }
+        }
+      }
+    );
+    if (mode === "abort") {
+      // Wait for actual streamed content so abort exercises message cutover,
+      // not only the no-parts settlement covered by the Workers regression.
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const stream =
+          this._resumableStream.latestActiveStreamInfoForRequest(submissionId);
+        if (
+          stream &&
+          this._resumableStream.getStreamChunks(stream.id).length > 2
+        ) {
+          this.abortRequest(submissionId);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(
+        "Submission cutover abort never reached streamed content"
+      );
+    }
+  }
+
+  @callable()
+  async inspectSubmissionCutover(
+    submissionId: string,
+    facet = false
+  ): Promise<{
+    paused: boolean;
+    status: string | null;
+    events: unknown[];
+    assistantMessages: number;
+  }> {
+    if (facet) {
+      const child = await this.subAgent(
+        ThinkSubmissionRecoveryE2EAgent,
+        "cutover-facet"
+      );
+      return child.inspectSubmissionCutover(submissionId);
+    }
+    return {
+      paused: this._submissionAtCutover,
+      status: (await this.inspectSubmission(submissionId))?.status ?? null,
+      events:
+        (await this.ctx.storage.get<unknown[]>(
+          "test:submission-workflow-events"
+        )) ?? [],
+      assistantMessages: (await this.getMessages()).filter(
+        (message) => message.role === "assistant"
+      ).length
+    };
   }
 
   @callable()
@@ -1757,6 +1912,168 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     `;
   }
 
+  /**
+   * Seed an inert interrupted submission before any model attempt exists. The
+   * next startup runs real chat classification over its user leaf and empty
+   * opened stream, then production schedules the recovered retry.
+   */
+  @callable()
+  async seedRecoverableEmptySubmission(submissionId: string): Promise<void> {
+    await this.inspectSubmission(submissionId);
+    const now = Date.now();
+    const userMessage: UIMessage = {
+      id: `user-${submissionId}`,
+      role: "user",
+      parts: [{ type: "text", text: "Recover this empty opened stream" }]
+    };
+    await this.session.appendMessage(userMessage);
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      ) VALUES (
+        ${submissionId}, NULL, ${submissionId}, NULL, 'running',
+        ${JSON.stringify([userMessage])}, NULL, NULL, ${now},
+        ${now}, ${now}, NULL
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (
+        ${`stream-${submissionId}`}, 'streaming', ${submissionId},
+        ${JSON.stringify({ cfChat: 1 })}, 0, ${now}, ${now}, NULL
+      )
+    `;
+
+    const snapshot = createChatFiberSnapshot({
+      kind: "think-chat-turn",
+      requestId: submissionId,
+      recoveryRootRequestId: submissionId,
+      continuation: false,
+      messages: [userMessage]
+    });
+    const wrapped = wrapChatFiberSnapshot(
+      "__cfThinkChatFiberSnapshot",
+      snapshot,
+      null
+    );
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (
+        ${`fiber-${submissionId}`},
+        ${`${ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME}:${submissionId}`},
+        ${JSON.stringify(wrapped)},
+        ${now}
+      )
+    `;
+    await this.ctx.storage.put(SUBMISSION_FORCE_STABLE_TIMEOUT_KEY, true);
+  }
+
+  private _submissionBookkeepingPaused = false;
+
+  /** Start a real recovery Task and park only its post-turn incident write. */
+  @callable()
+  async startRecoveryAtLedgerGap(submissionId: string): Promise<void> {
+    await this.seedRunningSubmission(submissionId, submissionId, true);
+    const userMessage: UIMessage = {
+      id: `user-${submissionId}`,
+      role: "user",
+      parts: [{ type: "text", text: "Recover before the ledger settles" }]
+    };
+    await this.session.appendMessage(userMessage);
+    const incidentId = `incident-${submissionId}`;
+    // SAFETY: this inert e2e fixture intercepts the existing bookkeeping seam;
+    // Tasks, inference, cutover, submission settlement, and restart stay real.
+    const internals = this as unknown as {
+      _updateChatRecoveryIncident(
+        id: string | undefined,
+        status: string,
+        reason?: string
+      ): Promise<void>;
+      _enqueueChatRecovery(
+        callback: "_chatRecoveryRetry",
+        data: Record<string, unknown>,
+        reason: "initial",
+        delay: number
+      ): Promise<void>;
+    };
+    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
+    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+      if (id === incidentId && status === "completed") {
+        this._submissionBookkeepingPaused = true;
+        // The test kills this process at the barrier; there is no live release.
+        await new Promise<void>(() => {});
+      }
+      return updateIncident(id, status, reason);
+    };
+    await internals._enqueueChatRecovery(
+      "_chatRecoveryRetry",
+      {
+        incidentId,
+        originalRequestId: submissionId,
+        recoveredRequestId: submissionId,
+        targetUserId: userMessage.id
+      },
+      "initial",
+      0
+    );
+  }
+
+  /** Observe the barrier only once both predecessor and successor Tasks are gone. */
+  @callable()
+  async isRecoveryAtLedgerGap(): Promise<boolean> {
+    const runs = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN (${CHAT_RECOVERY_TASK_NAME}, ${ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME})
+    `;
+    return this._submissionBookkeepingPaused && runs[0]?.count === 0;
+  }
+
+  /** Starting a foreign stream runs real reclaim before inspecting the evidence. */
+  @callable()
+  async reclaimDuringSubmissionGap(submissionId: string): Promise<{
+    streamStatus: string | null;
+    resultStatus: string | null;
+  }> {
+    const submission = await this.inspectSubmission(submissionId);
+    // SAFETY: the fixture uses the host's existing adapter, not synthetic SQL cleanup.
+    const { _resumableStream: stream } = this as unknown as {
+      _resumableStream: ResumableStream;
+    };
+    const foreign = stream.start(crypto.randomUUID());
+    stream.complete(foreign);
+    return {
+      streamStatus: submission?.requestId
+        ? (stream.latestStreamInfoForRequest(submission.requestId)?.status ??
+          null)
+        : null,
+      resultStatus:
+        this.sql<{ result_status: string | null }>`
+          SELECT result_status FROM cf_think_submissions
+          WHERE submission_id = ${submissionId}
+          LIMIT 1
+        `[0]?.result_status ?? null
+    };
+  }
+
+  /** Report a production-scheduled retry parked in its durable backoff. */
+  @callable()
+  async hasWaitingRecoveryRetry(submissionId: string): Promise<boolean> {
+    const runs = await this.tasks.list({
+      definition: CHAT_RECOVERY_TASK_NAME,
+      status: ["waiting"],
+      limit: Number.MAX_SAFE_INTEGER
+    });
+    return runs.some(
+      (run) =>
+        run.metadata?.callback === "_chatRecoveryRetry" &&
+        typeof run.metadata.incidentId === "string" &&
+        run.metadata.recoveredRequestId === submissionId
+    );
+  }
+
   @callable()
   async getSubmission(
     submissionId: string
@@ -1775,6 +2092,25 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   @callable()
   async getMessageCount(): Promise<number> {
     return this.messages.length;
+  }
+
+  @callable()
+  async getRecoveryOutcome(): Promise<{
+    userMessages: number;
+    assistantMessages: number;
+    responseCount: number;
+  }> {
+    const messages = await this.getMessages();
+    const responseLog =
+      (await this.ctx.storage.get<string[]>(SUBMISSION_RESPONSE_LOG_KEY)) ?? [];
+    return {
+      userMessages: messages.filter((message) => message.role === "user")
+        .length,
+      assistantMessages: messages.filter(
+        (message) => message.role === "assistant"
+      ).length,
+      responseCount: responseLog.length
+    };
   }
 
   @callable()
