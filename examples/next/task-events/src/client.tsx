@@ -30,6 +30,11 @@ import "./styles.css";
 
 const STORAGE_KEY = "next-task-events-session-v1";
 const MAX_NOTES = 10;
+const NOTE_PRESETS = [
+  "Lead with the mailbox guarantee.",
+  "Mention that consumption is replay-safe.",
+  "Call out that receipts confirm durable acceptance."
+];
 const TERMINAL_STATES = new Set(["completed", "failed", "cancelled"]);
 
 type QueuedNote = {
@@ -468,13 +473,12 @@ function App() {
     }
   };
 
-  const sendNote = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const sendNote = async (text: string) => {
     const runId = session.activeRunId;
     if (!agent.identified || !runId || operation) return;
 
     const attempt = session.pendingNote ?? {
-      text: note.trim(),
+      text: text.trim(),
       deliveryId: crypto.randomUUID()
     };
     if (!attempt.text) return;
@@ -504,7 +508,7 @@ function App() {
               }
             ]
       }));
-      setNote("");
+      setNote((current) => (current.trim() === attempt.text ? "" : current));
       setNotice(
         receipt.accepted
           ? "Note durably accepted into the run mailbox."
@@ -939,7 +943,36 @@ function App() {
               />
             ) : (
               <div className="space-y-5">
-                <form onSubmit={(event) => void sendNote(event)}>
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void sendNote(note);
+                  }}
+                >
+                  <fieldset className="mb-4">
+                    <legend className="mb-2 text-xs font-medium text-kumo-subtle">
+                      Quick notes
+                    </legend>
+                    <div className="flex flex-wrap gap-2">
+                      {NOTE_PRESETS.map((preset) => (
+                        <Button
+                          key={preset}
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={
+                            !agent.identified ||
+                            notesLocked ||
+                            session.pendingNote !== null ||
+                            operation !== null
+                          }
+                          onClick={() => void sendNote(preset)}
+                        >
+                          {preset}
+                        </Button>
+                      ))}
+                    </div>
+                  </fieldset>
                   <label htmlFor="mailbox-note">
                     <span className="mb-1 block text-xs font-medium text-kumo-subtle">
                       Note for later review
