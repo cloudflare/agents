@@ -28,6 +28,7 @@ const runtime = createCodemodeRuntime({
 | `runtime.search(query)` / `runtime.describe(target)` | Search connector methods and snippets, then fetch one target's on-demand TypeScript documentation                                          |
 | `runtime.pending(executionId?)`                      | Actions awaiting approval — drives approval UIs; no id aggregates all paused runs                                                          |
 | `runtime.approve({ executionId })`                   | Approve the pending action and continue via replay                                                                                         |
+| `runtime.resolve({ executionId, seq, result })`      | Supply a [client-resolved](./approvals.md#client-resolved-tools) call's result and continue via replay                                     |
 | `runtime.reject({ seq, executionId })`               | Reject a pending action; ends the execution. Returns `false` if it was a no-op (action no longer pending — approved or rejected elsewhere) |
 | `runtime.rollback({ executionId })`                  | Revert applied actions in reverse order via each tool's `revert`                                                                           |
 | `runtime.expirePaused({ maxAgeMs? })`                | Expire stale awaiting-approval runs and reclaim their resources                                                                            |
@@ -148,6 +149,7 @@ type ToolLogEntry = {
   args: unknown;
   result?: unknown; // recorded for replay (never for ephemeral entries)
   requiresApproval: boolean;
+  resolution?: "approval" | "client"; // how a pending entry is satisfied
   ephemeral?: boolean; // replay: "reexecute" — re-runs instead of replaying
   state: "executing" | "applied" | "pending" | "reverted";
 };
