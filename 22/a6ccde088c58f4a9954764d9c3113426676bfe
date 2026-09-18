@@ -1,0 +1,19 @@
+examples/next/task-events/src/client.tsx
+  s_c7ee88e60679f4::t_8a729dca12d6ea 33-37,476,481,511,946-975
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "22a6ccde088c58f4a9954764d9c3113426676bfe",
+  "prompts": {},
+  "sessions": {
+    "s_c7ee88e60679f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f60372b05ffeIpWNJ3GaQ16767",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}
