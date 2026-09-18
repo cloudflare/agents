@@ -1,5 +1,13 @@
 # @cloudflare/worker-bundler
 
+## 0.2.4
+
+### Patch Changes
+
+- [#2288](https://github.com/cloudflare/agents/pull/2288) [`9efee5f`](https://github.com/cloudflare/agents/commit/9efee5f0c23d6a217fe4ba5e73c078e64e9cd28c) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Raise the `smol-toml` floor to ^1.7.2, picking up the fix for a
+  high-severity denial of service via malformed TOML (patched upstream
+  in 1.7.1).
+
 ## 0.2.3
 
 ### Patch Changes
