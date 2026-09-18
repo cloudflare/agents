@@ -65,13 +65,16 @@ export type ChatProtocolEvent =
  * ```
  */
 export function parseProtocolMessage(raw: string): ChatProtocolEvent | null {
-  let data: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    data = JSON.parse(raw) as Record<string, unknown>;
+    parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const data = parsed as Record<string, unknown>;
   const wireType = data.type as string | undefined;
   if (!wireType) return null;
 
