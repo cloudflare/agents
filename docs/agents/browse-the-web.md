@@ -419,6 +419,24 @@ const connector = new BrowserConnector(this.ctx, {
 });
 ```
 
+You can also manage Browser Rendering sessions directly. `createBrowserSession` accepts [hostname guardrails](https://developers.cloudflare.com/browser-run/features/guardrails/) that restrict which domains the session may reach — fixed at launch for every connection to the session, including Live View (not supported with Kitesurf):
+
+```ts
+import { createBrowserSession, connectBrowserSession } from "agents/browser";
+
+const { sessionId } = await createBrowserSession(this.env.BROWSER, {
+  guardrails: { allowedDomains: ["example.com", "*.example.com"] }
+});
+
+// Connect (and reconnect) without deleting the session on close:
+const session = await connectBrowserSession(this.env.BROWSER, sessionId, {
+  timeoutMs: 30_000,
+  onClose: () => {
+    /* the CDP socket closed; the session itself stays alive */
+  }
+});
+```
+
 ## Local development
 
 Recent Wrangler releases support Browser Rendering in local development. `npx wrangler dev` provisions the browser automatically, so the same `browser: env.BROWSER` setup works locally and when deployed.

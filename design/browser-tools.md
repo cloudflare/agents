@@ -2,6 +2,8 @@
 
 **Status:** experimental (`agents/browser`)
 
+> A typed interaction layer (accessibility snapshots, element refs, verbs, named sessions, a `BrowserSessions` lifecycle capability) is being built alongside this connector — see [browser-interaction.md](./browser-interaction.md). It is an internal experiment: the verb surface ships publicly only if evaluations prove it beats raw CDP alone. Everything below is the shipping surface.
+
 ## Problem
 
 Agents need full Chrome DevTools Protocol access — navigation, DOM reads, screenshots, network inspection — without shipping a generated protocol bundle, without handing LLM-generated code a raw network capability, and with browser sessions that survive the pauses a durable agent naturally takes (approvals, hibernation, long waits).
