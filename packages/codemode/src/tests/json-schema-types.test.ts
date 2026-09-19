@@ -8,6 +8,7 @@
  * double as documentation for the output format.
  */
 import { describe, it, expect } from "vitest";
+import type { JSONSchema7Definition } from "json-schema";
 import {
   generateTypesFromJsonSchema,
   jsonSchemaToType
@@ -106,11 +107,100 @@ describe("jsonSchemaToType", () => {
     expect(result).toBe(
       [
         "type DataInput = {",
-        "    tags?: string[];",
-        "    scores?: number[];",
+        "    tags?: Array<string>;",
+        "    scores?: Array<number>;",
         "}"
       ].join("\n")
     );
+  });
+
+  it.each<{
+    name: string;
+    items: JSONSchema7Definition;
+    expected: string;
+  }>([
+    {
+      name: "type arrays",
+      items: { type: ["string", "null"] },
+      expected: "string | null"
+    },
+    {
+      name: "anyOf unions",
+      items: { anyOf: [{ type: "string" }, { type: "null" }] },
+      expected: "string | null"
+    },
+    {
+      name: "oneOf unions",
+      items: { oneOf: [{ type: "string" }, { type: "number" }] },
+      expected: "string | number"
+    },
+    {
+      name: "enums",
+      items: { enum: ["active", "inactive"] },
+      expected: '"active" | "inactive"'
+    },
+    {
+      name: "allOf intersections",
+      items: {
+        allOf: [
+          {
+            type: "object",
+            properties: { id: { type: "string" } },
+            required: ["id"]
+          },
+          {
+            type: "object",
+            properties: { name: { type: "string" } },
+            required: ["name"]
+          }
+        ]
+      },
+      expected: "{\n    id: string;\n} & {\n    name: string;\n}"
+    }
+  ])("preserves array item grouping for $name", ({ items, expected }) => {
+    expect(jsonSchemaToType({ type: "array", items }, "Items")).toBe(
+      `type Items = Array<${expected}>`
+    );
+  });
+
+  it("preserves nullable items resolved through a reference", () => {
+    const result = jsonSchemaToType(
+      {
+        type: "array",
+        items: { $ref: "#/definitions/Item" },
+        definitions: { Item: { type: ["string", "null"] } }
+      },
+      "Items"
+    );
+
+    expect(result).toBe("type Items = Array<string | null>");
+  });
+
+  it("preserves OpenAPI nullable items in a nullable array", () => {
+    const schema = {
+      type: "array" as const,
+      nullable: true,
+      items: { type: "string" as const, nullable: true }
+    };
+
+    expect(jsonSchemaToType(schema, "Items")).toBe(
+      "type Items = Array<string | null> | null"
+    );
+  });
+
+  it("preserves union items in nested arrays", () => {
+    const result = jsonSchemaToType(
+      {
+        type: "array",
+        items: {
+          type: "array",
+          items: { anyOf: [{ type: "string" }, { type: "null" }] }
+        }
+      },
+      "Rows"
+    );
+
+    expect(result).toBe("type Rows = Array<Array<string | null>>");
   });
 
   it("converts a bare string schema", () => {
@@ -261,6 +351,19 @@ describe("generateTypesFromJsonSchema", () => {
     );
   });
 
+  it("preserves nullable array items in tool inputs and outputs", () => {
+    const schema = {
+      type: "array" as const,
+      items: { anyOf: [{ type: "string" as const }, { type: "null" as const }] }
+    };
+    const result = generateTypesFromJsonSchema({
+      echo: { inputSchema: schema, outputSchema: schema }
+    });
+
+    expect(result).toContain("type EchoInput = Array<string | null>");
+    expect(result).toContain("type EchoOutput = Array<string | null>");
+  });
+
   it("handles an empty tool set", () => {
     expect(generateTypesFromJsonSchema({})).toBe("declare const codemode: {}");
   });
@@ -327,7 +430,7 @@ describe("generateTypesFromJsonSchema", () => {
         "    /** Issue body */",
         "    body?: string;",
         "    /** Labels to add */",
-        "    labels?: string[];",
+        "    labels?: Array<string>;",
         "}",
         "type CreateIssueOutput = unknown",
         "type ListIssuesInput = {",

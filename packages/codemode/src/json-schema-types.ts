@@ -175,7 +175,7 @@ export function jsonSchemaToTypeString(
 
       if (schema.items) {
         const itemType = jsonSchemaToTypeString(schema.items, indent, nextCtx);
-        return applyNullable(`${itemType}[]`, schema);
+        return applyNullable(`Array<${itemType}>`, schema);
       }
       return applyNullable("unknown[]", schema);
     }

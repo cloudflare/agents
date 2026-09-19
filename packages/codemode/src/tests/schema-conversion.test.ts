@@ -131,7 +131,7 @@ describe("basic types", () => {
       })
     },
     (result) => {
-      expect(result).toContain("tags?: string[];");
+      expect(result).toContain("tags?: Array<string>;");
     },
     { description: "Search" }
   );
