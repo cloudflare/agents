@@ -397,9 +397,13 @@ data argument); `awaitAnswers` → `answers` parks, `peekAnswers` does not
 - **No `forkWith`.** Background work is `spawn` or a stream; an
   un-awaited promise is not durable across eviction, and a second commit
   path makes invariant 5 unenforceable.
-- **Per-effect `compensate` on `do` is v2.** It needs a compensation
-  graph and an ordering model; the effect sandwich (commit intent →
-  effect → commit outcome) is expressible today.
+- **Per-effect `compensate` on `do` ships**, with the narrowest model
+  that is still correct: the inline default (§6.4) replays the current
+  turn's journal in a fresh, fenced invocation to collect the
+  compensations of completed steps, runs them newest first, each bounded
+  by its step's timeout, and records each success on the journal row so
+  an interrupted pass never repeats one. No graph: the order is the
+  journal's, and the effect sandwich stays the idiom for anything else.
 - **Mailbox `kind` is a free string**, with the payload typed by the
   `Mailbox` generic — a closed kind union would be a second naming space
   to keep in sync between `send` and `receive`.
@@ -477,8 +481,8 @@ Already decided by the maintainer, and not reopened by this RFC:
   `answers`; both `ctx.join` and `receive({ kind: "child" })`;
   `tasks.at(name, runId)` beside `handle(name)` and `run()`'s
   `TaskReceipt`; `terminate` / `pause` / `resume`, no `drain`, no `kill`;
-  `ctx.stream(name?)` → `StreamWriter`; no `forkWith`; `compensate`
-  deferred to v2; free-string mailbox `kind`; `ctx.aborted(reason?)`;
+  `ctx.stream(name?)` → `StreamWriter`; no `forkWith`; per-effect
+  `compensate` on `do`; free-string mailbox `kind`; `ctx.aborted(reason?)`;
   progress Rule A **and** Rule B (`transitionBudget`, default 1000,
   `TaskTransitionBudgetError`, `outcome: "faulted"`, one `transitions`
   column); typed asks via `defineAsk` / `AskKind` / `Pending<A>`;
@@ -1880,6 +1884,9 @@ CREATE TABLE IF NOT EXISTS cf_agents_task_routes (
   owner_path_key TEXT NOT NULL,
   parent_run_id TEXT,
   parent_owner_key TEXT,
+  definition TEXT,
+  background INTEGER NOT NULL DEFAULT 0,
+  settled_at INTEGER,
   created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS cf_agents_task_routes_owner  ON cf_agents_task_routes (owner_path_key);
@@ -1898,9 +1905,18 @@ mirror is _deleted_ and the root would lose every record of which facet
 owns it — breaking `tasks.answer(askId)` and `tasks.send(runId, …)` at
 the root, which is exactly where approvals arrive.
 
-The route row is written at accept and deleted at settle or subtree
-cleanup. It exists only for **routed** runs; a root-local run pays
-nothing. Both indexes are on columns written once at insert, and the
+The route row is written at accept and deleted when the run row is
+deleted — both ride the wake-sync message the owner already sends at
+those moments, so neither costs a round-trip of its own — or at subtree
+cleanup. It exists only for **routed** runs; a root-local run
+pays nothing. The same table on a **parent's** Lifecycle holds the
+children it spawned elsewhere (`parent_run_id` set, `definition` and
+`background` for the view, `settled_at` once the note arrived): what the
+cascade, `terminate`, `view().children` and a forwarded verb resolve
+through without a root round-trip. Any verb that misses locally —
+`get`, `view`, `send`, `withdraw`, `answer`, `withdrawAsk`, `cancel`,
+`terminate`, `pause`, `resume` — consults the table and forwards to the
+owner; an owner that is gone drops the stale row. Both indexes are on columns written once at insert, and the
 parent one is partial for the reason §4.1 gives: a route row for a
 top-level run carries a NULL parent, and an index entry for it would be
 one more billed row write per accept for nothing.
@@ -2235,17 +2251,26 @@ type TaskRouteMessage =
   | { type: "syncWake"; runId: string; next: number | null } // existing
   | { type: "dispatch"; runId: string } // existing
   | { type: "memoryLimit"; runId: string; context: MemoryLimitContext } // existing
-  | { type: "mailboxPush"; runId: string; item: TaskMailboxWire } // new
-  | { type: "answer"; askId: string; answer: TaskJson } // new
-  | { type: "childSettled"; parentRunId: string; child: TaskChildWire } // new
-  | {
-      type: "abortCascade";
-      runId: string;
-      mark: TaskAbortMark;
-      reason?: string;
-    } // new
-  | { type: "view"; runId: string }; // new
+  // the accept's wake sync carries the facts the root indexes (§4.5); a
+  // delete's carries `gone: true`
+  | { type: "syncWake"; runId; next; route?: { definition; background; parentRunId; parentOwnerKey }; gone?: true }
+  // a parent asks another Lifecycle to accept its child (§10.1)
+  | { type: "spawn"; definition; input; options; parent: { runId; notify; ownerKey } }
+  // a routed child settled; the root delivers or relays the note
+  | { type: "childSettled"; parentRunId: string; note: TaskChildNote }
+  // sibling subtrees reach each other only through the root
+  | { type: "relay"; target: LifecycleRouteAddress; message: TaskRouteMessage }
+  // every verb a Lifecycle forwards to a run's owner, typed per verb
+  | { type: "verb"; verb: "get" | "view" | "send" | "withdraw" | "cancel"
+        | "terminate" | "pause" | "resume" | "abort" | "answer" | "withdrawAsk";
+      args: [...] };
 ```
+
+`sendEvent` rides `send`; the cascade is the `abort` verb, one per
+routed child; `answer` carries the ask kind's name, since an `AskKind`
+is `{ name }` at runtime. The owner returns `{ result }` so a bare
+`false` — the transport's answer for a sub-agent that no longer exists —
+is distinguishable from a verb that returned false.
 
 **The owner of the target run always writes the row.** A routed
 `mailboxPush` carries the payload; the owner's `Tasks` executes the same
@@ -2426,20 +2451,42 @@ cancel(runId, reason?, options?: { wait?: boolean }): Promise<boolean>
 ### 6.4 The inline default
 
 A definition with **no declared `onCancel`** — which is every function
-definition and every machine that does not opt in — gets today's
-behaviour verbatim:
+definition and every machine that does not opt in — takes the inline
+default: **compensate, then settle by the mark.**
 
-- a **parked** run settles in one write inside `cancel()`
-  (`#settleCancelled`, `tasks.ts:975-1000`);
-- a **live** run has its signal aborted and settles at its next step
-  boundary (`ReplayStep.#enterStep` throws `TaskCancellation`).
+- a **parked** run is compensated and settled inside `cancel()`; with no
+  completed step in the current turn there is no pass and it is one
+  write (`#settleCancelled`);
+- a **live** run has its signal aborted and is not joined: the
+  compensation pass claims a fresh generation, which fences everything
+  the old invocation still tries to write, and a step boundary that sees
+  the mark simply unwinds (`ReplayStep.#enterStep` throws
+  `TaskCancellation`; `#afterAttempt` hands the run to the protocol).
 
-This is not a convenience: `capability.test.ts:641-659` reads
+The compensation pass (`#compensateAndSettle` → `#runCompensation`)
+replays the current turn's journal in a fresh invocation with
+`compensating: true`: completed `do` ground returns its journaled result
+and registers the step's `compensate` (unless the row already carries
+`compensated_at`); the first ground the attempt never completed —
+missing, running, waiting or failed `do`, a pending sleep, event, receive,
+answers or join — ends the walk with a `CompensationBoundary`. The walk
+executes no step, so it takes microseconds unless the handler awaits
+outside a step; it is bounded by the step timeout, after which the pass
+runs with what it collected. Compensations run newest first, each bounded
+by its step's timeout; a failure or timeout is recorded
+(`task:step:compensation-failed`) and the rest still run; each success
+writes `compensated_at` on the journal row, so a pass that dies part-way
+resumes without repeating one. The pass is non-reentrant, it is never
+signalled by a later mark, and the run's deadline is not enforced over it
+— a standing mark has applied the deadline already, so `#nextWake` and
+`#enforceDeadline` ignore `deadline_at` once one stands. The turn watchdog
+over a hung `onCancel` takes the same path: join (bounded), then the
+inline default. `terminate()` runs no compensation.
+
+This preserves the existing contract: `capability.test.ts` reads
 `await tasks.get()` synchronously after `await cancel()` and expects
-`state === "cancelled"` plus a second `cancel()` returning `false`. An
-asynchronously dispatched handler would fail it. The fresh-invocation
-protocol is opt-in precisely so the existing contract is preserved by
-construction.
+`state === "cancelled"` plus a second `cancel()` returning `false`, and
+it still does — the pass runs inside `cancel()`.
 
 The inline default for each mark: `cancel` ⇒ `cancelled`; `deadline` ⇒
 `failed` + `TaskDeadlineExceededError`; `turn-deadline` ⇒ `failed` +
@@ -2787,8 +2834,13 @@ that correlation.
 `ctx.spawn(definition, input, options)` accepts a run of `definition`
 with `parent_run_id` set to this run, `parent_owner_key` set when the
 parent lives on a facet, plus `background` and `notify`. Cross-facet
-spawn passes `options.owner`; the child is accepted on that Lifecycle and
-a route row is written on the root.
+spawn passes `options.owner`; the child is accepted on that Lifecycle
+(one routed `spawn` message: directly to a descendant, through the root
+otherwise), which indexes it on the root as it does every run it
+accepts, and the parent keeps its own route row for the child. The
+child's `parent_owner_key` is the parent Lifecycle's key (`""` for the
+root); its settlement note goes to the root, which delivers it to its
+own run or relays it to the parent's owner.
 
 A child's `runId` should be **derived from durable state**, not from a
 call counter: ``runId: `tool:${call.id}` `` or `` `child:${s.turnSeq}:${i}` ``. A counter-derived id is stable only if the
@@ -3188,24 +3240,23 @@ journal (`continuation` completed ⇒ settle, do not re-dispatch) first.
 
 ## 13. Deliberately out of scope for v1
 
-| Not shipping                                                                                  | Why                                                                                                                                                                                                                |
-| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `WorkflowInstance.restart({ from })`                                                          | needs a rewindable journal; we deliberately retire the journal at every checkpoint change, which is what caps a long-lived actor's storage                                                                         |
-| Step rollback / per-effect `compensate` (`WorkflowStepRollbackOptions`, workers-types :15465) | needs a compensation graph and an ordering model; the effect sandwich (commit intent → effect → commit outcome) is the supported idiom, expressible today. v2                                                      |
-| `WorkflowStepConfig.sensitive: "output"`                                                      | needs storage-level redaction across journal, view and events                                                                                                                                                      |
-| `WorkflowDelayFunction` dynamic delays (:15398)                                               | a durable park must compute its wake time without running user code at wake                                                                                                                                        |
-| `WorkflowStepContext.step.count` (:15437-15440)                                               | per-name occurrence counting; loop steps take a stable suffix, as `DuplicateTaskStepError`'s message already advises. This also closes `restart({from})` permanently, since `count` addressing is its prerequisite |
-| `waitForCompletion` on `run()`                                                                | acceptance is durable and asynchronous by design; `watch` + `view` is the await                                                                                                                                    |
-| `watch({ from })` resumable cursor                                                            | needs a durable change log = one write per change on the hottest paths                                                                                                                                             |
-| `ctx.forkWith(state, effect)`                                                                 | an un-awaited promise is not durable, and a second commit path breaks invariant 5; background work is `spawn` or a stream                                                                                          |
-| A `drain()` verb                                                                              | `pause()` already means "stop at the next boundary and keep the checkpoint"                                                                                                                                        |
-| A `kill()` verb                                                                               | `terminate()` is the Workflows name for the same tier                                                                                                                                                              |
-| Cross-object / cross-Worker orchestration                                                     | a run's storage lives where it was accepted; cross-object is Workflows' job                                                                                                                                        |
-| Automatic checkpoint compaction or a size heuristic                                           | §4.7 fails loudly instead; an automatic heuristic would hide a growing state until it was expensive                                                                                                                |
-| An ask spill table (asks beyond N move out of the checkpoint)                                 | the 256 KiB cap plus per-batch expiry is the bound for v1; revisit if a real consumer parks thousands of open asks                                                                                                 |
-| CRDT / multi-writer mailbox merge                                                             | `receiveAll` + a handler fold is sufficient and explicit                                                                                                                                                           |
-| A static transition graph (`toMermaid()`, `getNextTransitions()`, model-based testing)        | code per state has no declarative graph to read; annotating a handler's return recovers part of it at zero cost (§2.8)                                                                                             |
-| Making a missing `satisfies` a compile error                                                  | probe 5 shows the parameterless case degrades silently; making it loud requires a constraint that rejects every concrete machine (probes 2 and 3). The lint rule is the answer                                     |
+| Not shipping                                                                           | Why                                                                                                                                                                                                                |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WorkflowInstance.restart({ from })`                                                   | needs a rewindable journal; we deliberately retire the journal at every checkpoint change, which is what caps a long-lived actor's storage                                                                         |
+| `WorkflowStepConfig.sensitive: "output"`                                               | needs storage-level redaction across journal, view and events                                                                                                                                                      |
+| `WorkflowDelayFunction` dynamic delays (:15398)                                        | a durable park must compute its wake time without running user code at wake                                                                                                                                        |
+| `WorkflowStepContext.step.count` (:15437-15440)                                        | per-name occurrence counting; loop steps take a stable suffix, as `DuplicateTaskStepError`'s message already advises. This also closes `restart({from})` permanently, since `count` addressing is its prerequisite |
+| `waitForCompletion` on `run()`                                                         | acceptance is durable and asynchronous by design; `watch` + `view` is the await                                                                                                                                    |
+| `watch({ from })` resumable cursor                                                     | needs a durable change log = one write per change on the hottest paths                                                                                                                                             |
+| `ctx.forkWith(state, effect)`                                                          | an un-awaited promise is not durable, and a second commit path breaks invariant 5; background work is `spawn` or a stream                                                                                          |
+| A `drain()` verb                                                                       | `pause()` already means "stop at the next boundary and keep the checkpoint"                                                                                                                                        |
+| A `kill()` verb                                                                        | `terminate()` is the Workflows name for the same tier                                                                                                                                                              |
+| Cross-object / cross-Worker orchestration                                              | a run's storage lives where it was accepted; cross-object is Workflows' job                                                                                                                                        |
+| Automatic checkpoint compaction or a size heuristic                                    | §4.7 fails loudly instead; an automatic heuristic would hide a growing state until it was expensive                                                                                                                |
+| An ask spill table (asks beyond N move out of the checkpoint)                          | the 256 KiB cap plus per-batch expiry is the bound for v1; revisit if a real consumer parks thousands of open asks                                                                                                 |
+| CRDT / multi-writer mailbox merge                                                      | `receiveAll` + a handler fold is sufficient and explicit                                                                                                                                                           |
+| A static transition graph (`toMermaid()`, `getNextTransitions()`, model-based testing) | code per state has no declarative graph to read; annotating a handler's return recovers part of it at zero cost (§2.8)                                                                                             |
+| Making a missing `satisfies` a compile error                                           | probe 5 shows the parameterless case degrades silently; making it loud requires a constraint that rejects every concrete machine (probes 2 and 3). The lint rule is the answer                                     |
 
 ---
 

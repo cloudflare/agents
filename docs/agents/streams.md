@@ -24,16 +24,18 @@ export class ReportObject extends DurableObject<Env> {
 }
 ```
 
-On an `Agent`, install it onto the composition root in the constructor —
-the pattern for adding any extra capability to an Agent:
+An `Agent` installs the capability already, as `this.streams`, and hands
+it to `this.tasks` for engine-owned streams — do not install a second one.
+Chat's `ResumableStream` raises the per-chunk ceiling for its own writes
+through the same instance, so `createChatStreams()` is only for a plain
+Lifecycle host that constructs its own.
 
 ```ts
 export class ReportAgent extends Agent<Env> {
-  readonly streams = new Streams();
-
-  constructor(ctx: AgentContext, env: Env) {
-    super(ctx, env);
-    this.lifecycle.use(this.streams);
+  async report() {
+    const stream = await this.streams.open("report:1");
+    stream.append({ type: "text", delta: "…" });
+    stream.close();
   }
 }
 ```

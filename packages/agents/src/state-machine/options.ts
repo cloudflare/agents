@@ -29,7 +29,10 @@ export type StateMachineEventType =
   | "task:faulted"
   | "task:orphaned"
   | "task:paused"
-  | "task:resumed";
+  | "task:resumed"
+  | "task:compensating"
+  | "task:step:compensated"
+  | "task:step:compensation-failed";
 
 /**
  * Definitions and policy for a StateMachine capability.

@@ -51,6 +51,12 @@ const LEGACY_FOLD_PAGE_ROWS = 500;
 /** Default ceiling for one serialized chunk (1 MiB). */
 export const DEFAULT_MAX_CHUNK_BYTES = 1_048_576;
 
+/**
+ * The largest per-chunk ceiling any caller may raise to: under the 2 MB
+ * SQLite row limit with headroom for escaping.
+ */
+export const MAX_CHUNK_BYTES_CEILING = 1_900_000;
+
 const MAX_STREAM_ID_LENGTH = 256;
 const READ_BATCH_SIZE = 100;
 const DEFAULT_LIST_LIMIT = 100;
@@ -423,7 +429,16 @@ export class Streams extends LifecycleCapability {
    * diagnostics observe aperture writes exactly like capability writes. Will
    * break without notice; never use from application code.
    */
-  __DO_NOT_USE_WILL_BREAK__sync(): StreamsSyncInternal {
+  __DO_NOT_USE_WILL_BREAK__sync(
+    options: { maxChunkBytes?: number } = {}
+  ): StreamsSyncInternal {
+    // A producer that packs large segments (chat) raises the per-chunk
+    // ceiling for its own writes, so it needs no specially constructed
+    // capability instance; the hard ceiling still bounds it.
+    const ceiling = Math.min(
+      options.maxChunkBytes ?? this.#maxChunkBytes,
+      MAX_CHUNK_BYTES_CEILING
+    );
     return {
       ensureTables: () => this.#ensureTables(),
       getStream: (streamId) => this.#getStream(streamId),
@@ -442,7 +457,7 @@ export class Streams extends LifecycleCapability {
         `;
         this.#emit("stream:opened", { streamId });
       },
-      append: (streamId, chunk) => this.#append(streamId, chunk),
+      append: (streamId, chunk) => this.#append(streamId, chunk, ceiling),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
       cursor: (streamId) => this.#tail(streamId).nextSeq,
       onDelete: (hook) => {
@@ -503,7 +518,8 @@ export class Streams extends LifecycleCapability {
       importChunk: (streamId, chunk, createdAt) => {
         const chunkJson = this.#serialize(
           chunk,
-          `chunk for stream "${streamId}"`
+          `chunk for stream "${streamId}"`,
+          ceiling
         );
         if (chunkJson === null) return;
         this.#writeChunk(streamId, chunkJson, createdAt);
@@ -570,10 +586,18 @@ export class Streams extends LifecycleCapability {
     };
   }
 
-  #append(streamId: string, chunk: StreamJson): number {
+  #append(
+    streamId: string,
+    chunk: StreamJson,
+    ceiling: number = this.#maxChunkBytes
+  ): number {
     // Serialization runs BEFORE the fence read: JSON.stringify can execute
     // user toJSON() methods, which may synchronously re-enter this stream.
-    const chunkJson = this.#serialize(chunk, `chunk for stream "${streamId}"`);
+    const chunkJson = this.#serialize(
+      chunk,
+      `chunk for stream "${streamId}"`,
+      ceiling
+    );
     if (chunkJson === null) {
       throw new StreamSerializationError(
         `chunk for stream "${streamId}"`,
@@ -828,7 +852,11 @@ export class Streams extends LifecycleCapability {
     }
   }
 
-  #serialize(value: unknown, context: string): string | null {
+  #serialize(
+    value: unknown,
+    context: string,
+    ceiling: number = this.#maxChunkBytes
+  ): string | null {
     if (value === undefined) return null;
     let json: string | undefined;
     try {
@@ -846,10 +874,10 @@ export class Streams extends LifecycleCapability {
       );
     }
     const bytes = utf8.encode(json).byteLength;
-    if (bytes > this.#maxChunkBytes) {
+    if (bytes > ceiling) {
       throw new StreamSerializationError(
         context,
-        `serialized size ${bytes} bytes exceeds the ${this.#maxChunkBytes}-byte limit`
+        `serialized size ${bytes} bytes exceeds the ${ceiling}-byte limit`
       );
     }
     return json;

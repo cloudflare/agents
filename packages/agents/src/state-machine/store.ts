@@ -9,6 +9,7 @@
 import { SqlError } from "../sql-error";
 import { childMailboxKey } from "./machine";
 import { deserializeTaskValue } from "./serialization";
+import type { LifecycleRouteAddress } from "../lifecycle/capability";
 import type {
   StateMachineAskRecord,
   StateMachineAskState,
@@ -20,7 +21,8 @@ import type {
   TaskRunRow,
   StateMachineRunSnapshot,
   StateMachineRunView,
-  StateMachineValue
+  StateMachineValue,
+  TaskRouteRow
 } from "./types";
 
 /** Rows one journal-rebuild transaction copies. */
@@ -165,7 +167,11 @@ export class TaskStore {
     // speed up a delete path and one view read. The scan stays; ordering
     // moves to memory so it does not also build a temp b-tree.
     this.sql`DELETE FROM cf_agents_task_asks WHERE run_id = ${runId}`;
-    this.sql`DELETE FROM cf_agents_task_routes WHERE run_id = ${runId}`;
+    // Its own route row, and the rows for children it spawned elsewhere.
+    this.sql`
+      DELETE FROM cf_agents_task_routes
+      WHERE run_id = ${runId} OR parent_run_id = ${runId}
+    `;
     if (parent !== null) {
       this.write(
         `DELETE FROM cf_agents_task_mailbox WHERE run_id = ? AND key = ?`,
@@ -358,6 +364,7 @@ export class TaskStore {
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
+        compensated_at INTEGER,
         PRIMARY KEY (run_id, turn, name)
       ) WITHOUT ROWID`);
     // Primary key (run_id, key) and no secondary index: `requestId` dedupe
@@ -413,6 +420,9 @@ export class TaskStore {
         owner_path_key TEXT NOT NULL,
         parent_run_id TEXT,
         parent_owner_key TEXT,
+        definition TEXT,
+        background INTEGER NOT NULL DEFAULT 0,
+        settled_at INTEGER,
         created_at INTEGER NOT NULL
       ) WITHOUT ROWID`);
     // Both indexes are on columns written once at insert and never again —
@@ -706,11 +716,94 @@ export class TaskStore {
         AND state NOT IN ('completed', 'failed', 'cancelled')
       ORDER BY created_at
     `;
-    return rows.map((row) => ({
+    const local = rows.map((row) => ({
       runId: row.run_id,
       definition: row.definition,
       background: row.background === 1
     }));
+    const routed = this.listRoutedChildren(runId, { inTree: false }).map(
+      (row) => ({
+        runId: row.run_id,
+        definition: row.definition ?? "",
+        background: row.background === 1,
+        ownerKey: row.owner_path_key
+      })
+    );
+    return [...local, ...routed];
+  }
+
+  // ── Routes ──────────────────────────────────────────────────────────────
+
+  /** The route row of a run this Lifecycle reaches elsewhere, if any. */
+  getRoute(runId: string): TaskRouteRow | undefined {
+    return this.sql<TaskRouteRow>`
+      SELECT * FROM cf_agents_task_routes WHERE run_id = ${runId}
+    `[0];
+  }
+
+  /** Record where a run lives. A row for the same run is rewritten. */
+  upsertRoute(route: {
+    runId: string;
+    owner: LifecycleRouteAddress;
+    parentRunId: string | null;
+    parentOwnerKey: string | null;
+    definition: string | null;
+    background: boolean;
+  }): void {
+    this.write(
+      `INSERT INTO cf_agents_task_routes
+         (run_id, owner_path, owner_path_key, parent_run_id, parent_owner_key,
+          definition, background, settled_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+       ON CONFLICT (run_id) DO UPDATE SET
+         owner_path = excluded.owner_path,
+         owner_path_key = excluded.owner_path_key,
+         parent_run_id = excluded.parent_run_id,
+         parent_owner_key = excluded.parent_owner_key,
+         definition = excluded.definition,
+         background = excluded.background`,
+      [
+        route.runId,
+        route.owner.data,
+        route.owner.key,
+        route.parentRunId,
+        route.parentOwnerKey,
+        route.definition,
+        route.background ? 1 : 0,
+        Date.now()
+      ]
+    );
+  }
+
+  deleteRoute(runId: string): boolean {
+    return (
+      this.write("DELETE FROM cf_agents_task_routes WHERE run_id = ?", [
+        runId
+      ]) > 0
+    );
+  }
+
+  /** A routed child settled: it leaves its parent's live children. */
+  markRouteSettled(runId: string, at: number): void {
+    this.write(
+      `UPDATE cf_agents_task_routes SET settled_at = ?
+       WHERE run_id = ? AND settled_at IS NULL`,
+      [at, runId]
+    );
+  }
+
+  /** Unsettled children of `parentId` that live on another Lifecycle. */
+  listRoutedChildren(
+    parentId: string,
+    options: { inTree: boolean }
+  ): TaskRouteRow[] {
+    return this.read<TaskRouteRow>(
+      `SELECT * FROM cf_agents_task_routes
+       WHERE parent_run_id = ? AND settled_at IS NULL
+         ${options.inTree ? "AND background = 0" : ""}
+       ORDER BY created_at`,
+      [parentId]
+    );
   }
 }
 

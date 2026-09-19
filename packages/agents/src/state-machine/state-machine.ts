@@ -69,6 +69,7 @@ import type {
 } from "./options";
 import {
   AttemptSupersededError,
+  isCompensationBoundary,
   TaskCancellation,
   computeRetryDelayMs,
   isTaskCancellation,
@@ -78,7 +79,8 @@ import {
   toErrorSummary,
   type TaskStepEngine,
   type ResolvedRetryPolicy,
-  type ResolvedStepPolicy
+  type ResolvedStepPolicy,
+  type StepCompensation
 } from "./replay";
 import {
   deserializeTaskValue,
@@ -114,7 +116,8 @@ import type {
   StateMachineStartMode,
   StateMachineState,
   StateMachineValue,
-  StateMachineWaitReason
+  StateMachineWaitReason,
+  TaskRouteRow
 } from "./types";
 
 /**
@@ -272,7 +275,10 @@ const CHANGE_OF: Record<string, StateMachineChangeType> = {
   "task:paused": "waiting",
   "task:completed": "settled",
   "task:failed": "settled",
-  "task:cancelled": "settled"
+  "task:cancelled": "settled",
+  "task:compensating": "compensating",
+  "task:step:compensated": "progress",
+  "task:step:compensation-failed": "progress"
 };
 
 const TERMINAL_STATES: ReadonlySet<StateMachineRunState> = new Set([
@@ -362,24 +368,166 @@ function isTaskWakeJobPayload(value: unknown): value is TaskWakeJobPayload {
 }
 
 /** StateMachine protocol messages routed between a facet and the root Lifecycle. */
+/** A child's terminal outcome, as its parent's mailbox receives it. */
+type TaskChildNote = {
+  readonly runId: string;
+  readonly definition: string;
+  readonly state: StateMachineRunState;
+  readonly result?: StateMachineJson;
+  readonly error?: { readonly name: string; readonly message: string };
+  readonly reason?: string;
+  readonly outcome?: string;
+};
+
+/**
+ * The verbs a Lifecycle forwards to the owner of a run it only holds a
+ * route row for, with the arguments each carries over the wire.
+ */
+type TaskVerbArgs = {
+  get: [runId: string];
+  view: [runId: string];
+  send: [
+    runId: string,
+    payload: StateMachineJson,
+    options: StateMachineSendOptions | undefined
+  ];
+  withdraw: [runId: string, key: string];
+  cancel: [runId: string, reason: string | undefined, wait: boolean];
+  terminate: [runId: string, reason: string | undefined];
+  pause: [runId: string];
+  resume: [runId: string];
+  abort: [
+    runId: string,
+    mark: StateMachineAbortMark,
+    reason: string | undefined
+  ];
+  answer: [askId: string, kindName: string, answer: unknown];
+  withdrawAsk: [askId: string];
+};
+
+type TaskVerbResult = {
+  get: StateMachineRunSnapshot<StateMachineValue> | null;
+  view: StateMachineRunView<StateMachineValue> | null;
+  send: StateMachineSendReceipt;
+  withdraw: boolean;
+  cancel: boolean;
+  terminate: boolean;
+  pause: boolean;
+  resume: boolean;
+  abort: boolean;
+  answer: StateMachineAnswerReceipt;
+  withdrawAsk: boolean;
+};
+
+type TaskVerbMessage = {
+  [Verb in keyof TaskVerbArgs]: {
+    readonly type: "verb";
+    readonly verb: Verb;
+    readonly args: TaskVerbArgs[Verb];
+  };
+}[keyof TaskVerbArgs];
+
+/**
+ * What a routed sub-agent's wake sync carries beside the deadline: the
+ * facts the root indexes at accept (§4.5), or the news that the run row is
+ * gone. Riding the wake sync keeps a routed accept and a routed delete at
+ * one round-trip each.
+ */
+type TaskRouteFacts = {
+  readonly definition: string;
+  readonly background: boolean;
+  readonly parentRunId: string | null;
+  readonly parentOwnerKey: string | null;
+};
+type TaskRouteIndex =
+  | { readonly route: TaskRouteFacts }
+  | { readonly gone: true };
+
 type TaskRouteMessage =
   | {
       readonly type: "syncWake";
       readonly runId: string;
       readonly next: number | null;
+      readonly route?: TaskRouteFacts;
+      readonly gone?: true;
     }
   | { readonly type: "dispatch"; readonly runId: string }
   | {
       readonly type: "memoryLimit";
       readonly runId: string;
       readonly context: MemoryLimitContext;
-    };
+    }
+  /** A parent asks another Lifecycle to accept its child (§10.1). */
+  | {
+      readonly type: "spawn";
+      readonly definition: string;
+      readonly input: unknown;
+      readonly options: StateMachineRunOptions;
+      readonly parent: {
+        readonly runId: string;
+        readonly notify: boolean;
+        readonly ownerKey: string;
+      };
+    }
+  /** A routed child settled; the root delivers or relays the note. */
+  | {
+      readonly type: "childSettled";
+      readonly parentRunId: string;
+      readonly note: TaskChildNote;
+    }
+  /** Sibling subtrees reach each other only through the root. */
+  | {
+      readonly type: "relay";
+      readonly target: LifecycleRouteAddress;
+      readonly message: TaskRouteMessage;
+    }
+  | TaskVerbMessage;
+
+/** The route key of the root Lifecycle, which has no address of its own. */
+const ROOT_OWNER_KEY = "";
+
+/** The address a route row names. */
+function routeAddress(route: TaskRouteRow): LifecycleRouteAddress {
+  return { key: route.owner_path_key, data: route.owner_path };
+}
+
+/** The settlement note one child leaves for its parent (§10.2). */
+function childNote(child: TaskRunRow): TaskChildNote {
+  return {
+    runId: child.run_id,
+    definition: child.definition,
+    state: child.state,
+    ...(child.result !== null
+      ? { result: deserializeTaskValue(child.result) as StateMachineJson }
+      : {}),
+    ...(child.error_name !== null
+      ? {
+          error: {
+            name: child.error_name,
+            message: child.error_message ?? ""
+          }
+        }
+      : {}),
+    ...(child.state === "cancelled" && child.cancel_reason !== null
+      ? { reason: child.cancel_reason }
+      : {}),
+    ...(child.outcome !== null ? { outcome: child.outcome } : {})
+  };
+}
 
 /** One live execution attempt in this isolate. */
+/**
+ * What an invocation held in `#active` is doing: a phase transition, the
+ * cancel transition (`onCancel`), or a compensation pass. The abort protocol
+ * signals only transitions — the other two already run under a mark.
+ */
+type InvocationKind = "attempt" | "cancel" | "compensation";
+
 type ActiveAttempt = {
   readonly generation: string;
   readonly controller: AbortController;
   readonly promise: Promise<void>;
+  readonly kind: InvocationKind;
 };
 
 /** Filters accepted by {@link StateMachine.list}. */
@@ -755,7 +903,15 @@ export class StateMachine<
     await this.lifecycle.ready();
     const key = options?.requestId ?? nanoid();
     const row = this.#store.getRun(runId);
-    if (!row) return { accepted: false, key, reason: "unknown" };
+    if (!row) {
+      return (
+        (await this.#forward(runId, "send", [runId, payload, options])) ?? {
+          accepted: false,
+          key,
+          reason: "unknown"
+        }
+      );
+    }
     if (TERMINAL_STATES.has(row.state)) {
       return { accepted: false, key, reason: "terminal" };
     }
@@ -877,12 +1033,13 @@ export class StateMachine<
   /** Remove a still-queued mailbox item. False once it was consumed. */
   async withdraw(runId: string, key: string): Promise<boolean> {
     await this.lifecycle.ready();
-    return (
+    const removed =
       this.#store.write(
         "DELETE FROM cf_agents_task_mailbox WHERE run_id = ? AND key = ?",
         [runId, key]
-      ) > 0
-    );
+      ) > 0;
+    if (removed || this.#store.getRun(runId) !== undefined) return removed;
+    return (await this.#forward(runId, "withdraw", [runId, key])) ?? false;
   }
 
   /**
@@ -898,9 +1055,19 @@ export class StateMachine<
   ): Promise<StateMachineAnswerReceipt> {
     await this.lifecycle.ready();
     const ask = this.#store.getAsk(askId);
-    if (ask === undefined || ask.name !== kind.name) {
-      return { accepted: false, reason: "unknown" };
+    if (ask === undefined) {
+      return (
+        (await this.#forwardAsk(askId, "answer", [
+          askId,
+          kind.name,
+          answer
+        ])) ?? {
+          accepted: false,
+          reason: "unknown"
+        }
+      );
     }
+    if (ask.name !== kind.name) return { accepted: false, reason: "unknown" };
     const run = this.#store.getRun(ask.run_id);
     if (!run || TERMINAL_STATES.has(run.state)) {
       return { accepted: false, reason: "terminal" };
@@ -939,7 +1106,10 @@ export class StateMachine<
   async withdrawAsk(askId: string): Promise<boolean> {
     await this.lifecycle.ready();
     const ask = this.#store.getAsk(askId);
-    if (ask === undefined || ask.state !== "open") return false;
+    if (ask === undefined) {
+      return (await this.#forwardAsk(askId, "withdrawAsk", [askId])) ?? false;
+    }
+    if (ask.state !== "open") return false;
     const now = Date.now();
     if (!this.#settleAskRow(askId, "withdrawn", null, now)) return false;
     const run = this.#store.getRun(ask.run_id);
@@ -1024,7 +1194,9 @@ export class StateMachine<
   /**
    * Accept one child of `parentId` (§10.1). A background child is detached:
    * outside the cancel cascade, and silent unless `notify` is asked for.
-   * Cross-facet ownership (`options.owner`) is not wired in this release.
+   * With `options.owner` the child is accepted on that Lifecycle instead,
+   * and this side keeps a route row: what the cascade, the view and every
+   * verb addressed here use to reach it.
    */
   async #spawn(
     parentId: string,
@@ -1032,19 +1204,219 @@ export class StateMachine<
     input: unknown,
     options: StateMachineSpawnOptions | undefined
   ): Promise<StateMachineReceipt> {
-    if (options?.owner !== undefined) {
-      throw new Error(
-        "ctx.spawn(..., { owner }) is not supported yet: children run on the parent's Lifecycle"
+    const { notify, owner, ...runOptions } = options ?? {};
+    const background = runOptions.background === true;
+    const parent = { runId: parentId, notify: notify ?? !background };
+    const selfKey = this.lifecycle.routes.source?.key ?? ROOT_OWNER_KEY;
+    if (owner === undefined || owner.key === selfKey) {
+      this.#validateDefinitionName(definition);
+      return this.#accept(
+        definition,
+        input,
+        runOptions,
+        startMode(runOptions),
+        parent
       );
     }
-    this.#validateDefinitionName(definition);
-    const { notify, owner: _owner, ...runOptions } = options ?? {};
-    void _owner;
-    const background = runOptions.background === true;
-    return this.#accept(definition, input, runOptions, startMode(runOptions), {
-      runId: parentId,
-      notify: notify ?? !background
+    const accepted = await this.#routeTo(owner, {
+      type: "spawn",
+      definition,
+      input,
+      options: runOptions,
+      parent: { ...parent, ownerKey: selfKey }
     });
+    if (accepted === false) {
+      throw new Error(
+        `ctx.spawn("${definition}", { owner }): no Lifecycle at "${owner.key}"; create the sub-agent before spawning onto it`
+      );
+    }
+    const receipt = accepted as StateMachineReceipt;
+    this.#store.upsertRoute({
+      runId: receipt.runId,
+      owner,
+      parentRunId: parentId,
+      parentOwnerKey: selfKey,
+      definition,
+      background
+    });
+    return receipt;
+  }
+
+  /**
+   * Route one StateMachine message to the Lifecycle at `target`: the root
+   * by its empty key, a descendant directly, anything else through the
+   * root, which alone can descend into every subtree.
+   */
+  async #routeTo(
+    target: LifecycleRouteAddress,
+    message: TaskRouteMessage
+  ): Promise<unknown> {
+    const routes = this.lifecycle.routes;
+    if (target.key === ROOT_OWNER_KEY) return routes.toRoot(message);
+    const self = routes.source;
+    if (
+      self === undefined ||
+      target.key === self.key ||
+      target.key.startsWith(`${self.key}/`)
+    ) {
+      return routes.to(target, message);
+    }
+    return routes.toRoot({
+      type: "relay",
+      target,
+      message
+    } satisfies TaskRouteMessage);
+  }
+
+  /**
+   * Forward one verb to the owner of a run this Lifecycle only holds a
+   * route row for. Undefined when there is no such row — the run is simply
+   * unknown here — or when the owner is gone, in which case the stale row
+   * is dropped (§5.9). A transport failure is reported, not thrown: the
+   * caller's own run must not fail because a routed child is unreachable.
+   */
+  async #forward<Verb extends keyof TaskVerbArgs>(
+    runId: string,
+    verb: Verb,
+    args: TaskVerbArgs[Verb]
+  ): Promise<TaskVerbResult[Verb] | undefined> {
+    const route = this.#store.getRoute(runId);
+    if (route === undefined) return undefined;
+    return this.#forwardRoute(route, verb, args);
+  }
+
+  async #forwardRoute<Verb extends keyof TaskVerbArgs>(
+    route: TaskRouteRow,
+    verb: Verb,
+    args: TaskVerbArgs[Verb]
+  ): Promise<TaskVerbResult[Verb] | undefined> {
+    let outcome: unknown;
+    try {
+      outcome = await this.#routeTo(routeAddress(route), {
+        type: "verb",
+        verb,
+        args
+      } as TaskVerbMessage);
+    } catch (error) {
+      if (isPlatformFailure(error)) throw error;
+      console.error(
+        `Task verb "${verb}" could not reach the owner of run "${route.run_id}" at "${route.owner_path_key}"`,
+        error
+      );
+      return undefined;
+    }
+    if (outcome === false) {
+      this.#store.deleteRoute(route.run_id);
+      return undefined;
+    }
+    return (outcome as { result: TaskVerbResult[Verb] }).result;
+  }
+
+  /**
+   * An ask id is its run id plus `#t<turn>:<kind>:<ordinal>` (§8.1). The
+   * owner is the longest run-id prefix that has a route row, so a
+   * caller-chosen run id containing `#` still resolves.
+   */
+  async #forwardAsk<Verb extends "answer" | "withdrawAsk">(
+    askId: string,
+    verb: Verb,
+    args: TaskVerbArgs[Verb]
+  ): Promise<TaskVerbResult[Verb] | undefined> {
+    for (
+      let at = askId.lastIndexOf("#");
+      at > 0;
+      at = askId.lastIndexOf("#", at - 1)
+    ) {
+      const route = this.#store.getRoute(askId.slice(0, at));
+      if (route !== undefined) return this.#forwardRoute(route, verb, args);
+    }
+    return undefined;
+  }
+
+  /** Execute one forwarded verb as the owner of its run. */
+  async #applyVerb(
+    message: TaskVerbMessage
+  ): Promise<TaskVerbResult[keyof TaskVerbArgs]> {
+    switch (message.verb) {
+      case "get":
+        return this.get(...message.args);
+      case "view":
+        return this.view(...message.args);
+      case "send":
+        return this.send(...message.args);
+      case "withdraw":
+        return this.withdraw(...message.args);
+      case "cancel": {
+        const [runId, reason, wait] = message.args;
+        return this.cancel(runId, reason, { wait });
+      }
+      case "terminate":
+        return this.terminate(...message.args);
+      case "pause":
+        return this.pause(...message.args);
+      case "resume":
+        return this.resume(...message.args);
+      case "abort": {
+        const [runId, mark, reason] = message.args;
+        const row = this.#store.getRun(runId);
+        if (!row || TERMINAL_STATES.has(row.state)) return false;
+        await this.#requestAbort(row, mark, reason, false);
+        return true;
+      }
+      case "answer": {
+        const [askId, kindName, answer] = message.args;
+        return this.answer(askId, { name: kindName }, answer);
+      }
+      case "withdrawAsk":
+        return this.withdrawAsk(...message.args);
+      default:
+        throw new Error("Unknown routed StateMachine verb");
+    }
+  }
+
+  /** Accept a child another Lifecycle's run spawned here (§10.1). */
+  async #acceptRouted(
+    message: Extract<TaskRouteMessage, { type: "spawn" }>
+  ): Promise<StateMachineReceipt> {
+    this.#validateDefinitionName(message.definition);
+    return this.#accept(
+      message.definition,
+      message.input,
+      message.options,
+      startMode(message.options),
+      message.parent
+    );
+  }
+
+  /**
+   * Deliver a routed child's settlement note to its parent if the parent
+   * is here, or relay it to the parent's owner through a route row. False
+   * when the parent is unknown to this Lifecycle.
+   */
+  async #relayChildNote(
+    parentId: string,
+    note: TaskChildNote
+  ): Promise<unknown> {
+    if (this.#store.getRun(parentId) !== undefined) {
+      await this.#deliverChildNote(parentId, note);
+      return true;
+    }
+    const route = this.#store.getRoute(parentId);
+    if (route === undefined) return false;
+    return this.#routeTo(routeAddress(route), {
+      type: "childSettled",
+      parentRunId: parentId,
+      note
+    });
+  }
+
+  /**
+   * Delete a run row. The wake sync that follows cancels its mirror job
+   * and, on a routed Lifecycle, drops its root index in the same message.
+   */
+  async #deleteRun(runId: string): Promise<void> {
+    this.#store.deleteRun(runId);
+    await this.#syncWake(runId, undefined, { gone: true });
   }
 
   #requireStreams(): Streams {
@@ -1175,34 +1547,42 @@ export class StateMachine<
   async #notifyParent(child: TaskRunRow): Promise<void> {
     const parentId = child.parent_run_id;
     if (parentId === null || child.parent_notify !== 1) return;
+    const note = childNote(child);
+    if (child.parent_owner_key !== null) {
+      // The parent lives on another Lifecycle: the root delivers the note
+      // to its own run, or relays it to the parent's owner (§4.5).
+      try {
+        await this.lifecycle.routes.toRoot({
+          type: "childSettled",
+          parentRunId: parentId,
+          note
+        } satisfies TaskRouteMessage);
+      } catch (error) {
+        if (isPlatformFailure(error)) throw error;
+        console.error(
+          `Task run "${child.run_id}" could not notify its parent "${parentId}"`,
+          error
+        );
+      }
+      return;
+    }
+    await this.#deliverChildNote(parentId, note);
+  }
+
+  /** Append one child's note to its parent's mailbox and wake a join. */
+  async #deliverChildNote(
+    parentId: string,
+    note: TaskChildNote
+  ): Promise<void> {
+    const now = Date.now();
+    this.#store.markRouteSettled(note.runId, now);
     const parent = this.#store.getRun(parentId);
     if (!parent || TERMINAL_STATES.has(parent.state)) return;
-    const now = Date.now();
     const seq =
       this.#store.read<{ next: number }>(
         "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM cf_agents_task_mailbox WHERE run_id = ?",
         [parentId]
       )[0]?.next ?? 0;
-    const note = {
-      runId: child.run_id,
-      definition: child.definition,
-      state: child.state,
-      ...(child.result !== null
-        ? { result: deserializeTaskValue(child.result) as StateMachineJson }
-        : {}),
-      ...(child.error_name !== null
-        ? {
-            error: {
-              name: child.error_name,
-              message: child.error_message ?? ""
-            }
-          }
-        : {}),
-      ...(child.state === "cancelled" && child.cancel_reason !== null
-        ? { reason: child.cancel_reason }
-        : {}),
-      ...(child.outcome !== null ? { outcome: child.outcome } : {})
-    };
     const written = this.#store.write(
       `INSERT INTO cf_agents_task_mailbox
          (run_id, key, seq, kind, type, payload, visible_after, created_at)
@@ -1210,10 +1590,10 @@ export class StateMachine<
        ON CONFLICT (run_id, key) DO NOTHING`,
       [
         parentId,
-        childMailboxKey(child.run_id),
+        childMailboxKey(note.runId),
         seq,
         CHILD_MAILBOX_KIND,
-        child.definition,
+        note.definition,
         JSON.stringify(note),
         now
       ]
@@ -1222,8 +1602,8 @@ export class StateMachine<
     this.#emit("task:child", {
       runId: parentId,
       definition: parent.definition,
-      child: child.run_id,
-      state: child.state
+      child: note.runId,
+      state: note.state
     });
     await this.#wakeParked(parentId, ["child", "mailbox"], now);
   }
@@ -1246,6 +1626,11 @@ export class StateMachine<
     );
     for (const child of children) {
       await this.#requestAbort(child, mark, reason, false);
+    }
+    for (const child of this.#store.listRoutedChildren(parentId, {
+      inTree: true
+    })) {
+      await this.#forwardRoute(child, "abort", [child.run_id, mark, reason]);
     }
   }
 
@@ -1284,7 +1669,12 @@ export class StateMachine<
     await this.#cascadeAbort(runId, "parent", "parent aborted");
     const active = this.#active.get(runId);
     if (active) {
-      active.controller.abort(new TaskCancellation(reason));
+      // Only a transition is signalled: the cancel transition is
+      // non-reentrant (§6.2), and a compensation pass runs to its end
+      // under the mark it already holds.
+      if (active.kind === "attempt") {
+        active.controller.abort(new TaskCancellation(reason));
+      }
       await this.#syncWake(runId, now);
       if (wait) await this.#awaitSettled(runId, active);
       return;
@@ -1302,7 +1692,7 @@ export class StateMachine<
       else void transition.catch(() => {});
       return;
     }
-    await this.#settleByMark(marked, null);
+    await this.#compensateAndSettle(marked, definition);
   }
 
   // ── Lifecycle capability hooks ───────────────────────────────────────────
@@ -1703,17 +2093,20 @@ export class StateMachine<
       deadline_at: number | null;
       turn_deadline_at: number | null;
       state: StateMachineRunState;
+      abort_mark: string | null;
     }>`
-      SELECT next_at, deadline_at, turn_deadline_at, state
+      SELECT next_at, deadline_at, turn_deadline_at, state, abort_mark
       FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND state IN ('pending', 'waiting', 'running')
     `;
     const row = rows[0];
     if (!row) return null;
+    // A standing mark has applied the deadline already (or outranks it):
+    // what follows is bounded by the protocol's own budgets, not by it.
     const candidates = [
       row.next_at,
-      row.deadline_at,
+      row.abort_mark === null ? row.deadline_at : null,
       row.state === "running" ? row.turn_deadline_at : null
     ].filter((at): at is number => at !== null);
     return candidates.length === 0 ? null : Math.min(...candidates);
@@ -1725,7 +2118,12 @@ export class StateMachine<
     active: ActiveAttempt
   ): Promise<boolean> {
     const row = this.#store.getRun(runId);
-    if (!row || row.deadline_at === null || row.deadline_at > Date.now()) {
+    if (
+      !row ||
+      row.abort_mark !== null ||
+      row.deadline_at === null ||
+      row.deadline_at > Date.now()
+    ) {
       return false;
     }
     const error = new StateMachineDeadlineExceededError(runId, row.deadline_at);
@@ -1780,7 +2178,11 @@ export class StateMachine<
     `;
     await this.#cascadeAbort(runId, "parent", "parent aborted");
     const definition = this.#resolveDefinition(row.definition);
-    if (definition !== undefined && declaresOnCancel(definition)) {
+    if (
+      definition !== undefined &&
+      declaresOnCancel(definition) &&
+      active.kind === "attempt"
+    ) {
       active.controller.abort(error);
       await this.#joinAttempt(active);
       const current = this.#store.getRun(runId);
@@ -1788,13 +2190,19 @@ export class StateMachine<
       await this.#runCancelTransition(current, definition);
       return;
     }
-    const failed = await this.#settleFailed(
-      runId,
-      active.generation,
-      toErrorSummary(error)
-    );
     active.controller.abort(error);
-    if (failed) await this.#observeError(error, row);
+    if (active.kind === "cancel") {
+      // The watchdog over `onCancel` itself: the transition is joined
+      // (bounded) and the run takes the inline default under its mark.
+      await this.#joinAttempt(active);
+    }
+    // The inline default with compensation. A live transition is not
+    // joined: the pass claims a fresh generation, which fences the old
+    // one's journal, and the settle records the error the mark names.
+    await this.#compensateAndSettle(
+      this.#store.getRun(runId) ?? row,
+      definition
+    );
   }
 
   /**
@@ -1808,7 +2216,11 @@ export class StateMachine<
    * @returns False when the queue already carried exactly this wake and
    * nothing was written — a same-values upsert is still a billed row write.
    */
-  async #syncWake(runId: string, earliest?: number): Promise<boolean> {
+  async #syncWake(
+    runId: string,
+    earliest?: number,
+    index?: TaskRouteIndex
+  ): Promise<boolean> {
     // Mid-rebuild the mirror is left exactly as it stands: a wake that
     // dispatched now would read a half-copied journal.
     if (this.#migrating()) return false;
@@ -1829,7 +2241,8 @@ export class StateMachine<
       return (await this.lifecycle.routes.toRoot({
         type: "syncWake",
         runId,
-        next
+        next,
+        ...index
       } satisfies TaskRouteMessage)) as boolean;
     }
 
@@ -1864,10 +2277,30 @@ export class StateMachine<
         const owner = context.source;
         if (!owner)
           throw new Error("Routed StateMachine message missing source");
+        if (message.route !== undefined) {
+          this.#store.upsertRoute({
+            runId: message.runId,
+            owner,
+            parentRunId: message.route.parentRunId,
+            parentOwnerKey: message.route.parentOwnerKey,
+            definition: message.route.definition,
+            background: message.route.background
+          });
+        } else if (message.gone === true) {
+          this.#store.deleteRoute(message.runId);
+        }
         return this.#syncRoutedWake(owner, message.runId, message.next);
       }
       case "dispatch":
         return this.#dispatchRoutedRun(message.runId);
+      case "spawn":
+        return this.#acceptRouted(message);
+      case "childSettled":
+        return this.#relayChildNote(message.parentRunId, message.note);
+      case "relay":
+        return this.lifecycle.routes.to(message.target, message.message);
+      case "verb":
+        return { result: await this.#applyVerb(message) };
       case "memoryLimit": {
         await this.#applyMemoryLimit(message.runId, message.context);
         // The owner's own Lifecycle never observes the root's alarm; this
@@ -1972,7 +2405,9 @@ export class StateMachine<
   async get(
     runId: string
   ): Promise<StateMachineRunSnapshot<StateMachineValue> | null> {
-    return this.#snapshot(runId);
+    const local = await this.#snapshot(runId);
+    if (local !== null) return local;
+    return (await this.#forward(runId, "get", [runId])) ?? null;
   }
 
   /** Read one run by idempotency key across all definitions. */
@@ -2020,7 +2455,7 @@ export class StateMachine<
   ): Promise<StateMachineRunView<StateMachineValue> | null> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    if (!row) return null;
+    if (!row) return (await this.#forward(runId, "view", [runId])) ?? null;
     const view = this.#store.rowToView(row);
     const streams = await this.#streamViews(row);
     return streams.length === 0 ? view : { ...view, streams };
@@ -2061,7 +2496,16 @@ export class StateMachine<
   ): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    if (!row || TERMINAL_STATES.has(row.state)) return false;
+    if (!row) {
+      return (
+        (await this.#forward(runId, "cancel", [
+          runId,
+          reason,
+          options?.wait === true
+        ])) ?? false
+      );
+    }
+    if (TERMINAL_STATES.has(row.state)) return false;
     await this.#requestAbort(row, "cancel", reason, options?.wait === true);
     return true;
   }
@@ -2103,7 +2547,12 @@ export class StateMachine<
   async terminate(runId: string, reason?: string): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    if (!row || TERMINAL_STATES.has(row.state)) return false;
+    if (!row) {
+      return (
+        (await this.#forward(runId, "terminate", [runId, reason])) ?? false
+      );
+    }
+    if (TERMINAL_STATES.has(row.state)) return false;
     const active = this.#active.get(runId);
     active?.controller.abort(new TaskCancellation(reason));
     await this.#settleCancelled(runId, null, reason);
@@ -2114,6 +2563,11 @@ export class StateMachine<
       [runId]
     );
     for (const child of children) await this.terminate(child.run_id, reason);
+    for (const child of this.#store.listRoutedChildren(runId, {
+      inTree: true
+    })) {
+      await this.#forwardRoute(child, "terminate", [child.run_id, reason]);
+    }
     return true;
   }
 
@@ -2121,9 +2575,8 @@ export class StateMachine<
   async pause(runId: string): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    if (!row || TERMINAL_STATES.has(row.state) || row.paused === 1) {
-      return false;
-    }
+    if (!row) return (await this.#forward(runId, "pause", [runId])) ?? false;
+    if (TERMINAL_STATES.has(row.state) || row.paused === 1) return false;
     const now = Date.now();
     if (this.#active.has(runId)) {
       // Takes effect at the transition boundary the loop reaches next.
@@ -2148,9 +2601,8 @@ export class StateMachine<
   async resume(runId: string): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    if (!row || TERMINAL_STATES.has(row.state) || row.paused !== 1) {
-      return false;
-    }
+    if (!row) return (await this.#forward(runId, "resume", [runId])) ?? false;
+    if (TERMINAL_STATES.has(row.state) || row.paused !== 1) return false;
     const now = Date.now();
     this.#store.sql`
       UPDATE cf_agents_task_runs
@@ -2222,7 +2674,7 @@ export class StateMachine<
       throw new SqlError(query, cause);
     }
     for (const row of rows as Array<{ run_id: string; definition: string }>) {
-      this.#store.deleteRun(row.run_id);
+      await this.#deleteRun(row.run_id);
       this.#emit("task:deleted", {
         runId: row.run_id,
         definition: row.definition
@@ -2238,7 +2690,7 @@ export class StateMachine<
     input: unknown,
     options: StateMachineRunOptions = {},
     startMode: StateMachineStartMode = "warm",
-    parent: { runId: string; notify: boolean } | null = null
+    parent: { runId: string; notify: boolean; ownerKey?: string } | null = null
   ): Promise<StateMachineReceipt> {
     await this.lifecycle.ready();
     if ("parent" in options && options.parent !== undefined) {
@@ -2374,7 +2826,7 @@ export class StateMachine<
          metadata, idempotency_key, retain, attempt, deadline_at, interruptions,
          retry_policy, turn_timeout_ms, next_at, cancel_requested, checkpoint,
          checkpoint_turn, background, parent_run_id, parent_notify,
-         created_at, updated_at)
+         parent_owner_key, created_at, updated_at)
       VALUES
         (${runId}, ${definition}, ${base}, ${version}, ${inputJson}, 'pending',
          ${metadataJson},
@@ -2384,9 +2836,20 @@ export class StateMachine<
          ${turnTimeoutMs}, ${now}, 0, NULL,
          0, ${options.background === true ? 1 : 0},
          ${parent?.runId ?? null}, ${parent === null || parent.notify ? 1 : 0},
-         ${now}, ${now})
+         ${parent?.ownerKey ?? null}, ${now}, ${now})
     `;
-    await this.#syncWake(runId);
+    // A routed run is indexed on the root by this first wake sync (§4.5):
+    // the wake mirror alone cannot be that index, since a park with no
+    // deadline deletes it, and a verb addressed to the root must still
+    // find the owner.
+    await this.#syncWake(runId, undefined, {
+      route: {
+        definition,
+        background: options.background === true,
+        parentRunId: parent?.runId ?? null,
+        parentOwnerKey: parent?.ownerKey ?? null
+      }
+    });
     this.#emit("task:accepted", { runId, definition, accepted: true });
 
     // Warm path: begin the first attempt immediately when the host is past
@@ -2423,10 +2886,18 @@ export class StateMachine<
     // parked run's wake forward (see #nextWake), so the wake that fires at
     // the deadline finds `next_at` still in the future.
     if (row.deadline_at !== null && row.deadline_at <= now) {
-      await this.#failWithoutAttempt(
-        row,
-        new StateMachineDeadlineExceededError(runId, row.deadline_at)
-      );
+      // A parked run's deadline is a mark like any other: the protocol
+      // compensates or runs onCancel, then settles it failed.
+      this.#store.sql`
+        UPDATE cf_agents_task_runs
+        SET abort_mark = coalesce(abort_mark, 'deadline'),
+            abort_reason = coalesce(abort_reason, 'deadline passed'),
+            updated_at = ${now}
+        WHERE run_id = ${runId} AND state IN ('pending', 'waiting', 'running')
+      `;
+      await this.#cascadeAbort(runId, "parent", "parent aborted");
+      const marked = this.#store.getRun(runId);
+      if (marked) await this.#resolveMark(marked);
       return;
     }
     if (row.paused === 1) return;
@@ -2559,9 +3030,10 @@ export class StateMachine<
     runId: string,
     generation: string,
     controller: AbortController,
-    promise: Promise<void>
+    promise: Promise<void>,
+    kind: InvocationKind = "attempt"
   ): Promise<void> {
-    this.#active.set(runId, { generation, controller, promise });
+    this.#active.set(runId, { generation, controller, promise, kind });
     try {
       await promise;
     } finally {
@@ -2724,7 +3196,220 @@ export class StateMachine<
       await this.#runCancelTransition(row, definition);
       return;
     }
-    await this.#settleByMark(row, null);
+    await this.#compensateAndSettle(row, definition);
+  }
+
+  /**
+   * The inline default with compensation: a definition without `onCancel`
+   * whose journal holds completed steps replays them in a fresh, fenced
+   * invocation to collect the compensations they registered, runs those in
+   * reverse, and then settles by the mark. A run with nothing completed
+   * settles at once.
+   */
+  async #compensateAndSettle(
+    row: TaskRunRow,
+    definition: AnyStateMachineDefinition | undefined
+  ): Promise<void> {
+    const runId = row.run_id;
+    const held = this.#active.get(runId);
+    // Non-reentrant: a pass already running under this generation owns the
+    // settlement; a second mark landing meanwhile is already recorded.
+    if (held?.kind === "compensation" && held.generation === row.generation) {
+      return;
+    }
+    const completed =
+      this.#store.read<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM cf_agents_task_journal
+         WHERE run_id = ? AND turn = ? AND kind = 'do'
+           AND state = 'completed' AND compensated_at IS NULL`,
+        [runId, row.checkpoint_turn]
+      )[0]?.count ?? 0;
+    if (definition === undefined || completed === 0) {
+      await this.#settleByMark(row, null);
+      return;
+    }
+    const now = Date.now();
+    const generation = nanoid();
+    const attempt = row.attempt + 1;
+    const claimed = this.#store.write(
+      `UPDATE cf_agents_task_runs
+       SET state = 'running', attempt = ?, generation = ?,
+           started_at = coalesce(started_at, ?), next_at = ?,
+           turn_deadline_at = NULL, wait_reason = NULL, updated_at = ?
+       WHERE run_id = ? AND state IN ('pending', 'waiting', 'running')`,
+      [attempt, generation, now, now + this.#claimTimeoutMs(), now, runId]
+    );
+    if (claimed === 0) return;
+    await this.#syncWake(runId);
+    const current = this.#store.getRun(runId);
+    if (!current) return;
+    const controller = new AbortController();
+    const promise = this.#runCompensation(
+      current,
+      definition,
+      generation,
+      attempt,
+      controller
+    );
+    await this.#track(runId, generation, controller, promise, "compensation");
+  }
+
+  async #runCompensation(
+    row: TaskRunRow,
+    machine: AnyStateMachineDefinition,
+    generation: string,
+    attempt: number,
+    controller: AbortController
+  ): Promise<void> {
+    const runId = row.run_id;
+    const compiled = isCompiledCheckpoint(machine.initial);
+    const engine = this.#createEngine(
+      runId,
+      row.definition,
+      generation,
+      controller,
+      Date.now(),
+      compiled,
+      true
+    );
+    const input = deserializeTaskValue(row.input);
+    let state: unknown;
+    try {
+      state = this.#loadState(machine, row, input, compiled);
+    } catch {
+      await this.#settleByMark(row, generation);
+      return;
+    }
+    const phase = compiled ? COMPILED_PHASE : phaseOf(state);
+    const handler = machine.phases[phase];
+    const ctx = new ReplayStep(engine, {
+      attempt,
+      startsLive: false,
+      turn: row.checkpoint_turn,
+      input,
+      compensating: true,
+      facts: {
+        id: runId,
+        definition: row.definition,
+        version: row.definition_version,
+        background: row.background === 1,
+        metadata:
+          row.metadata === null
+            ? undefined
+            : (JSON.parse(row.metadata) as Record<string, StateMachineJson>),
+        createdAt: row.created_at,
+        progress: row.progress,
+        cancelling: row.abort_mark,
+        expiredWait: null,
+        carriedWait: null
+      }
+    });
+    if (handler !== undefined) {
+      // The walk executes no step, so it ends as soon as it reaches ground
+      // the attempt never completed — unless the handler awaits something
+      // outside a step. It is bounded like a step: at the step timeout the
+      // signal fires and the pass runs with what the walk collected.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const bound = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort(new TaskCancellation(row.abort_reason ?? undefined));
+          resolve(undefined);
+        }, this.#stepDefaults.timeoutMs);
+      });
+      // SAFETY: as in #runAttempt — the one place a handler is invoked.
+      const walk = this.lifecycle
+        .runInHostContext(() => handler(state as never, ctx as never))
+        .then(
+          () => undefined,
+          (thrown: unknown) => thrown
+        );
+      try {
+        const thrown = await Promise.race([walk, bound]);
+        // The walk ends at the first ground the attempt never completed;
+        // anything else it throws is also where it stops.
+        if (!isCompensationBoundary(thrown) && isPlatformFailure(thrown)) {
+          throw thrown;
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    const compensations = ctx.compensations();
+    if (compensations.length > 0) {
+      this.#emit("task:compensating", {
+        runId,
+        definition: row.definition,
+        steps: compensations.map((entry) => entry.step)
+      });
+    }
+    for (const entry of compensations) {
+      await this.#compensateStep(row, entry);
+    }
+    await this.#settleByMark(row, generation);
+  }
+
+  /**
+   * One compensation, bounded by its step's timeout. Success is recorded on
+   * the journal row so a pass interrupted part-way does not run it again;
+   * a failure is recorded and the rest of the pass still runs. Neither
+   * write is fenced: marking a step compensated twice is idempotent, and a
+   * run settled meanwhile has no journal rows left to mark.
+   */
+  async #compensateStep(
+    row: TaskRunRow,
+    entry: StepCompensation
+  ): Promise<void> {
+    const runId = row.run_id;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<Error>((resolve) => {
+      timer = setTimeout(
+        () =>
+          resolve(
+            new Error(
+              `Compensation of step "${entry.step}" timed out after ${entry.timeoutMs}ms`
+            )
+          ),
+        entry.timeoutMs
+      );
+    });
+    let failure: unknown = null;
+    try {
+      failure = await Promise.race([
+        this.lifecycle
+          .runInHostContext(() => entry.run())
+          .then(
+            () => null,
+            (thrown: unknown) => thrown ?? new Error("compensation rejected")
+          ),
+        expiry
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (failure === null) {
+      const now = Date.now();
+      this.#store.write(
+        `UPDATE cf_agents_task_journal SET compensated_at = ?, updated_at = ?
+         WHERE run_id = ? AND turn = ? AND name = ? AND state = 'completed'`,
+        [now, now, runId, row.checkpoint_turn, entry.step]
+      );
+      this.#emit("task:step:compensated", {
+        runId,
+        definition: row.definition,
+        step: entry.step
+      });
+      return;
+    }
+    const summary = toErrorSummary(failure);
+    console.error(
+      `Task run "${runId}" step "${entry.step}" compensation failed: ${summary.name}: ${summary.message}`
+    );
+    this.#emit("task:step:compensation-failed", {
+      runId,
+      definition: row.definition,
+      step: entry.step,
+      error: summary.name
+    });
   }
 
   /** The inline default for each mark (§6.4). */
@@ -2834,7 +3519,7 @@ export class StateMachine<
       now,
       claimed.abort_mark
     );
-    await this.#track(runId, generation, controller, promise);
+    await this.#track(runId, generation, controller, promise, "cancel");
     // A mark still standing after onCancel ran — a newer mark landed while
     // it ran, or its own write was fenced — is applied by the next wake,
     // never by re-entering here: the transition is non-reentrant (§6.2).
@@ -2899,7 +3584,7 @@ export class StateMachine<
     try {
       state = this.#loadState(machine, row, input, compiled);
     } catch (thrown) {
-      await this.#settleThrown(row, generation, thrown, mark, false);
+      await this.#settleThrown(row, generation, thrown, mark);
       return;
     }
     if (!compiled && checkpointJson === null) {
@@ -2913,7 +3598,7 @@ export class StateMachine<
           `initial checkpoint of "${row.definition}"`
         );
       } catch (thrown) {
-        await this.#settleThrown(row, generation, thrown, mark, false);
+        await this.#settleThrown(row, generation, thrown, mark);
         return;
       }
       const committed = this.#store.fencedWrite(
@@ -2944,8 +3629,7 @@ export class StateMachine<
           new Error(
             `Definition "${row.definition}" has no handler for phase "${phase}"`
           ),
-          mark,
-          false
+          mark
         );
         return;
       }
@@ -3010,7 +3694,6 @@ export class StateMachine<
           generation,
           thrown,
           mark,
-          declaresOnCancel(machine),
           ctx.takeConsumed()
         );
         return;
@@ -3044,8 +3727,7 @@ export class StateMachine<
           new Error(
             `Task definition "${row.definition}" returned no terminal from its compiled phase`
           ),
-          null,
-          false
+          null
         );
         return;
       }
@@ -3057,7 +3739,7 @@ export class StateMachine<
           `checkpoint returned by "${row.definition}" phase "${phase}"`
         );
       } catch (thrown) {
-        await this.#settleThrown(row, generation, thrown, mark, false);
+        await this.#settleThrown(row, generation, thrown, mark);
         return;
       }
       engine.creditProgress(ctx.takeStreamProgress());
@@ -3388,7 +4070,6 @@ export class StateMachine<
     generation: string,
     thrown: unknown,
     cancelling: StateMachineAbortMark | null,
-    deferToProtocol: boolean,
     consume: readonly string[] = []
   ): Promise<void> {
     const runId = row.run_id;
@@ -3404,11 +4085,25 @@ export class StateMachine<
     }
 
     if (isTaskCancellation(thrown)) {
-      // A step boundary saw the mark. A machine with `onCancel` gets its
-      // cancel transition from #afterAttempt; everything else takes the
-      // inline default now.
-      if (deferToProtocol) return;
-      await this.#settleCancelled(runId, generation, thrown.reason);
+      if (cancelling !== null) {
+        // `onCancel` gave the run up instead of settling it: the inline
+        // default under the mark it was running for.
+        const current = this.#store.getRun(runId);
+        if (
+          current &&
+          !TERMINAL_STATES.has(current.state) &&
+          current.generation === generation
+        ) {
+          await this.#compensateAndSettle(
+            current,
+            this.#resolveDefinition(current.definition)
+          );
+        }
+        return;
+      }
+      // A step boundary saw the mark. #afterAttempt hands the run to the
+      // protocol — the cancel transition, or the inline default with its
+      // compensation pass — once this invocation has ended.
       return;
     }
 
@@ -3701,7 +4396,8 @@ export class StateMachine<
       row?.retain === 0 &&
       (row.outcome === null || !PRESERVED_OUTCOMES.has(row.outcome))
     ) {
-      this.#store.deleteRun(runId);
+      await this.#deleteRun(runId);
+      return;
     }
     await this.#syncWake(runId);
   }

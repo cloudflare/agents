@@ -158,6 +158,33 @@ export function isTaskSuspension(value: unknown): value is TaskSuspension {
  * Thrown by the engine when a step boundary observes the run's cancellation
  * request. The capability settles the run as cancelled.
  */
+/**
+ * Thrown by a step boundary during a compensation replay when the replay
+ * reaches ground the original attempt never completed: the walk stops here,
+ * and everything registered before it is compensated.
+ */
+/** @internal One compensation a compensation replay collected. */
+export type StepCompensation = {
+  readonly step: string;
+  /** The step's resolved timeout, which bounds its compensation too. */
+  readonly timeoutMs: number;
+  readonly run: () => void | Promise<void>;
+};
+
+export class CompensationBoundary {
+  readonly step: string;
+
+  constructor(step: string) {
+    this.step = step;
+  }
+}
+
+export function isCompensationBoundary(
+  value: unknown
+): value is CompensationBoundary {
+  return value instanceof CompensationBoundary;
+}
+
 export class TaskCancellation {
   readonly reason: string | undefined;
 
@@ -406,7 +433,7 @@ export function resolveRetryPolicy(
 /** Resolve one `step.do()` config against the capability defaults. */
 export function resolveStepPolicy(
   defaults: ResolvedStepPolicy,
-  config: StateMachineStepConfig | undefined
+  config: Pick<StateMachineStepConfig<never>, "retries" | "timeout"> | undefined
 ): ResolvedStepPolicy {
   return {
     ...resolveRetryPolicy(defaults, config?.retries, "step retries"),
@@ -466,6 +493,17 @@ export class ReplayStep implements StateMachineContext<
    * nothing; until then they are hidden from every read here.
    */
   readonly #consumed = new Set<string>();
+  /**
+   * Compensations registered by completed `do` steps, in completion order.
+   * The engine runs them in reverse when the run is aborted (§ compensate).
+   */
+  readonly #compensations: StepCompensation[] = [];
+  /**
+   * True for a compensation replay: journaled ground replays as usual and
+   * registers its compensations, and the first step the original attempt
+   * never completed ends the walk instead of executing.
+   */
+  readonly #compensating: boolean;
   /** Asks raised in this transition, per kind: the ordinal in their ids. */
   readonly #askOrdinals = new Map<string, number>();
   /** Children spawned in this transition without a caller-chosen id. */
@@ -485,6 +523,7 @@ export class ReplayStep implements StateMachineContext<
       turn?: number;
       input?: unknown;
       facts?: ReplayRunFacts;
+      compensating?: boolean;
     }
   ) {
     this.#engine = engine;
@@ -505,6 +544,38 @@ export class ReplayStep implements StateMachineContext<
     this.#progressBase = facts.progress;
     this.#expiredWait = facts.expiredWait;
     this.#carriedWait = facts.carriedWait;
+    this.#compensating = options.compensating === true;
+  }
+
+  /** @internal The compensations to run, newest first. */
+  compensations(): ReadonlyArray<StepCompensation> {
+    return [...this.#compensations].reverse();
+  }
+
+  /**
+   * In a compensation replay, keep the compensation a completed step
+   * registered, bounded by that step's own timeout. A live attempt keeps
+   * nothing: its compensations run in a fresh pass, never inline.
+   */
+  #register<T>(
+    name: string,
+    config: StateMachineStepConfig<T> | undefined,
+    policy: ResolvedStepPolicy,
+    result: T
+  ): void {
+    if (!this.#compensating) return;
+    const compensate = config?.compensate;
+    if (compensate === undefined) return;
+    this.#compensations.push({
+      step: name,
+      timeoutMs: policy.timeoutMs,
+      run: () => compensate(result)
+    });
+  }
+
+  /** In a compensation replay, ground the attempt never completed ends the walk. */
+  #boundary(name: string): void {
+    if (this.#compensating) throw new CompensationBoundary(name);
   }
 
   /** @internal The mailbox keys taken this transition, handed to the boundary. */
@@ -609,6 +680,7 @@ export class ReplayStep implements StateMachineContext<
       return mailboxItem(row);
     }
     if (this.#tookExpiry("mailbox")) return TIMED_OUT;
+    this.#boundary("receive");
     throw new TaskSuspension(
       this.#withinDeadline(within, "mailbox"),
       "mailbox"
@@ -627,6 +699,7 @@ export class ReplayStep implements StateMachineContext<
       return rows.map(mailboxItem);
     }
     if (this.#tookExpiry("mailbox")) return TIMED_OUT;
+    this.#boundary("receive");
     throw new TaskSuspension(
       this.#withinDeadline(within, "mailbox"),
       "mailbox"
@@ -728,6 +801,7 @@ export class ReplayStep implements StateMachineContext<
         ? settled.length > 0
         : settled.length === ids.length;
     if (done) return ids.map((id) => answerOf<Answer>(byId.get(id)));
+    this.#boundary("answers");
     // A wake the expiry sweep explains is not the `within` deadline.
     if (!lapsed && this.#tookExpiry("ask")) return TIMED_OUT;
     const within = this.#withinDeadline(options?.within, "ask");
@@ -795,6 +869,7 @@ export class ReplayStep implements StateMachineContext<
       );
     }
     if (this.#tookExpiry("child")) return TIMED_OUT;
+    this.#boundary("join");
     throw new TaskSuspension(
       this.#withinDeadline(options?.within, "child"),
       "child"
@@ -897,13 +972,13 @@ export class ReplayStep implements StateMachineContext<
   ): Promise<T>;
   do<T extends StateMachineValue>(
     name: string,
-    config: StateMachineStepConfig,
+    config: StateMachineStepConfig<T>,
     callback: (attempt: StateMachineStepAttempt) => T | Promise<T>
   ): Promise<T>;
   async do<T extends StateMachineValue>(
     name: string,
     configOrCallback:
-      | StateMachineStepConfig
+      | StateMachineStepConfig<T>
       | ((attempt: StateMachineStepAttempt) => T | Promise<T>),
     maybeCallback?: (attempt: StateMachineStepAttempt) => T | Promise<T>
   ): Promise<T> {
@@ -919,6 +994,8 @@ export class ReplayStep implements StateMachineContext<
 
     const row = this.#engine.readStep(this.turn, name);
     if (row === undefined) {
+      // New ground: a compensation replay stops here; an attempt executes.
+      this.#boundary(name);
       this.#live = true;
       if (this.#engine.countSteps(this.turn) >= MAX_STEPS_PER_RUN) {
         throw new Error(
@@ -927,7 +1004,9 @@ export class ReplayStep implements StateMachineContext<
         );
       }
       this.#engine.insertStep(this.turn, name, "do", null);
-      return this.#executeAttempt(name, 1, policy, callback);
+      const result = await this.#executeAttempt(name, 1, policy, callback);
+      this.#register(name, config, policy, result);
+      return result;
     }
 
     if (row.kind !== "do") {
@@ -938,27 +1017,47 @@ export class ReplayStep implements StateMachineContext<
     }
 
     switch (row.state) {
-      case "completed":
-        return deserializeTaskValue(row.result) as T;
+      case "completed": {
+        // Journaled ground replays without executing. A compensation pass
+        // keeps the compensation the step registered — unless an earlier
+        // pass already ran it, which the journal records.
+        const result = deserializeTaskValue(row.result) as T;
+        if (row.compensated_at === null) {
+          this.#register(name, config, policy, result);
+        }
+        return result;
+      }
       case "failed":
-        // Defensive: a failed step fails its run, so replay should not reach
-        // it. Surface the persisted terminal error rather than re-executing.
+        this.#boundary(name);
         throw restoreStepError(row);
       case "waiting": {
-        // The frontier: a retry deadline from a previous attempt.
+        this.#boundary(name);
         this.#live = true;
         const wakeAt = row.next_at ?? Date.now();
         if (Date.now() < wakeAt) throw new TaskSuspension(wakeAt, "retry");
         const attempt = this.#engine.claimStepAttempt(this.turn, name);
         this.#engine.emit("task:step:retry", { step: name, attempt });
-        return this.#executeAttempt(name, attempt, policy, callback);
+        const result = await this.#executeAttempt(
+          name,
+          attempt,
+          policy,
+          callback
+        );
+        this.#register(name, config, policy, result);
+        return result;
       }
       case "running": {
-        // A previous attempt was interrupted mid-step. Default replay
-        // semantics: run it again under a fresh claim.
+        this.#boundary(name);
         this.#live = true;
         const attempt = this.#engine.claimStepAttempt(this.turn, name);
-        return this.#executeAttempt(name, attempt, policy, callback);
+        const result = await this.#executeAttempt(
+          name,
+          attempt,
+          policy,
+          callback
+        );
+        this.#register(name, config, policy, result);
+        return result;
       }
     }
   }
@@ -1001,6 +1100,7 @@ export class ReplayStep implements StateMachineContext<
     const row = this.#engine.readStep(this.turn, name);
     let deadline: number | null;
     if (row === undefined) {
+      this.#boundary(name);
       this.#live = true;
       deadline =
         options.timeout === undefined
@@ -1018,6 +1118,7 @@ export class ReplayStep implements StateMachineContext<
         return eventOf<Payload>(deserializeTaskValue(row.result));
       }
       if (row.state === "failed") throw restoreStepError(row);
+      this.#boundary(name);
       this.#live = true;
       deadline = row.next_at;
     }
@@ -1077,6 +1178,7 @@ export class ReplayStep implements StateMachineContext<
 
     const row = this.#engine.readStep(this.turn, name);
     if (row === undefined) {
+      this.#boundary(name);
       this.#live = true;
       const wakeAt = wakeTime();
       if (wakeAt <= Date.now()) {
@@ -1095,14 +1197,15 @@ export class ReplayStep implements StateMachineContext<
     }
     if (row.state === "completed") return;
 
-    // The frontier: an unfinished sleep is the first unfinished step.
+    // A sleep still ahead is where a compensation replay stops; a wake
+    // before the deadline parks again on the deadline first recorded.
+    this.#boundary(name);
     this.#live = true;
     const wakeAt = row.next_at ?? 0;
     if (Date.now() < wakeAt) throw new TaskSuspension(wakeAt, "sleep");
     this.#engine.completeStep(this.turn, name, undefined);
   }
 
-  /** Execute one claimed attempt of a `do` step under timeout and retries. */
   async #executeAttempt<T extends StateMachineValue>(
     name: string,
     attempt: number,

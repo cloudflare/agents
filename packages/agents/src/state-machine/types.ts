@@ -205,11 +205,19 @@ export interface StateMachineRetryConfig {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface StateMachineStepConfig {
+export interface StateMachineStepConfig<Result = StateMachineValue> {
   retries?: StateMachineRetryConfig;
-
-  /** Timeout of one callback attempt. */
   timeout?: number | StateMachineDurationString;
+  /**
+   * Undo this step's effect when the run is cancelled, its deadline or the
+   * transition watchdog fires, or a parent's cascade reaches it — after the
+   * step completed. Compensations run in reverse order of completion, each
+   * with the result the step journaled, in a fresh invocation before the
+   * run settles; a compensation that throws is recorded and the rest still
+   * run. Scoped to the run for a durable function and to the current
+   * transition for a machine, whose `onCancel` owns everything earlier.
+   */
+  compensate?: (result: Result) => void | Promise<void>;
 }
 
 /**
@@ -270,7 +278,7 @@ export interface StateMachineStep {
   ): Promise<T>;
   do<T extends StateMachineValue>(
     name: string,
-    config: StateMachineStepConfig,
+    config: StateMachineStepConfig<T>,
     callback: (attempt: StateMachineStepAttempt) => T | Promise<T>
   ): Promise<T>;
 
@@ -858,7 +866,12 @@ export interface StateMachineSpawnOptions extends StateMachineRunOptions {
   /** Deliver the child's terminal outcome as a mailbox item. Default true. */
   notify?: boolean;
 
-  /** Route the child onto another Lifecycle (a facet). */
+  /**
+   * Own the child on another Lifecycle: a sub-agent this Agent has already
+   * created, addressed by `Agent.subAgentRouteAddress()`. The child runs
+   * and journals there; its settlement note, the abort cascade and every
+   * verb addressed to the parent's Lifecycle are routed.
+   */
   owner?: LifecycleRouteAddress;
 }
 
@@ -988,6 +1001,7 @@ export type StateMachineChangeType =
   | "answer"
   | "child"
   | "waiting"
+  | "compensating"
   | "settled";
 
 /**
@@ -1242,6 +1256,8 @@ export type TaskJournalRow = {
   started_at: number | null;
   updated_at: number;
   completed_at: number | null;
+  /** When this step's `compensate` ran to completion, if it has. */
+  compensated_at: number | null;
 };
 
 /** @internal Raw `cf_agents_task_mailbox` SQLite row. */
@@ -1271,12 +1287,19 @@ export type TaskAskRow = {
   answered_at: number | null;
 };
 
-/** @internal Raw `cf_agents_task_routes` SQLite row. */
+/**
+ * @internal Raw `cf_agents_task_routes` SQLite row: a run this Lifecycle
+ * can reach but does not own. On the root, every run a routed sub-agent
+ * accepted; on a parent's Lifecycle, every child it spawned elsewhere.
+ */
 export type TaskRouteRow = {
   run_id: string;
   owner_path: string;
   owner_path_key: string;
   parent_run_id: string | null;
   parent_owner_key: string | null;
+  definition: string | null;
+  background: number;
+  settled_at: number | null;
   created_at: number;
 };

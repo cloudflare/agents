@@ -153,7 +153,8 @@ export type TaskMailbox<Definition> = StateMachineMailbox<Definition>;
 // ── The per-handler runtime ───────────────────────────────────────────────
 
 export type TaskStep = StateMachineStep;
-export type TaskStepConfig = StateMachineStepConfig;
+export type TaskStepConfig<Result extends TaskValue = TaskValue> =
+  StateMachineStepConfig<Result>;
 export type TaskRetryConfig = StateMachineRetryConfig;
 export type TaskStepAttempt = StateMachineStepAttempt;
 export type TaskStepEvent<Payload> = StateMachineStepEvent<Payload>;

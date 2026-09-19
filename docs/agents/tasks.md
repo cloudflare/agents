@@ -100,7 +100,8 @@ export class ReportAgent extends Agent<Env> {
 
 `taskDefinitions` is typed `TaskDefinitions`, so a machine declared on it
 (type the map `satisfies TaskDefinitions` when it mixes both forms) reaches
-the engine the same way. Task wakes share the Agent's
+the engine the same way. `this.subAgentRouteAddress(cls, name)` is the
+address a machine passes as `owner` to spawn a child onto that sub-agent. Task wakes share the Agent's
 physical alarm with schedules, keep-alive, and the rest of the Agent's
 durable work through the Lifecycle job queue. Internally, Agent's own chat
 frameworks (Think, AIChatAgent, and Think's messenger replies) run their
@@ -171,16 +172,16 @@ and at most 1 MiB serialized.
 
 ## Durable jobs: the step API
 
-| Method                                       | Behavior                                                                                                            |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `step.do(name, config?, cb)`                 | Run a named step once; journaled results replay without re-executing. `config` sets `retries` and `timeout`.        |
-| `step.sleep(name, duration)`                 | Persist a wake deadline and suspend; no isolate stays resident while waiting.                                       |
-| `step.sleepUntil(name, when)`                | Sleep until a wall-clock time.                                                                                      |
-| `step.waitForEvent(name, { type, timeout })` | Park until `tasks.sendEvent(runId, { type, payload })` delivers a matching event; the event is journaled once.      |
-| `step.status(message)`                       | Update observable progress; replays stay silent over old ground.                                                    |
-| `step.idempotencyKey(name)`                  | The stable external deduplication key `step.do(name, …)` receives.                                                  |
-| `step.signal`                                | Aborts for the whole attempt on `cancel()` and at the run's `deadline`, for work awaited outside a step.            |
-| `step.attempt`                               | This execution's claim number: 1 on the first, one higher on every later claim — replay, sleep or retry wake alike. |
+| Method                                       | Behavior                                                                                                                   |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `step.do(name, config?, cb)`                 | Run a named step once; journaled results replay without re-executing. `config` sets `retries`, `timeout` and `compensate`. |
+| `step.sleep(name, duration)`                 | Persist a wake deadline and suspend; no isolate stays resident while waiting.                                              |
+| `step.sleepUntil(name, when)`                | Sleep until a wall-clock time.                                                                                             |
+| `step.waitForEvent(name, { type, timeout })` | Park until `tasks.sendEvent(runId, { type, payload })` delivers a matching event; the event is journaled once.             |
+| `step.status(message)`                       | Update observable progress; replays stay silent over old ground.                                                           |
+| `step.idempotencyKey(name)`                  | The stable external deduplication key `step.do(name, …)` receives.                                                         |
+| `step.signal`                                | Aborts for the whole attempt on `cancel()` and at the run's `deadline`, for work awaited outside a step.                   |
+| `step.attempt`                               | This execution's claim number: 1 on the first, one higher on every later claim — replay, sleep or retry wake alike.        |
 
 Each `do` attempt receives `{ attempt, idempotencyKey, signal }`. The signal
 aborts on cancellation and on the attempt timeout (default 5 minutes); a
@@ -192,6 +193,13 @@ ignores it runs on as a zombie whose writes the generation fence rejects.
 
 A callback that throws retries on a durable delay (default: 5 attempts,
 exponential backoff). Throw `NonRetryableError` to fail the run immediately.
+
+A step with an external effect can declare how to undo it:
+`step.do("charge", { compensate: (result) => refund(result) }, cb)`. The
+compensation runs only when the run is aborted before it completes — by
+`cancel()`, its deadline, the watchdog, a parent's cascade or the memory
+limit — and only for steps that completed; see
+[Abort and deadlines](#abort-and-deadlines) for the order and the bounds.
 
 `waitForEvent` is the Workflows verb for one shape of the mailbox below:
 `tasks.sendEvent(runId, { type, payload, requestId? })` is
@@ -347,9 +355,11 @@ Annotate every machine `satisfies TaskMachine<State, Mailbox, Result, Seed>`.
 It is what narrows each handler's `state` to its own phase, rejects an
 unknown phase key, and types `ctx` — the mailbox payload, the result the
 terminals take, the seed `initial` receives. A map of parameterless handlers
-that omits it still compiles, with every handler's state read as `never`; a
-lint rule to catch that is planned, and until it lands the annotation is a
-review-time rule.
+that omits it still compiles, with every handler's state read as `never`,
+which is why the repository's check gate (`pnpm run check:machines`,
+`scripts/check-machine-satisfies.ts`) flags any `{ initial, phases }` literal
+that is not declared with one of those types. Run the same script over your
+own sources, or copy the rule into your linter.
 
 `initial` may be a value or a function of the run's seed (`run()`'s input).
 It is evaluated on the first dispatch and committed as turn 0, so a park in
@@ -430,8 +440,21 @@ parent. When it settles, a note lands in the parent's mailbox
 is parked on it. Cancelling a parent takes every in-tree child with it;
 `background: true` children are detached and run on. Derive a child's
 `runId` from durable state (`` `child:${state.turnSeq}:${i}` ``), never
-from a counter. Children run on the parent's Lifecycle in this release;
-cross-facet ownership (`spawn(..., { owner })`) is not wired yet.
+from a counter.
+
+A child may live on another Lifecycle: `spawn(definition, input, { owner })`
+takes the route address of one of the Agent's sub-agents —
+`this.subAgentRouteAddress(SubAgentClass, name)` — which must already
+exist. The child is accepted, runs and journals on that sub-agent, whose
+wakes the root already mirrors; its settlement note comes back to the
+parent through the root, the parent's cancel cascade and `terminate`
+reach it, and `view().children` lists it with its `ownerKey`. Every run a
+sub-agent accepts is indexed on the root, so a verb addressed to the root
+— `get`, `view`, `send`, `sendEvent`, `withdraw`, `answer`, `withdrawAsk`,
+`cancel`, `terminate`, `pause`, `resume` — is forwarded to the owner when
+the run is not local; that is how an approval answered at the root reaches
+a facet-hosted run parked with no wake at all. `watch()` and `list()` stay
+local to the Lifecycle they are called on.
 
 **Streams.** `ctx.stream(name)` opens an engine-owned stream whose id is
 `${runId}:${name}#${epoch}` and whose tag, `${runId}:${name}`, is stable
@@ -440,9 +463,10 @@ the next checkpoint from a transition that holds a live stream settles the
 stream and writes the checkpoint in one transaction. A reclaim after an
 interruption seals the lost attempt's stream and rotates the epoch. Chunks
 appended count as progress; nothing is written per append. The capability
-needs the `Streams` capability passed as `streams` in its options (and
-installed on the same Lifecycle); `Agent` does not install one today, so
-`ctx.stream()` on an Agent-hosted actor throws.
+needs the `Streams` capability passed as `streams` in its options and
+installed on the same Lifecycle; `Agent` installs one as `this.streams` and
+hands it to `this.tasks`, so `ctx.stream()` works on an Agent-hosted actor
+out of the box.
 
 Timer primitives never touch `setAlarm`: every `within`, every ask expiry,
 every sleep is the run's one wake, mirrored into the Lifecycle queue.
@@ -512,12 +536,28 @@ children included.
 The mark is a write barrier: every checkpoint, park and settle write is
 fenced on it, so a live transition that races the mark cannot commit past
 it. For a definition without `onCancel` — every job, and any machine that
-does not opt in — the **inline default** applies: a parked run settles
-inside `cancel()`, a live one has its `step.signal` aborted and settles at
-its next step boundary. `cancel` ⇒ `cancelled`; `deadline` ⇒ `failed` with
-`TaskDeadlineExceededError`; `turn-deadline` ⇒ `failed` with
-`TaskTurnDeadlineExceededError`; a parent's cascade ⇒ `cancelled` with
-reason `"parent aborted"`.
+does not opt in — the **inline default** applies: the run's completed
+steps are compensated, then it settles by the mark. `cancel` ⇒
+`cancelled`; `deadline` ⇒ `failed` with `TaskDeadlineExceededError`;
+`turn-deadline` ⇒ `failed` with `TaskTurnDeadlineExceededError`; a
+parent's cascade ⇒ `cancelled` with reason `"parent aborted"`. A live
+transition has its `step.signal` aborted and is not waited for: the
+compensation pass claims a fresh generation, which fences everything the
+old one still tries to write.
+
+**Compensation.** A compensation pass replays the current turn's journal
+in a fresh invocation — no step executes again — collecting the
+`compensate` callbacks of the steps that completed, and stops at the first
+ground the attempt never completed. The callbacks then run newest first,
+each bounded by its step's `timeout`; one that throws or times out is
+recorded (`task:step:compensation-failed`) and the rest still run. Each
+success is recorded on the journal row, so a pass interrupted part-way
+does not repeat it. A run with no completed step settles at once, and
+`cancel()` on a parked run is still terminal when it resolves. The replay
+itself is bounded by the step timeout: a handler that awaits something
+outside a step past that bound loses the compensations after it, which
+is one more reason to keep every await inside `step.do`.
+`tasks.terminate()` runs no compensation.
 
 For a machine with `onCancel`: the live invocation is signalled and joined
 (bounded), then a fresh invocation runs `onCancel(state, ctx)` with
@@ -592,7 +632,9 @@ with that view on every accepted send, ask, answer, checkpoint, park and
 settlement. It holds nothing durable: a subscriber that dies with its
 isolate calls `view()` once and subscribes again. `pause()` stops
 dispatching at the next boundary and `resume()` continues; a paused run
-holds no alarm and still accepts sends and answers.
+holds no alarm and still accepts sends and answers. Each of these verbs,
+called on an Agent for a run one of its sub-agents owns, is forwarded to
+that sub-agent (see Children above); `watch()` and `list()` are not.
 
 Cancellation is cooperative: an external effect already accepted cannot be
 undone. Every settlement — including faults, orphans and cascades — reaches
@@ -615,11 +657,7 @@ time moves — so choose on shape, not on price.
 
 ## Current limits
 
-No `waitForCompletion` on `run()`. `ctx.spawn(..., { owner })` — a child
-owned by another Lifecycle — is declared and refused; children run on their
-parent's object. `Agent` installs Tasks without a `Streams` capability, so
-`ctx.stream()` is available on a hand-composed Lifecycle Object only. The
-legacy `runFiber()`/`startFiber()` APIs are public and deprecated in favour
-of Tasks; they are still recovered by their own scan. Per-step compensation
-(`compensate`) is deferred. The design and its evolution are recorded in
+No `waitForCompletion` on `run()`. The legacy `runFiber()`/`startFiber()`
+APIs are public and deprecated in favour of Tasks; they are still recovered
+by their own scan. The design and its evolution are recorded in
 [`design/rfc-tasks-state-machine.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-tasks-state-machine.md).

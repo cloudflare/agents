@@ -58,8 +58,7 @@ import {
   type SubmitConcurrencyDecision,
   type ChatFiberSnapshot
 } from "agents/chat";
-import { ResumableStream, createChatStreams } from "agents/chat";
-import type { Streams } from "agents/streams";
+import { ResumableStream } from "agents/chat";
 import { Sessions, type Session, type SessionMessage } from "agents/sessions";
 import {
   CHAT_RECOVERY_TASK_NAME,
@@ -418,13 +417,6 @@ export class AIChatAgent<
 
   /** The default linear conversation handle. */
   readonly #session: Session = this.sessions.session();
-
-  /**
-   * The Streams capability backing `_resumableStream`: chat's in-flight
-   * output lives in the shared durable chunk log, readable by any
-   * `streams.read()` consumer on this Durable Object.
-   */
-  readonly streams: Streams = createChatStreams();
 
   /**
    * Resumable stream manager -- handles chunk buffering, persistence, and replay.
@@ -985,7 +977,6 @@ export class AIChatAgent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     this.lifecycle.use(this.sessions);
-    this.lifecycle.use(this.streams);
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
     withAgentSpan(

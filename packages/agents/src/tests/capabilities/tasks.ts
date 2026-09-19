@@ -33,6 +33,7 @@ type GuardianState =
   | { phase: "spawn"; background: boolean }
   | { phase: "wait"; child: string };
 type StreamerState = { phase: "first" } | { phase: "second" };
+type RefundState = { phase: "work" };
 type WardenState = { phase: "spawn" } | { phase: "wait"; child: string };
 type NapStreamerState = { phase: "stream" };
 type InboxState = {
@@ -106,6 +107,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly guardedEntries: string[] = [];
   /** `onCancel` entries, recorded as `phase:mark`. */
   readonly cancelLog: string[] = [];
+  /** Compensations that ran, in the order they ran. */
+  readonly compensations: string[] = [];
   /** Definitions resolved lazily, so a test can swap versions in place. */
   readonly dynamic: Record<string, TaskDefinition> = {
     "versioned@v1": versionedV1
@@ -891,6 +894,69 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           }
         }
       } satisfies TaskMachine<NapStreamerState, never, string>,
+
+      /**
+       * Two compensable effects, then a long park: the cancel probe.
+       * `hang` awaits the attempt signal outside any step; `failRefund`
+       * makes the newer compensation throw; `slowRefund` makes it hang
+       * past its step's timeout.
+       */
+      refundable: async (
+        input: { hang?: boolean; failRefund?: boolean; slowRefund?: boolean },
+        step: TaskStep
+      ) => {
+        await step.do(
+          "reserve",
+          { compensate: () => void this.compensations.push("release") },
+          () => "held"
+        );
+        const charge = await step.do(
+          "charge",
+          {
+            timeout: 100,
+            compensate: async (result) => {
+              if (input.failRefund === true) throw new Error("refund failed");
+              if (input.slowRefund === true) await new Promise(() => {});
+              this.compensations.push(`refund:${result}`);
+            }
+          },
+          () => 42
+        );
+        if (input.hang === true) {
+          // Awaits outside a step: only the attempt signal ends this.
+          await new Promise<void>((_resolve, reject) => {
+            step.signal.addEventListener("abort", () =>
+              reject(step.signal.reason)
+            );
+          });
+        }
+        await step.sleep("settle", 60_000);
+        return charge;
+      },
+
+      /** The same effects on a machine without onCancel. */
+      refundableMachine: {
+        initial: { phase: "work" } as RefundState,
+        phases: {
+          work: async (_state, ctx) => {
+            await ctx.do(
+              "reserve",
+              { compensate: () => void this.compensations.push("release") },
+              () => "held"
+            );
+            await ctx.do(
+              "charge",
+              {
+                compensate: (result) =>
+                  void this.compensations.push(`refund:${result}`)
+              },
+              () => 42
+            );
+            await ctx.sleep("settle", 60_000);
+            return ctx.complete("charged");
+          }
+        }
+      } satisfies TaskMachine<RefundState, never, string>,
 
       /** Progress without a checkpoint change: a memo, then completion. */
       memoist: {

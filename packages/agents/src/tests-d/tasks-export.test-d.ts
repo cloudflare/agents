@@ -493,6 +493,7 @@ unknownPhase satisfies object;
 // correctness loss, and a lint rule requires `satisfies` on every entry.
 // This probe exists so a future change making omission loud is reviewed
 // rather than accidental.
+// check-machine-satisfies-disable-next-line
 const unannotated = {
   initial: { phase: "a" },
   phases: {
@@ -556,3 +557,55 @@ void [
   _degradedState,
   _degradedOutput
 ];
+
+// A step's `compensate` is typed by the step's own result and runs only
+// through the engine's inline default: it is never a second return path.
+const refundable = new Tasks({
+  definitions: {
+    order: async (input: { sku: string }, step: TaskStep) => {
+      const held = await step.do(
+        "reserve",
+        {
+          timeout: "30 seconds",
+          compensate: (result) => {
+            result satisfies { hold: string };
+          }
+        },
+        () => ({ hold: input.sku })
+      );
+      await step.do(
+        "charge",
+        { compensate: (result: { sku: string }) => void result },
+        // @ts-expect-error the callback's result is what the compensation receives.
+        () => held.hold.length
+      );
+      return held;
+    }
+  }
+});
+refundable.run("order", { sku: "x" }) satisfies Promise<TaskReceipt>;
+
+// A child may be owned by another Lifecycle: the option is a route address.
+const _ownerProbe = {
+  initial: { phase: "spawn" } as { phase: "spawn" } | { phase: "join" },
+  phases: {
+    spawn: async (_state, ctx) => {
+      await ctx.spawn(
+        "work",
+        { n: 1 },
+        { owner: { key: "Facet:a", data: "[]" }, runId: `${ctx.id}:child` }
+      );
+      await ctx.spawn(
+        "work",
+        { n: 1 },
+        {
+          // @ts-expect-error an owner is an address, not a name.
+          owner: "Facet:a"
+        }
+      );
+      return { phase: "join" };
+    },
+    join: async (_state, ctx) => ctx.complete()
+  }
+} satisfies TaskMachine<{ phase: "spawn" } | { phase: "join" }>;
+void _ownerProbe;

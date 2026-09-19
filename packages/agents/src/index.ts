@@ -49,7 +49,10 @@ import {
   CF_SUB_AGENT_TAGS_KEY,
   SUB_AGENT_OUTER_URL_HEADER
 } from "./dynamic-agents/dynamic-agents";
-import { logicalNameFromPathV2Identity } from "./dynamic-agents/identity";
+import {
+  agentPathKey,
+  logicalNameFromPathV2Identity
+} from "./dynamic-agents/identity";
 import { DynamicAgentsInternal } from "./dynamic-agents/dynamic-agents";
 import { DynamicAgents as DynamicAgentsApi } from "./dynamic-agents/api";
 import type { DynamicAgentHostPort } from "./dynamic-agents/host";
@@ -174,6 +177,7 @@ import {
   setTaskDefinitionResolver,
   setTaskRoutedMemoryLimitHandler
 } from "./tasks/tasks";
+import { Streams } from "./streams/streams";
 import type { TaskDefinition, TaskDefinitions } from "./tasks/types";
 import type {
   Schedule,
@@ -1308,6 +1312,16 @@ export class Agent<
   readonly tasks: Tasks;
 
   /**
+   * Durable incremental output for this Agent: the Streams capability,
+   * installed into its Lifecycle beside Tasks, so a Task run's
+   * `ctx.stream()` opens engine-owned streams here and application code
+   * can open its own through `this.streams.open()`.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly streams: Streams;
+
+  /**
    * Named Task definitions for this Agent, resolved lazily on every
    * dispatch. Declare as a field so the map is rebuilt on every Durable
    * Object wake — that is what lets in-flight runs resolve their persisted
@@ -1902,7 +1916,9 @@ export class Agent<
         ).call(this, payload, item);
     });
 
+    this.streams = new Streams();
     this.tasks = new Tasks({
+      streams: this.streams,
       onError: (error) => this.onError(error)
     });
 
@@ -1982,6 +1998,7 @@ export class Agent<
       .use(this.mcp)
       .use(this._state)
       .use(this._webSockets)
+      .use(this.streams)
       .use(this.tasks)
       // Registered for capability identity/services; its hot paths are
       // wired directly (see the DynamicAgentsInternal class doc).
@@ -8020,6 +8037,33 @@ export class Agent<
    */
   deleteSubAgent(cls: SubAgentClass, name: string): Promise<void> {
     return this.dynamicAgents.delete(cls, name);
+  }
+
+  /**
+   * The Lifecycle route address of one of this Agent's sub-agents, for
+   * `ctx.spawn(definition, input, { owner })`: a child Task run owned by
+   * that sub-agent's own storage and wake. The sub-agent need not exist
+   * yet; it is resolved when the child is accepted.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  subAgentRouteAddress<T extends Agent>(
+    cls: SubAgentClass<T>,
+    name: string
+  ): LifecycleRouteAddress;
+  subAgentRouteAddress(className: string, name: string): LifecycleRouteAddress;
+  subAgentRouteAddress(
+    classOrName: SubAgentClass | string,
+    name: string
+  ): LifecycleRouteAddress {
+    const className =
+      typeof classOrName === "string" ? classOrName : classOrName.name;
+    const path = [...this.selfPath, { className, name }];
+    const key = agentPathKey(path);
+    if (key === null) {
+      throw new Error("A sub-agent route address needs a non-empty path");
+    }
+    return { key, data: JSON.stringify(path) };
   }
 
   // ── Sub-agent registry (backs `hasSubAgent` / `listSubAgents`) ──────────

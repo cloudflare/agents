@@ -184,7 +184,6 @@ import {
   CHAT_MESSAGE_TYPES,
   TurnQueue,
   ResumableStream,
-  createChatStreams,
   ContinuationState,
   PreStreamTurns,
   AutoContinuationController,
@@ -249,7 +248,6 @@ import {
   type ChatRecoveryIncident,
   type ChatRecoveryKind
 } from "agents/chat";
-import type { Streams } from "agents/streams";
 import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
 import type {
   StreamChunkData,
@@ -3093,7 +3091,6 @@ export class Think<
     super(ctx, env);
 
     this.lifecycle.use(this.sessions);
-    this.lifecycle.use(this.streams);
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
     this._registerMessengerReplyTaskDefinition();
@@ -4018,13 +4015,6 @@ export class Think<
 
   private _aborts = new AbortRegistry();
   private _turnQueue = new TurnQueue();
-  /**
-   * The Streams capability backing `_resumableStream`: chat's in-flight
-   * output lives in the shared durable chunk log, readable by any
-   * `streams.read()` consumer on this Durable Object.
-   */
-  readonly streams: Streams = createChatStreams();
-
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   /** Lazily-built shared resume-handshake driver (Tier-2). */
