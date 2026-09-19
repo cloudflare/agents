@@ -823,6 +823,22 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         }
       } satisfies TaskMachine<WardenState, never, string>,
 
+      /** Spawns a child without choosing its id, and waits on it. */
+      spawnerDefault: {
+        initial: { phase: "spawn" } as WardenState,
+        phases: {
+          spawn: async (_state, ctx) => {
+            const child = await ctx.spawn("napper", { ms: 60_000 });
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(results[0]?.ok ? "child-done" : "child-failed");
+          }
+        }
+      } satisfies TaskMachine<WardenState, never, string>,
+
       /** Spawns a child that faults, and joins it. */
       parentOfStuck: {
         initial: { phase: "spawn" } as WardenState,

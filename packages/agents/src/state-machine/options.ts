@@ -55,7 +55,11 @@ export interface StateMachineOptions<
   /** Default timeout of one step callback attempt. Default: 5 minutes. */
   readonly stepTimeout?: number | StateMachineDurationString;
 
-  /** Default per-transition watchdog. Defaults to `stepTimeout`. */
+  /**
+   * The per-transition watchdog for machine runs: a transition that neither
+   * returns nor heartbeats within it is aborted. Defaults to `stepTimeout`.
+   * Off for a durable function, whose steps carry their own timeouts.
+   */
   readonly turnTimeout?: number | StateMachineDurationString;
 
   /**

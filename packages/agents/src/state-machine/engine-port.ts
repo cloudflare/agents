@@ -305,7 +305,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       assertCurrent();
       const now = Date.now();
       deps.store.sql`
-          INSERT INTO cf_agents_task_asks
+          INSERT OR IGNORE INTO cf_agents_task_asks
             (ask_id, run_id, turn, name, question, answer, state, expires_at,
              metadata, created_at, answered_at)
           VALUES

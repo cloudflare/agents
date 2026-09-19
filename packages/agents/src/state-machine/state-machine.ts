@@ -763,6 +763,17 @@ export class StateMachine<
     const type = options?.type ?? null;
     const policy = options?.policy ?? "append";
     const now = Date.now();
+    // A repeat of a `requestId` is a duplicate before any policy acts on
+    // the mailbox — `latest` must not clear the original on its way in.
+    // `debounce` is the exception: its repeat is the upsert.
+    if (options?.requestId !== undefined && policy !== "debounce") {
+      const repeated =
+        this.#store.read<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM cf_agents_task_mailbox WHERE run_id = ? AND key = ?",
+          [runId, key]
+        )[0]?.count ?? 0;
+      if (repeated > 0) return { accepted: false, key, reason: "duplicate" };
+    }
     const count =
       this.#store.read<{ count: number }>(
         "SELECT COUNT(*) AS count FROM cf_agents_task_mailbox WHERE run_id = ?",
@@ -1528,7 +1539,10 @@ export class StateMachine<
   async #dispatchRoutedRun(runId: string): Promise<LifecycleJobOutcome> {
     const active = this.#active.get(runId);
     if (active) {
-      if (!(await this.#enforceDeadline(runId, active))) {
+      if (
+        !(await this.#enforceDeadline(runId, active)) &&
+        !(await this.#enforceTurnDeadline(runId, active))
+      ) {
         this.#refreshClaim(runId);
       }
       return this.#wakeOutcome(runId);
@@ -2158,19 +2172,16 @@ export class StateMachine<
   }
 
   /**
-   * Bring a `faulted` or `orphaned` run back: it re-enters `pending` at its
-   * preserved checkpoint and is re-resolved against the definitions now
-   * registered. False for any other run.
+   * Bring a `failed` or `cancelled` run whose row is still here back: it
+   * re-enters `pending` at its preserved checkpoint and is re-resolved
+   * against the definitions now registered — a faulted or orphaned run
+   * always keeps its row; any other keeps it at `retain: true`. False for
+   * a completed run, and for one whose row was released.
    */
   async reopen(runId: string): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    if (
-      !row ||
-      row.state !== "failed" ||
-      row.outcome === null ||
-      !PRESERVED_OUTCOMES.has(row.outcome)
-    ) {
+    if (!row || (row.state !== "failed" && row.state !== "cancelled")) {
       return false;
     }
     const now = Date.now();
@@ -2181,7 +2192,7 @@ export class StateMachine<
           generation = NULL, next_at = ${now}, wait_reason = NULL,
           abort_mark = NULL, abort_reason = NULL, cancel_requested = 0,
           cancel_reason = NULL, updated_at = ${now}
-      WHERE run_id = ${runId} AND state = 'failed'
+      WHERE run_id = ${runId} AND state IN ('failed', 'cancelled')
     `;
     await this.#syncWake(runId);
     return true;
@@ -2279,10 +2290,18 @@ export class StateMachine<
     // Resolved once and persisted with the run, like the interruption
     // policy: a later change to the capability's default must not re-bound
     // a transition already in flight.
+    // The transition watchdog defaults to the step timeout for a machine —
+    // a transition is a step-sized unit of liveness, and `ctx.heartbeat()`
+    // and stream appends extend it — and is off for a compiled function,
+    // whose steps carry their own timeouts.
+    const accepted = this.#resolveDefinition(definition);
+    const compiledDefinition =
+      accepted !== undefined && isCompiledCheckpoint(accepted.initial);
     const turnTimeoutMs =
-      options.turnTimeout === undefined
-        ? this.#turnTimeoutMs
-        : parseTaskDuration(options.turnTimeout, "turnTimeout");
+      options.turnTimeout !== undefined
+        ? parseTaskDuration(options.turnTimeout, "turnTimeout")
+        : (this.#turnTimeoutMs ??
+          (compiledDefinition ? null : this.#stepDefaults.timeoutMs));
 
     const inputJson = serializeTaskValue(
       input,
@@ -3222,9 +3241,11 @@ export class StateMachine<
   ): Promise<void> {
     const runId = row.run_id;
     const mark: MarkPredicate = cancelling === null ? "null" : "set";
-    // A terminal makes the transition's consumption durable; a retained
-    // run's mailbox keeps only what it never took.
-    if (consume.length > 0) this.#deleteMailbox(runId, consume);
+    // A terminal the fence accepts makes the transition's consumption
+    // durable; one it refuses leaves every item for whoever owns the run.
+    const consumed = () => {
+      if (consume.length > 0) this.#deleteMailbox(runId, consume);
+    };
     switch (terminal.kind) {
       case "complete": {
         const resultJson = serializeTaskValue(
@@ -3243,6 +3264,7 @@ export class StateMachine<
           [resultJson, now, now]
         );
         if (settled) {
+          consumed();
           this.#emit("task:completed", { runId, definition: row.definition });
           await this.#finishTerminalSettlement(
             runId,
@@ -3262,11 +3284,18 @@ export class StateMachine<
           null,
           { mark }
         );
-        if (failed) await this.#observeError(terminal.error, row);
+        if (failed) {
+          consumed();
+          await this.#observeError(terminal.error, row);
+        }
         return;
       }
       case "aborted":
-        await this.#settleCancelled(runId, generation, terminal.reason, mark);
+        if (
+          await this.#settleCancelled(runId, generation, terminal.reason, mark)
+        ) {
+          consumed();
+        }
         return;
     }
   }
@@ -3330,6 +3359,27 @@ export class StateMachine<
       wakeAt
     });
     await this.#syncWake(row.run_id);
+    // A send or an answer that landed between the handler's read and this
+    // park saw a live run and scheduled no wake (§5.8). Re-read here and
+    // wake at once if there is something to deliver, so nothing is lost
+    // to that window.
+    if (reason === "mailbox" || reason === "event" || reason === "child") {
+      const waiting =
+        this.#store.read<{ count: number }>(
+          `SELECT COUNT(*) AS count FROM cf_agents_task_mailbox
+           WHERE run_id = ? AND (visible_after IS NULL OR visible_after <= ?)`,
+          [row.run_id, now]
+        )[0]?.count ?? 0;
+      if (waiting > 0) await this.#syncWake(row.run_id, now);
+    } else if (reason === "ask") {
+      const answered =
+        this.#store.read<{ count: number }>(
+          `SELECT COUNT(*) AS count FROM cf_agents_task_asks
+           WHERE run_id = ? AND state <> 'open' AND answered_at >= ?`,
+          [row.run_id, row.updated_at]
+        )[0]?.count ?? 0;
+      if (answered > 0) await this.#syncWake(row.run_id, now);
+    }
   }
 
   /** Persist a non-completed attempt outcome. */
@@ -3532,7 +3582,7 @@ export class StateMachine<
     generation: string | null,
     reason: string | undefined,
     mark: MarkPredicate = "any"
-  ): Promise<void> {
+  ): Promise<boolean> {
     const now = Date.now();
     let settled: boolean;
     if (generation !== null) {
@@ -3572,6 +3622,7 @@ export class StateMachine<
       });
       await this.#finishTerminalSettlement(runId, row);
     }
+    return settled;
   }
 
   /**

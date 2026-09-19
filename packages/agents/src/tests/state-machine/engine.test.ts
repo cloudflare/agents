@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  Approval,
   seedTaskAsk,
   seedTaskJournal,
   seedTaskMailbox,
@@ -13,7 +14,11 @@ import {
   RUN_SCOPED_TURN
 } from "../../state-machine/engine-port";
 import { childMailboxKey } from "../../state-machine/machine";
-import { AttemptSupersededError, ReplayStep } from "../../state-machine/replay";
+import {
+  AttemptSupersededError,
+  ReplayStep,
+  type ReplayRunFacts
+} from "../../state-machine/replay";
 import { JOURNAL_REBUILD_START, TaskStore } from "../../state-machine/store";
 
 /**
@@ -979,6 +984,70 @@ describe("the port statements the machine engine will drive", () => {
           })
         ).toBe(true);
         expect(engine.readMemo("seed")?.result).toBe('"abc"');
+      }
+    );
+  });
+});
+
+describe("replay identity", () => {
+  it("derives the same ask ids on a replayed transition and inserts them once", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        seedTaskRun(state.storage, {
+          runId: "run_ask",
+          definition: "approver",
+          state: "running",
+          generation: "g-probe",
+          nextAt: Date.now() + 60_000
+        });
+        const port = portFor(state.storage, {
+          runId: "run_ask",
+          compiled: false
+        });
+        const facts: ReplayRunFacts = {
+          id: "run_ask",
+          definition: "approver",
+          version: 0,
+          background: false,
+          metadata: undefined,
+          createdAt: 0,
+          progress: 0,
+          cancelling: null,
+          expiredWait: null,
+          carriedWait: null
+        };
+        const first = new ReplayStep(port, {
+          attempt: 1,
+          startsLive: true,
+          turn: 2,
+          facts
+        });
+        const raised = first.ask(Approval, [{ what: "a" }, { what: "b" }]);
+        // The transition is lost before its commit and replays from the top.
+        const replay = new ReplayStep(port, {
+          attempt: 2,
+          startsLive: true,
+          turn: 2,
+          facts
+        });
+        const again = replay.ask(Approval, [{ what: "a" }, { what: "b" }]);
+        expect(again.map((ask) => ask.id)).toEqual(raised.map((ask) => ask.id));
+        expect(raised[0]?.id).toBe("run_ask#t2:approval:0000");
+        expect(raised[1]?.id).toBe("run_ask#t2:approval:0001");
+        expect(port.readAsks(raised.map((ask) => ask.id))).toHaveLength(2);
+        // A later turn's asks are distinct.
+        const later = new ReplayStep(port, {
+          attempt: 2,
+          startsLive: true,
+          turn: 3,
+          facts
+        });
+        expect(later.ask(Approval, [{ what: "c" }])[0]?.id).toBe(
+          "run_ask#t3:approval:0000"
+        );
       }
     );
   });

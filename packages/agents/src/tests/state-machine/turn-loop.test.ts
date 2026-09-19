@@ -271,6 +271,45 @@ describe("the abort protocol", () => {
   }, 15_000);
 });
 
+describe("the default watchdog and reopen", () => {
+  it("bounds a machine transition by the step timeout when no turnTimeout is given", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      // The harness's stepTimeout is 2 s; the transition never returns.
+      const receipt = await instance.tasks.run("hung");
+      const snapshot = await waitForState(
+        instance.tasks,
+        receipt.runId,
+        ["failed"],
+        15_000
+      );
+      if (snapshot.state !== "failed") throw new Error("unreachable");
+      expect(snapshot.error.name).toBe("StateMachineTurnDeadlineExceededError");
+    });
+  }, 20_000);
+
+  it("reopens a failed run at its checkpoint and refuses a completed one", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const doomed = await instance.tasks.run("doomed");
+        const failed = await waitForState(instance.tasks, doomed.runId, [
+          "failed"
+        ]);
+        expect(failed.state).toBe("failed");
+        expect(await instance.tasks.reopen(doomed.runId)).toBe(true);
+        await waitForState(instance.tasks, doomed.runId, ["failed"]);
+        expect(columns(state.storage, doomed.runId).attempt).toBe(2);
+
+        const done = await instance.tasks.run("counter", { from: 3 });
+        await waitForState(instance.tasks, done.runId, ["completed"]);
+        expect(await instance.tasks.reopen(done.runId)).toBe(false);
+      }
+    );
+  });
+});
+
 describe("pause and resume", () => {
   it("holds a parked run through its wake and resumes it", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());

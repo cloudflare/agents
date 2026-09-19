@@ -152,6 +152,23 @@ describe("children", () => {
     });
   });
 
+  it("derives a child's run id from the turn when none is given", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const parent = await instance.tasks.run("spawnerDefault");
+      const child = await waitForState(instance.tasks, `${parent.runId}:t0:0`, [
+        "waiting"
+      ]);
+      expect(child.definition).toBe("napper");
+      const view = await instance.tasks.view(parent.runId);
+      expect(view?.checkpoint).toEqual({
+        phase: "wait",
+        child: `${parent.runId}:t0:0`
+      });
+      expect(await instance.tasks.cancel(parent.runId)).toBe(true);
+    });
+  });
+
   it("terminate takes the children with it", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

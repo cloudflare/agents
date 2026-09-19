@@ -187,6 +187,29 @@ describe("the mailbox", () => {
     );
   });
 
+  it("refuses a repeated requestId before latest can clear the original", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "inbox",
+        {},
+        { start: "queued" }
+      );
+      expect(
+        (await instance.tasks.send(receipt.runId, "one", { requestId: "r1" }))
+          .accepted
+      ).toBe(true);
+      expect(
+        await instance.tasks.send(receipt.runId, "two", {
+          requestId: "r1",
+          policy: "latest"
+        })
+      ).toEqual({ accepted: false, key: "r1", reason: "duplicate" });
+      const view = await instance.tasks.view(receipt.runId);
+      expect(view?.mailbox.map((item) => item.payload)).toEqual(["one"]);
+    });
+  });
+
   it("refuses past the mailbox limit", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

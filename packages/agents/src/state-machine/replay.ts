@@ -22,7 +22,6 @@ import {
   StateMachineSerializationError,
   isNonRetryableError
 } from "./errors";
-import { nanoid } from "nanoid";
 import {
   asTaskTerminal,
   CHILD_MAILBOX_KIND,
@@ -467,6 +466,10 @@ export class ReplayStep implements StateMachineContext<
    * nothing; until then they are hidden from every read here.
    */
   readonly #consumed = new Set<string>();
+  /** Asks raised in this transition, per kind: the ordinal in their ids. */
+  readonly #askOrdinals = new Map<string, number>();
+  /** Children spawned in this transition without a caller-chosen id. */
+  #spawnOrdinal = 0;
   /** Engine-owned streams this invocation opened, by name. */
   readonly #streams = new Map<
     string,
@@ -669,11 +672,15 @@ export class ReplayStep implements StateMachineContext<
         : Date.now() + parseTaskDuration(options.expiresIn, "expiresIn");
     const metadata =
       options?.metadata === undefined ? null : JSON.stringify(options.metadata);
-    // Ids sort in batch order under `(created_at, ask_id)`: a time prefix,
-    // the index within the batch, then entropy.
-    const stamp = Date.now().toString(36).padStart(9, "0");
+    // Ids are derived, not drawn: run, turn, kind and the ordinal of the ask
+    // within this transition. A replay of the transition raises the same
+    // ids, the insert is idempotent, and the answers already durable under
+    // them are found rather than stranded behind a fresh batch.
     return payloads.map((payload, index) => {
-      const askId = `${this.id}#${stamp}${String(index).padStart(3, "0")}${nanoid(10)}`;
+      const ordinal = this.#askOrdinals.get(kind.name) ?? 0;
+      this.#askOrdinals.set(kind.name, ordinal + 1);
+      const askId = `${this.id}#t${this.turn}:${kind.name}:${String(ordinal).padStart(4, "0")}`;
+      void index;
       this.#engine.insertAsk({
         askId,
         turn: this.turn,
@@ -746,12 +753,21 @@ export class ReplayStep implements StateMachineContext<
 
   // ── children ─────────────────────────────────────────────────────────────
 
+  /**
+   * Accept a child of this run. Without a caller-chosen `runId` the child's
+   * id is derived from the run, the turn and the spawn's ordinal in this
+   * transition, so a replay of the transition joins the child it already
+   * accepted instead of starting a second one. Derive an explicit id from
+   * durable state, never from a counter.
+   */
   spawn(
     definition: string,
     input?: StateMachineJson,
     options?: StateMachineSpawnOptions
   ): Promise<StateMachineReceipt> {
-    return this.#engine.spawn(definition, input, options);
+    const runId =
+      options?.runId ?? `${this.id}:t${this.turn}:${this.#spawnOrdinal++}`;
+    return this.#engine.spawn(definition, input, { ...options, runId });
   }
 
   /**

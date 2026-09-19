@@ -2609,7 +2609,7 @@ and the docs say so in one line.
 ### 8.1 Model
 
 `ctx.ask(kind, payloads, opts)` writes one row per payload and returns
-`Pending<A>[]`, each `{ id: '<runId>#<nanoid>' }`. It is **synchronous**,
+`Pending<A>[]`, each `{ id: '<runId>#t<turn>:<kind>:<ordinal>' }` — derived, not drawn, so a replayed transition raises the same ids and the insert is idempotent. It is **synchronous**,
 so a phase handler can raise asks and return the next checkpoint holding
 them in one expression. The handler then either continues
 (fire-and-forget, e.g. a notification) or parks on
