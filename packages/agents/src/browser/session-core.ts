@@ -1,12 +1,12 @@
 import type { CdpSession } from "./cdp-session";
 import {
   type BrowserBinding,
-  BrowserRenderingError,
   type BrowserSessionGuardrails,
   connectBrowser,
   connectBrowserSession,
   createBrowserSession,
   deleteBrowserSession,
+  isMissingBrowserSession,
   listBrowserTargets
 } from "./browser-run";
 import {
@@ -111,14 +111,6 @@ export interface OneShotBrowserSessionOptions extends BrowserSessionCreateOption
   timeoutMs?: number;
   /** Select the browser engine. Kitesurf does not support guardrails. */
   browser?: "kitesurf";
-}
-
-function isMissingBrowserSession(error: unknown): boolean {
-  // Browser Run uses 404 for unknown ids and 410 after keep_alive expiry.
-  return (
-    error instanceof BrowserRenderingError &&
-    (error.status === 404 || error.status === 410)
-  );
 }
 
 /**
