@@ -85,6 +85,59 @@ const EXPECTED_SCHEMA_DDL = [
   // The Tasks capability creates its tables during Lifecycle startup (its own
   // version key gates the migration), so they are part of a started Agent's
   // canonical schema even though the Agent constructor does not create them.
+  `CREATE TABLE cf_agents_task_asks (
+        ask_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        turn INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        question TEXT,
+        answer TEXT,
+        state TEXT NOT NULL CHECK (state IN (
+          'open', 'answered', 'expired', 'withdrawn'
+        )),
+        expires_at INTEGER,
+        metadata TEXT,
+        created_at INTEGER NOT NULL,
+        answered_at INTEGER
+      ) WITHOUT ROWID`,
+  `CREATE TABLE cf_agents_task_journal (
+        run_id TEXT NOT NULL,
+        turn INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep', 'event', 'memo')),
+        state TEXT NOT NULL CHECK (state IN (
+          'running', 'waiting', 'completed', 'failed'
+        )),
+        result TEXT,
+        error_name TEXT,
+        error_message TEXT,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        next_at INTEGER,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        PRIMARY KEY (run_id, turn, name)
+      ) WITHOUT ROWID`,
+  `CREATE TABLE cf_agents_task_mailbox (
+        run_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        type TEXT,
+        payload TEXT,
+        visible_after INTEGER,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (run_id, key)
+      ) WITHOUT ROWID`,
+  `CREATE TABLE cf_agents_task_routes (
+        run_id TEXT PRIMARY KEY,
+        owner_path TEXT NOT NULL,
+        owner_path_key TEXT NOT NULL,
+        parent_run_id TEXT,
+        parent_owner_key TEXT,
+        created_at INTEGER NOT NULL
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_runs (
         run_id TEXT PRIMARY KEY,
         definition TEXT NOT NULL,
@@ -112,25 +165,27 @@ const EXPECTED_SCHEMA_DDL = [
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
-        settled_at INTEGER
-      ) WITHOUT ROWID`,
-  `CREATE TABLE cf_agents_task_steps (
-        run_id TEXT NOT NULL,
-        step_name TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
-        state TEXT NOT NULL CHECK (state IN (
-          'running', 'waiting', 'completed', 'failed'
-        )),
-        result TEXT,
-        error_name TEXT,
-        error_message TEXT,
-        attempt INTEGER NOT NULL DEFAULT 0,
-        next_at INTEGER,
-        created_at INTEGER NOT NULL,
-        started_at INTEGER,
-        updated_at INTEGER NOT NULL,
-        completed_at INTEGER,
-        PRIMARY KEY (run_id, step_name)
+        settled_at INTEGER,
+        checkpoint TEXT,
+        checkpoint_turn INTEGER NOT NULL DEFAULT 0,
+        definition_base TEXT,
+        definition_version INTEGER NOT NULL DEFAULT 0,
+        outcome TEXT,
+        progress INTEGER NOT NULL DEFAULT 0,
+        stream_retired INTEGER NOT NULL DEFAULT 0,
+        stall INTEGER NOT NULL DEFAULT 0,
+        transitions INTEGER NOT NULL DEFAULT 0,
+        abort_mark TEXT,
+        abort_reason TEXT,
+        turn_deadline_at INTEGER,
+        turn_timeout_ms INTEGER,
+        paused INTEGER NOT NULL DEFAULT 0,
+        parent_run_id TEXT,
+        parent_owner_key TEXT,
+        parent_notify INTEGER NOT NULL DEFAULT 1,
+        background INTEGER NOT NULL DEFAULT 0,
+        stream_epoch INTEGER NOT NULL DEFAULT 0,
+        stream_tag TEXT
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_workflows (
           id TEXT PRIMARY KEY NOT NULL,

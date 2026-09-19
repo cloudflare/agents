@@ -515,15 +515,58 @@ export class Streams extends LifecycleCapability {
 
   #writer(streamId: string): StreamWriter {
     const capability = this;
+    // Registrations belong to this writer object, not to the stream:
+    // reopening a live stream hands out a fresh writer with none. Retired
+    // (null) the moment this writer's own call settles the stream, so a
+    // writer held past its stream's life can neither replay its callbacks
+    // onto a later incarnation of the same id nor take new ones.
+    let registered: Array<() => void> | null = [];
+    // Settle, folding the registered callbacks into the one synchronous
+    // function the transaction runs. The set is snapshotted here, so a
+    // callback registering or unregistering during the run cannot change
+    // what this settle does. With nothing registered the options pass
+    // through untouched, so a writer that never registers keeps the cheaper
+    // non-transactional settle path.
+    const settle = (
+      state: Extract<StreamState, "completed" | "errored">,
+      reason: string | null,
+      options: StreamSettleOptions | undefined
+    ): boolean => {
+      const callbacks = registered === null ? [] : [...registered];
+      const settled = this.#settle(
+        streamId,
+        state,
+        reason,
+        callbacks.length === 0
+          ? options
+          : {
+              ...options,
+              commit: () => {
+                for (const callback of callbacks) callback();
+                options?.commit?.();
+              }
+            }
+      );
+      if (settled) registered = null;
+      return settled;
+    };
     return {
       streamId,
       get cursor(): number {
         return capability.#tail(streamId).nextSeq;
       },
       append: (chunk) => this.#append(streamId, chunk),
-      close: (options) => this.#settle(streamId, "completed", null, options),
-      error: (reason, options) =>
-        this.#settle(streamId, "errored", reason ?? null, options)
+      close: (options) => settle("completed", null, options),
+      error: (reason, options) => settle("errored", reason ?? null, options),
+      onCommit: (fn) => {
+        const list = registered;
+        if (list === null) return () => {};
+        list.push(fn);
+        return () => {
+          const index = list.indexOf(fn);
+          if (index !== -1) list.splice(index, 1);
+        };
+      }
     };
   }
 

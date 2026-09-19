@@ -5,6 +5,7 @@ import type {
   ToolSet,
   UIMessageChunk
 } from "ai";
+import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 import {
   Agent,
   isDurableObjectMemoryLimitReset,
@@ -701,6 +702,27 @@ export class AIChatAgent<
     }
   >();
 
+  /** Handles for the reserved (`__cf`-prefixed) definitions this host registers. */
+  private readonly _reservedTasks = new Map<string, TaskInternalHandle>();
+
+  private _registerReserved(name: string, definition: TaskDefinition): void {
+    this._reservedTasks.set(name, this.tasks.register(name, definition));
+  }
+
+  /**
+   * The handle for one reserved definition this host registered: the only
+   * way to start a run of it, since public `run()` refuses the prefix.
+   */
+  protected _reservedTask(name: string): TaskInternalHandle {
+    const handle = this._reservedTasks.get(name);
+    if (!handle) {
+      throw new Error(
+        `Reserved Task definition "${name}" is not registered on this host`
+      );
+    }
+    return handle;
+  }
+
   /**
    * Register the shared chat-turn Task definition (see
    * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
@@ -709,7 +731,7 @@ export class AIChatAgent<
   private _registerChatTurnTaskDefinition(): void {
     const chatFiberName = (this.constructor as typeof AIChatAgent)
       .CHAT_FIBER_NAME;
-    this.tasks.register(
+    this._registerReserved(
       chatFiberName,
       createChatTurnTaskDefinition({
         definitionName: chatFiberName,
@@ -729,7 +751,7 @@ export class AIChatAgent<
     // SAFETY: the recovery engine is the sole producer of each callback's
     // payload and the Task persists it verbatim, so the callback name selects
     // the matching host input type.
-    this.tasks.register(
+    this._registerReserved(
       CHAT_RECOVERY_TASK_NAME,
       createChatRecoveryTaskDefinition({
         _chatRecoveryContinue: (data) =>
@@ -773,7 +795,7 @@ export class AIChatAgent<
    * keys a retried enqueue so it joins its own prior attempt instead of
    * duplicating it — see {@link chatRecoveryTaskRunOptions}.
    */
-  private async _enqueueChatRecovery(
+  protected async _enqueueChatRecovery(
     callback: ChatRecoveryScheduleCallback,
     data: Record<string, unknown>,
     reason: ChatRecoveryTaskReason,
@@ -781,11 +803,10 @@ export class AIChatAgent<
     dedupeKey?: string
   ): Promise<void> {
     const input = { callback, data, delaySeconds };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, reason, dedupeKey)
-    );
+    await this._reservedTask(CHAT_RECOVERY_TASK_NAME).run(input, {
+      ...chatRecoveryTaskRunOptions(input, reason, dedupeKey),
+      start: "queued"
+    });
   }
 
   private async _runChatRecoveryFiber<T>(
@@ -838,10 +859,16 @@ export class AIChatAgent<
       settle: { resolve: resolveOutcome, reject: rejectOutcome }
     });
     try {
-      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-        (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
+      await this._reservedTask(
+        (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME
+      ).run(
         { requestId, continuation, nonce },
-        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+        {
+          runId: `chat_${nonce}`,
+          retain: false,
+          metadata: { requestId },
+          start: "attached"
+        }
       );
       return (await outcome) as T;
     } finally {

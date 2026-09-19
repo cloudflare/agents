@@ -5,7 +5,7 @@ import type {
   StreamHarnessObject,
   TaskStreamComposeObject
 } from "../capabilities/streams";
-import { seedTaskRun, seedTaskStep } from "../capabilities/tasks";
+import { seedTaskRun, seedTaskJournal } from "../capabilities/tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 import { sseResponse, type StreamChunk } from "../../streams";
 
@@ -504,6 +504,117 @@ describe("Streams capability", () => {
     });
   });
 
+  it("runs an onCommit callback inside the settle transaction", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const stream = await instance.streams.open("commit");
+      stream.append("a");
+      stream.onCommit(() => instance.note("committed"));
+      stream.close();
+
+      expect((await instance.streams.status("commit"))?.state).toBe(
+        "completed"
+      );
+      expect(instance.notes()).toEqual(["committed"]);
+    });
+  });
+
+  it("a throwing onCommit callback leaves the stream live", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const stream = await instance.streams.open("commit-throws");
+      stream.append("a");
+      stream.onCommit(() => {
+        instance.note("rolled-back");
+        throw new Error("persist failed");
+      });
+
+      expect(() => stream.close()).toThrow("persist failed");
+      expect((await instance.streams.status("commit-throws"))?.state).toBe(
+        "streaming"
+      );
+      expect(instance.notes()).toEqual([]);
+      expect(stream.append("b")).toBe(1);
+    });
+  });
+
+  it("runs registered callbacks in order, before the settle's commit", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const stream = await instance.streams.open("commit-order");
+      const order: string[] = [];
+      stream.onCommit(() => order.push("first"));
+      stream.onCommit(() => order.push("second"));
+      stream.close({ commit: () => order.push("option") });
+
+      expect(order).toEqual(["first", "second", "option"]);
+    });
+  });
+
+  it("unregistering an onCommit callback prevents it", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const stream = await instance.streams.open("commit-unregister");
+      const unregister = stream.onCommit(() => instance.note("unregistered"));
+      stream.onCommit(() => instance.note("still-registered"));
+      unregister();
+      stream.error("boom");
+
+      expect((await instance.streams.status("commit-unregister"))?.error).toBe(
+        "boom"
+      );
+      expect(instance.notes()).toEqual(["still-registered"]);
+    });
+  });
+
+  it("skips callbacks when the stream was settled elsewhere", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const producer = await instance.streams.open("commit-raced");
+      // A second writer on the same live stream settles it first; the
+      // callbacks registered on this one belong to a call that never ends
+      // the stream, so they never run.
+      const other = await instance.streams.open("commit-raced");
+      producer.onCommit(() => instance.note("never"));
+      other.close();
+
+      producer.close();
+      expect(instance.notes()).toEqual([]);
+      expect((await instance.streams.status("commit-raced"))?.state).toBe(
+        "completed"
+      );
+    });
+  });
+
+  it("takes no registrations once its own call settled the stream", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      await instance.lifecycle.start();
+      const writer = await instance.streams.open("commit-retired");
+      writer.onCommit(() => instance.note("first-close"));
+      writer.close({ discard: true });
+      expect(instance.notes()).toEqual(["first-close"]);
+
+      // The discard frees the id, so a writer held past its stream's life
+      // can settle a later incarnation of it. Neither the callback it
+      // already ran nor one registered since may run against that one.
+      const unregister = writer.onCommit(() => instance.note("late"));
+      await instance.streams.open("commit-retired");
+      writer.close();
+      unregister();
+
+      expect((await instance.streams.status("commit-retired"))?.state).toBe(
+        "completed"
+      );
+      expect(instance.notes()).toEqual(["first-close"]);
+    });
+  });
+
   it("emits lifecycle capability events", async () => {
     const name = crypto.randomUUID();
     const stub = env.StreamHarnessObject.getByName(name);
@@ -581,8 +692,9 @@ describe("Streams composed with Tasks", () => {
           attempt: 1,
           nextAt: Date.now() - 1000
         });
-        seedTaskStep(state.storage, {
+        seedTaskJournal(state.storage, {
           runId: "lost-producer",
+          turn: 0,
           name: "stream",
           kind: "do",
           state: "running",

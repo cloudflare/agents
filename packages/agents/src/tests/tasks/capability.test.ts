@@ -8,11 +8,14 @@ import { describe, expect, it } from "vitest";
 import {
   backdateTaskWake,
   interruptTaskRun,
+  seedTaskAsk,
+  seedTaskMailbox,
   seedTaskRun,
-  seedTaskStep,
+  seedTaskJournal,
   type TaskHarnessObject,
   type TaskSchedulerCoexistObject
 } from "../capabilities/tasks";
+import { childMailboxKey } from "../../state-machine/machine";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 import type { Tasks, TaskRunSnapshot, TaskValue } from "../../tasks";
 
@@ -51,6 +54,80 @@ async function waitForState(
     }
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/**
+ * What the delete cascade is supposed to leave behind for one run: the row
+ * counts of all five tables it owns. Zero everywhere is the contract §4.6
+ * states, and a partial cascade shows up here rather than only in `get()`.
+ */
+function countOwnedRows(
+  storage: DurableObjectStorage,
+  runId: string
+): Record<string, number> {
+  const count = (table: string, column: string): number =>
+    (
+      storage.sql
+        .exec(
+          `SELECT COUNT(*) AS count FROM ${table} WHERE ${column} = ?`,
+          runId
+        )
+        .toArray() as Array<{ count: number }>
+    ).at(0)?.count ?? 0;
+  return {
+    runs: count("cf_agents_task_runs", "run_id"),
+    journal: count("cf_agents_task_journal", "run_id"),
+    mailbox: count("cf_agents_task_mailbox", "run_id"),
+    asks: count("cf_agents_task_asks", "run_id"),
+    routes: count("cf_agents_task_routes", "run_id")
+  };
+}
+
+/**
+ * Give one accepted run the rest of what a run can own — a queued mailbox
+ * item, an open ask, a routed-owner row, and a settlement note in a parent
+ * whose own item must survive — so a settle exercises the cascade rather
+ * than observing it on empty tables.
+ */
+function seedOwnedRows(
+  storage: DurableObjectStorage,
+  runId: string,
+  parentRunId: string
+): void {
+  seedTaskMailbox(storage, { runId, key: "steer:1", kind: "user" });
+  seedTaskAsk(storage, { askId: `${runId}#1`, runId, name: "approve" });
+  storage.sql.exec(
+    `INSERT INTO cf_agents_task_routes
+       (run_id, owner_path, owner_path_key, parent_run_id, parent_owner_key,
+        created_at)
+     VALUES (?, 'root', 'root', ?, NULL, ?)`,
+    runId,
+    parentRunId,
+    Date.now()
+  );
+  storage.sql.exec(
+    "UPDATE cf_agents_task_runs SET parent_run_id = ? WHERE run_id = ?",
+    parentRunId,
+    runId
+  );
+  seedTaskRun(storage, {
+    runId: parentRunId,
+    definition: "checkpointing",
+    state: "waiting",
+    nextAt: Date.now() + 60_000
+  });
+  seedTaskMailbox(storage, {
+    runId: parentRunId,
+    key: childMailboxKey(runId),
+    kind: "child",
+    type: "pipeline"
+  });
+  seedTaskMailbox(storage, {
+    runId: parentRunId,
+    key: "steer:own",
+    kind: "user",
+    seq: 1
+  });
 }
 
 /** The interruption budget one run has spent, read straight from its row. */
@@ -123,11 +200,11 @@ describe("Tasks#register", () => {
   it("dispatches a registered reserved definition through the internal aperture", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      instance.tasks.register("__cf_test_registered", async () => "ran");
-      const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
+      const registered = instance.tasks.register(
         "__cf_test_registered",
-        undefined
+        async () => "ran"
       );
+      const receipt = await registered.run(undefined, { start: "attached" });
       expect(receipt.accepted).toBe(true);
       expect((await instance.tasks.get(receipt.runId))?.state).toBe(
         "completed"
@@ -325,13 +402,71 @@ describe("Tasks capability", () => {
   it("leaves internal enqueues to their durable wake instead of warm-starting", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      const receipt = await instance.tasks.run(
         "pipeline",
-        { label: "queued" }
+        { label: "queued" },
+        { start: "queued" }
       );
       expect((await instance.tasks.get(receipt.runId))?.state).toBe("pending");
       expect(instance.stepRuns).toEqual([]);
       await instance.tasks.cancel(receipt.runId);
+    });
+  });
+
+  it("leaves a queued start to its durable wake instead of warm-starting", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    let runId = "";
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "pipeline",
+        { label: "queued" },
+        { start: "queued" }
+      );
+      runId = receipt.runId;
+      expect(receipt.accepted).toBe(true);
+      // Read the instant acceptance resolves: a warm start has already
+      // claimed the row by here, so `pending` with nothing run is what
+      // distinguishes the queued mode from the default.
+      expect((await instance.tasks.get(runId))?.state).toBe("pending");
+      expect(instance.stepRuns).toEqual([]);
+    });
+
+    // It runs off its durable wake, and only off that.
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const snapshot = await waitForState(instance.tasks, runId, ["completed"]);
+      if (snapshot.state !== "completed") throw new Error("unreachable");
+      expect(instance.stepRuns).toEqual(["pipeline:first", "pipeline:second"]);
+    });
+  });
+
+  it("drives an attached start to its first durable boundary before returning", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "pipeline",
+        { label: "attached" },
+        { start: "attached" }
+      );
+      // `attached` resolves at the attempt's next durable boundary, which for
+      // a definition that never parks is terminal — read synchronously, with
+      // no polling, which is the whole difference from `warm`.
+      expect((await instance.tasks.get(receipt.runId))?.state).toBe(
+        "completed"
+      );
+      expect(instance.stepRuns).toEqual(["pipeline:first", "pipeline:second"]);
+    });
+  });
+
+  it("rejects a start mode it does not recognise before anything durable", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await expect(
+        instance.tasks.run("pipeline", { label: "bad" }, {
+          start: "eventually"
+        } as unknown as { start: "warm" })
+      ).rejects.toThrow(/start must be/);
+      expect(await instance.tasks.list()).toEqual([]);
     });
   });
 
@@ -368,6 +503,84 @@ describe("Tasks capability", () => {
         await instance.lifecycle.start();
         expect(await state.storage.getAlarm()).toBe(future);
         await instance.tasks.cancel("lost-alarm");
+      }
+    );
+  });
+
+  it("floors a wakeless pending row on startup but leaves an event park alone", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.TaskHarnessObject.getByName(name);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const future = Date.now() + 60 * 60 * 1000;
+        // A `pending` row carries a NULL `wait_reason`, which is why the
+        // repair keeps that half of its predicate explicit.
+        seedTaskRun(state.storage, {
+          runId: "wakeless-pending",
+          definition: "checkpointing",
+          state: "pending",
+          nextAt: future
+        });
+        // A sleep park that lost its wake is still repairable.
+        seedTaskRun(state.storage, {
+          runId: "wakeless-sleep",
+          definition: "checkpointing",
+          state: "waiting",
+          nextAt: future
+        });
+        // An event park carries no wake time BY DESIGN: a run waiting on
+        // its mailbox, an ask or a child has nothing to wake for, and
+        // flooring it would bill a row write and a transition per start.
+        seedTaskRun(state.storage, {
+          runId: "mailbox-parked",
+          definition: "checkpointing",
+          state: "waiting",
+          nextAt: future
+        });
+        // A waiting row with NO reason at all. Nothing in this build writes
+        // one, but `rowToSnapshot` reads one back as a sleep, so the repair
+        // has to agree that it is a sleep rather than strand it for the
+        // life of the object — an older build's row, or a host's own seed,
+        // otherwise has no path back short of `cancel()`.
+        seedTaskRun(state.storage, {
+          runId: "wakeless-unreasoned",
+          definition: "checkpointing",
+          state: "waiting",
+          nextAt: future
+        });
+        state.storage.sql.exec(
+          `UPDATE cf_agents_task_runs
+           SET next_at = NULL,
+               wait_reason = CASE run_id
+                 WHEN 'wakeless-sleep' THEN 'sleep'
+                 WHEN 'mailbox-parked' THEN 'mailbox'
+               END
+           WHERE run_id IN
+             ('wakeless-pending', 'wakeless-sleep', 'mailbox-parked',
+              'wakeless-unreasoned')`
+        );
+      }
+    );
+
+    await evictDurableObject(stub);
+    await runInDurableObject(
+      env.TaskHarnessObject.getByName(name),
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const wakes = state.storage.sql
+          .exec(
+            `SELECT run_id, next_at FROM cf_agents_task_runs
+             ORDER BY run_id`
+          )
+          .toArray() as Array<{ run_id: string; next_at: number | null }>;
+        const wakeOf = (runId: string) =>
+          wakes.find((row) => row.run_id === runId)?.next_at;
+        expect(wakeOf("wakeless-pending")).toBeTypeOf("number");
+        expect(wakeOf("wakeless-sleep")).toBeTypeOf("number");
+        expect(wakeOf("wakeless-unreasoned")).toBeTypeOf("number");
+        expect(wakeOf("mailbox-parked")).toBeNull();
       }
     );
   });
@@ -474,8 +687,9 @@ describe("Tasks capability", () => {
             attempt: 1,
             nextAt: Date.now() - 1000
           });
-          seedTaskStep(state.storage, {
+          seedTaskJournal(state.storage, {
             runId: "interrupted-run",
+            turn: 0,
             name: "first",
             kind: "do",
             state: "completed",
@@ -658,6 +872,129 @@ describe("Tasks capability", () => {
     });
   });
 
+  it("marks the abort barrier on every cancel, parked or claimed", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const readAbort = (runId: string) =>
+          state.storage.sql
+            .exec(
+              `SELECT state, cancel_requested, abort_mark, abort_reason
+               FROM cf_agents_task_runs WHERE run_id = ?`,
+              runId
+            )
+            .toArray();
+
+        const parked = await instance.tasks.run("sleeper", { ms: 60_000 });
+        await waitForState(instance.tasks, parked.runId, ["waiting"]);
+        expect(await instance.tasks.cancel(parked.runId, "changed")).toBe(true);
+        expect(readAbort(parked.runId)).toEqual([
+          {
+            state: "cancelled",
+            cancel_requested: 1,
+            abort_mark: "cancel",
+            abort_reason: "changed"
+          }
+        ]);
+
+        // The window a claim leaves between its own UPDATE and the capability
+        // registering the live attempt: `cancel()` finds nothing active and
+        // settles through the unfenced UPDATE, which still has to leave the
+        // barrier the claimed attempt's step boundaries read.
+        seedTaskRun(state.storage, {
+          runId: "claimed",
+          definition: "checkpointing",
+          state: "running",
+          generation: "g-live",
+          attempt: 1,
+          nextAt: Date.now() + 60_000
+        });
+        expect(await instance.tasks.cancel("claimed", "stop")).toBe(true);
+        expect(readAbort("claimed")).toEqual([
+          {
+            state: "cancelled",
+            cancel_requested: 1,
+            abort_mark: "cancel",
+            abort_reason: "stop"
+          }
+        ]);
+      }
+    );
+  });
+
+  it("reports a landed abort mark on the snapshot of a run that has not settled yet", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const future = Date.now() + 60_000;
+        // The window between `cancel()` taking the mark and the cancel
+        // transition writing its terminal: the run still reports its prior
+        // state, plus the mark, which is what `{ wait: false }` callers and
+        // a UI poll see.
+        seedTaskRun(state.storage, {
+          runId: "marked-running",
+          definition: "checkpointing",
+          state: "running",
+          generation: "g-live",
+          attempt: 1,
+          nextAt: future
+        });
+        seedTaskRun(state.storage, {
+          runId: "marked-waiting",
+          definition: "checkpointing",
+          state: "waiting",
+          nextAt: future
+        });
+        seedTaskRun(state.storage, {
+          runId: "unmarked",
+          definition: "checkpointing",
+          state: "running",
+          generation: "g-live",
+          attempt: 1,
+          nextAt: future
+        });
+        state.storage.sql.exec(
+          `UPDATE cf_agents_task_runs
+           SET abort_mark = 'cancel', abort_reason = 'changed'
+           WHERE run_id IN ('marked-running', 'marked-waiting')`
+        );
+
+        const running = await instance.tasks.get("marked-running");
+        expect(running).toMatchObject({
+          state: "running",
+          abortRequested: true,
+          abortReason: "changed"
+        });
+        const waiting = await instance.tasks.get("marked-waiting");
+        expect(waiting).toMatchObject({
+          state: "waiting",
+          abortRequested: true,
+          abortReason: "changed"
+        });
+
+        // An unmarked run carries neither key at all, rather than `false`
+        // and `undefined`: the projection omits, it does not default.
+        const clean = await instance.tasks.get("unmarked");
+        expect(clean).not.toBeNull();
+        expect(Object.hasOwn(clean ?? {}, "abortRequested")).toBe(false);
+        expect(Object.hasOwn(clean ?? {}, "abortReason")).toBe(false);
+
+        // A mark with no reason reports the request without inventing one.
+        state.storage.sql.exec(
+          `UPDATE cf_agents_task_runs SET abort_mark = 'deadline',
+             abort_reason = NULL
+           WHERE run_id = 'unmarked'`
+        );
+        const reasonless = await instance.tasks.get("unmarked");
+        expect(reasonless).toMatchObject({ abortRequested: true });
+        expect(Object.hasOwn(reasonless ?? {}, "abortReason")).toBe(false);
+      }
+    );
+  });
+
   it("cancels a live attempt cooperatively through its abort signal", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
@@ -670,6 +1007,47 @@ describe("Tasks capability", () => {
       ]);
       if (snapshot.state !== "cancelled") throw new Error("unreachable");
       expect(snapshot.reason).toBe("stop it");
+    });
+  });
+
+  it("joins the live attempt before returning under cancel({ wait })", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("lingersAfterCancel", {
+        label: "wait"
+      });
+      await waitFor(() => instance.signalWaits.includes("wait"));
+
+      // Without `wait` the caller only knows the mark landed, which is why
+      // every other cancel test polls afterwards. With it, the run is
+      // terminal by the time `cancel` resolves — no poll. The handler
+      // lingers a quarter second after noticing the abort, so a `cancel`
+      // that did not join would read a non-terminal snapshot here.
+      expect(
+        await instance.tasks.cancel(receipt.runId, "stop it", { wait: true })
+      ).toBe(true);
+      const snapshot = await instance.tasks.get(receipt.runId);
+      expect(snapshot?.state).toBe("cancelled");
+      if (snapshot?.state !== "cancelled") throw new Error("unreachable");
+      expect(snapshot.reason).toBe("stop it");
+    });
+  });
+
+  it("returns terminal from cancel({ wait }) on a parked run too", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("sleeper", { ms: 60_000 });
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+
+      // A parked run has no live attempt to join: the cancel settles it in
+      // the same call, so `wait` changes nothing observable and must not
+      // hang waiting for a promise that does not exist.
+      expect(
+        await instance.tasks.cancel(receipt.runId, "enough", { wait: true })
+      ).toBe(true);
+      expect((await instance.tasks.get(receipt.runId))?.state).toBe(
+        "cancelled"
+      );
     });
   });
 
@@ -693,7 +1071,7 @@ describe("Tasks capability", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("DuplicateTaskStepError");
+      expect(snapshot.error.name).toBe("StateMachineDuplicateStepError");
     });
   });
 
@@ -711,8 +1089,9 @@ describe("Tasks capability", () => {
           state: "pending",
           nextAt: Date.now() - 1000
         });
-        seedTaskStep(state.storage, {
+        seedTaskJournal(state.storage, {
           runId: "diverged-run",
+          turn: 0,
           name: "first",
           kind: "sleep",
           state: "waiting",
@@ -729,7 +1108,7 @@ describe("Tasks capability", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskReplayDivergedError");
+      expect(snapshot.error.name).toBe("StateMachineReplayDivergedError");
       expect(instance.stepRuns).toEqual([]);
     });
   });
@@ -757,7 +1136,7 @@ describe("Tasks capability", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("MissingTaskDefinitionError");
+      expect(snapshot.error.name).toBe("StateMachineMissingDefinitionError");
       expect(snapshot.error.message).toContain('"ghost"');
     });
   });
@@ -827,9 +1206,10 @@ describe("Tasks capability", () => {
     const result = await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
-        const receipt = await instance.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+        const receipt = await instance.tasks.run(
           "exhaustedPlatformStep",
-          undefined
+          undefined,
+          { start: "queued" }
         );
         backdateTaskWake(state.storage, receipt.runId);
         await instance.lifecycle.rearmAlarm();
@@ -912,34 +1292,123 @@ describe("Tasks capability", () => {
     });
   });
 
+  it("cascades every owned row when a non-retained queued run settles", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run(
+          "pipeline",
+          { label: "gone" },
+          { retain: false, start: "queued" }
+        );
+        // Everything else a run owns, seeded while it is still parked on its
+        // wake, so the settle below has a full cascade to run rather than
+        // empty tables to skip.
+        seedOwnedRows(state.storage, receipt.runId, "retain-parent");
+        backdateTaskWake(state.storage, receipt.runId);
+
+        const deadline = Date.now() + 5_000;
+        for (;;) {
+          const snapshot = await instance.tasks.get(receipt.runId);
+          if (snapshot === null) break;
+          expect(snapshot.state).not.toBe("failed");
+          if (Date.now() > deadline) {
+            throw new Error("non-retained run was not removed");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect(instance.stepRuns).toEqual([
+          "pipeline:first",
+          "pipeline:second"
+        ]);
+        // Zero orphans in all five tables, and only this run's note was
+        // taken from the parent's mailbox.
+        expect(countOwnedRows(state.storage, receipt.runId)).toEqual({
+          runs: 0,
+          journal: 0,
+          mailbox: 0,
+          asks: 0,
+          routes: 0
+        });
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT key FROM cf_agents_task_mailbox WHERE run_id = ?",
+              "retain-parent"
+            )
+            .toArray()
+        ).toEqual([{ key: "steer:own" }]);
+      }
+    );
+  });
+
   it("removes non-retained records after cancellation", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      const receipt = await instance.tasks.run(
-        "sleeper",
-        { ms: 60_000 },
-        { retain: false }
-      );
-      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
-      expect(
-        await instance.tasks.cancel(receipt.runId, "no longer needed")
-      ).toBe(true);
-      await waitFor(
-        async () => (await instance.tasks.get(receipt.runId)) === null
-      );
-    });
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run(
+          "sleeper",
+          { ms: 60_000 },
+          { retain: false }
+        );
+        await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+        seedOwnedRows(state.storage, receipt.runId, "cancel-parent");
+        expect(
+          await instance.tasks.cancel(receipt.runId, "no longer needed")
+        ).toBe(true);
+        await waitFor(
+          async () => (await instance.tasks.get(receipt.runId)) === null
+        );
+        expect(countOwnedRows(state.storage, receipt.runId)).toEqual({
+          runs: 0,
+          journal: 0,
+          mailbox: 0,
+          asks: 0,
+          routes: 0
+        });
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT key FROM cf_agents_task_mailbox WHERE run_id = ?",
+              "cancel-parent"
+            )
+            .toArray()
+        ).toEqual([{ key: "steer:own" }]);
+      }
+    );
   });
 
   it("deletes retained terminal runs on request", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      const receipt = await instance.tasks.run("pipeline", { label: "keep" });
-      await waitForState(instance.tasks, receipt.runId, ["completed"]);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run("pipeline", { label: "keep" });
+        await waitForState(instance.tasks, receipt.runId, ["completed"]);
+        seedOwnedRows(state.storage, receipt.runId, "delete-parent");
 
-      expect(await instance.tasks.delete({ status: ["failed"] })).toBe(0);
-      expect(await instance.tasks.delete()).toBe(1);
-      expect(await instance.tasks.get(receipt.runId)).toBeNull();
-    });
+        expect(await instance.tasks.delete({ status: ["failed"] })).toBe(0);
+        expect(await instance.tasks.delete()).toBe(1);
+        expect(await instance.tasks.get(receipt.runId)).toBeNull();
+        expect(countOwnedRows(state.storage, receipt.runId)).toEqual({
+          runs: 0,
+          journal: 0,
+          mailbox: 0,
+          asks: 0,
+          routes: 0
+        });
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT key FROM cf_agents_task_mailbox WHERE run_id = ?",
+              "delete-parent"
+            )
+            .toArray()
+        ).toEqual([{ key: "steer:own" }]);
+      }
+    );
   });
 
   it("rejects oversized inputs at acceptance", async () => {
@@ -995,15 +1464,17 @@ describe("Tasks capability", () => {
             attempt: 1,
             nextAt: Date.now() - 1000
           });
-          seedTaskStep(state.storage, {
+          seedTaskJournal(state.storage, {
             runId: "guarded-run",
+            turn: 0,
             name: "g-first",
             kind: "do",
             state: "completed",
             result: "g:JOURNAL"
           });
-          seedTaskStep(state.storage, {
+          seedTaskJournal(state.storage, {
             runId: "guarded-run",
+            turn: 0,
             name: "g-second",
             kind: "do",
             state: "running",
@@ -1124,7 +1595,9 @@ describe("Tasks run budget", () => {
           "failed"
         ]);
         if (snapshot.state !== "failed") throw new Error("unreachable");
-        expect(snapshot.error.name).toBe("TaskInterruptionsExhaustedError");
+        expect(snapshot.error.name).toBe(
+          "StateMachineInterruptionsExhaustedError"
+        );
         expect(snapshot.error.message).toMatch(/interrupted 1 time\b/);
         expect(instance.stepRuns).toEqual([]);
         await waitFor(() => instance.runErrorRuns.length > 0);
@@ -1132,7 +1605,7 @@ describe("Tasks run budget", () => {
           {
             runId: "spent-run",
             definition: "pipeline",
-            name: "TaskInterruptionsExhaustedError"
+            name: "StateMachineInterruptionsExhaustedError"
           }
         ]);
         // The failure is itself an interruption, and is counted like one:
@@ -1163,15 +1636,17 @@ describe("Tasks run budget", () => {
           retryPolicy: { limit: 2, delayMs: 60_000, backoff: "constant" },
           nextAt: Date.now() - 1000
         });
-        seedTaskStep(state.storage, {
+        seedTaskJournal(state.storage, {
           runId: "backoff-run",
+          turn: 0,
           name: "g-first",
           kind: "do",
           state: "completed",
           result: "g:JOURNAL"
         });
-        seedTaskStep(state.storage, {
+        seedTaskJournal(state.storage, {
           runId: "backoff-run",
+          turn: 0,
           name: "g-second",
           kind: "do",
           state: "running",
@@ -1261,7 +1736,9 @@ describe("Tasks run budget", () => {
         if (parked.state !== "waiting") throw new Error("unreachable");
         expect(parked.reason).toBe("interrupted");
         expect(readInterruptions(state.storage, "second-strike-run")).toBe(2);
-        expect(parked.wakeAt - Date.now()).toBeGreaterThan(45_000);
+        // An interruption backoff is a timed park, so it carries a wake.
+        expect(parked.wakeAt).toBeDefined();
+        expect((parked.wakeAt ?? 0) - Date.now()).toBeGreaterThan(45_000);
         expect(instance.stepRuns).toEqual([]);
       }
     );
@@ -1401,7 +1878,7 @@ describe("Tasks run budget", () => {
         ["failed"]
       );
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       expect(instance.guardedEntries).toEqual([]);
     });
   });
@@ -1422,15 +1899,17 @@ describe("Tasks run budget", () => {
           retryPolicy: { limit: 3, delayMs: 0, backoff: "constant" },
           nextAt: Date.now() - 1000
         });
-        seedTaskStep(state.storage, {
+        seedTaskJournal(state.storage, {
           runId: "zero-delay-run",
+          turn: 0,
           name: "g-first",
           kind: "do",
           state: "completed",
           result: "g:JOURNAL"
         });
-        seedTaskStep(state.storage, {
+        seedTaskJournal(state.storage, {
           runId: "zero-delay-run",
+          turn: 0,
           name: "g-second",
           kind: "do",
           state: "running",
@@ -1556,7 +2035,8 @@ describe("Tasks run budget", () => {
         // The policy the public option was accepted with — persisted with
         // the run, read back here — spaced this replay out.
         expect(parked.reason).toBe("interrupted");
-        expect(parked.wakeAt - Date.now()).toBeGreaterThan(30_000);
+        expect(parked.wakeAt).toBeDefined();
+        expect((parked.wakeAt ?? 0) - Date.now()).toBeGreaterThan(30_000);
         expect(readInterruptions(state.storage, runId)).toBe(1);
         expect(instance.stepRuns).toEqual(["sleeper:before"]);
       }
@@ -1677,15 +2157,17 @@ describe("Tasks run budget", () => {
             attempt: 1,
             nextAt: Date.now() - 1000
           });
-          seedTaskStep(state.storage, {
+          seedTaskJournal(state.storage, {
             runId: "unbounded-run",
+            turn: 0,
             name: "g-first",
             kind: "do",
             state: "completed",
             result: "g:JOURNAL"
           });
-          seedTaskStep(state.storage, {
+          seedTaskJournal(state.storage, {
             runId: "unbounded-run",
+            turn: 0,
             name: "g-second",
             kind: "do",
             state: "running",
@@ -1729,7 +2211,7 @@ describe("Tasks run budget", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       expect(instance.stepRuns).toEqual([]);
       await waitFor(() => instance.runErrorRuns.length > 0);
       expect(instance.runErrorRuns.map((run) => run.runId)).toEqual([
@@ -1753,7 +2235,7 @@ describe("Tasks run budget", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       expect(instance.stepRuns).toEqual(["sleeper:before"]);
     });
   });
@@ -1772,13 +2254,13 @@ describe("Tasks run budget", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       await waitFor(() => instance.runErrorRuns.length > 0);
       expect(instance.runErrorRuns).toEqual([
         {
           runId: receipt.runId,
           definition: "deaf",
-          name: "TaskDeadlineExceededError"
+          name: "StateMachineDeadlineExceededError"
         }
       ]);
     });
@@ -1798,9 +2280,11 @@ describe("Tasks run budget", () => {
         "failed"
       ]);
       if (snapshot.state !== "failed") throw new Error("unreachable");
-      expect(snapshot.error.name).toBe("TaskDeadlineExceededError");
+      expect(snapshot.error.name).toBe("StateMachineDeadlineExceededError");
       await waitFor(() => instance.signalReasons.length > 0);
-      expect(instance.signalReasons).toEqual(["TaskDeadlineExceededError"]);
+      expect(instance.signalReasons).toEqual([
+        "StateMachineDeadlineExceededError"
+      ]);
       // The attempt's own unwinding hit the fence; the enforcement already
       // observed the failure, so onError saw this run exactly once.
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1866,7 +2350,7 @@ describe("Tasks run budget", () => {
         ]);
         expect(snapshot.state).toBe("completed");
         expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
-          2
+          3
         );
       }
     );
@@ -1931,6 +2415,61 @@ describe("Tasks run budget", () => {
       expect(snapshot.state).toBe("cancelled");
       if (snapshot.state !== "cancelled") throw new Error("unreachable");
       expect(snapshot.reason).toBe("stop");
+    });
+  });
+});
+
+describe("Tasks#at", () => {
+  it("reads one run through a handle scoped to its definition", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("pipeline", { label: "x" });
+      await waitForState(instance.tasks, receipt.runId, ["completed"]);
+
+      const handle = instance.tasks.at("pipeline", receipt.runId);
+      expect(handle.runId).toBe(receipt.runId);
+      expect(handle.definition).toBe("pipeline");
+      expect(await handle.get()).toEqual(
+        await instance.tasks.get(receipt.runId)
+      );
+
+      // Another definition's handle does not see it — the same scoping the
+      // definition lens applies, on one run rather than on the set.
+      const wrong = instance.tasks.at("sleeper", receipt.runId);
+      expect(await wrong.get()).toBeNull();
+      expect(await wrong.cancel("nope")).toBe(false);
+      expect((await instance.tasks.get(receipt.runId))?.state).toBe(
+        "completed"
+      );
+    });
+  });
+
+  it("cancels through the handle", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("sleeper", { ms: 60_000 });
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+
+      expect(
+        await instance.tasks.at("sleeper", receipt.runId).cancel("enough")
+      ).toBe(true);
+      const snapshot = await instance.tasks.get(receipt.runId);
+      expect(snapshot?.state).toBe("cancelled");
+      if (snapshot?.state !== "cancelled") throw new Error("unreachable");
+      expect(snapshot.reason).toBe("enough");
+    });
+  });
+
+  it("rejects a definition name outside the declared map", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(() =>
+        (
+          instance.tasks as unknown as {
+            at(definition: string, runId: string): unknown;
+          }
+        ).at("nope", "run_1")
+      ).toThrow(/nope/);
     });
   });
 });

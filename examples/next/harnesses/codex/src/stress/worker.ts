@@ -109,7 +109,7 @@ export class StressCoder extends DurableObject<StressEnv> {
         .toArray(),
       steps: sql
         .exec(
-          "SELECT step_name, kind, state, attempt, error_name FROM cf_agents_task_steps WHERE run_id = ?",
+          "SELECT name, turn, kind, state, attempt, error_name FROM cf_agents_task_journal WHERE run_id = ?",
           `codex:${operationId}`
         )
         .toArray()

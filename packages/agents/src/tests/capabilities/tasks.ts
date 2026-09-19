@@ -4,9 +4,63 @@ import {
   Tasks,
   NonRetryableError,
   TaskInterruptionsExhaustedError,
+  defineAsk,
+  type TaskDefinition,
+  type TaskMachine,
   type TaskStep
 } from "../../tasks";
+
+/** The ask kind the `approver` machine raises; answers are strings. */
+export const Approval = defineAsk<{ what: string }, string>("approval");
+import { setTaskDefinitionResolver } from "../../tasks/tasks";
 import { Scheduler } from "../../schedules";
+import { Streams } from "../../streams";
+
+/** The one phase the harness's machine definition declares. */
+type CounterState = { phase: "counting"; value: number };
+type StuckState = { phase: "idle" };
+type SpinnerState = { phase: "spin"; n: number };
+type NapperState = { phase: "nap"; ms: number } | { phase: "done" };
+type GuardState =
+  | { phase: "hold"; decline: boolean; releases: number }
+  | { phase: "released"; decline: boolean; releases: number };
+type HungState = { phase: "hang" };
+type MemoState = { phase: "work"; rounds: number };
+type ParentState =
+  | { phase: "spawn"; background: boolean }
+  | { phase: "join"; children: string[] };
+type GuardianState =
+  | { phase: "spawn"; background: boolean }
+  | { phase: "wait"; child: string };
+type StreamerState = { phase: "first" } | { phase: "second" };
+type WardenState = { phase: "spawn" } | { phase: "wait"; child: string };
+type NapStreamerState = { phase: "stream" };
+type InboxState = {
+  phase: "listen";
+  seen: string[];
+  within: number | undefined;
+};
+type ApproverState =
+  | { phase: "ask"; expiresIn: number | undefined }
+  | { phase: "wait"; pending: { id: string }[]; mode: "all" | "any" };
+export type VersionedState =
+  | { phase: "one"; n: number }
+  | { phase: "two"; n: number; migrated: boolean };
+
+/**
+ * Version 1 of a versioned machine, supplied through the harness's dynamic
+ * resolver so a test can "redeploy" by swapping it for a version 2.
+ */
+export const versionedV1 = {
+  initial: { phase: "one", n: 1 } as VersionedState,
+  phases: {
+    one: async (state, ctx) => {
+      await ctx.sleep("wait", 60_000);
+      return ctx.complete(state.n);
+    },
+    two: async (state, ctx) => ctx.complete(state.n)
+  }
+} satisfies TaskMachine<VersionedState, never, number>;
 
 /**
  * Minimal real host for capability-level Tasks tests: a Durable Object
@@ -23,6 +77,8 @@ import { Scheduler } from "../../schedules";
 export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   /** Step callbacks that actually ran (journal hits never append here). */
   readonly stepRuns: string[] = [];
+  /** External deduplication keys step callbacks were handed. */
+  readonly stepKeys: string[] = [];
   /** Terminal run errors observed through the capability's onError. */
   readonly runErrors: string[] = [];
   /** The run each onError observation named, with the error's name. */
@@ -48,8 +104,27 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
    * `entry:input:interrupted-step:a<run attempt>`.
    */
   readonly guardedEntries: string[] = [];
+  /** `onCancel` entries, recorded as `phase:mark`. */
+  readonly cancelLog: string[] = [];
+  /** Definitions resolved lazily, so a test can swap versions in place. */
+  readonly dynamic: Record<string, TaskDefinition> = {
+    "versioned@v1": versionedV1
+  };
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    setTaskDefinitionResolver(
+      this.tasks,
+      (name) => this.dynamic[name],
+      () => Object.keys(this.dynamic)
+    );
+  }
+
+  /** Engine-owned streams are written through this sibling capability. */
+  readonly streams = new Streams();
 
   readonly tasks = new Tasks({
+    streams: this.streams,
     definitions: {
       /** Two journaled steps, then a host-context probe in the return value. */
       pipeline: async (input: { label: string }, step: TaskStep) => {
@@ -192,6 +267,25 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         }
       },
 
+      /**
+       * Notices the cancel, then lingers before returning: the window
+       * `cancel({ wait })` has to close, and that a bare `cancel()` leaves
+       * open.
+       */
+      lingersAfterCancel: async (input: { label: string }, step: TaskStep) => {
+        this.signalWaits.push(input.label);
+        try {
+          await new Promise<never>((_resolve, reject) => {
+            const fail = () => reject(step.signal.reason);
+            if (step.signal.aborted) return fail();
+            step.signal.addEventListener("abort", fail, { once: true });
+          });
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          return { stopped: true };
+        }
+      },
+
       /** Holds the handler body forever and ignores `step.signal`. */
       deaf: async (input: { label: string }, _step: TaskStep) => {
         this.signalWaits.push(input.label);
@@ -292,6 +386,18 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           throw new Error("Durable Object reset because its code was updated.");
         }
         return `${seed}-done`;
+      },
+
+      /**
+       * Records the external deduplication key one step is handed, which is
+       * what pins the key's exact bytes across a schema migration.
+       */
+      keyed: async (_input: undefined, step: TaskStep) => {
+        return step.do("keyed-step", ({ idempotencyKey }) => {
+          this.stepRuns.push("keyed:keyed-step");
+          this.stepKeys.push(idempotencyKey);
+          return idempotencyKey;
+        });
       },
 
       /** A single journaled step, for replay-memoization assertions. */
@@ -460,7 +566,340 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
           await new Promise((resolve) => setTimeout(resolve, 1_000));
           return "alarm-sibling-success";
         });
-      }
+      },
+
+      /**
+       * A machine definition, declared so the capability's machine-typed
+       * members are reachable from a test at their real types and so the
+       * stage's dispatch refusal is observable. Its phases do not run yet:
+       * the machine dispatch loop lands with the engine.
+       */
+      counter: {
+        initial: (seed: { from: number }): CounterState => ({
+          phase: "counting",
+          value: seed.from
+        }),
+        phases: {
+          counting: async (state, ctx) =>
+            state.value >= 3
+              ? ctx.complete(state.value)
+              : { phase: "counting", value: state.value + 1 }
+        }
+      } satisfies TaskMachine<
+        CounterState,
+        { step: number },
+        number,
+        { from: number }
+      >,
+
+      /** Rule A by construction: the same checkpoint, no park, no credit. */
+      stuck: {
+        initial: { phase: "idle" } as StuckState,
+        phases: { idle: async (state) => state }
+      } satisfies TaskMachine<StuckState>,
+
+      /** Rule B by construction: every transition changes the checkpoint. */
+      spinner: {
+        initial: { phase: "spin", n: 0 } as SpinnerState,
+        phases: {
+          spin: async (state) => ({ phase: "spin", n: state.n + 1 })
+        }
+      } satisfies TaskMachine<SpinnerState>,
+
+      /** Parks on a sleep in its first phase, then completes. */
+      napper: {
+        initial: (seed: { ms: number }): NapperState => ({
+          phase: "nap",
+          ms: seed.ms
+        }),
+        phases: {
+          nap: async (state, ctx) => {
+            await ctx.sleep("rest", state.ms);
+            return { phase: "done" };
+          },
+          done: async (_state, ctx) => ctx.complete("rested")
+        }
+      } satisfies TaskMachine<NapperState, never, string, { ms: number }>,
+
+      /** Declares `onCancel`: unwinds to a terminal, or declines the cancel. */
+      guardedMachine: {
+        initial: (seed: { decline: boolean }): GuardState => ({
+          phase: "hold",
+          decline: seed.decline,
+          releases: 0
+        }),
+        phases: {
+          hold: async (state, ctx) => {
+            await ctx.sleep("hold", 60_000);
+            return { ...state, phase: "released" };
+          },
+          released: async (state, ctx) => ctx.complete(state.releases)
+        },
+        onCancel: async (state, ctx) => {
+          this.cancelLog.push(`${state.phase}:${ctx.cancelling}`);
+          if (state.decline) {
+            return {
+              phase: "released",
+              decline: false,
+              releases: state.releases + 1
+            };
+          }
+          return ctx.aborted("unwound");
+        }
+      } satisfies TaskMachine<GuardState, never, number, { decline: boolean }>,
+
+      /** A transition that never returns and never heartbeats. */
+      hung: {
+        initial: { phase: "hang" } as HungState,
+        phases: { hang: () => new Promise<never>(() => {}) }
+      } satisfies TaskMachine<HungState>,
+
+      /**
+       * Receives messages one at a time — buffered ones first — until a
+       * "stop", then completes with everything it saw. A `within` turns a
+       * silent mailbox into a "timed-out" completion.
+       */
+      inbox: {
+        initial: (seed: { within?: number }): InboxState => ({
+          phase: "listen",
+          seen: [],
+          within: seed.within
+        }),
+        phases: {
+          listen: async (state, ctx) => {
+            const item = await ctx.receive({
+              kind: "message",
+              ...(state.within !== undefined ? { within: state.within } : {})
+            });
+            if (item === ctx.timedOut) return ctx.complete("timed-out");
+            const text = String(item.payload);
+            if (text === "stop") return ctx.complete(state.seen.join(","));
+            return { ...state, seen: [...state.seen, text] };
+          }
+        }
+      } satisfies TaskMachine<InboxState, string, string, { within?: number }>,
+
+      /** Raises two asks, parks on their answers, completes with them. */
+      approver: {
+        initial: (seed: {
+          expiresIn?: number;
+          mode?: "all" | "any";
+        }): ApproverState => ({ phase: "ask", expiresIn: seed.expiresIn }),
+        phases: {
+          ask: async (state, ctx) => {
+            const pending = ctx.ask(
+              Approval,
+              [{ what: "first" }, { what: "second" }],
+              state.expiresIn !== undefined
+                ? { expiresIn: state.expiresIn }
+                : undefined
+            );
+            return {
+              phase: "wait",
+              pending: pending.map((ask) => ({ id: ask.id })),
+              mode: (ctx.input as { mode?: "all" | "any" }).mode ?? "all"
+            };
+          },
+          wait: async (state, ctx) => {
+            const answers = await ctx.answers(
+              state.pending.map((ask) => ask as { id: string }),
+              { mode: state.mode }
+            );
+            if (answers === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(
+              answers.map((answer) => answer ?? "lapsed").join("+")
+            );
+          }
+        }
+      } satisfies TaskMachine<
+        ApproverState,
+        never,
+        string,
+        { expiresIn?: number; mode?: "all" | "any" }
+      >,
+
+      /** A durable function that waits for one approval event. */
+      listener: async (
+        input: { timeout?: number },
+        step: TaskStep
+      ): Promise<string> => {
+        const event = await step.waitForEvent<{ ok: boolean }>("go", {
+          type: "approval",
+          ...(input.timeout !== undefined ? { timeout: input.timeout } : {})
+        });
+        return `${event.type}:${event.payload.ok}:${event.timestamp instanceof Date}`;
+      },
+
+      /** Spawns two children, joins them, completes with their outputs. */
+      parent: {
+        initial: (seed: { background?: boolean }): ParentState => ({
+          phase: "spawn",
+          background: seed.background === true
+        }),
+        phases: {
+          spawn: async (state, ctx) => {
+            const first = await ctx.spawn(
+              "pipeline",
+              { label: "kid" },
+              { runId: `${ctx.id}:kid-1` }
+            );
+            const second = await ctx.spawn(
+              "counter",
+              { from: 1 },
+              {
+                runId: `${ctx.id}:kid-2`,
+                background: state.background,
+                ...(state.background ? { notify: true } : {})
+              }
+            );
+            return { phase: "join", children: [first.runId, second.runId] };
+          },
+          join: async (state, ctx) => {
+            const results = await ctx.join(state.children, { within: 60_000 });
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(
+              results
+                .map((result) =>
+                  result.ok
+                    ? JSON.stringify(result.output)
+                    : `error:${result.error.name}`
+                )
+                .join("|")
+            );
+          }
+        }
+      } satisfies TaskMachine<
+        ParentState,
+        never,
+        string,
+        { background?: boolean }
+      >,
+
+      /** Spawns one long-parked child and waits on it: the cascade probe. */
+      guardian: {
+        initial: (seed: { background: boolean }): GuardianState => ({
+          phase: "spawn",
+          background: seed.background
+        }),
+        phases: {
+          spawn: async (state, ctx) => {
+            const child = await ctx.spawn(
+              "napper",
+              { ms: 60_000 },
+              { runId: `${ctx.id}:ward`, background: state.background }
+            );
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(results[0]?.ok ? "child-done" : "child-failed");
+          }
+        }
+      } satisfies TaskMachine<
+        GuardianState,
+        never,
+        string,
+        { background: boolean }
+      >,
+
+      /** Spawns a child that declares onCancel and waits on it. */
+      guardianOfGuarded: {
+        initial: { phase: "spawn" } as WardenState,
+        phases: {
+          spawn: async (_state, ctx) => {
+            const child = await ctx.spawn(
+              "guardedMachine",
+              { decline: false },
+              { runId: `${ctx.id}:ward` }
+            );
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(results[0]?.ok ? "child-done" : "child-failed");
+          }
+        }
+      } satisfies TaskMachine<WardenState, never, string>,
+
+      /** Spawns a child without choosing its id, and waits on it. */
+      spawnerDefault: {
+        initial: { phase: "spawn" } as WardenState,
+        phases: {
+          spawn: async (_state, ctx) => {
+            const child = await ctx.spawn("napper", { ms: 60_000 });
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            return ctx.complete(results[0]?.ok ? "child-done" : "child-failed");
+          }
+        }
+      } satisfies TaskMachine<WardenState, never, string>,
+
+      /** Spawns a child that faults, and joins it. */
+      parentOfStuck: {
+        initial: { phase: "spawn" } as WardenState,
+        phases: {
+          spawn: async (_state, ctx) => {
+            const child = await ctx.spawn("stuck", undefined, {
+              runId: `${ctx.id}:stuck`
+            });
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            const [result] = results;
+            return ctx.complete(
+              result?.ok ? "child-done" : `error:${result?.error.name}`
+            );
+          }
+        }
+      } satisfies TaskMachine<WardenState, never, string>,
+
+      /** Streams across two phases: the first stream settles with the commit. */
+      streamer: {
+        initial: { phase: "first" } as StreamerState,
+        phases: {
+          first: async (_state, ctx) => {
+            const writer = await ctx.stream();
+            writer.append("a");
+            writer.append("b");
+            return { phase: "second" };
+          },
+          second: async (_state, ctx) => {
+            const writer = await ctx.stream();
+            writer.append("c");
+            return ctx.complete(writer.streamId);
+          }
+        }
+      } satisfies TaskMachine<StreamerState, never, string>,
+
+      /** Streams, then parks on a sleep with the stream still live. */
+      napStreamer: {
+        initial: { phase: "stream" } as NapStreamerState,
+        phases: {
+          stream: async (_state, ctx) => {
+            const writer = await ctx.stream("out");
+            writer.append("x");
+            writer.append("y");
+            await ctx.sleep("nap", 60_000);
+            return ctx.complete(writer.streamId);
+          }
+        }
+      } satisfies TaskMachine<NapStreamerState, never, string>,
+
+      /** Progress without a checkpoint change: a memo, then completion. */
+      memoist: {
+        initial: { phase: "work", rounds: 0 } as MemoState,
+        phases: {
+          work: async (state, ctx) =>
+            ctx.complete(ctx.memo("token", `t-${state.rounds}`))
+        }
+      } satisfies TaskMachine<MemoState, never, string>
     },
     retries: { limit: 3, delay: 5, backoff: "constant" },
     stepTimeout: 2_000,
@@ -479,7 +918,9 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     }
   });
 
-  readonly lifecycle = Lifecycle.install(this).use(this.tasks);
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.streams)
+    .use(this.tasks);
 }
 
 /**
@@ -576,6 +1017,8 @@ export function seedTaskRun(
       readonly delayMs: number;
       readonly backoff: "constant" | "linear" | "exponential";
     };
+    /** The run that owns this one, for delete-cascade and child tests. */
+    readonly parentRunId?: string;
   }
 ): void {
   const now = Date.now();
@@ -583,8 +1026,8 @@ export function seedTaskRun(
     `INSERT INTO cf_agents_task_runs
        (run_id, definition, input, state, generation, attempt, next_at,
         idempotency_key, retain, deadline_at, interruptions, retry_policy,
-        cancel_requested, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        parent_run_id, cancel_requested, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     options.runId,
     options.definition,
     options.input === undefined ? null : JSON.stringify(options.input),
@@ -605,6 +1048,7 @@ export function seedTaskRun(
           retryDelayMs: options.retryPolicy.delayMs,
           backoff: options.retryPolicy.backoff
         }),
+    options.parentRunId ?? null,
     now,
     now
   );
@@ -637,13 +1081,15 @@ export function seedTaskRun(
   );
 }
 
-/** Insert one task step row directly, bypassing the engine. */
-export function seedTaskStep(
+/** Insert one journal row directly, bypassing the engine. */
+export function seedTaskJournal(
   storage: DurableObjectStorage,
   options: {
     readonly runId: string;
+    /** The run's committed checkpoint turn; 0 for a function definition. */
+    readonly turn: number;
     readonly name: string;
-    readonly kind: "do" | "sleep";
+    readonly kind: "do" | "sleep" | "event";
     readonly state: "running" | "waiting" | "completed";
     readonly result?: unknown;
     readonly attempt?: number;
@@ -652,11 +1098,12 @@ export function seedTaskStep(
 ): void {
   const now = Date.now();
   storage.sql.exec(
-    `INSERT INTO cf_agents_task_steps
-       (run_id, step_name, kind, state, result, attempt, next_at,
+    `INSERT INTO cf_agents_task_journal
+       (run_id, turn, name, kind, state, result, attempt, next_at,
         created_at, started_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     options.runId,
+    options.turn,
     options.name,
     options.kind,
     options.state,
@@ -665,6 +1112,61 @@ export function seedTaskStep(
     options.nextAt ?? null,
     now,
     now,
+    now
+  );
+}
+
+/** Insert one mailbox row directly, bypassing the engine. */
+export function seedTaskMailbox(
+  storage: DurableObjectStorage,
+  options: {
+    readonly runId: string;
+    readonly key: string;
+    readonly kind: string;
+    readonly seq?: number;
+    readonly type?: string;
+    readonly payload?: unknown;
+  }
+): void {
+  const now = Date.now();
+  storage.sql.exec(
+    `INSERT INTO cf_agents_task_mailbox
+       (run_id, key, seq, kind, type, payload, visible_after, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+    options.runId,
+    options.key,
+    options.seq ?? 0,
+    options.kind,
+    options.type ?? null,
+    options.payload === undefined ? null : JSON.stringify(options.payload),
+    now
+  );
+}
+
+/** Insert one ask row directly, bypassing the engine. */
+export function seedTaskAsk(
+  storage: DurableObjectStorage,
+  options: {
+    readonly askId: string;
+    readonly runId: string;
+    readonly name: string;
+    readonly turn?: number;
+    readonly state?: "open" | "answered" | "expired" | "withdrawn";
+    readonly question?: unknown;
+  }
+): void {
+  const now = Date.now();
+  storage.sql.exec(
+    `INSERT INTO cf_agents_task_asks
+       (ask_id, run_id, turn, name, question, answer, state, expires_at,
+        metadata, created_at, answered_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, NULL)`,
+    options.askId,
+    options.runId,
+    options.turn ?? 0,
+    options.name,
+    options.question === undefined ? null : JSON.stringify(options.question),
+    options.state ?? "open",
     now
   );
 }
@@ -702,7 +1204,8 @@ export function interruptTaskRun(
 export function backdateTaskWake(
   storage: DurableObjectStorage,
   runId: string,
-  stepName?: string
+  stepName?: string,
+  turn = 0
 ): void {
   const past = Date.now() - 1000;
   storage.sql.exec(
@@ -717,9 +1220,11 @@ export function backdateTaskWake(
   );
   if (stepName !== undefined) {
     storage.sql.exec(
-      "UPDATE cf_agents_task_steps SET next_at = ? WHERE run_id = ? AND step_name = ?",
+      `UPDATE cf_agents_task_journal SET next_at = ?
+       WHERE run_id = ? AND turn = ? AND name = ?`,
       past,
       runId,
+      turn,
       stepName
     );
   }

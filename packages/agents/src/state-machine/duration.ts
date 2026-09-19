@@ -1,19 +1,25 @@
 /**
- * Duration parsing for the Tasks capability. Durations appear in step
+ * Duration parsing for the StateMachine capability. Durations appear in step
  * retry delays, per-attempt timeouts, and durable sleeps.
  */
 
-/** Units accepted in a {@link TaskDurationString}. */
-export type TaskDurationUnit = "second" | "minute" | "hour" | "day" | "week";
+/** Units accepted in a {@link StateMachineDurationString}. */
+export type StateMachineDurationUnit =
+  | "second"
+  | "minute"
+  | "hour"
+  | "day"
+  | "week";
 
 /**
  * A human-readable duration such as `"10 seconds"` or `"1 day"`.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type TaskDurationString = `${number} ${TaskDurationUnit}${"" | "s"}`;
+export type StateMachineDurationString =
+  `${number} ${StateMachineDurationUnit}${"" | "s"}`;
 
-const UNIT_MILLISECONDS: Record<TaskDurationUnit, number> = {
+const UNIT_MILLISECONDS: Record<StateMachineDurationUnit, number> = {
   second: 1000,
   minute: 60 * 1000,
   hour: 60 * 60 * 1000,
@@ -32,7 +38,7 @@ const DURATION_PATTERN = /^(\d+(?:\.\d+)?)\s+(second|minute|hour|day|week)s?$/;
  * @throws Error when the duration is negative, not finite, or unparseable.
  */
 export function parseTaskDuration(
-  duration: number | TaskDurationString,
+  duration: number | StateMachineDurationString,
   context: string
 ): number {
   if (typeof duration === "number") {
@@ -50,6 +56,6 @@ export function parseTaskDuration(
     );
   }
   const amount = Number(match[1]);
-  const unit = match[2] as TaskDurationUnit;
+  const unit = match[2] as StateMachineDurationUnit;
   return Math.floor(amount * UNIT_MILLISECONDS[unit]);
 }

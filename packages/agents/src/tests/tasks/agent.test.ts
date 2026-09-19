@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { TestTaskAgent } from "../agents/tasks";
-import { seedTaskRun, seedTaskStep } from "../capabilities/tasks";
+import { seedTaskRun, seedTaskJournal } from "../capabilities/tasks";
 import type { TaskRunSnapshot, TaskValue } from "../../tasks";
 
 /**
@@ -76,8 +76,9 @@ describe("Agent tasks integration", () => {
         attempt: 1,
         nextAt: Date.now() - 1000
       });
-      seedTaskStep(state.storage, {
+      seedTaskJournal(state.storage, {
         runId: "agent-interrupted",
+        turn: 0,
         name: "compose",
         kind: "do",
         state: "completed",
