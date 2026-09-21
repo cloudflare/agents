@@ -87,6 +87,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 import * as aiSdk from "ai";
 import type {
   FlexibleSchema,
@@ -183,7 +184,6 @@ import {
   CHAT_MESSAGE_TYPES,
   TurnQueue,
   ResumableStream,
-  createChatStreams,
   ContinuationState,
   PreStreamTurns,
   AutoContinuationController,
@@ -248,7 +248,6 @@ import {
   type ChatRecoveryIncident,
   type ChatRecoveryKind
 } from "agents/chat";
-import type { Streams } from "agents/streams";
 import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
 import type {
   StreamChunkData,
@@ -3092,7 +3091,6 @@ export class Think<
     super(ctx, env);
 
     this.lifecycle.use(this.sessions);
-    this.lifecycle.use(this.streams);
     this._registerChatTurnTaskDefinition();
     this._registerChatRecoveryTaskDefinition();
     this._registerMessengerReplyTaskDefinition();
@@ -4017,13 +4015,6 @@ export class Think<
 
   private _aborts = new AbortRegistry();
   private _turnQueue = new TurnQueue();
-  /**
-   * The Streams capability backing `_resumableStream`: chat's in-flight
-   * output lives in the shared durable chunk log, readable by any
-   * `streams.read()` consumer on this Durable Object.
-   */
-  readonly streams: Streams = createChatStreams();
-
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   /** Lazily-built shared resume-handshake driver (Tier-2). */
@@ -4840,6 +4831,27 @@ export class Think<
     }
   >();
 
+  /** Handles for the reserved (`__cf`-prefixed) definitions this host registers. */
+  private readonly _reservedTasks = new Map<string, TaskInternalHandle>();
+
+  private _registerReserved(name: string, definition: TaskDefinition): void {
+    this._reservedTasks.set(name, this.tasks.register(name, definition));
+  }
+
+  /**
+   * The handle for one reserved definition this host registered: the only
+   * way to start a run of it, since public `run()` refuses the prefix.
+   */
+  protected _reservedTask(name: string): TaskInternalHandle {
+    const handle = this._reservedTasks.get(name);
+    if (!handle) {
+      throw new Error(
+        `Reserved Task definition "${name}" is not registered on this host`
+      );
+    }
+    return handle;
+  }
+
   /**
    * Register the shared chat-turn Task definition (see
    * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
@@ -4847,7 +4859,7 @@ export class Think<
    */
   private _registerChatTurnTaskDefinition(): void {
     const chatFiberName = (this.constructor as typeof Think).CHAT_FIBER_NAME;
-    this.tasks.register(
+    this._registerReserved(
       chatFiberName,
       createChatTurnTaskDefinition({
         definitionName: chatFiberName,
@@ -4867,7 +4879,7 @@ export class Think<
     // SAFETY: the recovery engine is the sole producer of each callback's
     // payload and the Task persists it verbatim, so the callback name selects
     // the matching host input type.
-    this.tasks.register(
+    this._registerReserved(
       CHAT_RECOVERY_TASK_NAME,
       createChatRecoveryTaskDefinition({
         _chatRecoveryContinue: (data) =>
@@ -4911,7 +4923,7 @@ export class Think<
    * keys a retried enqueue so it joins its own prior attempt instead of
    * duplicating it — see {@link chatRecoveryTaskRunOptions}.
    */
-  private async _enqueueChatRecovery(
+  protected async _enqueueChatRecovery(
     callback: ChatRecoveryScheduleCallback,
     data: Record<string, unknown>,
     reason: ChatRecoveryTaskReason,
@@ -4919,11 +4931,10 @@ export class Think<
     dedupeKey?: string
   ): Promise<void> {
     const input = { callback, data, delaySeconds };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, reason, dedupeKey)
-    );
+    await this._reservedTask(CHAT_RECOVERY_TASK_NAME).run(input, {
+      ...chatRecoveryTaskRunOptions(input, reason, dedupeKey),
+      start: "queued"
+    });
   }
 
   /**
@@ -4934,7 +4945,7 @@ export class Think<
    * `ThinkMessengerRuntime.handleFiberRecovery` the legacy scan used.
    */
   private _registerMessengerReplyTaskDefinition(): void {
-    this.tasks.register(
+    this._registerReserved(
       MESSENGER_REPLY_TASK_DEFINITION,
       async (input, step) => {
         const { nonce } = input as { nonce: string };
@@ -5010,10 +5021,12 @@ export class Think<
     idempotencyKey: string;
     metadata: Record<string, unknown>;
   }): Promise<{ accepted: boolean }> {
-    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-      MESSENGER_REPLY_TASK_DEFINITION,
+    const receipt = await this._reservedTask(
+      MESSENGER_REPLY_TASK_DEFINITION
+    ).run(
       { nonce: input.nonce },
       {
+        start: "attached",
         runId: `msgr_${input.nonce}`,
         idempotencyKey: input.idempotencyKey,
         metadata: input.metadata as Record<
@@ -5075,10 +5088,16 @@ export class Think<
       settle: { resolve: resolveOutcome, reject: rejectOutcome }
     });
     try {
-      await this.tasks.__DO_NOT_USE_WILL_BREAK__runAttached(
-        (this.constructor as typeof Think).CHAT_FIBER_NAME,
+      await this._reservedTask(
+        (this.constructor as typeof Think).CHAT_FIBER_NAME
+      ).run(
         { requestId, continuation, nonce },
-        { runId: `chat_${nonce}`, retain: false, metadata: { requestId } }
+        {
+          runId: `chat_${nonce}`,
+          retain: false,
+          metadata: { requestId },
+          start: "attached"
+        }
       );
       return (await outcome) as T;
     } finally {

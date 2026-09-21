@@ -75,9 +75,14 @@ const CHAT_STREAM_MAX_CHUNK_BYTES = 1_900_000;
 const CHUNK_MAX_BYTES = 1_800_000;
 
 /**
- * Construct the Streams capability instance a chat host must install to back
- * its `ResumableStream`: identical to `new Streams()` except for the raised
- * per-chunk ceiling that chat's packed segments require.
+ * Construct a Streams capability instance with the raised per-chunk ceiling
+ * chat's packed segments require, for a plain Lifecycle host that installs
+ * its own. An `Agent` already installs `this.streams`, and `ResumableStream`
+ * raises the ceiling for its own writes, so an Agent host needs no special
+ * instance.
+ *
+ * @deprecated Hand `ResumableStream` the host's existing Streams capability
+ * (`this.streams` on an Agent) instead.
  */
 export function createChatStreams(): Streams {
   return new Streams({ maxChunkBytes: CHAT_STREAM_MAX_CHUNK_BYTES });
@@ -204,7 +209,9 @@ export class ResumableStream {
     sql: SqlTaggedTemplate,
     options: ResumableStreamOptions = {}
   ) {
-    this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
+    this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync({
+      maxChunkBytes: CHAT_STREAM_MAX_CHUNK_BYTES
+    });
     this.ops.ensureTables();
     this._sql = sql;
     this._onProgress = options.onProgress;

@@ -110,6 +110,8 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-streams.md`                         | RFC        | Streams — durable incremental output as a Lifecycle capability: chunk log, cursor, replay-then-tail reads, composed with Tasks via checkpointed cursors (proposed)              |
 | `rfc-pi-harness-example.md`              | RFC        | Pi `AgentHarness` as an example-local Lifecycle capability over Tasks, Streams, and WebSockets; what must land before it becomes a package export (proposed)                    |
 | `rfc-self-modifying-harness.md`          | RFC        | Editable harness source in Workspace, activation through Worker Bundler, and one fresh Dynamic Worker per turn (proposed)                                                       |
+| `rfc-tasks-state-machine.md`             | RFC        | Tasks as one durable state-machine engine with two definition forms — the step API compiled onto it — plus a normative specification appendix (proposed)                        |
+| `tasks-cleanup-plan.md`                  | design doc | Forward plan, not current state: surface-by-surface verdicts, consumer migrations and a sequenced PR order for the Tasks engine cutover; delete once it lands                   |
 
 ## Relationship to `/docs`
 

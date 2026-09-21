@@ -101,6 +101,41 @@ describe("v1 chunk rows fold into blocks lazily", () => {
     });
   });
 
+  it("re-derives the dropped-table flag when an owner's transaction rolls back", async () => {
+    const stub = env.CutoverHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {
+      const ctx = (instance as unknown as { ctx: DurableObjectState }).ctx;
+      await ctx.storage.put("cf_agents:streams_schema_version", 1);
+      // The one live stream holds the last v1 rows, so the settle inside
+      // the owner's transaction folds them and drops the legacy table.
+      seedV1(instance, {
+        live: { state: "streaming", chunks: ["a", "b", "c"] }
+      });
+      await instance.lifecycle.start();
+
+      const writer = await instance.streams.open("live");
+      expect(() =>
+        instance.streams.transaction(() => {
+          writer.close();
+          throw new Error("fence refused");
+        })
+      ).toThrow("fence refused");
+
+      // The rollback restored the table and the stream, and the capability
+      // still has to see the rows: folding again is what recovers the
+      // cursor, so a flag left saying the table is gone loses the log.
+      expect(
+        count(instance, "SELECT COUNT(*) AS n FROM cf_agents_stream_chunks")
+      ).toBe(3);
+      expect((await instance.streams.status("live"))?.state).toBe("streaming");
+      expect((await instance.streams.status("live"))?.cursor).toBe(3);
+      expect(writer.append("d")).toBe(3);
+      writer.close();
+      const chunks = await collect(instance.streams.read("live"));
+      expect(chunks.map((c) => c.chunk)).toEqual(["a", "b", "c", "d"]);
+    });
+  });
+
   it("folds one stream on first touch and drops the table once empty", async () => {
     const stub = env.CutoverHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {

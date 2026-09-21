@@ -43,14 +43,25 @@ class StartupAlarmProbe extends LifecycleCapability<StartupProps> {
   }
 
   async onStart({ props }: { props: StartupProps | undefined }): Promise<void> {
-    if (props?.label !== "startup-alarm") return;
-    // Pushing during startup defers the physical re-arm until startup
-    // completes; the alarm-coalescing test asserts it was applied.
-    await this.lifecycle.jobs.push({
-      id: "startup-tick",
-      fn: "tick",
-      time: Date.now() + 60_000
-    });
+    if (props?.label === "startup-alarm") {
+      // Pushing during startup defers the physical re-arm until startup
+      // completes; the alarm-coalescing test asserts it was applied.
+      await this.lifecycle.jobs.push({
+        id: "startup-tick",
+        fn: "tick",
+        time: Date.now() + 60_000
+      });
+      return;
+    }
+    if (props?.label === "startup-alarm-sync") {
+      // A sync push re-arms nothing itself; during startup the coalesced
+      // post-startup re-arm must still pick it up.
+      this.lifecycle.jobs.pushSync({
+        id: "startup-sync-tick",
+        fn: "tick",
+        time: Date.now() + 60_000
+      });
+    }
   }
 
   onJob(): void {}
@@ -107,6 +118,18 @@ class JobProbe extends LifecycleCapability {
 
   push(options: LifecycleJobPushOptions) {
     return this.lifecycle.jobs.push(options);
+  }
+
+  pushSync(options: LifecycleJobPushOptions) {
+    return this.lifecycle.jobs.pushSync(options);
+  }
+
+  cancelSync(id: string) {
+    return this.lifecycle.jobs.cancelSync(id);
+  }
+
+  rearm(): Promise<void> {
+    return this.lifecycle.jobs.rearm();
   }
 
   get(id: string) {
@@ -491,6 +514,127 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
     });
   }
 
+  /**
+   * Write one marker row and push one probe job in the SAME
+   * `transactionSync` — the pattern `pushSync` exists for — then re-arm as
+   * its contract requires. `throwInside` aborts the transaction, which must
+   * roll the marker and the job back together.
+   */
+  async pushJobInTransaction(options: {
+    id: string;
+    marker: string;
+    time: number;
+    throwInside?: boolean;
+  }): Promise<{
+    error: string | null;
+    markers: string[];
+    jobTime: number | null;
+    alarmBeforeRearm: number | null;
+    alarm: number | null;
+  }> {
+    await this.lifecycle.start();
+    this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS test_markers (marker TEXT PRIMARY KEY)"
+    );
+    let error: string | null = null;
+    try {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO test_markers (marker) VALUES (?)",
+          options.marker
+        );
+        this.#jobProbe.pushSync({
+          id: options.id,
+          fn: "tick",
+          time: options.time
+        });
+        if (options.throwInside) throw new Error("rolled back");
+      });
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+    }
+    const alarmBeforeRearm = await this.#alarmAfterSettling();
+    await this.#jobProbe.rearm();
+    return {
+      error,
+      markers: this.#markers(),
+      jobTime: this.#jobProbe.get(options.id)?.time ?? null,
+      alarmBeforeRearm,
+      alarm: await this.ctx.storage.getAlarm()
+    };
+  }
+
+  /**
+   * The read-then-write shape `pushSync` is for: decide from the queue,
+   * inside the caller's own transaction, whether to push. On a fresh object
+   * that read is what creates the job table, so a rollback drops it again —
+   * and the queue has to keep working afterwards.
+   */
+  async pushJobIfAbsentInTransaction(options: {
+    id: string;
+    time: number;
+    throwInside?: boolean;
+  }): Promise<{ error: string | null; pushed: boolean }> {
+    await this.lifecycle.start();
+    let error: string | null = null;
+    let pushed = false;
+    try {
+      this.ctx.storage.transactionSync(() => {
+        if (this.#jobProbe.get(options.id)) return;
+        this.#jobProbe.pushSync({
+          id: options.id,
+          fn: "tick",
+          time: options.time
+        });
+        pushed = true;
+        if (options.throwInside) throw new Error("rolled back");
+      });
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+    }
+    await this.#jobProbe.rearm();
+    return { error, pushed };
+  }
+
+  /** Cancel one probe job inside a transaction, then re-arm. */
+  async cancelJobInTransaction(id: string): Promise<{
+    cancelled: boolean;
+    jobTime: number | null;
+    alarmBeforeRearm: number | null;
+    alarm: number | null;
+  }> {
+    await this.lifecycle.start();
+    let cancelled = false;
+    this.ctx.storage.transactionSync(() => {
+      cancelled = this.#jobProbe.cancelSync(id);
+    });
+    const alarmBeforeRearm = await this.#alarmAfterSettling();
+    await this.#jobProbe.rearm();
+    return {
+      cancelled,
+      jobTime: this.#jobProbe.get(id)?.time ?? null,
+      alarmBeforeRearm,
+      alarm: await this.ctx.storage.getAlarm()
+    };
+  }
+
+  /**
+   * The physical alarm, read after the isolate has turned over — so a
+   * detached re-arm the sync verbs must not do would have landed by now.
+   */
+  async #alarmAfterSettling(): Promise<number | null> {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return this.ctx.storage.getAlarm();
+  }
+
+  #markers(): string[] {
+    return [
+      ...this.ctx.storage.sql.exec<{ marker: string }>(
+        "SELECT marker FROM test_markers ORDER BY marker"
+      )
+    ].map((row) => row.marker);
+  }
+
   getProbeJob(id: string): { fn: string; time: number } | null {
     const job = this.#jobProbe.get(id);
     return job ? { fn: job.fn, time: job.time } : null;
@@ -625,6 +769,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
 
   async startWithAlarmContribution(): Promise<number | null> {
     await this.lifecycle.start({ label: "startup-alarm" });
+    return this.ctx.storage.getAlarm();
+  }
+
+  async startWithSyncAlarmContribution(): Promise<number | null> {
+    await this.lifecycle.start({ label: "startup-alarm-sync" });
     return this.ctx.storage.getAlarm();
   }
 

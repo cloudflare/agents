@@ -114,6 +114,30 @@ export type LifecycleJobs = {
   readonly push: (options: LifecycleJobPushOptions) => Promise<LifecycleJob>;
   /** Cancel one owned job. Returns false when no job matched. */
   readonly cancel: (id: string) => Promise<boolean>;
+  /**
+   * Push one job WITHOUT re-arming the physical alarm — the same write as
+   * {@link push}. For callers inside `storage.transactionSync()`, where the
+   * async re-arm cannot run: the caller MUST call {@link rearm} once its
+   * transaction commits. During startup the re-arm is already deferred and
+   * coalesced, so a `pushSync` from `onStart` needs no explicit call.
+   *
+   * Lifecycle repairs nothing if that call is lost — a crash between the
+   * commit and the {@link rearm} leaves a row with no alarm, and startup
+   * re-arms only when a mutation during startup asked it to. An owner that
+   * pushes this way outside startup owes itself a startup reconcile that
+   * re-derives its own jobs, the way Tasks and Scheduler each do.
+   */
+  readonly pushSync: (options: LifecycleJobPushOptions) => LifecycleJob;
+  /**
+   * Cancel one owned job without re-arming — the same write as
+   * {@link cancel}, under the same "caller re-arms" contract as
+   * {@link pushSync}, but with the opposite failure mode: a lost re-arm
+   * leaves a surplus alarm for a row that is gone, and that one does
+   * self-heal — the alarm fires, finds nothing due, and the driver's own
+   * re-arm deletes it. The price is a spurious wake of a hibernating
+   * object: a full startup plus one host `onAlarm()`.
+   */
+  readonly cancelSync: (id: string) => boolean;
   /** Re-time one owned job. Returns false when no job matched. */
   readonly reschedule: (id: string, time: number) => Promise<boolean>;
   /** Read one owned job. */
@@ -170,6 +194,18 @@ export function hungTimeoutMs(row: JobStorageRow): number {
   return (row.hung_timeout_seconds ?? DEFAULT_HUNG_TIMEOUT_SECONDS) * 1000;
 }
 
+/**
+ * Whether a query failed because the job table is gone. Only one thing
+ * removes it: a caller transaction that created the table and then rolled
+ * back. Matched on the message like the platform-failure classifiers in
+ * `retries.ts` — the raw SQLite cause is what reaches here, before
+ * {@link SqlError} wraps it.
+ */
+function isMissingJobTable(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return message.includes("no such table: cf_agents_jobs");
+}
+
 /** Whether an in-flight single-flight job has crossed its hung timeout. */
 export function isHungRow(row: JobStorageRow, nowMs: number): boolean {
   return nowMs - (row.execution_started_at ?? 0) >= hungTimeoutMs(row);
@@ -191,11 +227,26 @@ export class JobQueue {
     query: string,
     ...params: (string | number | null)[]
   ): T[] {
+    const run = (): T[] => [...this.#storage.sql.exec(query, ...params)] as T[];
     this.#ensureTable();
     try {
-      return [...this.#storage.sql.exec(query, ...params)] as T[];
+      return run();
     } catch (cause) {
-      throw new SqlError(query, cause);
+      if (!isMissingJobTable(cause)) throw new SqlError(query, cause);
+      // The table can vanish from under the cached "ensured" bit: the call
+      // that created it may have run inside a caller's `transactionSync()`
+      // — a `pushSync`, or the `get`/`list` deciding whether to push — and
+      // a rollback takes the brand-new table with it, not the bit. Re-derive
+      // and run the query once more, rather than let one rolled-back
+      // transaction poison the queue for the rest of the isolate. The failed
+      // statement touched nothing, so the retry is the query's first effect.
+      this.#tableEnsured = false;
+      this.#ensureTable();
+      try {
+        return run();
+      } catch (retryCause) {
+        throw new SqlError(query, retryCause);
+      }
     }
   }
 

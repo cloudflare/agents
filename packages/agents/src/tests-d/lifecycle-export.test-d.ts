@@ -114,6 +114,12 @@ class ServiceCapability extends LifecycleCapability {
     expectTypeOf(this.lifecycle.jobs.cancel("id")).toEqualTypeOf<
       Promise<boolean>
     >();
+    // The sync verbs return their result directly: no promise to await
+    // inside a caller's `transactionSync()`.
+    expectTypeOf(
+      this.lifecycle.jobs.pushSync({ fn: "tick", time: Date.now() })
+    ).toEqualTypeOf<LifecycleJob>();
+    expectTypeOf(this.lifecycle.jobs.cancelSync("id")).toEqualTypeOf<boolean>();
     expectTypeOf(this.lifecycle.jobs.list()).toEqualTypeOf<LifecycleJob[]>();
     expectTypeOf(this.lifecycle.runInHostContext(() => 1)).toEqualTypeOf<
       Promise<unknown>

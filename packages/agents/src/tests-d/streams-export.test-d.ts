@@ -36,6 +36,9 @@ writer.append({ text: "chunk" }) satisfies number;
 writer.cursor satisfies number;
 writer.close() satisfies void;
 writer.error("boom") satisfies void;
+// onCommit registers a settle-transaction callback and hands back its
+// unregister function.
+writer.onCommit(() => {}) satisfies () => void;
 // @ts-expect-error chunks must be JSON values.
 writer.append(() => {});
 

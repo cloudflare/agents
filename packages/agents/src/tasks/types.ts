@@ -1,45 +1,136 @@
-import type { TaskDurationString } from "./duration";
+/**
+ * The `agents/tasks` vocabulary: every engine type under the `Task` name it
+ * shipped with, plus the durable-function form only this layer knows.
+ * `agents/state-machine` is the engine; a task run and a state-machine run
+ * are the same row.
+ *
+ * @experimental The whole `agents/tasks` surface may change before
+ * stabilizing.
+ */
+
+import type {
+  StateMachineDeleteOptions,
+  StateMachineListOptions
+} from "../state-machine/state-machine";
+import type {
+  StateMachineDurationString,
+  StateMachineDurationUnit
+} from "../state-machine/duration";
+import type {
+  StateMachineEventType,
+  StateMachineFailedRun,
+  StateMachineOptions
+} from "../state-machine/options";
+import type {
+  AnyStateMachineDefinition,
+  StateMachineAbortMark,
+  StateMachineAnswerReceipt,
+  StateMachineAskOptions,
+  StateMachineAskRecord,
+  StateMachineAskState,
+  StateMachineChange,
+  StateMachineChangeType,
+  StateMachineChildRef,
+  StateMachineChildResult,
+  StateMachineContext,
+  StateMachineDefinition,
+  StateMachineError,
+  StateMachineHandle,
+  StateMachineInput,
+  StateMachineInternalHandle,
+  StateMachineJson,
+  StateMachineMailbox,
+  StateMachineMailboxFilter,
+  StateMachineMailboxItem,
+  StateMachineOutput,
+  StateMachinePhased,
+  StateMachineReceipt,
+  StateMachineRetryConfig,
+  StateMachineRunHandle,
+  StateMachineRunOptions,
+  StateMachineRunOutcome,
+  StateMachineRunSnapshot,
+  StateMachineRunState,
+  StateMachineRunView,
+  StateMachineSendOptions,
+  StateMachineSendReceipt,
+  StateMachineSpawnOptions,
+  StateMachineStartMode,
+  StateMachineState,
+  StateMachineStep,
+  StateMachineStepAttempt,
+  StateMachineStepConfig,
+  StateMachineStepEvent,
+  StateMachineStreamOptions,
+  StateMachineTerminal,
+  StateMachineTimedOut,
+  StateMachineValue,
+  StateMachineWaitReason
+} from "../state-machine/types";
+
+export type { AskKind, AssertJson, Pending } from "../state-machine/types";
+
+// ── Values ────────────────────────────────────────────────────────────────
+
+export type TaskJson = StateMachineJson;
+export type TaskValue = StateMachineValue;
+export type TaskPhased = StateMachinePhased;
+export type TaskTerminal<Result extends TaskValue> =
+  StateMachineTerminal<Result>;
+export type TaskTimedOut = StateMachineTimedOut;
+export type TaskDurationUnit = StateMachineDurationUnit;
+export type TaskDurationString = StateMachineDurationString;
+
+// ── Definitions ───────────────────────────────────────────────────────────
 
 /**
- * JSON-serializable data accepted as Task input, step results, metadata,
- * and final results.
+ * Today's Workflows-shaped durable function. The input parameter is `never`
+ * so any concretely-typed definition satisfies the constraint under
+ * contravariance; each definition's real input type is recovered with
+ * {@link TaskInput}.
+ */
+export type TaskFunction = (
+  input: never,
+  step: TaskStep
+) => TaskValue | Promise<TaskValue>;
+
+/** The machine form, as declared with `satisfies TaskMachine<...>`. */
+export type TaskMachine<
+  State extends TaskPhased,
+  Mailbox = never,
+  Result extends TaskValue = void,
+  Seed = void
+> = StateMachineDefinition<State, Mailbox, Result, Seed>;
+
+/**
+ * One named, versioned durable program: either a durable function or a
+ * durable state machine. Both run on one engine.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type TaskJson =
-  | string
-  | number
-  | boolean
-  | null
-  | TaskJson[]
-  | { [key: string]: TaskJson };
+export type TaskDefinition = TaskFunction | AnyStateMachineDefinition;
 
 /**
- * A value a Task handler or step callback may produce. `undefined` and
- * `void` persist as SQL `NULL` and restore as `undefined`.
+ * Constraint for a Tasks definitions map. The map is the registry, rebuilt
+ * on every Durable Object wake, so in-flight runs always resolve their
+ * persisted definition names.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type TaskValue = TaskJson | undefined | void;
+export type TaskDefinitions = Record<string, TaskDefinition>;
 
 /**
- * Constraint for a Tasks definitions map: named handlers invoked from the
- * beginning on every execution attempt, with completed steps returning
- * journaled results instead of running again. An unclean interruption —
- * process loss mid-attempt — replays the handler the same way; durable
- * progress lives in the step journal and in whatever durable state the
- * handler wrote (a stream's cursor, an idempotent external write), so
- * handlers resume from evidence instead of receiving a recovery callback.
+ * Back-compat alias: the function-only constraint Tasks shipped with. Named
+ * handlers invoked from the beginning on every execution attempt, with
+ * completed steps returning journaled results instead of running again. An
+ * unclean interruption — process loss mid-attempt — replays the handler the
+ * same way; durable progress lives in the step journal and in whatever
+ * durable state the handler wrote, so handlers resume from evidence instead
+ * of receiving a recovery callback.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type TaskHandlers = Record<
-  string,
-  // The input parameter is `never` so any concretely-typed definition
-  // satisfies the constraint under contravariance; each definition's real
-  // input type is recovered with `TaskInput`.
-  (input: never, step: TaskStep) => TaskValue | Promise<TaskValue>
->;
+export type TaskHandlers = Record<string, TaskFunction>;
 
 /**
  * Default definitions surface for a Tasks constructed without a typed map:
@@ -54,357 +145,96 @@ export type TaskCallbacks = Record<
   (input: unknown, step: TaskStep) => TaskValue | Promise<TaskValue>
 >;
 
-/**
- * The input type a registered Task definition accepts.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export type TaskInput<Handler> = Handler extends (
-  input: infer Input,
-  ...rest: never[]
-) => unknown
-  ? Input
-  : never;
+export type TaskInput<Definition> = StateMachineInput<Definition>;
+export type TaskState<Definition> = StateMachineState<Definition>;
+export type TaskOutput<Definition> = StateMachineOutput<Definition>;
+export type TaskMailbox<Definition> = StateMachineMailbox<Definition>;
 
-/**
- * The settled output type a registered Task definition produces.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export type TaskOutput<Handler> = Handler extends (
-  ...args: never[]
-) => infer Output
-  ? Awaited<Output> extends TaskValue
-    ? Awaited<Output>
-    : never
-  : never;
+// ── The per-handler runtime ───────────────────────────────────────────────
 
-/**
- * Per-attempt context passed to a `step.do()` callback.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export interface TaskStepAttempt {
-  /** One-based attempt number for this named step. */
-  readonly attempt: number;
+export type TaskStep = StateMachineStep;
+export type TaskStepConfig<Result extends TaskValue = TaskValue> =
+  StateMachineStepConfig<Result>;
+export type TaskRetryConfig = StateMachineRetryConfig;
+export type TaskStepAttempt = StateMachineStepAttempt;
+export type TaskStepEvent<Payload> = StateMachineStepEvent<Payload>;
+export type TaskContext<
+  State extends TaskPhased,
+  Mailbox = never,
+  Result extends TaskValue = void,
+  Seed = void
+> = StateMachineContext<State, Mailbox, Result, Seed>;
+export type TaskAbortMark = StateMachineAbortMark;
+export type TaskMailboxItem<Payload = TaskJson> =
+  StateMachineMailboxItem<Payload>;
+export type TaskMailboxFilter = StateMachineMailboxFilter;
+export type TaskChildRef = StateMachineChildRef;
+export type TaskChildResult<Output extends TaskValue> =
+  StateMachineChildResult<Output>;
+export type TaskStreamOptions = StateMachineStreamOptions;
+export type TaskAskState = StateMachineAskState;
+export type TaskAskOptions = StateMachineAskOptions;
+export type TaskAskRecord = StateMachineAskRecord;
 
-  /**
-   * Stable external deduplication key for this step: identical across
-   * attempts and replays of the same run.
-   */
-  readonly idempotencyKey: string;
+// ── Runs ──────────────────────────────────────────────────────────────────
 
-  /** Aborted on cancellation or when this attempt's timeout elapses. */
-  readonly signal: AbortSignal;
-}
-
-/**
- * Retry policy shape, shared by a `step.do()` config and a run's `interruptions`
- * so one number never means two things: `limit` counts total attempts
- * including the first in both places, and `delay`/`backoff` space the
- * retries out durably.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export interface TaskRetryConfig {
-  /** Total attempts, including the first. */
-  limit?: number;
-  /** Delay before the first retry. */
-  delay?: number | TaskDurationString;
-  /** Delay growth across retries. Defaults to exponential. */
-  backoff?: "constant" | "linear" | "exponential";
-}
-
-/**
- * Retry and timeout policy for one `step.do()` call.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export interface TaskStepConfig {
-  retries?: TaskRetryConfig;
-
-  /** Timeout of one callback attempt. */
-  timeout?: number | TaskDurationString;
-}
-
-/**
- * The step API a Task handler receives. Named steps are the run's durable
- * journal: `do` memoizes completed results, sleeps persist their first
- * deadline, and both suspend the execution attempt rather than holding the
- * invocation open.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export interface TaskStep {
-  /**
-   * This execution's claim number for the run: 1 on the first attempt, and
-   * one higher on every later claim — a replay after an unclean
-   * interruption, and equally a wake from a sleep or a step retry park.
-   * It is not the counter a run's `interruptions` bounds; that one counts only
-   * interruptions.
-   */
-  readonly attempt: number;
-
-  /**
-   * The step an unclean interruption left mid-execution, or `null` on a
-   * clean attempt — the durable evidence a replayed handler branches on
-   * before re-entering irreversible work. Populated when a lost attempt's
-   * claim is taken over, including across the run's own interruption
-   * backoff park, which replays with the evidence intact. A first attempt,
-   * a sleep wake, and a step retry park all see `null`.
-   */
-  readonly interrupted: {
-    readonly name: string;
-    readonly attempt: number;
-  } | null;
-
-  /**
-   * Aborted for the whole attempt — on `cancel()`, and when the run's
-   * `deadline` passes — so work awaited outside `step.do()` (a long model
-   * turn, a drain loop) can unwind. Inside a step the per-attempt `signal`
-   * already covers it.
-   */
-  readonly signal: AbortSignal;
-
-  /** Run a named step once, replaying its journaled result thereafter. */
-  do<T extends TaskValue>(
-    name: string,
-    callback: (attempt: TaskStepAttempt) => T | Promise<T>
-  ): Promise<T>;
-  do<T extends TaskValue>(
-    name: string,
-    config: TaskStepConfig,
-    callback: (attempt: TaskStepAttempt) => T | Promise<T>
-  ): Promise<T>;
-
-  /**
-   * Sleep durably. The first recorded deadline is authoritative; replays
-   * before it suspend again, replays after it continue.
-   */
-  sleep(name: string, duration: number | TaskDurationString): Promise<void>;
-
-  /** Sleep durably until a wall-clock time. */
-  sleepUntil(name: string, when: number | Date): Promise<void>;
-
-  /**
-   * Update observable progress. Replays stay silent until execution reaches
-   * new ground, so old progress is not re-published as new.
-   */
-  status(message: string): Promise<void>;
-
-  /** The stable external deduplication key `step.do(name, ...)` would get. */
-  idempotencyKey(name: string): string;
-}
-
-/**
- * States a Task run moves through.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export type TaskRunState =
-  | "pending"
-  | "running"
-  | "waiting"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
-/**
- * Why a waiting run is waiting: parked on a `step.sleep()` deadline, on a
- * step's retry delay, or on the run's own backoff between an unclean
- * interruption and the replay of that attempt.
- */
-export type TaskWaitReason = "sleep" | "retry" | "interrupted";
-
-/** Safe projection of an error retained with a failed run. */
-export interface TaskError {
-  name: string;
-  message: string;
-}
-
-/**
- * Options accepted when starting one Task run.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export interface TaskRunOptions {
-  /** Stable key deduplicating repeated acceptance attempts onto one run. */
-  idempotencyKey?: string;
-
-  /** Caller-selected run ID. Generated when omitted. */
-  runId?: string;
-
-  /** JSON metadata retained with the run. */
-  metadata?: Record<string, TaskJson>;
-
-  /** Keep terminal state for inspection. Defaults to `true`. */
-  retain?: boolean;
-
-  /**
-   * Retry policy for INTERRUPTED attempts: an attempt whose isolate died
-   * mid-execution and is being reclaimed. `limit` counts total attempts
-   * including the first, exactly as a step's does, and counts only
-   * *consecutive* interruptions — reaching a durable boundary under the
-   * attempt's own power (a sleep, a step retry park) clears the count, so a
-   * long-lived run is never killed for having survived enough deploys.
-   * Wakes from those parks are not attempts and cost nothing. Omitted: an
-   * interruption replays immediately, without bound. When present, fields
-   * left unset fall back to the capability's step `retries` defaults, and
-   * the interruption that reaches `limit` fails the run with
-   * `TaskInterruptionsExhaustedError`.
-   */
-  interruptions?: TaskRetryConfig;
-
-  /**
-   * Wall-clock deadline (epoch milliseconds or a `Date`). A live attempt's
-   * `step.signal` aborts and the run fails with `TaskDeadlineExceededError`;
-   * a parked run fails at its next wake, which the deadline brings forward.
-   */
-  deadline?: number | Date;
-}
-
-/**
- * Durable acceptance receipt returned by `Task.run()`. `accepted: false`
- * means an existing run matched `runId` or `idempotencyKey`; it is not an
- * error.
- *
- * @experimental The API surface may change before stabilizing.
- */
-export interface TaskReceipt {
-  runId: string;
-  definition: string;
-  accepted: boolean;
-  state: TaskRunState;
-  createdAt: number;
-}
-
-/**
- * Read-only snapshot of one Task run, discriminated by state.
- *
- * @experimental The API surface may change before stabilizing.
- */
+export type TaskRunState = StateMachineRunState;
+export type TaskRunOutcome = StateMachineRunOutcome;
+export type TaskWaitReason = StateMachineWaitReason;
+export type TaskError = StateMachineError;
+export type TaskStartMode = StateMachineStartMode;
+export type TaskRunOptions = StateMachineRunOptions;
+export type TaskSpawnOptions = StateMachineSpawnOptions;
+export type TaskReceipt = StateMachineReceipt;
 export type TaskRunSnapshot<Output extends TaskValue> =
-  | {
-      runId: string;
-      definition: string;
-      state: "pending";
-      createdAt: number;
-      metadata?: Record<string, TaskJson>;
-    }
-  | {
-      runId: string;
-      definition: string;
-      state: "running";
-      attempt: number;
-      startedAt: number;
-      createdAt: number;
-      statusMessage?: string;
-      metadata?: Record<string, TaskJson>;
-    }
-  | {
-      runId: string;
-      definition: string;
-      state: "waiting";
-      reason: TaskWaitReason;
-      wakeAt: number;
-      createdAt: number;
-      statusMessage?: string;
-      metadata?: Record<string, TaskJson>;
-    }
-  | {
-      runId: string;
-      definition: string;
-      state: "completed";
-      result: Output;
-      createdAt: number;
-      settledAt: number;
-      metadata?: Record<string, TaskJson>;
-    }
-  | {
-      runId: string;
-      definition: string;
-      state: "failed";
-      error: TaskError;
-      createdAt: number;
-      settledAt: number;
-      metadata?: Record<string, TaskJson>;
-    }
-  | {
-      runId: string;
-      definition: string;
-      state: "cancelled";
-      reason?: string;
-      createdAt: number;
-      settledAt: number;
-      metadata?: Record<string, TaskJson>;
-    };
+  StateMachineRunSnapshot<Output>;
+export type TaskRunView<
+  Output extends TaskValue,
+  State = unknown
+> = StateMachineRunView<Output, State>;
+export type TaskChangeType = StateMachineChangeType;
+export type TaskChange<State = unknown> = StateMachineChange<State>;
+export type TaskSendOptions = StateMachineSendOptions;
+export type TaskSendReceipt = StateMachineSendReceipt;
+export type TaskAnswerReceipt = StateMachineAnswerReceipt;
+export type TaskEventType = StateMachineEventType;
+export type TaskFailedRun = StateMachineFailedRun;
+export type TaskListOptions = StateMachineListOptions;
+export type TaskDeleteOptions = StateMachineDeleteOptions;
+
+// ── Handles ───────────────────────────────────────────────────────────────
+
+export type TaskHandle<
+  Definition,
+  Input,
+  State,
+  Output extends TaskValue
+> = StateMachineHandle<Definition, Input, State, Output>;
 
 /**
- * Typed handle for one named Task definition, returned by
- * `tasks.create()`. The handle holds no state of its own; it addresses runs
- * of its definition through the owning capability.
+ * Back-compat alias for the lens shape Tasks shipped with: an untyped
+ * definition, so the three machine verbs read `never` on it — the honest
+ * answer for a lens that does not know its definition's shape.
  *
  * @experimental The API surface may change before stabilizing.
  */
-export interface Task<Input, Output extends TaskValue> {
-  readonly name: string;
+export type Task<Input, Output extends TaskValue> = TaskHandle<
+  unknown,
+  Input,
+  unknown,
+  Output
+>;
 
-  /** Durably accept a run and return without waiting for terminal state. */
-  run(input: Input, options?: TaskRunOptions): Promise<TaskReceipt>;
+export type TaskRunHandle<Definition> = StateMachineRunHandle<Definition>;
+export type TaskInternalHandle = StateMachineInternalHandle;
 
-  /** Read one run of this definition. */
-  get(runId: string): Promise<TaskRunSnapshot<Output> | null>;
-
-  /** Read one run of this definition by its idempotency key. */
-  getByIdempotencyKey(
-    idempotencyKey: string
-  ): Promise<TaskRunSnapshot<Output> | null>;
-
-  /** Request cooperative cancellation. True when a live run was cancelled. */
-  cancel(runId: string, reason?: string): Promise<boolean>;
-}
-
-/** @internal Raw `cf_agents_task_runs` SQLite row. */
-export type TaskRunRow = {
-  run_id: string;
-  definition: string;
-  input: string | null;
-  state: TaskRunState;
-  result: string | null;
-  error_name: string | null;
-  error_message: string | null;
-  status_message: string | null;
-  metadata: string | null;
-  idempotency_key: string | null;
-  retain: number;
-  attempt: number;
-  deadline_at: number | null;
-  interruptions: number;
-  retry_policy: string | null;
-  generation: string | null;
-  next_at: number | null;
-  wait_reason: TaskWaitReason | null;
-  cancel_requested: number;
-  cancel_reason: string | null;
-  created_at: number;
-  started_at: number | null;
-  updated_at: number;
-  settled_at: number | null;
-};
-
-/** @internal Raw `cf_agents_task_steps` SQLite row. */
-export type TaskStepRow = {
-  run_id: string;
-  step_name: string;
-  kind: "do" | "sleep";
-  state: "running" | "waiting" | "completed" | "failed";
-  result: string | null;
-  error_name: string | null;
-  error_message: string | null;
-  attempt: number;
-  next_at: number | null;
-  created_at: number;
-  started_at: number | null;
-  updated_at: number;
-  completed_at: number | null;
-};
+/**
+ * Definitions and policy for a Tasks capability: the engine's options with
+ * a definitions map that may hold durable functions as well as machines.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export type TasksOptions<Definitions extends TaskDefinitions = TaskCallbacks> =
+  Omit<StateMachineOptions<Definitions>, "definitions"> & {
+    readonly definitions?: Definitions;
+  };

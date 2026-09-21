@@ -4,6 +4,7 @@ import {
   type OnChatMessageOptions,
   type SaveMessagesResult
 } from "../";
+import type { TaskDefinition, TaskInternalHandle } from "agents/tasks";
 import type {
   UIMessage as ChatMessage,
   GenerateTextOnFinishCallback,
@@ -31,11 +32,7 @@ import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions
 } from "../";
-import {
-  CHAT_RECOVERY_TASK_NAME,
-  ResumableStream,
-  chatRecoveryTaskRunOptions
-} from "agents/chat";
+import { CHAT_RECOVERY_TASK_NAME, ResumableStream } from "agents/chat";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -2541,15 +2538,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    const input = {
-      callback: "_chatRecoveryContinue" as const,
+    await this._enqueueChatRecovery(
+      "_chatRecoveryContinue",
       data,
-      delaySeconds: 60
-    };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
+      "redefer",
+      60
     );
   }
 
@@ -2557,16 +2550,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async preScheduleRecoveryRetryForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    const input = {
-      callback: "_chatRecoveryRetry" as const,
-      data,
-      delaySeconds: 60
-    };
-    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      CHAT_RECOVERY_TASK_NAME,
-      input,
-      chatRecoveryTaskRunOptions(input, "redefer")
-    );
+    await this._enqueueChatRecovery("_chatRecoveryRetry", data, "redefer", 60);
   }
 
   async getChatRecoveringForTest(): Promise<{ requestId?: string } | null> {
@@ -2858,7 +2842,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       WHERE run_id = ${runId}
     `;
     this.sql`
-      UPDATE cf_agents_task_steps SET next_at = ${past}
+      UPDATE cf_agents_task_journal SET next_at = ${past}
       WHERE run_id = ${runId} AND kind = 'sleep'
     `;
     this.sql`
@@ -3372,17 +3356,13 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
 
     // Root turns now start on the tasks capability; stub its internal start
     // path the same way so the simulated failure covers the migrated engine.
-    type RunAttached = (...args: unknown[]) => Promise<unknown>;
-    const tasksInternal = this.tasks as unknown as {
-      __DO_NOT_USE_WILL_BREAK__runAttached: RunAttached;
-    };
-    const originalRunAttached =
-      tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached.bind(
-        this.tasks
-      ) as RunAttached;
-    tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached = (() => {
+    const chatTurn = this._reservedTask(
+      (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME
+    );
+    const originalRun = chatTurn.run;
+    chatTurn.run = () => {
       throw new Error("simulated runFiber failure");
-    }) as RunAttached;
+    };
 
     let threw = false;
     try {
@@ -3401,7 +3381,7 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
       threw = true;
     } finally {
       fiberMethods._runFiberWithStashWrapper = originalRunFiberWithStashWrapper;
-      tasksInternal.__DO_NOT_USE_WILL_BREAK__runAttached = originalRunAttached;
+      chatTurn.run = originalRun;
     }
 
     return {
@@ -3484,7 +3464,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     // strike-seeding — the sleep parks it safely regardless of when that
     // dispatch happens. Only a caller that forces the run due a second time
     // (past the journaled sleep) reaches the throw.
-    this.tasks.register(FACET_OOM_TEST_TASK_NAME, async (_input, step) => {
+    this._registerFacetTask(FACET_OOM_TEST_TASK_NAME, async (_input, step) => {
       await step.sleep("armed", "1 hour");
       throw new Error(
         "Durable Object's isolate exceeded its memory limit and was reset."
@@ -3494,13 +3474,22 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     // dispatch budget once armed, so the routed dispatch budget race on
     // the root actually detaches before this throws — exercising root's
     // own tracking of the still-pending call, not just the local path.
-    this.tasks.register(FACET_SLOW_OOM_TEST_TASK_NAME, async (_input, step) => {
-      await step.sleep("armed", "1 hour");
-      await new Promise((resolve) => setTimeout(resolve, 6_500));
-      throw new Error(
-        "Durable Object's isolate exceeded its memory limit and was reset."
-      );
-    });
+    this._registerFacetTask(
+      FACET_SLOW_OOM_TEST_TASK_NAME,
+      async (_input, step) => {
+        await step.sleep("armed", "1 hour");
+        await new Promise((resolve) => setTimeout(resolve, 6_500));
+        throw new Error(
+          "Durable Object's isolate exceeded its memory limit and was reset."
+        );
+      }
+    );
+  }
+
+  private readonly _facetTasks = new Map<string, TaskInternalHandle>();
+
+  private _registerFacetTask(name: string, definition: TaskDefinition): void {
+    this._facetTasks.set(name, this.tasks.register(name, definition));
   }
 
   /**
@@ -3529,10 +3518,11 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         lastAttemptAt: now
       }
     );
-    const receipt = await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      definition,
+    const facetTask = this._facetTasks.get(definition);
+    if (!facetTask) throw new Error(`unregistered facet task ${definition}`);
+    const receipt = await facetTask.run(
       { incidentId },
-      { retain: false }
+      { retain: false, start: "queued" }
     );
     for (let i = 0; i < 50; i++) {
       const run = await this.tasks.get(receipt.runId);
@@ -3553,8 +3543,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       UPDATE cf_agents_task_runs SET next_at = ${now} WHERE run_id = ${runId}
     `;
     this.sql`
-      UPDATE cf_agents_task_steps SET next_at = ${now}
-      WHERE run_id = ${runId} AND step_name = 'armed'
+      UPDATE cf_agents_task_journal SET next_at = ${now}
+      WHERE run_id = ${runId} AND name = 'armed'
     `;
   }
 

@@ -24,16 +24,18 @@ export class ReportObject extends DurableObject<Env> {
 }
 ```
 
-On an `Agent`, install it onto the composition root in the constructor —
-the pattern for adding any extra capability to an Agent:
+An `Agent` installs the capability already, as `this.streams`, and hands
+it to `this.tasks` for engine-owned streams — do not install a second one.
+Chat's `ResumableStream` raises the per-chunk ceiling for its own writes
+through the same instance, so `createChatStreams()` is only for a plain
+Lifecycle host that constructs its own.
 
 ```ts
 export class ReportAgent extends Agent<Env> {
-  readonly streams = new Streams();
-
-  constructor(ctx: AgentContext, env: Env) {
-    super(ctx, env);
-    this.lifecycle.use(this.streams);
+  async report() {
+    const stream = await this.streams.open("report:1");
+    stream.append({ type: "text", delta: "…" });
+    stream.close();
   }
 }
 ```
@@ -180,6 +182,39 @@ failed producer. `commit` must not await; a Session handle's
 `__DO_NOT_USE_WILL_BREAK__sync().upsert()` is the matching synchronous
 message write, and returns a `notify()` to dispatch the change feed after
 the transaction commits.
+
+A writer can also register its own cutover writes up front, for code that
+holds the writer but does not own the `close()` call:
+
+```ts
+const unregister = stream.onCommit(() => sessionSync.upsert(message));
+```
+
+Registered callbacks run inside the same settle transaction, in registration
+order, before the `commit` passed to `close()`/`error()`, and under the same
+rules: synchronous only, and a throw rolls the whole settle back. The set is
+fixed when `close()`/`error()` is called, so registering or unregistering
+from inside a callback changes only a later settle.
+
+They belong to the writer object rather than to the stream — reopening a live
+stream returns a fresh writer with none — and only the call that ends the
+stream runs them. A `close()` that transitions nothing, because the stream
+was already terminal or discarded, runs neither the registered callbacks nor
+its own `commit`, and reports nothing back; code whose write has to land must
+check the stream's state itself, exactly as a `commit` caller does. Once this
+writer's own call has settled the stream it accepts no more registrations, so
+a callback registered after that never runs and its unregister is a no-op.
+
+One cost: a writer with callbacks registered settles through the transaction
+path, never the cheaper non-transactional one. Writers that never call
+`onCommit` are unaffected, and so is a writer whose stream has settled.
+
+Several streams settle as one unit inside `streams.transaction(closure)`:
+every settle in the closure writes into one SQLite transaction together with
+any synchronous writes of your own, a throw takes all of them back, and the
+settle events and reader wakeups wait until the transaction returns. Tasks
+settles a run's engine-owned streams with the run's own checkpoint or
+terminal write this way.
 
 Measured on a real Durable Object (400-chunk chat turn, 10 chunks per
 write): the old log paid 42 rows to write and another 42 to sweep; blocks

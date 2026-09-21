@@ -51,6 +51,12 @@ const LEGACY_FOLD_PAGE_ROWS = 500;
 /** Default ceiling for one serialized chunk (1 MiB). */
 export const DEFAULT_MAX_CHUNK_BYTES = 1_048_576;
 
+/**
+ * The largest per-chunk ceiling any caller may raise to: under the 2 MB
+ * SQLite row limit with headroom for escaping.
+ */
+export const MAX_CHUNK_BYTES_CEILING = 1_900_000;
+
 const MAX_STREAM_ID_LENGTH = 256;
 const READ_BATCH_SIZE = 100;
 const DEFAULT_LIST_LIMIT = 100;
@@ -188,6 +194,12 @@ export class Streams extends LifecycleCapability {
    * (see {@link #foldLegacyChunks}); the table is dropped once empty.
    */
   #legacyChunkTable = false;
+  /**
+   * The settle side effects an owner's open transaction is holding, in the
+   * order they were raised. Undefined when no such transaction is open,
+   * which is every settle that stands on its own.
+   */
+  #deferred: Array<() => void> | undefined;
 
   constructor(options: StreamsOptions = {}) {
     super("streams");
@@ -258,6 +270,39 @@ export class Streams extends LifecycleCapability {
     `;
     this.#emit("stream:opened", { streamId });
     return this.#writer(streamId);
+  }
+
+  /**
+   * Settle several of this owner's streams as one unit. Every settle inside
+   * `closure` writes straight into one storage transaction, so a throw
+   * takes all of them back together — which is what a caller whose own
+   * write rides along needs: either the write and every settlement land, or
+   * none of them do.
+   *
+   * Two pieces of state outlive a rollback and are repaired here, because
+   * only the outermost transaction knows the writes actually landed. The
+   * settles' events and wakeups are held until it returns, since a
+   * settlement that rolled back never happened and must not be announced;
+   * and the legacy chunk table's flag is re-derived from the schema for the
+   * reason a cutover's own transaction re-derives it (see {@link #settle}).
+   */
+  transaction<T>(closure: () => T): T {
+    // Already inside one: the outermost call owns both repairs.
+    if (this.#deferred !== undefined) return closure();
+    const deferred: Array<() => void> = [];
+    const hadLegacy = this.#legacyChunkTable;
+    this.#deferred = deferred;
+    let result: T;
+    try {
+      result = this.lifecycle.storage.transactionSync(closure);
+    } finally {
+      this.#deferred = undefined;
+      if (hadLegacy && !this.#legacyChunkTable) {
+        this.#legacyChunkTable = this.#hasLegacyChunkTable();
+      }
+    }
+    for (const effect of deferred) effect();
+    return result;
   }
 
   // ── Consumer surface ─────────────────────────────────────────────────────
@@ -423,7 +468,16 @@ export class Streams extends LifecycleCapability {
    * diagnostics observe aperture writes exactly like capability writes. Will
    * break without notice; never use from application code.
    */
-  __DO_NOT_USE_WILL_BREAK__sync(): StreamsSyncInternal {
+  __DO_NOT_USE_WILL_BREAK__sync(
+    options: { maxChunkBytes?: number } = {}
+  ): StreamsSyncInternal {
+    // A producer that packs large segments (chat) raises the per-chunk
+    // ceiling for its own writes, so it needs no specially constructed
+    // capability instance; the hard ceiling still bounds it.
+    const ceiling = Math.min(
+      options.maxChunkBytes ?? this.#maxChunkBytes,
+      MAX_CHUNK_BYTES_CEILING
+    );
     return {
       ensureTables: () => this.#ensureTables(),
       getStream: (streamId) => this.#getStream(streamId),
@@ -442,7 +496,7 @@ export class Streams extends LifecycleCapability {
         `;
         this.#emit("stream:opened", { streamId });
       },
-      append: (streamId, chunk) => this.#append(streamId, chunk),
+      append: (streamId, chunk) => this.#append(streamId, chunk, ceiling),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
       cursor: (streamId) => this.#tail(streamId).nextSeq,
       onDelete: (hook) => {
@@ -503,7 +557,8 @@ export class Streams extends LifecycleCapability {
       importChunk: (streamId, chunk, createdAt) => {
         const chunkJson = this.#serialize(
           chunk,
-          `chunk for stream "${streamId}"`
+          `chunk for stream "${streamId}"`,
+          ceiling
         );
         if (chunkJson === null) return;
         this.#writeChunk(streamId, chunkJson, createdAt);
@@ -515,22 +570,73 @@ export class Streams extends LifecycleCapability {
 
   #writer(streamId: string): StreamWriter {
     const capability = this;
+    // Registrations belong to this writer object, not to the stream:
+    // reopening a live stream hands out a fresh writer with none. Retired
+    // (null) the moment this writer's own call settles the stream, so a
+    // writer held past its stream's life can neither replay its callbacks
+    // onto a later incarnation of the same id nor take new ones.
+    let registered: Array<() => void> | null = [];
+    // Settle, folding the registered callbacks into the one synchronous
+    // function the transaction runs. The set is snapshotted here, so a
+    // callback registering or unregistering during the run cannot change
+    // what this settle does. With nothing registered the options pass
+    // through untouched, so a writer that never registers keeps the cheaper
+    // non-transactional settle path.
+    const settle = (
+      state: Extract<StreamState, "completed" | "errored">,
+      reason: string | null,
+      options: StreamSettleOptions | undefined
+    ): boolean => {
+      const callbacks = registered === null ? [] : [...registered];
+      const settled = this.#settle(
+        streamId,
+        state,
+        reason,
+        callbacks.length === 0
+          ? options
+          : {
+              ...options,
+              commit: () => {
+                for (const callback of callbacks) callback();
+                options?.commit?.();
+              }
+            }
+      );
+      if (settled) registered = null;
+      return settled;
+    };
     return {
       streamId,
       get cursor(): number {
         return capability.#tail(streamId).nextSeq;
       },
       append: (chunk) => this.#append(streamId, chunk),
-      close: (options) => this.#settle(streamId, "completed", null, options),
-      error: (reason, options) =>
-        this.#settle(streamId, "errored", reason ?? null, options)
+      close: (options) => settle("completed", null, options),
+      error: (reason, options) => settle("errored", reason ?? null, options),
+      onCommit: (fn) => {
+        const list = registered;
+        if (list === null) return () => {};
+        list.push(fn);
+        return () => {
+          const index = list.indexOf(fn);
+          if (index !== -1) list.splice(index, 1);
+        };
+      }
     };
   }
 
-  #append(streamId: string, chunk: StreamJson): number {
+  #append(
+    streamId: string,
+    chunk: StreamJson,
+    ceiling: number = this.#maxChunkBytes
+  ): number {
     // Serialization runs BEFORE the fence read: JSON.stringify can execute
     // user toJSON() methods, which may synchronously re-enter this stream.
-    const chunkJson = this.#serialize(chunk, `chunk for stream "${streamId}"`);
+    const chunkJson = this.#serialize(
+      chunk,
+      `chunk for stream "${streamId}"`,
+      ceiling
+    );
     if (chunkJson === null) {
       throw new StreamSerializationError(
         `chunk for stream "${streamId}"`,
@@ -669,10 +775,14 @@ export class Streams extends LifecycleCapability {
   ): boolean {
     if (!options?.commit && !options?.discard) {
       const settled = this.#settleRow(streamId, state, reason);
-      if (settled) this.#emitSettled(streamId, state, reason);
       // Idempotent for recovery callers; readers re-poll and observe the
-      // terminal state either way.
-      this.#wake(streamId);
+      // terminal state either way. Inside an owner's transaction the row
+      // write is provisional, so the effects wait for it (see
+      // {@link transaction}).
+      this.#after(() => {
+        if (settled) this.#emitSettled(streamId, state, reason);
+        this.#wake(streamId);
+      });
       return settled;
     }
     // The cutover: settle, the caller's writes (a session message), and
@@ -700,9 +810,11 @@ export class Streams extends LifecycleCapability {
         this.#legacyChunkTable = this.#hasLegacyChunkTable();
       }
     }
-    if (settled) this.#emitSettled(streamId, state, reason);
-    if (deleted) this.#emit("stream:deleted", { streamId });
-    this.#wake(streamId);
+    this.#after(() => {
+      if (settled) this.#emitSettled(streamId, state, reason);
+      if (deleted) this.#emit("stream:deleted", { streamId });
+      this.#wake(streamId);
+    });
     return settled;
   }
 
@@ -728,6 +840,12 @@ export class Streams extends LifecycleCapability {
       [state, reason, Date.now(), Date.now(), finalCursor, streamId]
     );
     return settled > 0;
+  }
+
+  /** Raise a settle's side effects, or hold them for the open transaction. */
+  #after(effect: () => void): void {
+    if (this.#deferred === undefined) effect();
+    else this.#deferred.push(effect);
   }
 
   #emitSettled(
@@ -785,7 +903,11 @@ export class Streams extends LifecycleCapability {
     }
   }
 
-  #serialize(value: unknown, context: string): string | null {
+  #serialize(
+    value: unknown,
+    context: string,
+    ceiling: number = this.#maxChunkBytes
+  ): string | null {
     if (value === undefined) return null;
     let json: string | undefined;
     try {
@@ -803,10 +925,10 @@ export class Streams extends LifecycleCapability {
       );
     }
     const bytes = utf8.encode(json).byteLength;
-    if (bytes > this.#maxChunkBytes) {
+    if (bytes > ceiling) {
       throw new StreamSerializationError(
         context,
-        `serialized size ${bytes} bytes exceeds the ${this.#maxChunkBytes}-byte limit`
+        `serialized size ${bytes} bytes exceeds the ${ceiling}-byte limit`
       );
     }
     return json;

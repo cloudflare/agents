@@ -1,15 +1,8 @@
 import { Agent } from "../../index";
-import { ResumableStream, createChatStreams } from "../../chat";
+import { ResumableStream } from "../../chat";
 
 /** Test Agent retained for ResumableStream legacy migration coverage. */
 export class TestSessionAgent extends Agent {
-  readonly streams = createChatStreams();
-
-  constructor(...args: ConstructorParameters<typeof Agent>) {
-    super(...args);
-    this.lifecycle.use(this.streams);
-  }
-
   // ── ResumableStream legacy migration helpers ────────────────────
 
   /**

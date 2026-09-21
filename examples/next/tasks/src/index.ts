@@ -77,7 +77,7 @@ export class ReportObject extends DurableObject<Env> {
 
   onStart(): void {
     // Published reports live in the host's own table; the run bookkeeping
-    // (cf_agents_task_runs, cf_agents_task_steps) is owned by the capability.
+    // (cf_agents_task_runs, cf_agents_task_journal) is owned by the capability.
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS published_reports (
         topic TEXT PRIMARY KEY,

@@ -25,10 +25,14 @@ capabilities push jobs instead of contributing wake times.
 - **Deadman pre-alarm** — armed before the event loop drives any due job, so
   an isolate death mid-drive still wakes the object to resume its queue.
 - **Tasks** — the capability for durable replayable execution. Every
-  non-terminal run's authoritative `next_at` deadline is mirrored as one queue
-  job per run. Task wakes use one job-dispatch attempt because ReplayStep owns
-  their durable retry budget; a propagated platform failure must reach a fresh
-  alarm invocation instead of entering JobDriver's generic retry loop.
+  non-terminal run's authoritative wake — its park or claim deadline, its run
+  deadline, and while a transition is live its `turn_deadline_at` watchdog —
+  is mirrored as one queue job per run. A run parked on its mailbox, an ask
+  or a child with no `within` has no wake at all and holds no job: a send or
+  an answer schedules one directly. Task wakes use one job-dispatch attempt
+  because ReplayStep owns their durable retry budget; a propagated platform
+  failure must reach a fresh alarm invocation instead of entering JobDriver's
+  generic retry loop.
 
 ## How the alarm is derived
 
@@ -80,9 +84,8 @@ Scheduler rows. Root chat recovery uses the reserved
 temporarily keeps its root-owned Scheduler rows; its callback executes on the
 facet's own Lifecycle, outside any alarm, so `trackAlarmWork` declines there
 and the facet's post-handoff turn is bounded by the incident's own memory-reset
-budget rather than the breaker until Tasks can mirror child wakes to the alarm
-owner. A sealing strike still reaches the facet through the routed
-compatibility bridge.
+budget rather than the breaker. A sealing strike still reaches the facet
+through the routed compatibility bridge.
 
 ## Agent integration
 

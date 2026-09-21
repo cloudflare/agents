@@ -76,6 +76,113 @@ describe("Lifecycle job queue", () => {
     expect(alarm as number).toBeLessThanOrEqual(Date.now() + 61_000);
   });
 
+  it("applies a sync push made during capability startup", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    const before = Date.now();
+    // `pushSync` re-arms nothing itself; during startup the deferred,
+    // coalesced re-arm has to cover it, with no explicit rearm call.
+    const alarm = await stub.startWithSyncAlarmContribution();
+
+    expect(alarm).not.toBeNull();
+    expect(alarm as number).toBeGreaterThanOrEqual(before + 59_000);
+    expect(alarm as number).toBeLessThanOrEqual(Date.now() + 61_000);
+  });
+
+  it("commits a sync push with the caller's transaction, then re-arms", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    const time = Date.now() + 60_000;
+    const armed = await stub.pushJobInTransaction({
+      id: "tx-job",
+      marker: "committed",
+      time
+    });
+
+    expect(armed.error).toBeNull();
+    expect(armed.markers).toEqual(["committed"]);
+    expect(armed.jobTime).toBe(time);
+    // The defining property of the sync verbs: the row lands, the physical
+    // alarm does not move until the caller's own `rearm()`.
+    expect(armed.alarmBeforeRearm).toBeNull();
+    expect(armed.alarm).toBe(time);
+
+    // The same push backdated drives from the alarm loop like any other.
+    const due = await stub.pushJobInTransaction({
+      id: "tx-due",
+      marker: "due",
+      time: Date.now() - 1
+    });
+    expect(due.error).toBeNull();
+    await vi.waitFor(
+      async () => {
+        expect(await stub.getEvents()).toContain("capability:job:tick");
+      },
+      { timeout: 10_000 }
+    );
+  });
+
+  it("rolls a sync push back with the caller's transaction", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    const rolledBack = await stub.pushJobInTransaction({
+      id: "tx-rollback",
+      marker: "rolled-back",
+      time: Date.now() + 60_000,
+      throwInside: true
+    });
+
+    // The whole point: the caller's row and the job live or die together.
+    expect(rolledBack.error).toBe("rolled back");
+    expect(rolledBack.markers).toEqual([]);
+    expect(rolledBack.jobTime).toBeNull();
+    expect(rolledBack.alarmBeforeRearm).toBeNull();
+    expect(rolledBack.alarm).toBeNull();
+  });
+
+  it("cancels inside the caller's transaction, then re-arms", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    const time = Date.now() + 60_000;
+    expect(
+      (
+        await stub.pushJobInTransaction({
+          id: "tx-cancel",
+          marker: "cancel",
+          time
+        })
+      ).alarm
+    ).toBe(time);
+
+    expect(await stub.cancelJobInTransaction("tx-cancel")).toEqual({
+      cancelled: true,
+      jobTime: null,
+      // The cancel leaves the now-surplus alarm standing; `rearm()` clears
+      // it, and until then it would only fire and find nothing due.
+      alarmBeforeRearm: time,
+      alarm: null
+    });
+  });
+
+  it("keeps the queue usable after a rolled-back transaction created its table", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    // The read that decides whether to push is, on a fresh object, the call
+    // that creates the job table — inside the caller's transaction. The
+    // rollback takes the table with it, so nothing may cache it as present.
+    const rolledBack = await stub.pushJobIfAbsentInTransaction({
+      id: "tx-absent",
+      time: Date.now() + 60_000,
+      throwInside: true
+    });
+    expect(rolledBack).toEqual({ error: "rolled back", pushed: true });
+    expect(await stub.getProbeJob("tx-absent")).toBeNull();
+
+    const time = Date.now() + 60_000;
+    expect(
+      await stub.pushJobIfAbsentInTransaction({ id: "tx-absent", time })
+    ).toEqual({ error: null, pushed: true });
+    expect(await stub.getProbeJob("tx-absent")).toEqual({
+      fn: "tick",
+      time
+    });
+  });
+
   it("lets a same-id push made mid-dispatch survive the drive outcome", async () => {
     const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
     await stub.startFromRpc({ label: "rpc" });

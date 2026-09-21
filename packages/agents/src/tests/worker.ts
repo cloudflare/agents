@@ -91,6 +91,7 @@ export {
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent,
   TestTaskAgent,
+  TaskFacetAgent,
   TestWorkflowAgent,
   TestWorkflowOnStartSubAgent,
   TestWorkflowSubAgent,
@@ -177,6 +178,7 @@ import type {
   TestProtocolMessagesAgent,
   TestScheduleAgent,
   TestTaskAgent,
+  TaskFacetAgent,
   TestWorkflowAgent,
   TestAgentToolReplayAgent,
   TestAddMcpServerAgent,
@@ -249,6 +251,7 @@ export type Env = {
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
   TestTaskAgent: DurableObjectNamespace<TestTaskAgent>;
+  TaskFacetAgent: DurableObjectNamespace<TaskFacetAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
   TestAgentToolReplayAgent: DurableObjectNamespace<TestAgentToolReplayAgent>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
