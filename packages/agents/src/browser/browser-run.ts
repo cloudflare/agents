@@ -150,17 +150,18 @@ export async function createBrowserSession(
   }
 ): Promise<BrowserSessionInfo> {
   // Guardrails ride the acquire request's JSON body (the query string only
-  // carries scalar options).
-  const init: RequestInit = options?.guardrails
-    ? {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ guardrails: options.guardrails })
-      }
-    : { method: "POST" };
+  // carries scalar options). The endpoint accepts an empty `{}` body —
+  // verified against the live acquire API — so the request shape stays
+  // uniform whether or not guardrails are set.
   const response = await browser.fetch(
     browserSessionEndpoint(undefined, options),
-    init
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        options?.guardrails ? { guardrails: options.guardrails } : {}
+      )
+    }
   );
 
   if (!response.ok) {
