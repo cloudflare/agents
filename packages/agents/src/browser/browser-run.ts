@@ -13,6 +13,7 @@ export interface BrowserBinding {
  * Browser Run [hostname guardrails](https://developers.cloudflare.com/browser-run/features/guardrails/):
  * restrict which hostnames the session's HTTP/HTTPS requests may reach. Fixed
  * at session launch for every connection to the session, including Live View.
+ * Omitted entirely, the platform default applies: all hostnames are allowed.
  * Not supported by Kitesurf.
  */
 export interface BrowserSessionGuardrails {
