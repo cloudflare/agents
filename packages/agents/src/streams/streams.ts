@@ -194,6 +194,12 @@ export class Streams extends LifecycleCapability {
    * (see {@link #foldLegacyChunks}); the table is dropped once empty.
    */
   #legacyChunkTable = false;
+  /**
+   * The settle side effects an owner's open transaction is holding, in the
+   * order they were raised. Undefined when no such transaction is open,
+   * which is every settle that stands on its own.
+   */
+  #deferred: Array<() => void> | undefined;
 
   constructor(options: StreamsOptions = {}) {
     super("streams");
@@ -264,6 +270,39 @@ export class Streams extends LifecycleCapability {
     `;
     this.#emit("stream:opened", { streamId });
     return this.#writer(streamId);
+  }
+
+  /**
+   * Settle several of this owner's streams as one unit. Every settle inside
+   * `closure` writes straight into one storage transaction, so a throw
+   * takes all of them back together — which is what a caller whose own
+   * write rides along needs: either the write and every settlement land, or
+   * none of them do.
+   *
+   * Two pieces of state outlive a rollback and are repaired here, because
+   * only the outermost transaction knows the writes actually landed. The
+   * settles' events and wakeups are held until it returns, since a
+   * settlement that rolled back never happened and must not be announced;
+   * and the legacy chunk table's flag is re-derived from the schema for the
+   * reason a cutover's own transaction re-derives it (see {@link #settle}).
+   */
+  transaction<T>(closure: () => T): T {
+    // Already inside one: the outermost call owns both repairs.
+    if (this.#deferred !== undefined) return closure();
+    const deferred: Array<() => void> = [];
+    const hadLegacy = this.#legacyChunkTable;
+    this.#deferred = deferred;
+    let result: T;
+    try {
+      result = this.lifecycle.storage.transactionSync(closure);
+    } finally {
+      this.#deferred = undefined;
+      if (hadLegacy && !this.#legacyChunkTable) {
+        this.#legacyChunkTable = this.#hasLegacyChunkTable();
+      }
+    }
+    for (const effect of deferred) effect();
+    return result;
   }
 
   // ── Consumer surface ─────────────────────────────────────────────────────
@@ -736,10 +775,14 @@ export class Streams extends LifecycleCapability {
   ): boolean {
     if (!options?.commit && !options?.discard) {
       const settled = this.#settleRow(streamId, state, reason);
-      if (settled) this.#emitSettled(streamId, state, reason);
       // Idempotent for recovery callers; readers re-poll and observe the
-      // terminal state either way.
-      this.#wake(streamId);
+      // terminal state either way. Inside an owner's transaction the row
+      // write is provisional, so the effects wait for it (see
+      // {@link transaction}).
+      this.#after(() => {
+        if (settled) this.#emitSettled(streamId, state, reason);
+        this.#wake(streamId);
+      });
       return settled;
     }
     // The cutover: settle, the caller's writes (a session message), and
@@ -767,9 +810,11 @@ export class Streams extends LifecycleCapability {
         this.#legacyChunkTable = this.#hasLegacyChunkTable();
       }
     }
-    if (settled) this.#emitSettled(streamId, state, reason);
-    if (deleted) this.#emit("stream:deleted", { streamId });
-    this.#wake(streamId);
+    this.#after(() => {
+      if (settled) this.#emitSettled(streamId, state, reason);
+      if (deleted) this.#emit("stream:deleted", { streamId });
+      this.#wake(streamId);
+    });
     return settled;
   }
 
@@ -795,6 +840,12 @@ export class Streams extends LifecycleCapability {
       [state, reason, Date.now(), Date.now(), finalCursor, streamId]
     );
     return settled > 0;
+  }
+
+  /** Raise a settle's side effects, or hold them for the open transaction. */
+  #after(effect: () => void): void {
+    if (this.#deferred === undefined) effect();
+    else this.#deferred.push(effect);
   }
 
   #emitSettled(

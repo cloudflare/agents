@@ -163,6 +163,43 @@ describe("stream → session cutover", () => {
     });
   });
 
+  it("holds an owner transaction's terminal events until it returns", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.CutoverHarnessObject.getByName(name);
+    const capture = captureDiagnosticsEvents("agents:stream", name);
+    try {
+      await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {
+        await instance.lifecycle.start();
+        const left = await instance.streams.open("left");
+        const right = await instance.streams.open("right");
+        left.append("l");
+        right.append("r");
+        expect(() =>
+          instance.streams.transaction(() => {
+            left.close();
+            right.close();
+            throw new Error("fence refused");
+          })
+        ).toThrow("fence refused");
+        // Both rows went back to streaming with the rollback.
+        expect((await instance.streams.status("left"))?.state).toBe(
+          "streaming"
+        );
+        expect((await instance.streams.status("right"))?.state).toBe(
+          "streaming"
+        );
+      });
+      // Neither settlement happened, so neither was announced: a settle
+      // that rolls back has no corrective event to follow it.
+      expect(capture.events.map((event) => event.type)).toEqual([
+        "stream:opened",
+        "stream:opened"
+      ]);
+    } finally {
+      capture.stop();
+    }
+  });
+
   it("a rolled-back cutover emits no terminal event", async () => {
     const name = crypto.randomUUID();
     const stub = env.CutoverHarnessObject.getByName(name);

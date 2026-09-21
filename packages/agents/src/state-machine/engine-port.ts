@@ -73,6 +73,13 @@ export type TaskStepEngineDeps = {
     streamId: string,
     options: StateMachineStreamOptions
   ) => Promise<StreamWriter>;
+  /**
+   * Run one closure inside a single storage transaction, through the
+   * streams capability: settling several streams together is what needs
+   * one, and only their owner can repair the state a rollback leaves
+   * behind (§9.2).
+   */
+  transaction: <T>(closure: () => T) => T;
   emit: (type: string, payload: Record<string, unknown>) => void;
 };
 
@@ -352,41 +359,48 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     listChildren: () => deps.store.listChildren(runId),
     commitCheckpoint: (commit) => {
       // The fenced checkpoint write, the retired turn, and the mailbox items
-      // this transition consumed land in one synchronous block, which
-      // Durable Object storage persists together — and inside a stream's
-      // settle transaction when the cutover calls this from its commit hook,
-      // so no transaction is opened here. A commit the mark or the
-      // generation refuses leaves every item in the mailbox for the
-      // invocation that now owns the run (§6.8).
+      // this transition consumed land in one transaction. A commit the mark
+      // or the generation refuses leaves every item in the mailbox for the
+      // invocation that now owns the run (§6.8). The block is synchronous
+      // end to end, so storage would persist it together as it stands — the
+      // transaction is what keeps that true if an `await` ever appears
+      // between the statements. Nesting is allowed, so the same shape holds
+      // when the cutover calls this from the stream fan-out's transaction.
       const now = Date.now();
-      const written = deps.store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE cf_agents_task_runs
-         SET checkpoint = ?, checkpoint_turn = ?, transitions = ?, stall = ?,
-             progress = ?, updated_at = ?
-         WHERE run_id = ? AND generation = ? AND state = 'running'
-           AND abort_mark IS NULL`,
-        [
-          commit.checkpoint,
-          commit.turn,
-          commit.transitions,
-          commit.stall,
-          commit.progress,
-          now
-        ]
-      );
-      if (!written) return false;
-      if (commit.retireTurn !== null && commit.retireTurn !== RUN_SCOPED_TURN) {
-        deps.store.sql`
+      return deps.store.transactionSync(() => {
+        const written = deps.store.fencedWrite(
+          runId,
+          generation,
+          `UPDATE cf_agents_task_runs
+           SET checkpoint = ?, checkpoint_turn = ?, transitions = ?, stall = ?,
+               progress = ?, updated_at = ?
+           WHERE run_id = ? AND generation = ? AND state = 'running'
+             AND abort_mark IS NULL`,
+          [
+            commit.checkpoint,
+            commit.turn,
+            commit.transitions,
+            commit.stall,
+            commit.progress,
+            now
+          ]
+        );
+        if (!written) return false;
+        if (
+          commit.retireTurn !== null &&
+          commit.retireTurn !== RUN_SCOPED_TURN
+        ) {
+          deps.store.sql`
             DELETE FROM cf_agents_task_journal
             WHERE run_id = ${runId} AND turn = ${commit.retireTurn}
           `;
-      }
-      deleteMailbox(commit.consume);
-      return true;
+        }
+        deleteMailbox(commit.consume);
+        return true;
+      });
     },
     deleteMailbox: (keys) => deleteMailbox(keys),
+    transaction: (closure) => deps.transaction(closure),
     creditProgress: (units) => {
       creditedProgress += units;
     },

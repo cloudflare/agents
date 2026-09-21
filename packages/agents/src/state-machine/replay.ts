@@ -327,6 +327,15 @@ export interface TaskStepEngine {
   /** Delete mailbox items by key, unfenced: for the capability's own boundary writes. */
   deleteMailbox(keys: readonly string[]): number;
 
+  /**
+   * Run one closure inside a single storage transaction, through the
+   * streams capability. Nested calls are allowed: an inner transaction
+   * rolls back on its own, and an outer one that rolls back discards what
+   * the inner committed — including the settle events the outer one holds
+   * until it returns.
+   */
+  transaction<T>(closure: () => T): T;
+
   /** Credit durable work the chunk log cannot see. Writes nothing itself. */
   creditProgress(units: number): void;
 
@@ -900,7 +909,10 @@ export class ReplayStep implements StateMachineContext<
     const engine = this.#engine;
     // A machine that settles its own writer marks the entry settled: a
     // settled stream transitions nothing, so the cutover must not hand it
-    // the commit that carries the run's own write (§9.2).
+    // the commit that carries the run's own write (§9.2). The mark lands
+    // only once the settle has returned — a `commit` of the machine's own
+    // that throws rolls the settle back and leaves the stream live, so the
+    // entry has to stay open for the cutover to settle it.
     const writer: StreamWriter = {
       streamId: inner.streamId,
       get cursor() {
@@ -911,12 +923,12 @@ export class ReplayStep implements StateMachineContext<
         return inner.append(chunk);
       },
       close: (settle) => {
+        inner.close(settle);
         entry.settled = true;
-        return inner.close(settle);
       },
       error: (reason, settle) => {
+        inner.error(reason, settle);
         entry.settled = true;
-        return inner.error(reason, settle);
       },
       onCommit: (fn) => inner.onCommit(fn)
     };
@@ -945,7 +957,7 @@ export class ReplayStep implements StateMachineContext<
     return credited;
   }
 
-  /** @internal Settle every open engine-owned stream; the last one may commit. */
+  /** @internal Settle every open engine-owned stream, as one transaction. */
   settleStreams(
     state: "completed" | "errored",
     reason: string | undefined,
@@ -955,11 +967,19 @@ export class ReplayStep implements StateMachineContext<
       (entry) => !entry.settled
     );
     this.#streams.clear();
-    entries.forEach((entry, index) => {
-      const last = index === entries.length - 1;
-      const options = last && commit !== undefined ? { commit } : undefined;
-      if (state === "completed") entry.writer.close(options);
-      else entry.writer.error(reason, options);
+    // One transaction is what makes the fan-out atomic: each settle writes
+    // straight into it, and the run's own write is a statement of it rather
+    // than a rider on the last settle — a stream whose row is already
+    // terminal transitions nothing, and a commit handed to that settle
+    // would be skipped, leaving the earlier ones closed under a run that
+    // never settled. A write the fence refuses throws, and the rollback
+    // takes every settlement with it.
+    this.#engine.transaction(() => {
+      for (const entry of entries) {
+        if (state === "completed") entry.writer.close();
+        else entry.writer.error(reason);
+      }
+      commit?.();
     });
   }
 

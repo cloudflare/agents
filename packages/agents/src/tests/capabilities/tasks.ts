@@ -112,6 +112,11 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly cancelLog: string[] = [];
   /** Compensations that ran, in the order they ran. */
   readonly compensations: string[] = [];
+  /**
+   * When set, `fencedTwinStreamer` moves the generation out from under its
+   * own attempt once, so the terminal write its cutover carries is refused.
+   */
+  fenceOutTerminal = false;
   /** Definitions resolved lazily, so a test can swap versions in place. */
   readonly dynamic: Record<string, TaskDefinition> = {
     "versioned@v1": versionedV1
@@ -937,6 +942,96 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
             writer.append("y");
             await ctx.sleep("nap", 60_000);
             return ctx.complete(writer.streamId);
+          }
+        }
+      } satisfies TaskMachine<NapStreamerState, never, string>,
+
+      /**
+       * Its own settle's commit throws, which rolls that settle back: the
+       * stream is still live, so the next checkpoint's cutover settles it.
+       */
+      retryingCloser: {
+        initial: { phase: "first" } as StreamerState,
+        phases: {
+          first: async (_state, ctx) => {
+            const writer = await ctx.stream();
+            writer.append("a");
+            try {
+              writer.close({
+                commit: () => {
+                  throw new Error("retry");
+                }
+              });
+            } catch {
+              // The settle rolled back: the stream is this run's to settle.
+            }
+            return { phase: "second" };
+          },
+          second: async (_state, ctx) => ctx.complete("closed")
+        }
+      } satisfies TaskMachine<StreamerState, never, string>,
+
+      /** Two streams open at once, both settling with the same terminal. */
+      twinStreamer: {
+        initial: { phase: "stream" } as NapStreamerState,
+        phases: {
+          stream: async (_state, ctx) => {
+            const left = await ctx.stream("left");
+            const right = await ctx.stream("right");
+            left.append("l");
+            right.append("r");
+            return ctx.complete(`${left.streamId}|${right.streamId}`);
+          }
+        }
+      } satisfies TaskMachine<NapStreamerState, never, string>,
+
+      /**
+       * Two streams, then a terminal the fence refuses: the generation
+       * moves out from under the attempt just before the cutover runs.
+       */
+      fencedTwinStreamer: {
+        initial: { phase: "stream" } as NapStreamerState,
+        phases: {
+          stream: async (_state, ctx) => {
+            const left = await ctx.stream("left");
+            const right = await ctx.stream("right");
+            left.append("l");
+            right.append("r");
+            if (this.fenceOutTerminal) {
+              // Once only: the attempt that reclaims the run replays this
+              // transition and is allowed to finish.
+              this.fenceOutTerminal = false;
+              this.ctx.storage.sql.exec(
+                "UPDATE cf_agents_task_runs SET generation = ? WHERE run_id = ?",
+                "dead-generation",
+                ctx.id
+              );
+            }
+            return ctx.complete("settled");
+          }
+        }
+      } satisfies TaskMachine<NapStreamerState, never, string>,
+
+      /**
+       * Two streams, the later of which is already terminal by the time the
+       * terminal settles it: that settle transitions nothing, so it cannot
+       * be the one the run's own write rides on.
+       */
+      terminalTwinStreamer: {
+        initial: { phase: "stream" } as NapStreamerState,
+        phases: {
+          stream: async (_state, ctx) => {
+            const left = await ctx.stream("left");
+            const right = await ctx.stream("right");
+            left.append("l");
+            right.append("r");
+            // Settled behind the machine's back, so the entry stays open
+            // and the cutover still counts it among the live streams.
+            this.ctx.storage.sql.exec(
+              "UPDATE cf_agents_streams SET state = 'completed' WHERE stream_id = ?",
+              right.streamId
+            );
+            return ctx.complete("settled");
           }
         }
       } satisfies TaskMachine<NapStreamerState, never, string>,

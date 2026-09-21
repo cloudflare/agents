@@ -209,6 +209,13 @@ One cost: a writer with callbacks registered settles through the transaction
 path, never the cheaper non-transactional one. Writers that never call
 `onCommit` are unaffected, and so is a writer whose stream has settled.
 
+Several streams settle as one unit inside `streams.transaction(closure)`:
+every settle in the closure writes into one SQLite transaction together with
+any synchronous writes of your own, a throw takes all of them back, and the
+settle events and reader wakeups wait until the transaction returns. Tasks
+settles a run's engine-owned streams with the run's own checkpoint or
+terminal write this way.
+
 Measured on a real Durable Object (400-chunk chat turn, 10 chunks per
 write): the old log paid 42 rows to write and another 42 to sweep; blocks
 pay 42 to write and 3 to cut over.

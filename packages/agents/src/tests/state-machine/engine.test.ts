@@ -100,6 +100,7 @@ function portFor(
     openStream: () => Promise.reject(new Error("no streams in the port probe")),
     openExternalStream: () =>
       Promise.reject(new Error("no streams in the port probe")),
+    transaction: (closure) => storage.transactionSync(closure),
     defaults: STEP_DEFAULTS,
     emit: () => {}
   });

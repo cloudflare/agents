@@ -253,6 +253,87 @@ describe("engine-owned streams", () => {
     });
   });
 
+  it("keeps a stream whose own settle rolled back open for the cutover", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("retryingCloser");
+      const done = await waitForState(instance.tasks, receipt.runId, [
+        "completed"
+      ]);
+      expect(done.state).toBe("completed");
+      // The machine's own `close` threw inside its commit, so nothing
+      // settled: the entry stayed open and the next checkpoint's cutover
+      // carried the stream over with it, rather than committing beside a
+      // stream left live under a run that went on to complete.
+      const stream = await instance.streams.status(`${receipt.runId}:main#0`);
+      expect(stream?.state).toBe("completed");
+      expect(stream?.cursor).toBe(1);
+    });
+  });
+
+  it("settles both open streams with the terminal that closes them", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("twinStreamer");
+      const done = await waitForState(instance.tasks, receipt.runId, [
+        "completed"
+      ]);
+      if (done.state !== "completed") throw new Error("unreachable");
+      expect(done.result).toBe(
+        `${receipt.runId}:left#0|${receipt.runId}:right#0`
+      );
+      // One transaction covers the fan-out and the terminal write, so the
+      // earlier stream cannot end up settled ahead of the run.
+      expect(
+        (await instance.streams.status(`${receipt.runId}:left#0`))?.state
+      ).toBe("completed");
+      expect(
+        (await instance.streams.status(`${receipt.runId}:right#0`))?.state
+      ).toBe("completed");
+    });
+  });
+
+  it("leaves every open stream live when the terminal's fence refuses", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      instance.fenceOutTerminal = true;
+      const runId = crypto.randomUUID();
+      await instance.tasks.run("fencedTwinStreamer", undefined, {
+        runId,
+        start: "attached"
+      });
+      // The fan-out and the terminal write share one transaction, so the
+      // refused fence rolls both settlements back: neither stream is left
+      // durably closed under a run that never settled.
+      expect((await instance.streams.status(`${runId}:left#0`))?.state).toBe(
+        "streaming"
+      );
+      expect((await instance.streams.status(`${runId}:right#0`))?.state).toBe(
+        "streaming"
+      );
+      expect((await instance.tasks.get(runId))?.state).not.toBe("completed");
+    });
+  });
+
+  it("settles the run when the last open stream is already terminal", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const runId = crypto.randomUUID();
+      await instance.tasks.run("terminalTwinStreamer", undefined, {
+        runId,
+        start: "attached"
+      });
+      // The terminal write is a statement of the fan-out's transaction
+      // rather than a rider on the last settle, so a stream that
+      // transitions nothing cannot swallow it and leave the earlier
+      // stream settled beside a run that never was.
+      expect((await instance.tasks.get(runId))?.state).toBe("completed");
+      expect((await instance.streams.status(`${runId}:left#0`))?.state).toBe(
+        "completed"
+      );
+    });
+  });
+
   it("leaves the stream live when the terminal result cannot serialize", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

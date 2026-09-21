@@ -3772,11 +3772,10 @@ export class StateMachine<
       if (terminal !== undefined) {
         // The atomic cutover (§9.2), as on the checkpoint path below: the
         // terminal payload is serialized before a stream is touched, and
-        // the run's terminal write rides the last open stream's settlement
-        // transaction — earlier streams settle ahead of it. A write the
-        // fence refuses — or a payload that will not serialize — leaves
-        // that last stream live rather than durably closing it under a run
-        // that never settled.
+        // the run's terminal write rides the settlement transaction every
+        // open stream shares. A write the fence refuses — or a payload that
+        // will not serialize — leaves all of them live rather than durably
+        // closing them under a run that never settled.
         const cutover: TerminalCutover = (write) => {
           let settled = false;
           const commit = () => {
@@ -3889,11 +3888,11 @@ export class StateMachine<
           );
           return;
         }
-        // The atomic cutover (§9.2): a live engine-owned stream settles in
-        // the same transaction as the checkpoint, through the settle's
-        // `commit` hook. A commit the fence refuses throws inside it, which
-        // rolls the settle back and leaves the stream live for whoever now
-        // owns the run.
+        // The atomic cutover (§9.2): every live engine-owned stream settles
+        // in the same transaction as the checkpoint, which the fan-out
+        // opens and this commit runs inside. A commit the fence refuses
+        // throws there, which rolls every settle back and leaves the
+        // streams live for whoever now owns the run.
         let committed = false;
         const consume = ctx.takeConsumed();
         const commit = () => {
@@ -4018,6 +4017,8 @@ export class StateMachine<
     const mark: MarkPredicate = cancelling === null ? "null" : "set";
     // A terminal the fence accepts makes the transition's consumption
     // durable; one it refuses leaves every item for whoever owns the run.
+    // The deletion runs inside the terminal write's own transaction (see
+    // #settleWrite), so the two cannot come apart.
     const consumed = () => {
       if (consume.length > 0) this.#deleteMailbox(runId, consume);
     };
@@ -4029,19 +4030,22 @@ export class StateMachine<
         );
         const now = Date.now();
         const settled = cutover(() =>
-          this.#store.fencedWrite(
-            runId,
-            generation,
-            `UPDATE cf_agents_task_runs
+          this.#settleWrite(
+            () =>
+              this.#store.fencedWrite(
+                runId,
+                generation,
+                `UPDATE cf_agents_task_runs
            SET state = 'completed', result = ?, generation = NULL, next_at = NULL,
                turn_deadline_at = NULL, settled_at = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND state = 'running'
              AND ${markClause(mark)}`,
-            [resultJson, now, now]
+                [resultJson, now, now]
+              ),
+            consumed
           )
         );
         if (settled) {
-          consumed();
           this.#emit("task:completed", { runId, definition: row.definition });
           await this.#finishTerminalSettlement(
             runId,
@@ -4059,28 +4063,40 @@ export class StateMachine<
           generation,
           summary,
           null,
-          { mark, cutover }
+          { mark, cutover, consume: consumed }
         );
         if (failed) {
-          consumed();
           await this.#observeError(terminal.error, row);
         }
         return;
       }
       case "aborted":
-        if (
-          await this.#settleCancelled(
-            runId,
-            generation,
-            terminal.reason,
-            mark,
-            cutover
-          )
-        ) {
-          consumed();
-        }
+        await this.#settleCancelled(
+          runId,
+          generation,
+          terminal.reason,
+          mark,
+          cutover,
+          consumed
+        );
         return;
     }
+  }
+
+  /**
+   * One durable boundary: a fenced run write and the mailbox rows that
+   * write consumes, as a single transaction. The pair is synchronous as it
+   * stands, so storage would persist both or neither anyway — the
+   * transaction is what keeps that true if an `await` ever appears between
+   * them. Nesting is allowed, so this holds inside a stream cutover's
+   * transaction, where an outer rollback discards this one too.
+   */
+  #settleWrite(write: () => boolean, consume: () => void): boolean {
+    return this.#store.transactionSync(() => {
+      const written = write();
+      if (written) consume();
+      return written;
+    });
   }
 
   /** Settle `failed` with an outcome that preserves the row (§6.6). */
@@ -4120,20 +4136,27 @@ export class StateMachine<
   ): Promise<void> {
     const now = Date.now();
     const consume = columns.consume ?? [];
-    // The park write and the consumed items land in one synchronous block:
-    // Durable Object storage persists both or neither.
-    const parked = this.#store.fencedWrite(
-      row.run_id,
-      generation,
-      `UPDATE cf_agents_task_runs
-       SET state = 'waiting', wait_reason = ?, next_at = ?, generation = NULL,
-           turn_deadline_at = NULL, transitions = 0,
-           stall = coalesce(?, stall), updated_at = ?
-       WHERE run_id = ? AND generation = ? AND state = 'running'
-         AND abort_mark IS NULL`,
-      [reason, wakeAt, columns.stall ?? null, now]
-    );
-    if (parked && consume.length > 0) this.#deleteMailbox(row.run_id, consume);
+    // The park write and the consumed items land in one transaction. The
+    // block is synchronous end to end, so storage would persist both or
+    // neither as it stands — the transaction is what keeps that true if an
+    // `await` ever appears between the two statements.
+    const parked = this.#store.transactionSync(() => {
+      const written = this.#store.fencedWrite(
+        row.run_id,
+        generation,
+        `UPDATE cf_agents_task_runs
+         SET state = 'waiting', wait_reason = ?, next_at = ?, generation = NULL,
+             turn_deadline_at = NULL, transitions = 0,
+             stall = coalesce(?, stall), updated_at = ?
+         WHERE run_id = ? AND generation = ? AND state = 'running'
+           AND abort_mark IS NULL`,
+        [reason, wakeAt, columns.stall ?? null, now]
+      );
+      if (written && consume.length > 0) {
+        this.#deleteMailbox(row.run_id, consume);
+      }
+      return written;
+    });
     if (!parked) return;
     this.#emit(reason === "paused" ? "task:paused" : "task:waiting", {
       runId: row.run_id,
@@ -4220,12 +4243,14 @@ export class StateMachine<
     // Rule 6: an application error settles `failed`.
     const summary = toErrorSummary(thrown);
     const failed = await this.#settleFailed(runId, generation, summary, null, {
-      mark: cancelling === null ? "null" : "set"
-    });
-    if (failed) {
+      mark: cancelling === null ? "null" : "set",
       // The fence accepted, so what the handler read before it threw is
       // consumed: a retained run must not redeliver it on `reopen()`.
-      if (consume.length > 0) this.#deleteMailbox(runId, consume);
+      consume: () => {
+        if (consume.length > 0) this.#deleteMailbox(runId, consume);
+      }
+    });
+    if (failed) {
       console.error(
         `Task run "${runId}" (definition "${row.definition}") failed: ${summary.name}: ${summary.message}`
       );
@@ -4335,6 +4360,7 @@ export class StateMachine<
       spawn: (child, input, options) =>
         this.#spawn(runId, child, input, options),
       openStream: (name, options) => this.#openStream(runId, name, options),
+      transaction: (closure) => this.#requireStreams().transaction(closure),
       openExternalStream: (streamId, options) =>
         this.#requireStreams().open(streamId, {
           ...(options.tag !== undefined ? { tag: options.tag } : {}),
@@ -4381,17 +4407,21 @@ export class StateMachine<
     generation: string | null,
     reason: string | undefined,
     mark: MarkPredicate = "any",
-    cutover?: TerminalCutover
+    cutover?: TerminalCutover,
+    /** Rows this settlement consumes, deleted inside the same write. */
+    consume: () => void = () => {}
   ): Promise<boolean> {
     const now = Date.now();
     let settled: boolean;
     if (generation !== null) {
       const fence = generation;
       const write = () =>
-        this.#store.fencedWrite(
-          runId,
-          fence,
-          `UPDATE cf_agents_task_runs
+        this.#settleWrite(
+          () =>
+            this.#store.fencedWrite(
+              runId,
+              fence,
+              `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              abort_mark = coalesce(abort_mark, 'cancel'),
              abort_reason = coalesce(abort_reason, ?),
@@ -4399,7 +4429,9 @@ export class StateMachine<
              settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
            AND state = 'running' AND ${markClause(mark)}`,
-          [reason ?? null, reason ?? null, now, now]
+              [reason ?? null, reason ?? null, now, now]
+            ),
+          consume
         );
       settled = cutover === undefined ? write() : cutover(write);
     } else {
@@ -4445,6 +4477,8 @@ export class StateMachine<
       outcome?: "faulted" | "orphaned";
       mark?: MarkPredicate;
       cutover?: TerminalCutover;
+      /** Rows this settlement consumes, deleted inside the same write. */
+      consume?: () => void;
     } = {}
   ): Promise<boolean> {
     const now = Date.now();
@@ -4452,17 +4486,22 @@ export class StateMachine<
     let settled: boolean;
     if (generation !== null) {
       const fence = generation;
+      const consume = options.consume ?? ((): void => {});
       const write = () =>
-        this.#store.fencedWrite(
-          runId,
-          fence,
-          `UPDATE cf_agents_task_runs
+        this.#settleWrite(
+          () =>
+            this.#store.fencedWrite(
+              runId,
+              fence,
+              `UPDATE cf_agents_task_runs
          SET state = 'failed', error_name = ?, error_message = ?, outcome = ?,
              generation = NULL, next_at = NULL, turn_deadline_at = NULL,
              settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
            AND state = 'running' AND ${markClause(options.mark ?? "any")}`,
-          [error.name, error.message, outcome, now, now]
+              [error.name, error.message, outcome, now, now]
+            ),
+          consume
         );
       const { cutover } = options;
       settled = cutover === undefined ? write() : cutover(write);
