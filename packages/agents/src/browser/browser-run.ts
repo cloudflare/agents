@@ -256,7 +256,7 @@ export async function connectBrowser(
     // an ID for analytics correlation, but it cannot be used with the
     // session-scoped reconnect or delete endpoints.
     ws.accept();
-    return new CdpSession(ws, normalizedOptions.timeoutMs);
+    return new CdpSession(ws, { timeoutMs: normalizedOptions.timeoutMs });
   }
 
   const sessionId = response.headers.get("cf-browser-session-id");
@@ -267,10 +267,9 @@ export async function connectBrowser(
   }
 
   ws.accept();
-  return new CdpSession(
-    ws,
-    normalizedOptions.timeoutMs,
-    () => {
+  return new CdpSession(ws, {
+    timeoutMs: normalizedOptions.timeoutMs,
+    onClose: () => {
       deleteBrowserSession(browser, sessionId).catch((error: unknown) => {
         console.warn(
           `[agents/browser] Failed to delete one-shot Browser Run session ${sessionId}`,
@@ -279,7 +278,7 @@ export async function connectBrowser(
       });
     },
     sessionId
-  );
+  });
 }
 
 /**
@@ -381,11 +380,10 @@ export async function connectBrowserSession(
   }
 
   ws.accept();
-  return new CdpSession(
-    ws,
-    normalized.timeoutMs,
-    normalized.onClose,
+  return new CdpSession(ws, {
+    timeoutMs: normalized.timeoutMs,
+    onClose: normalized.onClose,
     sessionId,
-    normalized.onActivity
-  );
+    onActivity: normalized.onActivity
+  });
 }

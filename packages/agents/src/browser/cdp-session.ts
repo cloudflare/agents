@@ -22,6 +22,21 @@ export interface CdpAttachOptions {
   timeoutMs?: number;
 }
 
+/** Construction options for {@link CdpSession}. */
+export interface CdpSessionOptions {
+  /** Default per-command timeout. Defaults to 10 seconds. */
+  timeoutMs?: number;
+  /**
+   * Invoked exactly once when the session reaches a terminal state — an
+   * explicit `close()`, peer closure, or a socket error.
+   */
+  onClose?: () => void;
+  /** Browser Run session id, when connected to a session-scoped browser. */
+  sessionId?: string;
+  /** Invoked on every CDP command sent — an activity signal for idle tracking. */
+  onActivity?: () => void;
+}
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_DEBUG_ENTRIES = 400;
 
@@ -43,18 +58,12 @@ export class CdpSession {
   #onActivity?: () => void;
   readonly sessionId?: string;
 
-  constructor(
-    socket: WebSocket,
-    defaultTimeoutMs = DEFAULT_TIMEOUT_MS,
-    dispose?: () => void,
-    sessionId?: string,
-    onActivity?: () => void
-  ) {
+  constructor(socket: WebSocket, options: CdpSessionOptions = {}) {
     this.#socket = socket;
-    this.#defaultTimeoutMs = defaultTimeoutMs;
-    this.#dispose = dispose;
-    this.sessionId = sessionId;
-    this.#onActivity = onActivity;
+    this.#defaultTimeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#dispose = options.onClose;
+    this.sessionId = options.sessionId;
+    this.#onActivity = options.onActivity;
 
     socket.addEventListener("message", (event) => this.#handleMessage(event));
     socket.addEventListener("error", () => {
@@ -304,5 +313,5 @@ export async function connectUrl(
   }
   ws.accept();
 
-  return new CdpSession(ws, options?.timeoutMs);
+  return new CdpSession(ws, { timeoutMs: options?.timeoutMs });
 }
