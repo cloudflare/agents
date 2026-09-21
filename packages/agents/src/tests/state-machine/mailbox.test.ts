@@ -4,10 +4,16 @@ import { describe, expect, it } from "vitest";
 import {
   Approval,
   backdateTaskWake,
+  seedTaskMailbox,
   type TaskHarnessObject
 } from "../capabilities/tasks";
 import { TaskMailboxFullError } from "../../tasks";
-import type { TaskChange, TaskRunSnapshot, TaskValue } from "../../tasks";
+import type {
+  TaskChange,
+  TaskJson,
+  TaskRunSnapshot,
+  TaskValue
+} from "../../tasks";
 
 /** Poll one run until it reaches one of the given states. */
 async function waitForState(
@@ -226,6 +232,96 @@ describe("the mailbox", () => {
       ).rejects.toBeInstanceOf(TaskMailboxFullError);
     });
   }, 30_000);
+
+  it("does not redeliver the message a failed run had already consumed", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run(
+          "inbox",
+          {},
+          { start: "queued" }
+        );
+        await instance.tasks.send(receipt.runId, "boom");
+        backdateTaskWake(state.storage, receipt.runId);
+        await instance.lifecycle.rearmAlarm();
+        const failed = await waitForState(instance.tasks, receipt.runId, [
+          "failed"
+        ]);
+        if (failed.state !== "failed") throw new Error("unreachable");
+        expect(failed.error.message).toBe("inbox boom");
+        expect(mailboxRows(state.storage, receipt.runId)).toBe(0);
+
+        // The retained row comes back with an empty mailbox: the message
+        // the throwing handler read is gone, so it parks instead.
+        expect(await instance.tasks.reopen(receipt.runId)).toBe(true);
+        const parked = await waitForState(instance.tasks, receipt.runId, [
+          "waiting",
+          "failed"
+        ]);
+        expect(parked.state).toBe("waiting");
+      }
+    );
+  });
+
+  it("keeps the mailbox intact when a latest send cannot serialize", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "inbox",
+        {},
+        { start: "queued" }
+      );
+      expect((await instance.tasks.send(receipt.runId, "keep")).accepted).toBe(
+        true
+      );
+      const cyclic: { self?: unknown } = {};
+      cyclic.self = cyclic;
+      await expect(
+        instance.tasks.send(receipt.runId, cyclic as TaskJson, {
+          policy: "latest"
+        })
+      ).rejects.toThrow(/circular|cyclic|convert/i);
+      // The replacement never happened, so the queued item is still there.
+      const view = await instance.tasks.view(receipt.runId);
+      expect(view?.mailbox.map((item) => item.payload)).toEqual(["keep"]);
+    });
+  });
+
+  it("takes a replacement at the limit and refuses only growth", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const receipt = await instance.tasks.run(
+          "inbox",
+          {},
+          { start: "queued" }
+        );
+        const runId = receipt.runId;
+        // The harness runs at the default limit of 1000; seeding fills it
+        // without a thousand round trips.
+        for (let i = 0; i < 1000; i++) {
+          seedTaskMailbox(state.storage, {
+            runId,
+            key: `seed-${i}`,
+            kind: "message",
+            seq: i,
+            payload: `m${i}`
+          });
+        }
+        // Neither of these grows the mailbox, so neither is refused.
+        expect(
+          (await instance.tasks.send(runId, "y", { policy: "drop" })).reason
+        ).toBe("dropped");
+        expect(
+          (await instance.tasks.send(runId, "z", { policy: "latest" })).accepted
+        ).toBe(true);
+        expect(mailboxRows(state.storage, runId)).toBe(1);
+      }
+    );
+  });
 
   it("returns timedOut when a receive's within passes", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());

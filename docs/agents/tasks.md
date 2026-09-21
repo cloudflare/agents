@@ -118,8 +118,11 @@ const receipt = await this.tasks.run("build-report@v1", input, {
 `run()` durably accepts the work and returns a receipt without waiting for
 completion. The same `idempotencyKey` (or a caller-selected `runId`) joins
 the existing run instead of creating a second one; `accepted: false` on the
-receipt marks that join. Pass `metadata` to retain JSON alongside the run and
-`retain: false` to remove the record after terminal settlement.
+receipt marks that join, and the receipt's `definition` is the name the run
+is stored under. The join matches on the base name, so a fixed `runId` keeps
+joining its run across a version bump; a different base still throws. Pass
+`metadata` to retain JSON alongside the run and `retain: false` to remove
+the record after terminal settlement.
 
 `start` chooses who drives the first attempt: `"warm"` (the default) begins
 it at once in the accepting invocation, `"queued"` leaves it to the next
@@ -153,8 +156,10 @@ await this.tasks.run("build-report@v1", input, {
 
 `run()`, `handle()` and `at()` type the definition name and its input
 against the declared map. A handle is a typed lens scoped to one definition
-— its `run`, `get`, `getByIdempotencyKey`, and `cancel` see only that
-definition's runs — and `at(name, runId)` is a typed handle on one run:
+— every verb on it sees only that definition's runs, and another
+definition's run reads as absent; versions of one base count as the same
+definition, as they do for the join — and `at(name, runId)` is a typed
+handle on one run:
 
 ```ts
 const buildReport = this.tasks.handle("build-report@v1");
@@ -415,8 +420,8 @@ race to lose a message to. `policy: "latest"` replaces every unconsumed
 item of the same kind and type, `"drop"` writes nothing when one exists,
 and `"debounce"` with `debounceMs` re-hides the same `requestId` until the
 window passes. `tasks.withdraw(runId, key)` removes a still-queued item.
-Past `mailboxLimit` (default 1000) items, `send` throws
-`TaskMailboxFullError`.
+A `send` that would grow the mailbox past `mailboxLimit` (default 1000)
+throws `TaskMailboxFullError`; a replacement at the limit is not growth.
 
 | Reading mode                   | Parks?          | Row writes               |
 | ------------------------------ | --------------- | ------------------------ |
@@ -513,9 +518,11 @@ changed no checkpoint, parked on nothing and credited nothing has made
 none; at the limit the run fails with `TaskNoProgressError`. **Rule B**
 (`transitionBudget`, default 1000): the number of transitions since the
 last park; exceeding it fails the run with `TaskTransitionBudgetError`,
-naming the phases it cycled through. Both record `outcome: "faulted"` on
-the failed run and **keep the row even at `retain: false`** — a fault is
-never silently deleted. A healthy handler that parks is never faulted,
+naming the phases it cycled through. A machine that legitimately transitions
+many times per park — a queue drainer running one transition per item —
+declares its own `transitionBudget` on the definition. Both record
+`outcome: "faulted"` on the failed run and **keep the row even at
+`retain: false`** — a fault is never silently deleted. A healthy handler that parks is never faulted,
 because parks are decided above the stall rule. Neither rule can fire for
 a job: its one phase returns a terminal or parks.
 

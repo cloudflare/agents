@@ -20,6 +20,9 @@ import { Streams } from "../../streams";
 type CounterState = { phase: "counting"; value: number };
 type StuckState = { phase: "idle" };
 type SpinnerState = { phase: "spin"; n: number };
+type BudgetedState =
+  | { phase: "ping"; n: number }
+  | { phase: "pong"; n: number };
 type NapperState = { phase: "nap"; ms: number } | { phase: "done" };
 type GuardState =
   | { phase: "hold"; decline: boolean; releases: number }
@@ -609,6 +612,22 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         }
       } satisfies TaskMachine<SpinnerState>,
 
+      /** Six transitions without a park, under its own tighter Rule B bound. */
+      tightBudget: {
+        initial: { phase: "ping", n: 0 } as BudgetedState,
+        phases: {
+          ping: async (state, ctx) =>
+            state.n >= 6
+              ? ctx.complete(state.n)
+              : { phase: "pong", n: state.n + 1 },
+          pong: async (state, ctx) =>
+            state.n >= 6
+              ? ctx.complete(state.n)
+              : { phase: "ping", n: state.n + 1 }
+        },
+        transitionBudget: 3
+      } satisfies TaskMachine<BudgetedState, never, number>,
+
       /** Parks on a sleep in its first phase, then completes. */
       napper: {
         initial: (seed: { ms: number }): NapperState => ({
@@ -659,8 +678,9 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
 
       /**
        * Receives messages one at a time — buffered ones first — until a
-       * "stop", then completes with everything it saw. A `within` turns a
-       * silent mailbox into a "timed-out" completion.
+       * "stop", then completes with everything it saw. A "boom" throws
+       * after the receive. A `within` turns a silent mailbox into a
+       * "timed-out" completion.
        */
       inbox: {
         initial: (seed: { within?: number }): InboxState => ({
@@ -677,6 +697,9 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
             if (item === ctx.timedOut) return ctx.complete("timed-out");
             const text = String(item.payload);
             if (text === "stop") return ctx.complete(state.seen.join(","));
+            // Receives, then throws: the probe for what a failed run does
+            // with the message it had already consumed.
+            if (text === "boom") throw new Error("inbox boom");
             return { ...state, seen: [...state.seen, text] };
           }
         }
@@ -863,6 +886,29 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         }
       } satisfies TaskMachine<WardenState, never, string>,
 
+      /** Spawns a `retain: false` child and joins it: the note outlives it. */
+      releaser: {
+        initial: { phase: "spawn" } as WardenState,
+        phases: {
+          spawn: async (_state, ctx) => {
+            const child = await ctx.spawn(
+              "counter",
+              { from: 1 },
+              { runId: `${ctx.id}:released`, retain: false }
+            );
+            return { phase: "wait", child: child.runId };
+          },
+          wait: async (state, ctx) => {
+            const results = await ctx.join([state.child]);
+            if (results === ctx.timedOut) return ctx.complete("timed-out");
+            const [result] = results;
+            return ctx.complete(
+              result?.ok ? JSON.stringify(result.output) : "child-failed"
+            );
+          }
+        }
+      } satisfies TaskMachine<WardenState, never, string>,
+
       /** Streams across two phases: the first stream settles with the commit. */
       streamer: {
         initial: { phase: "first" } as StreamerState,
@@ -891,6 +937,33 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
             writer.append("y");
             await ctx.sleep("nap", 60_000);
             return ctx.complete(writer.streamId);
+          }
+        }
+      } satisfies TaskMachine<NapStreamerState, never, string>,
+
+      /** Closes its own stream, then returns a terminal on the same turn. */
+      closingStreamer: {
+        initial: { phase: "stream" } as NapStreamerState,
+        phases: {
+          stream: async (_state, ctx) => {
+            const writer = await ctx.stream("out");
+            writer.append("x");
+            writer.close();
+            return ctx.complete(writer.streamId);
+          }
+        }
+      } satisfies TaskMachine<NapStreamerState, never, string>,
+
+      /** Streams, then returns a terminal result that cannot serialize. */
+      cyclicStreamer: {
+        initial: { phase: "stream" } as NapStreamerState,
+        phases: {
+          stream: async (_state, ctx) => {
+            const writer = await ctx.stream("out");
+            writer.append("x");
+            const cyclic: { self?: unknown } = {};
+            cyclic.self = cyclic;
+            return ctx.complete(cyclic as unknown as string);
           }
         }
       } satisfies TaskMachine<NapStreamerState, never, string>,

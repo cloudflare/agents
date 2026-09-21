@@ -623,6 +623,14 @@ export interface StateMachineDefinition<
     fromVersion: number,
     input: StateMachineJson
   ) => { state: State; input?: Seed };
+
+  /**
+   * How many checkpoint changes this machine may make between two parks
+   * before progress Rule B faults the run; defaults to the capability's
+   * `transitionBudget`. A machine that legitimately transitions many times
+   * per park — a queue drainer running one transition per item — raises it.
+   */
+  readonly transitionBudget?: number;
 }
 
 /**
@@ -647,6 +655,7 @@ export type AnyStateMachineDefinition = {
     fromVersion: number,
     input: StateMachineJson
   ) => { state: unknown; input?: unknown };
+  readonly transitionBudget?: number;
 };
 
 /**

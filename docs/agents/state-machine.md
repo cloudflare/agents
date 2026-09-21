@@ -5,10 +5,11 @@
 
 `agents/state-machine` is the durable state-machine engine that
 [Tasks](./tasks.md) is built on: one `StateMachine` capability that owns
-named machine definitions — `{ initial, phases, onCancel?, migrate? }` —
-and drives each run's checkpoint through its phase handlers, with a
-mailbox, durable asks, children, engine-owned streams, and the abort
-protocol described on the Tasks page.
+named machine definitions —
+`{ initial, phases, onCancel?, migrate?, transitionBudget? }` — and drives
+each run's checkpoint through its phase handlers, with a mailbox, durable
+asks, children, engine-owned streams, and the abort protocol described on
+the Tasks page.
 
 Use it directly when a Lifecycle Object runs actors and never needs the
 Workflows-shaped job form. `Tasks` **extends** `StateMachine` — same

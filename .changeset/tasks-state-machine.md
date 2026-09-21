@@ -28,4 +28,9 @@ The repository's `check` gate now runs `check:machines`, a rule that requires ev
 
 Review round two: a machine run's transition watchdog defaults to the step timeout (off for a durable function) and is enforced on routed runs too; a terminal the fence refuses consumes no mailbox items; a duplicate `requestId` is refused before `latest` can clear the original; ask ids and default child run ids derive from the turn so a replayed transition finds what it already raised or spawned; a park re-checks for a send or answer that raced it; `reopen()` accepts any failed or cancelled run whose row is still present.
 
+Two engine knobs for one-machine-per-address hosts:
+
+- A definition may declare `transitionBudget`, overriding the capability's for its own runs, so a machine that legitimately transitions many times between parks is not faulted by progress Rule B.
+- `run()` at an existing `runId` or `idempotencyKey` joins across versions of one base — the conflict check compares base names — and the receipt's `definition` is the name the run is stored under. A handle scopes by base for the same reason, so the handle that joined the run can still read it. A different base still throws.
+
 Breaking, experimental surface.

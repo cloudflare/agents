@@ -249,6 +249,14 @@ const BUDGET_TRAIL = 8;
 const PRESERVED_OUTCOMES = new Set(["faulted", "orphaned"]);
 /** Which abort-mark state a fenced write requires (§5.2). */
 type MarkPredicate = "null" | "set" | "any";
+/**
+ * Run one terminal row write inside the transition's stream cutover (§9.2),
+ * so a live engine-owned stream settles in the same transaction. Returns
+ * whether the write landed; a refused one leaves the stream live.
+ */
+type TerminalCutover = (write: () => boolean) => boolean;
+/** What a handle's `watch` returns when the run is another definition's. */
+const noUnsubscribe = () => {};
 /** Mailbox items a run may hold before `send` refuses (§7.4). */
 const DEFAULT_MAILBOX_LIMIT = 1000;
 /** The parks a mailbox write wakes. */
@@ -763,10 +771,10 @@ export class StateMachine<
   }
 
   /**
-   * A typed handle scoped to one declared definition: its `run`, `get`,
-   * `getByIdempotencyKey`, and `cancel` see only that definition's runs. The
-   * handle is a pure lens over this capability — it holds no state and may
-   * be created at any time.
+   * A typed handle scoped to one declared definition: every verb sees only
+   * that definition's runs, and another definition's run reads as absent.
+   * The handle is a pure lens over this capability — it holds no state and
+   * may be created at any time.
    */
   handle<Name extends keyof Definitions & string>(
     definition: Name
@@ -791,14 +799,24 @@ export class StateMachine<
       at: (runId: string) => this.at(definition, runId),
       // `send`, `view` and `watch` are conditional on the definition type —
       // `never`, and so uncallable, on a function definition.
-      send: (
+      send: async (
         runId: string,
         payload: StateMachineJson,
         options?: StateMachineSendOptions
-      ) => this.send(runId, payload, options),
-      view: (runId: string) => this.view(runId),
+      ) =>
+        this.#owns(runId, definition)
+          ? this.send(runId, payload, options)
+          : {
+              accepted: false,
+              key: options?.requestId ?? "",
+              reason: "unknown" as const
+            },
+      view: async (runId: string) =>
+        this.#owns(runId, definition) ? this.view(runId) : null,
       watch: (runId: string, listener: (change: StateMachineChange) => void) =>
-        this.watch(runId, listener)
+        this.#owns(runId, definition)
+          ? this.watch(runId, listener)
+          : noUnsubscribe
     };
     // SAFETY: the three machine verbs are typed against `Definitions[Name]`,
     // a type parameter here, so no concrete value satisfies them inside this
@@ -855,7 +873,10 @@ export class StateMachine<
         kind: AskKind<Payload, Answer>,
         answer: Answer
       ) =>
-        this.#owns(runId, definition) && askId.startsWith(`${runId}#`)
+        // By the ask's `run_id`, not by an `askId` prefix: a caller-chosen
+        // run id may itself contain '#', so run `A` would reach `A#B`'s asks.
+        this.#owns(runId, definition) &&
+        this.#store.getAsk(askId)?.run_id === runId
           ? this.answer(askId, kind, answer)
           : { accepted: false, reason: "unknown" as const },
       withdraw: async (key: string) =>
@@ -863,7 +884,9 @@ export class StateMachine<
       view: async () =>
         this.#owns(runId, definition) ? this.view(runId) : null,
       watch: (listener: (change: StateMachineChange) => void) =>
-        this.watch(runId, listener),
+        this.#owns(runId, definition)
+          ? this.watch(runId, listener)
+          : noUnsubscribe,
       terminate: async (reason?: string) =>
         this.#owns(runId, definition) ? this.terminate(runId, reason) : false
     };
@@ -882,7 +905,7 @@ export class StateMachine<
   ): Promise<boolean> {
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
-    if (!row || row.definition !== definition) return false;
+    if (!this.#scopedTo(row, definition)) return false;
     return this.cancel(runId, reason, options);
   }
 
@@ -930,91 +953,104 @@ export class StateMachine<
         )[0]?.count ?? 0;
       if (repeated > 0) return { accepted: false, key, reason: "duplicate" };
     }
-    const count =
-      this.#store.read<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM cf_agents_task_mailbox WHERE run_id = ?",
-        [runId]
-      )[0]?.count ?? 0;
-    if (count >= this.#mailboxLimit) {
-      throw new StateMachineMailboxFullError(runId, this.#mailboxLimit);
-    }
+    // The payload is serialized before the policy touches anything: an
+    // unserializable payload must not empty a `latest` shape or a
+    // `debounce` key on its way to the error.
+    const payloadJson = serializeTaskValue(
+      payload,
+      `mailbox item "${key}" for run "${runId}"`
+    );
     const sameShape = `run_id = ? AND kind = ? AND ${
       type === null ? "type IS NULL" : "type = ?"
     }`;
     const shapeParams = type === null ? [runId, kind] : [runId, kind, type];
-    let visibleAfter: number | null = null;
-    let seq: number | null = null;
-    switch (policy) {
-      case "drop": {
-        const existing =
+    // One transaction: the policy's delete and the insert land together, so
+    // a refusal anywhere leaves the mailbox exactly as it was.
+    const outcome = this.#store.transactionSync(
+      ():
+        | { accepted: true; visibleAfter: number | null }
+        | { accepted: false; reason: "dropped" | "duplicate" } => {
+        let visibleAfter: number | null = null;
+        let seq: number | null = null;
+        switch (policy) {
+          case "drop": {
+            const existing =
+              this.#store.read<{ count: number }>(
+                `SELECT COUNT(*) AS count FROM cf_agents_task_mailbox WHERE ${sameShape}`,
+                shapeParams
+              )[0]?.count ?? 0;
+            if (existing > 0) return { accepted: false, reason: "dropped" };
+            break;
+          }
+          case "latest":
+            this.#store.write(
+              `DELETE FROM cf_agents_task_mailbox WHERE ${sameShape}`,
+              shapeParams
+            );
+            break;
+          case "debounce": {
+            if (options?.requestId === undefined) {
+              throw new Error(
+                'send({ policy: "debounce" }) needs a requestId: the key is what a later send re-hides'
+              );
+            }
+            visibleAfter = now + Math.max(0, options.debounceMs ?? 0);
+            // The same key keeps its place: an upsert re-hides it without
+            // moving its seq, so a debounced item is delivered in first-send
+            // order.
+            const previous = this.#store.read<{ seq: number }>(
+              "SELECT seq FROM cf_agents_task_mailbox WHERE run_id = ? AND key = ?",
+              [runId, key]
+            )[0];
+            if (previous !== undefined) {
+              seq = previous.seq;
+              this.#store.write(
+                "DELETE FROM cf_agents_task_mailbox WHERE run_id = ? AND key = ?",
+                [runId, key]
+              );
+            }
+            break;
+          }
+          case "append":
+            break;
+        }
+        // The limit bounds what the mailbox holds, so it is checked where
+        // the mailbox actually grows: once the policy has made its room, a
+        // replacement at the limit is not one more item.
+        const count =
           this.#store.read<{ count: number }>(
-            `SELECT COUNT(*) AS count FROM cf_agents_task_mailbox WHERE ${sameShape}`,
-            shapeParams
+            "SELECT COUNT(*) AS count FROM cf_agents_task_mailbox WHERE run_id = ?",
+            [runId]
           )[0]?.count ?? 0;
-        if (existing > 0) return { accepted: false, key, reason: "dropped" };
-        break;
-      }
-      case "latest":
-        this.#store.write(
-          `DELETE FROM cf_agents_task_mailbox WHERE ${sameShape}`,
-          shapeParams
+        if (count >= this.#mailboxLimit) {
+          throw new StateMachineMailboxFullError(runId, this.#mailboxLimit);
+        }
+        seq ??=
+          this.#store.read<{ next: number }>(
+            "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM cf_agents_task_mailbox WHERE run_id = ?",
+            [runId]
+          )[0]?.next ?? 0;
+        const written = this.#store.write(
+          `INSERT INTO cf_agents_task_mailbox
+             (run_id, key, seq, kind, type, payload, visible_after, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (run_id, key) DO NOTHING`,
+          [runId, key, seq, kind, type, payloadJson, visibleAfter, now]
         );
-        break;
-      case "debounce": {
-        if (options?.requestId === undefined) {
-          throw new Error(
-            'send({ policy: "debounce" }) needs a requestId: the key is what a later send re-hides'
-          );
-        }
-        visibleAfter = now + Math.max(0, options.debounceMs ?? 0);
-        // The same key keeps its place: an upsert re-hides it without
-        // moving its seq, so a debounced item is delivered in first-send
-        // order.
-        const previous = this.#store.read<{ seq: number }>(
-          "SELECT seq FROM cf_agents_task_mailbox WHERE run_id = ? AND key = ?",
-          [runId, key]
-        )[0];
-        if (previous !== undefined) {
-          seq = previous.seq;
-          this.#store.write(
-            "DELETE FROM cf_agents_task_mailbox WHERE run_id = ? AND key = ?",
-            [runId, key]
-          );
-        }
-        break;
+        if (written === 0) return { accepted: false, reason: "duplicate" };
+        return { accepted: true, visibleAfter };
       }
-      case "append":
-        break;
-    }
-    seq ??=
-      this.#store.read<{ next: number }>(
-        "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM cf_agents_task_mailbox WHERE run_id = ?",
-        [runId]
-      )[0]?.next ?? 0;
-    const written = this.#store.write(
-      `INSERT INTO cf_agents_task_mailbox
-         (run_id, key, seq, kind, type, payload, visible_after, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (run_id, key) DO NOTHING`,
-      [
-        runId,
-        key,
-        seq,
-        kind,
-        type,
-        serializeTaskValue(payload, `mailbox item "${key}" for run "${runId}"`),
-        visibleAfter,
-        now
-      ]
     );
-    if (written === 0) return { accepted: false, key, reason: "duplicate" };
+    if (!outcome.accepted) {
+      return { accepted: false, key, reason: outcome.reason };
+    }
     this.#emit("task:mailbox", {
       runId,
       definition: row.definition,
       key,
       kind
     });
-    await this.#wakeParked(runId, MAILBOX_PARKS, visibleAfter ?? now);
+    await this.#wakeParked(runId, MAILBOX_PARKS, outcome.visibleAfter ?? now);
     return { accepted: true, key };
   }
 
@@ -1135,9 +1171,23 @@ export class StateMachine<
     return this.#store.queryAsks(options ?? {});
   }
 
-  /** True when `runId` exists and belongs to `definition`. */
+  /**
+   * True when `row` is `definition`'s. Versions of one base are the same
+   * machine, as they are when a run joins an existing row: a run joined
+   * across a version bump stays reachable through the handle that joined
+   * it, whichever version name the row still carries.
+   */
+  #scopedTo(row: TaskRunRow | undefined, definition: string): boolean {
+    if (row === undefined) return false;
+    if (row.definition === definition) return true;
+    const base =
+      row.definition_base ?? parseDefinitionName(row.definition).base;
+    return base === parseDefinitionName(definition).base;
+  }
+
+  /** True when `runId` exists and is `definition`'s. */
   #owns(runId: string, definition: string): boolean {
-    return this.#store.getRun(runId)?.definition === definition;
+    return this.#scopedTo(this.#store.getRun(runId), definition);
   }
 
   #deleteMailbox(runId: string, keys: readonly string[]): number {
@@ -1414,8 +1464,11 @@ export class StateMachine<
    * Delete a run row. The wake sync that follows cancels its mirror job
    * and, on a routed Lifecycle, drops its root index in the same message.
    */
-  async #deleteRun(runId: string): Promise<void> {
-    this.#store.deleteRun(runId);
+  async #deleteRun(
+    runId: string,
+    options: { keepParentNote?: boolean } = {}
+  ): Promise<void> {
+    this.#store.deleteRun(runId, options);
     await this.#syncWake(runId, undefined, { gone: true });
   }
 
@@ -2772,7 +2825,17 @@ export class StateMachine<
         ? this.#store.getRunByKey(options.idempotencyKey)
         : undefined);
     if (existing) {
-      if (existing.definition !== definition) {
+      // Versions of one base are the same machine: a caller holding a fixed
+      // runId keeps joining its run across a version bump. The stored name
+      // stays authoritative — the successor and its `migrate` are resolved
+      // at dispatch, not here.
+      const existingBase =
+        existing.definition_base ??
+        parseDefinitionName(existing.definition).base;
+      if (
+        existing.definition !== definition &&
+        existingBase !== parseDefinitionName(definition).base
+      ) {
         throw new Error(
           `Task run "${existing.run_id}" already belongs to definition ` +
             `"${existing.definition}"; refusing to reuse its ` +
@@ -2804,7 +2867,7 @@ export class StateMachine<
       await this.#syncWake(existing.run_id);
       return {
         runId: existing.run_id,
-        definition,
+        definition: existing.definition,
         accepted: false,
         state: existing.state,
         createdAt: existing.created_at
@@ -3570,6 +3633,12 @@ export class StateMachine<
       cancelling !== null
     );
     const input = deserializeTaskValue(row.input);
+    // Rule B's bound is the machine's own when it declares one: a machine
+    // that transitions many times per park raises it past the capability's.
+    const transitionBudget = Math.max(
+      1,
+      machine.transitionBudget ?? this.#transitionBudget
+    );
     let turn = row.checkpoint_turn;
     let checkpointJson = row.checkpoint;
     let transitions = row.transitions;
@@ -3701,18 +3770,41 @@ export class StateMachine<
 
       const terminal = readTaskTerminal(returned);
       if (terminal !== undefined) {
-        ctx.settleStreams(
-          terminal.kind === "complete" ? "completed" : "errored",
-          terminal.kind === "aborted"
-            ? (terminal.reason ?? "aborted")
-            : "failed"
-        );
+        // The atomic cutover (§9.2), as on the checkpoint path below: the
+        // terminal payload is serialized before a stream is touched, and
+        // the run's terminal write rides the last open stream's settlement
+        // transaction — earlier streams settle ahead of it. A write the
+        // fence refuses — or a payload that will not serialize — leaves
+        // that last stream live rather than durably closing it under a run
+        // that never settled.
+        const cutover: TerminalCutover = (write) => {
+          let settled = false;
+          const commit = () => {
+            settled = write();
+            if (!settled) throw new AttemptSupersededError(runId);
+          };
+          try {
+            if (ctx.openStreams().length === 0) commit();
+            else
+              ctx.settleStreams(
+                terminal.kind === "complete" ? "completed" : "errored",
+                terminal.kind === "aborted"
+                  ? (terminal.reason ?? "aborted")
+                  : "failed",
+                commit
+              );
+          } catch (thrown) {
+            if (!(thrown instanceof AttemptSupersededError)) throw thrown;
+          }
+          return settled;
+        };
         await this.#settleTerminal(
           row,
           generation,
           terminal,
           mark,
-          ctx.takeConsumed()
+          ctx.takeConsumed(),
+          cutover
         );
         return;
       }
@@ -3786,7 +3878,7 @@ export class StateMachine<
       } else if (nextJson !== checkpointJson) {
         // Rule 7: the checkpoint changed.
         transitions += 1;
-        if (transitions > this.#transitionBudget) {
+        if (transitions > transitionBudget) {
           await this.#settleOutcome(
             row,
             generation,
@@ -3919,7 +4011,8 @@ export class StateMachine<
     generation: string,
     terminal: TaskTerminalSignal,
     cancelling: StateMachineAbortMark | null,
-    consume: readonly string[] = []
+    consume: readonly string[],
+    cutover: TerminalCutover
   ): Promise<void> {
     const runId = row.run_id;
     const mark: MarkPredicate = cancelling === null ? "null" : "set";
@@ -3935,15 +4028,17 @@ export class StateMachine<
           `result of Task definition "${row.definition}"`
         );
         const now = Date.now();
-        const settled = this.#store.fencedWrite(
-          runId,
-          generation,
-          `UPDATE cf_agents_task_runs
+        const settled = cutover(() =>
+          this.#store.fencedWrite(
+            runId,
+            generation,
+            `UPDATE cf_agents_task_runs
            SET state = 'completed', result = ?, generation = NULL, next_at = NULL,
                turn_deadline_at = NULL, settled_at = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND state = 'running'
              AND ${markClause(mark)}`,
-          [resultJson, now, now]
+            [resultJson, now, now]
+          )
         );
         if (settled) {
           consumed();
@@ -3964,7 +4059,7 @@ export class StateMachine<
           generation,
           summary,
           null,
-          { mark }
+          { mark, cutover }
         );
         if (failed) {
           consumed();
@@ -3974,7 +4069,13 @@ export class StateMachine<
       }
       case "aborted":
         if (
-          await this.#settleCancelled(runId, generation, terminal.reason, mark)
+          await this.#settleCancelled(
+            runId,
+            generation,
+            terminal.reason,
+            mark,
+            cutover
+          )
         ) {
           consumed();
         }
@@ -4122,6 +4223,9 @@ export class StateMachine<
       mark: cancelling === null ? "null" : "set"
     });
     if (failed) {
+      // The fence accepted, so what the handler read before it threw is
+      // consumed: a retained run must not redeliver it on `reopen()`.
+      if (consume.length > 0) this.#deleteMailbox(runId, consume);
       console.error(
         `Task run "${runId}" (definition "${row.definition}") failed: ${summary.name}: ${summary.message}`
       );
@@ -4276,15 +4380,18 @@ export class StateMachine<
     runId: string,
     generation: string | null,
     reason: string | undefined,
-    mark: MarkPredicate = "any"
+    mark: MarkPredicate = "any",
+    cutover?: TerminalCutover
   ): Promise<boolean> {
     const now = Date.now();
     let settled: boolean;
     if (generation !== null) {
-      settled = this.#store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE cf_agents_task_runs
+      const fence = generation;
+      const write = () =>
+        this.#store.fencedWrite(
+          runId,
+          fence,
+          `UPDATE cf_agents_task_runs
          SET state = 'cancelled', cancel_requested = 1, cancel_reason = ?,
              abort_mark = coalesce(abort_mark, 'cancel'),
              abort_reason = coalesce(abort_reason, ?),
@@ -4292,8 +4399,9 @@ export class StateMachine<
              settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
            AND state = 'running' AND ${markClause(mark)}`,
-        [reason ?? null, reason ?? null, now, now]
-      );
+          [reason ?? null, reason ?? null, now, now]
+        );
+      settled = cutover === undefined ? write() : cutover(write);
     } else {
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
@@ -4336,23 +4444,28 @@ export class StateMachine<
     options: {
       outcome?: "faulted" | "orphaned";
       mark?: MarkPredicate;
+      cutover?: TerminalCutover;
     } = {}
   ): Promise<boolean> {
     const now = Date.now();
     const outcome = options.outcome ?? null;
     let settled: boolean;
     if (generation !== null) {
-      settled = this.#store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE cf_agents_task_runs
+      const fence = generation;
+      const write = () =>
+        this.#store.fencedWrite(
+          runId,
+          fence,
+          `UPDATE cf_agents_task_runs
          SET state = 'failed', error_name = ?, error_message = ?, outcome = ?,
              generation = NULL, next_at = NULL, turn_deadline_at = NULL,
              settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
            AND state = 'running' AND ${markClause(options.mark ?? "any")}`,
-        [error.name, error.message, outcome, now, now]
-      );
+          [error.name, error.message, outcome, now, now]
+        );
+      const { cutover } = options;
+      settled = cutover === undefined ? write() : cutover(write);
     } else {
       const written = this.#store.write(
         `UPDATE cf_agents_task_runs
@@ -4396,7 +4509,9 @@ export class StateMachine<
       row?.retain === 0 &&
       (row.outcome === null || !PRESERVED_OUTCOMES.has(row.outcome))
     ) {
-      await this.#deleteRun(runId);
+      // The note #notifyParent just delivered is this run's outcome, still
+      // unread by a parked join: releasing the run keeps it.
+      await this.#deleteRun(runId, { keepParentNote: true });
       return;
     }
     await this.#syncWake(runId);
@@ -4439,7 +4554,9 @@ export class StateMachine<
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
     if (!row) return null;
-    if (definition !== undefined && row.definition !== definition) return null;
+    if (definition !== undefined && !this.#scopedTo(row, definition)) {
+      return null;
+    }
     return this.#store.rowToSnapshot<Output>(row);
   }
 
@@ -4450,7 +4567,9 @@ export class StateMachine<
     await this.lifecycle.ready();
     const row = this.#store.getRunByKey(idempotencyKey);
     if (!row) return null;
-    if (definition !== undefined && row.definition !== definition) return null;
+    if (definition !== undefined && !this.#scopedTo(row, definition)) {
+      return null;
+    }
     return this.#store.rowToSnapshot<Output>(row);
   }
 

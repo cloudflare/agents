@@ -151,13 +151,19 @@ export class TaskStore {
    * that removes a run — a `retain:false` settle, `tasks.delete()`, the
    * sealing purge, a facet subtree teardown — goes through here, so none of
    * them can leave an orphan row behind.
+   *
+   * `keepParentNote` is the one release that must not take the note with it:
+   * a `retain:false` run has just delivered its outcome to a parent that has
+   * yet to read it, so the note is the run's result rather than a leftover.
+   * Every other path deletes a note nobody is waiting on.
    */
-  deleteRun(runId: string): void {
+  deleteRun(runId: string, options: { keepParentNote?: boolean } = {}): void {
     // The parent, read before the run row goes, so the note this run left in
     // its parent's mailbox can be removed by primary key rather than by a
     // scan. One narrow read on a delete path, against a whole-table scan on
     // every settle of every run.
-    const parent = this.#parentOf(runId);
+    const parent =
+      options.keepParentNote === true ? null : this.#parentOf(runId);
     this.sql`DELETE FROM cf_agents_task_journal WHERE run_id = ${runId}`;
     this.sql`DELETE FROM cf_agents_task_mailbox WHERE run_id = ${runId}`;
     // By `run_id`, not by the `ask_id` prefix: a run id is caller-chosen and

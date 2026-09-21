@@ -6,6 +6,7 @@ import {
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  Approval,
   backdateTaskWake,
   interruptTaskRun,
   seedTaskAsk,
@@ -17,7 +18,12 @@ import {
 } from "../capabilities/tasks";
 import { childMailboxKey } from "../../state-machine/machine";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
-import type { Tasks, TaskRunSnapshot, TaskValue } from "../../tasks";
+import type {
+  Tasks,
+  TaskChange,
+  TaskRunSnapshot,
+  TaskValue
+} from "../../tasks";
 
 /**
  * Capability-level Tasks tests: the capability installed on a minimal real
@@ -1322,8 +1328,8 @@ describe("Tasks capability", () => {
           "pipeline:first",
           "pipeline:second"
         ]);
-        // Zero orphans in all five tables, and only this run's note was
-        // taken from the parent's mailbox.
+        // Zero orphans in all five tables, and the parent's mailbox intact:
+        // the note is this run's outcome, which a join has yet to read.
         expect(countOwnedRows(state.storage, receipt.runId)).toEqual({
           runs: 0,
           journal: 0,
@@ -1338,7 +1344,10 @@ describe("Tasks capability", () => {
               "retain-parent"
             )
             .toArray()
-        ).toEqual([{ key: "steer:own" }]);
+        ).toEqual([
+          { key: childMailboxKey(receipt.runId) },
+          { key: "steer:own" }
+        ]);
       }
     );
   });
@@ -1375,7 +1384,10 @@ describe("Tasks capability", () => {
               "cancel-parent"
             )
             .toArray()
-        ).toEqual([{ key: "steer:own" }]);
+        ).toEqual([
+          { key: childMailboxKey(receipt.runId) },
+          { key: "steer:own" }
+        ]);
       }
     );
   });
@@ -2470,6 +2482,63 @@ describe("Tasks#at", () => {
           }
         ).at("nope", "run_1")
       ).toThrow(/nope/);
+    });
+  });
+
+  it("answers only its own run's asks when another run id extends it", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.tasks.run("approver", {}, { runId: "A" });
+      await instance.tasks.run("approver", {}, { runId: "A#B" });
+      await waitForState(instance.tasks, "A", ["waiting"]);
+      await waitForState(instance.tasks, "A#B", ["waiting"]);
+      const [ask] = await instance.tasks.asks({ runId: "A#B" });
+      if (!ask) throw new Error("unreachable");
+
+      // "A#B" is a run of its own, not a part of "A": a caller-chosen run id
+      // may contain '#' itself, so the ask's own run id decides.
+      expect(
+        await instance.tasks
+          .at("approver", "A")
+          .answer(ask.askId, Approval, "no")
+      ).toEqual({ accepted: false, reason: "unknown" });
+      expect(
+        await instance.tasks
+          .at("approver", "A#B")
+          .answer(ask.askId, Approval, "yes")
+      ).toEqual({ accepted: true });
+    });
+  });
+});
+
+describe("Tasks#handle", () => {
+  it("scopes view and watch to its own definition's runs", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run(
+        "inbox",
+        {},
+        { start: "queued" }
+      );
+      const changes: TaskChange[] = [];
+      const wrong = instance.tasks.handle("counter");
+      expect(await wrong.view(receipt.runId)).toBeNull();
+      expect(
+        await wrong.send(receipt.runId, { step: 1 }, { requestId: "r" })
+      ).toEqual({ accepted: false, key: "r", reason: "unknown" });
+      const stop = wrong.watch(receipt.runId, (change) => changes.push(change));
+      const stopAt = instance.tasks
+        .at("approver", receipt.runId)
+        .watch((change) => changes.push(change));
+
+      await instance.tasks.send(receipt.runId, "hello");
+      expect(changes).toEqual([]);
+      // The unsubscribe a refused watch returns is callable like a real one.
+      expect(() => stop()).not.toThrow();
+      expect(() => stopAt()).not.toThrow();
+      expect(
+        (await instance.tasks.handle("inbox").view(receipt.runId))?.mailbox
+      ).toEqual([expect.objectContaining({ payload: "hello" })]);
     });
   });
 });

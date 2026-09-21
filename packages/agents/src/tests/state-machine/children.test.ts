@@ -169,6 +169,20 @@ describe("children", () => {
     });
   });
 
+  it("joins a released child: its note outlives the run row", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("releaser");
+      const done = await waitForState(instance.tasks, receipt.runId, [
+        "completed"
+      ]);
+      if (done.state !== "completed") throw new Error("unreachable");
+      expect(done.result).toBe("3");
+      // `retain: false` released the child once its note was delivered.
+      expect(await instance.tasks.get(`${receipt.runId}:released`)).toBeNull();
+    });
+  });
+
   it("terminate takes the children with it", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
@@ -219,6 +233,43 @@ describe("engine-owned streams", () => {
         ]);
       }
     );
+  });
+
+  it("settles the run when the machine closed its own stream first", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("closingStreamer");
+      const done = await waitForState(instance.tasks, receipt.runId, [
+        "completed"
+      ]);
+      if (done.state !== "completed") throw new Error("unreachable");
+      // A stream the machine settled itself carries no commit, so the
+      // terminal write runs on its own rather than riding a settle that
+      // transitions nothing.
+      expect(done.result).toBe(`${receipt.runId}:out#0`);
+      expect(
+        (await instance.streams.status(`${receipt.runId}:out#0`))?.state
+      ).toBe("completed");
+    });
+  });
+
+  it("leaves the stream live when the terminal result cannot serialize", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const runId = crypto.randomUUID();
+      await expect(
+        instance.tasks.run("cyclicStreamer", undefined, {
+          runId,
+          start: "attached"
+        })
+      ).rejects.toThrow(/Cannot serialize result of Task definition/);
+      // The stream and the run agree: nothing settled, so the stream is
+      // still live for the attempt that reclaims the run.
+      expect((await instance.streams.status(`${runId}:out#0`))?.state).toBe(
+        "streaming"
+      );
+      expect((await instance.tasks.get(runId))?.state).not.toBe("completed");
+    });
   });
 
   it("seals a lost attempt's live stream and rotates the epoch on reclaim", async () => {

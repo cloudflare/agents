@@ -511,7 +511,7 @@ export class ReplayStep implements StateMachineContext<
   /** Engine-owned streams this invocation opened, by name. */
   readonly #streams = new Map<
     string,
-    { writer: StreamWriter; openedCursor: number }
+    { writer: StreamWriter; openedCursor: number; settled: boolean }
   >();
 
   constructor(
@@ -898,6 +898,9 @@ export class ReplayStep implements StateMachineContext<
     if (open !== undefined) return open.writer;
     const inner = await this.#engine.openStream(name, options);
     const engine = this.#engine;
+    // A machine that settles its own writer marks the entry settled: a
+    // settled stream transitions nothing, so the cutover must not hand it
+    // the commit that carries the run's own write (§9.2).
     const writer: StreamWriter = {
       streamId: inner.streamId,
       get cursor() {
@@ -907,17 +910,26 @@ export class ReplayStep implements StateMachineContext<
         engine.refreshClaim();
         return inner.append(chunk);
       },
-      close: (settle) => inner.close(settle),
-      error: (reason, settle) => inner.error(reason, settle),
+      close: (settle) => {
+        entry.settled = true;
+        return inner.close(settle);
+      },
+      error: (reason, settle) => {
+        entry.settled = true;
+        return inner.error(reason, settle);
+      },
       onCommit: (fn) => inner.onCommit(fn)
     };
-    this.#streams.set(name, { writer, openedCursor: inner.cursor });
+    const entry = { writer, openedCursor: inner.cursor, settled: false };
+    this.#streams.set(name, entry);
     return writer;
   }
 
   /** @internal The engine-owned writers still open in this invocation. */
   openStreams(): StreamWriter[] {
-    return [...this.#streams.values()].map((entry) => entry.writer);
+    return [...this.#streams.values()]
+      .filter((entry) => !entry.settled)
+      .map((entry) => entry.writer);
   }
 
   /** @internal Cursor advance since open (or since last taken), as progress. */
@@ -939,7 +951,9 @@ export class ReplayStep implements StateMachineContext<
     reason: string | undefined,
     commit?: () => void
   ): void {
-    const entries = [...this.#streams.values()];
+    const entries = [...this.#streams.values()].filter(
+      (entry) => !entry.settled
+    );
     this.#streams.clear();
     entries.forEach((entry, index) => {
       const last = index === entries.length - 1;

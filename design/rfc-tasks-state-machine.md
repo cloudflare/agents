@@ -569,7 +569,10 @@ The compiler lives beside `Tasks` (`tasks/compile.ts`); the engine recognises on
     bounds transitions since the last park. Exceeding it fails the run
     with `TaskTransitionBudgetError` and `outcome: 'faulted'`, naming the
     last phases. A park resets it. Rule A cannot catch a loop whose
-    checkpoint differs every time; Rule B is that bound.
+    checkpoint differs every time; Rule B is that bound. A definition may
+    declare its own `transitionBudget`, which overrides the capability's
+    for its runs — a machine that legitimately transitions many times per
+    park raises it.
 11. **Abort mark** — a durable `abort_mark` ∈
     `cancel | deadline | turn-deadline | parent | seal`. It is inside the
     fence predicate of every checkpoint-advancing write, so a live
@@ -1992,6 +1995,10 @@ ask rows (filtered on `run_id`, per §4.4), the route row, the settlement
 note this run wrote into its parent's mailbox — a primary-key point
 delete on `(parentRunId, 'child:' + runId)`, which is why `deleteRun`
 reads the parent before it drops the run row — and the run row itself.
+The note is the one exception: the `retain:false` auto-release has just
+delivered it to a parent that has yet to read it, so it passes
+`keepParentNote` and the note stands; `tasks.delete()` and a facet
+subtree teardown still point-delete a note nobody is waiting on.
 `TaskStore.deleteRun` grows from two statements to six. A test asserts
 zero orphan rows in all five tables after each of the four paths.
 
@@ -2604,8 +2611,9 @@ Permanent idempotency _inside_ a transition is
 - `withdraw(runId, key)` deletes a still-queued item; `false` when it was
   already consumed. It is what expresses Think's "withdraw a queued
   steer".
-- `mailboxLimit` (default 1000) is checked before the write; exceeding it
-  throws `TaskMailboxFullError` rather than growing without bound.
+- `mailboxLimit` (default 1000) is checked where the mailbox grows — after
+  the policy's replacement, before the insert; exceeding it throws
+  `TaskMailboxFullError` rather than growing without bound.
 - **Terminality, in writing:** a `send` to a terminal run writes nothing
   and returns `{accepted:false, reason:"terminal"}`. **A mailbox write
   never resurrects a run.**

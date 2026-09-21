@@ -600,8 +600,12 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
         expect(mailbox).toEqual([]);
         expect(asks).toEqual([]);
         expect(wakes).toEqual([]);
-        // The child's note went with it; the parent's own item did not.
-        expect(parentMailbox).toEqual([{ key: "steer:own" }]);
+        // The sealed run's own rows went; the note it left its parent is
+        // its outcome, and stays for the join that reads it.
+        expect(parentMailbox).toEqual([
+          { key: childMailboxKey(runId) },
+          { key: "steer:own" }
+        ]);
         // A sealed strike is a terminal failure the host never saw a
         // handler for: it reaches onError with the run it belongs to.
         expect(instance.runErrorRuns).toEqual([

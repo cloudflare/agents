@@ -138,6 +138,19 @@ describe("the turn loop", () => {
     });
   }, 30_000);
 
+  it("bounds transitions by the machine's own budget when it declares one", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const tight = await instance.tasks.run("tightBudget");
+      const faulted = await waitForState(instance.tasks, tight.runId, [
+        "failed"
+      ]);
+      if (faulted.state !== "failed") throw new Error("unreachable");
+      expect(faulted.error.name).toBe("StateMachineTransitionBudgetError");
+      expect(faulted.outcome).toBe("faulted");
+    });
+  });
+
   it("parks a machine on a sleep at the same turn, then resumes and retires the turn's journal", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     let runId = "";
@@ -389,6 +402,35 @@ describe("versioning", () => {
       }
     );
   });
+  it("joins a fixed runId across versions of one base and refuses another base", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const runId = `run_${crypto.randomUUID()}`;
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await dynamicTasks(instance).run("versioned@v1", undefined, { runId });
+      await waitForState(instance.tasks, runId, ["waiting"]);
+      instance.dynamic["versioned@v2"] = versionedV2;
+
+      const rejoined = await dynamicTasks(instance).run(
+        "versioned@v2",
+        undefined,
+        { runId }
+      );
+      expect(rejoined.accepted).toBe(false);
+      expect(rejoined.runId).toBe(runId);
+      expect(rejoined.definition).toBe("versioned@v1");
+      // The handle that joined the run can read it: scoping matches on the
+      // base, as the join does, so the row's older name stays reachable.
+      expect(
+        (await dynamicTasks(instance).handle("versioned@v2").get(runId))
+          ?.definition
+      ).toBe("versioned@v1");
+
+      await expect(
+        instance.tasks.run("napper", { ms: 60_000 }, { runId })
+      ).rejects.toThrow(/already belongs to definition "versioned@v1"/);
+    });
+  });
+
   it("orphans a run whose newer version declares no migrate, and reopen brings it back", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     let runId = "";
