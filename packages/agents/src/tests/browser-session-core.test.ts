@@ -6,6 +6,7 @@ import {
   namedBrowserSessionKey,
   openOneShotBrowserSession
 } from "../browser/session-core";
+import type { OneShotBrowserSessionOptions } from "../browser/session-core";
 import { DEFAULT_SWEEP_IDLE_MS } from "../browser/session-manager";
 import type {
   BrowserSessionLock,
@@ -632,13 +633,27 @@ describe("openOneShotBrowserSession", () => {
     expect(deletes(requests, "session-1")).toHaveLength(1);
   });
 
-  it("rejects guardrails on kitesurf (platform unsupported)", async () => {
-    const { browser } = createFakeBrowser();
-    await expect(
-      openOneShotBrowserSession(browser, {
-        browser: "kitesurf",
-        guardrails: { allowedDomains: ["example.com"] }
-      })
-    ).rejects.toThrow(/[Kk]itesurf/);
+  it("rejects Chromium-only options smuggled onto kitesurf", async () => {
+    const { browser, requests } = createFakeBrowser();
+
+    // The options union forbids these at the type level — the casts simulate
+    // plain-JS callers smuggling Chromium-only options past the compiler.
+    for (const smuggled of [
+      { guardrails: { allowedDomains: ["example.com"] } },
+      { keepAliveMs: 30_000 },
+      { recording: true }
+    ]) {
+      await expect(
+        openOneShotBrowserSession(browser, {
+          browser: "kitesurf",
+          ...smuggled
+        } as OneShotBrowserSessionOptions)
+      ).rejects.toThrow(
+        "Kitesurf does not support guardrails, keepAliveMs, or recording"
+      );
+    }
+
+    // Rejected before any platform work — nothing was created.
+    expect(creates(requests)).toHaveLength(0);
   });
 });

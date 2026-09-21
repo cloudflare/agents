@@ -107,11 +107,30 @@ export interface BrowserSessionSweepResult {
   swept: Array<{ name: string; sessionId: string }>;
 }
 
-export interface OneShotBrowserSessionOptions extends BrowserSessionCreateOptions {
+/** One-shot session options for the default Chromium engine. */
+export interface OneShotChromiumSessionOptions extends BrowserSessionCreateOptions {
+  /** Select the browser engine. Defaults to Chromium. */
+  browser?: "chromium";
   timeoutMs?: number;
-  /** Select the browser engine. Kitesurf does not support guardrails. */
-  browser?: "kitesurf";
 }
+
+/**
+ * One-shot session options for Kitesurf. The Chromium-only options —
+ * `guardrails`, `keepAliveMs`, `recording` — do not exist on this arm:
+ * Kitesurf does not support them.
+ */
+export interface OneShotKitesurfSessionOptions {
+  browser: "kitesurf";
+  timeoutMs?: number;
+}
+
+/**
+ * Engine-discriminated {@link openOneShotBrowserSession} options: selecting
+ * `browser: "kitesurf"` removes the Chromium-only options at the type level.
+ */
+export type OneShotBrowserSessionOptions =
+  | OneShotChromiumSessionOptions
+  | OneShotKitesurfSessionOptions;
 
 function isMissingBrowserSession(error: unknown): boolean {
   // Browser Run uses 404 for unknown ids and 410 after keep_alive expiry.
@@ -453,16 +472,24 @@ export async function openOneShotBrowserSession(
   options: OneShotBrowserSessionOptions = {}
 ): Promise<CdpSession> {
   if (options.browser === "kitesurf") {
-    if (options.guardrails) {
-      throw new Error("Kitesurf does not support guardrails");
+    // The options union already rejects these at the type level for literal
+    // call sites; plain-JS callers and spreads can still smuggle them in, so
+    // fail loudly in one place with one message.
+    const smuggled = options as {
+      guardrails?: unknown;
+      keepAliveMs?: unknown;
+      recording?: unknown;
+    };
+    if (smuggled.guardrails || smuggled.keepAliveMs || smuggled.recording) {
+      throw new Error(
+        "Kitesurf does not support guardrails, keepAliveMs, or recording"
+      );
     }
     // Kitesurf browsers are scoped to their WebSocket — connectBrowser is
-    // already one-shot there (and rejects the other Chromium-only options).
+    // already one-shot there.
     return connectBrowser(browser, {
       browser: "kitesurf",
-      timeoutMs: options.timeoutMs,
-      keepAliveMs: options.keepAliveMs,
-      recording: options.recording
+      timeoutMs: options.timeoutMs
     });
   }
 

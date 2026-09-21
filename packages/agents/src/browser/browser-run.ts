@@ -43,7 +43,10 @@ export interface BrowserSessionInfo {
   webSocketDebuggerUrl?: string;
 }
 
-export interface ConnectBrowserOptions {
+/** {@link connectBrowser} options for the default Chromium engine. */
+export interface ConnectChromiumBrowserOptions {
+  /** Select the browser engine. Defaults to Chromium. */
+  browser?: "chromium";
   timeoutMs?: number;
   keepAliveMs?: number;
   includeTargets?: boolean;
@@ -54,12 +57,26 @@ export interface ConnectBrowserOptions {
    * {@link getBrowserRecording}.
    */
   recording?: boolean;
-  /**
-   * Select the browser engine. Defaults to Chromium. Use `"kitesurf"` for
-   * Cloudflare's connection-scoped, agent-first browser engine.
-   */
-  browser?: "kitesurf";
 }
+
+/**
+ * {@link connectBrowser} options for Kitesurf, Cloudflare's connection-scoped,
+ * agent-first browser engine. A Kitesurf browser lives and dies with its
+ * WebSocket, so the Chromium-only options (`keepAliveMs`, `includeTargets`,
+ * `recording`) do not exist on this arm.
+ */
+export interface ConnectKitesurfBrowserOptions {
+  browser: "kitesurf";
+  timeoutMs?: number;
+}
+
+/**
+ * Engine-discriminated {@link connectBrowser} options: selecting
+ * `browser: "kitesurf"` removes the Chromium-only options at the type level.
+ */
+export type ConnectBrowserOptions =
+  | ConnectChromiumBrowserOptions
+  | ConnectKitesurfBrowserOptions;
 
 /** An rrweb session recording for a closed Browser Run session. */
 export interface BrowserRecording {
@@ -217,29 +234,36 @@ export async function connectBrowser(
   browser: BrowserBinding,
   options?: number | ConnectBrowserOptions
 ): Promise<CdpSession> {
-  const normalizedOptions =
+  const normalizedOptions: ConnectBrowserOptions =
     typeof options === "number" ? { timeoutMs: options } : (options ?? {});
-  const isKitesurf = normalizedOptions.browser === "kitesurf";
-  if (
-    isKitesurf &&
-    (normalizedOptions.keepAliveMs ||
-      normalizedOptions.includeTargets ||
-      normalizedOptions.recording)
-  ) {
-    throw new Error(
-      "Kitesurf does not support keepAliveMs, includeTargets, or recording"
-    );
+  if (normalizedOptions.browser === "kitesurf") {
+    // The options union already rejects these at the type level for literal
+    // call sites; plain-JS callers and spreads can still smuggle them in.
+    // Explicitly disabled values are tolerated but never sent — `keep_alive=0`
+    // is not a valid Kitesurf query parameter.
+    const smuggled = normalizedOptions as {
+      keepAliveMs?: number;
+      includeTargets?: boolean;
+      recording?: boolean;
+    };
+    if (smuggled.keepAliveMs || smuggled.includeTargets || smuggled.recording) {
+      throw new Error(
+        "Kitesurf does not support keepAliveMs, includeTargets, or recording"
+      );
+    }
   }
 
   const response = await browser.fetch(
-    browserSessionEndpoint(undefined, {
-      // Explicitly disabled Chromium-only options are accepted but never sent:
-      // `keep_alive=0` is not a valid Kitesurf query parameter.
-      keepAliveMs: isKitesurf ? undefined : normalizedOptions.keepAliveMs,
-      includeTargets: normalizedOptions.includeTargets,
-      recording: normalizedOptions.recording,
-      browser: normalizedOptions.browser
-    }),
+    browserSessionEndpoint(
+      undefined,
+      normalizedOptions.browser === "kitesurf"
+        ? { browser: "kitesurf" }
+        : {
+            keepAliveMs: normalizedOptions.keepAliveMs,
+            includeTargets: normalizedOptions.includeTargets,
+            recording: normalizedOptions.recording
+          }
+    ),
     { headers: { Upgrade: "websocket" } }
   );
 

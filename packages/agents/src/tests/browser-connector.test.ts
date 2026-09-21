@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createBrowserRuntime } from "../browser/ai";
 import { BrowserConnector } from "../browser/connector";
 import { connectBrowser, getBrowserRecording } from "../browser/browser-run";
+import type { ConnectBrowserOptions } from "../browser/browser-run";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
@@ -362,7 +363,12 @@ describe("Kitesurf Browser Run connections", () => {
     const { browser, requests } = createFakeBrowser();
 
     await expect(
-      connectBrowser(browser, { browser: "kitesurf", ...option })
+      // The options union forbids this at the type level — the cast simulates
+      // a plain-JS caller smuggling a Chromium-only option past the compiler.
+      connectBrowser(browser, {
+        browser: "kitesurf",
+        ...option
+      } as ConnectBrowserOptions)
     ).rejects.toThrow("does not support");
     expect(requests).toHaveLength(0);
   });
@@ -370,12 +376,14 @@ describe("Kitesurf Browser Run connections", () => {
   it("allows explicitly disabled Chromium-only options", async () => {
     const { browser, requests } = createFakeBrowser();
 
+    // Type-invalid but runtime-tolerated: explicitly disabled values from
+    // plain-JS callers are accepted and never sent on the wire.
     const session = await connectBrowser(browser, {
       browser: "kitesurf",
       keepAliveMs: 0,
       includeTargets: false,
       recording: false
-    });
+    } as ConnectBrowserOptions);
     session.disconnect();
 
     expect(requests[0]?.url).toBe(
