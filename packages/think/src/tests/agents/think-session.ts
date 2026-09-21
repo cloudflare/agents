@@ -53,7 +53,7 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator
 } from "agents/chat";
-import type { ClientToolSchema } from "agents/chat";
+import type { ClientToolSchema, ResumableStream, TurnQueue } from "agents/chat";
 import type { Schedule } from "agents";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
@@ -5024,6 +5024,10 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   private _responseLog: ChatResponseResult[] = [];
   private _submissionLog: ThinkSubmissionInspection[] = [];
+  private _submissionSettlementRows = new Map<
+    string,
+    Record<string, string | number | null>
+  >();
   private _workflowEventLog: Array<{
     workflowName: string;
     workflowId: string;
@@ -5131,6 +5135,44 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
+    // Capture the real cutover, BEFORE the submission finalizer writes its
+    // ledger outcome. Tests restore exactly this durable crash-window row.
+    const row = this.sql<Record<string, string | number | null>>`
+      SELECT * FROM cf_think_submissions
+      WHERE request_id = ${result.requestId} AND status = 'running'
+    `[0];
+    if (row) this._submissionSettlementRows.set(result.requestId, row);
+  }
+
+  /** Abort the request (not cancelSubmission), after it starts streaming. */
+  async abortSubmissionRequestForTest(requestId: string): Promise<void> {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (this._resumableStream.latestActiveStreamInfoForRequest(requestId)) {
+        this.abortRequest(requestId);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("Submission request never started streaming");
+  }
+
+  /** Replay startup against the row captured before normal ledger settlement. */
+  async recoverSubmissionSettlementForTest(requestId: string): Promise<void> {
+    await this.drainSubmissionsForTest();
+    await this.drainWorkflowNotificationsForTest();
+    const row = this._submissionSettlementRows.get(requestId);
+    if (!row) throw new Error("Submission settlement snapshot missing");
+    const columns = Object.keys(row);
+    // Column names and values come only from SELECT * on our own SQLite table.
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_think_submissions (${columns.join(", ")})
+       VALUES (${columns.map(() => "?").join(", ")})`,
+      ...Object.values(row)
+    );
+    this._workflowEventLog = [];
+    this._submissionLog = [];
+    await this.recoverSubmissionsForTest();
+    await this.drainWorkflowNotificationsForTest();
   }
 
   override async sendWorkflowEvent(
@@ -5891,6 +5933,43 @@ export class ThinkProgrammaticTestAgent extends Think {
     )._recoverSubmissionsOnStart();
   }
 
+  /** Emulate an upgrade from the table definition without cutover columns. */
+  async useLegacySubmissionSchemaForTest(): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "ALTER TABLE cf_think_submissions DROP COLUMN result_status"
+    );
+    this.ctx.storage.sql.exec(
+      "ALTER TABLE cf_think_submissions DROP COLUMN output_json"
+    );
+    // SAFETY: startup's once-per-isolate DDL guard is reset to model a new isolate.
+    (
+      this as unknown as { _submissionTableEnsured: boolean }
+    )._submissionTableEnsured = false;
+  }
+
+  /** Seed legacy terminal evidence or an overflow attempt awaiting its retry. */
+  async seedSubmissionStreamForTest(
+    requestId: string,
+    status: "completed" | "error" | "retry"
+  ): Promise<void> {
+    const streamId = this._startResumableStream(requestId);
+    if (status === "error") this._errorResumableStream(streamId, requestId);
+    else this._completeResumableStream(streamId);
+    if (status === "retry") {
+      this
+        .sql`UPDATE cf_think_submissions SET result_status = 'retry' WHERE request_id = ${requestId}`;
+    }
+  }
+
+  /** Model an accepted retry that crashes before opening its successor stream. */
+  async moveSubmissionRequestForTest(
+    submissionId: string,
+    requestId: string
+  ): Promise<void> {
+    this
+      .sql`UPDATE cf_think_submissions SET request_id = ${requestId} WHERE submission_id = ${submissionId}`;
+  }
+
   async resetTurnStateForTest(): Promise<void> {
     this.resetTurnState();
   }
@@ -5949,6 +6028,47 @@ export class ThinkProgrammaticTestAgent extends Think {
       { recoveredRequestId: requestId },
       { idempotent: true }
     );
+  }
+
+  /** Seed one pending recovered retry through the selected production transport. */
+  async scheduleRecoveredRetryForTest(
+    requestId: string,
+    transport: "tasks" | "legacy-schedule"
+  ): Promise<void> {
+    const data = { recoveredRequestId: requestId };
+    if (transport === "legacy-schedule") {
+      await this.schedule(60, "_chatRecoveryRetry", data, {
+        idempotent: true
+      });
+      return;
+    }
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
+  }
+
+  /** Mark matching Task attempts terminal without removing their metadata. */
+  async markScheduledRecoveryTaskTerminalForTest(
+    requestId: string
+  ): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_task_runs
+      SET state = 'completed', next_at = NULL
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND json_extract(metadata, '$.recoveredRequestId') = ${requestId}
+    `;
+  }
+
+  /** Deliver the pending retry through the production recovery callback. */
+  async runScheduledRecoveryRetryForTest(): Promise<void> {
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
   async insertSubmissionForTest(options: {
@@ -6249,6 +6369,46 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  /** Inspect a submission's stream evidence through the real resume handshake. */
+  async inspectSubmissionStreamEvidenceForTest(requestId: string): Promise<{
+    streamStatus: string | null;
+    resultStatus: string | null;
+    hasActiveStream: boolean;
+    hasActiveRequestStream: boolean;
+    resumeFrames: Array<{ type: string; reason?: string }>;
+  }> {
+    const resumeFrames: Array<{ type: string; reason?: string }> = [];
+    const connection = {
+      id: "submission-evidence-probe",
+      readyState: WebSocket.OPEN,
+      send(message: string) {
+        resumeFrames.push(JSON.parse(message));
+      }
+    };
+    // SAFETY: the real resume driver only needs this open connection's id and
+    // send method on its idle path; the private host method has this signature.
+    const host = this as unknown as {
+      _handleStreamResumeRequest(target: typeof connection): Promise<void>;
+    };
+    await host._handleStreamResumeRequest(connection);
+    return {
+      streamStatus:
+        this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
+        null,
+      resultStatus:
+        this.sql<{ result_status: string | null }>`
+          SELECT result_status FROM cf_think_submissions
+          WHERE request_id = ${requestId}
+          LIMIT 1
+        `[0]?.result_status ?? null,
+      hasActiveStream: this._resumableStream.hasActiveStream(),
+      hasActiveRequestStream:
+        this._resumableStream.latestActiveStreamInfoForRequest(requestId) !==
+        null,
+      resumeFrames
+    };
   }
 
   async getResponseLog(): Promise<ChatResponseResult[]> {
@@ -8057,8 +8217,418 @@ export class ThinkRecoveryTestAgent extends Think {
     return super.waitUntilStable(options);
   }
 
-  /** Seed a `running` durable submission keyed by `requestId` (== submission id). */
-  async seedRunningSubmissionForTest(requestId: string): Promise<void> {
+  /**
+   * Gate real recovery work at each ownership boundary and run startup ledger
+   * reconciliation there. Only the seed is synthetic; Tasks and turns are real.
+   */
+  async reproduceSubmissionRecoveryHandoffGapForTest(
+    recoveryKind: "retry" | "continue",
+    pauseAt:
+      | "before-acceptance"
+      | "after-acceptance"
+      | "before-completion"
+      | "after-terminal-foreign-stream"
+      | "after-foreign-turn" = "before-acceptance",
+    streamOutcome: "completed" | "error" = "completed"
+  ): Promise<{
+    duringHandoff: string | null;
+    afterCompletion: string | null;
+    requestRebound: boolean;
+    handoffSignals: number;
+    activeChatTasks: number;
+    activeRecoveryTasks: number;
+    terminalStatuses: string[];
+    responseCount: number;
+    error: string | null;
+    foreignTurn?: {
+      submissionId: string;
+      requestId: string;
+      status: string;
+      requestIdAfterForeignTurn: string | null;
+      recoverySettledAfterForeignTurn: boolean;
+      successorQueuedBehindBlocker: boolean;
+      requestIdAtSuccessorAcceptance: string | null;
+      completedRequestId: string | null;
+      responseRequestIds: string[];
+      terminalRequestIds: Array<string | null>;
+    };
+  }> {
+    const submissionId = `handoff-${recoveryKind}-${crypto.randomUUID()}`;
+    const userMessage: UIMessage = {
+      id: `user-${submissionId}`,
+      role: "user",
+      parts: [{ type: "text", text: "Recover this submission" }]
+    };
+    await this.session.appendMessage(userMessage);
+    let targetAssistantId: string | undefined;
+    if (recoveryKind === "continue") {
+      targetAssistantId = `assistant-${submissionId}`;
+      await this.session.appendMessage({
+        id: targetAssistantId,
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      });
+    }
+
+    // SAFETY: this inert fixture reaches Think's private startup/bookkeeping
+    // seams without exposing production test hooks. These are their signatures.
+    const internals = this as unknown as {
+      _turnQueue: TurnQueue;
+      _ensureSubmissionTable(): void;
+      _updateChatRecoveryIncident(
+        incidentId: string | undefined,
+        status: string,
+        reason?: string
+      ): Promise<void>;
+    };
+    internals._ensureSubmissionTable();
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      ) VALUES (
+        ${submissionId}, NULL, ${submissionId}, NULL, 'running',
+        ${JSON.stringify([userMessage])}, NULL, NULL, ${now},
+        ${now}, ${now}, NULL
+      )
+    `;
+
+    const callback =
+      recoveryKind === "retry"
+        ? ("_chatRecoveryRetry" as const)
+        : ("_chatRecoveryContinue" as const);
+    const data = {
+      incidentId: `incident-${submissionId}`,
+      originalRequestId: submissionId,
+      recoveredRequestId: submissionId,
+      ...(recoveryKind === "retry"
+        ? { targetUserId: userMessage.id }
+        : { targetAssistantId })
+    };
+    if (recoveryKind === "retry") {
+      await this.preScheduleRecoveryRetryForTest(data);
+    } else {
+      await this.preScheduleRecoveryContinueForTest(data);
+    }
+
+    const createGate = () => {
+      let resolve = () => {};
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    };
+    const paused = createGate();
+    const release = createGate();
+    const terminal = createGate();
+    const detachedFinished = createGate();
+    const successorQueued = createGate();
+    const releaseQueueBlocker = createGate();
+    const queue = internals._turnQueue;
+    const enqueue = queue.enqueue.bind(queue);
+    const pause = async () => {
+      paused.resolve();
+      await release.promise;
+    };
+    const session = this.session;
+    const getLatestLeaf = session.getLatestLeaf.bind(session);
+    const beforeStep = this.beforeStep.bind(this);
+    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
+    const onSubmissionStatus = this.onSubmissionStatus.bind(this);
+    const onChatResponse = this.onChatResponse.bind(this);
+    const getModel = this.getModel.bind(this);
+    const retryDetached = this._chatRecoveryRetryDetached.bind(this);
+    const continueDetached = this._chatRecoveryContinueDetached.bind(this);
+    let handoffSignals = 0;
+    let responseCount = 0;
+    const terminalStatuses: string[] = [];
+    const responseRequestIds: string[] = [];
+    const terminalRequestIds: Array<string | null> = [];
+    let requestIdAtSuccessorAcceptance: string | null = null;
+    const readSubmissionRequestId = () =>
+      this.sql<{ request_id: string }>`
+        SELECT request_id FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0]?.request_id ?? null;
+    const beforeAcceptance =
+      pauseAt === "before-acceptance" || pauseAt === "after-foreign-turn";
+    let latestLeafReads = 0;
+    session.getLatestLeaf = async () => {
+      const leaf = await getLatestLeaf();
+      latestLeafReads++;
+      if (beforeAcceptance && latestLeafReads === 2) {
+        await pause();
+      }
+      return leaf;
+    };
+    this.beforeStep = async (ctx) => {
+      if (pauseAt === "after-acceptance") await pause();
+      if (pauseAt === "after-foreign-turn" && responseCount === 1) {
+        requestIdAtSuccessorAcceptance = readSubmissionRequestId();
+      }
+      return beforeStep(ctx);
+    };
+    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+      // The successor Task has been removed, but ledger completion has not
+      // started. This is the exact terminal-stream / ledger handoff window.
+      if (
+        (pauseAt === "before-completion" ||
+          pauseAt === "after-terminal-foreign-stream") &&
+        id === data.incidentId &&
+        (status === "completed" || status === "failed")
+      ) {
+        await pause();
+      }
+      return updateIncident(id, status, reason);
+    };
+    this.onSubmissionStatus = async (submission) => {
+      await onSubmissionStatus(submission);
+      if (
+        submission.submissionId === submissionId &&
+        submission.status !== "running"
+      ) {
+        terminalStatuses.push(submission.status);
+        terminalRequestIds.push(submission.requestId ?? null);
+        terminal.resolve();
+      }
+    };
+    this.onChatResponse = async (result) => {
+      responseCount++;
+      responseRequestIds.push(result.requestId);
+      await onChatResponse(result);
+    };
+    if (streamOutcome === "error") {
+      this.getModel = () => createInBandErrorMockModel("handoff stream error");
+    }
+    this._chatRecoveryRetryDetached = async (input, onTurnStarted) => {
+      try {
+        await retryDetached(input, () => {
+          handoffSignals++;
+          onTurnStarted?.();
+        });
+      } finally {
+        detachedFinished.resolve();
+      }
+    };
+    this._chatRecoveryContinueDetached = async (input, onTurnStarted) => {
+      try {
+        await continueDetached(input, () => {
+          handoffSignals++;
+          onTurnStarted?.();
+        });
+      } finally {
+        detachedFinished.resolve();
+      }
+    };
+
+    let recoverySettled = false;
+    const recoveryWork = runQueuedRecoveryTaskForTest(this, callback).then(
+      (result) => {
+        recoverySettled = true;
+        return result;
+      }
+    );
+    try {
+      await paused.promise;
+      // This turn originates outside the paused successor's async context. Let
+      // it finish before resuming the successor's pre-admission leaf read.
+      const foreignResult =
+        pauseAt === "after-foreign-turn"
+          ? await this.saveMessages([
+              {
+                id: `foreign-${submissionId}`,
+                role: "user",
+                parts: [{ type: "text", text: "An unrelated turn" }]
+              }
+            ])
+          : undefined;
+      // On the broken implementation the foreign acceptance releases recovery;
+      // await its settlement explicitly rather than depending on microtask order.
+      if (foreignResult && handoffSignals > 0) await recoveryWork;
+      const recoverySettledAfterForeignTurn = recoverySettled;
+      // Once accepted, explicitly wait for the predecessor to settle so the
+      // successor alone must protect the row. Before acceptance the signal
+      // count proves the predecessor has NOT been told to hand off.
+      if (!beforeAcceptance) await recoveryWork;
+      const handoffSignalsAtPause = handoffSignals;
+      const activeRecoveryTasks = recoveryWorkCountForTest(this, callback);
+      const chatTasks = this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
+          AND state IN ('pending', 'running', 'waiting', 'recovering')
+      `;
+      const row = this.sql<{ request_id: string }>`
+        SELECT request_id FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0];
+      if (pauseAt === "after-terminal-foreign-stream") {
+        // A foreign producer invokes reclaim after the successor's cutover,
+        // while the recovery callback is still paused before ledger settlement.
+        // SAFETY: the fixture accesses the existing private stream adapter.
+        const { _resumableStream } = this as unknown as {
+          _resumableStream: ResumableStream;
+        };
+        const foreignStream = _resumableStream.start("foreign-terminal-gap");
+        _resumableStream.complete(foreignStream);
+      }
+      await this.recoverSubmissionsOnStartForTest();
+      // Repeated reconciliation must not duplicate terminal notifications.
+      await this.recoverSubmissionsOnStartForTest();
+      const duringHandoff = await this.getSubmissionStatusForTest(submissionId);
+
+      // Occupy the real admission queue outside the successor's async context.
+      // Waiting behind this entry must preserve the successor's acceptance
+      // context, even though the predecessor releases it from a foreign context.
+      const blockerId = `queue-blocker-${submissionId}`;
+      const queueBlocker = foreignResult
+        ? enqueue(blockerId, () => releaseQueueBlocker.promise)
+        : undefined;
+      if (foreignResult) {
+        queue.enqueue = (requestId, fn, options) => {
+          const result = enqueue(requestId, fn, options);
+          successorQueued.resolve();
+          return result;
+        };
+      }
+      release.resolve();
+      let successorQueuedBehindBlocker = false;
+      if (foreignResult) {
+        await successorQueued.promise;
+        successorQueuedBehindBlocker =
+          queue.activeRequestId === blockerId && queue.queuedCount() === 2;
+        releaseQueueBlocker.resolve();
+        await queueBlocker;
+      }
+      await recoveryWork;
+      await terminal.promise;
+      await detachedFinished.promise;
+      const afterCompletion =
+        await this.getSubmissionStatusForTest(submissionId);
+      const completed = this.sql<{ error_message: string | null }>`
+        SELECT error_message FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0];
+      return {
+        duringHandoff,
+        afterCompletion,
+        requestRebound: row?.request_id !== submissionId,
+        handoffSignals: handoffSignalsAtPause,
+        activeChatTasks: chatTasks[0]?.count ?? 0,
+        activeRecoveryTasks,
+        terminalStatuses,
+        responseCount,
+        error: completed?.error_message ?? null,
+        ...(foreignResult && {
+          foreignTurn: {
+            submissionId,
+            requestId: foreignResult.requestId,
+            status: foreignResult.status,
+            requestIdAfterForeignTurn: row?.request_id ?? null,
+            recoverySettledAfterForeignTurn,
+            successorQueuedBehindBlocker,
+            requestIdAtSuccessorAcceptance,
+            completedRequestId: readSubmissionRequestId(),
+            responseRequestIds,
+            terminalRequestIds
+          }
+        })
+      };
+    } finally {
+      release.resolve();
+      releaseQueueBlocker.resolve();
+      queue.enqueue = enqueue;
+      session.getLatestLeaf = getLatestLeaf;
+      this.beforeStep = beforeStep;
+      internals._updateChatRecoveryIncident = updateIncident;
+      this.onSubmissionStatus = onSubmissionStatus;
+      this.onChatResponse = onChatResponse;
+      this.getModel = getModel;
+      this._chatRecoveryRetryDetached = retryDetached;
+      this._chatRecoveryContinueDetached = continueDetached;
+    }
+  }
+
+  /** Exercise the facet legacy-fiber branch without requiring facet routing. */
+  async facetRecoveryAcceptanceForTest(): Promise<{
+    acceptedBeforeCompletion: boolean;
+    durableAtAcceptance: boolean;
+  }> {
+    // SAFETY: these private methods are the real acceptance and fiber seams;
+    // overriding only the path selects the facet engine in this inert fixture.
+    const internals = this as unknown as {
+      _runRecoveredTurnAfterAcceptance<T>(
+        row: null,
+        onAccepted: () => void,
+        run: () => Promise<T>
+      ): Promise<T>;
+      _runChatRecoveryFiber<T>(
+        requestId: string,
+        continuation: boolean,
+        run: () => Promise<T>
+      ): Promise<T>;
+    };
+    Object.defineProperty(this, "parentPath", {
+      configurable: true,
+      value: [{ className: "ThinkRecoveryTestAgent", name: "parent" }]
+    });
+    let accepted = false;
+    let durableAtAcceptance = false;
+    const requestId = crypto.randomUUID();
+    try {
+      return await internals._runRecoveredTurnAfterAcceptance(
+        null,
+        () => {
+          accepted = true;
+          durableAtAcceptance = this.sql<{ snapshot: string | null }>`
+            SELECT snapshot FROM cf_agents_runs
+            WHERE name = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME + ":" + requestId}
+          `.some((row) => row.snapshot !== null);
+        },
+        () =>
+          internals._runChatRecoveryFiber(requestId, false, async () => ({
+            acceptedBeforeCompletion: accepted,
+            durableAtAcceptance
+          }))
+      );
+    } finally {
+      Reflect.deleteProperty(this, "parentPath");
+    }
+  }
+
+  /** A subclass can settle recovery without accepting a successor Task. */
+  async recoverSubmissionWithoutSuccessorForTest(): Promise<{
+    status: string | null;
+    activeRecoveryTasks: number;
+  }> {
+    const submissionId = `no-successor-${crypto.randomUUID()}`;
+    await this.seedRunningSubmissionForTest(submissionId);
+    const continueLastTurn = this.continueLastTurn.bind(this);
+    this.continueLastTurn = async () => ({ requestId: "", status: "skipped" });
+    try {
+      await this.preScheduleRecoveryContinueForTest({
+        recoveredRequestId: submissionId,
+        originalRequestId: submissionId
+      });
+      await runQueuedRecoveryTaskForTest(this, "_chatRecoveryContinue");
+      return {
+        status: await this.getSubmissionStatusForTest(submissionId),
+        activeRecoveryTasks: recoveryWorkCountForTest(
+          this,
+          "_chatRecoveryContinue"
+        )
+      };
+    } finally {
+      this.continueLastTurn = continueLastTurn;
+    }
+  }
+
+  /** Seed a running submission, optionally already rebound to a successor. */
+  async seedRunningSubmissionForTest(
+    requestId: string,
+    submissionId = requestId
+  ): Promise<void> {
     (
       this as unknown as { _ensureSubmissionTable(): void }
     )._ensureSubmissionTable();
@@ -8069,7 +8639,7 @@ export class ThinkRecoveryTestAgent extends Think {
         messages_json, metadata_json, error_message, created_at,
         messages_applied_at, started_at, completed_at
       ) VALUES (
-        ${requestId}, NULL, ${requestId}, NULL, 'running',
+        ${submissionId}, NULL, ${requestId}, NULL, 'running',
         '[]', NULL, NULL, ${now}, ${now}, ${now}, NULL
       )
     `;
