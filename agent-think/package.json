@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agent-think",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "private": true,
   "type": "module",
   "description": "Think agent that reproduces and fixes cloudflare/agents GitHub issues in a container-backed Workspace. Invoked as `@agent-think repro|pr` via the gh-app webhook service; streams a live thread UI and reports back on the issue.",
@@ -41,7 +41,7 @@
     "msw": "^2.7.0",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "vitest": "4.1.10",
+    "vitest": "4.1.11",
     "wrangler": "^4.115.0"
   }
 }

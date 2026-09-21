@@ -1,5 +1,27 @@
 # @cloudflare/think
 
+## 0.19.0
+
+### Minor Changes
+
+- [#2245](https://github.com/cloudflare/agents/pull/2245) [`beff78a`](https://github.com/cloudflare/agents/commit/beff78a8f7dbe6c6de303ed32b709876adba94f1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add the `Queue` Lifecycle capability (`agents/queue`) for durable background work. Each pushed item is a job in the Lifecycle job queue, due immediately, run from the alarm loop one at a time in push order with Lifecycle's retry, deadman, and memory-limit policy. Callbacks are registered in the constructor and typed at declaration and push; `push()` accepts a stable `id` (upsert) and per-item `retry`.
+
+  `Agent.queue()` and friends now delegate to the capability. Queued callbacks run from the alarm loop in a fresh invocation, so they no longer see the enqueuing request's `connection` or `request` through `getCurrentAgent()` (the agent itself is still available). The `cf_agents_queues` table and the in-isolate drain are gone; legacy rows migrate into the job queue on the next start. `queue()` accepts `options.id`; `dequeue`, `dequeueAll`, `dequeueAllByCallback`, `getQueue`, and `getQueues` are now asynchronous; and `QueueItem.created_at` is renamed `createdAt`. `LifecycleServices.starting()` is replaced by `status()`, which returns `"zero" | "starting" | "started"`.
+
+  Think's workflow-notification outbox and submission drain now run as queue items; the `cf_think_workflow_notifications` table migrates and is dropped on start.
+
+  Both one-shot migrations (`cf_agents_queues` in Queue, `cf_think_workflow_notifications` in Think) are temporary upgrade paths and will be removed in the next minor release, by which point every started object has migrated. Deployments skipping this release should upgrade through it. Workflow-notification delivery retries with backoff capped at ten minutes (previously five) and gives up after twelve hours of continuous failure (previously never), reporting the failure through `onError`.
+
+### Patch Changes
+
+- [#2304](https://github.com/cloudflare/agents/pull/2304) [`4f2e5a3`](https://github.com/cloudflare/agents/commit/4f2e5a32ab8bbf25399f8e955294c846af76738f) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Require `agents >=0.24.0` for Think's background work, which relies on the Queue capability's stable item IDs and alarm-driven execution.
+
+- [#2256](https://github.com/cloudflare/agents/pull/2256) [`ee6a8cf`](https://github.com/cloudflare/agents/commit/ee6a8cfaf50213cabcc8e823c91e773010b994f7) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Recover an interrupted Think turn that had opened its stream but persisted no content by re-running its user message instead of trying to continue it. Think opens the resumable stream row before inference, so a Durable Object reset in the window before the first chunk left a turn with a stream id, no partial, and a user message as the latest leaf; recovery classified it as `continue`, found no assistant message to continue from, and marked the incident `skipped`. A parent tailing such a child through agent tools then sealed the run as an error. This mirrors `AIChatAgent`'s empty-partial new-turn rule ([#1691](https://github.com/cloudflare/agents/issues/1691)).
+
+- [#2297](https://github.com/cloudflare/agents/pull/2297) [`0fd3c8b`](https://github.com/cloudflare/agents/commit/0fd3c8b9fe7e7805f18226114b925066e33904fe) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Preserve running durable submissions during startup when either a retry or continuation chat-recovery callback is still pending. This applies to both current Tasks recovery attempts and legacy scheduled callbacks, allowing interrupted empty streams to retry and complete after a restart instead of being marked as errors.
+
+  Keep recovery ownership until the successor chat turn is durably accepted, and bind the submission to that successor before handing off. Scope the handoff signal to the successor turn so concurrent turns cannot claim it, including facet-hosted turns after their legacy successor fiber is durably created. New recovery payloads carry stable submission identity; exact submission IDs take precedence over request-ID fallback, preventing collisions from recovering or terminalizing another submission. Record each turn's actual outcome and structured output on the submission row in the same transaction that settles its stream, so a restart between turn completion and ledger settlement records the completed, aborted, or errored outcome from recorded fact instead of inferring from stream state — without rerunning the turn or duplicating response callbacks: aborted turns stay aborted, recovered workflow completions keep their output, an overflow retry segment is never mistaken for an answer, and the recorded fact survives unrelated turns reclaiming stream rows.
+
 ## 0.18.0
 
 ### Minor Changes

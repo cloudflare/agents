@@ -57,8 +57,8 @@ const REPLAY_PAGE_SEGMENTS = 10;
  * the newest chunk's timestamp for rows past it — so a long but still-active
  * stream is never reclaimed mid-flight. Terminal rows carry no such window:
  * a stream that finished is redundant with its persisted message, and the
- * cutover deletes it in the same transaction; anything a crash left behind
- * is reclaimed by the next {@link ResumableStream.start}.
+ * cutover deletes it in the same transaction; leftovers are reclaimed by
+ * the next {@link ResumableStream.start}.
  */
 const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
@@ -106,6 +106,7 @@ type ChatStreamMetadata = {
    * and drops the parts streamed before the continuation.
    */
   isContinuation?: 1;
+  /** Terminal evidence pinned until its consumer durably settles and releases it. */
 };
 
 /** Public status vocabulary predates the Streams state names. */
@@ -570,27 +571,29 @@ export class ResumableStream {
    * crash leaves either the live stream or the finished message, never
    * neither; nothing is left to sweep. `discard: false` keeps the settled
    * rows (an agent-tool child whose parent still tails them); they are
-   * reclaimed by the next {@link start}.
+   * reclaimed by the next {@link start}. The settlement and `persist`
+   * writes commit or roll back together.
    */
   cutover(
     streamId: string,
     persist: () => void,
     options: { discard?: boolean } = {}
-  ) {
+  ): void {
     this.flushBuffer();
     const discard = options.discard ?? true;
+    const commit = persist;
     // The discard deletes the rows inside the settle transaction, and the
     // deletion hook retires their segments there, so the marker moves with
     // the commit or not at all.
     const settled = this.ops.settle(streamId, "completed", null, {
-      commit: persist,
+      commit,
       discard
     });
     if (settled && discard) this._notifyProgress();
     // The stream was settled (or deleted) by another path first, so the
     // settle was a no-op and `persist` did not run: the message must still
     // land, just not atomically with a settlement that already happened.
-    if (!settled) persist();
+    if (!settled) commit();
     if (this._pendingCutover === streamId) this._pendingCutover = null;
     this._clearActive();
   }
@@ -598,12 +601,14 @@ export class ResumableStream {
   /**
    * Settle a {@link finish}ed stream that had nothing to persist (no parts,
    * a persist that threw). Idempotent; a no-op when nothing is pending.
+   * The pending marker clears only once settlement succeeds, so a caller
+   * may retry after a settlement failure — matching {@link cutover}.
    */
-  finalizePending() {
+  finalizePending(): void {
     const streamId = this._pendingCutover;
     if (streamId === null) return;
-    this._pendingCutover = null;
     this.ops.settle(streamId, "completed", null);
+    this._pendingCutover = null;
   }
 
   private _clearActive() {
@@ -617,7 +622,7 @@ export class ResumableStream {
    * Mark a stream as errored and clean up state.
    * @param streamId - The stream to mark as errored
    */
-  markError(streamId: string) {
+  markError(streamId: string): void {
     this.flushBuffer();
     this.ops.settle(streamId, "errored", null);
     if (this._pendingCutover === streamId) this._pendingCutover = null;

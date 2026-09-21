@@ -2336,6 +2336,14 @@ describe("Think — body persistence", () => {
 // ── chatRecovery ────────────────────────────────────────
 
 describe("Think — chatRecovery", () => {
+  it("hands off facet recovery after durable fiber creation and before turn completion", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+    await expect(agent.facetRecoveryAcceptanceForTest()).resolves.toEqual({
+      acceptedBeforeCompletion: true,
+      durableAtAcceptance: true
+    });
+  });
+
   it("keeps pre-handoff failure on the current Task and replaces only post-handoff failure", async () => {
     for (const callback of [
       "_chatRecoveryContinue",
@@ -2362,6 +2370,276 @@ describe("Think — chatRecovery", () => {
       expect(after).toEqual({ threw: false, tasks: 2, schedules: 0 });
     }
   });
+
+  it.each(["retry", "continue"] as const)(
+    "keeps a submission recoverable during the %s successor-turn handoff",
+    async (recoveryKind) => {
+      const agent = await freshRecoveryAgent(
+        `submission-handoff-${recoveryKind}-${crypto.randomUUID()}`
+      );
+
+      await expect(
+        agent.reproduceSubmissionRecoveryHandoffGapForTest(recoveryKind)
+      ).resolves.toEqual({
+        duringHandoff: "running",
+        afterCompletion: "completed",
+        requestRebound: false,
+        handoffSignals: 0,
+        activeChatTasks: 0,
+        activeRecoveryTasks: 1,
+        terminalStatuses: ["completed"],
+        responseCount: 1,
+        error: null
+      });
+    }
+  );
+
+  it.each(["retry", "continue"] as const)(
+    "does not let a foreign turn claim the %s recovery handoff before successor admission",
+    async (recoveryKind) => {
+      const agent = await freshRecoveryAgent(
+        `submission-foreign-${recoveryKind}-${crypto.randomUUID()}`
+      );
+      const result = await agent.reproduceSubmissionRecoveryHandoffGapForTest(
+        recoveryKind,
+        "after-foreign-turn"
+      );
+
+      expect(result).toMatchObject({
+        duringHandoff: "running",
+        afterCompletion: "completed",
+        requestRebound: false,
+        handoffSignals: 0,
+        activeChatTasks: 0,
+        activeRecoveryTasks: 1,
+        terminalStatuses: ["completed"],
+        responseCount: 2,
+        error: null
+      });
+      const foreign = result.foreignTurn;
+      if (!foreign)
+        throw new Error("Missing foreign-turn handoff observations");
+      expect(foreign.status).toBe("completed");
+      expect(foreign.requestIdAfterForeignTurn).toBe(foreign.submissionId);
+      expect(foreign.recoverySettledAfterForeignTurn).toBe(false);
+      expect(foreign.successorQueuedBehindBlocker).toBe(true);
+      expect(foreign.responseRequestIds).toHaveLength(2);
+      expect(foreign.responseRequestIds[0]).toBe(foreign.requestId);
+      const successorRequestId = foreign.responseRequestIds[1];
+      expect(successorRequestId).toBeTruthy();
+      expect(successorRequestId).not.toBe(foreign.requestId);
+      expect(successorRequestId).not.toBe(foreign.submissionId);
+      expect(foreign.requestIdAtSuccessorAcceptance).toBe(successorRequestId);
+      expect(foreign.completedRequestId).toBe(successorRequestId);
+      expect(foreign.terminalRequestIds).toEqual([successorRequestId]);
+    }
+  );
+
+  it.each(["retry", "continue"] as const)(
+    "keeps a submission recoverable after the %s successor is accepted",
+    async (recoveryKind) => {
+      const agent = await freshRecoveryAgent(
+        `submission-accepted-${recoveryKind}-${crypto.randomUUID()}`
+      );
+      await expect(
+        agent.reproduceSubmissionRecoveryHandoffGapForTest(
+          recoveryKind,
+          "after-acceptance"
+        )
+      ).resolves.toEqual({
+        duringHandoff: "running",
+        afterCompletion: "completed",
+        requestRebound: true,
+        handoffSignals: 1,
+        activeChatTasks: 1,
+        activeRecoveryTasks: 0,
+        terminalStatuses: ["completed"],
+        responseCount: 1,
+        error: null
+      });
+    }
+  );
+
+  it.each([
+    ["retry", "completed"],
+    ["continue", "completed"],
+    ["retry", "error"],
+    ["continue", "error"]
+  ] as const)(
+    "settles a %s submission from its %s successor stream before ledger completion",
+    async (recoveryKind, streamOutcome) => {
+      const agent = await freshRecoveryAgent(
+        `submission-terminal-${recoveryKind}-${streamOutcome}-${crypto.randomUUID()}`
+      );
+      await expect(
+        agent.reproduceSubmissionRecoveryHandoffGapForTest(
+          recoveryKind,
+          "before-completion",
+          streamOutcome
+        )
+      ).resolves.toEqual({
+        duringHandoff: streamOutcome,
+        afterCompletion: streamOutcome,
+        requestRebound: true,
+        handoffSignals: 1,
+        activeChatTasks: 0,
+        activeRecoveryTasks: 0,
+        terminalStatuses: [streamOutcome],
+        responseCount: 1,
+        error:
+          streamOutcome === "error"
+            ? "Recovered chat stream had already errored."
+            : null
+      });
+    }
+  );
+
+  it.each([
+    ["retry", "completed"],
+    ["continue", "completed"],
+    ["retry", "error"],
+    ["continue", "error"]
+  ] as const)(
+    "preserves %s %s successor evidence across a foreign stream before ledger settlement",
+    async (recoveryKind, streamOutcome) => {
+      const agent = await freshRecoveryAgent(crypto.randomUUID());
+      await expect(
+        agent.reproduceSubmissionRecoveryHandoffGapForTest(
+          recoveryKind,
+          "after-terminal-foreign-stream",
+          streamOutcome
+        )
+      ).resolves.toMatchObject({
+        duringHandoff: streamOutcome,
+        afterCompletion: streamOutcome,
+        handoffSignals: 1,
+        activeChatTasks: 0,
+        activeRecoveryTasks: 0,
+        terminalStatuses: [streamOutcome],
+        responseCount: 1,
+        error:
+          streamOutcome === "completed"
+            ? null
+            : "Recovered chat stream had already errored."
+      });
+    }
+  );
+
+  it("gives exact submission identity precedence over another row's successor request", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+    await agent.seedRunningSubmissionForTest("collision", "submission-A");
+    await agent.seedRunningSubmissionForTest("successor-B", "collision");
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "collision"
+    });
+    await expect(agent.getSubmissionStatusForTest("collision")).resolves.toBe(
+      "skipped"
+    );
+    await expect(
+      agent.getSubmissionStatusForTest("submission-A")
+    ).resolves.toBe("running");
+
+    // A redelivered payload for terminal B must not fall back to A either.
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "collision"
+    });
+    await expect(
+      agent.getSubmissionStatusForTest("submission-A")
+    ).resolves.toBe("running");
+  });
+
+  it("protects only the exact submission targeted by scheduled recovery", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+    await agent.seedRunningSubmissionForTest("collision", "submission-A");
+    await agent.seedRunningSubmissionForTest("successor-B", "collision");
+    await agent.preScheduleRecoveryRetryForTest({
+      recoveredRequestId: "collision"
+    });
+    await agent.recoverSubmissionsOnStartForTest();
+    await expect(agent.getSubmissionStatusForTest("collision")).resolves.toBe(
+      "running"
+    );
+    await expect(
+      agent.getSubmissionStatusForTest("submission-A")
+    ).resolves.toBe("error");
+  });
+
+  it("settles the recovery Task when a continuation override accepts no successor", async () => {
+    const agent = await freshRecoveryAgent(
+      `no-successor-${crypto.randomUUID()}`
+    );
+    await expect(
+      agent.recoverSubmissionWithoutSuccessorForTest()
+    ).resolves.toEqual({
+      status: "skipped",
+      activeRecoveryTasks: 0
+    });
+  });
+
+  it("does not mistake another request's terminal stream for submission completion", async () => {
+    const agent = await freshRecoveryAgent(
+      `terminal-isolation-${crypto.randomUUID()}`
+    );
+    await agent.seedRunningSubmissionForTest("running-submission");
+    await agent.insertAgedStreamForTest(
+      "unrelated-stream",
+      "another-request",
+      "completed",
+      0
+    );
+    await agent.recoverSubmissionsOnStartForTest();
+    await expect(
+      agent.getSubmissionStatusForTest("running-submission")
+    ).resolves.toBe("error");
+  });
+
+  it("settles an exact terminal stream even beyond the active-evidence stale window", async () => {
+    const agent = await freshRecoveryAgent(
+      `terminal-old-${crypto.randomUUID()}`
+    );
+    await agent.seedRunningSubmissionForTest("old-terminal-submission");
+    await agent.insertAgedStreamForTest(
+      "old-terminal-stream",
+      "old-terminal-submission",
+      "completed",
+      24 * 60 * 60 * 1000
+    );
+    await agent.recoverSubmissionsOnStartForTest();
+    await expect(
+      agent.getSubmissionStatusForTest("old-terminal-submission")
+    ).resolves.toBe("completed");
+  });
+
+  it.each(["retry", "continue"] as const)(
+    "keeps pending %s recovery ahead of terminal-stream ledger settlement",
+    async (recoveryKind) => {
+      const agent = await freshRecoveryAgent(
+        `terminal-pending-${recoveryKind}-${crypto.randomUUID()}`
+      );
+      const submissionId = `pending-${recoveryKind}`;
+      await agent.seedRunningSubmissionForTest(submissionId);
+      await agent.insertAgedStreamForTest(
+        `stream-${submissionId}`,
+        submissionId,
+        "completed",
+        0
+      );
+      const data = {
+        recoveredRequestId: submissionId,
+        originalRequestId: submissionId
+      };
+      if (recoveryKind === "retry") {
+        await agent.preScheduleRecoveryRetryForTest(data);
+      } else {
+        await agent.preScheduleRecoveryContinueForTest(data);
+      }
+      await agent.recoverSubmissionsOnStartForTest();
+      await expect(
+        agent.getSubmissionStatusForTest(submissionId)
+      ).resolves.toBe("running");
+    }
+  );
 
   it("chat turn with recovery=true works normally and cleans up fibers", async () => {
     const agent = await freshRecoveryAgent("recovery-basic");
@@ -3485,6 +3763,51 @@ describe("Think — onChatRecovery", () => {
     expect(await agent.getTurnBodies()).toEqual([{ mode: "snapshot" }]);
   });
 
+  it("retries an interrupted opened stream with no assistant content", async () => {
+    const agent = await freshRecoveryAgent(
+      `empty-opened-stream-retry-${crypto.randomUUID()}`
+    );
+
+    await agent.persistTestMessage({
+      id: "u-empty-opened-stream",
+      role: "user",
+      parts: [{ type: "text", text: "Retry after the empty opened stream" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-empty-opened",
+      "req-empty-opened",
+      []
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-empty-opened",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-empty-opened",
+          continuation: false,
+          latestMessageId: "u-empty-opened-stream",
+          latestMessageRole: "user",
+          latestUserMessageId: "u-empty-opened-stream",
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledRetryCount).toBe(1);
+    await agent.runScheduledRecoveryRetryForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(messages[0].id).toBe("u-empty-opened-stream");
+    expect(await agent.getTurnCallCount()).toBe(1);
+  });
+
   it("continues a partial stream with request context from the recovered snapshot", async () => {
     const agent = await freshRecoveryAgent(
       `partial-continue-context-${crypto.randomUUID()}`
@@ -3717,59 +4040,62 @@ describe("Think — onChatRecovery", () => {
 
   // ── Recovery under multi-deploy churn (chained continuations) ──────────────
 
-  it("schedules chained continuations against the recovery root submission, not the per-continuation requestId", async () => {
-    const agent = await freshRecoveryAgent(
-      `chain-ownership-${crypto.randomUUID()}`
-    );
+  it.each(["root-1", "stable-submission"])(
+    "schedules chained continuations with stable submission identity %s",
+    async (submissionId) => {
+      const agent = await freshRecoveryAgent(
+        `chain-ownership-${crypto.randomUUID()}`
+      );
 
-    // A running submission keyed by the recovery ROOT request id.
-    await agent.seedRunningSubmissionForTest("root-1");
-    await agent.persistTestMessage({
-      id: "u-1",
-      role: "user",
-      parts: [{ type: "text", text: "do it" }]
-    });
-    await agent.persistTestMessage({
-      id: "a-1",
-      role: "assistant",
-      parts: [{ type: "text", text: "Partial" }]
-    });
+      // Released snapshots may still identify the submission by its request.
+      await agent.seedRunningSubmissionForTest("root-1", submissionId);
+      await agent.persistTestMessage({
+        id: "u-1",
+        role: "user",
+        parts: [{ type: "text", text: "do it" }]
+      });
+      await agent.persistTestMessage({
+        id: "a-1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      });
 
-    // A continuation turn (requestId "cont-2", DIFFERENT from the root) is
-    // interrupted mid-stream. Its snapshot carries the recovery root.
-    await agent.insertInterruptedStream("stream-2", "cont-2", [
-      { body: JSON.stringify({ type: "start", messageId: "a-1" }), index: 0 },
-      { body: JSON.stringify({ type: "text-start" }), index: 1 },
-      {
-        body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
-        index: 2
-      }
-    ]);
-    await agent.insertInterruptedFiber("__cf_internal_chat_turn:cont-2", {
-      __cfThinkChatFiberSnapshot: {
-        kind: "think-chat-turn",
-        version: 1,
-        requestId: "cont-2",
-        recoveryRootRequestId: "root-1",
-        continuation: true,
-        latestMessageId: "a-1",
-        latestMessageRole: "assistant",
-        latestUserMessageId: "u-1",
-        startedAt: Date.now()
-      },
-      user: null
-    });
+      // A continuation turn (requestId "cont-2", DIFFERENT from the root) is
+      // interrupted mid-stream. Its snapshot carries the recovery root.
+      await agent.insertInterruptedStream("stream-2", "cont-2", [
+        { body: JSON.stringify({ type: "start", messageId: "a-1" }), index: 0 },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+          index: 2
+        }
+      ]);
+      await agent.insertInterruptedFiber("__cf_internal_chat_turn:cont-2", {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "cont-2",
+          recoveryRootRequestId: "root-1",
+          continuation: true,
+          latestMessageId: "a-1",
+          latestMessageRole: "assistant",
+          latestUserMessageId: "u-1",
+          startedAt: Date.now()
+        },
+        user: null
+      });
 
-    await agent.triggerFiberRecovery();
+      await agent.triggerFiberRecovery();
 
-    // The scheduled continuation must still own the submission via the stable
-    // root id — otherwise the continuation that completes the turn can never
-    // mark the submission done (the bug under deploy churn).
-    const payload = await agent.getScheduledChatRecoveryPayloadForTest(
-      "_chatRecoveryContinue"
-    );
-    expect(payload?.recoveredRequestId).toBe("root-1");
-  });
+      // The scheduled continuation must still own the submission via the stable
+      // root id — otherwise the continuation that completes the turn can never
+      // mark the submission done (the bug under deploy churn).
+      const payload = await agent.getScheduledChatRecoveryPayloadForTest(
+        "_chatRecoveryContinue"
+      );
+      expect(payload?.recoveredRequestId).toBe(submissionId);
+    }
+  );
 
   it("marks the root submission errored when a chained continuation is abandoned (recovery disabled)", async () => {
     const agent = await freshRecoveryAgent(
