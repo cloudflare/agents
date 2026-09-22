@@ -7,6 +7,11 @@
  */
 import { Agent, callable, routeAgentRequest } from "agents";
 import type { TaskHandlers, TaskStep } from "agents/tasks";
+import {
+  StateMachine,
+  defineMachine,
+  type MachineDefinition
+} from "agents/state-machine";
 import { Streams } from "agents/streams";
 import { Sessions } from "agents/sessions";
 import type {
@@ -21,6 +26,7 @@ import type { Observability } from "agents/observability";
 type Env = {
   RunFiberTestAgent: DurableObjectNamespace<RunFiberTestAgent>;
   TaskKillTestAgent: DurableObjectNamespace<TaskKillTestAgent>;
+  StateMachineKillAgent: DurableObjectNamespace<StateMachineKillAgent>;
   StreamKillTestAgent: DurableObjectNamespace<StreamKillTestAgent>;
   CutoverKillAgent: DurableObjectNamespace<CutoverKillAgent>;
   SubAgentFiberParent: DurableObjectNamespace<SubAgentFiberParent>;
@@ -1011,6 +1017,63 @@ export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
       SELECT stream_state, stream_cursor
       FROM e2e_stream_recoveries ORDER BY recovered_at ASC
     `;
+  }
+}
+
+type StateMachineKillState = {
+  phase: "step";
+  index: number;
+  total: number;
+};
+
+const stateMachineKillDefinition = defineMachine<
+  StateMachineKillState,
+  { completed: number },
+  { total: number }
+>({
+  version: 1,
+  initial: (input) => ({ phase: "step", index: 0, total: input.total }),
+  phases: {
+    step: async (state, context) => {
+      await fiberSleep(1_000);
+      if (state.index + 1 >= state.total) {
+        return context.complete({ completed: state.total });
+      }
+      return context.transition({
+        phase: "step",
+        index: state.index + 1,
+        total: state.total
+      });
+    }
+  }
+} satisfies MachineDefinition<
+  StateMachineKillState,
+  { completed: number },
+  { total: number }
+>);
+
+export class StateMachineKillAgent extends Agent<Record<string, unknown>> {
+  readonly stateMachine = new StateMachine({
+    definitions: { recovery: stateMachineKillDefinition }
+  });
+
+  constructor(ctx: DurableObjectState, env: Record<string, unknown>) {
+    super(ctx, env);
+    this.lifecycle.use(this.stateMachine);
+  }
+
+  @callable()
+  startStateMachine(total: number) {
+    return this.stateMachine.run(
+      "recovery",
+      { total },
+      { runId: "e2e-state-machine" }
+    );
+  }
+
+  @callable()
+  getStateMachineRun(runId: string) {
+    return this.stateMachine.get(runId, "recovery");
   }
 }
 

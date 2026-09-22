@@ -739,11 +739,24 @@ export class Lifecycle<
       await this.rearmAlarm();
       return result;
     };
+    const noteRearmDuringStartup = (): void => {
+      if (this.#status === "starting") this.#rearmRequestedDuringStart = true;
+    };
     return Object.freeze({
       push: (options: LifecycleJobPushOptions) =>
         rearmAfter(() => this.#jobQueue.push(owner, options)),
       cancel: (id: string) =>
         rearmAfter(() => this.#jobQueue.cancel(owner, id)),
+      pushSync: (options: LifecycleJobPushOptions) => {
+        const job = this.#jobQueue.push(owner, options);
+        noteRearmDuringStartup();
+        return job;
+      },
+      cancelSync: (id: string) => {
+        const cancelled = this.#jobQueue.cancel(owner, id);
+        noteRearmDuringStartup();
+        return cancelled;
+      },
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
       get: (id: string) => this.#jobQueue.get(owner, id),

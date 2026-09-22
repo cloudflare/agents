@@ -35,6 +35,8 @@ export {
   TaskHarnessObject,
   TaskSchedulerCoexistObject
 } from "./capabilities/tasks.ts";
+export { StateMachineHarnessObject } from "./capabilities/state-machine.ts";
+import type { StateMachineHarnessObject } from "./capabilities/state-machine.ts";
 export {
   CutoverHarnessObject,
   StreamHarnessObject,
@@ -222,6 +224,7 @@ export type Env = {
   QueueHarnessObject: DurableObjectNamespace<QueueHarnessObject>;
   TaskHarnessObject: DurableObjectNamespace<TaskHarnessObject>;
   TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
+  StateMachineHarnessObject: DurableObjectNamespace<StateMachineHarnessObject>;
   StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;
   CutoverHarnessObject: DurableObjectNamespace<CutoverHarnessObject>;
   SqliteStrategiesBench: DurableObjectNamespace<SqliteStrategiesBench>;
