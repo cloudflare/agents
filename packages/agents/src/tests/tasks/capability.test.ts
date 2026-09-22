@@ -128,6 +128,111 @@ describe("Tasks#register", () => {
   });
 });
 
+describe("Tasks event waits", () => {
+  it("publishes wait metadata and resumes with the delivered payload", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("waiter", {
+        type: "authorize:call-1",
+        timeoutMs: 60_000
+      });
+      const waiting = await waitForState(instance.tasks, receipt.runId, [
+        "waiting"
+      ]);
+      expect(waiting).toMatchObject({
+        state: "waiting",
+        reason: "event",
+        event: {
+          type: "authorize:call-1",
+          metadata: { kind: "authorization", tool: "exec" }
+        }
+      });
+
+      expect(
+        await instance.tasks.sendEvent(receipt.runId, "authorize:call-1", {
+          approved: true
+        })
+      ).toEqual({ status: "delivered" });
+
+      const completed = await waitForState(instance.tasks, receipt.runId, [
+        "completed"
+      ]);
+      expect(completed).toMatchObject({
+        state: "completed",
+        result: "approved"
+      });
+      expect(
+        await instance.tasks.sendEvent(receipt.runId, "authorize:call-1", {
+          approved: false
+        })
+      ).toEqual({ status: "terminal" });
+    });
+  });
+
+  it("delivers repeated event types to the currently waiting step", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("doubleWaiter", {
+        type: "answer"
+      });
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+      expect(
+        await instance.tasks.sendEvent(receipt.runId, "answer", "first")
+      ).toEqual({ status: "delivered" });
+
+      const secondWait = await waitForState(instance.tasks, receipt.runId, [
+        "waiting"
+      ]);
+      expect(secondWait).toMatchObject({
+        state: "waiting",
+        reason: "event",
+        event: { type: "answer" }
+      });
+      expect(
+        await instance.tasks.sendEvent(receipt.runId, "answer", "second")
+      ).toEqual({ status: "delivered" });
+      expect(
+        await waitForState(instance.tasks, receipt.runId, ["completed"])
+      ).toMatchObject({ result: "first:second" });
+    });
+  });
+
+  it("fails when an event wait reaches its deadline", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const receipt = await instance.tasks.run("waiter", {
+        type: "authorize:call-1",
+        timeoutMs: 20
+      });
+      const failed = await waitForState(instance.tasks, receipt.runId, [
+        "failed"
+      ]);
+      expect(failed).toMatchObject({
+        state: "failed",
+        error: { name: "TaskEventTimeoutError" }
+      });
+    });
+  });
+
+  it("reports missing and unmatched deliveries", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(
+        await instance.tasks.sendEvent("missing", "authorize", true)
+      ).toEqual({ status: "not-found" });
+
+      const receipt = await instance.tasks.run("waiter", {
+        type: "authorize:call-1",
+        timeoutMs: 60_000
+      });
+      await waitForState(instance.tasks, receipt.runId, ["waiting"]);
+      expect(
+        await instance.tasks.sendEvent(receipt.runId, "wrong-event", true)
+      ).toEqual({ status: "wrong-event" });
+    });
+  });
+});
+
 describe("Tasks capability", () => {
   it("accepts runs durably and deduplicates acceptance", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());

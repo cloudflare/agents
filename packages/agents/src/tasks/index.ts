@@ -12,6 +12,7 @@ export {
   DuplicateTaskStepError,
   TaskReplayDivergedError,
   TaskSerializationError,
+  TaskEventTimeoutError,
   MissingTaskDefinitionError,
   NonRetryableError
 } from "./errors";
@@ -20,6 +21,8 @@ export type {
   Task,
   TaskCallbacks,
   TaskError,
+  TaskEventDelivery,
+  TaskEventWaitOptions,
   TaskHandlers,
   TaskInput,
   TaskJson,

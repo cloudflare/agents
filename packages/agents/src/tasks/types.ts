@@ -120,11 +120,32 @@ export interface TaskStepConfig {
 /**
  * The step API a Task handler receives. Named steps are the run's durable
  * journal: `do` memoizes completed results, sleeps persist their first
- * deadline, and both suspend the execution attempt rather than holding the
- * invocation open.
+ * deadline, and event waits persist their public metadata and timeout.
+ * Waiting operations suspend the attempt rather than holding an invocation
+ * open.
  *
  * @experimental The API surface may change before stabilizing.
  */
+export interface TaskEventWaitOptions {
+  /** Event name the run is waiting to receive. */
+  type: string;
+
+  /** Public JSON metadata exposed while the run is waiting. */
+  metadata?: Record<string, TaskJson>;
+
+  /** Maximum time to wait before failing the run. */
+  timeout?: number | TaskDurationString;
+}
+
+/** Outcome of delivering an external event to a Task run. */
+export type TaskEventDelivery =
+  | { status: "delivered" }
+  | { status: "duplicate" }
+  | { status: "not-waiting" }
+  | { status: "wrong-event" }
+  | { status: "not-found" }
+  | { status: "terminal" };
+
 export interface TaskStep {
   /**
    * The step an unclean interruption left mid-execution, or `null` on a
@@ -158,6 +179,15 @@ export interface TaskStep {
   sleepUntil(name: string, when: number | Date): Promise<void>;
 
   /**
+   * Wait for an external event. The event payload becomes the journaled step
+   * result, so replay returns it without waiting again.
+   */
+  waitForEvent<T extends TaskValue>(
+    name: string,
+    options: TaskEventWaitOptions
+  ): Promise<T>;
+
+  /**
    * Update observable progress. Replays stay silent until execution reaches
    * new ground, so old progress is not re-published as new.
    */
@@ -181,7 +211,7 @@ export type TaskRunState =
   | "cancelled";
 
 /** Why a waiting run is waiting. */
-export type TaskWaitReason = "sleep" | "retry";
+export type TaskWaitReason = "sleep" | "retry" | "event";
 
 /** Safe projection of an error retained with a failed run. */
 export interface TaskError {
@@ -246,16 +276,25 @@ export type TaskRunSnapshot<Output extends TaskValue> =
       statusMessage?: string;
       metadata?: Record<string, TaskJson>;
     }
-  | {
+  | ({
       runId: string;
       definition: string;
       state: "waiting";
-      reason: TaskWaitReason;
       wakeAt: number;
       createdAt: number;
       statusMessage?: string;
       metadata?: Record<string, TaskJson>;
-    }
+    } & (
+      | {
+          reason: "event";
+          event: {
+            type: string;
+            metadata?: Record<string, TaskJson>;
+            timeoutAt: number;
+          };
+        }
+      | { reason: "sleep" | "retry"; event?: never }
+    ))
   | {
       runId: string;
       definition: string;
@@ -338,7 +377,7 @@ export type TaskRunRow = {
 export type TaskStepRow = {
   run_id: string;
   step_name: string;
-  kind: "do" | "sleep";
+  kind: "do" | "sleep" | "event";
   state: "running" | "waiting" | "completed" | "failed";
   result: string | null;
   error_name: string | null;
@@ -349,4 +388,6 @@ export type TaskStepRow = {
   started_at: number | null;
   updated_at: number;
   completed_at: number | null;
+  event_type: string | null;
+  event_metadata: string | null;
 };
