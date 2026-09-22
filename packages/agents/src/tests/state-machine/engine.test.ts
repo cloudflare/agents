@@ -1,14 +1,33 @@
 import { env } from "cloudflare:workers";
-import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject
-} from "cloudflare:test";
+import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { StateMachineHarnessObject } from "../capabilities/state-machine";
+
+type Snapshot = {
+  status: string;
+  revision: number;
+  result?: string;
+};
+
+type HarnessStub = DurableObjectStub & {
+  start(
+    label: string,
+    runId?: string
+  ): Promise<{
+    runId: string;
+    accepted: boolean;
+  }>;
+  snapshot(runId: string): Promise<Snapshot | null>;
+  dispatchStale(runId: string): Promise<unknown>;
+};
+
+function harnessStub(): HarnessStub {
+  return env.StateMachineHarnessObject.getByName(
+    crypto.randomUUID()
+  ) as unknown as HarnessStub;
+}
 
 async function waitForTerminal(
-  stub: DurableObjectStub<StateMachineHarnessObject>,
+  stub: HarnessStub,
   runId: string,
   timeoutMs = 5_000
 ) {
@@ -26,7 +45,7 @@ async function waitForTerminal(
 
 describe("StateMachine capability", () => {
   it("runs a typed three-phase machine to completion", async () => {
-    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const stub = harnessStub();
     const receipt = await stub.start("alpha");
     await expect(waitForTerminal(stub, receipt.runId)).resolves.toMatchObject({
       status: "completed",
@@ -36,7 +55,7 @@ describe("StateMachine capability", () => {
   });
 
   it("deduplicates acceptance by caller-selected run ID", async () => {
-    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const stub = harnessStub();
     const runId = `machine_${crypto.randomUUID()}`;
     expect((await stub.start("alpha", runId)).accepted).toBe(true);
     expect((await stub.start("alpha", runId)).accepted).toBe(false);
@@ -47,7 +66,7 @@ describe("StateMachine capability", () => {
   });
 
   it("survives eviction after durable acceptance", async () => {
-    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const stub = harnessStub();
     const receipt = await stub.start("evicted");
     await evictDurableObject(stub);
     await expect(waitForTerminal(stub, receipt.runId)).resolves.toMatchObject({
@@ -58,31 +77,10 @@ describe("StateMachine capability", () => {
   });
 
   it("ignores a stale job dispatch after the run advances", async () => {
-    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const stub = harnessStub();
     const receipt = await stub.start("stale");
     const settled = await waitForTerminal(stub, receipt.runId);
-
-    await runInDurableObject(
-      stub,
-      async (instance: StateMachineHarnessObject) => {
-        await instance.stateMachine.onJob({
-          attempt: 1,
-          job: {
-            id: `state-machine:${receipt.runId}`,
-            capability: "state-machine",
-            fn: "drive",
-            time: Date.now(),
-            payload: { runId: receipt.runId, revision: 0 },
-            retry: undefined,
-            singleflight: true,
-            exclusive: false,
-            recoveryLoop: false,
-            createdAt: Date.now()
-          }
-        });
-      }
-    );
-
+    await stub.dispatchStale(receipt.runId);
     expect(await stub.snapshot(receipt.runId)).toEqual(settled);
   });
 });
