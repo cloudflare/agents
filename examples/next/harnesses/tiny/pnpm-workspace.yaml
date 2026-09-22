@@ -1,0 +1,22 @@
+# This example is its own pnpm root, which the sibling harnesses are not.
+#
+# That is deliberate. Without this file the example joins the monorepo's
+# 108-project workspace, and every `pnpm test` reconciles all 1,570 packages
+# before running — minutes instead of seconds. Keeping it means the example
+# installs and tests standalone, which is what an example should do.
+#
+# The cost: this example loads `agents` from ../../../../packages because it
+# uses the unpublished `agents/state` entry point. Keep the separate workspace:
+# it prevents each test run from reconciling every package in the monorepo.
+# Once `agents/state` is published, the dependency can return to the released
+# package without changing this workspace boundary.
+allowBuilds:
+  core-js-pure: set this to true or false
+  workerd: true
+minimumReleaseAgeExclude:
+  - "@ag-ui/core@1.0.0"
+overrides:
+  # @tanstack/ai-cloudflare declares @cloudflare/workers-types@^4 as a runtime
+  # dependency while this example is on v5. Two copies in one tree make
+  # `env.AI` structurally incompatible with itself, so dedupe onto v5.
+  "@cloudflare/workers-types": "^5.20260729.1"

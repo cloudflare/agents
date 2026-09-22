@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "next-tiny-harness",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-09-15",
+  // `nodejs_compat` for @cloudflare/computer; `experimental` for the Worker
+  // Loader that backs the worker-javascript exec backend.
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+  // The AI binding is the credential. No AI_GATEWAY_API_KEY, and no key can
+  // reach model-authored code running in a Dynamic Worker.
+  "ai": { "binding": "AI", "remote": true },
+  // Dynamic Workers for `exec`. One fresh isolate per call, then discarded.
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "Agent", "class_name": "Agent" },
+      { "name": "Subagent", "class_name": "Subagent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Agent", "Subagent"]
+    }
+  ],
+  "vars": {
+    // Gateway id used for every model call. "default" is the gateway
+    // Cloudflare creates for each account.
+    "GATEWAY_ID": "default"
+  },
+  "assets": { "directory": "./dist/client" },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true },
+    "traces": { "enabled": true },
+    "issues": { "enabled": true }
+  }
+}

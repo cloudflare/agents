@@ -1,0 +1,13 @@
+{
+  // The tests need two things the app build does not: the `cloudflare:test`
+  // module's types, and the test-only Durable Object bindings.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "@cloudflare/vitest-pool-workers",
+      "@cloudflare/workers-types",
+      "node"
+    ]
+  },
+  "include": [".", "../../env.d.ts"]
+}

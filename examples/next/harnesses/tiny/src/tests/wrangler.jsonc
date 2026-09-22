@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "next-tiny-harness-tests",
+  "main": "worker.ts",
+  // Deliberately older than the production config's 2026-09-15: the
+  // `workerd` shipped with @cloudflare/vitest-pool-workers lags the date the
+  // deployed Worker targets, and a test config only has to be new enough for
+  // the capabilities under test. Raise this when the pool catches up.
+  "compatibility_date": "2026-08-06",
+  // `nodejs_compat` for @cloudflare/computer; `experimental` for the Worker
+  // Loader that backs the worker-javascript exec backend, so exec.test.ts can
+  // run real code in a real Dynamic Worker rather than a stub.
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TINY_TEST", "class_name": "TestAgent" },
+      { "name": "TINY_TEST_SUBAGENT", "class_name": "TestSubagent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TestAgent", "TestSubagent"]
+    }
+  ]
+}
