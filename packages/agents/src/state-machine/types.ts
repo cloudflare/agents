@@ -9,6 +9,11 @@ export type MachineJson =
 export type MachineValue = MachineJson | undefined | void;
 export type MachinePhased = { phase: string } & Record<string, MachineJson>;
 
+export interface MachineCommitTransaction {
+  /** Run a synchronous notification only after the outer transaction commits. */
+  afterCommit(callback: () => void): void;
+}
+
 export interface MachineCommitParticipant {
   /** @internal Runtime validation prevents application-created participants. */
   readonly __brand: "MachineCommitParticipant";

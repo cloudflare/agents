@@ -103,6 +103,25 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
           })
       }
     }),
+    streamSettlementFailure: defineMachine<
+      { phase: "close"; streamId: string },
+      string,
+      { streamId: string }
+    >({
+      version: 1,
+      initial: (input) => ({ phase: "close", streamId: input.streamId }),
+      phases: {
+        close: (state, context) =>
+          context.complete(state.streamId, {
+            commit: [
+              settleStreamOnMachineCommit(this.streams, state.streamId),
+              createMachineCommitParticipant(() => {
+                throw new Error("later participant failed");
+              })
+            ]
+          })
+      }
+    }),
     participantFailure: defineMachine<CommitState, string, { value: string }>({
       version: 1,
       initial: (input) => ({ phase: "write", value: input.value }),
@@ -178,9 +197,11 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
       : this.stateMachine.run("participant", { value });
   }
 
-  async startStreamSettlement(streamId: string) {
+  async startStreamSettlement(streamId: string, fail = false) {
     await this.streams.open(streamId);
-    return this.stateMachine.run("streamSettlement", { streamId });
+    return fail
+      ? this.stateMachine.run("streamSettlementFailure", { streamId })
+      : this.stateMachine.run("streamSettlement", { streamId });
   }
 
   async streamState(streamId: string): Promise<string | null> {

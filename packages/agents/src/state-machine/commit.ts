@@ -1,34 +1,28 @@
-import type { MachineCommitParticipant } from "./types";
+import type {
+  MachineCommitParticipant,
+  MachineCommitTransaction
+} from "./types";
 
-type PreparedCommit = {
-  readonly apply: () => void;
-  readonly committed?: () => void;
-};
+type CommitBlock = (transaction: MachineCommitTransaction) => void;
 
-const participants = new WeakMap<object, PreparedCommit>();
+const participants = new WeakMap<object, CommitBlock>();
 
 /** @internal Create a branded participant for one synchronous machine commit. */
 export function createMachineCommitParticipant(
-  apply: () => void,
-  committed?: () => void
+  commit: CommitBlock
 ): MachineCommitParticipant {
   const participant = Object.freeze({
     __brand: "MachineCommitParticipant" as const
   });
-  participants.set(participant, { apply, committed });
+  participants.set(participant, commit);
   return participant;
 }
 
 export function applyMachineCommitParticipant(
-  participant: MachineCommitParticipant
+  participant: MachineCommitParticipant,
+  transaction: MachineCommitTransaction
 ): void {
-  const prepared = participants.get(participant);
-  if (!prepared) throw new Error("Invalid Machine commit participant");
-  prepared.apply();
-}
-
-export function publishMachineCommitParticipant(
-  participant: MachineCommitParticipant
-): void {
-  participants.get(participant)?.committed?.();
+  const commit = participants.get(participant);
+  if (!commit) throw new Error("Invalid Machine commit participant");
+  commit(transaction);
 }

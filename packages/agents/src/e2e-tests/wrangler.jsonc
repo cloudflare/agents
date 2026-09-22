@@ -50,10 +50,6 @@
         "class_name": "TaskKillTestAgent"
       },
       {
-        "name": "StateMachineKillAgent",
-        "class_name": "StateMachineKillAgent"
-      },
-      {
         "name": "StreamKillTestAgent",
         "class_name": "StreamKillTestAgent"
       },
@@ -91,10 +87,6 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["CutoverKillAgent"]
-    },
-    {
-      "tag": "v7",
-      "new_sqlite_classes": ["StateMachineKillAgent"]
     }
   ]
 }

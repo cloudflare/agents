@@ -15,6 +15,7 @@ export {
 } from "./errors";
 export type {
   MachineCommitParticipant,
+  MachineCommitTransaction,
   MachineContext,
   MachineDecision,
   MachineDefinition,

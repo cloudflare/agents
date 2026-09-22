@@ -1,14 +1,10 @@
-import { nanoid } from "nanoid";
 import { LifecycleCapability } from "../lifecycle/capability";
 import type {
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
-import {
-  applyMachineCommitParticipant,
-  publishMachineCommitParticipant
-} from "./commit";
+import { applyMachineCommitParticipant } from "./commit";
 import {
   MachineTransitionConflictError,
   MissingMachineDefinitionError
@@ -25,6 +21,7 @@ import {
 import { StateMachineStore } from "./store";
 import type {
   MachineCommitParticipant,
+  MachineCommitTransaction,
   MachineContext,
   MachineDecision,
   MachineDefinitions,
@@ -55,6 +52,24 @@ type RuntimeDefinition = {
 };
 
 type DrivePayload = { runId: string; revision: number };
+
+const RUN_ID_ALPHABET =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const MAX_UNBIASED_RANDOM_BYTE = 256 - (256 % RUN_ID_ALPHABET.length);
+
+function randomAlphanumeric(length = 12): string {
+  let value = "";
+  const bytes = new Uint8Array(length);
+  while (value.length < length) {
+    crypto.getRandomValues(bytes);
+    for (const byte of bytes) {
+      if (byte >= MAX_UNBIASED_RANDOM_BYTE) continue;
+      value += RUN_ID_ALPHABET[byte % RUN_ID_ALPHABET.length];
+      if (value.length === length) break;
+    }
+  }
+  return value;
+}
 
 export interface StateMachineOptions<Definitions extends MachineDefinitions> {
   readonly definitions: Definitions;
@@ -140,7 +155,7 @@ export class StateMachine<
       initial,
       `checkpoint for Machine definition "${definitionName}"`
     );
-    const runId = options.runId ?? `machine_${nanoid()}`;
+    const runId = options.runId ?? `machine_${randomAlphanumeric()}`;
     const now = Date.now();
     const jobId = this.#jobId(runId);
 
@@ -262,84 +277,98 @@ export class StateMachine<
     const participants = decision.commit ?? [];
     const nextRevision = row.revision + 1;
     const now = Date.now();
-
-    this.#store.transaction(() => {
-      for (const participant of participants) {
-        applyMachineCommitParticipant(participant);
+    const afterCommitCallbacks: Array<() => void> = [];
+    let transactionOpen = true;
+    const commitTransaction: MachineCommitTransaction = Object.freeze({
+      afterCommit: (callback: () => void) => {
+        if (!transactionOpen) {
+          throw new Error("Machine commit transaction is no longer active");
+        }
+        afterCommitCallbacks.push(callback);
       }
-      let written: number;
-      if (decision.kind === "transition") {
-        this.#assertState(row.definition, definition, decision.state);
-        const checkpoint = serializeMachineValue(
-          decision.state,
-          `checkpoint for Machine run "${row.run_id}"`
-        );
-        this.#pushJob(row.run_id, nextRevision, now);
-        written = this.#store.write(
-          `UPDATE cf_agents_state_machine_runs
+    });
+
+    try {
+      this.#store.transaction(() => {
+        for (const participant of participants) {
+          applyMachineCommitParticipant(participant, commitTransaction);
+        }
+        let written: number;
+        if (decision.kind === "transition") {
+          this.#assertState(row.definition, definition, decision.state);
+          const checkpoint = serializeMachineValue(
+            decision.state,
+            `checkpoint for Machine run "${row.run_id}"`
+          );
+          this.#pushJob(row.run_id, nextRevision, now);
+          written = this.#store.write(
+            `UPDATE cf_agents_state_machine_runs
            SET phase = ?, checkpoint_json = ?, revision = ?, updated_at = ?
            WHERE run_id = ? AND status = 'running' AND revision = ?`,
-          [
-            decision.state.phase,
-            checkpoint,
-            nextRevision,
-            now,
-            row.run_id,
-            row.revision
-          ]
-        );
-      } else if (decision.kind === "complete") {
-        const result = serializeMachineValue(
-          decision.result,
-          `result for Machine run "${row.run_id}"`
-        );
-        this.lifecycle.jobs.cancelSync(this.#jobId(row.run_id));
-        written = this.#store.write(
-          `UPDATE cf_agents_state_machine_runs
+            [
+              decision.state.phase,
+              checkpoint,
+              nextRevision,
+              now,
+              row.run_id,
+              row.revision
+            ]
+          );
+        } else if (decision.kind === "complete") {
+          const result = serializeMachineValue(
+            decision.result,
+            `result for Machine run "${row.run_id}"`
+          );
+          this.lifecycle.jobs.cancelSync(this.#jobId(row.run_id));
+          written = this.#store.write(
+            `UPDATE cf_agents_state_machine_runs
            SET status = 'completed', phase = NULL, checkpoint_json = NULL,
                result_json = ?, revision = ?, job_id = NULL,
                updated_at = ?, settled_at = ?
            WHERE run_id = ? AND status = 'running' AND revision = ?`,
-          [result, nextRevision, now, now, row.run_id, row.revision]
-        );
-      } else {
-        this.lifecycle.jobs.cancelSync(this.#jobId(row.run_id));
-        written = this.#store.write(
-          `UPDATE cf_agents_state_machine_runs
+            [result, nextRevision, now, now, row.run_id, row.revision]
+          );
+        } else {
+          this.lifecycle.jobs.cancelSync(this.#jobId(row.run_id));
+          written = this.#store.write(
+            `UPDATE cf_agents_state_machine_runs
            SET status = 'failed', phase = NULL, checkpoint_json = NULL,
                error_name = ?, error_message = ?, revision = ?, job_id = NULL,
                updated_at = ?, settled_at = ?
            WHERE run_id = ? AND status = 'running' AND revision = ?`,
-          [
-            decision.error.name,
-            decision.error.message,
-            nextRevision,
-            now,
-            now,
-            row.run_id,
-            row.revision
-          ]
-        );
-      }
-      if (written !== 1) {
-        throw new MachineTransitionConflictError(row.run_id, row.revision);
-      }
-      if (decision.kind !== "transition" && row.retain === 0) {
-        this.#store.write(
-          "DELETE FROM cf_agents_state_machine_runs WHERE run_id = ?",
-          [row.run_id]
-        );
-      }
-    });
+            [
+              decision.error.name,
+              decision.error.message,
+              nextRevision,
+              now,
+              now,
+              row.run_id,
+              row.revision
+            ]
+          );
+        }
+        if (written !== 1) {
+          throw new MachineTransitionConflictError(row.run_id, row.revision);
+        }
+        if (decision.kind !== "transition" && row.retain === 0) {
+          this.#store.write(
+            "DELETE FROM cf_agents_state_machine_runs WHERE run_id = ?",
+            [row.run_id]
+          );
+        }
+      });
+    } finally {
+      transactionOpen = false;
+    }
 
-    await this.lifecycle.jobs.rearm();
-    for (const participant of participants) {
+    for (const callback of afterCommitCallbacks) {
       try {
-        publishMachineCommitParticipant(participant);
+        callback();
       } catch (error) {
-        console.error("Machine commit participant publication failed", error);
+        console.error("Machine afterCommit callback failed", error);
       }
     }
+    await this.lifecycle.jobs.rearm();
     this.lifecycle.events.emit(`state-machine:${decision.kind}`, {
       runId: row.run_id,
       definition: row.definition,

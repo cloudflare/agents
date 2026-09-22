@@ -55,4 +55,18 @@ describe("StateMachine durable commits", () => {
     );
     await expect(stub.streamState(streamId)).resolves.toBe("completed");
   });
+
+  it("keeps the stream live when a later participant rolls back", async () => {
+    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const streamId = `stream_${crypto.randomUUID()}`;
+    const receipt = await stub.startStreamSettlement(streamId, true);
+
+    await expect(waitForSettlement(stub, receipt.runId)).resolves.toMatchObject(
+      {
+        status: "failed",
+        error: { message: "later participant failed" }
+      }
+    );
+    await expect(stub.streamState(streamId)).resolves.toBe("streaming");
+  });
 });
