@@ -5,6 +5,10 @@ import {
   type MachineValue
 } from "../state-machine";
 
+function assertNever(value: never): never {
+  throw new Error(`Unexpected harness runtime inspection: ${String(value)}`);
+}
+
 export interface HarnessRuntimeInvocation {
   readonly executionId: string;
   readonly signal: AbortSignal;
@@ -65,18 +69,24 @@ export function createHarnessEffectRuntime<
           throw new Error(
             `Harness execution "${executionId}" was not found after start`
           );
+        default:
+          return assertNever(inspected);
       }
     },
     reconcile: async (externalId, _invocation) => {
       const inspected = await runtime.inspect(externalId);
-      if (inspected.status === "running") return { status: "running" };
-      if (inspected.status === "completed") {
-        return { status: "completed", output: inspected.result };
+      switch (inspected.status) {
+        case "running":
+          return { status: "running" };
+        case "completed":
+          return { status: "completed", output: inspected.result };
+        case "failed":
+          return { status: "failed", error: inspected.error };
+        case "not-found":
+          return { status: "not-found" };
+        default:
+          return assertNever(inspected);
       }
-      if (inspected.status === "failed") {
-        return { status: "failed", error: inspected.error };
-      }
-      return { status: "not-found" };
     },
     ...(runtime.cancel
       ? {

@@ -9,11 +9,11 @@ type Snapshot = {
 };
 
 type TestHarnessStub = DurableObjectStub & {
-  submit(
+  start(
     key: string,
     options?: { runId?: string; idempotencyKey?: string }
   ): Promise<{ runId: string; accepted: boolean }>;
-  send(
+  notify(
     runId: string,
     key: string,
     value: string,
@@ -53,17 +53,17 @@ async function waitFor(
 describe("StateMachineHarness", () => {
   it("submits idempotently and settles through a typed event", async () => {
     const stub = createStub();
-    const first = await stub.submit("input", {
+    const first = await stub.start("input", {
       idempotencyKey: "submission-1"
     });
-    const duplicate = await stub.submit("input", {
+    const duplicate = await stub.start("input", {
       idempotencyKey: "submission-1"
     });
     expect(first.accepted).toBe(true);
     expect(duplicate).toMatchObject({ runId: first.runId, accepted: false });
 
     await expect(stub.result(first.runId)).resolves.toBeNull();
-    await stub.send(first.runId, "input", "finished", "input-event-1");
+    await stub.notify(first.runId, "input", "finished", "input-event-1");
     await expect(
       waitFor(stub, first.runId, "completed")
     ).resolves.toMatchObject({
@@ -71,17 +71,17 @@ describe("StateMachineHarness", () => {
     });
     await expect(stub.result(first.runId)).resolves.toBe("finished");
     await expect(
-      stub.send(first.runId, "input", "late", "input-event-late")
+      stub.notify(first.runId, "input", "late", "input-event-late")
     ).resolves.toEqual({ status: "terminal" });
   });
 
   it("preserves a waiting run across eviction", async () => {
     const stub = createStub();
-    const receipt = await stub.submit("eviction");
+    const receipt = await stub.start("eviction");
     await waitFor(stub, receipt.runId, "waiting");
     await evictDurableObject(stub);
 
-    await stub.send(receipt.runId, "eviction", "restored", "eviction-event");
+    await stub.notify(receipt.runId, "eviction", "restored", "eviction-event");
     await expect(
       waitFor(stub, receipt.runId, "completed")
     ).resolves.toMatchObject({
@@ -91,7 +91,7 @@ describe("StateMachineHarness", () => {
 
   it("maps durable abort, pause, and resume", async () => {
     const stub = createStub();
-    const paused = await stub.submit("pause");
+    const paused = await stub.start("pause");
     await waitFor(stub, paused.runId, "waiting");
     expect(await stub.pause(paused.runId)).toBe(true);
     await expect(waitFor(stub, paused.runId, "paused")).resolves.toBeTruthy();
@@ -99,7 +99,7 @@ describe("StateMachineHarness", () => {
     expect(await stub.resume(paused.runId)).toBe(true);
     expect(await stub.resume(paused.runId)).toBe(false);
 
-    const aborted = await stub.submit("abort");
+    const aborted = await stub.start("abort");
     await waitFor(stub, aborted.runId, "waiting");
     expect(await stub.abort(aborted.runId, "stop")).toBe(true);
     await expect(
@@ -118,7 +118,7 @@ describe("StateMachineHarness", () => {
     await expect(stub.pause("missing")).resolves.toBe(false);
     await expect(stub.resume("missing")).resolves.toBe(false);
     await expect(
-      stub.send("missing", "input", "ignored", "missing-event")
+      stub.notify("missing", "input", "ignored", "missing-event")
     ).resolves.toEqual({ status: "not-found" });
   });
 });

@@ -10,7 +10,7 @@ export type ConformanceSnapshot = {
 
 export type ConformanceHarness = {
   readonly stub: DurableObjectStub;
-  submit(
+  start(
     key: string,
     options?: { runId?: string; idempotencyKey?: string }
   ): Promise<{ runId: string; accepted: boolean }>;
@@ -50,11 +50,11 @@ export function runHarnessConformance(
     it("accepts idempotently and retains its result", async () => {
       const harness = create();
       const runId = `${name}-input`;
-      const first = await harness.submit("input", {
+      const first = await harness.start("input", {
         runId,
         idempotencyKey: `${name}:input`
       });
-      const duplicate = await harness.submit("input", {
+      const duplicate = await harness.start("input", {
         runId,
         idempotencyKey: `${name}:input`
       });
@@ -71,7 +71,7 @@ export function runHarnessConformance(
 
     it("restores a waiting run after eviction", async () => {
       const harness = create();
-      const receipt = await harness.submit("eviction");
+      const receipt = await harness.start("eviction");
       await waitFor(harness, receipt.runId, "waiting");
       await evictDurableObject(harness.stub);
       await harness.settle(receipt.runId, "eviction", "restored");
@@ -82,7 +82,7 @@ export function runHarnessConformance(
 
     it("maps abort, pause, and resume", async () => {
       const harness = create();
-      const paused = await harness.submit("pause");
+      const paused = await harness.start("pause");
       await waitFor(harness, paused.runId, "waiting");
       expect(await harness.pause(paused.runId)).toBe(true);
       await waitFor(harness, paused.runId, "paused");
@@ -90,7 +90,7 @@ export function runHarnessConformance(
       expect(await harness.resume(paused.runId)).toBe(true);
       expect(await harness.resume(paused.runId)).toBe(false);
 
-      const aborted = await harness.submit("abort");
+      const aborted = await harness.start("abort");
       await waitFor(harness, aborted.runId, "waiting");
       expect(await harness.abort(aborted.runId, "stopped")).toBe(true);
       await expect(

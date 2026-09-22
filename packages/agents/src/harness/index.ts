@@ -13,8 +13,8 @@ export type {
 export type { StateMachineHarnessOptions } from "./state-machine-harness";
 export type {
   AgentHarness,
+  HarnessNotifyOptions,
   HarnessReceipt,
-  HarnessSendOptions,
-  HarnessStreams,
-  HarnessSubmitOptions
+  HarnessStartOptions,
+  HarnessStreams
 } from "./types";

@@ -9,7 +9,7 @@ type Snapshot = {
 };
 
 type TestHarnessStub = DurableObjectStub & {
-  submit(
+  start(
     prompt: string,
     options?: { runId?: string; idempotencyKey?: string }
   ): Promise<{ runId: string; accepted: boolean }>;
@@ -47,7 +47,7 @@ async function waitFor(
 describe("wrapped durable harness runtime", () => {
   it("reconciles terminal output after eviction", async () => {
     const stub = createStub();
-    const receipt = await stub.submit("research");
+    const receipt = await stub.start("research");
     await waitFor(stub, receipt.runId, "waiting");
     expect(await stub.runtimeStatus(receipt.runId)).toBe("running");
 
@@ -64,10 +64,10 @@ describe("wrapped durable harness runtime", () => {
 
   it("deduplicates dispatch by stable outer run ID", async () => {
     const stub = createStub();
-    const first = await stub.submit("once", {
+    const first = await stub.start("once", {
       idempotencyKey: "wrapped-once"
     });
-    const duplicate = await stub.submit("once", {
+    const duplicate = await stub.start("once", {
       idempotencyKey: "wrapped-once"
     });
     expect(duplicate).toMatchObject({ runId: first.runId, accepted: false });
@@ -75,7 +75,7 @@ describe("wrapped durable harness runtime", () => {
 
   it("cancels the wrapped runtime with the outer run", async () => {
     const stub = createStub();
-    const receipt = await stub.submit("cancel");
+    const receipt = await stub.start("cancel");
     await waitFor(stub, receipt.runId, "waiting");
 
     expect(await stub.abort(receipt.runId, "stop wrapped")).toBe(true);

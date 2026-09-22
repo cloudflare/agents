@@ -66,12 +66,12 @@ export class StateMachineAdapterHarnessObject extends DurableObject<Cloudflare.E
   });
   readonly lifecycle = Lifecycle.install(this).use(this.#machines);
 
-  submit(key: string, options?: { runId?: string; idempotencyKey?: string }) {
-    return this.#harness.submit({ key, timeoutMs: 60_000 }, options);
+  start(key: string, options?: { runId?: string; idempotencyKey?: string }) {
+    return this.#harness.start({ key, timeoutMs: 60_000 }, options);
   }
 
-  send(runId: string, key: string, value: string, eventId: string) {
-    return this.#harness.send(
+  notify(runId: string, key: string, value: string, eventId: string) {
+    return this.#harness.notify(
       runId,
       { type: "message", key, value },
       { eventId }

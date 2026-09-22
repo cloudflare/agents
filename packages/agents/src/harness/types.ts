@@ -1,10 +1,10 @@
-export interface HarnessSubmitOptions {
+export interface HarnessStartOptions {
   readonly runId?: string;
   readonly idempotencyKey?: string;
   readonly retain?: boolean;
 }
 
-export interface HarnessSendOptions {
+export interface HarnessNotifyOptions {
   readonly eventId: string;
   readonly expiresAt?: number | Date;
 }
@@ -29,11 +29,11 @@ export interface AgentHarness<
   Result,
   Delivery = unknown
 > {
-  submit(input: Input, options?: HarnessSubmitOptions): Promise<HarnessReceipt>;
-  send(
+  start(input: Input, options?: HarnessStartOptions): Promise<HarnessReceipt>;
+  notify(
     runId: string,
     event: Event,
-    options: HarnessSendOptions
+    options: HarnessNotifyOptions
   ): Promise<Delivery>;
   inspect(runId: string): Promise<Snapshot | null>;
   abort(runId: string, reason?: string): Promise<boolean>;

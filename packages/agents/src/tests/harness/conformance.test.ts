@@ -7,7 +7,7 @@ import {
 } from "./conformance";
 
 type ContractStub = DurableObjectStub & {
-  submit(
+  start(
     input: string,
     options?: { runId?: string; idempotencyKey?: string }
   ): Promise<{ runId: string; accepted: boolean }>;
@@ -19,7 +19,7 @@ type ContractStub = DurableObjectStub & {
 };
 
 type StateMachineAdapterStub = ContractStub & {
-  send(
+  notify(
     runId: string,
     key: string,
     value: string,
@@ -46,9 +46,9 @@ function stateMachineHarness(): ConformanceHarness {
   ) as unknown as StateMachineAdapterStub;
   return {
     stub,
-    submit: (key, options) => stub.submit(key, options),
+    start: (key, options) => stub.start(key, options),
     settle: async (runId, key, value) => {
-      await stub.send(runId, key, value, `event_${crypto.randomUUID()}`);
+      await stub.notify(runId, key, value, `event_${crypto.randomUUID()}`);
       return value;
     },
     inspect: (runId) => stub.inspect(runId),
@@ -65,7 +65,7 @@ function nativeHarness(): ConformanceHarness {
   ) as unknown as NativeHarnessStub;
   return {
     stub,
-    submit: (key, options) => stub.submit(`exec:${key}`, options),
+    start: (key, options) => stub.start(`exec:${key}`, options),
     settle: async (runId, key) => {
       const deadline = Date.now() + 5_000;
       let gate: { gateId: string } | undefined;
@@ -100,7 +100,7 @@ function wrappedHarness(): ConformanceHarness {
   ) as unknown as WrappedHarnessStub;
   return {
     stub,
-    submit: (key, options) => stub.submit(key, options),
+    start: (key, options) => stub.start(key, options),
     settle: async (runId, _key, value) => {
       const deadline = Date.now() + 5_000;
       while ((await stub.runtimeStatus(runId)) !== "running") {

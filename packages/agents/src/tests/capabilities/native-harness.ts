@@ -227,7 +227,7 @@ export class NativeHarnessObject extends DurableObject<Cloudflare.Env> {
     ];
   }
 
-  async submit(
+  async start(
     prompt: string,
     options?: {
       runId?: string;
@@ -238,7 +238,7 @@ export class NativeHarnessObject extends DurableObject<Cloudflare.Env> {
     const runId = options?.runId ?? `native_${crypto.randomUUID()}`;
     const streamId = `native:${runId}`;
     await this.#streams.open(streamId, { tag: runId });
-    return this.#harness.submit(
+    return this.#harness.start(
       {
         prompt,
         streamId,

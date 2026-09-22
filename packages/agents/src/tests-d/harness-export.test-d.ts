@@ -49,10 +49,10 @@ object.harness satisfies AgentHarness<
   MachineSendReceipt
 >;
 
-object.harness.submit({ key: "one" });
+object.harness.start({ key: "one" });
 // @ts-expect-error input remains definition-specific
-object.harness.submit({ value: "one" });
-object.harness.send(
+object.harness.start({ value: "one" });
+object.harness.notify(
   "machine_1",
   { type: "input", key: "one", value: "hello" },
   { eventId: "event_1" }

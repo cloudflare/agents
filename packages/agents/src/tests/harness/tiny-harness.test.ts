@@ -10,7 +10,7 @@ type Snapshot = {
 };
 
 type TestHarnessStub = DurableObjectStub & {
-  submit(
+  start(
     prompt: string,
     options?: { permissionTimeoutMs?: number }
   ): Promise<{ runId: string }>;
@@ -54,7 +54,7 @@ async function waitFor(
 describe("native test harness", () => {
   it("runs a model phase to completion", async () => {
     const stub = createStub();
-    const receipt = await stub.submit("hello");
+    const receipt = await stub.start("hello");
 
     await expect(
       waitFor(stub, receipt.runId, "completed")
@@ -70,7 +70,7 @@ describe("native test harness", () => {
 
   it("parks an exec tool behind a permission gate", async () => {
     const stub = createStub();
-    const receipt = await stub.submit("exec:ls");
+    const receipt = await stub.start("exec:ls");
     const waiting = await waitFor(stub, receipt.runId, "waiting");
     const gate = waiting.gates?.[0];
     if (!gate) throw new Error("permission gate not found");
@@ -90,7 +90,7 @@ describe("native test harness", () => {
 
   it("does not run a denied tool", async () => {
     const stub = createStub();
-    const receipt = await stub.submit("exec:rm");
+    const receipt = await stub.start("exec:rm");
     const waiting = await waitFor(stub, receipt.runId, "waiting");
     const gate = waiting.gates?.[0];
     if (!gate) throw new Error("permission gate not found");
@@ -105,7 +105,7 @@ describe("native test harness", () => {
 
   it("settles permission expiry and withdrawal", async () => {
     const stub = createStub();
-    const expiring = await stub.submit("exec:expiry", {
+    const expiring = await stub.start("exec:expiry", {
       permissionTimeoutMs: 20
     });
     await expect(
@@ -114,7 +114,7 @@ describe("native test harness", () => {
       result: "expired"
     });
 
-    const withdrawn = await stub.submit("exec:withdraw");
+    const withdrawn = await stub.start("exec:withdraw");
     const waiting = await waitFor(stub, withdrawn.runId, "waiting");
     const gate = waiting.gates?.[0];
     if (!gate) throw new Error("permission gate not found");
@@ -128,14 +128,14 @@ describe("native test harness", () => {
 
   it("records model and tool failures without terminal output", async () => {
     const stub = createStub();
-    const model = await stub.submit("model-error");
+    const model = await stub.start("model-error");
     await expect(waitFor(stub, model.runId, "failed")).resolves.toMatchObject({
       error: { message: "model effect failed" }
     });
     await expect(stub.transcript(model.runId)).resolves.toEqual([]);
     await expect(stub.streamState(model.runId)).resolves.toBe("streaming");
 
-    const tool = await stub.submit("exec:tool-error");
+    const tool = await stub.start("exec:tool-error");
     const waiting = await waitFor(stub, tool.runId, "waiting");
     const gate = waiting.gates?.[0];
     if (!gate) throw new Error("permission gate not found");
@@ -148,7 +148,7 @@ describe("native test harness", () => {
 
   it("cancels while waiting for permission", async () => {
     const stub = createStub();
-    const receipt = await stub.submit("exec:sleep");
+    const receipt = await stub.start("exec:sleep");
     await waitFor(stub, receipt.runId, "waiting");
 
     expect(await stub.abort(receipt.runId, "user stopped")).toBe(true);

@@ -114,11 +114,8 @@ export class WrappedHarnessObject extends DurableObject<Cloudflare.Env> {
     ) WITHOUT ROWID`);
   }
 
-  submit(
-    prompt: string,
-    options?: { runId?: string; idempotencyKey?: string }
-  ) {
-    return this.#harness.submit({ prompt }, options);
+  start(prompt: string, options?: { runId?: string; idempotencyKey?: string }) {
+    return this.#harness.start({ prompt }, options);
   }
 
   async inspect(runId: string): Promise<TestHarnessSnapshot | null> {

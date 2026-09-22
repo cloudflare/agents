@@ -11,9 +11,9 @@ import type {
 } from "../state-machine";
 import type {
   AgentHarness,
+  HarnessNotifyOptions,
   HarnessReceipt,
-  HarnessSendOptions,
-  HarnessSubmitOptions
+  HarnessStartOptions
 } from "./types";
 
 export interface StateMachineHarnessOptions<
@@ -50,9 +50,9 @@ export class StateMachineHarness<
     this.#definition = options.definition;
   }
 
-  async submit(
+  async start(
     input: MachineInput<Definitions[Name]>,
-    options: HarnessSubmitOptions = {}
+    options: HarnessStartOptions = {}
   ): Promise<HarnessReceipt> {
     const receipt = await this.#stateMachine.run(
       this.#definition,
@@ -66,10 +66,10 @@ export class StateMachineHarness<
     };
   }
 
-  send(
+  notify(
     runId: string,
     event: MachineEventOf<Definitions[Name]>,
-    options: HarnessSendOptions
+    options: HarnessNotifyOptions
   ): Promise<MachineSendReceipt> {
     return this.#stateMachine.send(runId, event as MachineEvent, options);
   }

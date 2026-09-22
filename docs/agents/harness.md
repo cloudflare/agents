@@ -32,12 +32,12 @@ The adapter owns no phases or storage. It maps the common lifecycle operations
 to the named definition:
 
 ```ts
-const receipt = await harness.submit(
+const receipt = await harness.start(
   { prompt: "Run the tests" },
   { idempotencyKey: "request-123" }
 );
 
-await harness.send(
+await harness.notify(
   receipt.runId,
   { type: "permission", key: "exec-1", approved: true },
   { eventId: "permission-exec-1" }
