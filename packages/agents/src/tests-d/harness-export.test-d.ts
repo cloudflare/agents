@@ -10,7 +10,7 @@ import {
   defineMachine,
   type MachineDefinition,
   type MachineRunSnapshot,
-  type MachineSendReceipt
+  type MachineNotifyReceipt
 } from "../state-machine";
 
 type State = { phase: "waiting"; key: string };
@@ -46,7 +46,7 @@ object.harness satisfies AgentHarness<
   Event,
   MachineRunSnapshot<State, string>,
   string,
-  MachineSendReceipt
+  MachineNotifyReceipt
 >;
 
 object.harness.start({ key: "one" });

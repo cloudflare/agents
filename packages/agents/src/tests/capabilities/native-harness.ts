@@ -107,7 +107,7 @@ export class NativeHarnessObject extends DurableObject<Cloudflare.Env> {
           });
         }
         const expiresAt = Date.now() + state.permissionTimeoutMs;
-        const gate = context.gates.open(
+        const gate = context.gates.create(
           Permission,
           { tool: "exec" },
           { metadata: { tool: "exec" }, expiresAt }
@@ -271,11 +271,16 @@ export class NativeHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   answerPermission(gateId: string, approved: boolean, eventId: string) {
-    return this.#machines.answer(gateId, Permission, { approved }, { eventId });
+    return this.#machines.gates.notify(
+      gateId,
+      Permission,
+      { approved },
+      { eventId }
+    );
   }
 
   withdrawPermission(gateId: string) {
-    return this.#machines.withdrawGate(gateId);
+    return this.#machines.gates.withdraw(gateId);
   }
 
   async streamState(runId: string): Promise<string | null> {

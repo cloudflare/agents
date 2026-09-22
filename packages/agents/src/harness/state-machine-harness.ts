@@ -6,7 +6,7 @@ import type {
   MachineInput,
   MachineOutput,
   MachineRunSnapshot,
-  MachineSendReceipt,
+  MachineNotifyReceipt,
   MachineState
 } from "../state-machine";
 import type {
@@ -40,7 +40,7 @@ export class StateMachineHarness<
     MachineOutput<Definitions[Name]>
   >,
   MachineOutput<Definitions[Name]>,
-  MachineSendReceipt
+  MachineNotifyReceipt
 > {
   readonly #stateMachine: StateMachine<Definitions>;
   readonly #definition: Name;
@@ -70,8 +70,8 @@ export class StateMachineHarness<
     runId: string,
     event: MachineEventOf<Definitions[Name]>,
     options: HarnessNotifyOptions
-  ): Promise<MachineSendReceipt> {
-    return this.#stateMachine.send(runId, event as MachineEvent, options);
+  ): Promise<MachineNotifyReceipt> {
+    return this.#stateMachine.notify(runId, event as MachineEvent, options);
   }
 
   inspect(
