@@ -149,11 +149,21 @@ export interface MachineEffectInvocation {
   readonly signal: AbortSignal;
 }
 
+export interface MachineEffectPending {
+  readonly status: "running";
+  readonly externalId: string;
+  /** @internal Runtime validation prevents application-created pending values. */
+  readonly __brand: "MachineEffectPending";
+}
+
 export interface MachineEffectRuntime<
   Input extends MachineJson = MachineJson,
   Output extends MachineValue = MachineValue
 > {
-  execute(input: Input, invocation: MachineEffectInvocation): Promise<Output>;
+  execute(
+    input: Input,
+    invocation: MachineEffectInvocation
+  ): Promise<Output | MachineEffectPending>;
   reconcile?(
     externalId: string,
     invocation: MachineEffectInvocation
@@ -163,6 +173,10 @@ export interface MachineEffectRuntime<
     | { status: "failed"; error: { name: string; message: string } }
     | { status: "not-found" }
   >;
+  cancel?(
+    externalId: string,
+    invocation: MachineEffectInvocation
+  ): Promise<void>;
 }
 
 export type MachineEffectOutcome<Output extends MachineValue> =

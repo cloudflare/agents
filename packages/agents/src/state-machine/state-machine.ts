@@ -311,6 +311,7 @@ export class StateMachine<
     await this.lifecycle.ready();
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATUSES.has(row.status)) return false;
+    await this.#effects.cancelExternal(row);
     await this.#commitCancelled(row, reason);
     return true;
   }
@@ -411,6 +412,9 @@ export class StateMachine<
           `${row.definition_version}`
       });
       return;
+    }
+    if (row.cancel_requested === 1) {
+      await this.#effects.cancelExternal(row);
     }
     const state = deserializeMachineValue(row.checkpoint_json) as MachinePhased;
     this.#assertState(row.definition, definition, state);

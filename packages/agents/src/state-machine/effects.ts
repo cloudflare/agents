@@ -1,3 +1,4 @@
+import { isMachineEffectPending } from "./effect";
 import { randomAlphanumeric } from "./ids";
 import {
   deserializeMachineValue,
@@ -185,6 +186,15 @@ export class MachineEffectManager {
         ...(row.external_id ? { externalId: row.external_id } : {}),
         signal: controller.signal
       });
+      if (isMachineEffectPending(output)) {
+        this.#store.write(
+          `UPDATE cf_agents_state_machine_effects
+           SET external_id = ?
+           WHERE run_id = ? AND effect_id = ? AND status = 'running'`,
+          [output.externalId, runId, effect.id]
+        );
+        return { status: "running" };
+      }
       this.#settleCompleted(runId, effect.id, output);
       return { status: "completed", output: output as Output };
     } catch (error) {
@@ -201,6 +211,21 @@ export class MachineEffectManager {
       if (key.startsWith(`${runId}:`)) {
         controller.abort(new Error(reason ?? "cancelled"));
       }
+    }
+  }
+
+  async cancelExternal(row: MachineRunRow): Promise<void> {
+    for (const effect of this.#store.effectsForRun(row.run_id)) {
+      if (effect.status !== "running" || !effect.external_id) continue;
+      const runtime = this.#runtimes[effect.kind];
+      if (!runtime?.cancel) continue;
+      await runtime.cancel(effect.external_id, {
+        effectId: effect.effect_id,
+        idempotencyKey: `${row.run_id}:${effect.effect_id}`,
+        externalId: effect.external_id,
+        signal: AbortSignal.abort(row.cancel_reason ?? "cancelled")
+      });
+      this.#markInterrupted(row.run_id, effect.effect_id);
     }
   }
 

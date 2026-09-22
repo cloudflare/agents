@@ -70,9 +70,27 @@ const output: HarnessStreams<OutputDescriptor> = {
 A reconnecting transport can inspect the run, discover implementation-specific
 stream IDs, and replay them from its own cursors.
 
-## Implementing another harness
+## Wrapping an existing durable runtime
+
+Use `createHarnessEffectRuntime()` when another harness already owns its
+transcript and internal recovery:
+
+```ts
+import { createHarnessEffectRuntime } from "agents/harness";
+
+const runtime = createHarnessEffectRuntime({
+  start: (input, { executionId, signal }) =>
+    existingHarness.start(input, { executionId, signal }),
+  inspect: (executionId) => existingHarness.inspect(executionId),
+  cancel: (executionId) => existingHarness.cancel(executionId)
+});
+```
+
+Register `runtime` as a StateMachine effect with `recovery: "reconcile"` and a
+stable external execution ID. A running execution becomes a durable pending
+effect; later drives inspect it instead of starting it again.
 
 A harness does not need to use `StateMachineHarness`. It can implement
-`AgentHarness` directly as long as it preserves the lifecycle contract. A
-wrapper around an existing durable runtime should reconcile that runtime by a
-stable execution ID rather than replaying its internal model or tool effects.
+`AgentHarness` directly as long as it preserves the lifecycle contract. Native
+pi, OpenCode, and Codex message, provider, tool, and continuation types remain
+outside `agents/harness`.
