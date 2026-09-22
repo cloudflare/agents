@@ -341,7 +341,8 @@ function newMessageProjection(): MessageProjection {
 function toolPartFor(
   projection: MessageProjection,
   toolCallId: string,
-  toolName?: string
+  toolName?: string,
+  dynamic?: boolean
 ): MessagePart {
   const existing = projection.toolParts.get(toolCallId);
   if (existing) {
@@ -351,8 +352,8 @@ function toolPartFor(
     return existing;
   }
   const part: MessagePart =
-    toolName === undefined
-      ? { type: "dynamic-tool", toolName: "tool", toolCallId }
+    toolName === undefined || dynamic === true
+      ? { type: "dynamic-tool", toolName: toolName ?? "tool", toolCallId }
       : { type: `tool-${toolName}`, toolCallId };
   projection.toolParts.set(toolCallId, part);
   projection.parts.push(part);
@@ -371,7 +372,12 @@ function projectUIChunk(
       projection.parts.push({ type: "reasoning", text: chunk.delta });
       return;
     case "tool-input-start": {
-      const part = toolPartFor(projection, chunk.toolCallId, chunk.toolName);
+      const part = toolPartFor(
+        projection,
+        chunk.toolCallId,
+        chunk.toolName,
+        chunk.dynamic
+      );
       part.state = "input-streaming";
       if (chunk.providerExecuted !== undefined) {
         part.providerExecuted = chunk.providerExecuted;
@@ -379,7 +385,12 @@ function projectUIChunk(
       return;
     }
     case "tool-input-available": {
-      const part = toolPartFor(projection, chunk.toolCallId, chunk.toolName);
+      const part = toolPartFor(
+        projection,
+        chunk.toolCallId,
+        chunk.toolName,
+        chunk.dynamic
+      );
       part.state = "input-available";
       part.input = chunk.input;
       if (chunk.providerExecuted !== undefined) {
@@ -388,7 +399,12 @@ function projectUIChunk(
       return;
     }
     case "tool-input-error": {
-      const part = toolPartFor(projection, chunk.toolCallId, chunk.toolName);
+      const part = toolPartFor(
+        projection,
+        chunk.toolCallId,
+        chunk.toolName,
+        chunk.dynamic
+      );
       part.state = "output-error";
       part.input = chunk.input;
       part.errorText = chunk.errorText;
@@ -564,6 +580,8 @@ class ConfiguredWebChannel
   readonly #clientToolNamesByRequest = new Map<string, ReadonlySet<string>>();
   readonly #cancelledOperations = new Set<string>();
   readonly #dispatchingOperations = new Set<string>();
+  /** Conversation each connection belongs to, remembered past disconnect. */
+  readonly #conversationByConnection = new Map<string, string>();
   readonly #admittedByConversation = new Map<
     string,
     Map<string, ChannelConversationMessage>
@@ -827,6 +845,10 @@ class ConfiguredWebChannel
       };
     }
 
+    this.#conversationByConnection.set(
+      address.ownerConnectionId,
+      address.conversationId
+    );
     const key = this.#requestKey(address.ownerConnectionId, address.requestId);
     if (this.#cancelledOperations.has(key)) {
       const reason = new DOMException(
@@ -907,9 +929,10 @@ class ConfiguredWebChannel
               chunk.type === "tool-input-start" ||
               chunk.type === "tool-input-available"
             ) {
-              const isClientTool = configuredClientTools
-                ? configuredClientTools.has(chunk.toolName)
-                : chunk.providerExecuted !== true;
+              const isClientTool =
+                chunk.providerExecuted !== true &&
+                (configuredClientTools === undefined ||
+                  configuredClientTools.has(chunk.toolName));
               if (isClientTool) clientToolCallIds.add(chunk.toolCallId);
             }
             if (
@@ -1566,14 +1589,11 @@ class ConfiguredWebChannel
       return true;
     }
     const identity = this.#identityOf(connection);
-    const candidates = await this.#webResponseCandidates(
+    const { streaming, latest } = await this.#webResponseCandidates(
       identity.conversationId
     );
-    let status = candidates.find(
-      (candidate) => candidate.state === "streaming"
-    );
+    let status = streaming;
     if (!status) {
-      const latest = candidates[0];
       if (latest && this.#resolveMessages) {
         const snapshot = await this.#resolveMessages({
           conversationId: identity.conversationId
@@ -1610,34 +1630,44 @@ class ConfiguredWebChannel
   }
 
   /**
-   * Page the conversation's streams until this Channel's responses appear.
-   * Streams from other Channels share the conversation tag, so a single page
-   * can hold none of them.
+   * Page the conversation's streams for this Channel's responses. Streams from
+   * other Channels share the conversation tag, so a single page can hold none
+   * of this Channel's, and newer settled responses can hide a live one. The
+   * newest still-streaming response wins; otherwise the newest settled one is
+   * the replay candidate.
    */
-  async #webResponseCandidates(
-    conversationId: string
-  ): Promise<StreamStatus[]> {
+  async #webResponseCandidates(conversationId: string): Promise<{
+    streaming?: StreamStatus;
+    latest?: StreamStatus;
+  }> {
     const streams = this.#responseStreams;
-    if (!streams) return [];
+    if (!streams) return {};
     let after: StreamListCursor | undefined;
     let scanned = 0;
+    let latest: StreamStatus | undefined;
     while (scanned < RESPONSE_REPLAY_MAX_SCAN) {
       const statuses = await streams.list({
         tag: conversationId,
         limit: RESPONSE_REPLAY_PAGE_SIZE,
         ...(after !== undefined && { after })
       });
-      if (statuses.length === 0) return [];
+      if (statuses.length === 0) break;
       scanned += statuses.length;
-      const candidates = statuses.filter(
-        (candidate) => this.#webResponseMetadata(candidate) !== null
-      );
-      if (candidates.length > 0) return candidates;
-      if (statuses.length < RESPONSE_REPLAY_PAGE_SIZE) return [];
+      for (const candidate of statuses) {
+        if (this.#webResponseMetadata(candidate) === null) continue;
+        if (candidate.state === "streaming") {
+          return {
+            streaming: candidate,
+            ...(latest !== undefined && { latest })
+          };
+        }
+        latest ??= candidate;
+      }
+      if (statuses.length < RESPONSE_REPLAY_PAGE_SIZE) break;
       const oldest = statuses[statuses.length - 1];
       after = { createdAt: oldest.createdAt, streamId: oldest.streamId };
     }
-    return [];
+    return latest === undefined ? {} : { latest };
   }
 
   async #resumeResponseReplay(
@@ -1690,6 +1720,7 @@ class ConfiguredWebChannel
         if (
           (chunk.type === "tool-input-start" ||
             chunk.type === "tool-input-available") &&
+          chunk.providerExecuted !== true &&
           metadata.clientToolNames.has(chunk.toolName)
         ) {
           clientToolCallIds.add(chunk.toolCallId);
@@ -1782,6 +1813,7 @@ class ConfiguredWebChannel
       const chunk = entry.chunk as ChannelChunk;
       if (
         chunk.type === "tool-input-available" &&
+        chunk.providerExecuted !== true &&
         metadata.clientToolNames.has(chunk.toolName)
       ) {
         pending.add(chunk.toolCallId);
@@ -1913,18 +1945,31 @@ class ConfiguredWebChannel
     if (!conversation || !participant) {
       throw new Error("Web chat connection identity is unavailable");
     }
+    const conversationId = conversation.slice(CONVERSATION_TAG_PREFIX.length);
+    this.#conversationByConnection.set(connection.id, conversationId);
     return {
-      conversationId: conversation.slice(CONVERSATION_TAG_PREFIX.length),
+      conversationId,
       participantId: participant.slice(PARTICIPANT_TAG_PREFIX.length)
     };
   }
 
+  /**
+   * Drop every per-connection record the conversation owns, including records
+   * left behind by owners that have already disconnected mid-response.
+   */
   #clearConversationState(conversationId: string): void {
     this.#admittedByConversation.delete(conversationId);
+    const connectionIds = new Set<string>();
     for (const connection of this.webSockets.getConnections(
       conversationTag(conversationId)
     )) {
-      const prefix = `${connection.id}\u0000`;
+      connectionIds.add(connection.id);
+    }
+    for (const [connectionId, conversation] of this.#conversationByConnection) {
+      if (conversation === conversationId) connectionIds.add(connectionId);
+    }
+    for (const connectionId of connectionIds) {
+      const prefix = `${connectionId}\u0000`;
       for (const key of this.#dispatchingOperations) {
         if (key.startsWith(prefix)) this.#cancelledOperations.add(key);
       }
@@ -1937,14 +1982,14 @@ class ConfiguredWebChannel
           this.#active.delete(key);
         }
       }
-      this.#pendingResponseReplays.delete(connection.id);
-      this.#replayingConnections.delete(connection.id);
+      this.#pendingResponseReplays.delete(connectionId);
+      this.#replayingConnections.delete(connectionId);
       this.#replayControllers
-        .get(connection.id)
+        .get(connectionId)
         ?.abort.abort(
           new DOMException("The conversation was reset", "AbortError")
         );
-      this.#replayControllers.delete(connection.id);
+      this.#replayControllers.delete(connectionId);
       for (const [key, pending] of this.#pendingToolContinuations) {
         if (key.startsWith(prefix)) {
           pending.settle(false);
@@ -1958,9 +2003,12 @@ class ConfiguredWebChannel
         if (key.startsWith(prefix)) this.#clientToolNamesByRequest.delete(key);
       }
       for (const [key, pending] of this.#pendingApprovals) {
-        if (pending.connectionId === connection.id) {
+        if (pending.connectionId === connectionId) {
           this.#pendingApprovals.delete(key);
         }
+      }
+      if (!this.webSockets.getConnection(connectionId)) {
+        this.#conversationByConnection.delete(connectionId);
       }
     }
   }
@@ -1995,6 +2043,10 @@ class ConfiguredWebChannel
     for (const key of this.#clientToolNamesByRequest.keys()) {
       if (key.startsWith(prefix)) this.#clientToolNamesByRequest.delete(key);
     }
+    const streaming = [...this.#active.keys()].some((key) =>
+      key.startsWith(prefix)
+    );
+    if (!streaming) this.#conversationByConnection.delete(connectionId);
   }
 
   #requestKey(connectionId: string, requestId: string): string {

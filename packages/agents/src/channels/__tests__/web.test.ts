@@ -768,6 +768,84 @@ describe("web Channel", () => {
     });
   });
 
+  it("keeps a provider-executed tool conversation-visible when its name is a client tool", async () => {
+    const channel = web();
+    const capability = capabilityOf(channel);
+    const owner = {
+      id: "browser-1",
+      tags: connectionTags("browser-1", "conversation-1", "user-1"),
+      send: vi.fn()
+    };
+    const memberSend = vi.fn();
+    const member = {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "conversation-1", "user-2"),
+      send: memberSend
+    };
+    capability.connections.set(owner.id, owner);
+    capability.connections.set(member.id, member);
+    let host!: ChannelHost;
+    host = new ChannelHost({
+      channels: { browser: channel },
+      async onMessage(event) {
+        await host.stream(
+          event.message.replySurface!,
+          streamOf([
+            {
+              type: "tool-input-available",
+              toolCallId: "provider-tool-1",
+              toolName: "search",
+              input: { query: "Channels" },
+              providerExecuted: true
+            },
+            {
+              type: "tool-output-available",
+              toolCallId: "provider-tool-1",
+              output: { matches: 1 },
+              providerExecuted: true
+            }
+          ])
+        );
+      }
+    });
+
+    await capability.handlers.onMessage!(
+      owner as never,
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: "turn-1",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            clientTools: [{ name: "search", parameters: { type: "object" } }],
+            messages: [
+              {
+                id: "message-1",
+                role: "user",
+                parts: [{ type: "text", text: "Search for Channels" }]
+              }
+            ]
+          })
+        }
+      }) as never
+    );
+
+    expect(responseChunks(memberSend)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool-input-available",
+          toolCallId: "provider-tool-1",
+          toolName: "search"
+        }),
+        expect.objectContaining({
+          type: "tool-output-available",
+          toolCallId: "provider-tool-1",
+          output: { matches: 1 }
+        })
+      ])
+    );
+  });
+
   it("dispatches browser turns through ChannelHost and streams the reply", async () => {
     const channel = web();
     const capability = capabilityOf(channel);
@@ -1177,6 +1255,66 @@ describe("web Channel", () => {
     ]);
   });
 
+  it("hydrates a dynamic tool call as a dynamic canonical part", async () => {
+    const channel = web({
+      resolveMessages: vi.fn().mockResolvedValue({
+        messages: [
+          {
+            id: "assistant-1",
+            author: { type: "agent" },
+            content: [
+              {
+                type: "tool-input-available",
+                toolCallId: "dynamic-tool-1",
+                toolName: "lookup",
+                input: { id: 7 },
+                dynamic: true
+              },
+              {
+                type: "tool-output-available",
+                toolCallId: "dynamic-tool-1",
+                output: { found: true }
+              }
+            ]
+          }
+        ]
+      })
+    });
+    const capability = capabilityOf(channel);
+    const send = vi.fn();
+
+    await capability.handlers.onConnect!(
+      {
+        id: "browser-2",
+        tags: connectionTags("browser-2", "conversation-1", "user-2"),
+        send
+      } as never,
+      {} as never
+    );
+
+    expect(protocolFrames(send)).toEqual([
+      {
+        type: "cf_agent_chat_messages",
+        messages: [
+          {
+            id: "assistant-1",
+            role: "assistant",
+            parts: [
+              {
+                type: "dynamic-tool",
+                toolName: "lookup",
+                toolCallId: "dynamic-tool-1",
+                state: "output-available",
+                input: { id: 7 },
+                output: { found: true }
+              }
+            ]
+          }
+        ]
+      }
+    ]);
+  });
+
   it("omits a canonical message that only contains another participant's content", async () => {
     const channel = web({
       resolveMessages: vi.fn().mockResolvedValue({
@@ -1481,6 +1619,97 @@ describe("web Channel", () => {
       {
         type: "cf_agent_stream_resuming",
         id: "request-1",
+        probeId: "probe-1"
+      }
+    ]);
+  });
+
+  it("keeps paging past completed Web responses to reach a live one", async () => {
+    const webMetadata = (requestId: string) => ({
+      owner: "channels",
+      channelType: "web",
+      channelKey: "browser",
+      conversationId: "conversation-1",
+      messageId: `assistant-${requestId}`,
+      webRequestId: requestId,
+      webOwnerParticipantId: "user-1",
+      webClientToolNames: []
+    });
+    const completed = Array.from({ length: 20 }, (_, index) => ({
+      streamId: `response-completed-${index}`,
+      state: "completed" as const,
+      cursor: 1,
+      tag: "conversation-1",
+      metadata: webMetadata(`completed-${index}`),
+      createdAt: 10 + index,
+      updatedAt: 11 + index,
+      closedAt: 11 + index
+    }));
+    const streaming = {
+      streamId: "response-live",
+      state: "streaming" as const,
+      cursor: 1,
+      tag: "conversation-1",
+      metadata: webMetadata("request-live"),
+      createdAt: 1,
+      updatedAt: 2
+    };
+    const ordered = [...completed].sort(
+      (left, right) => right.createdAt - left.createdAt
+    );
+    ordered.push(streaming);
+    const streams = {
+      list: vi.fn(
+        async ({
+          limit,
+          after
+        }: {
+          limit: number;
+          after?: { createdAt: number; streamId: string };
+        }) => {
+          const start =
+            after === undefined
+              ? 0
+              : ordered.findIndex(
+                  (status) => status.streamId === after.streamId
+                ) + 1;
+          return ordered.slice(start, start + limit);
+        }
+      ),
+      status: vi.fn().mockResolvedValue(streaming),
+      async *read() {
+        yield { seq: 0, chunk: { type: "message-start", messageId: "a-1" } };
+      }
+    };
+    const channel = web();
+    const capability = capabilityOf(channel);
+    const send = vi.fn();
+    const connection = {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "conversation-1", "user-1"),
+      send
+    };
+    capability.connections.set(connection.id, connection);
+    new ChannelHost({
+      channels: { browser: channel },
+      streams: streams as never,
+      resolveMessages: vi.fn().mockResolvedValue({ messages: [] }),
+      onMessage: vi.fn()
+    });
+
+    await capability.handlers.onMessage!(
+      connection as never,
+      JSON.stringify({
+        type: "cf_agent_stream_resume_request",
+        probeId: "probe-1"
+      }) as never
+    );
+
+    expect(streams.list.mock.calls.length).toBeGreaterThan(1);
+    expect(protocolFrames(send)).toEqual([
+      {
+        type: "cf_agent_stream_resuming",
+        id: "request-live",
         probeId: "probe-1"
       }
     ]);
@@ -3321,6 +3550,87 @@ describe("web Channel", () => {
     await delivery;
 
     expect(protocolFrames(send).at(-1)).toEqual({
+      type: "cf_agent_chat_clear"
+    });
+  });
+
+  it("aborts a durable response whose owner left before the reset", async () => {
+    const appended: unknown[] = [];
+    const streams = {
+      open: vi.fn().mockResolvedValue({
+        streamId: "response-1",
+        cursor: 0,
+        append(chunk: unknown) {
+          appended.push(chunk);
+          return appended.length - 1;
+        },
+        close: vi.fn(),
+        error: vi.fn()
+      }),
+      list: vi.fn().mockResolvedValue([]),
+      status: vi.fn().mockResolvedValue(null),
+      async *read() {}
+    };
+    const channel = web();
+    const capability = capabilityOf(channel);
+    const owner = {
+      id: "browser-1",
+      tags: connectionTags("browser-1", "conversation-1", "user-1"),
+      send: vi.fn()
+    };
+    const memberSend = vi.fn();
+    const member = {
+      id: "browser-2",
+      tags: connectionTags("browser-2", "conversation-1", "user-2"),
+      send: memberSend
+    };
+    capability.connections.set(owner.id, owner);
+    capability.connections.set(member.id, member);
+    const host = new ChannelHost({
+      channels: { browser: channel },
+      streams: streams as never,
+      onConversationReset: vi.fn(),
+      onMessage: vi.fn()
+    });
+
+    const delivery = host.stream(
+      {
+        channelKey: "browser",
+        version: 1,
+        address: {
+          conversationId: "conversation-1",
+          ownerConnectionId: "browser-1",
+          requestId: "turn-1",
+          participantId: "user-1"
+        },
+        label: "Web chat"
+      },
+      new ReadableStream<ChannelChunk>({
+        start(controller) {
+          controller.enqueue({ type: "text", text: "Partial" });
+        }
+      }),
+      {
+        response: {
+          id: "response-1",
+          conversationId: "conversation-1",
+          messageId: "assistant-1"
+        }
+      }
+    );
+    await vi.waitFor(() =>
+      expect(responseChunks(memberSend).length).toBeGreaterThan(1)
+    );
+
+    capability.connections.delete(owner.id);
+    await capability.handlers.onClose!(owner as never);
+    await capability.handlers.onMessage!(
+      member as never,
+      JSON.stringify({ type: "cf_agent_chat_clear" }) as never
+    );
+    await delivery;
+
+    expect(protocolFrames(memberSend).at(-1)).toEqual({
       type: "cf_agent_chat_clear"
     });
   });
