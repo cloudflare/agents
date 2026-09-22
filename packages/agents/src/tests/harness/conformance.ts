@@ -5,15 +5,16 @@ export type ConformanceSnapshot = {
   status: string;
   result?: string;
   error?: { message: string };
+  gates?: Array<{ gateId: string }>;
 };
 
 export type ConformanceHarness = {
   readonly stub: DurableObjectStub;
   submit(
     key: string,
-    options?: { idempotencyKey?: string }
+    options?: { runId?: string; idempotencyKey?: string }
   ): Promise<{ runId: string; accepted: boolean }>;
-  settle(runId: string, key: string, value: string): Promise<void>;
+  settle(runId: string, key: string, value: string): Promise<string>;
   inspect(runId: string): Promise<ConformanceSnapshot | null>;
   result(runId: string): Promise<string | null>;
   abort(runId: string, reason: string): Promise<boolean>;
@@ -30,7 +31,7 @@ async function waitFor(
   timeoutMs = 5_000
 ): Promise<ConformanceSnapshot> {
   const deadline = Date.now() + timeoutMs;
-  for (;;) {
+  while (true) {
     const snapshot = await harness.inspect(runId);
     if (snapshot?.status === status) return snapshot;
     if (Date.now() > deadline) {
@@ -48,20 +49,24 @@ export function runHarnessConformance(
   describe(`${name} harness conformance`, () => {
     it("accepts idempotently and retains its result", async () => {
       const harness = create();
+      const runId = `${name}-input`;
       const first = await harness.submit("input", {
+        runId,
         idempotencyKey: `${name}:input`
       });
       const duplicate = await harness.submit("input", {
+        runId,
         idempotencyKey: `${name}:input`
       });
       expect(first.accepted).toBe(true);
       expect(duplicate).toMatchObject({ runId: first.runId, accepted: false });
 
-      await harness.settle(first.runId, "input", "done");
+      await expect(harness.result(first.runId)).resolves.toBeNull();
+      const expected = await harness.settle(first.runId, "input", "done");
       await expect(
         waitFor(harness, first.runId, "completed")
-      ).resolves.toMatchObject({ result: "done" });
-      await expect(harness.result(first.runId)).resolves.toBe("done");
+      ).resolves.toMatchObject({ result: expected });
+      await expect(harness.result(first.runId)).resolves.toBe(expected);
     });
 
     it("restores a waiting run after eviction", async () => {
@@ -81,7 +86,9 @@ export function runHarnessConformance(
       await waitFor(harness, paused.runId, "waiting");
       expect(await harness.pause(paused.runId)).toBe(true);
       await waitFor(harness, paused.runId, "paused");
+      expect(await harness.pause(paused.runId)).toBe(false);
       expect(await harness.resume(paused.runId)).toBe(true);
+      expect(await harness.resume(paused.runId)).toBe(false);
 
       const aborted = await harness.submit("abort");
       await waitFor(harness, aborted.runId, "waiting");
@@ -89,6 +96,16 @@ export function runHarnessConformance(
       await expect(
         waitFor(harness, aborted.runId, "cancelled")
       ).resolves.toMatchObject({ error: { message: "stopped" } });
+      expect(await harness.abort(aborted.runId, "again")).toBe(false);
+    });
+
+    it("returns stable outcomes for a missing run", async () => {
+      const harness = create();
+      await expect(harness.inspect("missing")).resolves.toBeNull();
+      await expect(harness.result("missing")).resolves.toBeNull();
+      await expect(harness.abort("missing", "none")).resolves.toBe(false);
+      await expect(harness.pause("missing")).resolves.toBe(false);
+      await expect(harness.resume("missing")).resolves.toBe(false);
     });
   });
 }

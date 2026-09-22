@@ -1,9 +1,4 @@
 import { DurableObject } from "cloudflare:workers";
-import {
-  StateMachineHarness,
-  createHarnessEffectRuntime,
-  type HarnessRuntime
-} from "../../harness";
 import { Lifecycle } from "../../lifecycle";
 import { LifecycleCapability } from "../../lifecycle/capability";
 import type { LifecycleJobContext } from "../../lifecycle/job-queue";
@@ -12,7 +7,6 @@ import {
   defineGate,
   defineMachine,
   settleStreamOnMachineCommit,
-  type MachineCommitParticipant,
   type MachineDefinition,
   type MachineJson
 } from "../../state-machine";
@@ -99,46 +93,6 @@ type HarnessSnapshot =
       effects?: never;
     };
 
-type TinyState =
-  | { phase: "model-plan"; prompt: string; streamId: string }
-  | {
-      phase: "model";
-      prompt: string;
-      streamId: string;
-      effect: {
-        id: string;
-        kind: string;
-        recovery: "safe" | "never" | "reconcile";
-      };
-    }
-  | {
-      phase: "permission";
-      prompt: string;
-      streamId: string;
-      gateId: string;
-      expiresAt: number;
-    }
-  | {
-      phase: "tool";
-      streamId: string;
-      effect: {
-        id: string;
-        kind: string;
-        recovery: "safe" | "never" | "reconcile";
-      };
-    };
-
-type WrappedState =
-  | { phase: "plan"; prompt: string }
-  | {
-      phase: "running";
-      effect: {
-        id: string;
-        kind: string;
-        recovery: "safe" | "never" | "reconcile";
-      };
-    };
-
 class SyncJobProbe extends LifecycleCapability {
   constructor() {
     super("sync-job-probe");
@@ -186,44 +140,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly #streams = new Streams();
   readonly #effectRuns: string[] = [];
   readonly #effectReconciles: string[] = [];
-  readonly #wrappedRuntime: HarnessRuntime<{ prompt: string }, string> = {
-    start: async (input, invocation) => {
-      this.ctx.storage.sql.exec(
-        `INSERT OR IGNORE INTO wrapped_harness_runs
-          (execution_id, prompt, status, result)
-         VALUES (?, ?, 'running', NULL)`,
-        invocation.executionId,
-        input.prompt
-      );
-    },
-    inspect: async (executionId) => {
-      const row = this.ctx.storage.sql
-        .exec<{ status: string; result: string | null }>(
-          `SELECT status, result FROM wrapped_harness_runs
-           WHERE execution_id = ?`,
-          executionId
-        )
-        .toArray()[0];
-      if (!row) return { status: "not-found" } as const;
-      if (row.status === "running") return { status: "running" } as const;
-      if (row.status === "completed") {
-        return { status: "completed", result: row.result ?? "" } as const;
-      }
-      return {
-        status: "failed",
-        error: { name: "Cancelled", message: row.result ?? "cancelled" }
-      } as const;
-    },
-    cancel: async (executionId) => {
-      this.ctx.storage.sql.exec(
-        `UPDATE wrapped_harness_runs SET status = 'failed', result = 'cancelled'
-         WHERE execution_id = ? AND status = 'running'`,
-        executionId
-      );
-    }
-  };
   readonly #effectRuntimes = {
-    wrapped: createHarnessEffectRuntime(this.#wrappedRuntime),
     blocking: {
       execute: async (
         _input: import("../../state-machine").MachineJson,
@@ -474,18 +391,6 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     definitions: this.#definitions,
     effects: this.#effectRuntimes
   });
-  readonly #harness = new StateMachineHarness({
-    stateMachine: this.#stateMachine,
-    definition: "waiter"
-  });
-  readonly #tinyHarness = new StateMachineHarness({
-    stateMachine: this.#stateMachine,
-    definition: "tinyHarness"
-  });
-  readonly #wrappedHarness = new StateMachineHarness({
-    stateMachine: this.#stateMachine,
-    definition: "wrappedHarness"
-  });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.#jobProbe)
     .use(this.#streams)
@@ -502,42 +407,6 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS sync_job_probe_deliveries (value TEXT NOT NULL)"
     );
-    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS wrapped_harness_runs (
-      execution_id TEXT PRIMARY KEY,
-      prompt TEXT NOT NULL,
-      status TEXT NOT NULL,
-      result TEXT
-    ) WITHOUT ROWID`);
-    this.ctx.storage.sql
-      .exec(`CREATE TABLE IF NOT EXISTS tiny_harness_transcript (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      run_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL
-    )`);
-  }
-
-  #tinyOutputCommit(
-    runId: string,
-    streamId: string,
-    output: string
-  ): MachineCommitParticipant[] {
-    return [
-      createMachineCommitParticipant(() => {
-        this.#streams
-          .__DO_NOT_USE_WILL_BREAK__sync()
-          .append(streamId, { type: "output", text: output });
-      }),
-      createMachineCommitParticipant(() => {
-        this.ctx.storage.sql.exec(
-          `INSERT INTO tiny_harness_transcript (run_id, role, content)
-           VALUES (?, 'assistant', ?)`,
-          runId,
-          output
-        );
-      }),
-      settleStreamOnMachineCommit(this.#streams, streamId)
-    ];
   }
 
   start(label: string, runId?: string) {
@@ -584,126 +453,6 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
 
   startWaiter(key: string, timeoutMs = 60_000, runId?: string) {
     return this.#stateMachine.run("waiter", { key, timeoutMs }, { runId });
-  }
-
-  harnessSubmit(
-    key: string,
-    options?: { runId?: string; idempotencyKey?: string }
-  ) {
-    return this.#harness.submit({ key, timeoutMs: 60_000 }, options);
-  }
-
-  harnessSend(runId: string, key: string, value: string, eventId: string) {
-    return this.#harness.send(
-      runId,
-      { type: "message", key, value },
-      { eventId }
-    );
-  }
-
-  async harnessInspect(runId: string): Promise<HarnessSnapshot | null> {
-    return (await this.#harness.inspect(
-      runId
-    )) as unknown as HarnessSnapshot | null;
-  }
-
-  harnessAbort(runId: string, reason?: string) {
-    return this.#harness.abort(runId, reason);
-  }
-
-  harnessPause(runId: string) {
-    return this.#harness.pause(runId);
-  }
-
-  harnessResume(runId: string) {
-    return this.#harness.resume(runId);
-  }
-
-  harnessResult(runId: string) {
-    return this.#harness.result(runId);
-  }
-
-  async tinySubmit(
-    prompt: string,
-    options?: { runId?: string; idempotencyKey?: string }
-  ) {
-    const runId = options?.runId ?? `tiny_${crypto.randomUUID()}`;
-    const streamId = `tiny:${runId}`;
-    await this.#streams.open(streamId, { tag: runId });
-    return this.#tinyHarness.submit(
-      { prompt, streamId },
-      { ...options, runId }
-    );
-  }
-
-  async tinyInspect(runId: string): Promise<HarnessSnapshot | null> {
-    return (await this.#tinyHarness.inspect(
-      runId
-    )) as unknown as HarnessSnapshot | null;
-  }
-
-  tinyResult(runId: string) {
-    return this.#tinyHarness.result(runId);
-  }
-
-  async tinyStreamState(runId: string): Promise<string | null> {
-    return (await this.#streams.status(`tiny:${runId}`))?.state ?? null;
-  }
-
-  tinyTranscript(runId: string): string[] {
-    return this.ctx.storage.sql
-      .exec<{ content: string }>(
-        `SELECT content FROM tiny_harness_transcript
-         WHERE run_id = ? ORDER BY id`,
-        runId
-      )
-      .toArray()
-      .map((row) => row.content);
-  }
-
-  tinyAbort(runId: string, reason?: string) {
-    return this.#tinyHarness.abort(runId, reason);
-  }
-
-  wrappedSubmit(
-    prompt: string,
-    options?: { runId?: string; idempotencyKey?: string }
-  ) {
-    return this.#wrappedHarness.submit({ prompt }, options);
-  }
-
-  async wrappedInspect(runId: string): Promise<HarnessSnapshot | null> {
-    return (await this.#wrappedHarness.inspect(
-      runId
-    )) as unknown as HarnessSnapshot | null;
-  }
-
-  wrappedAbort(runId: string, reason?: string) {
-    return this.#wrappedHarness.abort(runId, reason);
-  }
-
-  wrappedResult(runId: string) {
-    return this.#wrappedHarness.result(runId);
-  }
-
-  completeWrapped(runId: string, result: string): void {
-    this.ctx.storage.sql.exec(
-      `UPDATE wrapped_harness_runs SET status = 'completed', result = ?
-       WHERE execution_id = ? AND status = 'running'`,
-      result,
-      `${runId}:execution`
-    );
-  }
-
-  wrappedRuntimeStatus(runId: string): string | null {
-    return (
-      this.ctx.storage.sql
-        .exec<{ status: string }>(
-          "SELECT status FROM wrapped_harness_runs WHERE execution_id = ?",
-          `${runId}:execution`
-        )
-        .toArray()[0]?.status ?? null
-    );
   }
 
   sendMessage(runId: string, key: string, value: string, eventId: string) {
