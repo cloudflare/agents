@@ -24,6 +24,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/schedules/parser`     | `src/schedules/parser.ts`     | Zod-based natural-language scheduling prompt and schema helpers              |
 | `agents/tasks`                | `src/tasks/index.ts`          | Durable replayable background Tasks capability                               |
 | `agents/state-machine`        | `src/state-machine/index.ts`  | Durable checkpointed machines driven by Lifecycle jobs                       |
+| `agents/harness`              | `src/harness/index.ts`        | Transport-neutral harness lifecycle contract and StateMachine adapter        |
 | `agents/streams`              | `src/streams/index.ts`        | Durable incremental output Streams capability                                |
 | `agents/observability`        | `src/observability/index.ts`  | Observability event types and emitters                                       |
 | `agents/ai-chat-agent`        | `src/ai-chat-agent.ts`        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
@@ -67,6 +68,7 @@ src/
   schedules/            # Scheduler capability, runtime types, and parsing helpers
   tasks/                # Durable replayable function capability
   state-machine/        # Durable checkpointed machines over Lifecycle jobs
+  harness/              # Harness contract and StateMachine lifecycle adapter
   streams/              # Durable incremental output capability
   serializable.ts       # RPC serialization types
   types.ts              # Shared message type enums

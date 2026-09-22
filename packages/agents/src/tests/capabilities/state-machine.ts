@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { StateMachineHarness } from "../../harness";
 import { Lifecycle } from "../../lifecycle";
 import { LifecycleCapability } from "../../lifecycle/capability";
 import type { LifecycleJobContext } from "../../lifecycle/job-queue";
@@ -391,6 +392,10 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     definitions: this.#definitions,
     effects: this.#effectRuntimes
   });
+  readonly #harness = new StateMachineHarness({
+    stateMachine: this.#stateMachine,
+    definition: "waiter"
+  });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.#jobProbe)
     .use(this.#streams)
@@ -453,6 +458,43 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
 
   startWaiter(key: string, timeoutMs = 60_000, runId?: string) {
     return this.#stateMachine.run("waiter", { key, timeoutMs }, { runId });
+  }
+
+  harnessSubmit(
+    key: string,
+    options?: { runId?: string; idempotencyKey?: string }
+  ) {
+    return this.#harness.submit({ key, timeoutMs: 60_000 }, options);
+  }
+
+  harnessSend(runId: string, key: string, value: string, eventId: string) {
+    return this.#harness.send(
+      runId,
+      { type: "message", key, value },
+      { eventId }
+    );
+  }
+
+  async harnessInspect(runId: string): Promise<HarnessSnapshot | null> {
+    return (await this.#harness.inspect(
+      runId
+    )) as unknown as HarnessSnapshot | null;
+  }
+
+  harnessAbort(runId: string, reason?: string) {
+    return this.#harness.abort(runId, reason);
+  }
+
+  harnessPause(runId: string) {
+    return this.#harness.pause(runId);
+  }
+
+  harnessResume(runId: string) {
+    return this.#harness.resume(runId);
+  }
+
+  harnessResult(runId: string) {
+    return this.#harness.result(runId);
   }
 
   sendMessage(runId: string, key: string, value: string, eventId: string) {

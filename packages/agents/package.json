@@ -150,6 +150,11 @@
       "import": "./dist/state-machine/index.js",
       "require": "./dist/state-machine/index.js"
     },
+    "./harness": {
+      "types": "./dist/harness/index.d.ts",
+      "import": "./dist/harness/index.js",
+      "require": "./dist/harness/index.js"
+    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",
