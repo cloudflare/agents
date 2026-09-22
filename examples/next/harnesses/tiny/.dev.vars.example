@@ -1,0 +1,4 @@
+# AI Gateway id. "default" is the per-account gateway.
+GATEWAY_ID="default"
+# Optional override for the lead model.
+MODEL_LEAD=""
