@@ -66,12 +66,12 @@ export function createMachineContext(options: {
         > | null
     }),
     gates: Object.freeze({
-      open: <Payload extends MachineJson, Answer extends MachineJson>(
+      create: <Payload extends MachineJson, Answer extends MachineJson>(
         kind: GateKind<Payload, Answer>,
         request: Payload,
         gateOptions: MachineGateOptions
       ): MachineGateRef<Answer> =>
-        gates.open(row, pending.gates, kind, request, gateOptions),
+        gates.create(row, pending.gates, kind, request, gateOptions),
       take: <Answer extends MachineJson>(gate: MachineGateRef<Answer>) =>
         gates.take(gate, (type, key) => takeEvent({ type, key }))
     }),

@@ -34,7 +34,7 @@ const example = defineMachine<
       state.phase satisfies "first";
       const message = context.events.take({ type: "message" });
       if (message) message.event.value satisfies string;
-      const gate = context.gates.open(
+      const gate = context.gates.create(
         Permission,
         { tool: "exec" },
         { expiresAt: Date.now() + 1_000 }
@@ -64,7 +64,7 @@ class ExampleObject extends DurableObject {
 declare const object: ExampleObject;
 object.stateMachine satisfies DurableObjectCapability;
 object.stateMachine.run("example", { value: "ok" });
-object.stateMachine.send(
+object.stateMachine.notify(
   "machine_1",
   { type: "message", key: "inbox", value: "hello" },
   { eventId: "event_1" }

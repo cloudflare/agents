@@ -116,7 +116,7 @@ export type MachineGateOutcome<Answer extends MachineJson> =
   | { readonly status: "expired" | "withdrawn" | "cancelled" };
 
 export interface MachineGates {
-  open<Payload extends MachineJson, Answer extends MachineJson>(
+  create<Payload extends MachineJson, Answer extends MachineJson>(
     kind: GateKind<Payload, Answer>,
     payload: Payload,
     options: MachineGateOptions
@@ -330,12 +330,12 @@ export interface MachineReceipt {
   readonly createdAt: number;
 }
 
-export interface MachineSendOptions {
+export interface MachineNotifyOptions {
   readonly eventId: string;
   readonly expiresAt?: number | Date;
 }
 
-export type MachineSendReceipt =
+export type MachineNotifyReceipt =
   | { readonly status: "accepted"; readonly sequence: number }
   | { readonly status: "duplicate"; readonly sequence: number }
   | { readonly status: "not-found" }

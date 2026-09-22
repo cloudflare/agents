@@ -45,7 +45,7 @@ export class MachineGateManager {
     this.#emit = options.emit;
   }
 
-  open<Payload extends MachineJson, Answer extends MachineJson>(
+  create<Payload extends MachineJson, Answer extends MachineJson>(
     row: MachineRunRow,
     pending: PendingGate[],
     kind: GateKind<Payload, Answer>,
@@ -134,7 +134,7 @@ export class MachineGateManager {
     }
   }
 
-  async answer<Payload extends MachineJson, Answer extends MachineJson>(
+  async notify<Payload extends MachineJson, Answer extends MachineJson>(
     gateId: string,
     kind: GateKind<Payload, Answer>,
     answer: Answer,

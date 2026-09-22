@@ -8,8 +8,8 @@ import type {
   MachineEventRow,
   MachineQueuedEvent,
   MachineRunRow,
-  MachineSendOptions,
-  MachineSendReceipt,
+  MachineNotifyOptions,
+  MachineNotifyReceipt,
   MachineWake
 } from "./types";
 
@@ -36,11 +36,11 @@ export class MachineEventManager {
     this.#emit = options.emit;
   }
 
-  async send(
+  async notify(
     runId: string,
     event: MachineEvent,
-    options: MachineSendOptions
-  ): Promise<MachineSendReceipt> {
+    options: MachineNotifyOptions
+  ): Promise<MachineNotifyReceipt> {
     if (!options.eventId) throw new Error("Machine events require an eventId");
     if (!event.type) throw new Error("Machine events require a non-empty type");
     const eventJson = serializeMachineValue(event, "Machine event payload");
@@ -49,7 +49,7 @@ export class MachineEventManager {
     }
     const expiresAt = optionalTime(options.expiresAt);
     let wake = false;
-    let receipt: MachineSendReceipt;
+    let receipt: MachineNotifyReceipt;
 
     this.#store.transaction(() => {
       const row = this.#store.getRun(runId);

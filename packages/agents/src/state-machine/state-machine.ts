@@ -43,8 +43,8 @@ import type {
   MachineRunOptions,
   MachineRunRow,
   MachineRunSnapshot,
-  MachineSendOptions,
-  MachineSendReceipt,
+  MachineNotifyOptions,
+  MachineNotifyReceipt,
   MachineState,
   MachineValue
 } from "./types";
@@ -76,6 +76,16 @@ export interface StateMachineOptions<Definitions extends MachineDefinitions> {
   readonly effects?: MachineEffectRuntimes;
 }
 
+export interface StateMachineGateNotifications {
+  notify<Payload extends MachineJson, Answer extends MachineJson>(
+    gateId: string,
+    kind: GateKind<Payload, Answer>,
+    answer: Answer,
+    options: { eventId: string }
+  ): Promise<MachineAnswerReceipt>;
+  withdraw(gateId: string): Promise<boolean>;
+}
+
 /** Durable checkpointed state machines driven by Lifecycle jobs. */
 export class StateMachine<
   Definitions extends MachineDefinitions = MachineDefinitions
@@ -87,11 +97,27 @@ export class StateMachine<
   #gateManager: MachineGateManager | undefined;
   #effectManager: MachineEffectManager | undefined;
   #childManager: MachineChildManager | undefined;
+  readonly gates: StateMachineGateNotifications;
 
   constructor(options: StateMachineOptions<Definitions>) {
     super("state-machine");
     this.#definitions = options.definitions;
     this.#effectRuntimes = options.effects ?? {};
+    this.gates = Object.freeze({
+      notify: async <Payload extends MachineJson, Answer extends MachineJson>(
+        gateId: string,
+        kind: GateKind<Payload, Answer>,
+        answer: Answer,
+        notifyOptions: { eventId: string }
+      ) => {
+        await this.lifecycle.ready();
+        return this.#gates.notify(gateId, kind, answer, notifyOptions);
+      },
+      withdraw: async (gateId: string) => {
+        await this.lifecycle.ready();
+        return this.#gates.withdraw(gateId);
+      }
+    });
   }
 
   get #store(): StateMachineStore {
@@ -250,28 +276,13 @@ export class StateMachine<
     >;
   }
 
-  async send(
+  async notify(
     runId: string,
     event: MachineEvent,
-    options: MachineSendOptions
-  ): Promise<MachineSendReceipt> {
+    options: MachineNotifyOptions
+  ): Promise<MachineNotifyReceipt> {
     await this.lifecycle.ready();
-    return this.#events.send(runId, event, options);
-  }
-
-  async answer<Payload extends MachineJson, Answer extends MachineJson>(
-    gateId: string,
-    kind: GateKind<Payload, Answer>,
-    answer: Answer,
-    options: { eventId: string }
-  ): Promise<MachineAnswerReceipt> {
-    await this.lifecycle.ready();
-    return this.#gates.answer(gateId, kind, answer, options);
-  }
-
-  async withdrawGate(gateId: string): Promise<boolean> {
-    await this.lifecycle.ready();
-    return this.#gates.withdraw(gateId);
+    return this.#events.notify(runId, event, options);
   }
 
   async cancel(runId: string, reason?: string): Promise<MachineCancelReceipt> {

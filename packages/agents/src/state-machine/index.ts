@@ -4,7 +4,10 @@
  * @experimental The whole surface may change before stabilizing.
  */
 export { StateMachine } from "./state-machine";
-export type { StateMachineOptions } from "./state-machine";
+export type {
+  StateMachineGateNotifications,
+  StateMachineOptions
+} from "./state-machine";
 export { defineGate, defineMachine } from "./definition";
 export { settleStreamOnMachineCommit } from "./streams";
 export { MAX_MACHINE_CHECKPOINT_BYTES } from "./serialization";
@@ -55,8 +58,8 @@ export type {
   MachineReceipt,
   MachineRunOptions,
   MachineRunSnapshot,
-  MachineSendOptions,
-  MachineSendReceipt,
+  MachineNotifyOptions,
+  MachineNotifyReceipt,
   MachineSpawnOptions,
   MachineState,
   MachineTransitionOptions,

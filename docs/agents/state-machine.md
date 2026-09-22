@@ -77,12 +77,12 @@ const snapshot = await machines.get(receipt.runId, "run");
 A caller-selected `runId` or `idempotencyKey` joins an existing run instead of
 creating another one.
 
-## Send events
+## Notify a machine
 
 Every delivery requires an idempotent `eventId`:
 
 ```ts
-await machines.send(
+await machines.notify(
   receipt.runId,
   { type: "input", key: "request-1", value: "hello" },
   { eventId: "input-request-1" }
@@ -117,7 +117,7 @@ const Permission = defineGate<
   { approved: boolean }
 >("permission");
 
-const gate = context.gates.open(
+const gate = context.gates.create(
   Permission,
   { tool: "exec", command: "pnpm test" },
   {
@@ -130,7 +130,7 @@ const gate = context.gates.open(
 Store `gate.id` in the next checkpoint. An external request answers it by ID:
 
 ```ts
-await machines.answer(
+await machines.gates.notify(
   gateId,
   Permission,
   { approved: true },

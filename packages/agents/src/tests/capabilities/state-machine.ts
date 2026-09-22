@@ -243,7 +243,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
       phases: {
         open: (state, context) => {
           const expiresAt = Date.now() + state.timeoutMs;
-          const gate = context.gates.open(
+          const gate = context.gates.create(
             Permission,
             { tool: "exec" },
             {
@@ -525,7 +525,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   sendMessage(runId: string, key: string, value: string, eventId: string) {
-    return this.#stateMachine.send(
+    return this.#stateMachine.notify(
       runId,
       { type: "message", key, value },
       { eventId }
@@ -555,7 +555,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   answerPermission(gateId: string, approved: boolean, eventId: string) {
-    return this.#stateMachine.answer(
+    return this.#stateMachine.gates.notify(
       gateId,
       Permission,
       { approved },
@@ -564,7 +564,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   answerWrongPermissionKind(gateId: string, eventId: string) {
-    return this.#stateMachine.answer(
+    return this.#stateMachine.gates.notify(
       gateId,
       OtherPermission,
       { approved: true },
@@ -573,7 +573,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   withdrawPermission(gateId: string) {
-    return this.#stateMachine.withdrawGate(gateId);
+    return this.#stateMachine.gates.withdraw(gateId);
   }
 
   startEffect(
