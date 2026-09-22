@@ -9,6 +9,7 @@ import {
   MachineTransitionConflictError,
   MissingMachineDefinitionError
 } from "./errors";
+import { randomAlphanumeric } from "./ids";
 import {
   migrateStateMachineSchema,
   STATE_MACHINE_SCHEMA_VERSION,
@@ -52,24 +53,6 @@ type RuntimeDefinition = {
 };
 
 type DrivePayload = { runId: string; revision: number };
-
-const RUN_ID_ALPHABET =
-  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-const MAX_UNBIASED_RANDOM_BYTE = 256 - (256 % RUN_ID_ALPHABET.length);
-
-function randomAlphanumeric(length = 12): string {
-  let value = "";
-  const bytes = new Uint8Array(length);
-  while (value.length < length) {
-    crypto.getRandomValues(bytes);
-    for (const byte of bytes) {
-      if (byte >= MAX_UNBIASED_RANDOM_BYTE) continue;
-      value += RUN_ID_ALPHABET[byte % RUN_ID_ALPHABET.length];
-      if (value.length === length) break;
-    }
-  }
-  return value;
-}
 
 export interface StateMachineOptions<Definitions extends MachineDefinitions> {
   readonly definitions: Definitions;
