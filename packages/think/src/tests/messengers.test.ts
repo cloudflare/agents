@@ -626,6 +626,58 @@ describe("think messengers core", () => {
     expect(attachment.raw).toBeDefined();
   });
 
+  describe("attachment fetch", () => {
+    function fetched(fetchData: () => Promise<unknown>) {
+      return toMessengerAttachment({
+        // `chat@4.31` types this as `Promise<Buffer>`; later releases inside
+        // the declared range widen it to `Promise<Buffer | ArrayBuffer>`.
+        fetchData: fetchData as () => Promise<Buffer>,
+        mimeType: "text/plain",
+        name: "hi.txt",
+        type: "file"
+      }).fetch?.();
+    }
+
+    it("copies only a Buffer view's own bytes out of its backing store", async () => {
+      const pool = new Uint8Array([0, 0, 104, 105, 0, 0]);
+      const data = await fetched(() =>
+        Promise.resolve(Buffer.from(pool.buffer, 2, 2))
+      );
+
+      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(new TextDecoder().decode(data)).toBe("hi");
+      pool[2] = 0;
+      expect(new TextDecoder().decode(data)).toBe("hi");
+    });
+
+    it("returns an ArrayBuffer from the adapter unchanged", async () => {
+      const bytes = new TextEncoder().encode("hello").buffer;
+      const data = await fetched(() => Promise.resolve(bytes));
+
+      expect(data).toBe(bytes);
+      expect(new TextDecoder().decode(data)).toBe("hello");
+    });
+
+    it.skipIf(typeof SharedArrayBuffer === "undefined")(
+      "copies a view backed by a SharedArrayBuffer instead of dropping it",
+      async () => {
+        const shared = new Uint8Array(new SharedArrayBuffer(3));
+        shared.set([104, 105, 33]);
+        const data = await fetched(() => Promise.resolve(shared));
+
+        expect(data).toBeInstanceOf(ArrayBuffer);
+        expect(new TextDecoder().decode(data)).toBe("hi!");
+      }
+    );
+
+    it("returns an empty ArrayBuffer when the adapter resolves nothing", async () => {
+      const data = await fetched(() => Promise.resolve(undefined));
+
+      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(data?.byteLength).toBe(0);
+    });
+  });
+
   it("leaves attachment id undefined when fetchMetadata has no known id key", () => {
     const attachment = toMessengerAttachment({
       fetchMetadata: { region: "us-east" },

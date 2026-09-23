@@ -852,14 +852,7 @@ export function toMessengerAttachment(
     fetch: attachment.fetchData
       ? async () => {
           const data = await attachment.fetchData?.();
-          if (!data) {
-            return new ArrayBuffer(0);
-          }
-          const copy = data.buffer.slice(
-            data.byteOffset,
-            data.byteOffset + data.byteLength
-          );
-          return copy instanceof ArrayBuffer ? copy : new ArrayBuffer(0);
+          return data ? attachmentBytes(data) : new ArrayBuffer(0);
         }
       : undefined,
     fetchMetadata: fetchMetadata ? { ...fetchMetadata } : undefined,
@@ -870,6 +863,21 @@ export function toMessengerAttachment(
     size: attachment.size,
     url: attachment.url
   };
+}
+
+/**
+ * `chat` adapters resolve `fetchData` to a `Buffer` or, from `chat@4.41`
+ * (inside this package's `^4.31.0` range), a plain `ArrayBuffer`. A `Buffer` is
+ * a view that may share a pooled or `SharedArrayBuffer` backing store with
+ * unrelated bytes, so only its own range is copied out.
+ */
+function attachmentBytes(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
+  if (data instanceof ArrayBuffer) {
+    return data;
+  }
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  return copy.buffer;
 }
 
 const FETCH_METADATA_ID_KEYS = ["id", "fileId", "mediaId", "fileUniqueId"];
