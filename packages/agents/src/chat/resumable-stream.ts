@@ -188,6 +188,13 @@ export class ResumableStream {
    */
   private _activeIsContinuation = false;
 
+  /**
+   * Index the next stored chunk of the active stream gets, which is also its
+   * position in a replay. `null` for a stream restored from SQLite, whose
+   * count is not tracked.
+   */
+  private _nextChunkSeq: number | null = null;
+
   private _chunkBuffer: Array<{ streamId: string; body: string }> = [];
   private _chunkBufferBytes = 0;
   private _isFlushingChunks = false;
@@ -515,6 +522,7 @@ export class ResumableStream {
     this._activeRequestId = requestId;
     this._isLive = true;
     this._activeIsContinuation = options.continuation ?? false;
+    this._nextChunkSeq = 0;
 
     const metadata: ChatStreamMetadata = { cfChat: 1 };
     if (options.messageId != null) metadata.messageId = options.messageId;
@@ -638,8 +646,11 @@ export class ResumableStream {
    * but will be missing from replay on reconnection.
    * @param streamId - The stream this chunk belongs to
    * @param body - The serialized chunk body
+   * @returns The chunk's index in a replay of the stream, for the live
+   *   broadcast to carry as `seq`; `undefined` when the chunk is not stored
+   *   or the stream's count is not tracked.
    */
-  storeChunk(streamId: string, body: string) {
+  storeChunk(streamId: string, body: string): number | undefined {
     // Guard against chunks that would exceed the SQLite row limit, measured
     // on the stored (JSON-escaped) encoding. The chunk is still broadcast to
     // live clients; only replay storage is skipped.
@@ -649,8 +660,12 @@ export class ResumableStream {
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
           `to prevent SQLite row limit crash. Live clients still receive it.`
       );
-      return;
+      return undefined;
     }
+    const seq =
+      streamId === this._activeStreamId && this._nextChunkSeq !== null
+        ? this._nextChunkSeq++
+        : undefined;
 
     // Force flush if buffer is at max to prevent memory issues
     if (this._chunkBuffer.length >= CHUNK_BUFFER_MAX_SIZE) {
@@ -676,6 +691,7 @@ export class ResumableStream {
     if (this._chunkBuffer.length >= CHUNK_BUFFER_SIZE) {
       this.flushBuffer();
     }
+    return seq;
   }
 
   /**
@@ -925,6 +941,7 @@ export class ResumableStream {
       // replayed after hibernation still carries `continuation: true` on
       // its frames (#1733).
       this._activeIsContinuation = row.chat.isContinuation === 1;
+      this._nextChunkSeq = null;
     }
   }
 

@@ -21,6 +21,7 @@ export function sendReplayBodies(
   bodies: Iterable<string>,
   continuation: boolean
 ): boolean {
+  let seq = 0;
   for (const body of bodies) {
     const sent = sendIfOpen(
       connection,
@@ -30,6 +31,7 @@ export function sendReplayBodies(
         id: requestId,
         type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
         replay: true,
+        seq: seq++,
         ...(continuation && { continuation: true })
       })
     );

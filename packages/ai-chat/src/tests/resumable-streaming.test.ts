@@ -1166,6 +1166,70 @@ describe("Resumable Streaming", () => {
       ws2.close(1000);
     });
 
+    it("replays each chunk with the seq its live broadcast carried (#1951)", async () => {
+      const room = crypto.randomUUID();
+
+      const { ws: ws1 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      const streamId = await agentStub.testStartStream("req-replay-seq", {
+        continuation: true
+      });
+      const liveSeqs = [
+        await agentStub.testStoreStreamChunk(
+          streamId,
+          '{"type":"text-start","id":"t1"}'
+        ),
+        await agentStub.testStoreStreamChunk(
+          streamId,
+          '{"type":"text-delta","id":"t1","delta":"a"}'
+        ),
+        await agentStub.testStoreStreamChunk(
+          streamId,
+          '{"type":"text-delta","id":"t1","delta":"b"}'
+        )
+      ];
+      expect(liveSeqs).toEqual([0, 1, 2]);
+
+      ws1.close();
+      await new Promise((r) => setTimeout(r, 50));
+
+      const { ws: ws2 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages2 = collectMessages(ws2);
+      await new Promise((r) => setTimeout(r, 50));
+      const resumeMsg = messages2.find(isStreamResumingMessage);
+      expect(resumeMsg).toBeDefined();
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: (resumeMsg as { id: string }).id
+        })
+      );
+      await waitFor(() =>
+        messages2.some(
+          (m) =>
+            isUseChatResponseMessage(m) &&
+            (m as { replayComplete?: boolean }).replayComplete === true
+        )
+      );
+
+      const replayed = messages2
+        .filter(isUseChatResponseMessage)
+        .map(
+          (m) => m as { body?: string; seq?: number; continuation?: boolean }
+        )
+        .filter((m) => m.body);
+      expect(replayed.map((m) => m.seq)).toEqual([0, 1, 2]);
+      expect(replayed.every((m) => m.continuation === true)).toBe(true);
+
+      ws2.close(1000);
+    });
+
     it("sends done=true for orphaned streams after hibernation wake", async () => {
       const room = crypto.randomUUID();
 

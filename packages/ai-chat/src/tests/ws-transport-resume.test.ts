@@ -178,6 +178,50 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(stream).toBeInstanceOf(ReadableStream);
   });
 
+  it("drops continuation replay chunks the client already applied (#1951)", async () => {
+    transport.appliedChunks.record("req-c", 2);
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+    transport.handleStreamResuming({ id: "req-c" });
+    const stream = await promise;
+    const reader = stream!.getReader();
+
+    const chunks = [
+      { type: "start" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "already" },
+      { type: "text-delta", id: "t1", delta: " more" }
+    ];
+    for (const [seq, chunk] of chunks.entries()) {
+      agent.dispatch({
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        id: "req-c",
+        body: JSON.stringify(chunk),
+        done: false,
+        replay: true,
+        continuation: true,
+        seq
+      });
+    }
+    agent.dispatch({
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      id: "req-c",
+      body: "",
+      done: true,
+      continuation: true
+    });
+
+    const received: unknown[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received.push(value);
+    }
+    expect(received).toEqual([
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: " more" }
+    ]);
+  });
+
   it("sends ACK when handleStreamResuming is called", async () => {
     const promise = transport.reconnectToStream({ chatId: "chat-1" });
 

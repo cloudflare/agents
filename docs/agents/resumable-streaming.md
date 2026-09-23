@@ -84,6 +84,8 @@ function Chat() {
 
 Replayed chunks include `replay: true` to distinguish them from live chunks. The client uses this to batch-apply all replayed chunks before rendering, which prevents intermediate states (like reasoning "Thinking..." indicators) from flashing briefly during replay. During a live stream, chunks arrive gradually and React renders each intermediate state naturally.
 
+Live and replayed chunks also carry a `seq` field: the chunk's position in the stream, starting at `0`. A continuation stream (for example, a tool continuation) appends to an assistant message that the client already holds, so replaying it from the start would apply the same text twice. The client remembers the highest `seq` it has applied for each request and skips replayed continuation chunks at or below it. Replays of non-continuation streams rebuild the message from the first chunk and are not filtered.
+
 ## Durable client cleanup
 
 `resume: true` controls whether the client tries to reconnect to an active stream. `cancelOnClientAbort: false` is the default cancellation behavior: generic client stream abort/cleanup is local-only, while explicit `stop()` still cancels the server turn.

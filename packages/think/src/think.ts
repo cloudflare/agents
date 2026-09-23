@@ -13466,7 +13466,7 @@ export class Think<
           this._alignStreamStartId(streamChunk, action, accumulator, false);
 
           const chunkBody = JSON.stringify(streamChunk);
-          await this._storeChunkDurably(
+          const seq = await this._storeChunkDurably(
             streamId,
             streamChunk,
             chunkBody,
@@ -13476,7 +13476,8 @@ export class Think<
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: chunkBody,
-            done: false
+            done: false,
+            ...(seq !== undefined && { seq })
           });
           await callback.onEvent(chunkBody);
         }
@@ -13760,8 +13761,8 @@ export class Think<
     chunk: StreamChunkData,
     chunkBody: string,
     state: { chunksSinceFlush: number; hasFlushedContent: boolean }
-  ): Promise<void> {
-    this._resumableStream.storeChunk(streamId, chunkBody);
+  ): Promise<number | undefined> {
+    const seq = this._resumableStream.storeChunk(streamId, chunkBody);
     state.chunksSinceFlush++;
     if (
       this._shouldFlushRecoverableChunk(
@@ -13779,6 +13780,7 @@ export class Think<
     // the stream log (`_chatRecoveryProgressMarker`). A reconnect replay or a
     // recovery re-persist reads the log without appending, so neither can
     // fake progress (#1637), and compaction never touches it (#1628).
+    return seq;
   }
 
   private async _streamResult(
@@ -13973,7 +13975,7 @@ export class Think<
           );
 
           const chunkBody = JSON.stringify(streamChunk);
-          await this._storeChunkDurably(
+          const seq = await this._storeChunkDurably(
             streamId,
             streamChunk,
             chunkBody,
@@ -13984,6 +13986,7 @@ export class Think<
             id: requestId,
             body: chunkBody,
             done: false,
+            ...(seq !== undefined && { seq }),
             ...(continuation && { continuation: true })
           });
         }

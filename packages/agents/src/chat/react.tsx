@@ -1527,7 +1527,13 @@ export function useAgentChat<
     fallbackAckedResumeRequestIdsRef.current.clear();
     replayHydratedAssistantMessageIdsRef.current.clear();
     protectedStreamingAssistantRef.current = null;
-  }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
+    customTransport.appliedChunks.clear();
+  }, [
+    markInitialMessagesSeeded,
+    setMessages,
+    resetToolContinuation,
+    customTransport
+  ]);
 
   const sendMessageWithStreamingProtection: typeof sendMessage = useCallback(
     async (message, options) => {
@@ -2198,6 +2204,7 @@ export function useAgentChat<
           }
           if (data.error) {
             pendingReplayResumeRequestIdsRef.current.delete(data.id);
+            customTransport.appliedChunks.forget(data.id);
             customTransport.handleServerTurnCompleted(data.id);
             fallbackAckedResumeRequestIdsRef.current.delete(data.id);
             setIsRecovering(false);
@@ -2281,11 +2288,22 @@ export function useAgentChat<
             data.done &&
             observedToolContinuationRequestIdRef.current === data.id;
 
+          // The replayed `start` still re-seeds the continuation accumulator
+          // from the current message, which already holds the applied chunks.
+          const alreadyApplied =
+            customTransport.appliedChunks.isAppliedReplay(data.id, data) &&
+            (chunkData as { type?: string } | undefined)?.type !== "start";
+          if (data.done) {
+            customTransport.appliedChunks.forget(data.id);
+          } else if (!alreadyApplied) {
+            customTransport.appliedChunks.record(data.id, data.seq);
+          }
+
           const result = broadcastTransition(streamStateRef.current, {
             type: "response",
             streamId: data.id,
             messageId: nanoid(),
-            chunkData,
+            chunkData: alreadyApplied ? undefined : chunkData,
             done: data.done,
             error: data.error,
             replay: data.replay,

@@ -12,6 +12,7 @@ import {
   failChatStream,
   ReplayChunkBatch
 } from "./replay-batch";
+import { AppliedChunkLedger, ContinuationReplayFilter } from "./replay-dedupe";
 import { MessageType, type OutgoingMessage } from "./wire-types";
 
 /**
@@ -97,6 +98,11 @@ export class WebSocketChatTransport<
   // Pending resume resolver — set by reconnectToStream, called by
   // handleStreamResuming when onAgentMessage sees CF_AGENT_STREAM_RESUMING.
   private _resumeResolver: ((data: { id: string }) => void) | null = null;
+  /**
+   * Continuation chunks this client applied, shared with the hook's fallback
+   * observer so a replay after reconnect skips them on either path (#1951).
+   */
+  readonly appliedChunks = new AppliedChunkLedger();
   // Pending "no stream" resolver — called by handleStreamResumeNone
   // when onAgentMessage sees CF_AGENT_STREAM_RESUME_NONE.
   private _resumeNoneResolver:
@@ -703,6 +709,11 @@ export class WebSocketChatTransport<
         readerController = controller;
         const batch = new ReplayChunkBatch(controller);
         replayBatch = batch;
+        let replayFilter: ContinuationReplayFilter<
+          OutgoingMessage<UIMessage> & {
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE;
+          }
+        > | null = null;
         let timeout: ReturnType<typeof setTimeout> | undefined;
 
         const armTimeout = (delay: number) => {
@@ -776,13 +787,21 @@ export class WebSocketChatTransport<
             }
 
             if (data.error) {
+              transport.appliedChunks.forget(requestId);
               finish(() => failChatStream(batch, data.body || "Stream error"));
               return;
             }
 
-            applyChatResponseFrame(batch, data);
+            replayFilter ??= new ContinuationReplayFilter(
+              transport.appliedChunks,
+              requestId
+            );
+            for (const frame of replayFilter.frames(data)) {
+              applyChatResponseFrame(batch, frame);
+            }
 
             if (data.done) {
+              transport.appliedChunks.forget(requestId);
               finish(() => controller.close());
             }
           } catch {
@@ -885,6 +904,11 @@ export class WebSocketChatTransport<
         streamController = controller;
         const batch = new ReplayChunkBatch(controller);
         replayBatch = batch;
+        const replayFilter = new ContinuationReplayFilter<
+          OutgoingMessage<UIMessage> & {
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE;
+          }
+        >(transport.appliedChunks, requestId);
 
         const onMessage = (event: MessageEvent) => {
           try {
@@ -896,13 +920,17 @@ export class WebSocketChatTransport<
             if (data.id !== requestId) return;
 
             if (data.error) {
+              transport.appliedChunks.forget(requestId);
               finish(() => failChatStream(batch, data.body || "Stream error"));
               return;
             }
 
-            applyChatResponseFrame(batch, data);
+            for (const frame of replayFilter.frames(data)) {
+              applyChatResponseFrame(batch, frame);
+            }
 
             if (data.done) {
+              transport.appliedChunks.forget(requestId);
               finish(() => controller.close());
             }
           } catch {
