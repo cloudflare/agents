@@ -735,6 +735,15 @@ describe("Think — error handling", () => {
     expect(result.delays).toEqual([1, 2, 4, 8, 16, 30, 30, 30, 30, 30]);
   });
 
+  it("classifies an in-stream error once when overflow recovery is on", async () => {
+    const agent = await freshAgent(`transient-classify-${crypto.randomUUID()}`);
+    const result = await agent.testSingleStreamErrorClassificationForTest();
+
+    expect(result.classifications).toBe(1);
+    expect(result.error).toBeUndefined();
+    expect(result.scheduledContinues).toBe(1);
+  });
+
   it("keeps a submission running while transient recovery finishes it", async () => {
     const agent = await freshAgent(`transient-sub-${crypto.randomUUID()}`);
     const result = await agent.testTransientSubmissionForTest();

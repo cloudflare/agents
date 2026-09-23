@@ -1839,6 +1839,38 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * An in-stream error with reactive overflow on, classified by a hook that
+   * only answers `"transient"` the first time it is asked.
+   */
+  async testSingleStreamErrorClassificationForTest(): Promise<{
+    classifications: number;
+    error: string | undefined;
+    scheduledContinues: number;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    let classifications = 0;
+    this.classifyChatError = () =>
+      ++classifications === 1 ? "transient" : "fatal";
+    this.contextOverflow = { reactive: true };
+    try {
+      const first = await this.testChat("trigger transient error");
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      return { classifications, error: first.error, scheduledContinues };
+    } finally {
+      this.contextOverflow = undefined;
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
   /** A submission whose first stream fails transiently, then recovers. */
   async testTransientSubmissionForTest(): Promise<{
     afterFailure: string | undefined;

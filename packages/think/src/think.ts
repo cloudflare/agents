@@ -1743,6 +1743,12 @@ const recoveredTurnAcceptanceContext = new AsyncLocalStorage<{
 // A `runTurn` continuation dispatched through an overridden `continueLastTurn`:
 // the base method, when the override delegates to it, records the full result
 // (with structured output) for that `runTurn` call alone.
+function isTransientClassification(
+  classification: ChatErrorClassification | undefined
+): boolean {
+  return classification === "transient" || classification === "rate_limit";
+}
+
 const continuationOutputContext = new AsyncLocalStorage<{
   agent: unknown;
   taken: boolean;
@@ -6190,14 +6196,35 @@ export class Think<
   ): ChatErrorClassification | void {}
 
   /**
-   * Whether an error (thrown or surfaced as an in-stream error string) should
-   * trigger the opt-in compact-and-retry backstop. Consults the app's
-   * `classifyChatError` and the `contextOverflow.reactive` flag. Centralized
-   * so both stream consumers (WebSocket + RPC) classify identically.
+   * The app's `classifyChatError` verdict for a stream error (thrown or
+   * surfaced as an in-stream error string). Call once per error: the hook may
+   * be stateful or have side effects.
+   */
+  private _classifyStreamError(
+    error: unknown,
+    requestId: string
+  ): ChatErrorClassification | undefined {
+    if (!isMethodOverridden(this, "classifyChatError")) return undefined;
+    try {
+      return (
+        this.classifyChatError(error, { stage: "stream", requestId }) ??
+        undefined
+      );
+    } catch (err) {
+      console.warn(
+        `[Think] classifyChatError threw; treating as unclassified: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Whether a classified stream error should trigger the opt-in
+   * compact-and-retry backstop. Centralized so both stream consumers
+   * (WebSocket + RPC) decide identically.
    */
   private _isRecoverableContextOverflow(
-    error: unknown,
-    requestId?: string
+    classification: ChatErrorClassification | undefined
   ): boolean {
     if (!this._overflowReactiveEnabled) return false;
     // DX guard: enabling recovery without teaching Think which errors are
@@ -6211,45 +6238,22 @@ export class Think<
       }
       return false;
     }
-    let classification: ChatErrorClassification | void;
-    try {
-      classification = this.classifyChatError(error, {
-        stage: "stream",
-        requestId
-      });
-    } catch (err) {
-      console.warn(
-        `[Think] classifyChatError threw; treating as non-overflow: ${err instanceof Error ? err.message : String(err)}`
-      );
-      return false;
-    }
     return classification === "context_overflow";
   }
 
   /**
-   * Whether a stream error (thrown or surfaced as an in-stream error string)
-   * is one the app classified as `"transient"` or `"rate_limit"`. Such errors
-   * route into bounded chat recovery like a stream stall instead of
-   * terminalizing the turn (#2085). Without a `classifyChatError` override
-   * nothing is transient, so today's terminal behavior is unchanged.
+   * Whether a stream error is one the app classified as `"transient"` or
+   * `"rate_limit"`. Such errors route into bounded chat recovery like a stream
+   * stall instead of terminalizing the turn (#2085). Without a
+   * `classifyChatError` override nothing is transient, so today's terminal
+   * behavior is unchanged.
    */
   private _isTransientStreamError(error: unknown, requestId: string): boolean {
     if (error instanceof TransientChatStreamError) return true;
     if (error instanceof ChatStreamStalledError) return false;
-    if (!isMethodOverridden(this, "classifyChatError")) return false;
-    let classification: ChatErrorClassification | void;
-    try {
-      classification = this.classifyChatError(error, {
-        stage: "stream",
-        requestId
-      });
-    } catch (err) {
-      console.warn(
-        `[Think] classifyChatError threw; treating as non-transient: ${err instanceof Error ? err.message : String(err)}`
-      );
-      return false;
-    }
-    return classification === "transient" || classification === "rate_limit";
+    return isTransientClassification(
+      this._classifyStreamError(error, requestId)
+    );
   }
 
   /**
@@ -13351,14 +13355,18 @@ export class Think<
             // the partial after the loop, then signal the driver to compact and
             // re-run. No `message:error`/`chat:request:failed`/error frame here
             // — the turn isn't over.
+            const classification = this._classifyStreamError(
+              streamError,
+              requestId
+            );
             if (
               options?.overflowRecovery &&
-              this._isRecoverableContextOverflow(streamError, requestId)
+              this._isRecoverableContextOverflow(classification)
             ) {
               overflowRetry = true;
               break;
             }
-            if (this._isTransientStreamError(streamError, requestId)) {
+            if (isTransientClassification(classification)) {
               throw new TransientChatStreamError(streamError);
             }
             this._emit("message:error", { error: streamError });
@@ -13841,14 +13849,18 @@ export class Think<
             // Recoverable context overflow (opt-in): don't terminalize. Persist
             // the partial after the loop, then signal the driver to compact and
             // re-run. No `message:error`/`chat:request:failed`/error frame here.
+            const classification = this._classifyStreamError(
+              streamError,
+              requestId
+            );
             if (
               options?.overflowRecovery &&
-              this._isRecoverableContextOverflow(streamError, requestId)
+              this._isRecoverableContextOverflow(classification)
             ) {
               overflowRetry = true;
               break;
             }
-            if (this._isTransientStreamError(streamError, requestId)) {
+            if (isTransientClassification(classification)) {
               throw new TransientChatStreamError(streamError);
             }
             if (options?.captureProgrammaticStreamError) {
