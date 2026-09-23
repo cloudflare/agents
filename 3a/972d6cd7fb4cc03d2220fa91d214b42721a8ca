@@ -1,0 +1,21 @@
+packages/think/src/tests/agents/messengers.ts
+  s_368991bdec7f77::t_09a31e0148a211 61-69,174-194,208-227
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_1f79b0f72caf39 1131-1135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3a972d6cd7fb4cc03d2220fa91d214b42721a8ca",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
