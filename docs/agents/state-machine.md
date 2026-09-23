@@ -104,6 +104,12 @@ await machines.notify(
 
 const snapshot = await machines.get(receipt.runId, "order");
 
+const liveOrders = await machines.list({
+  definition: "order",
+  status: ["running", "waiting"],
+  limit: 20
+});
+
 if (snapshot?.status === "completed") {
   console.log(snapshot.result.transactionId);
 }
@@ -285,6 +291,13 @@ const command = defineMachine<
       if (outcome.status === "failed") {
         return context.fail(new Error(outcome.error.message));
       }
+      if (outcome.status === "retrying") {
+        return context.wait(state, {
+          type: "effect.retry",
+          key: state.effect.id,
+          timeoutAt: outcome.retryAt
+        });
+      }
       if (outcome.status === "interrupted") {
         return context.fail(new Error("Command interrupted"));
       }
@@ -302,6 +315,38 @@ const machines = new StateMachine({
   effects: { command: commandEffect }
 });
 ```
+
+Use `context.effects.run()` to commit and execute an effect without an
+intermediate transition. It accepts `timeoutMs` and a durable retry policy:
+
+```ts
+const outcome = await context.effects.run(
+  "command",
+  { command: state.command },
+  {
+    recovery: "safe",
+    timeoutMs: 30_000,
+    retries: { limit: 3, delay: 1_000, backoff: "exponential" }
+  }
+);
+
+if (outcome.status === "retrying") {
+  return context.wait(state, {
+    type: "effect.retry",
+    key: context.runId,
+    timeoutAt: outcome.retryAt
+  });
+}
+```
+
+Retry `limit` includes the first attempt. A retrying run waits durably until
+`retryAt`, so it does not keep the Durable Object in memory. Keep calls and
+arguments to `effects.run()`, `effects.plan()`, `gates.create()`, and
+`children.spawn()` in a stable order while the same phase visit re-enters. A
+later transition back to the phase creates new operations.
+
+After an effect with `recovery: "never"` starts, the engine does not invoke it
+again after an error, timeout, process failure, or transition conflict.
 
 ## Join a child
 

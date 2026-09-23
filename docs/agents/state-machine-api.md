@@ -36,6 +36,15 @@ class StateMachine<Definitions extends MachineDefinitions> {
     MachineOutput<Definitions[Name]>
   > | null>;
 
+  list<Name extends keyof Definitions & string>(
+    options?: MachineListOptions & { definition?: Name }
+  ): Promise<
+    MachineRunSnapshot<
+      MachineState<Definitions[Name]>,
+      MachineOutput<Definitions[Name]>
+    >[]
+  >;
+
   notify(
     runId: string,
     event: MachineEvent,
@@ -72,7 +81,13 @@ interface StateMachineOptions<Definitions extends MachineDefinitions> {
 interface MachineRunOptions {
   runId?: string;
   idempotencyKey?: string;
-  retain?: boolean; // Default: true
+  persist?: boolean; // Default: true
+}
+
+interface MachineListOptions {
+  definition?: string;
+  status?: MachineRunStatus | readonly MachineRunStatus[];
+  limit?: number;
 }
 
 interface MachineReceipt {
@@ -83,9 +98,11 @@ interface MachineReceipt {
 }
 ```
 
-`MachineRunOptions` controls identity and terminal retention. `MachineReceipt.accepted` is `false` when `run()` joins an existing run.
+`MachineRunOptions` controls identity and terminal persistence. `MachineReceipt.accepted` is `false` when `run()` joins an existing run.
 
-`retain: false` removes the run after it reaches a terminal state.
+`persist: false` removes the run after it reaches a terminal state. `list()`
+returns newest runs first, defaults to 100 results, and accepts at most 1,000.
+An empty status list returns no runs.
 
 ## Definitions
 
@@ -352,21 +369,40 @@ interface MachineEffects {
   execute<Output extends MachineValue>(
     effect: MachineEffectRef<Output>
   ): Promise<MachineEffectOutcome<Output>>;
+
+  run<Input extends MachineJson, Output extends MachineValue>(
+    kind: string,
+    input: Input,
+    options: MachineEffectPlanOptions
+  ): Promise<MachineEffectOutcome<Output>>;
 }
 
 interface MachineEffectRef<Output extends MachineValue = MachineValue> {
   id: string;
   kind: string;
   recovery: MachineEffectRecovery;
+  timeoutMs?: number;
+  retries?: MachineEffectRetryPolicy;
 }
 
 interface MachineEffectPlanOptions {
   recovery: MachineEffectRecovery;
   externalId?: string;
+  timeoutMs?: number;
+  retries?: MachineEffectRetryPolicy;
+}
+
+interface MachineEffectRetryPolicy {
+  limit?: number;
+  delay?: number;
+  backoff?: "constant" | "linear" | "exponential";
 }
 ```
 
-`MachineEffectRef` is stored in a checkpoint. `MachineEffectPlanOptions` selects its recovery policy and optional external ID.
+`MachineEffectRef` is stored in a checkpoint. `MachineEffectPlanOptions` selects
+its recovery policy, external ID, per-attempt timeout, and durable retry policy.
+Retry `limit` includes the first attempt. `run()` commits the effect at the
+current checkpoint and executes it without an intermediate transition.
 
 `MachineEffectRuntime` supplies execution, reconciliation, and cancellation for one effect kind. `MachineEffectInvocation` provides stable identifiers and an abort signal.
 
@@ -400,6 +436,7 @@ interface MachineEffectInvocation {
   effectId: string;
   idempotencyKey: string;
   externalId?: string;
+  attempt: number;
   signal: AbortSignal;
 }
 ```
@@ -415,10 +452,15 @@ interface MachineEffectPending {
 }
 
 type MachineEffectOutcome<Output extends MachineValue> =
-  | { status: "running" }
-  | { status: "completed"; output: Output }
-  | { status: "failed"; error: { name: string; message: string } }
-  | { status: "interrupted" };
+  | { status: "running"; attempt: number }
+  | { status: "retrying"; attempt: number; retryAt: number }
+  | { status: "completed"; output: Output; attempt: number }
+  | {
+      status: "failed";
+      error: { name: string; message: string };
+      attempt: number;
+    }
+  | { status: "interrupted"; attempt: number };
 ```
 
 | Recovery    | Interrupted execution                                 |
@@ -426,6 +468,10 @@ type MachineEffectOutcome<Output extends MachineValue> =
 | `safe`      | Runs `execute()` again with the same idempotency key. |
 | `never`     | Returns `interrupted`.                                |
 | `reconcile` | Calls `reconcile()` with `externalId`.                |
+
+A retryable failure returns `retrying` with a durable `retryAt` deadline. The
+phase must return a wait decision using that deadline. Once a `never` effect
+starts, the engine does not invoke it again after any failure.
 
 ## Children
 
@@ -447,26 +493,19 @@ interface MachineChildren<Definitions extends MachineDefinitions> {
 }
 ```
 
-`MachineChildRef` stores the underlying effect reference in the parent checkpoint. `MachineSpawnOptions` selects identity, cancellation mode, and owner.
+`MachineChildRef` stores the underlying effect reference in the parent checkpoint. `MachineSpawnOptions` selects identity and cancellation mode.
 
 ```ts
 interface MachineChildRef<Output extends MachineValue = MachineValue> {
   runId: string;
   definition: string;
   mode: MachineChildMode;
-  owner?: MachineOwnerAddress;
   effect: MachineEffectRef<MachineJson>;
-}
-
-interface MachineOwnerAddress {
-  key: string;
-  data: string;
 }
 
 interface MachineSpawnOptions {
   runId?: string;
   mode?: MachineChildMode; // Default: "attached"
-  owner?: MachineOwnerAddress;
 }
 
 type MachineChildResult<Output extends MachineValue> =
@@ -480,8 +519,6 @@ type MachineChildResult<Output extends MachineValue> =
 | `background` | Does not cancel the child. | Read with `children.join()`. |
 
 A `state-machine:child-completed` event is the normal wake path. A timer-backed wait can call `join()` again as a reconciliation fallback.
-
-`owner` is reserved for routed child ownership. Omit it for the supported local child lifecycle.
 
 ## Snapshots
 
@@ -554,7 +591,6 @@ interface MachineChildView {
   definition: string;
   mode: MachineChildMode;
   status: string;
-  owner?: MachineOwnerAddress;
 }
 ```
 
