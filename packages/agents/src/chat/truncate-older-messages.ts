@@ -186,13 +186,21 @@ function truncateModelOutput(
         : output;
     }
     case "content": {
+      // `maxChars` bounds the whole result, so text items share one budget.
+      let remaining = maxChars;
       let changed = false;
-      const value = output.value.map((item) => {
-        if (item.type !== "text") return item;
-        const truncated = truncateToolOutput(item.text, maxChars);
-        if (!truncated.truncated) return item;
+      type ContentItem = (typeof output.value)[number];
+      const value = output.value.flatMap((item): ContentItem[] => {
+        if (item.type !== "text") return [item];
+        if (item.text.length <= remaining) {
+          remaining -= item.text.length;
+          return [item];
+        }
         changed = true;
-        return { ...item, text: truncated.output as string };
+        if (remaining <= 0) return [];
+        const truncated = truncateToolOutput(item.text, remaining);
+        remaining = 0;
+        return [{ ...item, text: truncated.output as string }];
       });
       return changed ? { ...output, value } : output;
     }

@@ -273,6 +273,49 @@ describe("truncateOlderToolResults", () => {
     expect(kept).toBe(media);
   });
 
+  it("bounds the combined text of a content result by one budget", () => {
+    const messages = [
+      toolMessage("old", {}),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+    const media = {
+      type: "image-data" as const,
+      data: "AAAA",
+      mediaType: "image/png"
+    };
+    const modelMessages = [
+      toolResults([
+        "tc-old",
+        {
+          type: "content",
+          value: [
+            ...Array.from({ length: 10 }, () => ({
+              type: "text" as const,
+              text: "q".repeat(400)
+            })),
+            media
+          ]
+        }
+      ])
+    ];
+
+    const [message] = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 500
+    });
+
+    const output = outputOf(message);
+    if (output.type !== "content") throw new Error("expected content");
+    const texts = output.value.flatMap((item) =>
+      item.type === "text" ? [item.text] : []
+    );
+    expect(texts.join("").length).toBeLessThanOrEqual(500);
+    expect(texts[0]).toBe("q".repeat(400));
+    expect(texts[1]).toContain("[truncated");
+    expect(output.value.at(-1)).toBe(media);
+  });
+
   it("leaves provider-executed results intact", () => {
     const old = toolMessage("old", {});
     (old.parts[0] as { providerExecuted?: boolean }).providerExecuted = true;
