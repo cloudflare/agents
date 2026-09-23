@@ -6,6 +6,8 @@ See the [State machine API reference](./state-machine-api.md) for signatures and
 
 ## Define and install
 
+A definition maps each stored `phase` to a handler. Install the definition map on a Lifecycle Object so runs can resume after eviction.
+
 ```ts
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
@@ -81,6 +83,8 @@ export class OrderObject extends DurableObject<Env> {
 
 ## Start, notify, and inspect
 
+`run()` durably accepts work, `notify()` adds an idempotent event, and `get()` returns the current checkpoint or terminal result.
+
 ```ts
 const receipt = await machines.run(
   "order",
@@ -107,6 +111,8 @@ if (snapshot?.status === "completed") {
 
 ## Handle cancellation
 
+Add `onCancel` for a final transition. Without it, cancellation settles the run as cancelled.
+
 ```ts
 const cancellableOrder = defineMachine<
   OrderState,
@@ -123,6 +129,8 @@ await machines.cancel(runId, "customer requested");
 ```
 
 ## Ask for approval
+
+A gate stores a typed request and waits for one external answer. Save the gate reference in the next checkpoint.
 
 ```ts
 import {
@@ -197,6 +205,8 @@ await machines.gates.withdraw(gateId);
 ```
 
 ## Run an external effect
+
+Plan external work in one phase and execute it in the next. The recovery policy controls what happens when execution is interrupted.
 
 ```ts
 import {
@@ -295,6 +305,8 @@ const machines = new StateMachine({
 
 ## Join a child
 
+An attached child starts with the parent checkpoint. `children.take()` returns its durable result and parent cancellation includes the child.
+
 ```ts
 import type { MachineChildRef } from "agents/state-machine";
 
@@ -337,6 +349,8 @@ Use `mode: "background"` to exclude the child from parent cancellation.
 
 ## Detach a child
 
+A detached child may outlive its parent run. Completion goes to a named, at-least-once handler instead of back to a waiting parent phase.
+
 ```ts
 import type { MachineDetachedDelivery } from "agents/state-machine";
 
@@ -346,11 +360,7 @@ async function record(delivery: MachineDetachedDelivery) {
     return;
   }
 
-  await saveResult(
-    delivery.childRunId,
-    delivery.outcome,
-    delivery.deliveryId
-  );
+  await saveResult(delivery.childRunId, delivery.outcome, delivery.deliveryId);
 }
 
 const machines = new StateMachine({
@@ -377,6 +387,8 @@ Deduplicate handler work with `delivery.deliveryId`.
 
 ## Pause, resume, terminate, and delete
 
+Pause keeps the checkpoint. Terminate settles immediately. Delete removes a terminal run.
+
 ```ts
 await machines.pause(runId);
 await machines.resume(runId);
@@ -386,6 +398,8 @@ await machines.delete(runId); // Terminal runs only
 ```
 
 ## Settle a stream with a decision
+
+A commit participant updates another Lifecycle capability in the same transaction as the machine decision.
 
 ```ts
 import { settleStreamOnMachineCommit } from "agents/state-machine";

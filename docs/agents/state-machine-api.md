@@ -16,6 +16,8 @@ See [State machine examples](./state-machine.md) for complete patterns.
 
 ## `StateMachine`
 
+`StateMachine` is the installed Lifecycle capability. Use it to accept runs, inspect snapshots, deliver events, and control execution.
+
 ```ts
 class StateMachine<Definitions extends MachineDefinitions> {
   constructor(options: StateMachineOptions<Definitions>);
@@ -59,6 +61,8 @@ class StateMachine<Definitions extends MachineDefinitions> {
 }
 ```
 
+`StateMachineOptions` registers every definition and the runtime handlers used by effects and detached children.
+
 ```ts
 interface StateMachineOptions<Definitions extends MachineDefinitions> {
   definitions: Definitions;
@@ -80,9 +84,13 @@ interface MachineReceipt {
 }
 ```
 
+`MachineRunOptions` controls identity and terminal retention. `MachineReceipt.accepted` is `false` when `run()` joins an existing run.
+
 `retain: false` removes the run after it reaches a terminal state.
 
 ## Definitions
+
+`defineMachine()` preserves the input, state, event, and result types of a `MachineDefinition`. The definition contains the initial checkpoint and one handler for every phase.
 
 ```ts
 function defineMachine<
@@ -121,6 +129,8 @@ interface MachineDefinition<
 }
 ```
 
+`MachinePhased`, `MachineJson`, and `MachineValue` define what StateMachine can store in checkpoints, events, and results.
+
 ```ts
 interface MachinePhased {
   phase: string;
@@ -141,6 +151,8 @@ type MachineValue = MachineJson | undefined | void;
 The definition name and `version` must remain registered while stored runs use them.
 
 ## Phase context
+
+`MachineContext` is passed to each phase handler. It exposes durable coordination APIs and creates the decision committed after the handler returns.
 
 ```ts
 interface MachineContext<
@@ -179,6 +191,8 @@ interface MachineContext<
 }
 ```
 
+`MachineWake` says why the phase is running. `MachineDecision` describes the next checkpoint or terminal result.
+
 ```ts
 type MachineWake =
   | { kind: "ordinary" }
@@ -213,6 +227,8 @@ type MachineDecision<State, Result> =
 Each phase returns a decision and its pending events, gates, effects, children, and commit participants are stored in one transaction.
 
 ## Events and waits
+
+`notify()` writes a durable inbound event. `MachineNotifyOptions` supplies its unique ID and expiry; `MachineNotifyReceipt` reports admission. `MachineEvents.take()` claims the oldest matching event for the current decision.
 
 ```ts
 interface MachineEvent {
@@ -254,6 +270,8 @@ interface MachineQueuedEvent<Event extends MachineEvent> {
 }
 ```
 
+`MachineWaitOptions` parks a run until a matching event or optional deadline wakes it.
+
 ```ts
 interface MachineWaitOptions {
   type: string;
@@ -265,6 +283,8 @@ interface MachineWaitOptions {
 `eventId` is required. Reusing it with another payload throws. A phase cannot take an event and return `wait()` in the same transition.
 
 ## Gates
+
+A gate is a typed request and answer built on the event queue. `GateKind` carries the request and answer types; `MachineGateRef` is safe to store in a checkpoint.
 
 ```ts
 function defineGate<Payload extends MachineJson, Answer extends MachineJson>(
@@ -304,6 +324,8 @@ type MachineGateOutcome<Answer extends MachineJson> =
   | { status: "expired" | "withdrawn" | "cancelled" };
 ```
 
+`MachineAnswerReceipt` reports whether an external gate answer was accepted.
+
 ```ts
 type MachineAnswerReceipt =
   | { status: "accepted" }
@@ -315,6 +337,8 @@ type MachineAnswerReceipt =
 ```
 
 ## Effects
+
+Effects represent outbound work that cannot be part of the checkpoint transaction. `MachineEffects` stores intent and executes the registered `MachineEffectRuntime`.
 
 ```ts
 type MachineEffectRecovery = "safe" | "never" | "reconcile";
@@ -342,6 +366,10 @@ interface MachineEffectPlanOptions {
   externalId?: string;
 }
 ```
+
+`MachineEffectRef` is stored in a checkpoint. `MachineEffectPlanOptions` selects its recovery policy and optional external ID.
+
+`MachineEffectRuntime` supplies execution, reconciliation, and cancellation for one effect kind. `MachineEffectInvocation` provides stable identifiers and an abort signal.
 
 ```ts
 interface MachineEffectRuntime<
@@ -377,6 +405,8 @@ interface MachineEffectInvocation {
 }
 ```
 
+`effectPending()` records external work that is still running. `MachineEffectOutcome` is returned to the phase that calls `execute()`.
+
 ```ts
 function effectPending(externalId: string): MachineEffectPending;
 
@@ -400,6 +430,8 @@ type MachineEffectOutcome<Output extends MachineValue> =
 
 ## Children
 
+`MachineChildren` starts another registered definition and reads its terminal result. `MachineChildMode` controls cancellation and result delivery.
+
 ```ts
 type MachineChildMode = "attached" | "background" | "detached";
 
@@ -415,6 +447,8 @@ interface MachineChildren<Definitions extends MachineDefinitions> {
   ): MachineChildResult<Output> | null;
 }
 ```
+
+`MachineChildRef` is stored in the parent checkpoint. `MachineSpawnOptions` selects identity, mode, owner, and detached delivery settings.
 
 ```ts
 interface MachineChildRef<Output extends MachineValue = MachineValue> {
@@ -452,6 +486,8 @@ type MachineChildResult<Output extends MachineValue> =
 
 ## Detached delivery
 
+`MachineDetachedDelivery` is passed to the named handler registered in `StateMachineOptions.detachedHandlers`.
+
 ```ts
 interface MachineDetachedDelivery {
   deliveryId: string;
@@ -471,6 +507,8 @@ type MachineDetachedHandler = (
 Delivery is at least once. Deduplicate handler work with `deliveryId`. `give-up` and `finish` use different delivery IDs.
 
 ## Snapshots
+
+`MachineRunSnapshot` is a status-discriminated view returned by `get()`. Active snapshots include coordination state; terminal snapshots include a result or error.
 
 ```ts
 type MachineRunSnapshot<
@@ -515,6 +553,8 @@ type MachineRunSnapshot<
     };
 ```
 
+The view interfaces summarize open gates, effects, and children on active snapshots.
+
 ```ts
 interface MachineGateView {
   gateId: string;
@@ -543,6 +583,8 @@ interface MachineChildView {
 
 ## Type helpers
 
+These helpers extract the types carried by a definition.
+
 | Type                         | Extracts                       |
 | ---------------------------- | ------------------------------ |
 | `MachineInput<Definition>`   | Input passed to `initial()`.   |
@@ -551,6 +593,8 @@ interface MachineChildView {
 | `MachineEventOf<Definition>` | Event accepted by `notify()`.  |
 
 ## Control receipts
+
+`MachineCancelReceipt` distinguishes an accepted request from missing and terminal runs. The boolean control methods return `false` when the requested state change does not apply.
 
 ```ts
 type MachineCancelReceipt =
@@ -568,6 +612,8 @@ type MachineCancelReceipt =
 | `delete()`    | Deletes a terminal run.                                              |
 
 ## Commit participants
+
+A `MachineCommitParticipant` adds another synchronous durable write to the machine transaction. Applications receive participants from integrations such as Streams rather than constructing them.
 
 ```ts
 interface MachineTransitionOptions {
@@ -587,6 +633,8 @@ function settleStreamOnMachineCommit(
 ```
 
 ## Limits and errors
+
+Checkpoints are limited to one mebibyte. The exported errors identify serialization, definition lookup, queue capacity, and concurrent transition failures.
 
 ```ts
 const MAX_MACHINE_CHECKPOINT_BYTES = 1_048_576;
