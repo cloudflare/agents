@@ -1230,6 +1230,76 @@ describe("Resumable Streaming", () => {
       ws2.close(1000);
     });
 
+    it("continues seq across streams restarted under one request (#1951)", async () => {
+      const room = crypto.randomUUID();
+
+      const { ws: ws1 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      const first = await agentStub.testStartStream("req-restarted", {
+        continuation: true
+      });
+      await agentStub.testStoreStreamChunk(
+        first,
+        '{"type":"text-start","id":"t1"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        first,
+        '{"type":"text-delta","id":"t1","delta":"a"}'
+      );
+      await agentStub.testCompleteStream(first);
+
+      const retry = await agentStub.testStartStream("req-restarted", {
+        continuation: true
+      });
+      const liveSeqs = [
+        await agentStub.testStoreStreamChunk(
+          retry,
+          '{"type":"text-start","id":"t2"}'
+        ),
+        await agentStub.testStoreStreamChunk(
+          retry,
+          '{"type":"text-delta","id":"t2","delta":"b"}'
+        )
+      ];
+      expect(liveSeqs).toEqual([2, 3]);
+
+      ws1.close();
+      await new Promise((r) => setTimeout(r, 50));
+
+      const { ws: ws2 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages2 = collectMessages(ws2);
+      await new Promise((r) => setTimeout(r, 50));
+      const resumeMsg = messages2.find(isStreamResumingMessage);
+      expect(resumeMsg).toBeDefined();
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: (resumeMsg as { id: string }).id
+        })
+      );
+      await waitFor(() =>
+        messages2.some(
+          (m) =>
+            isUseChatResponseMessage(m) &&
+            (m as { replayComplete?: boolean }).replayComplete === true
+        )
+      );
+
+      const replayed = messages2
+        .filter(isUseChatResponseMessage)
+        .map((m) => m as { body?: string; seq?: number })
+        .filter((m) => m.body);
+      expect(replayed.map((m) => m.seq)).toEqual([2, 3]);
+
+      ws2.close(1000);
+    });
+
     it("sends done=true for orphaned streams after hibernation wake", async () => {
       const room = crypto.randomUUID();
 

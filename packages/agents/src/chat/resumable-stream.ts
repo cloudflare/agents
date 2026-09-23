@@ -106,6 +106,13 @@ type ChatStreamMetadata = {
    * and drops the parts streamed before the continuation.
    */
   isContinuation?: 1;
+  /**
+   * The `seq` of this stream's first chunk. A request that restarts its
+   * stream (an overflow retry) continues its earlier streams' sequence, so a
+   * client's per-request record of applied chunks never mistakes the new
+   * stream's chunks for ones it already has (#1951).
+   */
+  seqBase?: number;
   /** Terminal evidence pinned until its consumer durably settles and releases it. */
 };
 
@@ -512,6 +519,8 @@ export class ResumableStream {
   ): string {
     // Flush any pending chunks from previous streams to prevent mixing
     this.flushBuffer();
+    // Before the reclaim below deletes the request's earlier stream.
+    const seqBase = this._nextSeqForRequest(requestId);
     // Reclaim whatever a previous turn left behind: finished streams (their
     // messages are persisted, so the rows are dead weight) and in-flight
     // rows abandoned past the stale window. One row-table scan, no alarm.
@@ -522,14 +531,28 @@ export class ResumableStream {
     this._activeRequestId = requestId;
     this._isLive = true;
     this._activeIsContinuation = options.continuation ?? false;
-    this._nextChunkSeq = 0;
+    this._nextChunkSeq = seqBase;
 
     const metadata: ChatStreamMetadata = { cfChat: 1 };
     if (options.messageId != null) metadata.messageId = options.messageId;
     if (this._activeIsContinuation) metadata.isContinuation = 1;
+    if (seqBase > 0) metadata.seqBase = seqBase;
     this.ops.insertStream(streamId, requestId, metadata);
 
     return streamId;
+  }
+
+  private _nextSeqForRequest(requestId: string): number {
+    const prior = this._latestChatRowByTag(requestId);
+    if (!prior) return 0;
+    let count = 0;
+    for (const _body of this._storedBodies(prior.stream_id)) count++;
+    return (parseChatMetadata(prior)?.seqBase ?? 0) + count;
+  }
+
+  private _seqBase(streamId: string): number {
+    const row = this.ops.getStream(streamId);
+    return (row && parseChatMetadata(row)?.seqBase) || 0;
   }
 
   /**
@@ -787,7 +810,8 @@ export class ResumableStream {
         connection,
         requestId,
         this._storedBodies(streamId),
-        continuation
+        continuation,
+        this._seqBase(streamId)
       )
     ) {
       // Connection closed mid-replay — leave the stream active so the
@@ -842,13 +866,15 @@ export class ResumableStream {
     const row = this._latestChatRowByTag(requestId, "completed");
     if (!row) return false;
 
-    const continuation = parseChatMetadata(row)?.isContinuation === 1;
+    const chat = parseChatMetadata(row);
+    const continuation = chat?.isContinuation === 1;
     if (
       !sendReplayBodies(
         connection,
         requestId,
         this._storedBodies(row.stream_id),
-        continuation
+        continuation,
+        chat?.seqBase
       )
     ) {
       return false;
@@ -880,11 +906,13 @@ export class ResumableStream {
     this.flushBuffer();
     const row = this._latestChatRowByTag(requestId, "errored");
     if (!row) return true;
+    const chat = parseChatMetadata(row);
     return sendReplayBodies(
       connection,
       requestId,
       this._storedBodies(row.stream_id),
-      parseChatMetadata(row)?.isContinuation === 1
+      chat?.isContinuation === 1,
+      chat?.seqBase
     );
   }
 

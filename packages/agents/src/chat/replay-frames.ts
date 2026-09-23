@@ -19,9 +19,10 @@ export function sendReplayBodies(
   connection: Connection,
   requestId: string,
   bodies: Iterable<string>,
-  continuation: boolean
+  continuation: boolean,
+  firstSeq = 0
 ): boolean {
-  let seq = 0;
+  let seq = firstSeq;
   for (const body of bodies) {
     const sent = sendIfOpen(
       connection,
