@@ -1203,6 +1203,15 @@ describe("think messengers core", () => {
       }
     );
 
+    it("posts every recovered attempt's text after a second interruption", async () => {
+      const posted = await sendAndSettle(
+        `recover-twice-${crypto.randomUUID()}`,
+        "it was successful"
+      );
+
+      expect(posted).toEqual(["Got", "it was successful"]);
+    }, 20_000);
+
     it("posts the apology once when recovery is exhausted", async () => {
       const posted = await sendAndSettle(
         `recover-exhaust-${crypto.randomUUID()}`,
@@ -1459,6 +1468,44 @@ describe("think messengers core", () => {
 
     expect(posts).toEqual(["partial answer"]);
     expect(stages.at(-1)).toBe("completed");
+  });
+
+  it("posts text past the visible limit before the target delivers the rest (#2106)", async () => {
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: { stash() {} } as unknown as FiberContext,
+      policy: {
+        visibleSoftLimit: 7,
+        splitText: (text) => (text ? [text] : [])
+      },
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            posts.push((await collectText(message)).join(""));
+            return;
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-recovering" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          callback.onInterrupted?.({ deliversRecoveredReply: true });
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts.join("")).toBe("partial answer");
+    expect(posts).toHaveLength(2);
   });
 
   it.each([

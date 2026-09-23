@@ -477,7 +477,16 @@ export async function deliverMessengerReply(
           options.snapshotThread
         )
       );
-      if (callback.targetDeliversRecoveredReply()) return;
+      if (callback.targetDeliversRecoveredReply()) {
+        // The target subtracts every streamed character from the recovered
+        // reply, including any past `visibleSoftLimit` that is still unposted.
+        for (const chunk of options.policy?.splitText?.(
+          callback.remainingText()
+        ) ?? []) {
+          await options.surface.post(chunk).catch(() => undefined);
+        }
+        return;
+      }
       await options.surface
         .post(interruptedResponseText)
         .catch(() => undefined);

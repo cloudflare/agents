@@ -88,18 +88,19 @@ function lastUserText(prompt: unknown): string {
 export class ThinkMessengerDeliveryTestAgent extends Think {
   private _chat: ChatInstance | undefined;
   private _streamCalls = 0;
-  override chatRecovery = { maxAttempts: 1 };
+  override chatRecovery = { maxAttempts: 2 };
 
   /**
    * #2106: an agent named `recover-<mode>-…` fails its first model stream
    * mid-reply with an error classified as transient (`recover-exhaust-…`:
-   * every stream), and `recover-thread-…` answers in a per-thread sub-agent,
-   * which inherits the mode from its parent's name.
+   * every stream; `recover-twice-…`: the first recovery too), and
+   * `recover-thread-…` answers in a per-thread sub-agent, which inherits the
+   * mode from its parent's name.
    */
-  private _recoveryMode(): "self" | "thread" | "exhaust" | undefined {
+  private _recoveryMode(): "self" | "thread" | "exhaust" | "twice" | undefined {
     const name = this.parentPath.at(-1)?.name ?? this.name;
-    const mode = /^recover-(self|thread|exhaust)-/.exec(name)?.[1];
-    return mode as "self" | "thread" | "exhaust" | undefined;
+    const mode = /^recover-(self|thread|exhaust|twice)-/.exec(name)?.[1];
+    return mode as "self" | "thread" | "exhaust" | "twice" | undefined;
   }
 
   override classifyChatError(): "transient" | undefined {
@@ -121,8 +122,13 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       doStream(options: { prompt: unknown }) {
         record(lastUserText(options.prompt));
         const call = nextCall();
-        const fails = mode === "exhaust" || (mode !== undefined && call === 1);
-        const deltas = mode && call > 1 ? ["it"] : ["Got ", "it"];
+        const fails =
+          mode === "exhaust" ||
+          (mode !== undefined && call === 1) ||
+          (mode === "twice" && call === 2);
+        const failDelta = call === 1 ? "Got " : "it was ";
+        const deltas =
+          mode === "twice" ? ["successful"] : mode ? ["it"] : ["Got ", "it"];
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue({ type: "stream-start", warnings: [] });
@@ -131,7 +137,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
               controller.enqueue({
                 type: "text-delta",
                 id: "t",
-                delta: "Got "
+                delta: failDelta
               });
               controller.enqueue({
                 type: "error",
