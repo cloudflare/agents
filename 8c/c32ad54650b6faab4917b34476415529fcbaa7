@@ -1,0 +1,23 @@
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_61a1e9adee89be 5507-5510,5512-5522,5527-5535
+packages/think/src/tests/hooks.test.ts
+  s_368991bdec7f77::t_ee14180da77bd7 1946-1984
+packages/think/src/think.ts
+  s_368991bdec7f77::t_80d224654d7231 1732-1740,8698-8705,8708-8709,12116-12118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8cc32ad54650b6faab4917b34476415529fcbaa7",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
