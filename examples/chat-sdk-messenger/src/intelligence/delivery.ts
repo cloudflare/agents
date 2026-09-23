@@ -18,6 +18,7 @@ export type AiReplySnapshot = {
   stage: AiReplyStage;
   thread: unknown;
   message: unknown;
+  skipped?: unknown[];
 };
 
 export function aiReplyRecoveryMode(
@@ -71,20 +72,25 @@ export function parseAiReplySnapshot(
     type: AI_REPLY_FIBER_NAME,
     stage: candidate.stage,
     thread: candidate.thread,
-    message: candidate.message
+    message: candidate.message,
+    ...(Array.isArray(candidate.skipped) && { skipped: candidate.skipped })
   };
 }
 
 export function aiReplySnapshot(
   stage: AiReplyStage,
   thread: Thread,
-  message: Message
+  message: Message,
+  skipped: readonly Message[] = []
 ): AiReplySnapshot {
   return {
     type: AI_REPLY_FIBER_NAME,
     stage,
     thread: thread.toJSON(),
-    message: message.toJSON()
+    message: message.toJSON(),
+    ...(skipped.length > 0 && {
+      skipped: skipped.map((entry) => entry.toJSON())
+    })
   };
 }
 

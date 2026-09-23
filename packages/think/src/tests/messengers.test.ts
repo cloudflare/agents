@@ -29,6 +29,7 @@ import {
   toMessengerAttachment,
   toMessengerUserMessage,
   type MessengerEvent,
+  type MessengerMessage,
   type MessengerThinkHost
 } from "../messengers";
 import telegramMessenger, {
@@ -288,6 +289,202 @@ describe("think messengers core", () => {
         ].join("\n")
       }
     ]);
+  });
+
+  describe("messages folded by the concurrency strategy (#2312)", () => {
+    const ada = { fullName: "Ada Lovelace", userId: "u-ada", userName: "ada" };
+    const bob = { fullName: "Bob Babbage", userId: "u-bob", userName: "bob" };
+
+    function line(
+      id: string,
+      text: string,
+      author = ada,
+      attachments: MessengerMessage["attachments"] = []
+    ): MessengerMessage {
+      return { attachments, author, id, providerMessageId: id, text };
+    }
+
+    function burst(
+      skipped: MessengerMessage[],
+      message: MessengerMessage,
+      isDirectMessage = false
+    ): MessengerEvent {
+      return {
+        ...baseEvent,
+        message,
+        skipped,
+        thread: { ...baseEvent.thread, isDirectMessage }
+      };
+    }
+
+    function text(event: MessengerEvent) {
+      return toMessengerUserMessage(event).parts;
+    }
+
+    it("carries skipped messages on the event, oldest first, resolving self-mentions in each", () => {
+      const [definition] = normalizeMessengers({
+        slack: chatSdkMessenger({
+          adapter: fakeAdapter({ botUserId: "U0BD9EYL52S" }),
+          provider: "slack",
+          userName: "think_bot",
+          verifyWebhook: false
+        })
+      });
+
+      const event = defaultChatSdkEvent(definition!, {
+        eventKind: "mention",
+        message: fakeMessage("and keep it short"),
+        skipped: [
+          fakeMessage("<@U0BD9EYL52S> summarize the thread"),
+          fakeMessage("for me")
+        ],
+        thread: fakeThread("slack:C123")
+      });
+
+      expect(event.skipped?.map((entry) => entry.text)).toEqual([
+        "@think_bot summarize the thread",
+        "for me"
+      ]);
+      expect(event.message?.text).toBe("and keep it short");
+    });
+
+    it("leaves `skipped` off the event when nothing was folded", () => {
+      const [definition] = normalizeMessengers({
+        slack: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          provider: "slack",
+          userName: "think_bot",
+          verifyWebhook: false
+        })
+      });
+
+      const event = defaultChatSdkEvent(definition!, {
+        eventKind: "mention",
+        message: fakeMessage("hello"),
+        skipped: [],
+        thread: fakeThread("slack:C123")
+      });
+
+      expect("skipped" in event).toBe(false);
+    });
+
+    it("renders one sender's burst under a single speaker label", () => {
+      const event = burst(
+        [line("1", "summarize the thread"), line("2", "for me")],
+        line("3", "and keep it short")
+      );
+
+      expect(text(event)).toEqual([
+        {
+          type: "text",
+          text: "Ada Lovelace: summarize the thread\nfor me\nand keep it short"
+        }
+      ]);
+    });
+
+    it("keeps each speaker's own label when a burst mixes senders", () => {
+      const event = burst(
+        [line("1", "is the deploy done?", bob), line("2", "hold on", ada)],
+        line("3", "@think_bot what changed?", ada)
+      );
+
+      expect(text(event)).toEqual([
+        {
+          type: "text",
+          text: "Bob Babbage: is the deploy done?\nAda Lovelace: hold on\n@think_bot what changed?"
+        }
+      ]);
+    });
+
+    it("renders a direct-message burst without speaker labels", () => {
+      const event = burst(
+        [line("1", "summarize the thread"), line("2", "for me")],
+        line("3", "and keep it short"),
+        true
+      );
+
+      expect(text(event)).toEqual([
+        {
+          type: "text",
+          text: "summarize the thread\nfor me\nand keep it short"
+        }
+      ]);
+    });
+
+    it("lists attachments from skipped messages before the answered message's own", () => {
+      const photo = { mediaType: "image/jpeg", name: "photo.jpg" };
+      const notes = { mediaType: "text/plain", name: "notes.txt" };
+      const event = burst(
+        [line("1", "", ada, [photo])],
+        line("2", "what is this?", ada, [notes]),
+        true
+      );
+
+      expect(text(event)).toEqual([
+        {
+          type: "text",
+          text: [
+            "what is this?",
+            "",
+            "Attachments:",
+            "- photo.jpg (image/jpeg)",
+            "- notes.txt (text/plain)"
+          ].join("\n")
+        }
+      ]);
+    });
+
+    it("drops an attachment-only run's empty speaker line", () => {
+      const event = burst(
+        [line("1", "", bob, [{ name: "chart.png" }])],
+        line("2", "thoughts?", ada)
+      );
+
+      expect(text(event)[0]).toEqual({
+        type: "text",
+        text: "Ada Lovelace: thoughts?\n\nAttachments:\n- chart.png"
+      });
+    });
+
+    it("keeps the answered message's id so idempotency is unchanged", () => {
+      const event = burst([line("1", "first")], line("2", "second"));
+
+      expect(toMessengerUserMessage(event).id).toBe("telegram:2");
+      expect(idempotencyKeyForEvent(event)).toBe(
+        idempotencyKeyForEvent({ ...event, skipped: undefined })
+      );
+    });
+
+    it("serializes skipped messages without live-only fields", () => {
+      const event = burst(
+        [
+          {
+            ...line("1", "first", ada, [
+              {
+                fetch: () => Promise.resolve(new ArrayBuffer(0)),
+                fetchMetadata: { fileId: "f1" },
+                name: "a.png",
+                raw: {}
+              }
+            ]),
+            raw: { platform: "payload" }
+          }
+        ],
+        line("2", "second")
+      );
+
+      const cloned = JSON.parse(
+        JSON.stringify(serializableMessengerEvent(event))
+      );
+
+      expect(cloned.skipped).toHaveLength(1);
+      expect(cloned.skipped[0].raw).toBeUndefined();
+      expect(cloned.skipped[0].text).toBe("first");
+      expect(cloned.skipped[0].attachments[0]).toEqual({
+        fetchMetadata: { fileId: "f1" },
+        name: "a.png"
+      });
+    });
   });
 
   it("prefixes channel messages with the default fullName cascade", () => {
@@ -961,6 +1158,91 @@ describe("think messengers core", () => {
 
       expect(streamed.join("")).toBe("Hello there");
       expect(calls).toEqual([]);
+    });
+  });
+
+  describe("burst replies end to end (#2312)", () => {
+    type Webhook = import("./agents/messengers").FakeMessengerWebhook;
+
+    async function sendBurst(name: string, webhooks: Webhook[]) {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        name
+      );
+      const res = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        { body: JSON.stringify({ burst: webhooks }), method: "POST" }
+      );
+      await res.text();
+      return agent;
+    }
+
+    it("answers a direct-message burst once, with every line in order", async () => {
+      const agent = await sendBurst("burst-dm", [
+        { id: "b1", text: "summarize the thread", threadId: "fake:dm-burst" },
+        { id: "b2", text: "for me", threadId: "fake:dm-burst" },
+        { id: "b3", text: "and keep it short", threadId: "fake:dm-burst" }
+      ]);
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "summarize the thread\nfor me\nand keep it short"
+      ]);
+      expect(await agent.getRecorded("post")).toEqual(["Got"]);
+    });
+
+    it("keeps each sender's label when a group burst mixes senders", async () => {
+      const bob = { fullName: "Bob", userId: "user-bob" };
+      const ada = { fullName: "Ada", userId: "user-ada" };
+      const agent = await sendBurst("burst-group", [
+        {
+          author: bob,
+          id: "g1",
+          isMention: true,
+          text: "@fake_bot is the deploy done?",
+          threadId: "fake:group"
+        },
+        {
+          author: ada,
+          id: "g2",
+          isMention: true,
+          text: "@fake_bot what changed?",
+          threadId: "fake:group"
+        }
+      ]);
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Bob: @fake_bot is the deploy done?\nAda: @fake_bot what changed?"
+      ]);
+    });
+
+    it("answers a subscribed-thread burst whose mention is not the newest message", async () => {
+      const threadId = "fake:group-subscribed";
+      const agent = await sendBurst("burst-subscribed", [
+        { id: "s0", isMention: true, text: "@fake_bot hi", threadId }
+      ]);
+      const res = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            burst: [
+              {
+                id: "s1",
+                isMention: true,
+                text: "@fake_bot deploy status?",
+                threadId
+              },
+              { id: "s2", text: "please keep it short", threadId }
+            ]
+          }),
+          method: "POST"
+        }
+      );
+      await res.text();
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Ada: @fake_bot hi",
+        "Ada: @fake_bot deploy status?\nplease keep it short"
+      ]);
     });
   });
 

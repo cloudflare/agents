@@ -131,6 +131,14 @@ export interface ChatSdkMessengerEventInput {
   eventKind: MessengerEventKind;
   message?: ChatMessage;
   raw?: unknown;
+  /**
+   * Earlier messages the Chat SDK's concurrency strategy folded into this one,
+   * oldest first (`MessageContext.skipped`). The runtime's `burst` strategy
+   * answers only the newest message of a quick run and reports the rest here.
+   * {@link defaultChatSdkEvent} carries them on the event's `skipped` so they
+   * reach the model; a custom `toEvent` that ignores them drops them.
+   */
+  skipped?: readonly ChatMessage[];
   thread: ChatThread;
 }
 
@@ -369,7 +377,7 @@ export class ThinkMessengerRuntime {
       userName: this.definitions[0]?.userName ?? "think"
     } satisfies ChatConfig<Record<string, Adapter>>);
 
-    chat.onDirectMessage(async (thread, message) => {
+    chat.onDirectMessage(async (thread, message, _channel, context) => {
       const definition = this.definitionForThread(thread);
       if (!definition) return;
       if (definition.respondTo.includes("direct-message")) {
@@ -378,6 +386,7 @@ export class ThinkMessengerRuntime {
           await this.toEvent(definition, {
             eventKind: "direct-message",
             message,
+            skipped: context?.skipped,
             thread
           }),
           thread
@@ -385,7 +394,7 @@ export class ThinkMessengerRuntime {
       }
     });
 
-    chat.onNewMention(async (thread, message) => {
+    chat.onNewMention(async (thread, message, context) => {
       const definition = this.definitionForThread(thread);
       if (!definition) return;
       if (definition.subscribeOnMention) {
@@ -397,6 +406,7 @@ export class ThinkMessengerRuntime {
           await this.toEvent(definition, {
             eventKind: "mention",
             message,
+            skipped: context?.skipped,
             thread
           }),
           thread
@@ -404,18 +414,22 @@ export class ThinkMessengerRuntime {
       }
     });
 
-    chat.onSubscribedMessage(async (thread, message) => {
+    chat.onSubscribedMessage(async (thread, message, context) => {
       const definition = this.definitionForThread(thread);
       if (!definition) return;
+      const mentioned =
+        message.isMention ||
+        (context?.skipped.some((skipped) => skipped.isMention) ?? false);
       if (
         definition.respondTo.includes("subscribed-thread") ||
-        (message.isMention && definition.respondTo.includes("mention"))
+        (mentioned && definition.respondTo.includes("mention"))
       ) {
         await this.enqueueReply(
           definition,
           await this.toEvent(definition, {
-            eventKind: message.isMention ? "mention" : "subscribed-message",
+            eventKind: mentioned ? "mention" : "subscribed-message",
             message,
+            skipped: context?.skipped,
             thread
           }),
           thread
@@ -780,22 +794,27 @@ export function defaultChatSdkEvent(
   definition: NormalizedMessengerDefinition,
   input: ChatSdkMessengerEventInput
 ): MessengerEvent {
-  const message = input.message && toMessengerMessage(input.message);
-  if (message) {
+  const convert = (chatMessage: ChatMessage): MessengerMessage => {
+    const message = toMessengerMessage(chatMessage);
     message.text = resolveSelfMention(
       message.text,
       definition.adapter.botUserId,
       definition.userName
     );
-  }
+    return message;
+  };
+  const skipped = input.skipped?.length
+    ? input.skipped.map(convert)
+    : undefined;
   return {
     capabilities: definition.capabilities ?? {},
     action: input.action && toMessengerAction(input.action),
     kind: input.eventKind,
-    message,
+    message: input.message && convert(input.message),
     messengerId: definition.id,
     provider: definition.provider,
     raw: input.raw ?? input.message?.raw,
+    ...(skipped && { skipped }),
     thread: toMessengerThread(input.thread)
   };
 }

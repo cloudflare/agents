@@ -80,6 +80,14 @@ export interface MessengerContext {
   message?: MessengerMessage;
   messengerId: string;
   provider: string;
+  /**
+   * Earlier messages folded into this event, oldest first. A quick run of
+   * messages in one thread is answered once, for its newest message (the Chat
+   * SDK `burst` concurrency strategy); the rest arrive here. They are part of
+   * this turn's input: the model-facing user message renders them before
+   * `message`, and their attachments are listed with its own.
+   */
+  skipped?: MessengerMessage[];
   thread: MessengerThread;
 }
 
@@ -98,6 +106,7 @@ export function messengerContextFromEvent(
     message: event.message,
     messengerId: event.messengerId,
     provider: event.provider,
+    skipped: event.skipped,
     thread: event.thread
   };
 }
@@ -120,26 +129,33 @@ export function serializableMessengerEvent(
         }
       : undefined,
     message: event.message
-      ? {
-          attachments: event.message.attachments.map((attachment) => ({
-            fetchMetadata: attachment.fetchMetadata
-              ? { ...attachment.fetchMetadata }
-              : undefined,
-            id: attachment.id,
-            mediaType: attachment.mediaType,
-            name: attachment.name,
-            size: attachment.size,
-            text: attachment.text,
-            url: attachment.url
-          })),
-          author: { ...event.message.author },
-          createdAt: event.message.createdAt,
-          id: event.message.id,
-          isMention: event.message.isMention,
-          providerMessageId: event.message.providerMessageId,
-          text: event.message.text
-        }
-      : undefined
+      ? serializableMessengerMessage(event.message)
+      : undefined,
+    skipped: event.skipped?.map(serializableMessengerMessage)
+  };
+}
+
+function serializableMessengerMessage(
+  message: MessengerMessage
+): MessengerMessage {
+  return {
+    attachments: message.attachments.map((attachment) => ({
+      fetchMetadata: attachment.fetchMetadata
+        ? { ...attachment.fetchMetadata }
+        : undefined,
+      id: attachment.id,
+      mediaType: attachment.mediaType,
+      name: attachment.name,
+      size: attachment.size,
+      text: attachment.text,
+      url: attachment.url
+    })),
+    author: { ...message.author },
+    createdAt: message.createdAt,
+    id: message.id,
+    isMention: message.isMention,
+    providerMessageId: message.providerMessageId,
+    text: message.text
   };
 }
 
@@ -212,19 +228,27 @@ export function toMessengerUserMessage(
     throw new Error(`Messenger event ${event.kind} does not contain a message`);
   }
 
-  const text = message.text.trim();
-  const displayName = resolveChannelSpeakerLabel(
-    message.author,
-    channelSpeakerLabel
+  const messages = [...(event.skipped ?? []), message];
+  const runs = speakerRuns(messages).map((run) => ({
+    author: run[0].author,
+    text: run
+      .map((entry) => entry.text.trim())
+      .filter(Boolean)
+      .join("\n")
+  }));
+  const content = runs
+    .filter((run) => runs.length === 1 || run.text)
+    .map((run) => {
+      const displayName = event.thread.isDirectMessage
+        ? undefined
+        : resolveChannelSpeakerLabel(run.author, channelSpeakerLabel);
+      return displayName ? `${displayName}: ${run.text}` : run.text;
+    })
+    .join("\n");
+  const attachmentText = describeAttachments(
+    messages.flatMap((entry) => entry.attachments)
   );
-  const content =
-    event.thread.isDirectMessage || !displayName
-      ? text
-      : `${displayName}: ${text}`;
-  const attachmentText = describeAttachments(message.attachments);
-  const fullText = [content || text, attachmentText]
-    .filter(Boolean)
-    .join("\n\n");
+  const fullText = [content, attachmentText].filter(Boolean).join("\n\n");
 
   return {
     id: `${event.messengerId}:${message.id}`,
@@ -234,6 +258,20 @@ export function toMessengerUserMessage(
       messenger: messengerContextFromEvent(event)
     }
   } as UIMessage;
+}
+
+/** Consecutive messages from the same author, in order. */
+function speakerRuns(messages: MessengerMessage[]): MessengerMessage[][] {
+  const runs: MessengerMessage[][] = [];
+  for (const message of messages) {
+    const run = runs.at(-1);
+    if (run && run[0].author.userId === message.author.userId) {
+      run.push(message);
+    } else {
+      runs.push([message]);
+    }
+  }
+  return runs;
 }
 
 function describeAttachments(attachments: MessengerAttachment[]): string {
