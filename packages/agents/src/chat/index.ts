@@ -300,5 +300,7 @@ export type {
 } from "./lifecycle";
 export {
   truncateOlderMessages,
-  type TruncateOptions
+  truncateOlderToolResults,
+  type TruncateOptions,
+  type TruncateToolResultsOptions
 } from "./truncate-older-messages";

@@ -3941,7 +3941,8 @@ export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
 // Uses a mock model that calls the "echo" tool on first invocation.
 
 function createToolCallingMockModel(
-  toolInput = JSON.stringify({ message: "hello" })
+  toolInput = JSON.stringify({ message: "hello" }),
+  onPrompt?: (prompt: string) => void
 ): LanguageModel {
   let callCount = 0;
   return {
@@ -3955,6 +3956,7 @@ function createToolCallingMockModel(
     doStream(options: Record<string, unknown>) {
       callCount++;
       const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      onPrompt?.(JSON.stringify(messages));
       const hasToolResult = messages.some(
         (m: unknown) =>
           typeof m === "object" &&
@@ -4412,6 +4414,11 @@ export class ThinkToolsTestAgent extends Think {
     if (this._repairToolCalls) {
       return createToolCallingMockModel('```json\n{"message":"repaired"}\n```');
     }
+    if (this._echoExecuteMode === "validated-output") {
+      return createToolCallingMockModel(undefined, (prompt) =>
+        this._toolPrompts.push(prompt)
+      );
+    }
     return createToolCallingMockModel();
   }
 
@@ -4489,6 +4496,31 @@ export class ThinkToolsTestAgent extends Think {
             this._echoExecuteCount++;
             return `echo: ${message}`;
           }
+        })
+      };
+    }
+    if (mode === "validated-output") {
+      const outputSchema = z.object({
+        rows: z.array(z.object({ id: z.string(), title: z.string() }))
+      });
+      return {
+        echo: tool({
+          description: "List rows",
+          inputSchema: z.object({ message: z.string() }),
+          outputSchema,
+          execute: async () => {
+            this._echoExecuteCount++;
+            return {
+              rows: Array.from({ length: 40 }, (_, i) => ({
+                id: `row-${i}`,
+                title: `Row ${i} `.padEnd(60, "x")
+              }))
+            };
+          },
+          toModelOutput: ({ output }) => ({
+            type: "json",
+            value: outputSchema.parse(output)
+          })
         })
       };
     }
@@ -4713,7 +4745,9 @@ export class ThinkToolsTestAgent extends Think {
     | "sync-iterable"
     | "async-generator"
     | "needs-approval"
-    | "add-messages" = "default";
+    | "add-messages"
+    | "validated-output" = "default";
+  private _toolPrompts: string[] = [];
 
   /** Counts how many times the `echo` tool's `execute` actually runs. */
   private _echoExecuteCount = 0;
@@ -4777,8 +4811,14 @@ export class ThinkToolsTestAgent extends Think {
       | "async-generator"
       | "needs-approval"
       | "add-messages"
+      | "validated-output"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  /** Model prompts recorded in `validated-output` mode, as JSON. */
+  async getToolPrompts(): Promise<string[]> {
+    return this._toolPrompts;
   }
 
   /** How many times the `echo` tool's `execute` body actually ran. */

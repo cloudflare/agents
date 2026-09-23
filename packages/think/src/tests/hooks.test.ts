@@ -1205,6 +1205,32 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
     expect(probe.insideLoop).toBe(true);
     expect(probe.persisted).toBe(true);
   });
+
+  it("replays an aged tool output through a validating toModelOutput (#2014)", async () => {
+    const agent = await freshToolAgent("validated-output-aged");
+    await agent.setEchoExecuteMode("validated-output");
+    const first = await agent.testChat("call echo");
+    expect(first.error).toBeUndefined();
+    expect(await agent.getEchoExecuteCount()).toBe(1);
+
+    for (let i = 0; i < 4; i++) {
+      const result = await agent.testChat(`follow-up ${i}`);
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+    }
+
+    const prompt = JSON.parse(
+      (await agent.getToolPrompts()).at(-1) ?? "[]"
+    ) as Array<{ role: string; content: unknown }>;
+    const toolResult = JSON.stringify(
+      prompt.find((message) => message.role === "tool")
+    );
+    expect(toolResult).toContain("__truncated");
+    expect(toolResult).not.toContain("row-39");
+
+    const stored = JSON.stringify(await agent.getDurableMessagesForTest());
+    expect(stored).toContain("row-39");
+  });
 });
 
 // ── beforeToolCall gates whether execute runs (invocation counter) ──

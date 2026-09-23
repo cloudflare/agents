@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { truncateOlderMessages } from "../../chat/truncate-older-messages";
+import type { ModelMessage, ToolModelMessage } from "ai";
+import {
+  truncateOlderMessages,
+  truncateOlderToolResults
+} from "../../chat/truncate-older-messages";
 import type { SessionMessage } from "../../sessions";
+
+type ToolResultOutput = Extract<
+  ToolModelMessage["content"][number],
+  { type: "tool-result" }
+>["output"];
 
 /**
  * Read-time truncation is a chat concern: it shapes what goes to the model,
@@ -134,5 +143,153 @@ describe("truncateOlderMessages", () => {
 
     expect(typeof output).toBe("string");
     expect(output).toContain("[truncated");
+  });
+
+  it("never truncates provider-executed tool outputs", () => {
+    const providerOutput = [
+      { url: "https://a", encryptedContent: "e".repeat(2000) }
+    ];
+    const old = toolMessage("old-search", providerOutput);
+    (old.parts[0] as { providerExecuted?: boolean }).providerExecuted = true;
+    const messages = [
+      old,
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+
+    const truncated = truncateOlderMessages(messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 100
+    });
+
+    expect(firstOutput(truncated[0])).toBe(providerOutput);
+  });
+
+  it("leaves tool outputs intact when toolOutputs is false", () => {
+    const output = { content: "x".repeat(1000) };
+    const messages = [
+      toolMessage("old-tool", output),
+      textMessage("old-user", "q".repeat(200)),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+
+    const truncated = truncateOlderMessages(messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 100,
+      maxTextChars: 100,
+      toolOutputs: false
+    });
+
+    expect(firstOutput(truncated[0])).toBe(output);
+    expect((truncated[1].parts[0] as { text: string }).text).toContain(
+      "[truncated"
+    );
+  });
+});
+
+describe("truncateOlderToolResults", () => {
+  function toolResults(
+    ...results: Array<[toolCallId: string, output: ToolResultOutput]>
+  ): ModelMessage {
+    return {
+      role: "tool",
+      content: results.map(([toolCallId, output]) => ({
+        type: "tool-result",
+        toolCallId,
+        toolName: "read",
+        output
+      }))
+    };
+  }
+
+  function outputOf(message: ModelMessage, index = 0): ToolResultOutput {
+    const part = (message as ToolModelMessage).content[index];
+    if (part.type !== "tool-result") throw new Error("not a tool result");
+    return part.output;
+  }
+
+  it("truncates converted results of older messages and keeps recent ones", () => {
+    const messages = [
+      toolMessage("old", {}),
+      toolMessage("recent", {}),
+      textMessage("recent-user", "hi")
+    ];
+    const oldJson: ToolResultOutput = {
+      type: "json",
+      value: { rows: "x".repeat(1000) }
+    };
+    const recentText: ToolResultOutput = {
+      type: "text",
+      value: "y".repeat(1000)
+    };
+    const modelMessages = [
+      toolResults(["tc-old", oldJson]),
+      toolResults(["tc-recent", recentText])
+    ];
+
+    const truncated = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 100
+    });
+
+    const old = outputOf(truncated[0]);
+    expect(old.type).toBe("json");
+    expect(JSON.stringify(old)).toContain("[truncated");
+    expect(outputOf(truncated[1])).toBe(recentText);
+    expect(outputOf(modelMessages[0])).toBe(oldJson);
+  });
+
+  it("truncates text items of content results and keeps media", () => {
+    const messages = [
+      toolMessage("old", {}),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+    const media = {
+      type: "image-data" as const,
+      data: "AAAA",
+      mediaType: "image/png"
+    };
+    const modelMessages = [
+      toolResults([
+        "tc-old",
+        {
+          type: "content",
+          value: [{ type: "text", text: "z".repeat(1000) }, media]
+        }
+      ])
+    ];
+
+    const [message] = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 100
+    });
+
+    const output = outputOf(message);
+    if (output.type !== "content") throw new Error("expected content");
+    const [text, kept] = output.value;
+    expect(text.type === "text" && text.text).toContain("[truncated");
+    expect(kept).toBe(media);
+  });
+
+  it("leaves provider-executed results intact", () => {
+    const old = toolMessage("old", {});
+    (old.parts[0] as { providerExecuted?: boolean }).providerExecuted = true;
+    const messages = [
+      old,
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+    const modelMessages = [
+      toolResults(["tc-old", { type: "text", value: "p".repeat(1000) }])
+    ];
+
+    expect(
+      truncateOlderToolResults(modelMessages, messages, {
+        keepRecent: 2,
+        maxToolOutputChars: 100
+      })
+    ).toBe(modelMessages);
   });
 });
