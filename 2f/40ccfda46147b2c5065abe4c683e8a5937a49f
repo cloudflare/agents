@@ -1,0 +1,47 @@
+packages/agents/src/chat/react.tsx
+  s_368991bdec7f77::t_289d19621e1923 1530-1536,2207,2291-2301,2306
+packages/agents/src/chat/replay-frames.ts
+  s_368991bdec7f77::t_2e4c48442ba39b 24,34
+packages/agents/src/chat/resumable-stream.ts
+  s_368991bdec7f77::t_203970927ce381 191-197,525,649-651,653,663,665-668,694,944
+packages/agents/src/chat/wire-types.ts
+  s_368991bdec7f77::t_5d6a09a715f931 80-85
+packages/agents/src/chat/ws-chat-transport.ts
+  s_368991bdec7f77::t_396ec99d1012e1 15,101-105,712-716,790,795-801,804,907-911,923,928-930,933
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_5b80da0f2fbc63 1875-1879,1893,2232,2238,6835,6841
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_368991bdec7f77::t_2e2b16f7733088 6207-6285
+packages/ai-chat/src/tests/resumable-streaming.test.ts
+  s_368991bdec7f77::t_969fa32a83d05f 1169-1232
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_677ee326eab757 784-788
+packages/ai-chat/src/tests/ws-transport-resume.test.ts
+  s_368991bdec7f77::t_4600e7df5a2fee 181-224
+packages/think/src/think.ts
+  s_368991bdec7f77::t_652deccfaca368 13377,13387-13388,13681-13682,13700,13891,13902
+.changeset/replay-chunk-seq.md
+  s_368991bdec7f77::t_de3541cae7ff42 1-7
+docs/agents/resumable-streaming.md
+  s_368991bdec7f77::t_80d133c510e34d 87-88
+packages/agents/src/chat/__tests__/replay-dedupe.test.ts
+  s_368991bdec7f77::t_6ce0c9c2711bf8 1-103
+packages/agents/src/chat/replay-dedupe.ts
+  s_368991bdec7f77::t_2b1fac44f701ab 1-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2f40ccfda46147b2c5065abe4c683e8a5937a49f",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
