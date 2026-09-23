@@ -300,6 +300,107 @@ const ACTION_OUTPUT_MAX_CHARS = 20_000;
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_LEDGER_LAST_SWEPT_KEY = "cf_think_action_ledger:last_swept_at";
+const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
+
+type ResolvedPauseOutcome = { executionId: string; output: unknown };
+
+function isPausedToolPart(part: Record<string, unknown>): boolean {
+  const output = part.output as { status?: unknown } | null | undefined;
+  return (
+    part.state === "output-available" &&
+    output != null &&
+    typeof output === "object" &&
+    output.status === "paused"
+  );
+}
+
+function ownsPausedToolCall(message: UIMessage, toolCallId: string): boolean {
+  return (message.parts as unknown as Array<Record<string, unknown>>).some(
+    (part) => part.toolCallId === toolCallId && isPausedToolPart(part)
+  );
+}
+
+/** The tool call id of a part whose output carries `executionId`, if any. */
+function executionToolCallIn(
+  message: UIMessage,
+  executionId: string,
+  pausedOnly: boolean
+): string | null {
+  if (message.role !== "assistant") return null;
+  for (const part of message.parts as unknown as Array<
+    Record<string, unknown>
+  >) {
+    if (part.state !== "output-available") continue;
+    if (typeof part.toolCallId !== "string") continue;
+    const output = part.output as
+      | { status?: unknown; executionId?: unknown }
+      | null
+      | undefined;
+    if (
+      output != null &&
+      typeof output === "object" &&
+      (!pausedOnly || output.status === "paused") &&
+      output.executionId === executionId
+    ) {
+      return part.toolCallId;
+    }
+  }
+  return null;
+}
+
+/**
+ * A client that missed a pause's resolution resubmits its part still paused,
+ * and reconciliation protects server results only from pre-output client
+ * states. Keep the server's resolved part, and drop the pending-state text
+ * after it as the resolution did.
+ */
+function keepResolvedPauses(
+  incoming: UIMessage[],
+  serverMessages: readonly UIMessage[]
+): UIMessage[] {
+  const resolved = new Map<string, UIMessage["parts"][number]>();
+  for (const message of serverMessages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts) {
+      const record = part as Record<string, unknown>;
+      if (
+        typeof record.toolCallId === "string" &&
+        (record.state === "output-available" ||
+          record.state === "output-error" ||
+          record.state === "output-denied") &&
+        !isPausedToolPart(record)
+      ) {
+        resolved.set(record.toolCallId, part);
+      }
+    }
+  }
+  if (resolved.size === 0) return incoming;
+
+  return incoming.map((message) => {
+    if (message.role !== "assistant") return message;
+    const stale = message.parts.flatMap((part) => {
+      const record = part as Record<string, unknown>;
+      return typeof record.toolCallId === "string" &&
+        isPausedToolPart(record) &&
+        resolved.has(record.toolCallId)
+        ? [record.toolCallId]
+        : [];
+    });
+    if (stale.length === 0) return message;
+    let parts = message.parts;
+    for (const toolCallId of stale) {
+      parts = dropGenerationAfterToolCall(
+        parts.map((part) =>
+          "toolCallId" in part && part.toolCallId === toolCallId
+            ? resolved.get(toolCallId)!
+            : part
+        ),
+        toolCallId
+      );
+    }
+    return { ...message, parts };
+  });
+}
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
@@ -2061,6 +2162,25 @@ function reservedMetadataOf(
     }
   }
   return Object.keys(reserved).length > 0 ? reserved : undefined;
+}
+
+/**
+ * `parts` without the text and reasoning that follow the part for
+ * `toolCallId`. Returns `parts` itself when nothing is dropped.
+ */
+function dropGenerationAfterToolCall(
+  parts: UIMessage["parts"],
+  toolCallId: string
+): UIMessage["parts"] {
+  const index = parts.findIndex(
+    (part) => "toolCallId" in part && part.toolCallId === toolCallId
+  );
+  if (index === -1) return parts;
+  const kept = parts.filter(
+    (part, i) =>
+      i <= index || (part.type !== "text" && part.type !== "reasoning")
+  );
+  return kept.length === parts.length ? parts : kept;
 }
 
 /**
@@ -4205,6 +4325,13 @@ export class Think<
   // persist. Null when no stream is active. Mirrors `@cloudflare/ai-chat`'s
   // `_streamingMessage` handling.
   private _streamingAssistant: StreamAccumulator | null = null;
+  // Resolved pauses, by tool call id, whose outcome write or generation drop
+  // may not have landed: the outcome is being written, or its own turn was
+  // still streaming. See `_dropGenerationAfterResolvedPause`. Mirrored in
+  // storage with the outcome so both survive a restart before the next turn;
+  // loaded once per isolate.
+  private _deferredResolvedPauses = new Map<string, ResolvedPauseOutcome>();
+  private _deferredResolvedPausesLoad: Promise<void> | undefined;
   private _submitConcurrency = new SubmitConcurrencyController({
     defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
   });
@@ -6483,6 +6610,7 @@ export class Think<
   private async _prepareInferenceInvocation(
     input: TurnInput
   ): Promise<() => StreamableResult> {
+    await this._flushDeferredResolvedPauses();
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.
     const includeMcpTools = this.includeMcpTools;
@@ -14073,10 +14201,9 @@ export class Think<
     const serverMessagesById = new Map(
       serverMessages.map((message) => [message.id, message])
     );
-    const reconciled = reconcileMessages(
-      incomingMessages,
-      serverMessages,
-      sanitizeMessage
+    const reconciled = keepResolvedPauses(
+      reconcileMessages(incomingMessages, serverMessages, sanitizeMessage),
+      serverMessages
     );
 
     let branchParentId: string | undefined;
@@ -14690,11 +14817,16 @@ export class Think<
     executionId: string,
     output: unknown
   ): Promise<boolean> {
-    const toolCallId = this._findPausedExecutionToolCall(executionId);
+    const toolCallId = await this._findExecutionToolCallDurably(
+      executionId,
+      true
+    );
     if (!toolCallId) {
       // Already resolved in place (e.g. approved from another tab)? Then the
       // transcript has the outcome and nothing more is needed.
-      if (this._findExecutionToolCall(executionId) != null) return false;
+      if ((await this._findExecutionToolCallDurably(executionId)) != null) {
+        return false;
+      }
       let summary: string;
       try {
         summary = JSON.stringify(output)?.slice(0, 4_000) ?? String(output);
@@ -14718,11 +14850,15 @@ export class Think<
         ]
       } as UIMessage);
     } else {
-      await this._enqueueInteractionApply(() =>
-        this._applyToolUpdateToMessages(
+      await this._enqueueInteractionApply(async () => {
+        // Recorded before the outcome is written, so a restart before either
+        // write lands still applies both before the next inference.
+        await this._rememberResolvedPause(toolCallId, { executionId, output });
+        await this._applyToolUpdateToMessages(
           pausedExecutionUpdate(toolCallId, executionId, output)
-        )
-      );
+        );
+        await this._dropGenerationAfterResolvedPause(toolCallId);
+      });
     }
     // Continue on the approving connection when there is one (WS callable),
     // else any open connection (DO-stub approval with clients attached). When
@@ -14746,16 +14882,9 @@ export class Think<
   }
 
   /**
-   * Find the tool part holding the paused output of `executionId` — in the
-   * in-flight streaming accumulator first (an approval can land while a new
-   * turn streams), then the persisted transcript, newest message first.
-   */
-  private _findPausedExecutionToolCall(executionId: string): string | null {
-    return this._findExecutionToolCall(executionId, true);
-  }
-
-  /**
-   * Find the tool part carrying `executionId` in its output. With
+   * Find the tool part carrying `executionId` in its output — in the in-flight
+   * streaming accumulator first (an approval can land while a new turn
+   * streams), then the in-memory transcript, newest message first. With
    * `pausedOnly`, only a still-paused output matches — used to locate the
    * part an approval outcome should replace. Without it, any settled output
    * matches — used to distinguish "already resolved elsewhere" from "the
@@ -14765,40 +14894,141 @@ export class Think<
     executionId: string,
     pausedOnly = false
   ): string | null {
-    const matches = (part: Record<string, unknown>): boolean => {
-      if (part.state !== "output-available") return false;
-      if (typeof part.toolCallId !== "string") return false;
-      const output = part.output as
-        | { status?: unknown; executionId?: unknown }
-        | null
-        | undefined;
-      return (
-        output != null &&
-        typeof output === "object" &&
-        (!pausedOnly || output.status === "paused") &&
-        output.executionId === executionId
-      );
-    };
-
     const streaming = this._streamingAssistant;
     if (streaming) {
-      for (const part of streaming.parts as unknown as Array<
-        Record<string, unknown>
-      >) {
-        if (matches(part)) return part.toolCallId as string;
-      }
+      const found = executionToolCallIn(
+        { role: "assistant", parts: streaming.parts } as unknown as UIMessage,
+        executionId,
+        pausedOnly
+      );
+      if (found) return found;
     }
 
     for (let i = this.messages.length - 1; i >= 0; i--) {
-      const message = this.messages[i];
-      if (message.role !== "assistant") continue;
-      for (const part of message.parts as unknown as Array<
-        Record<string, unknown>
-      >) {
-        if (matches(part)) return part.toolCallId as string;
-      }
+      const found = executionToolCallIn(
+        this.messages[i],
+        executionId,
+        pausedOnly
+      );
+      if (found) return found;
     }
     return null;
+  }
+
+  /**
+   * {@link _findExecutionToolCall}, falling back to storage when the hydrated
+   * window does not cover the whole transcript, so a long-lived pause is
+   * still resolved in place.
+   */
+  private async _findExecutionToolCallDurably(
+    executionId: string,
+    pausedOnly = false
+  ): Promise<string | null> {
+    const found = this._findExecutionToolCall(executionId, pausedOnly);
+    if (found || this._cacheCoversActivePath) return found;
+    for await (const message of this.session.history({ newestFirst: true })) {
+      const stored = executionToolCallIn(
+        message as UIMessage,
+        executionId,
+        pausedOnly
+      );
+      if (stored) return stored;
+    }
+    return null;
+  }
+
+  /**
+   * Text and reasoning the model wrote after a paused tool result were written
+   * against the pending state ("once approved, ..."). Once the pause resolves
+   * they contradict the result, so drop them before the continuation reads the
+   * transcript. Tool, file, and other parts after the pause stay.
+   *
+   * While the turn that paused is still streaming, its accumulator owns the
+   * message and appends deltas to the last text part, so parts cannot be
+   * removed underneath it. The drop is deferred to the next inference, which
+   * is queued behind that turn and runs after it persists.
+   *
+   * The resolved pause stays recorded (see `_rememberResolvedPause`) until
+   * the drop has been applied.
+   */
+  private async _dropGenerationAfterResolvedPause(
+    toolCallId: string
+  ): Promise<void> {
+    const streaming = this._streamingAssistant;
+    if (
+      streaming?.parts.some(
+        (part) => "toolCallId" in part && part.toolCallId === toolCallId
+      )
+    ) {
+      return;
+    }
+    const owner = await this._resolveToolCallOwner(toolCallId, undefined);
+    const parts = owner
+      ? dropGenerationAfterToolCall(owner.parts, toolCallId)
+      : undefined;
+    if (owner && parts && parts !== owner.parts) {
+      const safe = await this._updateMessageInHistory({ ...owner, parts });
+      this._patchCachedMessage(safe);
+      this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
+    }
+    await this._forgetResolvedPause(toolCallId);
+  }
+
+  private _loadResolvedPauses(): Promise<void> {
+    this._deferredResolvedPausesLoad ??= (async () => {
+      const stored = await this.ctx.storage.get<
+        Array<[string, ResolvedPauseOutcome]>
+      >(DEFERRED_RESOLVED_PAUSES_KEY);
+      for (const [toolCallId, outcome] of stored ?? []) {
+        if (!this._deferredResolvedPauses.has(toolCallId)) {
+          this._deferredResolvedPauses.set(toolCallId, outcome);
+        }
+      }
+    })().catch((error: unknown) => {
+      // Let the next caller retry instead of treating the key as empty.
+      this._deferredResolvedPausesLoad = undefined;
+      throw error;
+    });
+    return this._deferredResolvedPausesLoad;
+  }
+
+  private async _rememberResolvedPause(
+    toolCallId: string,
+    outcome: ResolvedPauseOutcome
+  ): Promise<void> {
+    await this._loadResolvedPauses();
+    this._deferredResolvedPauses.set(toolCallId, outcome);
+    await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
+      ...this._deferredResolvedPauses
+    ]);
+  }
+
+  private async _forgetResolvedPause(toolCallId: string): Promise<void> {
+    await this._loadResolvedPauses();
+    if (!this._deferredResolvedPauses.delete(toolCallId)) return;
+    if (this._deferredResolvedPauses.size === 0) {
+      await this.ctx.storage.delete(DEFERRED_RESOLVED_PAUSES_KEY);
+    } else {
+      await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
+        ...this._deferredResolvedPauses
+      ]);
+    }
+  }
+
+  private async _flushDeferredResolvedPauses(): Promise<void> {
+    await this._loadResolvedPauses();
+    for (const [toolCallId, outcome] of [...this._deferredResolvedPauses]) {
+      // Still paused: a restart landed before the outcome was written, and the
+      // execution it resolved is already consumed, so write it now. The owner
+      // is looked up in storage when the hydrated window does not hold it.
+      const owner = await this._resolveToolCallOwner(toolCallId, undefined);
+      if (owner && ownsPausedToolCall(owner, toolCallId)) {
+        await this._applyToolUpdateToMessages(
+          pausedExecutionUpdate(toolCallId, outcome.executionId, outcome.output)
+        );
+      }
+      await this._dropGenerationAfterResolvedPause(toolCallId);
+    }
   }
 
   private async _applyToolUpdateToMessages(update: {

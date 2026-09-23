@@ -180,6 +180,21 @@ client is connected; `rejectExecution()` resolves the action without running it.
 single approval UI can drive both. (`durable-pause` requires an `approval`
 policy — an action that would never park is rejected at definition time.)
 
+After an action parks, the model can still write a reply in the same turn, such
+as "Once approved, the deploy will start." That text describes the pending
+state, so it is wrong once the execution resolves. When you approve or reject,
+Think replaces the paused output with the outcome and removes the text and
+reasoning parts that follow it in that assistant message. Earlier content and
+later tool and file parts are kept. The continuation then reads a transcript
+that ends with the real outcome. If the outcome arrives while the parking turn
+is still streaming, the removal waits until that turn is saved and runs before
+the next model call, whether that is the continuation or a new user turn. The
+outcome is saved in Durable Object storage before the transcript is updated, so
+if the agent restarts before either write lands, both the outcome and the
+removal are applied before the next model call. A client that resubmits an
+older copy of the message, still showing the paused output, does not restore
+the paused output or the removed text.
+
 Both approval-gated and durable-pause parts carry a stable
 `ActionApprovalDescriptor` (`{ requestId, toolCallId, action, summary, input,
 permissions, risk, kind }`) so your UI has everything it needs to render the

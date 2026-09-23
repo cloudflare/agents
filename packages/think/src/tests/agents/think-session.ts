@@ -4080,8 +4080,12 @@ function createAttachReplyMockModel(): LanguageModel {
 
 // Calls the `pauseAction` durable-pause action on the first model step, then
 // emits text on every later step (within the parking turn and on the
-// connection-independent continuation after approval).
-function createDurablePauseMockModel(): LanguageModel {
+// connection-independent continuation after approval). While the latest tool
+// result is still paused, that text (and a reasoning part) describes the
+// pending state, as a real model would.
+function createDurablePauseMockModel(
+  onPrompt?: (prompt: string) => void
+): LanguageModel {
   let callCount = 0;
   return {
     specificationVersion: "v3",
@@ -4094,11 +4098,16 @@ function createDurablePauseMockModel(): LanguageModel {
     doStream(options: Record<string, unknown>) {
       callCount++;
       const messages = (options as { prompt?: unknown[] }).prompt ?? [];
-      const hasToolResult = messages.some(
+      onPrompt?.(JSON.stringify(messages));
+      const toolMessages = messages.filter(
         (m: unknown) =>
           typeof m === "object" &&
           m !== null &&
           (m as Record<string, unknown>).role === "tool"
+      );
+      const hasToolResult = toolMessages.length > 0;
+      const pausePending = JSON.stringify(toolMessages.at(-1) ?? "").includes(
+        '"status":"paused"'
       );
       // Only park when a user explicitly asked for it on this turn — so a
       // post-resolution continuation (driven by provider-projected framework
@@ -4151,11 +4160,23 @@ function createDurablePauseMockModel(): LanguageModel {
             });
           } else {
             const id = `dp-text-${callCount}`;
+            if (pausePending) {
+              const reasoningId = `dp-reasoning-${callCount}`;
+              controller.enqueue({ type: "reasoning-start", id: reasoningId });
+              controller.enqueue({
+                type: "reasoning-delta",
+                id: reasoningId,
+                delta: "The action is waiting for approval."
+              });
+              controller.enqueue({ type: "reasoning-end", id: reasoningId });
+            }
             controller.enqueue({ type: "text-start", id });
             controller.enqueue({
               type: "text-delta",
               id,
-              delta: "acknowledged"
+              delta: pausePending
+                ? "Once approved, the change will be applied."
+                : "acknowledged"
             });
             controller.enqueue({ type: "text-end", id });
             controller.enqueue({
@@ -4260,6 +4281,115 @@ export class ThinkToolsTestAgent extends Think {
         0
       )
     });
+    if (this._approveParkedInNextStepForTest && ctx.stepNumber > 0) {
+      this._approveParkedInNextStepForTest = false;
+      const [pending] = this._listActionPendingRowsForTest();
+      if (pending) void this.approveExecution(pending.execution_id);
+    }
+  }
+
+  private _approveParkedInNextStepForTest = false;
+
+  /**
+   * Approve the parked action from `beforeStep` of the step after it parks,
+   * so the outcome lands while the parking turn is still streaming.
+   */
+  async approveParkedInNextStepForTest(): Promise<void> {
+    this._approveParkedInNextStepForTest = true;
+  }
+
+  /** Keep a resolved pause's connectionless continuation from running. */
+  async holdConnectionlessContinuationForTest(): Promise<void> {
+    (
+      this as unknown as { _queueConnectionlessContinuation(): Promise<void> }
+    )._queueConnectionlessContinuation = () => Promise.resolve();
+  }
+
+  /** Skip the next resolved-pause drop, as a restart right before it would. */
+  async skipNextResolvedPauseDropForTest(): Promise<void> {
+    const self = this as unknown as {
+      _dropGenerationAfterResolvedPause(toolCallId: string): Promise<void>;
+    };
+    const original = self._dropGenerationAfterResolvedPause;
+    self._dropGenerationAfterResolvedPause = async () => {
+      self._dropGenerationAfterResolvedPause = original;
+    };
+  }
+
+  /** Skip the next transcript tool update, as a restart right before it would. */
+  async skipNextToolUpdateForTest(): Promise<void> {
+    const self = this as unknown as {
+      _applyToolUpdateToMessages(update: unknown): Promise<void>;
+    };
+    const original = self._applyToolUpdateToMessages;
+    self._applyToolUpdateToMessages = async () => {
+      self._applyToolUpdateToMessages = original;
+    };
+  }
+
+  /** Keep only the newest `count` messages in memory, as a windowed hydration. */
+  async windowCachedMessagesForTest(count: number): Promise<void> {
+    const self = this as unknown as {
+      _cachedMessages: UIMessage[];
+      _cacheCoversActivePath: boolean;
+    };
+    self._cachedMessages = self._cachedMessages.slice(-count);
+    self._cacheCoversActivePath = false;
+  }
+
+  /** Reconcile and persist a client transcript, as a chat request does. */
+  async persistClientMessagesForTest(messages: UIMessage[]): Promise<void> {
+    await (
+      this as unknown as {
+        _reconcileAndPersistIncoming(
+          messages: UIMessage[],
+          options: {
+            requestId: string;
+            isRegeneration: boolean;
+            isCurrent: () => boolean;
+          }
+        ): Promise<unknown>;
+      }
+    )._reconcileAndPersistIncoming(messages, {
+      requestId: crypto.randomUUID(),
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+  }
+
+  async getDurableMessagesForTest(): Promise<UIMessage[]> {
+    return (await this.session.getHistory()) as UIMessage[];
+  }
+
+  /** Fail the next storage read of `key`. */
+  async failNextStorageGetForTest(key: string): Promise<void> {
+    const storage = this.ctx.storage as unknown as {
+      get(key: string): Promise<unknown>;
+    };
+    const get = storage.get.bind(storage);
+    storage.get = async (requested: string) => {
+      if (requested !== key) return get(requested);
+      storage.get = get;
+      throw new Error("simulated storage read failure");
+    };
+  }
+
+  /** Drop in-memory deferred-pause state, as an eviction would. */
+  async forgetDeferredResolvedPausesForTest(): Promise<void> {
+    const state = this as unknown as {
+      _deferredResolvedPauses: Map<string, unknown>;
+      _deferredResolvedPausesLoad: Promise<void> | undefined;
+    };
+    state._deferredResolvedPauses.clear();
+    state._deferredResolvedPausesLoad = undefined;
+  }
+
+  private _listActionPendingRowsForTest(): Array<{ execution_id: string }> {
+    return (
+      this as unknown as {
+        _listActionPendingRows: () => Array<{ execution_id: string }>;
+      }
+    )._listActionPendingRows();
   }
 
   async getBeforeStepLog(): Promise<
@@ -4274,7 +4404,11 @@ export class ThinkToolsTestAgent extends Think {
 
   override getModel(): LanguageModel {
     if (this._useAttachReplyAction) return createAttachReplyMockModel();
-    if (this._useDurablePauseAction) return createDurablePauseMockModel();
+    if (this._useDurablePauseAction) {
+      return createDurablePauseMockModel((prompt) =>
+        this._durablePausePrompts.push(prompt)
+      );
+    }
     if (this._repairToolCalls) {
       return createToolCallingMockModel('```json\n{"message":"repaired"}\n```');
     }
@@ -4619,6 +4753,7 @@ export class ThinkToolsTestAgent extends Think {
     | "permission-noop"
     | "attach-then-throw" = "two";
   private _useDurablePauseAction = false;
+  private _durablePausePrompts: string[] = [];
   private _durablePauseApproval: boolean | "predicate-hello" | undefined =
     undefined;
   private _durablePauseIdempotencyKey: string | null = null;
@@ -4868,6 +5003,17 @@ export class ThinkToolsTestAgent extends Think {
 
   async getDurablePauseExecCount(): Promise<number> {
     return this._durablePauseExecCount;
+  }
+
+  /** The serialized prompt of every durable-pause model call, in order. */
+  async getDurablePausePromptsForTest(): Promise<string[]> {
+    return this._durablePausePrompts;
+  }
+
+  async appendMessagesForTest(messages: UIMessage[]): Promise<void> {
+    for (const message of messages) {
+      await this.appendMessageToHistory(message);
+    }
   }
 
   /** Simulate compaction removing a durable-pause action's tool part. */

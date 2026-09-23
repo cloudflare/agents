@@ -317,6 +317,9 @@ An AI SDK tool with `needsApproval` doesn't run immediately inside the sandbox �
 
 - `approveExecution(executionId)` — resumes the run where it stopped (already-done work is replayed, not re-executed); the outcome replaces the paused output in the transcript and the chat auto-continues.
 - `rejectExecution(executionId, reason?)` — ends the run with `{ status: "rejected", reason }` so the model can adapt.
+
+Either way, the text and reasoning the model wrote after the paused output (its "waiting for approval" reply) are removed from that assistant message, so the continuation does not read a stale pending state next to the real outcome.
+
 - `pendingExecutions()` — pending actions (with full args) for rendering approval UI.
 
 > **Render approval cards from `pendingExecutions()`, not the transcript.** The `pending` array in the paused tool output is a _truncated preview_ — args are bounded (~2 KB each) so they don't blow up model context, but the full args (up to 1 MB) are what actually execute on approve. A human approving a gated call must see the authoritative args, so fetch them via `pendingExecutions(executionId)` before enabling the Approve button. `examples/assistant`'s `PausedExecutionCard` shows the pattern.
