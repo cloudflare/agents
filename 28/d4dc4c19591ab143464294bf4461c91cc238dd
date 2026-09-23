@@ -1,0 +1,35 @@
+packages/think/src/tests/agents/index.ts
+  s_368991bdec7f77::t_c078f396e66623 15-21
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_13a8074d2dc212 3513-3579
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_1e14649593df76 11-17,1068-1105,1119-1168,1178-1238
+packages/think/src/tests/worker.ts
+  s_368991bdec7f77::t_97a4e6bedd911a 30-36,79-85,232-238
+packages/think/src/tests/wrangler.jsonc
+  s_368991bdec7f77::t_71879dc2b47bbd 74-101,243-249
+packages/think/src/think.ts
+  s_368991bdec7f77::t_1034b75f12e5c5 2806-2840,3142,5469,5904
+.changeset/calm-tools-think.md
+  s_368991bdec7f77::t_47c761fbbb7857 1-5
+docs/think/index.md
+  s_368991bdec7f77::t_91795a9fccd8b3 525-534
+docs/think/lifecycle-hooks.md
+  s_368991bdec7f77::t_07a8508a465e44 830-831
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "28d4dc4c19591ab143464294bf4461c91cc238dd",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
