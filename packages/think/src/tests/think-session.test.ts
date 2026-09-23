@@ -616,8 +616,10 @@ describe("Think — error handling", () => {
     expect(result.firstInterruptedCalls).toBe(1);
     // ...a continuation was scheduled...
     expect(result.scheduledContinues).toBeGreaterThanOrEqual(1);
-    // ...and it streamed the turn to completion (recovered, not failed).
+    // ...and it streamed the turn to completion (recovered, not failed), into
+    // the same assistant message rather than a second one (#1876).
     expect(result.finalAssistantText.length).toBeGreaterThan(0);
+    expect(result.assistantMessages).toBe(1);
   });
 
   it("retries the user turn when the stream stalls before its first chunk (#1941)", async () => {
@@ -701,7 +703,13 @@ describe("Think — error handling", () => {
     });
     expect(call.partialText.length).toBeGreaterThan(0);
     expect(call.createdAt).toBeGreaterThanOrEqual(before);
-    expect(result.finalAssistantText.length).toBeGreaterThan(0);
+    // The continuation extends the interrupted assistant message (#1876).
+    expect(result.rolesAfterStall).toEqual(["user", "assistant"]);
+    expect(result.finalRoles).toEqual(["user", "assistant"]);
+    expect(result.finalAssistantText.startsWith(call.partialText)).toBe(true);
+    expect(result.finalAssistantText.length).toBeGreaterThan(
+      call.partialText.length
+    );
   });
 
   it("stops stall recovery when onChatRecovery declines to continue", async () => {
