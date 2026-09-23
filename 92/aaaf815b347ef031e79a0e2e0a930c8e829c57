@@ -1,0 +1,49 @@
+packages/think/src/tests/agents/messengers.ts
+  s_368991bdec7f77::t_ba458cf6ba468c 1-3,52-60,70-173,195-207,228-244
+.changeset/messenger-no-placeholder-post.md
+  s_368991bdec7f77::t_8f2262fc47aad6 1-4
+packages/think/src/tests/worker.ts
+  s_368991bdec7f77::t_7d3b60942f9745 13-14,46,88,231
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_dfb6e760c57e1d 997,1002-1009,1011-1082,1103-1145
+  s_368991bdec7f77::t_e1d472d7c976b4 32,294-489,1146-1153,1159-1200
+packages/think/src/messengers/chat-sdk.ts
+  s_368991bdec7f77::t_6434ffc0108c10 9,12,54-60,318,370,668-673,682-693
+  s_368991bdec7f77::t_52210b8c94bd73 134-141,380,389,397,409,417,429,789-790,796-800,805,809
+packages/think/src/tests/agents/index.ts
+  s_368991bdec7f77::t_20f50720683b48 41-44
+packages/think/src/tests/wrangler.jsonc
+  s_368991bdec7f77::t_1404707ed96915 126-129,188-191,228
+docs/think/messengers.md
+  s_368991bdec7f77::t_daf413cebe8ee2 208-214
+  s_368991bdec7f77::t_d16c1f7965bb40 131-158,228-230
+examples/chat-sdk-messenger/src/index.ts
+  s_368991bdec7f77::t_1105e846b1f03b 137
+  s_368991bdec7f77::t_f8cb818fd98fed 141,148,151,162,165,177,335,340,342-344,448,457,478,485,495,501,509,515-516,522-523
+examples/chat-sdk-messenger/src/tests/intelligence.test.ts
+  s_368991bdec7f77::t_fe1f731fe55306 8,10,30-37,40-44,57,173-227,233-236
+packages/think/src/messengers/events.ts
+  s_368991bdec7f77::t_abc8cfa134ccb3 83-90,109,132-158,231-249,251,263-276
+.changeset/messenger-burst-skipped.md
+  s_368991bdec7f77::t_a7daa449bdcc44 1-5
+examples/chat-sdk-messenger/src/intelligence/delivery.ts
+  s_368991bdec7f77::t_c87895067dd784 21,75-76,83-84,90-93
+examples/chat-sdk-messenger/src/intelligence/messages.ts
+  s_368991bdec7f77::t_444d00038fc5d2 42-66,71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "92aaaf815b347ef031e79a0e2e0a930c8e829c57",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
