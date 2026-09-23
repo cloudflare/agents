@@ -15745,7 +15745,8 @@ export class Think<
           this._settleMessengerRecovery(event.incidentId, "completed");
         } else if (
           event.type === "chat:recovery:skipped" ||
-          event.type === "chat:recovery:failed"
+          (event.type === "chat:recovery:failed" &&
+            !this._deferringRecoveryIncidents.has(event.incidentId))
         ) {
           this._settleMessengerRecovery(event.incidentId, "interrupted");
         }
@@ -16106,6 +16107,12 @@ export class Think<
       this._recoveryOwnedSubmissions.add(submissionId);
     }
   }
+
+  /**
+   * Incidents marked `failed` only for observability while the platform
+   * re-runs the same recovery attempt; their messenger reply stays pending.
+   */
+  private _deferringRecoveryIncidents = new Set<string>();
 
   /** Incidents whose running recovery attempt scheduled the next attempt. */
   private _rescheduledRecoveryIncidents = new Set<string>();
@@ -16756,12 +16763,10 @@ export class Think<
     if (await this._handleRecoveryOom(callback, data, error)) return;
     if (isPlatformTransientError(error)) {
       const message = error instanceof Error ? error.message : String(error);
+      const incidentId = data?.incidentId;
+      if (incidentId) this._deferringRecoveryIncidents.add(incidentId);
       try {
-        await this._updateChatRecoveryIncident(
-          data?.incidentId,
-          "failed",
-          message
-        );
+        await this._updateChatRecoveryIncident(incidentId, "failed", message);
       } catch (bookkeepingError) {
         // Best-effort observability only — in the exact window this branch
         // fires (deploy reset / storage outage) the incident write itself can
@@ -16770,6 +16775,8 @@ export class Think<
           "[Think] failed to mark recovery incident failed before deferring",
           bookkeepingError
         );
+      } finally {
+        if (incidentId) this._deferringRecoveryIncidents.delete(incidentId);
       }
       throw error;
     }
