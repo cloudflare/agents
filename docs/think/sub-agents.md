@@ -330,6 +330,8 @@ protected async continueLastTurn(
 
 Returns `{ requestId, status: "skipped" }` if the last message is not an assistant message.
 
+A direct call persists the new response as a separate assistant message after the last one, which suits "generate more" or self-correction flows. Recovery continuations (after an eviction, deploy, or stream stall) are different: they stream into the interrupted assistant message, keeping its id and parts, so a recovered answer stays a single message.
+
 Most applications do not call this directly. Treat `continueLastTurn()` as an
 advanced subclass and recovery primitive; user-facing, server-triggered turns
 usually use `saveMessages()` or `submitMessages()` instead.

@@ -574,7 +574,7 @@ Network access, tools, and workspace writes are opt-in. The default timeout is
 
 ### Chat Recovery
 
-Think always wraps chat turns in recoverable fibers. If the Durable Object is evicted mid-stream, Think reconstructs any buffered chunks, persists partial output, and schedules either a continuation of the assistant turn or a retry of the unanswered user turn. `chatRecovery = false` is no longer supported; assign an object only to tune recovery.
+Think always wraps chat turns in recoverable fibers. If the Durable Object is evicted mid-stream, Think reconstructs any buffered chunks, persists partial output, and schedules either a continuation of the assistant turn or a retry of the unanswered user turn. A continuation streams into the interrupted assistant message, so the recovered answer stays one message. `chatRecovery = false` is no longer supported; assign an object only to tune recovery.
 
 A stream-stall watchdog abort (`chatStreamStallTimeoutMs`, above) is treated as just another interruption and routes into this same bounded path. Think calls `onChatRecovery` (see below), preserves the settled partial, and schedules a continuation, so a transient hang recovers automatically. If the stall happens before the model produces its first chunk, there is no partial to continue, so Think retries the unanswered user message instead. A persistently hanging provider exhausts the budget and terminalizes through the **same** exhaustion handling as a deploy/eviction interruption: `onExhausted` fires, the `chat:recovery:exhausted` event is emitted, and the configured `terminalMessage` is shown (not a raw stall error).
 

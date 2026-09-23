@@ -493,6 +493,18 @@ function streamErrorToString(error: unknown): string {
 }
 
 /**
+ * A recovery continuation opens its own text and reasoning parts, and an end
+ * chunk only closes the newest part of its type, so a part the interruption
+ * left streaming would never be closed.
+ */
+function settleInterruptedPart(part: UIMessage["parts"][number]) {
+  return (part.type === "text" || part.type === "reasoning") &&
+    part.state === "streaming"
+    ? { ...part, state: "done" as const }
+    : part;
+}
+
+/**
  * Normalizes the AI SDK tool-execution-finished event across major versions.
  *
  * Think registers a single `experimental_onToolCallFinish` callback, which is
@@ -11846,7 +11858,8 @@ export class Think<
    * (Phase 4), "generate more" buttons, and self-correction.
    *
    * Note: this creates a new message, not an append to the existing one.
-   * True continuation-as-append (chunk rewriting) is planned for Phase 4.
+   * Recovery continuations (`trigger: "recovery-continue"`) are the exception:
+   * they stream into the interrupted assistant message so it stays one message.
    *
    * Returns early with `status: "skipped"` if there is no assistant message
    * to continue from.
@@ -11922,7 +11935,8 @@ export class Think<
                 result,
                 abortSignal,
                 {
-                  continuation: true
+                  continuation: true,
+                  extendLeafAssistant: trigger === "recovery-continue"
                 }
               );
               status = streamResult.status;
@@ -13389,6 +13403,13 @@ export class Think<
        * returned. Pass only while the retry budget allows.
        */
       overflowRecovery?: { onRetry: (error?: string) => void };
+      /**
+       * Stream into the assistant leaf (same id, existing parts) instead of a
+       * new assistant message. Recovery continuations set this so an
+       * interrupted answer stays one message (#1876); other continuations keep
+       * the documented `continueLastTurn()` behavior of a separate message.
+       */
+      extendLeafAssistant?: boolean;
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
@@ -13403,8 +13424,20 @@ export class Think<
       );
     }
 
+    const leaf = this.messages.at(-1);
+    const continuationAssistant =
+      continuation && options?.extendLeafAssistant && leaf?.role === "assistant"
+        ? leaf
+        : undefined;
+    const leafMetadata = continuationAssistant?.metadata;
     const accumulator = new StreamAccumulator({
-      messageId: crypto.randomUUID()
+      messageId: continuationAssistant?.id ?? crypto.randomUUID(),
+      continuation: continuationAssistant !== undefined,
+      existingParts: continuationAssistant?.parts.map(settleInterruptedPart),
+      existingMetadata:
+        leafMetadata !== null && typeof leafMetadata === "object"
+          ? (leafMetadata as Record<string, unknown>)
+          : undefined
     });
     // Expose the in-flight message so a client tool result arriving before the
     // end-of-stream persist lands on the accumulator instead of being dropped

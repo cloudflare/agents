@@ -616,8 +616,10 @@ describe("Think — error handling", () => {
     expect(result.firstInterruptedCalls).toBe(1);
     // ...a continuation was scheduled...
     expect(result.scheduledContinues).toBeGreaterThanOrEqual(1);
-    // ...and it streamed the turn to completion (recovered, not failed).
+    // ...and it streamed the turn to completion (recovered, not failed), into
+    // the same assistant message rather than a second one (#1876).
     expect(result.finalAssistantText.length).toBeGreaterThan(0);
+    expect(result.assistantMessages).toBe(1);
   });
 
   it("retries the user turn when the stream stalls before its first chunk (#1941)", async () => {
@@ -684,8 +686,9 @@ describe("Think — error handling", () => {
   it("calls onChatRecovery with the live turn's stash when a stall schedules a continuation (#2042)", async () => {
     const agent = await freshAgent(`stall-hook-${crypto.randomUUID()}`);
     const before = Date.now();
+    // Four chunks stop the stream inside its text part, before `text-end`.
     const result = await agent.testStallRecoveryForTest({
-      afterChunks: 5,
+      afterChunks: 4,
       timeoutMs: 50,
       stash: "provider-response-id"
     });
@@ -701,7 +704,15 @@ describe("Think — error handling", () => {
     });
     expect(call.partialText.length).toBeGreaterThan(0);
     expect(call.createdAt).toBeGreaterThanOrEqual(before);
-    expect(result.finalAssistantText.length).toBeGreaterThan(0);
+    // The continuation extends the interrupted assistant message (#1876).
+    expect(result.rolesAfterStall).toEqual(["user", "assistant"]);
+    expect(result.finalRoles).toEqual(["user", "assistant"]);
+    expect(result.finalAssistantText.startsWith(call.partialText)).toBe(true);
+    expect(result.finalAssistantText.length).toBeGreaterThan(
+      call.partialText.length
+    );
+    // The part the stall interrupted is closed, not left streaming.
+    expect(result.finalStreamingParts).toBe(0);
   });
 
   it("stops stall recovery when onChatRecovery declines to continue", async () => {

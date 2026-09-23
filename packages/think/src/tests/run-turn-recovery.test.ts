@@ -110,4 +110,81 @@ describe("recovery × runTurn", () => {
     expect(finalMessages.at(-1)?.role).toBe("assistant");
     expect(await agent.getActiveFibers()).toHaveLength(0);
   });
+
+  it("continues an interrupted assistant message instead of appending a duplicate assistant", async () => {
+    const agent = await freshRecoveryAgent(
+      `runturn-continuation-accumulator-${crypto.randomUUID()}`
+    );
+
+    await agent.persistTestMessage({
+      id: "u-continuation-accumulator",
+      role: "user",
+      parts: [{ type: "text", text: "continue this partial answer" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-continuation-accumulator",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial answer" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-continuation-accumulator",
+      "req-continuation-accumulator",
+      [
+        {
+          body: JSON.stringify({
+            type: "start",
+            messageId: "a-continuation-accumulator"
+          }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "Partial answer"
+          }),
+          index: 2
+        }
+      ]
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-continuation-accumulator",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-continuation-accumulator",
+          continuation: false,
+          latestMessageId: "a-continuation-accumulator",
+          latestMessageRole: "assistant",
+          latestUserMessageId: "u-continuation-accumulator",
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+
+    await agent.triggerFiberRecovery();
+    await agent.runScheduledRecoveryContinueForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const assistants = messages.filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]?.id).toBe("a-continuation-accumulator");
+    expect(
+      assistants[0]?.parts
+        .filter(
+          (part): part is { type: "text"; text: string } => part.type === "text"
+        )
+        .map((part) => part.text)
+        .join("")
+    ).toContain("Continued response.");
+    expect(
+      assistants[0]?.parts.filter(
+        (part) => "state" in part && part.state === "streaming"
+      )
+    ).toEqual([]);
+  });
 });
