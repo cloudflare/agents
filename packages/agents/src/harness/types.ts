@@ -1,7 +1,7 @@
 export interface HarnessStartOptions {
   readonly runId?: string;
   readonly idempotencyKey?: string;
-  readonly retain?: boolean;
+  readonly persist?: boolean;
 }
 
 export interface HarnessNotifyOptions {
