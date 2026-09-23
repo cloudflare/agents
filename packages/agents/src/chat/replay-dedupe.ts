@@ -19,14 +19,24 @@ type ChunkFrame = {
   seq?: number;
 };
 
+/**
+ * Requests the ledger remembers. A request that finishes while the client is
+ * disconnected never delivers the terminal frame that would forget it.
+ */
+const MAX_TRACKED_REQUESTS = 32;
+
 /** Highest chunk `seq` this client applied, per request id. */
 export class AppliedChunkLedger {
   private readonly applied = new Map<string, number>();
 
   record(requestId: string, seq: number | undefined): void {
     if (seq === undefined) return;
-    if (seq > (this.applied.get(requestId) ?? -1)) {
-      this.applied.set(requestId, seq);
+    const applied = Math.max(seq, this.applied.get(requestId) ?? -1);
+    this.applied.delete(requestId);
+    this.applied.set(requestId, applied);
+    if (this.applied.size > MAX_TRACKED_REQUESTS) {
+      const oldest = this.applied.keys().next().value;
+      if (oldest !== undefined) this.applied.delete(oldest);
     }
   }
 

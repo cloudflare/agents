@@ -35,6 +35,19 @@ describe("AppliedChunkLedger", () => {
     ledger.forget("r1");
     expect(ledger.isAppliedReplay("r1", replay(0, {}))).toBe(false);
   });
+
+  it("forgets the least recently applied requests past its capacity", () => {
+    const ledger = new AppliedChunkLedger();
+    ledger.record("r0", 0);
+    for (let i = 1; i <= 32; i++) ledger.record(`r${i}`, 0);
+    ledger.record("r1", 1);
+    ledger.record("r33", 0);
+
+    expect(ledger.isAppliedReplay("r0", replay(0, {}))).toBe(false);
+    expect(ledger.isAppliedReplay("r1", replay(1, {}))).toBe(true);
+    expect(ledger.isAppliedReplay("r2", replay(0, {}))).toBe(false);
+    expect(ledger.isAppliedReplay("r33", replay(0, {}))).toBe(true);
+  });
 });
 
 describe("ContinuationReplayFilter", () => {
