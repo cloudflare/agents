@@ -687,6 +687,36 @@ describe("Think durable submissions", () => {
     await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
   });
 
+  it("links the partial persisted after cancellation to the aborted submission", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+
+    const accepted = await agent.testSubmitMessages("cancel me", {
+      submissionId: "sub-cancel-partial"
+    });
+    await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "running"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await agent.cancelSubmissionForTest(accepted.submissionId, "stop");
+    await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "aborted"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const assistant = (await agent.getStoredMessages()).find(
+      (message) => message.role === "assistant"
+    );
+    expect(assistant).toBeDefined();
+    await expect(
+      agent.inspectSubmissionForTest(accepted.submissionId)
+    ).resolves.toMatchObject({ status: "aborted", messageId: assistant?.id });
+  });
+
   it("aborts a running submission without letting late completion overwrite it", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);

@@ -8675,11 +8675,18 @@ export class Think<
     this._validateRunTurnAdmission(options, "wait");
 
     if (options.continuation === true) {
-      const result = await this._continueLastTurn(options.body, {
+      const continueOptions = {
         signal: options.signal,
-        channel: options.channel,
-        captureOutput: true
-      });
+        channel: options.channel
+      };
+      // An overridden `continueLastTurn` owns the continuation; it has no
+      // output channel, so only the built-in one captures structured output.
+      const result = isMethodOverridden(this, "continueLastTurn")
+        ? await this.continueLastTurn(options.body, continueOptions)
+        : await this._continueLastTurn(options.body, {
+            ...continueOptions,
+            captureOutput: true
+          });
       return this._enrichTurnResult(result, true);
     }
 
@@ -14164,7 +14171,10 @@ export class Think<
     messageId?: string
   ): void {
     const row = this._readRunningSubmissionForRecovery(requestId);
-    if (!row || row.request_id !== requestId) return;
+    if (!row || row.request_id !== requestId) {
+      if (messageId) this._recordAbortedSubmissionMessage(requestId, messageId);
+      return;
+    }
     this.sql`
       UPDATE cf_think_submissions
       SET result_status = ${result.status},
@@ -14176,11 +14186,31 @@ export class Think<
 
   private _recordSubmissionMessage(requestId: string, messageId: string): void {
     const row = this._readRunningSubmissionForRecovery(requestId);
-    if (!row || row.request_id !== requestId) return;
+    if (!row || row.request_id !== requestId) {
+      this._recordAbortedSubmissionMessage(requestId, messageId);
+      return;
+    }
     this.sql`
       UPDATE cf_think_submissions
       SET message_id = ${messageId}
       WHERE submission_id = ${row.submission_id} AND status = 'running'
+    `;
+  }
+
+  /**
+   * Cancellation settles a submission as `aborted` before the stream persists
+   * its partial; link that message without touching the terminal status.
+   */
+  private _recordAbortedSubmissionMessage(
+    requestId: string,
+    messageId: string
+  ): void {
+    this.sql`
+      UPDATE cf_think_submissions
+      SET message_id = ${messageId}
+      WHERE request_id = ${requestId}
+        AND status = 'aborted'
+        AND message_id IS NULL
     `;
   }
 
