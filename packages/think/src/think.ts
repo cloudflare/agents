@@ -1325,8 +1325,9 @@ export interface RunTurnBase {
   /**
    * Channel id this turn belongs to (resolved against `configureChannels()` /
    * `getMessengers()`). Sets the turn-scoped channel context and is persisted on
-   * the user message so a recovered/continued turn re-resolves it. Defaults to
-   * the implicit `web` channel.
+   * the user message so a recovered/continued turn re-resolves it. Omit it to
+   * run without a channel context. (WebSocket chat turns always run on the
+   * implicit `web` channel.)
    */
   channel?: string;
 }
@@ -1574,6 +1575,12 @@ type QueueTurnSpec<T> = {
   continuation?: boolean;
   allowNested?: boolean;
   channel?: string;
+  /**
+   * Ignore `channel` and extend the previous turn's channel, resolved when the
+   * turn starts rather than when it is admitted, so it sees turns queued
+   * ahead of it.
+   */
+  inheritChannel?: boolean;
   onQueued?: () => void;
   getStatus?: () => string | undefined;
   execute: () => Promise<T>;
@@ -2034,6 +2041,26 @@ const cachedMessageEncoder = new TextEncoder();
  */
 function cachedMessageBytes(message: UIMessage): number {
   return cachedMessageEncoder.encode(JSON.stringify(message)).byteLength;
+}
+
+function reservedMetadataOf(
+  message: UIMessage
+): Record<string, unknown> | undefined {
+  const metadata = message.metadata;
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    Array.isArray(metadata)
+  ) {
+    return undefined;
+  }
+  const reserved: Record<string, unknown> = {};
+  for (const key of RESERVED_MESSAGE_METADATA_KEYS) {
+    if (key in metadata) {
+      reserved[key] = (metadata as Record<string, unknown>)[key];
+    }
+  }
+  return Object.keys(reserved).length > 0 ? reserved : undefined;
 }
 
 /**
@@ -3096,6 +3123,15 @@ export class Think<
    * `deliverNotice` and per-channel policy. Save/restore keeps nested turns safe.
    */
   private _activeChannelContext?: ChannelContext;
+
+  /**
+   * Channel of the latest admitted queue turn, which a continuation without
+   * an explicit channel extends. Differs from the latest user message's
+   * channel when a WebSocket regeneration reuses a message another channel
+   * stored, or a continuation ran on an explicit channel. In memory only:
+   * after an eviction, continuations fall back to history.
+   */
+  private _lastTurnChannel?: { channel: string | undefined };
 
   /**
    * Live delivery surface for the active turn, bound by `deliverMessengerReply`
@@ -4767,6 +4803,12 @@ export class Think<
   /** Re-resolve the channel for a continuation from the latest user message. */
   private _channelFromLatestUserMessage(): string | undefined {
     return this._channelFromMessages(this.messages);
+  }
+
+  private _channelForAutoContinuation(): string | undefined {
+    return this._lastTurnChannel
+      ? this._lastTurnChannel.channel
+      : this._channelFromLatestUserMessage();
   }
 
   /**
@@ -8058,8 +8100,11 @@ export class Think<
   }
 
   private async _runInsideAdmittedTurnBody<T>(
-    spec: QueueTurnSpec<T>
+    admitted: QueueTurnSpec<T>
   ): Promise<T> {
+    const spec = admitted.inheritChannel
+      ? { ...admitted, channel: this._channelForAutoContinuation() }
+      : admitted;
     // A turn is one unit of traced work and owns its own boundary, never that
     // of whatever admitted it. A handler that awaits its turn ends at the same
     // moment anyway; one that does not — an ack-and-return submit, or an
@@ -8107,6 +8152,7 @@ export class Think<
 
                 this._activeTurnReplyAttachments = [];
                 this._activeTurnReplyAttachmentsRequestId = spec.requestId;
+                this._lastTurnChannel = { channel: spec.channel };
 
                 try {
                   const value = await this._withChannelContext(
@@ -11886,9 +11932,6 @@ export class Think<
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
-    // Re-resolve the channel from durable history so a continued/recovered turn
-    // re-applies per-channel policy.
-    const channel = options?.channel ?? this._channelFromLatestUserMessage();
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
@@ -11898,7 +11941,10 @@ export class Think<
       trigger,
       requestId,
       continuation: true,
-      channel,
+      // Without an explicit channel, a continued/recovered turn re-applies the
+      // per-channel policy of the turn it extends.
+      channel: options?.channel,
+      inheritChannel: options?.channel === undefined,
       getStatus: () => status,
       execute: async () => {
         if (this._turnQueue.generation !== epoch) {
@@ -12394,7 +12440,8 @@ export class Think<
         {
           requestId,
           isRegeneration,
-          isCurrent: () => this._turnQueue.generation === epoch
+          isCurrent: () => this._turnQueue.generation === epoch,
+          channel: "web"
         }
       );
       if (!reconciledTurn) {
@@ -12417,6 +12464,7 @@ export class Think<
           requestId,
           generation: epoch,
           continuation: false,
+          channel: "web",
           onQueued: releaseIfPending,
           execute: async () => {
             // Superseded by a later overlapping submit (latest/merge/debounce)
@@ -14006,6 +14054,8 @@ export class Think<
       requestId: string;
       isRegeneration: boolean;
       isCurrent: () => boolean;
+      /** Channel stamped on user messages the server has not stored yet. */
+      channel?: string;
     }
   ): Promise<{ branchParentId: string | undefined } | null> {
     const spanAttributes = {
@@ -14047,7 +14097,8 @@ export class Think<
           await this._persistIncomingMessage(
             msg,
             serverMessages,
-            serverMessagesById
+            serverMessagesById,
+            options.channel
           );
         }
 
@@ -14091,23 +14142,47 @@ export class Think<
    * without this every prior message would cost Sessions an existence read
    * plus a full-row compare (and, for media, a decode and hash of every
    * payload) per turn — reads spent discovering nothing changed.
+   *
+   * Reserved metadata (`channel`, `turnMetadata`) is server-owned. The client's
+   * copy is ignored, a stored row keeps its own, and a new user message gets
+   * `channel` when the caller supplies one.
    */
   private async _persistIncomingMessage(
     msg: UIMessage,
     serverMessages: readonly UIMessage[],
-    serverMessagesById?: ReadonlyMap<string, UIMessage>
+    serverMessagesById?: ReadonlyMap<string, UIMessage>,
+    channel?: string
   ): Promise<void> {
     const resolved =
       msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
     const prior = serverMessagesById?.get(resolved.id);
+    const incoming = stripReservedMetadata(sanitizeMessage(resolved));
     if (
       prior &&
-      JSON.stringify(prior) ===
-        JSON.stringify(stripReservedMetadata(sanitizeMessage(resolved)))
+      JSON.stringify(stripReservedMetadata(prior)) === JSON.stringify(incoming)
     ) {
       return;
     }
-    await this._upsertMessageInHistory(resolved, undefined, "client");
+    const reserved = prior
+      ? reservedMetadataOf(prior)
+      : incoming.role === "user" && channel
+        ? { channel }
+        : undefined;
+    if (!reserved) {
+      await this._upsertMessageInHistory(resolved, undefined, "client");
+      return;
+    }
+    await this._upsertMessageInHistory(
+      {
+        ...incoming,
+        metadata: {
+          ...(incoming.metadata as Record<string, unknown> | undefined),
+          ...reserved
+        }
+      },
+      undefined,
+      "server"
+    );
   }
 
   /**
@@ -16781,6 +16856,7 @@ export class Think<
       trigger: "auto-continuation",
       requestId,
       continuation: true,
+      inheritChannel: true,
       allowNested: true,
       execute: async () => {
         if (this._continuation.pending) {
@@ -16865,6 +16941,7 @@ export class Think<
         trigger: "auto-continuation",
         requestId,
         continuation: true,
+        inheritChannel: true,
         allowNested: true,
         execute: async () => {
           const continuationBody = async () => {

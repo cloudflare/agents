@@ -847,6 +847,11 @@ export class ThinkTestAgent extends Think {
 
   override configureChannels() {
     return {
+      web: {
+        kind: "web" as const,
+        ingress: { transport: "websocket" as const },
+        instructions: "WEB MODE"
+      },
       voice: {
         kind: "voice" as const,
         ingress: { transport: "voice" as const },
@@ -973,6 +978,40 @@ export class ThinkTestAgent extends Think {
       }
     )._renderChannelAttachments(attachments);
     return this.getMessages();
+  }
+
+  /**
+   * Queue continuations, in order, behind a held turn so none of them starts
+   * before the last is admitted.
+   */
+  async runQueuedContinuationsForTest(
+    channels: Array<string | undefined>
+  ): Promise<void> {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queue = (
+      this as unknown as {
+        _turnQueue: {
+          enqueue(id: string, fn: () => Promise<void>): Promise<unknown>;
+        };
+      }
+    )._turnQueue;
+    const blocker = queue.enqueue(crypto.randomUUID(), () => gate);
+    const runs: Promise<unknown>[] = [];
+    for (const channel of channels) {
+      runs.push(this.continueLastTurn(undefined, { channel }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    release();
+    await Promise.all([blocker, ...runs]);
+  }
+
+  async getAutoContinuationChannelForTest(): Promise<string | undefined> {
+    return (
+      this as unknown as { _channelForAutoContinuation(): string | undefined }
+    )._channelForAutoContinuation();
   }
 
   async resetCapturedTurnChannelsForTest(): Promise<void> {
