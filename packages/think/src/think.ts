@@ -175,6 +175,7 @@ import type {
   Connection,
   FiberRecoveryContext,
   RetryOptions,
+  SubAgentClass,
   WSMessage
 } from "agents";
 import {
@@ -302,6 +303,20 @@ const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_LEDGER_LAST_SWEPT_KEY = "cf_think_action_ledger:last_swept_at";
 const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
 const PENDING_RESPONSE_HOOK_PREFIX = "cf_think_pending_response_hook:";
+const MESSENGER_RECOVERY_PREFIX = "cf_think_messenger_recovery:";
+
+/**
+ * A messenger reply this agent owes after chat recovery settles, keyed by the
+ * recovery incident. `outcome` is set once the incident settles, so a reset
+ * between settling and posting re-delivers on the next start.
+ */
+type MessengerRecoveryDelivery = {
+  messengerId: string;
+  threadId: string;
+  partialText: string;
+  outcome?: "completed" | "interrupted";
+  text?: string;
+};
 
 type PendingResponseHook = {
   requestId: string;
@@ -1354,8 +1369,16 @@ export interface StreamCallback {
    * Note: a deploy/eviction interruption kills the isolate (and this callback)
    * before this can fire — the caller observes a transport break instead. This
    * fires only for an in-isolate interruption (the stall→recovery path).
+   *
+   * `info.deliversRecoveredReply` is true when the interrupted turn was a
+   * messenger turn and this agent will post the recovered answer (or the
+   * interrupted apology, if recovery gives up) to the messenger thread itself.
    */
-  onInterrupted?(): void | Promise<void>;
+  onInterrupted?(info?: ChatInterruptedInfo): void | Promise<void>;
+}
+
+export interface ChatInterruptedInfo {
+  deliversRecoveredReply?: boolean;
 }
 
 /**
@@ -3599,6 +3622,7 @@ export class Think<
               await this._sweepActionPendingApprovals();
               await this._migrateLegacyWorkflowNotifications();
               await this._replayPendingResponseHooks();
+              await this._replayMessengerRecoveryDeliveries();
               await this._recoverSubmissionsOnStart();
             },
             "Pending submissions / workflow notifications were not recovered on " +
@@ -5058,6 +5082,28 @@ export class Think<
       });
       throw error;
     }
+  }
+
+  /**
+   * Post a recovered messenger reply, or the interrupted apology, to a thread.
+   * Called by a conversation sub-agent (or this agent) once chat recovery of
+   * an interrupted messenger turn settles; only the host holds the messenger
+   * runtime (#2106).
+   *
+   * @internal
+   */
+  async _cf_deliverRecoveredMessengerReply(input: {
+    messengerId: string;
+    threadId: string;
+    outcome: "completed" | "interrupted";
+    text?: string;
+  }): Promise<void> {
+    if (!this._messengerRuntime) {
+      throw new Error(
+        `Cannot deliver a recovered reply for messenger "${input.messengerId}": this agent has no messenger runtime`
+      );
+    }
+    await this._messengerRuntime.deliverRecoveredReply(input);
   }
 
   /**
@@ -13538,7 +13584,11 @@ export class Think<
           // the caller doesn't read this clean resolve as success and finalize a
           // truncated partial (#1644); NOT onDone/onError — see `onInterrupted`.
           skipFinalizeRearm = true;
-          await callback.onInterrupted?.();
+          await callback.onInterrupted?.(
+            this._messengerRecoveryClaims.delete(requestId)
+              ? { deliversRecoveredReply: true }
+              : undefined
+          );
           return { status: "aborted" };
         }
         if (outcome === "exhausted" || outcome === "declined") {
@@ -15681,7 +15731,7 @@ export class Think<
       deleteIncident: async (key) => {
         await this.ctx.storage.delete(key);
       },
-      emitRecoveryEvent: (event) =>
+      emitRecoveryEvent: (event) => {
         this._emit(event.type, {
           incidentId: event.incidentId,
           requestId: event.requestId,
@@ -15689,7 +15739,16 @@ export class Think<
           maxAttempts: event.maxAttempts,
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
-        }),
+        });
+        if (event.type === "chat:recovery:completed") {
+          this._settleMessengerRecovery(event.incidentId, "completed");
+        } else if (
+          event.type === "chat:recovery:skipped" ||
+          event.type === "chat:recovery:failed"
+        ) {
+          this._settleMessengerRecovery(event.incidentId, "interrupted");
+        }
+      },
       scheduleRecovery: (callback, data, reason, delaySeconds) =>
         this._enqueueChatRecovery(callback, data, reason, delaySeconds),
       setRecovering: (active, requestId) =>
@@ -15766,7 +15825,10 @@ export class Think<
         createdAt
       },
       {
-        emit: (event) => this._emit("chat:recovery:exhausted", event),
+        emit: (event) => {
+          this._emit("chat:recovery:exhausted", event);
+          this._settleMessengerRecovery(incident.incidentId, "interrupted");
+        },
         onExhausted: config.onExhausted,
         onError: (error) =>
           console.error("[Think] chatRecovery onExhausted hook threw", error),
@@ -15972,6 +16034,11 @@ export class Think<
       : input.partialParts.length === 0
         ? retryTargetUserId
         : await this._latestUserLeafId();
+    await this._claimMessengerRecoveryDelivery(
+      input.requestId,
+      incident.incidentId,
+      partialText
+    );
     let delaySeconds: number | undefined;
     if (input.backoff) {
       const retries = await this._chatRecoveryEngine().recordTransientRetry(
@@ -17696,6 +17763,104 @@ export class Think<
         });
       }
       await this.ctx.storage.delete(key);
+    }
+  }
+
+  /** Request ids whose interruption handed messenger delivery to recovery. */
+  private _messengerRecoveryClaims = new Set<string>();
+
+  /**
+   * An interrupted messenger turn that recovery will continue: record where
+   * the recovered answer goes before the continuation is scheduled, so the
+   * messenger delivery can skip its apology (#2106). A continuation attempt
+   * of the same incident keeps the existing record.
+   */
+  private async _claimMessengerRecoveryDelivery(
+    requestId: string,
+    incidentId: string,
+    partialText: string
+  ): Promise<void> {
+    const context = this._activeMessengerContext;
+    if (!context) return;
+    const delivery: MessengerRecoveryDelivery = {
+      messengerId: context.messengerId,
+      threadId: context.thread.id,
+      partialText
+    };
+    await this.ctx.storage.put(
+      MESSENGER_RECOVERY_PREFIX + incidentId,
+      delivery
+    );
+    this._messengerRecoveryClaims.add(requestId);
+  }
+
+  private _settleMessengerRecovery(
+    incidentId: string,
+    outcome: "completed" | "interrupted"
+  ): void {
+    void this.keepAliveWhile(async () => {
+      const key = MESSENGER_RECOVERY_PREFIX + incidentId;
+      const delivery =
+        await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
+      if (!delivery || delivery.outcome) return;
+      const settled: MessengerRecoveryDelivery = { ...delivery, outcome };
+      if (outcome === "completed") {
+        const text = (
+          this.messages.filter((m) => m.role === "assistant").at(-1)?.parts ??
+          []
+        )
+          .filter((p): p is { type: "text"; text: string } => p.type === "text")
+          .map((p) => p.text)
+          .join("");
+        settled.text = text.startsWith(delivery.partialText)
+          ? text.slice(delivery.partialText.length)
+          : text;
+      }
+      await this.ctx.storage.put(key, settled);
+      await this._deliverMessengerRecovery(key, settled);
+    }).catch((error: unknown) => {
+      console.error("[Think] recovered messenger reply delivery failed", error);
+    });
+  }
+
+  private async _deliverMessengerRecovery(
+    key: string,
+    delivery: MessengerRecoveryDelivery
+  ): Promise<void> {
+    if (!delivery.outcome) return;
+    const input = {
+      messengerId: delivery.messengerId,
+      threadId: delivery.threadId,
+      outcome: delivery.outcome,
+      ...(delivery.text !== undefined && { text: delivery.text })
+    };
+    const parent = this.parentPath.at(-1);
+    if (parent) {
+      // `parentAgent` resolves the parent by class name only.
+      const host = await this.parentAgent({
+        name: parent.className
+      } as unknown as SubAgentClass<Think>);
+      await host._cf_deliverRecoveredMessengerReply(input);
+    } else {
+      await this._cf_deliverRecoveredMessengerReply(input);
+    }
+    await this.ctx.storage.delete(key);
+  }
+
+  private async _replayMessengerRecoveryDeliveries(): Promise<void> {
+    const pending = await this.ctx.storage.list<MessengerRecoveryDelivery>({
+      prefix: MESSENGER_RECOVERY_PREFIX
+    });
+    for (const [key, delivery] of pending) {
+      if (!delivery.outcome) continue;
+      try {
+        await this._deliverMessengerRecovery(key, delivery);
+      } catch (error) {
+        console.error(
+          "[Think] recovered messenger reply delivery failed",
+          error
+        );
+      }
     }
   }
 

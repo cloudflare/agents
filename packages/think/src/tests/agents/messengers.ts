@@ -87,9 +87,29 @@ function lastUserText(prompt: unknown): string {
  */
 export class ThinkMessengerDeliveryTestAgent extends Think {
   private _chat: ChatInstance | undefined;
+  private _streamCalls = 0;
+  override chatRecovery = { maxAttempts: 1 };
+
+  /**
+   * #2106: an agent named `recover-<mode>-…` fails its first model stream
+   * mid-reply with an error classified as transient (`recover-exhaust-…`:
+   * every stream), and `recover-thread-…` answers in a per-thread sub-agent,
+   * which inherits the mode from its parent's name.
+   */
+  private _recoveryMode(): "self" | "thread" | "exhaust" | undefined {
+    const name = this.parentPath.at(-1)?.name ?? this.name;
+    const mode = /^recover-(self|thread|exhaust)-/.exec(name)?.[1];
+    return mode as "self" | "thread" | "exhaust" | undefined;
+  }
+
+  override classifyChatError(): "transient" | undefined {
+    return this._recoveryMode() ? "transient" : undefined;
+  }
 
   override getModel(): LanguageModel {
     const record = (text: string) => this._record("prompt", text);
+    const mode = this._recoveryMode();
+    const nextCall = () => ++this._streamCalls;
     return {
       specificationVersion: "v3",
       provider: "test",
@@ -100,11 +120,27 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       },
       doStream(options: { prompt: unknown }) {
         record(lastUserText(options.prompt));
+        const call = nextCall();
+        const fails = mode === "exhaust" || (mode !== undefined && call === 1);
+        const deltas = mode && call > 1 ? ["it"] : ["Got ", "it"];
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue({ type: "stream-start", warnings: [] });
             controller.enqueue({ type: "text-start", id: "t" });
-            for (const delta of ["Got ", "it"]) {
+            if (fails) {
+              controller.enqueue({
+                type: "text-delta",
+                id: "t",
+                delta: "Got "
+              });
+              controller.enqueue({
+                type: "error",
+                error: new Error("upstream connection reset")
+              });
+              controller.close();
+              return;
+            }
+            for (const delta of deltas) {
               controller.enqueue({ type: "text-delta", id: "t", delta });
             }
             controller.enqueue({ type: "text-end", id: "t" });
@@ -133,7 +169,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return {
       fake: chatSdkMessenger({
         adapter: this._recordingAdapter(),
-        conversation: "self",
+        conversation: this._recoveryMode() === "thread" ? "thread" : "self",
         provider: "fake",
         userName: "fake_bot",
         verifyWebhook: false

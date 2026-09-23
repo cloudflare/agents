@@ -2,7 +2,11 @@ import { RpcTarget } from "cloudflare:workers";
 import type { FiberContext } from "agents";
 import { TextSegmentJoiner } from "agents/chat";
 import type { UIMessage } from "ai";
-import type { ChatStartEvent, StreamCallback } from "../think";
+import type {
+  ChatInterruptedInfo,
+  ChatStartEvent,
+  StreamCallback
+} from "../think";
 import type { MessengerEvent } from "./events";
 import { toMessengerUserMessage } from "./events";
 
@@ -37,6 +41,7 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
   private chatRequestId?: string;
   private closed = false;
   private interrupted = false;
+  private recoveredReplyDelivered = false;
   private error?: Error;
   private text = "";
   private visibleClosed = false;
@@ -77,18 +82,23 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
     this.fail(new Error(error));
   }
 
-  onInterrupted(): void {
+  onInterrupted(info?: ChatInterruptedInfo): void {
     // The attempt was interrupted and a continuation (not this callback) owns
-    // the real answer — delivered only to WebSocket connections, never to this
-    // surface. Mark interrupted and stop the visible stream WITHOUT failing it,
-    // so delivery surfaces the interrupted apology instead of treating the
-    // partial as the final reply (#1644).
+    // the real answer. Mark interrupted and stop the visible stream WITHOUT
+    // failing it, so delivery does not treat the partial as the final reply
+    // (#1644).
     this.interrupted = true;
+    this.recoveredReplyDelivered = info?.deliversRecoveredReply === true;
     this.close();
   }
 
   wasInterrupted(): boolean {
     return this.interrupted;
+  }
+
+  /** Whether the target posts the recovered reply to the thread itself. */
+  targetDeliversRecoveredReply(): boolean {
+    return this.recoveredReplyDelivered;
   }
 
   /** Ends a completed turn, streaming `emptyText` if it produced no text. */
@@ -451,11 +461,11 @@ export async function deliverMessengerReply(
     }
     if (callback.wasInterrupted()) {
       // The model turn was interrupted and routed into bounded recovery; the
-      // recovered answer is produced later by a scheduled continuation and
-      // broadcast only to WebSocket connections, NOT to this one-shot messenger
-      // delivery. Do NOT mark the turn complete or finalize the truncated
-      // partial as the reply — surface the interrupted apology so the user
-      // knows to retry (#1644). `completedModelTurn` stays false.
+      // recovered answer is produced later by a scheduled continuation. Do NOT
+      // mark the turn complete or finalize the truncated partial as the reply
+      // (#1644). When the target posts the recovered answer (or the apology,
+      // if recovery gives up) itself, stay quiet (#2106); otherwise surface
+      // the interrupted apology so the user knows to retry.
       callback.close();
       await post.catch(() => undefined);
       // Checkpoint before the post: a reset after it must not let recovery
@@ -467,6 +477,7 @@ export async function deliverMessengerReply(
           options.snapshotThread
         )
       );
+      if (callback.targetDeliversRecoveredReply()) return;
       await options.surface
         .post(interruptedResponseText)
         .catch(() => undefined);
