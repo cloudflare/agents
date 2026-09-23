@@ -1,0 +1,27 @@
+packages/think/src/think.ts
+  s_368991bdec7f77::t_b5cd4652e0ef9f 13179-13183,13629-13631,13818,13822,13824,13826
+.changeset/think-stall-recovery-retry.md
+  s_368991bdec7f77::t_a3830fce3d486f 7
+docs/think/index.md
+  s_368991bdec7f77::t_7a21cadf553110 581
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_f952b9dcec29ab 613-615,1174-1184,1202-1205,1628,1644,1684
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_37627ba2a338fc 735-752
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e1128b246aa74beb37fb4b9129466abb40020f7c",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

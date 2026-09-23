@@ -1,0 +1,56 @@
+packages/think/src/tests/agents/messengers.ts
+  s_368991bdec7f77::t_ba458cf6ba468c 1-3,52-60,70-173,195-207,241-257
+.changeset/messenger-no-placeholder-post.md
+  s_368991bdec7f77::t_8f2262fc47aad6 1-4
+packages/think/src/tests/worker.ts
+  s_368991bdec7f77::t_7d3b60942f9745 13-14,53,102,252
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_dfb6e760c57e1d 997,1003-1010,1012-1033,1039-1087,1121-1163
+  s_368991bdec7f77::t_e1d472d7c976b4 32,294-489,1164-1171,1177-1216,1247-1248
+  s_368991bdec7f77::t_1e93b32e868def 1217-1246
+packages/think/src/messengers/chat-sdk.ts
+  s_368991bdec7f77::t_6434ffc0108c10 9,12,54-60,370,671-675,686,690,693-701
+  s_368991bdec7f77::t_52210b8c94bd73 134-141,380,389,397,409,417,432,797-798,804-808,813,817
+  s_368991bdec7f77::t_e029dfa3447219 420-422,425,430
+packages/think/src/tests/agents/index.ts
+  s_368991bdec7f77::t_20f50720683b48 48-51
+packages/think/src/tests/wrangler.jsonc
+  s_368991bdec7f77::t_1404707ed96915 154-157,216-219,263
+docs/think/messengers.md
+  s_368991bdec7f77::t_daf413cebe8ee2 214-220
+  s_368991bdec7f77::t_d16c1f7965bb40 131-156,164,234-236
+  s_368991bdec7f77::t_b8b051acba21ca 157-163
+examples/chat-sdk-messenger/src/index.ts
+  s_368991bdec7f77::t_1105e846b1f03b 136
+  s_368991bdec7f77::t_f8cb818fd98fed 140,145,149,309,314,316-318,422,431,452,459,469,475,483,489-490,496-497
+  s_368991bdec7f77::t_b137bcd465ad40 43,142,146,150-152,521-543
+examples/chat-sdk-messenger/src/tests/intelligence.test.ts
+  s_368991bdec7f77::t_fe1f731fe55306 8,10,31-38,41-45,58,173-206,254-274,280-283
+  s_368991bdec7f77::t_61e78a37526cab 20,207-253
+packages/think/src/messengers/events.ts
+  s_368991bdec7f77::t_abc8cfa134ccb3 83-90,109,132-158,231-249,251,263-276
+.changeset/messenger-burst-skipped.md
+  s_368991bdec7f77::t_a7daa449bdcc44 1-4
+  s_368991bdec7f77::t_e38c9af8890225 5
+examples/chat-sdk-messenger/src/intelligence/delivery.ts
+  s_368991bdec7f77::t_c87895067dd784 21,75-76,83-84,90-93
+examples/chat-sdk-messenger/src/intelligence/messages.ts
+  s_368991bdec7f77::t_444d00038fc5d2 73-82,84-91,93-95,97,102
+  s_368991bdec7f77::t_576968c195eae4 42-72,83,92,96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ed20d92c806ca93eac86ef0a9fb126430d582326",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
