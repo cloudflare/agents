@@ -1,0 +1,84 @@
+packages/agents/src/chat/truncate-older-messages.ts
+  s_368991bdec7f77::t_b56a3bdef3afa6 201,203-206
+packages/agents/src/tests/chat/truncate-older-messages.test.ts
+  s_368991bdec7f77::t_e1a8cb9a434c02 276-318
+docs/think/lifecycle-hooks.md
+  s_368991bdec7f77::t_8bb8daaf9289fa 744,751-758
+  s_368991bdec7f77::t_5597626deab2bb 743
+packages/think/src/messengers/delivery.ts
+  s_368991bdec7f77::t_c725dd9ee9b8ac 471-472,481-483,516-518
+packages/think/src/tests/run-turn-recovery.test.ts
+  s_368991bdec7f77::t_7e9c2b3f7d9fbb 191,267-299,339-371
+  s_368991bdec7f77::t_c7ae99b0db09e1 300-338
+  s_368991bdec7f77::t_0faba35aa61ca2 192-266
+.changeset/response-hook-after-reset.md
+  s_368991bdec7f77::t_d67c28ea7c1e22 1-6
+packages/agents/src/chat/lifecycle.ts
+  s_368991bdec7f77::t_069ff98eb8c550 44-48
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_9cb89dc032786e 7612-7671,7678-7696,7697-7698,7709-7716,7711-7716
+  s_368991bdec7f77::t_4ba3364935ebfa 7672-7677
+  s_368991bdec7f77::t_7b445dd085d103 1045-1056,1061-1065,1069-1079
+  s_368991bdec7f77::t_7585883aa05f53 1057-1060,1066-1068,6738-6761
+  s_368991bdec7f77::t_a50a14bdcbae90 7699-7710
+  s_368991bdec7f77::t_362d0b4bdcca52 1923-1925,1928-1936,1939-1942,1956-1959,1967-1972,1975-1978
+  s_368991bdec7f77::t_99418a3a6375c8 1927,1938,1960-1966,1974
+  s_368991bdec7f77::t_b9738d7f8255c7 1926,1937,1943-1955,1973
+  s_368991bdec7f77::t_10e3bd01cc787f 1874-1922
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_212bad862f1a18 1464-1518
+packages/think/src/think.ts
+  s_368991bdec7f77::t_23b5df241b46b4 305,320-327,3624,14151-14161,14164,14179-14180,14182,16135-16170,17680-17745,17754-17768
+  s_368991bdec7f77::t_16f2332804c51a 13501-13507,13509,13538-13539,13541,17746-17753
+  s_368991bdec7f77::t_d10f3bae75628b 1509-1514,2353-2354,2392,7176-7178,8760,8814-8818,8831,10714-10715,10722-10723,10752-10753,10768-10769,10804-10805,10820-10821,10842-10843,11219-11220,11231-11232,11569-11570,11611-11612,14267-14269,14285-14286,14316-14317,14327-14334,14339-14341,17005-17006
+  s_368991bdec7f77::t_f0bc2523982ee7 12211,12213,12216-12226,12244,12293-12294,12299,12321-12326,18089,18093-18097,18100-18106
+  s_368991bdec7f77::t_67ba1b1329aa1d 16042-16048
+  s_368991bdec7f77::t_2680248b19b51b 16049,16109-16118,16929,16942-16948,17225,17237-17243
+  s_368991bdec7f77::t_5de70d6c015854 16050-16053,16058,16077
+  s_368991bdec7f77::t_fb34f5feb856cf 11491,16070,16089,16093-16108
+.changeset/turn-result-output.md
+  s_368991bdec7f77::t_ce70a1a7f33b22 1-5
+docs/think/index.md
+  s_368991bdec7f77::t_7892036567017d 264-266
+docs/think/programmatic-submissions.md
+  s_368991bdec7f77::t_092dfb11511700 103-107
+packages/think/src/tests/hooks.test.ts
+  s_368991bdec7f77::t_c20b1499f7b21e 1878-1899,1985-1995
+  s_368991bdec7f77::t_68f8b4b134f0ee 1900-1925
+packages/think/src/tests/submissions.test.ts
+  s_368991bdec7f77::t_e0abc4524a4dd7 339-342
+  s_368991bdec7f77::t_dcece7f12ab1c2 128-131,1521-1538
+packages/agents/src/chat/__tests__/recovery-incident.test.ts
+  s_368991bdec7f77::t_4a9f384d9ca478 831-859
+packages/agents/src/chat/recovery-engine.ts
+  s_368991bdec7f77::t_58cc04bf7d9123 689-704
+  s_368991bdec7f77::t_895ee95308fe54 52-55,57-60
+packages/agents/src/chat/recovery-incident.ts
+  s_368991bdec7f77::t_30cc1b470f9275 102-109,738-743,767,794,813
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_2bc0160236db5c 731-737
+  s_368991bdec7f77::t_4f23e5298c1f71 755-759,763-765
+  s_368991bdec7f77::t_fb1f05cc0de64b 760-762
+  s_368991bdec7f77::t_5608d25d428ab1 747-754
+.changeset/transient-stream-recovery.md
+  s_368991bdec7f77::t_3b24f1dc05ea3f 7
+  s_368991bdec7f77::t_3086d395b4a715 8
+packages/agents/src/chat/recovery-task.ts
+  s_368991bdec7f77::t_78252d536e2625 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f5d59ad72fb4fd0d04e062305834d3e615242768",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

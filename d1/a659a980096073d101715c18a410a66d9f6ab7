@@ -1,0 +1,87 @@
+packages/agents/src/chat/truncate-older-messages.ts
+  s_368991bdec7f77::t_b56a3bdef3afa6 201,203-206
+packages/agents/src/tests/chat/truncate-older-messages.test.ts
+  s_368991bdec7f77::t_e1a8cb9a434c02 276-318
+docs/think/lifecycle-hooks.md
+  s_368991bdec7f77::t_8bb8daaf9289fa 744,751-758
+  s_368991bdec7f77::t_5597626deab2bb 743
+packages/think/src/messengers/delivery.ts
+  s_368991bdec7f77::t_c725dd9ee9b8ac 461-462,470-472,505-507
+packages/think/src/tests/run-turn-recovery.test.ts
+  s_368991bdec7f77::t_7e9c2b3f7d9fbb 191,267-299,339-371
+  s_368991bdec7f77::t_c7ae99b0db09e1 300-338
+  s_368991bdec7f77::t_0faba35aa61ca2 192-266
+.changeset/response-hook-after-reset.md
+  s_368991bdec7f77::t_d67c28ea7c1e22 1-6
+packages/agents/src/chat/lifecycle.ts
+  s_368991bdec7f77::t_069ff98eb8c550 44-48
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_9cb89dc032786e 7612-7671,7678-7696,7697-7698,7709-7716,7711-7716
+  s_368991bdec7f77::t_4ba3364935ebfa 7672-7677
+  s_368991bdec7f77::t_7b445dd085d103 1045-1056,1061-1065,1069-1079
+  s_368991bdec7f77::t_7585883aa05f53 1057-1060,1066-1068,6738-6761
+  s_368991bdec7f77::t_a50a14bdcbae90 7699-7710
+  s_368991bdec7f77::t_362d0b4bdcca52 1923-1925,1928-1936,1939-1942,1956-1959,1967-1972,1975-1978
+  s_368991bdec7f77::t_99418a3a6375c8 1927,1938,1960-1966,1974
+  s_368991bdec7f77::t_b9738d7f8255c7 1926,1937,1943-1955,1973
+  s_368991bdec7f77::t_10e3bd01cc787f 1874-1922
+  s_368991bdec7f77::t_7ac13f4ad96072 1842-1873
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_212bad862f1a18 1371-1425
+packages/think/src/think.ts
+  s_368991bdec7f77::t_23b5df241b46b4 304-312,3601,14101-14111,14114,14129-14130,14132,16068-16103,17613-17678,17687-17701
+  s_368991bdec7f77::t_16f2332804c51a 13455-13461,13463,13492-13493,13495,17679-17686
+  s_368991bdec7f77::t_d10f3bae75628b 1486-1491,2330-2331,2369,7130-7132,8714,8768-8772,8785,10668-10669,10676-10677,10706-10707,10722-10723,10758-10759,10774-10775,10796-10797,11173-11174,11185-11186,11523-11524,11565-11566,14217-14219,14235-14236,14266-14267,14277-14284,14289-14291,16938-16939
+  s_368991bdec7f77::t_f0bc2523982ee7 12165,12167,12170-12180,12198,12247-12248,12253,12275-12280,17924,17928-17932,17935-17941
+  s_368991bdec7f77::t_67ba1b1329aa1d 15975-15981
+  s_368991bdec7f77::t_2680248b19b51b 15982,16042-16051,16862,16875-16881,17158,17170-17176
+  s_368991bdec7f77::t_5de70d6c015854 15983-15986,15991,16010
+  s_368991bdec7f77::t_fb34f5feb856cf 11445,16003,16022,16026-16041
+  s_368991bdec7f77::t_bf97e6026111ef 1746-1751,6199-6201,6203,6205-6227,6245-6249,6254-6256,13358-13361,13364,13369,13852-13855,13858,13863
+.changeset/turn-result-output.md
+  s_368991bdec7f77::t_ce70a1a7f33b22 1-5
+docs/think/index.md
+  s_368991bdec7f77::t_7892036567017d 264-266
+docs/think/programmatic-submissions.md
+  s_368991bdec7f77::t_092dfb11511700 103-107
+packages/think/src/tests/hooks.test.ts
+  s_368991bdec7f77::t_c20b1499f7b21e 1878-1899,1985-1995
+  s_368991bdec7f77::t_68f8b4b134f0ee 1900-1925
+packages/think/src/tests/submissions.test.ts
+  s_368991bdec7f77::t_e0abc4524a4dd7 339-342
+  s_368991bdec7f77::t_dcece7f12ab1c2 128-131,1521-1538
+packages/agents/src/chat/__tests__/recovery-incident.test.ts
+  s_368991bdec7f77::t_4a9f384d9ca478 831-859
+packages/agents/src/chat/recovery-engine.ts
+  s_368991bdec7f77::t_58cc04bf7d9123 689-704
+  s_368991bdec7f77::t_895ee95308fe54 52-55,57-60
+packages/agents/src/chat/recovery-incident.ts
+  s_368991bdec7f77::t_30cc1b470f9275 102-109,738-743,767,794,813
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_2bc0160236db5c 731-737
+  s_368991bdec7f77::t_4f23e5298c1f71 755-759,763-765
+  s_368991bdec7f77::t_fb1f05cc0de64b 760-762
+  s_368991bdec7f77::t_5608d25d428ab1 747-754
+  s_368991bdec7f77::t_c3b0806286cc33 738-746
+.changeset/transient-stream-recovery.md
+  s_368991bdec7f77::t_3b24f1dc05ea3f 7
+  s_368991bdec7f77::t_3086d395b4a715 8
+packages/agents/src/chat/recovery-task.ts
+  s_368991bdec7f77::t_78252d536e2625 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d1a659a980096073d101715c18a410a66d9f6ab7",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
