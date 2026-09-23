@@ -67,8 +67,11 @@ export function projectHarnessEvent(
           type: "operation_wait",
           operationId: event.runId,
           reason: "deferred",
-          // SAFETY: pi's DeferredHandle carries provider JSON; PiDeferredHandle
-          // is its mutable-array public projection.
+          // SAFETY: the two handles hold the same provider JSON and differ
+          // only in how their `data` field types arrays. Pi's `JsonValue`
+          // uses `readonly` arrays; our `PiJson` uses mutable ones, and a
+          // `readonly` array is not assignable to a mutable one. We only
+          // ever read this value, so the cast is sound.
           deferred: event.deferred as PiDeferredHandle
         }
       };

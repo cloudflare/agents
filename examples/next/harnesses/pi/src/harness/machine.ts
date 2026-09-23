@@ -9,19 +9,30 @@ import type { PiOperationRequest, PiOperationResult } from "./types";
 /**
  * A request as it is stored in a durable checkpoint.
  *
- * {@link PiOperationRequest} uses `readonly` arrays, which do not satisfy
- * `MachineJson`'s mutable index signature. The machine therefore carries the
- * request in its serialized form and {@link toOperationRequest} narrows it
- * back at the pi boundary. The value is the same JSON either way.
+ * This is the same JSON as {@link PiOperationRequest}, typed so it satisfies
+ * `MachineJson`. The two cannot be assigned to each other directly because
+ * `PiOperationRequest` uses `readonly` arrays and `MachineJson` uses mutable
+ * ones, and TypeScript rejects that in both directions.
  */
 export type PiRequestJson = { readonly [key: string]: MachineJson };
 
-/** Widen a request for storage in a checkpoint or effect input. */
+/**
+ * Retype a request for storage in a checkpoint or effect input.
+ *
+ * An unchecked cast: it changes no values and validates nothing, it only
+ * moves between the two spellings of the same JSON described above.
+ */
 export function toRequestJson(request: PiOperationRequest): PiRequestJson {
   return request as unknown as PiRequestJson;
 }
 
-/** Narrow a stored request back to pi's own request union. */
+/**
+ * Retype a stored request back to pi's own request union.
+ *
+ * The inverse of {@link toRequestJson}, and equally unchecked. A checkpoint
+ * written by an older version is not validated here; pi rejects a request it
+ * does not understand at the point it is used.
+ */
 export function toOperationRequest(request: PiRequestJson): PiOperationRequest {
   return request as unknown as PiOperationRequest;
 }
@@ -233,8 +244,8 @@ export const piRunMachine: MachineDefinition<
             }
           });
         }
-        // Pi asked to be re-driven later; park without holding a JavaScript
-        // invocation resident.
+        // Pi asked to be re-driven later. Park the run so it is woken by an
+        // alarm instead of blocking on a timer.
         return context.wait(
           {
             phase: "waiting",
@@ -273,8 +284,8 @@ export const piRunMachine: MachineDefinition<
       }
 
       // Still running externally. Stay in `drive` holding the same effect so
-      // the next wake reconciles that execution rather than starting a new
-      // one, exactly as the SDK's wrapped-runtime pattern does.
+      // the next wake reconciles that execution rather than starting a
+      // second one against the same operation.
       return context.wait(state, {
         type: "pi:drive-ready",
         key: state.operationId,
@@ -283,8 +294,13 @@ export const piRunMachine: MachineDefinition<
     },
 
     /**
-     * Parked between passes. Any wake — the deadline, a steer, or an
-     * explicit ready event — plans and enters the next bounded pass.
+     * Parked between passes.
+     *
+     * The run resumes on whichever comes first: the park deadline expiring,
+     * the user steering the operation, or pi signalling it is ready to be
+     * driven again. Whichever it is, the next pass is planned and entered.
+     * Passes are capped at {@link MAX_DRIVE_PASSES} so an operation that
+     * keeps asking to be re-driven cannot loop forever.
      */
     waiting: (state, context) => {
       context.events.take({ type: "pi:drive-ready", key: state.operationId });
