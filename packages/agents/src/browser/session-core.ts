@@ -40,6 +40,19 @@ export function namedBrowserSessionKey(name: string): string {
 }
 
 /**
+ * Where a pruned tombstone moves to: permanent evidence that the name once
+ * owned a browser, so a later resolve still reports `restarted: true`. Kept
+ * outside {@link NAMED_SESSION_KEY_PREFIX} so sweeps never list it and the
+ * Lifecycle sweep job can retire once no sessions remain. Grows with the
+ * number of distinct names the host has ever used.
+ */
+const RETIRED_SESSION_KEY_PREFIX = "browser:retired:";
+
+function retiredBrowserSessionKey(name: string): string {
+  return `${RETIRED_SESSION_KEY_PREFIX}${name}`;
+}
+
+/**
  * Durable host configuration reapplied on **every** session create — including
  * the reattach-or-create restart path — so options like guardrails survive a
  * session being swept and recreated.
@@ -86,8 +99,8 @@ export interface ResolvedBrowserSession {
   /**
    * `true` when this resolution had to create a fresh browser to replace one
    * that previously existed (died, was closed, or was swept). Page state from
-   * the prior browser is gone; surface this loudly to the model. `false` on
-   * first-ever use — nothing was lost.
+   * the prior browser is gone; surface this loudly to the model. `false` only
+   * on first-ever use of the name — nothing was lost.
    */
   restarted: boolean;
   createdAt: number;
@@ -194,14 +207,17 @@ export class NamedBrowserSessions {
       const existing = await this.#readStored(key);
 
       if (existing === undefined || existing.closedAt !== undefined) {
-        // First use, or a tombstone left by close()/sweep(). A tombstone is
-        // evidence a prior browser existed — that's a restart.
+        // First use, or a tombstone left by close()/sweep(). A tombstone —
+        // or, once pruned, its retired marker — is evidence a prior browser
+        // existed: that's a restart.
+        const restarted =
+          existing !== undefined || (await this.#wasRetired(name));
         const outcome = await this.#createAndCommit(key, existing?.sessionId);
         if (outcome.winner) {
           if (outcome.winner.closedAt !== undefined) continue; // re-tombstoned
-          return { name, restarted: existing !== undefined, ...outcome.winner };
+          return { name, restarted, ...outcome.winner };
         }
-        return { name, restarted: existing !== undefined, ...outcome.stored };
+        return { name, restarted, ...outcome.stored };
       }
 
       // Live entry on record — probe it outside any lock.
@@ -327,7 +343,9 @@ export class NamedBrowserSessions {
 
   /**
    * Close named sessions idle past the configured window, leaving tombstones,
-   * and prune tombstones idle past the same window. Requires a store with
+   * and prune tombstones idle past the same window (a pruned name keeps a
+   * small retired marker, so its next resolve still reports
+   * `restarted: true`). Requires a store with
    * `list` support (the auto-supplied Durable Object store has it); without
    * `list` this is a no-op.
    *
@@ -345,7 +363,9 @@ export class NamedBrowserSessions {
       const name = key.slice(NAMED_SESSION_KEY_PREFIX.length);
 
       if (entry.closedAt !== undefined) {
-        // Tombstone — prune once it has aged out.
+        // Tombstone — prune once it has aged out, retiring it first so the
+        // name keeps its restart evidence. Both writes happen under this
+        // key's lock, so a resolver sees the tombstone or the marker.
         if (now - entry.closedAt >= this.#sweepIdleMs) {
           const lock = await this.#store.acquireLock(key);
           try {
@@ -354,6 +374,7 @@ export class NamedBrowserSessions {
               current?.sessionId === entry.sessionId &&
               current.closedAt !== undefined
             ) {
+              await this.#store.set(retiredBrowserSessionKey(name), current);
               await this.#store.delete(key);
             }
           } finally {
@@ -465,6 +486,12 @@ export class NamedBrowserSessions {
       if (isMissingBrowserSession(error)) return false;
       throw error;
     }
+  }
+
+  async #wasRetired(name: string): Promise<boolean> {
+    return (
+      (await this.#store.get(retiredBrowserSessionKey(name))) !== undefined
+    );
   }
 
   async #readStored(key: string): Promise<StoredBrowserSession | undefined> {
