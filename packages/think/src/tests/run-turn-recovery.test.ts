@@ -222,6 +222,45 @@ describe("recovery × onChatResponse after a reset (#2266)", () => {
     expect(await agent.getChatResponsesForTest()).toHaveLength(1);
   });
 
+  it("settles an RPC turn persisted before the reset without re-running it", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-reset-rpc-${crypto.randomUUID()}`
+    );
+    await agent.resetBeforeNextResponseHookForTest();
+    const result = await agent.testChat("hello");
+    expect(result.done).toBe(true);
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.recoverFromResetForTest();
+    await agent.runScheduledRecoveryContinueForTest();
+    await agent.runScheduledRecoveryRetryForTest();
+    expect(await agent.getTurnCallCount()).toBe(1);
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "completed", recovered: true })
+    ]);
+  });
+
+  it("leaves an owed hook to chat recovery when startup runs first", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-reset-order-${crypto.randomUUID()}`
+    );
+    await agent.resetBeforeNextResponseHookForTest();
+    await agent.testRunTurnWait("hello");
+    await agent.restoreFiberFromResetForTest();
+
+    await agent.replayPendingResponseHooksForTest();
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.triggerFiberRecovery();
+    await agent.runScheduledRecoveryContinueForTest();
+    await agent.runScheduledRecoveryRetryForTest();
+    expect(await agent.getTurnCallCount()).toBe(1);
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "completed", recovered: true })
+    ]);
+    expect(await agent.getActiveFibers()).toHaveLength(0);
+  });
+
   it("replays an owed response hook on startup without a chat fiber", async () => {
     const agent = await freshRecoveryAgent(
       `hook-reset-start-${crypto.randomUUID()}`

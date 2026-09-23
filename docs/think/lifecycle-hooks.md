@@ -740,7 +740,7 @@ Called after a chat turn completes and the assistant message has been persisted.
 
 Fires for all turn completion paths that persist an assistant message: WebSocket, sub-agent RPC, `saveMessages()`, durable `submitMessages()` execution, `continueLastTurn()`, and auto-continuation.
 
-If the Durable Object resets after the assistant message is persisted but before the hook runs, Think fires the hook when the agent wakes, with `recovered: true` and the stored message. A reset while the hook itself is running can fire it again on wake, so make side effects in the hook idempotent (for example, keyed by `requestId`).
+If the Durable Object resets after the assistant message is persisted but before the hook runs, Think fires the hook when the agent wakes, with `recovered: true` and the stored message. A reset while the hook itself is running can fire it again on wake, so make side effects in the hook idempotent (for example, keyed by `requestId`). A recovered hook runs outside the original turn, so it has no reply attachments and no channel context from that turn.
 
 ```typescript
 onChatResponse(result: ChatResponseResult): void | Promise<void>

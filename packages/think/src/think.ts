@@ -13317,7 +13317,15 @@ export class Think<
       streamFinalized = true;
 
       assistantMsg = accumulator.toMessage();
+      const response: ChatResponseResult = {
+        message: assistantMsg,
+        requestId,
+        continuation: false,
+        status: streamError ? "error" : aborted ? "aborted" : "completed",
+        ...(streamError && { error: streamError })
+      };
       if (accumulator.parts.length > 0) {
+        await this._rememberPendingResponseHook(response);
         await this._persistAssistantMessageWithCutover(
           streamId,
           assistantMsg,
@@ -13342,31 +13350,14 @@ export class Think<
       });
 
       if (streamError) {
-        await this._fireResponseHook({
-          message: assistantMsg,
-          requestId,
-          continuation: false,
-          status: "error",
-          error: streamError
-        });
         pendingRpcError = streamError;
       } else if (!aborted) {
         await callback.onDone();
-        await this._fireResponseHook({
-          message: assistantMsg,
-          requestId,
-          continuation: false,
-          status: "completed"
-        });
-      } else {
-        await this._fireResponseHook({
-          message: assistantMsg,
-          requestId,
-          continuation: false,
-          status: "aborted"
-        });
       }
+      await this._fireResponseHook(response);
+      await this._forgetPendingResponseHook(requestId);
     } catch (error) {
+      await this._forgetPendingResponseHook(requestId).catch(() => {});
       // #1626: a stream-stall watchdog abort is a recoverable interruption, not
       // a terminal error. Persist the settled partial (re-anchor), route into
       // bounded recovery, and suppress the terminal error when a continuation is
@@ -17428,6 +17419,14 @@ export class Think<
           ]);
     for (const [key, hook] of pending) {
       if (!hook || this._responseHooksInFlight.has(hook.requestId)) continue;
+      // Chat recovery reads this marker to settle the turn instead of
+      // re-running it, so leave it for recovery while the turn is pending.
+      if (
+        requestId === undefined &&
+        this._hasRecoverableChatTurn(hook.requestId)
+      ) {
+        continue;
+      }
       const message = await this.session.getMessage(hook.messageId);
       if (message) {
         await this._fireResponseHook({

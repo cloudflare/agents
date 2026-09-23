@@ -7344,6 +7344,12 @@ export class ThinkRecoveryTestAgent extends Think {
 
   /** Re-create the chat fiber the reset left behind, then wake recovery. */
   async recoverFromResetForTest(): Promise<void> {
+    await this.restoreFiberFromResetForTest();
+    await this.triggerFiberRecovery();
+  }
+
+  /** Re-create the chat fiber the reset left behind, without recovering it. */
+  async restoreFiberFromResetForTest(): Promise<void> {
     const turn = this._turnAtReset;
     if (!turn) throw new Error("no reset captured");
     this._turnAtReset = null;
@@ -7363,7 +7369,6 @@ export class ThinkRecoveryTestAgent extends Think {
         user: null
       }
     );
-    await this.triggerFiberRecovery();
   }
 
   /** Replay owed response hooks, as the startup durable-work step does. */
