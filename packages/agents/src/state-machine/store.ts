@@ -1,6 +1,8 @@
 import { SqlError } from "../sql-error";
 import { deserializeMachineValue } from "./serialization";
 import type {
+  MachineChildRow,
+  MachineChildView,
   MachineEffectRow,
   MachineEffectView,
   MachineEventRow,
@@ -138,6 +140,26 @@ export class StateMachineStore {
       settled_at INTEGER,
       PRIMARY KEY (run_id, effect_id)
     ) WITHOUT ROWID`);
+
+    this.createChildTable();
+  }
+
+  createChildTable(): void {
+    this.sql(`CREATE TABLE IF NOT EXISTS cf_agents_state_machine_children (
+      parent_run_id TEXT NOT NULL,
+      child_run_id TEXT NOT NULL,
+      child_definition TEXT NOT NULL,
+      mode TEXT NOT NULL CHECK (mode IN ('attached', 'background')),
+      status TEXT NOT NULL CHECK (status IN (
+        'running', 'completed', 'failed', 'cancelled'
+      )),
+      completion_event_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      settled_at INTEGER,
+      PRIMARY KEY (parent_run_id, child_run_id)
+    ) WITHOUT ROWID`);
+    this.sql(`CREATE INDEX IF NOT EXISTS cf_agents_state_machine_child_run
+      ON cf_agents_state_machine_children (child_run_id)`);
   }
 
   getRun(runId: string): MachineRunRow | undefined {
@@ -317,6 +339,22 @@ export class StateMachineStore {
     );
   }
 
+  childrenForRun(runId: string): MachineChildRow[] {
+    return this.sql<MachineChildRow>(
+      `SELECT * FROM cf_agents_state_machine_children
+       WHERE parent_run_id = ? ORDER BY created_at`,
+      runId
+    );
+  }
+
+  parentRelations(childRunId: string): MachineChildRow[] {
+    return this.sql<MachineChildRow>(
+      `SELECT * FROM cf_agents_state_machine_children
+       WHERE child_run_id = ?`,
+      childRunId
+    );
+  }
+
   deleteOwnedRows(runId: string): void {
     this.sql(
       "DELETE FROM cf_agents_state_machine_events WHERE run_id = ?",
@@ -328,6 +366,10 @@ export class StateMachineStore {
     );
     this.sql(
       "DELETE FROM cf_agents_state_machine_effects WHERE run_id = ?",
+      runId
+    );
+    this.sql(
+      "DELETE FROM cf_agents_state_machine_children WHERE parent_run_id = ?",
       runId
     );
   }
@@ -370,6 +412,14 @@ export class StateMachineStore {
           ...(effect.retry_at === null ? {} : { retryAt: effect.retry_at })
         })
       );
+      const children = this.childrenForRun(row.run_id).map<MachineChildView>(
+        (child) => ({
+          runId: child.child_run_id,
+          definition: child.child_definition,
+          mode: child.mode,
+          status: child.status
+        })
+      );
       return {
         ...base,
         status: row.status,
@@ -385,7 +435,8 @@ export class StateMachineStore {
             }
           : {}),
         ...(gates.length > 0 ? { gates } : {}),
-        ...(effects.length > 0 ? { effects } : {})
+        ...(effects.length > 0 ? { effects } : {}),
+        ...(children.length > 0 ? { children } : {})
       };
     }
     if (row.status === "completed") {

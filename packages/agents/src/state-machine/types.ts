@@ -234,10 +234,46 @@ export interface MachineEffects {
   ): Promise<MachineEffectOutcome<Output>>;
 }
 
+/**
+ * - `attached`: parent cancellation requests child cancellation.
+ * - `background`: outlives the parent turn; excluded from the default join.
+ */
+export type MachineChildMode = "attached" | "background";
+
+export interface MachineChildRef<Output extends MachineValue = MachineValue> {
+  readonly runId: string;
+  readonly definition: string;
+  readonly mode: MachineChildMode;
+  readonly effect: MachineEffectRef<MachineJson>;
+  /** @internal Type carrier. */
+  readonly __output?: Output;
+}
+
+export type MachineChildResult<Output extends MachineValue> =
+  | { readonly ok: true; readonly output: Output }
+  | { readonly ok: false; readonly error: { name: string; message: string } };
+
+export interface MachineSpawnOptions {
+  readonly runId?: string;
+  readonly mode?: MachineChildMode;
+}
+
+export interface MachineChildren<Definitions extends MachineDefinitions> {
+  spawn<Output extends MachineValue = MachineValue>(
+    definition: keyof Definitions & string,
+    input: MachineValue,
+    options?: MachineSpawnOptions
+  ): MachineChildRef<Output>;
+  join<Output extends MachineValue>(
+    child: MachineChildRef<Output>
+  ): Promise<MachineChildResult<Output> | null>;
+}
+
 export interface MachineContext<
   State extends MachinePhased,
   Result extends MachineValue,
-  Event extends MachineEvent = MachineEvent
+  Event extends MachineEvent = MachineEvent,
+  Definitions extends MachineDefinitions = MachineDefinitions
 > {
   readonly runId: string;
   readonly revision: number;
@@ -245,6 +281,7 @@ export interface MachineContext<
   readonly events: MachineEvents<Event>;
   readonly gates: MachineGates;
   readonly effects: MachineEffects;
+  readonly children: MachineChildren<Definitions>;
 
   transition(
     state: State,
@@ -406,6 +443,7 @@ export type MachineRunSnapshot<
       };
       readonly gates?: readonly MachineGateView[];
       readonly effects?: readonly MachineEffectView[];
+      readonly children?: readonly MachineChildView[];
     }
   | {
       readonly runId: string;
@@ -446,6 +484,13 @@ export interface MachineEffectView {
   readonly externalId?: string;
   readonly attempt: number;
   readonly retryAt?: number;
+}
+
+export interface MachineChildView {
+  readonly runId: string;
+  readonly definition: string;
+  readonly mode: MachineChildMode;
+  readonly status: string;
 }
 
 /** @internal Raw StateMachine run row. */
@@ -534,6 +579,18 @@ export interface MachineEffectRow {
   attempt: number;
   retry_at: number | null;
   options_json: string;
+  created_at: number;
+  settled_at: number | null;
+}
+
+/** @internal */
+export interface MachineChildRow {
+  parent_run_id: string;
+  child_run_id: string;
+  child_definition: string;
+  mode: MachineChildMode;
+  status: "running" | "completed" | "failed" | "cancelled";
+  completion_event_id: string;
   created_at: number;
   settled_at: number | null;
 }

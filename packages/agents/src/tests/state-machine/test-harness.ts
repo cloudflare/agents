@@ -21,6 +21,12 @@ export type HarnessSnapshot = {
     recovery?: string;
     status: string;
   }>;
+  children?: Array<{
+    runId: string;
+    definition: string;
+    mode: string;
+    status: string;
+  }>;
 };
 
 type RunEffectOptions = {
@@ -114,6 +120,18 @@ export type HarnessStub = DurableObjectStub & {
     status?: string | readonly string[];
     limit?: number;
   }): Promise<string | null>;
+  startParent(
+    value: string,
+    mode?: "attached" | "background",
+    childRunId?: string,
+    childDefinition?: "child" | "otherChild"
+  ): Promise<{ runId: string }>;
+  cancelChild(runId: string): Promise<{ status: string }>;
+  startFanout(count: number): Promise<{ runId: string }>;
+  suppressChildCompletion(
+    parentRunId: string,
+    childRunId: string
+  ): Promise<void>;
   cancelRun(runId: string, reason?: string): Promise<{ status: string }>;
   pauseRun(runId: string): Promise<boolean>;
   resumeRun(runId: string): Promise<boolean>;
@@ -127,6 +145,7 @@ export type HarnessStub = DurableObjectStub & {
     attempt: number;
     supportsRetrying: boolean;
   }>;
+  remigrateChildren(): Promise<{ rowCount: number; version?: number }>;
   runSnapshot(runId: string): Promise<HarnessSnapshot | null>;
 };
 

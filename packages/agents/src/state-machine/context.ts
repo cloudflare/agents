@@ -1,8 +1,10 @@
+import type { MachineChildManager } from "./children";
 import type { MachineEffectManager, PendingEffect } from "./effects";
 import type { MachineEventManager } from "./events";
 import type { MachineGateManager, PendingGate } from "./gates";
 import type {
   GateKind,
+  MachineChildRef,
   MachineCommitParticipant,
   MachineContext,
   MachineEffectPlanOptions,
@@ -14,6 +16,7 @@ import type {
   MachinePhased,
   MachineQueuedEvent,
   MachineRunRow,
+  MachineSpawnOptions,
   MachineTransitionOptions,
   MachineValue,
   MachineWaitOptions,
@@ -32,14 +35,23 @@ export function createMachineContext(options: {
   events: MachineEventManager;
   gates: MachineGateManager;
   effects: MachineEffectManager;
+  children: MachineChildManager;
   errorSummary: (error: unknown) => { name: string; message: string };
   flushPending: (pending: PendingChanges) => void;
 }): {
   context: MachineContext<MachinePhased, MachineValue>;
   pending: PendingChanges;
 } {
-  const { row, wake, events, gates, effects, errorSummary, flushPending } =
-    options;
+  const {
+    row,
+    wake,
+    events,
+    gates,
+    effects,
+    children,
+    errorSummary,
+    flushPending
+  } = options;
   const pending: PendingChanges = {
     claimedEventIds: [],
     gates: [],
@@ -47,6 +59,7 @@ export function createMachineContext(options: {
   };
   let gateOrdinal = 0;
   let effectOrdinal = 0;
+  let childOrdinal = 0;
   const takeEvent = (filter: MachineEventFilter): MachineQueuedEvent | null =>
     events.take(row, pending.claimedEventIds, filter);
   const commit = (transition?: MachineTransitionOptions) =>
@@ -112,6 +125,27 @@ export function createMachineContext(options: {
         flushPending(pending);
         return effects.execute(row.run_id, effect);
       }
+    }),
+    children: Object.freeze({
+      spawn: <Output extends MachineValue = MachineValue>(
+        definitionName: string,
+        input: MachineValue,
+        spawnOptions: MachineSpawnOptions = {}
+      ): MachineChildRef<Output> =>
+        children.spawn(
+          row,
+          pending.effects,
+          effects,
+          effectOrdinal++,
+          childOrdinal++,
+          definitionName,
+          input,
+          spawnOptions
+        ),
+      join: <Output extends MachineValue>(child: MachineChildRef<Output>) =>
+        children.join<Output>(row.run_id, effects, child, (type, key) =>
+          takeEvent({ type, key })
+        )
     }),
     transition: (
       state: MachinePhased,
