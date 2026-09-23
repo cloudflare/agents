@@ -16114,6 +16114,9 @@ export class Think<
    */
   private _deferringRecoveryIncidents = new Set<string>();
 
+  /** Recovered reply text per incident, pinned when its recovery completes. */
+  private _recoveredReplyText = new Map<string, string>();
+
   /** Incidents whose running recovery attempt scheduled the next attempt. */
   private _rescheduledRecoveryIncidents = new Set<string>();
 
@@ -16954,6 +16957,7 @@ export class Think<
         // Interrupted again: the attempt it scheduled owns the outcome.
         return;
       }
+      this._pinRecoveredReplyText(data, result.status);
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -17249,6 +17253,7 @@ export class Think<
         // Interrupted again: the attempt it scheduled owns the outcome.
         return;
       }
+      this._pinRecoveredReplyText(data, result.status);
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -17802,10 +17807,40 @@ export class Think<
     this._messengerRecoveryClaims.add(requestId);
   }
 
+  /**
+   * Pin the recovered reply's text before anything else can append to the
+   * transcript; settlement reads it after awaiting storage.
+   */
+  private _pinRecoveredReplyText(
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
+    status: SaveMessagesResult["status"]
+  ): void {
+    if (status !== "completed" || !data?.incidentId) return;
+    const messages = this.messages;
+    let reply: UIMessage | undefined;
+    if ("targetAssistantId" in data && data.targetAssistantId) {
+      reply = messages.find((m) => m.id === data.targetAssistantId);
+    } else if ("targetUserId" in data && data.targetUserId) {
+      const index = messages.findIndex((m) => m.id === data.targetUserId);
+      const next = index >= 0 ? messages[index + 1] : undefined;
+      if (next?.role === "assistant") reply = next;
+    }
+    reply ??= messages.filter((m) => m.role === "assistant").at(-1);
+    this._recoveredReplyText.set(
+      data.incidentId,
+      (reply?.parts ?? [])
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    );
+  }
+
   private _settleMessengerRecovery(
     incidentId: string,
     outcome: "completed" | "interrupted"
   ): void {
+    const pinnedText = this._recoveredReplyText.get(incidentId);
+    this._recoveredReplyText.delete(incidentId);
     void this.keepAliveWhile(async () => {
       const key = MESSENGER_RECOVERY_PREFIX + incidentId;
       const delivery =
@@ -17813,13 +17848,17 @@ export class Think<
       if (!delivery || delivery.outcome) return;
       const settled: MessengerRecoveryDelivery = { ...delivery, outcome };
       if (outcome === "completed") {
-        const text = (
-          this.messages.filter((m) => m.role === "assistant").at(-1)?.parts ??
-          []
-        )
-          .filter((p): p is { type: "text"; text: string } => p.type === "text")
-          .map((p) => p.text)
-          .join("");
+        const text =
+          pinnedText ??
+          (
+            this.messages.filter((m) => m.role === "assistant").at(-1)?.parts ??
+            []
+          )
+            .filter(
+              (p): p is { type: "text"; text: string } => p.type === "text"
+            )
+            .map((p) => p.text)
+            .join("");
         settled.text = text.startsWith(delivery.partialText)
           ? text.slice(delivery.partialText.length)
           : text;

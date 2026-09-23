@@ -1,4 +1,4 @@
-import type { LanguageModel } from "ai";
+import type { LanguageModel, UIMessage } from "ai";
 import type { Adapter, ChatInstance } from "chat";
 import { Message, parseMarkdown } from "chat";
 import { Think } from "../../think";
@@ -85,7 +85,7 @@ function lastUserText(prompt: unknown): string {
  * the model was asked and what the adapter sent are recorded in agent SQL.
  * Thread ids starting with `fake:dm` are direct messages.
  */
-type RecoveryMode = "self" | "thread" | "exhaust" | "twice" | "empty";
+type RecoveryMode = "self" | "thread" | "exhaust" | "twice" | "empty" | "later";
 
 export class ThinkMessengerDeliveryTestAgent extends Think {
   private _chat: ChatInstance | undefined;
@@ -96,14 +96,39 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
    * #2106: an agent named `recover-<mode>-…` fails its first model stream
    * mid-reply with an error classified as transient (`recover-exhaust-…`:
    * every stream; `recover-twice-…`: the first recovery too;
-   * `recover-empty-…`: fails before any text, and recovery has none), and
+   * `recover-empty-…`: fails before any text, and recovery has none;
+   * `recover-later-…`: a newer assistant message lands as recovery
+   * completes), and
    * `recover-thread-…` answers in a per-thread sub-agent, which inherits the
    * mode from its parent's name.
    */
   private _recoveryMode(): RecoveryMode | undefined {
     const name = this.parentPath.at(-1)?.name ?? this.name;
-    const mode = /^recover-(self|thread|exhaust|twice|empty)-/.exec(name)?.[1];
+    const mode = /^recover-(self|thread|exhaust|twice|empty|later)-/.exec(
+      name
+    )?.[1];
     return mode as RecoveryMode | undefined;
+  }
+
+  protected override _emit(
+    type: Parameters<Think["_emit"]>[0],
+    payload?: Record<string, unknown>
+  ): void {
+    super._emit(type, payload);
+    if (
+      type === "chat:recovery:completed" &&
+      this._recoveryMode() === "later"
+    ) {
+      const internal = this as unknown as { _cachedMessages: UIMessage[] };
+      internal._cachedMessages = [
+        ...internal._cachedMessages,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          parts: [{ type: "text", text: "a later reply" }]
+        }
+      ];
+    }
   }
 
   override classifyChatError(): "transient" | undefined {

@@ -1212,6 +1212,15 @@ describe("think messengers core", () => {
       expect(posted).toEqual(["Got", "it was successful"]);
     }, 20_000);
 
+    it("posts the recovered reply, not a newer message, to the thread", async () => {
+      const posted = await sendAndSettle(
+        `recover-later-${crypto.randomUUID()}`,
+        "it"
+      );
+
+      expect(posted).toEqual(["Got", "it"]);
+    });
+
     it("posts the empty-response text when recovery completes without text", async () => {
       const posted = await sendAndSettle(
         `recover-empty-${crypto.randomUUID()}`,
