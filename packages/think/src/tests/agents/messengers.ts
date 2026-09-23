@@ -218,9 +218,22 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
           await deliver(body);
           return new Response("ok");
         }
+        // The rest of the burst must arrive while the first message holds the
+        // thread lock, or one of them becomes the leader instead.
+        const state = this._chat?.getState();
+        const leaderLocked = new Promise<void>((resolve) => {
+          if (!state) return resolve();
+          const acquireLock = state.acquireLock.bind(state);
+          state.acquireLock = async (...args) => {
+            state.acquireLock = acquireLock;
+            const lock = await acquireLock(...args);
+            resolve();
+            return lock;
+          };
+        });
         const [first, ...rest] = body.burst;
         const leader = deliver(first);
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await leaderLocked;
         for (const webhook of rest) {
           await deliver(webhook);
         }
