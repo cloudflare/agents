@@ -522,10 +522,16 @@ When skills are available, Think exposes:
 | `read_skill_resource` | Read a bundled resource by `{ name, path }` or `skill-name/path`    |
 | `run_skill_script`    | Run a bundled script when `getSkillScriptRunner()` returns a runner |
 
-Skills are not always-on system prompt text. Use `getSystemPrompt()` or a
-context block from `configureContext()` for behavior that should apply to every
-turn. Use skills for task-specific procedures, references, scripts, templates,
-and assets that should be loaded only when relevant.
+Skills are not always-on system prompt text. Use a context block from
+`configureContext()` for behavior that should apply to every turn. Use skills
+for task-specific procedures, references, scripts, templates, and assets that
+should be loaded only when relevant.
+
+Skills register a context block of their own, and `getSystemPrompt()` is only a
+fallback for agents with no context blocks. Once `getSkills()` returns a source,
+an overridden `getSystemPrompt()` is no longer part of the prompt, and Think
+logs a one-time warning suggesting you move that text into `configureContext()`.
+Agents that keep the default `getSystemPrompt()` do not see the warning.
 
 Script execution is opt-in and requires a Worker Loader binding:
 

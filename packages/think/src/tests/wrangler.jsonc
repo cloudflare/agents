@@ -72,6 +72,34 @@
         "name": "ThinkSystemPromptSkillsWarningAgent"
       },
       {
+        "class_name": "ThinkDefaultSystemPromptSkillsAgent",
+        "name": "ThinkDefaultSystemPromptSkillsAgent"
+      },
+      {
+        "class_name": "ThinkInheritedSystemPromptSkillsAgent",
+        "name": "ThinkInheritedSystemPromptSkillsAgent"
+      },
+      {
+        "class_name": "ThinkSystemPromptFieldSkillsAgent",
+        "name": "ThinkSystemPromptFieldSkillsAgent"
+      },
+      {
+        "class_name": "ThinkMissingClassifierWarningAgent",
+        "name": "ThinkMissingClassifierWarningAgent"
+      },
+      {
+        "class_name": "ThinkClassifierMethodAgent",
+        "name": "ThinkClassifierMethodAgent"
+      },
+      {
+        "class_name": "ThinkInheritedClassifierAgent",
+        "name": "ThinkInheritedClassifierAgent"
+      },
+      {
+        "class_name": "ThinkClassifierFieldAgent",
+        "name": "ThinkClassifierFieldAgent"
+      },
+      {
         "class_name": "ThinkAsyncConfigSessionAgent",
         "name": "ThinkAsyncConfigSessionAgent"
       },
@@ -212,6 +240,13 @@
         "ThinkClientToolsAgent",
         "ThinkSessionTestAgent",
         "ThinkSystemPromptSkillsWarningAgent",
+        "ThinkDefaultSystemPromptSkillsAgent",
+        "ThinkInheritedSystemPromptSkillsAgent",
+        "ThinkSystemPromptFieldSkillsAgent",
+        "ThinkMissingClassifierWarningAgent",
+        "ThinkClassifierMethodAgent",
+        "ThinkInheritedClassifierAgent",
+        "ThinkClassifierFieldAgent",
         "ThinkAsyncConfigSessionAgent",
         "ThinkConfigTestAgent",
         "ThinkLegacyConfigMigrationAgent",

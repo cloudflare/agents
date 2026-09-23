@@ -8,6 +8,13 @@ import type {
   ThinkPropsTestAgent,
   ThinkSessionTestAgent,
   ThinkSystemPromptSkillsWarningAgent,
+  ThinkDefaultSystemPromptSkillsAgent,
+  ThinkInheritedSystemPromptSkillsAgent,
+  ThinkSystemPromptFieldSkillsAgent,
+  ThinkMissingClassifierWarningAgent,
+  ThinkClassifierMethodAgent,
+  ThinkInheritedClassifierAgent,
+  ThinkClassifierFieldAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
@@ -1058,6 +1065,44 @@ describe("Think — context blocks", () => {
     expect(systemPrompt).toContain("[writable]");
   });
 
+  it("does not warn when a skills agent inherits the default getSystemPrompt", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      // Construct the intermediate class first. Agent's method wrapping mutates
+      // this prototype, which used to poison later override detection.
+      await (
+        await freshSessionAgent("skills-default-parent")
+      ).getContextLabels();
+
+      for (const name of ["skills-default-first", "skills-default-second"]) {
+        const agent = await getAgentByName(
+          env.ThinkDefaultSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>,
+          `${name}-${crypto.randomUUID()}`
+        );
+        await expect(agent.testChat("Hello")).resolves.toMatchObject({
+          done: true
+        });
+        await expect(agent.getAssembledSystemPrompt()).resolves.toContain(
+          "map-reading"
+        );
+      }
+
+      const fallbackWarnings = warn.mock.calls
+        .flat()
+        .filter(
+          (value) =>
+            typeof value === "string" &&
+            value.includes(
+              "getSystemPrompt() is only used as a fallback when no context blocks are configured"
+            )
+        );
+      expect(fallbackWarnings).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("warns when getSkills makes an overridden getSystemPrompt fallback-only", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const agent = await getAgentByName(
@@ -1071,11 +1116,122 @@ describe("Think — context blocks", () => {
       await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
         done: true
       });
+      await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
+        done: true
+      });
+      const fallbackWarnings = warn.mock.calls
+        .flat()
+        .filter(
+          (value) =>
+            typeof value === "string" &&
+            value.includes(
+              "getSystemPrompt() is only used as a fallback when no context blocks are configured"
+            )
+        );
+      expect(fallbackWarnings).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("warns for an inherited getSystemPrompt override", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const agent = await getAgentByName(
+      env.ThinkInheritedSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>,
+      `skills-inherited-system-prompt-warning-${crypto.randomUUID()}`
+    );
+
+    try {
+      await expect(agent.testChat("Hello")).resolves.toMatchObject({
+        done: true
+      });
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining(
           "getSystemPrompt() is only used as a fallback when no context blocks are configured"
         )
       );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("warns for a getSystemPrompt class-field override", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const agent = await getAgentByName(
+      env.ThinkSystemPromptFieldSkillsAgent as unknown as DurableObjectNamespace<ThinkSystemPromptFieldSkillsAgent>,
+      `skills-field-system-prompt-warning-${crypto.randomUUID()}`
+    );
+
+    try {
+      await expect(agent.testChat("Hello")).resolves.toMatchObject({
+        done: true
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "getSystemPrompt() is only used as a fallback when no context blocks are configured"
+        )
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("warns when reactive overflow recovery has no classifier", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const agent = await getAgentByName(
+      env.ThinkMissingClassifierWarningAgent as unknown as DurableObjectNamespace<ThinkMissingClassifierWarningAgent>,
+      `missing-overflow-classifier-warning-${crypto.randomUUID()}`
+    );
+
+    try {
+      await agent.testChat("Hello");
+      await agent.testChat("Hello again");
+      const classifierWarnings = warn.mock.calls
+        .flat()
+        .filter(
+          (value) =>
+            typeof value === "string" &&
+            value.includes(
+              "contextOverflow.reactive is enabled but classifyChatError() is not overridden"
+            )
+        );
+      expect(classifierWarnings).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not warn when classifyChatError is overridden", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const methodAgent = await getAgentByName(
+        env.ThinkClassifierMethodAgent as unknown as DurableObjectNamespace<ThinkClassifierMethodAgent>,
+        `method-overflow-classifier-${crypto.randomUUID()}`
+      );
+      const inheritedAgent = await getAgentByName(
+        env.ThinkInheritedClassifierAgent as unknown as DurableObjectNamespace<ThinkInheritedClassifierAgent>,
+        `inherited-overflow-classifier-${crypto.randomUUID()}`
+      );
+      const fieldAgent = await getAgentByName(
+        env.ThinkClassifierFieldAgent as unknown as DurableObjectNamespace<ThinkClassifierFieldAgent>,
+        `field-overflow-classifier-${crypto.randomUUID()}`
+      );
+
+      await methodAgent.testChat("Hello");
+      await inheritedAgent.testChat("Hello");
+      await fieldAgent.testChat("Hello");
+
+      const classifierWarnings = warn.mock.calls
+        .flat()
+        .filter(
+          (value) =>
+            typeof value === "string" &&
+            value.includes(
+              "contextOverflow.reactive is enabled but classifyChatError() is not overridden"
+            )
+        );
+      expect(classifierWarnings).toEqual([]);
     } finally {
       warn.mockRestore();
     }

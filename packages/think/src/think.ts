@@ -2833,6 +2833,41 @@ export type ThinkModel = LanguageModel | ThinkModelId;
  */
 const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
 
+// Agent wraps subclass methods during super(), copying inherited methods onto
+// the concrete prototype. Snapshot the chain first so later checks see user
+// declarations rather than framework-installed wrappers.
+const declaredPrototypeMembers = new WeakMap<
+  object,
+  ReadonlySet<PropertyKey>
+>();
+
+function snapshotDeclaredMembers(prototype: object): void {
+  for (
+    let current: object | null = prototype;
+    current && current !== Think.prototype;
+    current = Object.getPrototypeOf(current) as object | null
+  ) {
+    if (!declaredPrototypeMembers.has(current)) {
+      declaredPrototypeMembers.set(current, new Set(Reflect.ownKeys(current)));
+    }
+  }
+}
+
+function isMethodOverridden(instance: object, methodName: string): boolean {
+  // Agent's auto-wrapper writes to the concrete prototype, not the instance;
+  // an own member here is a subclass class-field override initialized later.
+  if (Object.prototype.hasOwnProperty.call(instance, methodName)) return true;
+
+  for (
+    let current: object | null = Object.getPrototypeOf(instance) as object;
+    current && current !== Think.prototype;
+    current = Object.getPrototypeOf(current) as object | null
+  ) {
+    if (declaredPrototypeMembers.get(current)?.has(methodName)) return true;
+  }
+  return false;
+}
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -3134,6 +3169,7 @@ export class Think<
     false;
 
   constructor(ctx: DurableObjectState, env: Env) {
+    snapshotDeclaredMembers(new.target.prototype);
     super(ctx, env);
 
     this.lifecycle.use(this.sessions);
@@ -5471,7 +5507,7 @@ export class Think<
       const sources = await this.getSkills();
       if (sources.length === 0) return;
 
-      if (this.getSystemPrompt !== Think.prototype.getSystemPrompt) {
+      if (isMethodOverridden(this, "getSystemPrompt")) {
         const warning =
           "getSystemPrompt() is only used as a fallback when no context blocks are configured. getSkills() registers a skills context block, so move always-on instructions into configureContext() instead.";
         if (!this._loggedSkillWarnings.has(warning)) {
@@ -5906,7 +5942,7 @@ export class Think<
     if (!this._overflowReactiveEnabled) return false;
     // DX guard: enabling recovery without teaching Think which errors are
     // overflows silently does nothing. Warn once instead of failing quietly.
-    if (this.classifyChatError === Think.prototype.classifyChatError) {
+    if (!isMethodOverridden(this, "classifyChatError")) {
       if (!this._warnedMissingClassifier) {
         this._warnedMissingClassifier = true;
         console.warn(
