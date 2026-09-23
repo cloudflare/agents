@@ -192,6 +192,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly #streams = new Streams();
   readonly #effectRuns: string[] = [];
   readonly #effectReconciles: string[] = [];
+  readonly #reconcileInputs: (string | null)[] = [];
   readonly #effectRuntimes = {
     conflict: {
       execute: async (
@@ -259,8 +260,16 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
         this.#effectRuns.push(value);
         return `effect:${value}`;
       },
-      reconcile: async (externalId: string) => {
+      reconcile: async (
+        externalId: string,
+        invocation: import("../../state-machine").MachineEffectInvocation
+      ) => {
         this.#effectReconciles.push(externalId);
+        // Recovery must see the input the effect was planned with, not just
+        // the external id it was keyed by.
+        this.#reconcileInputs.push(
+          (invocation.input as { value?: string }).value ?? null
+        );
         return externalId.startsWith("done:")
           ? ({
               status: "completed" as const,
@@ -1138,7 +1147,8 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   effectActivity() {
     return {
       runs: [...this.#effectRuns],
-      reconciles: [...this.#effectReconciles]
+      reconciles: [...this.#effectReconciles],
+      reconcileInputs: [...this.#reconcileInputs]
     };
   }
 

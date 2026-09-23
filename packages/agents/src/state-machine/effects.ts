@@ -231,13 +231,15 @@ export class MachineEffectManager {
       const controller = new AbortController();
       this.#controllers.set(controllerKey, controller);
       try {
+        const input = JSON.parse(row.input_json);
         const reconciled = await withTimeout(
           runtime.reconcile(row.external_id, {
             effectId: row.effect_id,
             idempotencyKey: `${runId}:${row.effect_id}`,
             externalId: row.external_id,
             signal: controller.signal,
-            attempt: row.attempt
+            attempt: row.attempt,
+            input
           }),
           effect.timeoutMs,
           row.kind,
@@ -290,13 +292,15 @@ export class MachineEffectManager {
     const controllerKey = `${runId}:${effect.id}`;
     this.#controllers.set(controllerKey, controller);
     try {
+      const input = JSON.parse(row.input_json);
       const output = await withTimeout(
-        runtime.execute(JSON.parse(row.input_json), {
+        runtime.execute(input, {
           effectId: row.effect_id,
           idempotencyKey: `${runId}:${row.effect_id}`,
           ...(row.external_id ? { externalId: row.external_id } : {}),
           signal: controller.signal,
-          attempt
+          attempt,
+          input
         }),
         effect.timeoutMs,
         row.kind,
@@ -369,7 +373,8 @@ export class MachineEffectManager {
         idempotencyKey: `${row.run_id}:${effect.effect_id}`,
         externalId: effect.external_id,
         signal: AbortSignal.abort(row.cancel_reason ?? "cancelled"),
-        attempt: effect.attempt
+        attempt: effect.attempt,
+        input: JSON.parse(effect.input_json)
       });
       this.#markInterrupted(row.run_id, effect.effect_id);
     }

@@ -171,18 +171,30 @@ export interface MachineEffectPlanOptions {
 
 export type MachineEffectBackoff = "constant" | "linear" | "exponential";
 
-export interface MachineEffectRetryPolicy {
+export type MachineEffectRetryPolicy = {
   readonly limit?: number;
   readonly delay?: number;
   readonly backoff?: MachineEffectBackoff;
-}
+};
 
-export interface MachineEffectInvocation {
+export interface MachineEffectInvocation<
+  Input extends MachineJson = MachineJson
+> {
   readonly effectId: string;
   readonly idempotencyKey: string;
   readonly externalId?: string;
   readonly attempt: number;
   readonly signal: AbortSignal;
+  /**
+   * The input this effect was planned with.
+   *
+   * Available to every hook, including `reconcile` and `cancel`. Those run
+   * after a crash, when the only other thing they are given is `externalId`,
+   * so without this a runtime has to encode what it needs into that string
+   * and parse it back, or keep an in-memory side table that recovery has
+   * already lost.
+   */
+  readonly input: Input;
 }
 
 export interface MachineEffectPending {
@@ -198,11 +210,11 @@ export interface MachineEffectRuntime<
 > {
   execute(
     input: Input,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<Output | MachineEffectPending>;
   reconcile?(
     externalId: string,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<
     | { status: "running" }
     | { status: "completed"; output: Output }
@@ -211,7 +223,7 @@ export interface MachineEffectRuntime<
   >;
   cancel?(
     externalId: string,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<void>;
 }
 

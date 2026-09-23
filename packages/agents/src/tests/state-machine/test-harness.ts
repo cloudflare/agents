@@ -94,7 +94,11 @@ export type HarnessStub = DurableObjectStub & {
     }>
   >;
   effectAttempts(key: string): Promise<number>;
-  effectActivity(): Promise<{ runs: string[]; reconciles: string[] }>;
+  effectActivity(): Promise<{
+    runs: string[];
+    reconciles: string[];
+    reconcileInputs: (string | null)[];
+  }>;
   seedEffectRecovery(
     value: string,
     recovery: "safe" | "never" | "reconcile",

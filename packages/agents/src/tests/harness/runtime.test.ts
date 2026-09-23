@@ -30,7 +30,8 @@ const invocation = {
   effectId: "effect-1",
   idempotencyKey: "run:effect-1",
   attempt: 1,
-  signal: new AbortController().signal
+  signal: new AbortController().signal,
+  input: { prompt: "hello" } satisfies MachineJson
 };
 
 describe("createHarnessEffectRuntime", () => {
