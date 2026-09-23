@@ -156,6 +156,13 @@ export class NamedBrowserSessions {
   readonly #timeoutMs?: number;
   readonly #sweepIdleMs: number;
   readonly #touchIntervalMs: number;
+  /**
+   * Last CDP send per Browser Run session id on sockets from this instance,
+   * recorded synchronously before the command goes out. The durable touch is
+   * throttled and asynchronous, so the sweep's locked recheck consults this
+   * too: a command sent before that recheck always keeps its browser.
+   */
+  readonly #lastActivityAt = new Map<string, number>();
 
   constructor(options: NamedBrowserSessionsOptions) {
     this.#browser = options.browser;
@@ -218,6 +225,7 @@ export class NamedBrowserSessions {
         // any resolver that reads this key during the replacement window
         // sees the tombstone and reports restarted: true too.
         await this.#store.set(key, { ...current, closedAt: Date.now() });
+        this.#lastActivityAt.delete(current.sessionId);
       } finally {
         await lock.release();
       }
@@ -246,6 +254,7 @@ export class NamedBrowserSessions {
       timeoutMs: this.#timeoutMs,
       onActivity: () => {
         const now = Date.now();
+        this.#lastActivityAt.set(resolved.sessionId, now);
         if (touchInFlight || now - lastTouchAt < this.#touchIntervalMs) return;
         touchInFlight = true;
         lastTouchAt = now;
@@ -287,6 +296,7 @@ export class NamedBrowserSessions {
       if (!current || current.closedAt !== undefined) return false;
       stored = current;
       await this.#store.set(key, { ...current, closedAt: Date.now() });
+      this.#lastActivityAt.delete(current.sessionId);
     } finally {
       await lock.release();
     }
@@ -361,12 +371,17 @@ export class NamedBrowserSessions {
       const lock = await this.#store.acquireLock(key);
       try {
         const current = await this.#store.get(key);
+        const lastSeen = Math.max(
+          current?.updatedAt ?? 0,
+          this.#lastActivityAt.get(entry.sessionId) ?? 0
+        );
         if (
           current?.sessionId === entry.sessionId &&
           current.closedAt === undefined &&
-          now - current.updatedAt >= this.#sweepIdleMs
+          now - lastSeen >= this.#sweepIdleMs
         ) {
           await this.#store.set(key, { ...current, closedAt: now });
+          this.#lastActivityAt.delete(entry.sessionId);
           tombstoned = true;
         }
       } finally {

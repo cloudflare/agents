@@ -506,6 +506,29 @@ describe("NamedBrowserSessions.connect", () => {
     expect(store.sessions.get(key)?.closedAt).toBeUndefined();
   });
 
+  it("a command racing the sweep keeps its session even before its touch lands", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    // Default 60s touch interval: a send right after connect writes nothing
+    // durable, so only in-memory activity can protect this session.
+    const sessions = new NamedBrowserSessions({ browser, store });
+    const { cdp, sessionId } = await sessions.connect("work");
+
+    const key = namedBrowserSessionKey("work");
+    const stale = {
+      ...store.sessions.get(key)!,
+      updatedAt: Date.now() - DEFAULT_SWEEP_IDLE_MS * 2
+    };
+    store.sessions.set(key, stale);
+
+    cdp.send("Page.navigate", {}, { timeoutMs: 50 }).catch(() => {});
+    const result = await sessions.sweep();
+
+    expect(result.swept).toEqual([]);
+    expect(store.sessions.get(key)).toEqual(stale);
+    expect(deletes(requests, sessionId)).toHaveLength(0);
+  });
+
   it("throttles activity touches to the configured interval", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();
