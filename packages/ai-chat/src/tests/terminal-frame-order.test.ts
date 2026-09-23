@@ -17,9 +17,14 @@ import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 
 type Frame =
   | { kind: "messages"; messages: UIMessage[] }
+  | { kind: "error" }
   | { kind: "done"; error: boolean };
 
-/** Records transcript and terminal frames, in order, until `done`. */
+/**
+ * Records transcript and terminal frames, in order, until `done`. An in-band
+ * stream error arrives as an `error` frame before `done`; clients treat it as
+ * terminal too.
+ */
 function recordUntilDone(ws: WebSocket, timeout = 10_000): Promise<Frame[]> {
   return new Promise((resolve, reject) => {
     const frames: Frame[] = [];
@@ -34,6 +39,8 @@ function recordUntilDone(ws: WebSocket, timeout = 10_000): Promise<Frame[]> {
           kind: "messages",
           messages: data.messages as UIMessage[]
         });
+      } else if (isUseChatResponseMessage(data) && data.error && !data.done) {
+        frames.push({ kind: "error" });
       } else if (isUseChatResponseMessage(data) && data.done) {
         frames.push({ kind: "done", error: data.error === true });
         clearTimeout(timer);
@@ -125,6 +132,42 @@ describe("AIChatAgent — terminal frame ordering", () => {
     const recorded = await frames;
     expectAssistantTranscriptBeforeDone(recorded);
     expect(recorded.at(-1)).toEqual({ kind: "done", error: true });
+    sender.close(1000);
+    observer.close(1000);
+  });
+
+  it("broadcasts the persisted partial before an in-band SSE error frame", async () => {
+    const room = crypto.randomUUID();
+    const { ws: sender } = await connectChatWS(
+      `/agents/response-agent/${room}`
+    );
+    const { ws: observer } = await connectChatWS(
+      `/agents/response-agent/${room}`
+    );
+    await settle();
+
+    const frames = recordUntilDone(observer);
+    sendChat(sender, {
+      format: "sse",
+      streamError: "quota exceeded",
+      streamErrorAfterText: true
+    });
+
+    const recorded = await frames;
+    const errorIndex = recorded.findIndex((frame) => frame.kind === "error");
+    const transcriptIndex = recorded.findIndex(
+      (frame) =>
+        frame.kind === "messages" &&
+        frame.messages.at(-1)?.role === "assistant" &&
+        frame.messages.at(-1)!.parts.length > 0
+    );
+    expect(errorIndex).toBeGreaterThanOrEqual(0);
+    expect(transcriptIndex).toBeGreaterThanOrEqual(0);
+    expect(transcriptIndex).toBeLessThan(errorIndex);
+    expect(recorded.slice(errorIndex).map((frame) => frame.kind)).toEqual([
+      "error",
+      "done"
+    ]);
     sender.close(1000);
     observer.close(1000);
   });

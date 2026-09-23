@@ -1499,6 +1499,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
           chunkDelayMs?: number;
           throwError?: boolean;
           streamError?: string;
+          streamErrorAfterText?: boolean;
           useAbortSignal?: boolean;
         }
       | undefined;
@@ -1508,13 +1509,14 @@ export class ResponseAgent extends AIChatAgent<Env> {
     const chunkDelayMs = body?.chunkDelayMs ?? 10;
     const throwError = body?.throwError ?? false;
     const streamError = body?.streamError;
+    const streamErrorAfterText = body?.streamErrorAfterText ?? false;
     const useAbortSignal = body?.useAbortSignal ?? false;
     const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async pull(controller) {
-        if (format === "sse" && streamError) {
+        if (format === "sse" && streamError && !streamErrorAfterText) {
           const chunk = JSON.stringify({
             type: "error",
             errorText: streamError
@@ -1550,7 +1552,13 @@ export class ResponseAgent extends AIChatAgent<Env> {
             controller.enqueue(encoder.encode(`chunk-${i} `));
           }
         }
-        if (format === "sse") {
+        if (format === "sse" && streamError) {
+          const chunk = JSON.stringify({
+            type: "error",
+            errorText: streamError
+          });
+          controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+        } else if (format === "sse") {
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         }
         controller.close();

@@ -2156,11 +2156,13 @@ export class AIChatAgent<
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
     if (
       message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-      message.done &&
-      this._heldTerminalFrames.has(message.id)
+      (message.done || message.error)
     ) {
-      this._heldTerminalFrames.set(message.id, { message, exclude });
-      return;
+      const held = this._heldTerminalFrames.get(message.id);
+      if (held) {
+        held.push({ message, exclude });
+        return;
+      }
     }
     // Combine explicit exclusions with connections pending stream resume.
     // Pending connections should not receive live stream chunks until they ACK,
@@ -2175,27 +2177,35 @@ export class AIChatAgent<
   /**
    * `useAgentChat` flips to ready on the terminal `done` frame, and a message
    * the user sends after that is replaced by any transcript broadcast that
-   * arrives later. So while `_reply` owns a request, its terminal frame is held
-   * here and sent only after the assistant message is persisted and broadcast.
+   * arrives later. So while `_reply` owns a request, its terminal frames (the
+   * `done` frame, and an in-band `error` frame, which clients also treat as
+   * terminal) are held here in order and sent only after the assistant message
+   * is persisted and broadcast.
    */
   private _heldTerminalFrames = new Map<
     string,
-    { message: OutgoingMessage; exclude?: string[] } | null
+    Array<{ message: OutgoingMessage; exclude?: string[] }>
   >();
 
-  private _releaseTerminalFrame(id: string, errorText?: string): void {
+  private _releaseTerminalFrames(id: string, errorText?: string): void {
     const held = this._heldTerminalFrames.get(id);
     this._heldTerminalFrames.delete(id);
     if (!held) return;
-    const { message, exclude } = held;
-    this._broadcastChatMessage(
+    const failed =
       errorText !== undefined &&
-        message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        !message.error
-        ? { ...message, body: errorText, error: true }
-        : message,
-      exclude
-    );
+      !held.some(
+        ({ message }) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.error
+      );
+    for (const { message, exclude } of held) {
+      this._broadcastChatMessage(
+        failed && message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          ? { ...message, body: errorText, error: true }
+          : message,
+        exclude
+      );
+    }
   }
 
   /**
@@ -7085,7 +7095,7 @@ export class AIChatAgent<
         // tool parts) is persisted to `this.messages` — so the re-armed barrier
         // check sees the fully-materialized batch.
         this._streamingTurnActive = true;
-        this._heldTerminalFrames.set(id, null);
+        this._heldTerminalFrames.set(id, []);
         let persisted = false;
         try {
           try {
@@ -7268,7 +7278,7 @@ export class AIChatAgent<
           this.#pendingCutover = null;
           this._resumableStream.finalizePending();
           persisted = true;
-          this._releaseTerminalFrame(id);
+          this._releaseTerminalFrames(id);
 
           this._pendingChatResponseResults.push({
             message,
@@ -7283,7 +7293,7 @@ export class AIChatAgent<
         } finally {
           this.#pendingCutover = null;
           this._resumableStream.finalizePending();
-          this._releaseTerminalFrame(
+          this._releaseTerminalFrames(
             id,
             persisted ? undefined : "Failed to save the response."
           );
