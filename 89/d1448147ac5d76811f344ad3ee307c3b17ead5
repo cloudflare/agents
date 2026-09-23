@@ -1,0 +1,25 @@
+packages/think/src/think.ts
+  s_368991bdec7f77::t_16f2332804c51a 13320-13326,13328,13357-13358,13360,17422-17429
+docs/think/lifecycle-hooks.md
+  s_368991bdec7f77::t_5597626deab2bb 743
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_4ba3364935ebfa 7347-7352
+packages/think/src/tests/run-turn-recovery.test.ts
+  s_368991bdec7f77::t_c7ae99b0db09e1 225-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "89d1448147ac5d76811f344ad3ee307c3b17ead5",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
