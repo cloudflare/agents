@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { transition } from "../broadcast-state";
+import { observedDivergesFrom, transition } from "../broadcast-state";
 import type { BroadcastStreamState } from "../broadcast-state";
 import type { UIMessage } from "ai";
 
@@ -585,6 +585,88 @@ describe("broadcast stream state machine", () => {
       .join("");
     expect(fullText).toContain("first half");
     expect(fullText).toContain(" second half");
+  });
+
+  // ── diverged accumulator vs stored copy (#2166) ──────────────────
+
+  function observe(deltas: string[]): BroadcastStreamState {
+    let state: BroadcastStreamState = idle;
+    for (const chunkData of [
+      { type: "start", messageId: "a1" },
+      { type: "text-start", id: "t1" },
+      ...deltas.map((delta) => ({ type: "text-delta", id: "t1", delta }))
+    ]) {
+      state = transition(state, {
+        type: "response",
+        streamId: "s-heal",
+        messageId: "tmp",
+        chunkData
+      }).state;
+    }
+    return state;
+  }
+
+  function stored(text: string): UIMessage[] {
+    return [
+      { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] },
+      { id: "a1", role: "assistant", parts: [{ type: "text", text }] }
+    ] as UIMessage[];
+  }
+
+  function assistantText(messages: UIMessage[]): string {
+    return messages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => m.parts)
+      .filter((p) => p.type === "text")
+      .map((p) => (p as { text: string }).text)
+      .join("");
+  }
+
+  it("observedDivergesFrom flags an accumulator that no longer extends the stored copy", () => {
+    const scrambled = observe(["You", " can", "You", " can"]);
+    const healthy = observe(["You", " can", " see"]);
+    if (scrambled.status !== "observing" || healthy.status !== "observing") {
+      throw new Error("expected observing");
+    }
+    expect(observedDivergesFrom(scrambled.accumulator, stored("You can"))).toBe(
+      false
+    );
+    expect(
+      observedDivergesFrom(scrambled.accumulator, stored("You can see"))
+    ).toBe(true);
+    expect(observedDivergesFrom(healthy.accumulator, stored("You can"))).toBe(
+      false
+    );
+    expect(observedDivergesFrom(healthy.accumulator, stored(""))).toBe(false);
+    expect(observedDivergesFrom(healthy.accumulator, makeMessages("hi"))).toBe(
+      false
+    );
+  });
+
+  it("done keeps a stored copy the accumulator diverged from", () => {
+    const state = observe(["You", " canYou", " see can", " see"]);
+    const done = transition(state, {
+      type: "response",
+      streamId: "s-heal",
+      messageId: "tmp",
+      done: true
+    });
+    expect(assistantText(done.messagesUpdate!(stored("You can see")))).toBe(
+      "You can see"
+    );
+  });
+
+  it("done still merges an accumulator that extends the stored copy", () => {
+    const state = observe(["You", " can", " see"]);
+    const done = transition(state, {
+      type: "response",
+      streamId: "s-heal",
+      messageId: "tmp",
+      done: true
+    });
+    expect(assistantText(done.messagesUpdate!(stored("You can")))).toBe(
+      "You can see"
+    );
   });
 
   // ── resume-fallback then response chunks ─────────────────────────
