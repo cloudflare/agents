@@ -434,6 +434,54 @@ describe("NamedBrowserSessions.sweep", () => {
     expect(deletes(requests, "session-gone")).toHaveLength(0);
   });
 
+  it("still reports restarted: true after the tombstone is pruned", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const sessions = new NamedBrowserSessions({
+      browser,
+      store,
+      sweepIdleMs: 1_000
+    });
+
+    await sessions.resolve("checkout");
+    await sessions.close("checkout");
+    const key = namedBrowserSessionKey("checkout");
+    store.sessions.set(key, {
+      ...store.sessions.get(key)!,
+      closedAt: Date.now() - 5_000
+    });
+    await sessions.sweep();
+    expect(store.sessions.has(key)).toBe(false); // tombstone pruned
+
+    const resolved = await sessions.resolve("checkout");
+    expect(resolved.restarted).toBe(true);
+  });
+
+  it("keeps pruned-name evidence out of the swept keyspace", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const now = Date.now();
+    store.sessions.set(namedBrowserSessionKey("gone"), {
+      sessionId: "session-gone",
+      createdAt: now - 10_000,
+      updatedAt: now - 10_000,
+      closedAt: now - 5_000
+    });
+    const sessions = new NamedBrowserSessions({
+      browser,
+      store,
+      sweepIdleMs: 1_000
+    });
+
+    await sessions.sweep();
+
+    // Nothing left under the named-session prefix, so the Lifecycle sweep
+    // job can still retire once every session is gone.
+    expect(await store.list(namedBrowserSessionKey(""))).toEqual(new Map());
+    // A never-used name is still first use.
+    expect((await sessions.resolve("fresh")).restarted).toBe(false);
+  });
+
   it("honors a creator-overridden idle TTL", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
