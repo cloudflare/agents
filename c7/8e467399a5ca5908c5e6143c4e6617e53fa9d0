@@ -1,0 +1,21 @@
+packages/agents/src/chat/__tests__/replay-dedupe.test.ts
+  s_368991bdec7f77::t_89dc4851107290 38-50
+packages/agents/src/chat/replay-dedupe.ts
+  s_368991bdec7f77::t_9959be803dd9e5 22-27,34-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c78e467399a5ca5908c5e6143c4e6617e53fa9d0",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
