@@ -1575,6 +1575,12 @@ type QueueTurnSpec<T> = {
   continuation?: boolean;
   allowNested?: boolean;
   channel?: string;
+  /**
+   * Ignore `channel` and extend the previous turn's channel, resolved when the
+   * turn starts rather than when it is admitted, so it sees turns queued
+   * ahead of it.
+   */
+  inheritChannel?: boolean;
   onQueued?: () => void;
   getStatus?: () => string | undefined;
   execute: () => Promise<T>;
@@ -8094,8 +8100,11 @@ export class Think<
   }
 
   private async _runInsideAdmittedTurnBody<T>(
-    spec: QueueTurnSpec<T>
+    admitted: QueueTurnSpec<T>
   ): Promise<T> {
+    const spec = admitted.inheritChannel
+      ? { ...admitted, channel: this._channelForAutoContinuation() }
+      : admitted;
     // A turn is one unit of traced work and owns its own boundary, never that
     // of whatever admitted it. A handler that awaits its turn ends at the same
     // moment anyway; one that does not — an ack-and-return submit, or an
@@ -11923,9 +11932,6 @@ export class Think<
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
-    // Re-resolve the channel so a continued/recovered turn re-applies
-    // per-channel policy.
-    const channel = options?.channel ?? this._channelForAutoContinuation();
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
@@ -11935,7 +11941,10 @@ export class Think<
       trigger,
       requestId,
       continuation: true,
-      channel,
+      // Without an explicit channel, a continued/recovered turn re-applies the
+      // per-channel policy of the turn it extends.
+      channel: options?.channel,
+      inheritChannel: options?.channel === undefined,
       getStatus: () => status,
       execute: async () => {
         if (this._turnQueue.generation !== epoch) {
@@ -16847,7 +16856,7 @@ export class Think<
       trigger: "auto-continuation",
       requestId,
       continuation: true,
-      channel: this._channelForAutoContinuation(),
+      inheritChannel: true,
       allowNested: true,
       execute: async () => {
         if (this._continuation.pending) {
@@ -16932,7 +16941,7 @@ export class Think<
         trigger: "auto-continuation",
         requestId,
         continuation: true,
-        channel: this._channelForAutoContinuation(),
+        inheritChannel: true,
         allowNested: true,
         execute: async () => {
           const continuationBody = async () => {

@@ -980,6 +980,34 @@ export class ThinkTestAgent extends Think {
     return this.getMessages();
   }
 
+  /**
+   * Queue continuations, in order, behind a held turn so none of them starts
+   * before the last is admitted.
+   */
+  async runQueuedContinuationsForTest(
+    channels: Array<string | undefined>
+  ): Promise<void> {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queue = (
+      this as unknown as {
+        _turnQueue: {
+          enqueue(id: string, fn: () => Promise<void>): Promise<unknown>;
+        };
+      }
+    )._turnQueue;
+    const blocker = queue.enqueue(crypto.randomUUID(), () => gate);
+    const runs: Promise<unknown>[] = [];
+    for (const channel of channels) {
+      runs.push(this.continueLastTurn(undefined, { channel }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    release();
+    await Promise.all([blocker, ...runs]);
+  }
+
   async getAutoContinuationChannelForTest(): Promise<string | undefined> {
     return (
       this as unknown as { _channelForAutoContinuation(): string | undefined }

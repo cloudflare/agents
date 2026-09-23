@@ -187,6 +187,20 @@ describe("Think — WebSocket chat runs on the web channel (#2255)", () => {
     ws.close();
   });
 
+  it("resolves a queued continuation's channel when it runs, not when it is admitted", async () => {
+    const { agent, ws } = await freshAgent();
+    await sendChat(ws, [userMessage("hello")]);
+    await agent.resetCapturedTurnChannelsForTest();
+
+    await agent.runQueuedContinuationsForTest(["voice", undefined]);
+
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual([
+      "voice",
+      "voice"
+    ]);
+    ws.close();
+  });
+
   it("still runs server-driven turns without a channel by default", async () => {
     const { agent, ws } = await freshAgent();
 
