@@ -577,6 +577,25 @@ describe("NamedBrowserSessions.connect", () => {
     expect(deletes(requests, sessionId)).toHaveLength(0);
   });
 
+  it("sweeps forget activity from sockets whose session is gone", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const sessions = new NamedBrowserSessions({ browser, store });
+    const { cdp } = await sessions.connect("work");
+    const { cdp: other } = await sessions.connect("other");
+
+    // A superseded socket keeps sending after its session was closed.
+    await sessions.close("work");
+    cdp.send("Page.navigate", {}, { timeoutMs: 50 }).catch(() => {});
+    other.send("Page.navigate", {}, { timeoutMs: 50 }).catch(() => {});
+    expect(sessions.trackedActivityCount()).toBe(2);
+
+    await sessions.sweep();
+
+    // Only the live session's activity survives.
+    expect(sessions.trackedActivityCount()).toBe(1);
+  });
+
   it("throttles activity touches to the configured interval", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();

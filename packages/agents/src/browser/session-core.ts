@@ -161,6 +161,10 @@ function isMissingBrowserSession(error: unknown): boolean {
  * Store discipline mirrors {@link BrowserConnector}: locks wrap storage
  * operations only — liveness probes and Browser Run create/delete calls always
  * happen outside any lock, with a commit re-check to detect concurrent swaps.
+ *
+ * Use one instance per store: in-flight CDP activity is tracked in memory per
+ * instance, so a sweep only sees activity from sockets its own instance
+ * opened.
  */
 export class NamedBrowserSessions {
   readonly #browser: BrowserBinding;
@@ -356,6 +360,18 @@ export class NamedBrowserSessions {
     const entries = await this.#store.list?.(NAMED_SESSION_KEY_PREFIX);
     if (!entries) return { swept: [] };
 
+    // Superseded sockets can re-record activity after their session was
+    // closed or replaced; forget every id the store no longer holds live.
+    const liveSessionIds = new Set(
+      [...entries.values()]
+        .filter((entry) => entry.closedAt === undefined)
+        .map((entry) => entry.sessionId)
+    );
+    for (const sessionId of this.#lastActivityAt.keys()) {
+      if (!liveSessionIds.has(sessionId))
+        this.#lastActivityAt.delete(sessionId);
+    }
+
     const now = Date.now();
     const swept: Array<{ name: string; sessionId: string }> = [];
 
@@ -486,6 +502,11 @@ export class NamedBrowserSessions {
       if (isMissingBrowserSession(error)) return false;
       throw error;
     }
+  }
+
+  /** @internal For testing only */
+  trackedActivityCount(): number {
+    return this.#lastActivityAt.size;
   }
 
   async #wasRetired(name: string): Promise<boolean> {
