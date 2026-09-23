@@ -18,6 +18,7 @@ import type {
   ChatResponseResult,
   SaveMessagesOptions,
   SaveMessagesResult,
+  ChatErrorClassification,
   ChatRecoveryConfig,
   ChatRecoveryContext,
   ChatRecoveryExhaustedContext,
@@ -603,7 +604,11 @@ export class ThinkTestAgent extends Think {
   private _errorConfig: {
     afterChunks: number;
     message: string;
+    inStream?: boolean;
   } | null = null;
+  // #2085: when set, only the first N inferences error (then the recovery
+  // continuation streams normally). `null` = every inference errors.
+  private _errorAttemptsRemaining: number | null = null;
   private _stripTextResponseForTest = false;
   private _stallAfterChunks: number | null = null;
   // #1626 stall-recovery: when set, only the first N inferences stall (then the
@@ -1232,7 +1237,14 @@ export class ThinkTestAgent extends Think {
     )
       return result;
 
-    const config = this._errorConfig;
+    let config = this._errorConfig;
+    if (config && this._errorAttemptsRemaining != null) {
+      if (this._errorAttemptsRemaining > 0) {
+        this._errorAttemptsRemaining--;
+      } else {
+        config = null;
+      }
+    }
     const stripText = this._stripTextResponseForTest;
     // Per-inference stall gating: if attempt-limited (#1626), only stall while
     // attempts remain (decrement here so the continuation inference streams).
@@ -1268,6 +1280,7 @@ export class ThinkTestAgent extends Think {
         )[Symbol.asyncIterator]();
         let chunkCount = 0;
         let shouldThrow = false;
+        let erroredInStream = false;
 
         const wrapped: AsyncIterable<unknown> = {
           [Symbol.asyncIterator]() {
@@ -1288,9 +1301,19 @@ export class ThinkTestAgent extends Think {
                 if (chunkDelayMs != null) {
                   await new Promise((r) => setTimeout(r, chunkDelayMs));
                 }
+                if (erroredInStream) {
+                  return { done: true as const, value: undefined };
+                }
                 while (true) {
                   if (shouldThrow && config) {
                     await iterator.return?.();
+                    if (config.inStream) {
+                      erroredInStream = true;
+                      return {
+                        done: false as const,
+                        value: { type: "error", errorText: config.message }
+                      };
+                    }
                     throw new SimulatedChatError(config.message);
                   }
                   const { done, value } = await iterator.next();
@@ -1764,6 +1787,58 @@ export class ThinkTestAgent extends Think {
   }
 
   /** Stall the next inference after `afterChunks` chunks (one attempt only). */
+  /**
+   * #2085: the first inference fails after `afterChunks` chunks (thrown, or as
+   * an in-stream error chunk), and `classifyChatError` returns
+   * `classification` for every error. Pair with
+   * {@link runScheduledRecoveryForTest}, which reads the scheduled delay and
+   * clears this setup.
+   */
+  async armTransientErrorForTest(options: {
+    classification: ChatErrorClassification | undefined;
+    inStream?: boolean;
+    afterChunks?: number;
+    message?: string;
+  }): Promise<void> {
+    this._errorConfig = {
+      afterChunks: options.afterChunks ?? 2,
+      message: options.message ?? "upstream connection reset",
+      inStream: options.inStream
+    };
+    this._errorAttemptsRemaining = 1;
+    this.classifyChatError = () => options.classification;
+  }
+
+  async testChatWithTransientErrorForTest(
+    options: Parameters<ThinkTestAgent["armTransientErrorForTest"]>[0]
+  ): Promise<{
+    first: TestChatResult;
+    scheduledContinues: number;
+    scheduledRetries: number;
+    delaySeconds: number | null;
+    assistantMessages: number;
+    finalAssistantText: string;
+  }> {
+    await this.armTransientErrorForTest(options);
+    const first = await this.testChat("trigger transient error");
+    const recovered = await this.runScheduledRecoveryForTest();
+    const assistant = (await this.getMessages()).filter(
+      (m) => m.role === "assistant"
+    );
+    const finalAssistantText = (assistant.at(-1)?.parts ?? [])
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    return {
+      first,
+      scheduledContinues: recovered.scheduledContinues,
+      scheduledRetries: recovered.scheduledRetries,
+      delaySeconds: recovered.delaySeconds,
+      assistantMessages: assistant.length,
+      finalAssistantText
+    };
+  }
+
   async armStallForTest(afterChunks: number, timeoutMs: number): Promise<void> {
     this._stallAfterChunks = afterChunks;
     this._stallAttemptsRemaining = 1;
@@ -1773,8 +1848,17 @@ export class ThinkTestAgent extends Think {
   async runScheduledRecoveryForTest(): Promise<{
     scheduledContinues: number;
     scheduledRetries: number;
+    delaySeconds: number | null;
     finalRoles: string[];
   }> {
+    const delaySeconds =
+      this.sql<{ delay: number | null }>`
+        SELECT json_extract(input, '$.delaySeconds') AS delay
+        FROM cf_agents_task_runs
+        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `[0]?.delay ?? null;
     const scheduledContinues = recoveryWorkCountForTest(
       this,
       "_chatRecoveryContinue"
@@ -1792,9 +1876,13 @@ export class ThinkTestAgent extends Think {
     this._stallAfterChunks = null;
     this._stallAttemptsRemaining = null;
     this.chatStreamStallTimeoutMs = 0;
+    this._errorConfig = null;
+    this._errorAttemptsRemaining = null;
+    Reflect.deleteProperty(this, "classifyChatError");
     return {
       scheduledContinues,
       scheduledRetries,
+      delaySeconds,
       finalRoles: (await this.getMessages()).map((m) => m.role)
     };
   }

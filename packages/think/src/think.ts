@@ -311,6 +311,17 @@ type PendingResponseHook = {
   error?: string;
 };
 
+/**
+ * Carries an in-stream error that `classifyChatError` marked transient out of
+ * the drain loop, so it reaches the same recovery routing as a thrown error.
+ */
+class TransientChatStreamError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransientChatStreamError";
+  }
+}
+
 type ResolvedPauseOutcome = { executionId: string; output: unknown };
 
 function isPausedToolPart(part: Record<string, unknown>): boolean {
@@ -2570,8 +2581,10 @@ export interface TurnConfig {
  *
  * - `context_overflow` — the prompt exceeded the model's context window
  *   (Anthropic `"prompt is too long"`, OpenAI `context_length_exceeded`, …).
- *   The only category Think currently acts on (auto-compact + retry).
- * - `rate_limit` / `transient` — reserved for future backoff/retry policies.
+ *   Think compacts and retries when `contextOverflow.reactive` is enabled.
+ * - `rate_limit` / `transient` — a stream error worth retrying (a 429, a
+ *   dropped connection). Think routes the turn into bounded chat recovery, like
+ *   a stream stall, and schedules the continuation with exponential backoff.
  * - `fatal` — unrecoverable; surface terminally.
  * - `unknown` — default; Think applies its existing terminal behavior.
  */
@@ -6140,15 +6153,16 @@ export class Think<
    * knowledge into core. The app does know its provider/model, so it owns the
    * mapping — the same split Think already uses for `tokenCounter`.
    *
-   * Currently this hook drives **only** context-overflow recovery: it is
-   * consulted when a turn errors **and** `contextOverflow.reactive` is enabled
-   * (if reactive is off, it is not called). Return `"context_overflow"` to run
-   * the compact-and-retry backstop; if recovery cannot save the turn, that
-   * classification is surfaced on the terminal `onChatError` call via
-   * {@link ChatErrorContext.classification}. The other categories are reserved
-   * for future use — returning one today is a no-op (the turn terminalizes as
-   * usual) and it is **not** forwarded to `onChatError`. Returning
-   * `void`/`"unknown"` keeps the existing terminal behavior.
+   * Think consults it when a turn's stream errors. Return `"context_overflow"`
+   * to run the compact-and-retry backstop (only when `contextOverflow.reactive`
+   * is enabled); if recovery cannot save the turn, that classification is
+   * surfaced on the terminal `onChatError` call via
+   * {@link ChatErrorContext.classification}. Return `"transient"` or
+   * `"rate_limit"` to route the turn into bounded chat recovery (the same path
+   * as a stream stall: `onChatRecovery`, `chatRecovery.maxAttempts`, then the
+   * exhaustion message), with the continuation delayed by exponential backoff.
+   * Returning `void`, `"fatal"`, or `"unknown"` keeps the existing terminal
+   * behavior.
    *
    * The argument may be an `Error`, an AI SDK `APICallError` (with
    * `statusCode`/`responseBody`), or — for in-stream provider errors that
@@ -6210,6 +6224,32 @@ export class Think<
       return false;
     }
     return classification === "context_overflow";
+  }
+
+  /**
+   * Whether a stream error (thrown or surfaced as an in-stream error string)
+   * is one the app classified as `"transient"` or `"rate_limit"`. Such errors
+   * route into bounded chat recovery like a stream stall instead of
+   * terminalizing the turn (#2085). Without a `classifyChatError` override
+   * nothing is transient, so today's terminal behavior is unchanged.
+   */
+  private _isTransientStreamError(error: unknown, requestId: string): boolean {
+    if (error instanceof TransientChatStreamError) return true;
+    if (error instanceof ChatStreamStalledError) return false;
+    if (!isMethodOverridden(this, "classifyChatError")) return false;
+    let classification: ChatErrorClassification | void;
+    try {
+      classification = this.classifyChatError(error, {
+        stage: "stream",
+        requestId
+      });
+    } catch (err) {
+      console.warn(
+        `[Think] classifyChatError threw; treating as non-transient: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return false;
+    }
+    return classification === "transient" || classification === "rate_limit";
   }
 
   /**
@@ -13317,6 +13357,9 @@ export class Think<
               overflowRetry = true;
               break;
             }
+            if (this._isTransientStreamError(streamError, requestId)) {
+              throw new TransientChatStreamError(streamError);
+            }
             this._emit("message:error", { error: streamError });
             // An AI-SDK error surfaces as a stream error part (not a thrown
             // exception), so it lands here rather than in the `catch` below.
@@ -13445,10 +13488,15 @@ export class Think<
       // a terminal error. Persist the settled partial (re-anchor), route into
       // bounded recovery, and suppress the terminal error when a continuation is
       // scheduled; fall through to terminal only once the budget is exhausted.
-      if (error instanceof ChatStreamStalledError) {
+      // Errors the app classifies as transient/rate_limit take the same route.
+      if (
+        error instanceof ChatStreamStalledError ||
+        this._isTransientStreamError(error, requestId)
+      ) {
         const outcome = await this._routeStallToBoundedRecovery({
           requestId,
           streamId,
+          backoff: !(error instanceof ChatStreamStalledError),
           partialParts: (assistantMsg ?? accumulator.toMessage()).parts,
           persistPartial: async () => {
             if (assistantMsg) return assistantMsg.id;
@@ -13799,6 +13847,9 @@ export class Think<
               overflowRetry = true;
               break;
             }
+            if (this._isTransientStreamError(streamError, requestId)) {
+              throw new TransientChatStreamError(streamError);
+            }
             if (options?.captureProgrammaticStreamError) {
               this._programmaticStreamErrors.set(requestId, streamError);
             }
@@ -13908,12 +13959,17 @@ export class Think<
       // a terminal error. Persist the settled partial (so the continuation
       // re-anchors without re-running completed tool calls), then route into
       // bounded recovery; only fall through to the terminal path below once the
-      // budget is exhausted.
-      if (error instanceof ChatStreamStalledError) {
+      // budget is exhausted. Errors the app classifies as transient/rate_limit
+      // take the same route.
+      if (
+        error instanceof ChatStreamStalledError ||
+        this._isTransientStreamError(error, requestId)
+      ) {
         const partialMsg = accumulator.toMessage();
         const outcome = await this._routeStallToBoundedRecovery({
           requestId,
           streamId,
+          backoff: !(error instanceof ChatStreamStalledError),
           partialParts: partialMsg.parts,
           persistPartial: async () => {
             if (
@@ -15781,6 +15837,8 @@ export class Think<
     streamId: string;
     partialParts: MessagePart[];
     persistPartial: () => Promise<string | undefined>;
+    /** Delay the continuation with exponential backoff (transient errors). */
+    backoff?: boolean;
   }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
@@ -15901,9 +15959,13 @@ export class Think<
       : input.partialParts.length === 0
         ? retryTargetUserId
         : await this._latestUserLeafId();
+    const delaySeconds = input.backoff
+      ? Math.min(2 ** Math.max(0, incident.attempt - 1), 30)
+      : undefined;
     if (unansweredUserId) {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
+        delaySeconds,
         recoveryKind: "retry",
         callback: "_chatRecoveryRetry",
         data: {
@@ -15920,6 +15982,7 @@ export class Think<
 
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
+      delaySeconds,
       recoveryKind: "continue",
       callback: "_chatRecoveryContinue",
       data: {

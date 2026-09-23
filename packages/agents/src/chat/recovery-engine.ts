@@ -610,6 +610,7 @@ export class ChatRecoveryEngine {
     callback: ChatRecoveryScheduleCallback;
     data: Record<string, unknown>;
     reason?: ChatRecoveryScheduleReason;
+    delaySeconds?: number;
   }): Promise<void> {
     const { incident } = input;
     await this.updateIncident(incident.incidentId, "scheduled");
@@ -625,7 +626,7 @@ export class ChatRecoveryEngine {
       input.callback,
       input.data,
       input.reason ?? "initial",
-      0
+      input.delaySeconds ?? 0
     );
   }
 
