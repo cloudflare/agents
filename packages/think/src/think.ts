@@ -4225,9 +4225,10 @@ export class Think<
   // persist. Null when no stream is active. Mirrors `@cloudflare/ai-chat`'s
   // `_streamingMessage` handling.
   private _streamingAssistant: StreamAccumulator | null = null;
-  // Tool calls whose pause resolved while their own turn was still streaming;
-  // see `_dropGenerationAfterResolvedPause`. Mirrored in storage so the drop
-  // survives an eviction before the next turn; loaded once per isolate.
+  // Tool calls whose resolved pause still needs its generation dropped: the
+  // outcome is being written, or its own turn was still streaming. See
+  // `_dropGenerationAfterResolvedPause`. Mirrored in storage so the drop
+  // survives a restart before the next turn; loaded once per isolate.
   private _deferredResolvedPauses = new Set<string>();
   private _deferredResolvedPausesLoaded = false;
   private _submitConcurrency = new SubmitConcurrencyController({
@@ -14745,6 +14746,9 @@ export class Think<
       } as UIMessage);
     } else {
       await this._enqueueInteractionApply(async () => {
+        // Recorded before the outcome is written, so a restart between the
+        // two writes still drops the generation before the next inference.
+        await this._rememberResolvedPause(toolCallId);
         await this._applyToolUpdateToMessages(
           pausedExecutionUpdate(toolCallId, executionId, output)
         );
@@ -14838,6 +14842,9 @@ export class Think<
    * message and appends deltas to the last text part, so parts cannot be
    * removed underneath it. The drop is deferred to the next inference, which
    * is queued behind that turn and runs after it persists.
+   *
+   * The pending drop stays recorded (see `_rememberResolvedPause`) until it
+   * has been applied.
    */
   private async _dropGenerationAfterResolvedPause(
     toolCallId: string
@@ -14848,38 +14855,81 @@ export class Think<
         (part) => "toolCallId" in part && part.toolCallId === toolCallId
       )
     ) {
-      this._deferredResolvedPauses.add(toolCallId);
-      await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
-        ...this._deferredResolvedPauses
-      ]);
+      await this._rememberResolvedPause(toolCallId);
       return;
     }
     const owner = await this._resolveToolCallOwner(toolCallId, undefined);
-    if (!owner) return;
-    const parts = dropGenerationAfterToolCall(owner.parts, toolCallId);
-    if (parts === owner.parts) return;
-    const safe = await this._updateMessageInHistory({ ...owner, parts });
-    this._patchCachedMessage(safe);
-    this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
+    const parts = owner
+      ? dropGenerationAfterToolCall(owner.parts, toolCallId)
+      : undefined;
+    if (owner && parts && parts !== owner.parts) {
+      const safe = await this._updateMessageInHistory({ ...owner, parts });
+      this._patchCachedMessage(safe);
+      this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
+    }
+    await this._forgetResolvedPause(toolCallId);
+  }
+
+  private async _loadResolvedPauses(): Promise<void> {
+    if (this._deferredResolvedPausesLoaded) return;
+    this._deferredResolvedPausesLoaded = true;
+    const stored = await this.ctx.storage.get<string[]>(
+      DEFERRED_RESOLVED_PAUSES_KEY
+    );
+    for (const toolCallId of stored ?? []) {
+      this._deferredResolvedPauses.add(toolCallId);
+    }
+  }
+
+  private async _rememberResolvedPause(toolCallId: string): Promise<void> {
+    await this._loadResolvedPauses();
+    if (this._deferredResolvedPauses.has(toolCallId)) return;
+    this._deferredResolvedPauses.add(toolCallId);
+    await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
+      ...this._deferredResolvedPauses
+    ]);
+  }
+
+  private async _forgetResolvedPause(toolCallId: string): Promise<void> {
+    await this._loadResolvedPauses();
+    if (!this._deferredResolvedPauses.delete(toolCallId)) return;
+    if (this._deferredResolvedPauses.size === 0) {
+      await this.ctx.storage.delete(DEFERRED_RESOLVED_PAUSES_KEY);
+    } else {
+      await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
+        ...this._deferredResolvedPauses
+      ]);
+    }
   }
 
   private async _flushDeferredResolvedPauses(): Promise<void> {
-    if (!this._deferredResolvedPausesLoaded) {
-      this._deferredResolvedPausesLoaded = true;
-      const stored = await this.ctx.storage.get<string[]>(
-        DEFERRED_RESOLVED_PAUSES_KEY
-      );
-      for (const toolCallId of stored ?? []) {
-        this._deferredResolvedPauses.add(toolCallId);
-      }
-    }
-    if (this._deferredResolvedPauses.size === 0) return;
-    const toolCallIds = [...this._deferredResolvedPauses];
-    this._deferredResolvedPauses.clear();
-    await this.ctx.storage.delete(DEFERRED_RESOLVED_PAUSES_KEY);
-    for (const toolCallId of toolCallIds) {
+    await this._loadResolvedPauses();
+    for (const toolCallId of [...this._deferredResolvedPauses]) {
+      // Still paused: the restart landed before the outcome was written, so
+      // the pause is unresolved and its approval will run the drop.
+      if (this._findToolCallStillPaused(toolCallId)) continue;
       await this._dropGenerationAfterResolvedPause(toolCallId);
     }
+  }
+
+  private _findToolCallStillPaused(toolCallId: string): boolean {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const message = this.messages[i];
+      if (message.role !== "assistant") continue;
+      for (const part of message.parts as unknown as Array<
+        Record<string, unknown>
+      >) {
+        if (part.toolCallId !== toolCallId) continue;
+        const output = part.output as { status?: unknown } | null | undefined;
+        return (
+          part.state === "output-available" &&
+          output != null &&
+          typeof output === "object" &&
+          output.status === "paused"
+        );
+      }
+    }
+    return false;
   }
 
   private async _applyToolUpdateToMessages(update: {

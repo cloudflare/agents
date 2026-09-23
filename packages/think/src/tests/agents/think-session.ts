@@ -4305,6 +4305,17 @@ export class ThinkToolsTestAgent extends Think {
     )._queueConnectionlessContinuation = () => Promise.resolve();
   }
 
+  /** Skip the next resolved-pause drop, as a restart right before it would. */
+  async skipNextResolvedPauseDropForTest(): Promise<void> {
+    const self = this as unknown as {
+      _dropGenerationAfterResolvedPause(toolCallId: string): Promise<void>;
+    };
+    const original = self._dropGenerationAfterResolvedPause;
+    self._dropGenerationAfterResolvedPause = async () => {
+      self._dropGenerationAfterResolvedPause = original;
+    };
+  }
+
   /** Drop in-memory deferred-pause state, as an eviction would. */
   async forgetDeferredResolvedPausesForTest(): Promise<void> {
     const state = this as unknown as {

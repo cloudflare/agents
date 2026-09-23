@@ -188,8 +188,9 @@ reasoning parts that follow it in that assistant message. Earlier content and
 later tool and file parts are kept. The continuation then reads a transcript
 that ends with the real outcome. If the outcome arrives while the parking turn
 is still streaming, the removal waits until that turn is saved and runs before
-the next model call, whether that is the continuation or a new user turn, even
-if the agent restarts in between.
+the next model call, whether that is the continuation or a new user turn. The
+pending removal is saved before the outcome is written, so a restart at any
+point in between still removes the text before the next model call.
 
 Both approval-gated and durable-pause parts carry a stable
 `ActionApprovalDescriptor` (`{ requestId, toolCallId, action, summary, input,

@@ -591,6 +591,30 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     );
     expect(generatedAfter(resolved, "dp1")).toEqual([]);
   });
+
+  it("drops the generation after a restart between writing the outcome and the drop", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-restart");
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.skipNextResolvedPauseDropForTest();
+    await agent.approveExecutionForTest(executionId);
+    await agent.forgetDeferredResolvedPausesForTest();
+    const written = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(written, "dp1")).toBe("paused-exec: hello");
+
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts[2]).toContain("paused-exec: hello");
+    expect(prompts[2]).not.toContain("Once approved");
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
 });
 
 describe("paused-output descriptor derivation", () => {
