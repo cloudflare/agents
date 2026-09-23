@@ -100,6 +100,12 @@ type MachineView = {
   phase?: string;
   result?: unknown;
   error?: string;
+  effects?: {
+    kind: string;
+    recovery: string;
+    status: string;
+    externalId?: string;
+  }[];
 };
 
 describe("PiHarness durability", () => {
@@ -375,6 +381,45 @@ describe("PiHarness reconcile of a live operation", () => {
     const snapshot = (await stub.machine(operationId)) as MachineView | null;
     expect(snapshot?.status).not.toBe("completed");
     expect(snapshot?.status).not.toBe("failed");
+
+    await stub.releaseGate();
+  });
+});
+
+/**
+ * The recovery policy the machine commits for each drive pass.
+ *
+ * This is the contract that makes pi a *wrapped* runtime rather than a
+ * replayed one. A pass marked `safe` would re-run the model after a crash
+ * and `never` would abandon a recoverable operation, so the planned policy
+ * is asserted directly on the durable effect row instead of being implied
+ * by downstream behaviour.
+ */
+describe("PiHarness effect planning", () => {
+  it("plans each drive pass as a reconcilable effect keyed by pi's id", async () => {
+    const stub = fresh();
+    const { operationId } = await stub.submitGated(11);
+
+    const deadline = Date.now() + 10_000;
+    let planned: NonNullable<MachineView["effects"]> = [];
+    for (;;) {
+      const snapshot = (await stub.machine(operationId)) as MachineView | null;
+      planned = snapshot?.effects ?? [];
+      if (planned.length > 0) break;
+      if (Date.now() > deadline) {
+        throw new Error(`no effect planned: ${JSON.stringify(snapshot)}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(planned[0]).toMatchObject({
+      kind: "pi-drive",
+      // Recovery must consult pi, never repeat or abandon the request.
+      recovery: "reconcile",
+      // The external id is pi's own operation id plus the pass number, so
+      // recovery can find the right execution to ask about.
+      externalId: `${operationId}:0`
+    });
 
     await stub.releaseGate();
   });

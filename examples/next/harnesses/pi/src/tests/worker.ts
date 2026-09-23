@@ -37,6 +37,13 @@ export type MachineView = {
   phase?: string;
   result?: unknown;
   error?: string;
+  /** The durable effect rows, so tests can assert the recovery policy. */
+  effects?: {
+    kind: string;
+    recovery: string;
+    status: string;
+    externalId?: string;
+  }[];
 };
 
 function messageText(message: PiMessage): string {
@@ -164,6 +171,18 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     if (snapshot.status === "completed") view.result = snapshot.result;
     if (snapshot.status === "failed" || snapshot.status === "cancelled") {
       view.error = snapshot.error.message;
+    }
+    if (
+      snapshot.status === "running" ||
+      snapshot.status === "waiting" ||
+      snapshot.status === "paused"
+    ) {
+      view.effects = (snapshot.effects ?? []).map((effect) => ({
+        kind: effect.kind,
+        recovery: effect.recovery,
+        status: effect.status,
+        externalId: effect.externalId
+      }));
     }
     return view;
   }
