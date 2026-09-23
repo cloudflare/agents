@@ -19,7 +19,7 @@ import {
   type Skill as UpstreamSkill
 } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, Models } from "@earendil-works/pi-ai";
-import { SqliteStorage } from "@earendil-works/pi-session-backend-sqlite-node/storage";
+import { SqliteStorage } from "@earendil-works/pi-session-backend-sqlite-node";
 import {
   LifecycleCapability,
   type CapabilityStartContext,
@@ -27,7 +27,7 @@ import {
   type LifecycleJobOutcome
 } from "agents/lifecycle";
 import type { Streams } from "agents/streams";
-import type { Tasks, TaskStep } from "agents/tasks";
+import { StateMachine, type MachineRunSnapshot } from "agents/state-machine";
 import type { WebSocketsOptions } from "agents/websockets";
 import { DurableObjectPiDatabase, ensurePiSession } from "./do-sqlite";
 import {
@@ -45,9 +45,26 @@ import {
 import { resolveModel } from "../providers/models";
 import { resolveSkillSources, type ResolvedSkills } from "./skills";
 import { PiTransport, type PiTransportHost } from "./transport";
+import {
+  createPiDriveRuntime,
+  type PiDriveHost,
+  type PiOperationLookup
+} from "./drive-runtime";
+import {
+  PI_DRIVE_EFFECT,
+  PI_RUN_DEFINITION,
+  piRunMachine,
+  toOperationRequest,
+  toRequestJson,
+  type PiDriveInput,
+  type PiDriveOutput,
+  type PiRunResult,
+  type PiRunState
+} from "./machine";
 import type {
   PiAbortResult,
   PiContext,
+  PiDeferredHandle,
   PiEvent,
   PiEventListener,
   PiHarnessConfig,
@@ -72,31 +89,16 @@ import type {
   PiTranscriptOptions
 } from "./types";
 
-/** Task definition that drives one lane's operations to settlement. */
-export const LANE_DRIVER_DEFINITION = "__cf_pi_harness_lane@v1";
+/** The StateMachine definition name for one pi operation. */
+export const PI_OPERATION_DEFINITION = PI_RUN_DEFINITION;
 
 const RECONCILE_JOB_ID = "reconcile";
 const RECONCILE_FN = "reconcile";
-const ENSURE_DRIVER_FN = "ensure-driver";
-const DRIVE_STEP_TIMEOUT = "7 days";
-const DRIVE_STEP_RETRIES = 100;
-/** Each pass and each wait is a journaled step; Tasks caps steps per run. */
-const MAX_PASSES_PER_DRIVER = 4_000;
-const DRIVER_ROTATION_DELAY_MS = 2_000;
+const ADMIT_FN = "admit";
 const DEFERRED_POLL_MS = 30_000;
-const ERROR_BACKOFF_BASE_MS = 1_000;
-const ERROR_BACKOFF_MAX_MS = 5 * 60_000;
 const RESULT_POLL_MS = 500;
-
-type LaneDriverInput = { readonly version: 1; readonly lane: string };
-
-type DrivePassOutcome =
-  | { readonly kind: "idle" }
-  | { readonly kind: "settled"; readonly operationId: string }
-  | { readonly kind: "rejected"; readonly operationId: string }
-  | { readonly kind: "retry"; readonly notBefore: number }
-  | { readonly kind: "deferred"; readonly pollAfterMs: number }
-  | { readonly kind: "error"; readonly message: string };
+/** How long a run parks when another operation holds its lane. */
+const LANE_BUSY_WAIT_MS = 250;
 
 type Attached = {
   readonly harness: UpstreamAgentHarness<object | undefined>;
@@ -114,21 +116,6 @@ export class PiOperationRejectedError extends Error {
     this.operationId = operationId;
     this.code = code;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseLaneDriverInput(value: unknown): LaneDriverInput {
-  if (
-    !isRecord(value) ||
-    value.version !== 1 ||
-    typeof value.lane !== "string"
-  ) {
-    throw new Error("Invalid pi lane driver input");
-  }
-  return { version: 1, lane: value.lane };
 }
 
 function asUpstreamContext(context: PiContext | undefined): UpstreamContext {
@@ -252,6 +239,22 @@ function projectResult(record: OperationResultRecord): PiOperationResult {
   };
 }
 
+/**
+ * Project pi's terminal record into the machine's bounded result.
+ *
+ * The checkpoint keeps only the disposition; the full record and the
+ * transcript stay in pi's own tables.
+ */
+function projectRunResult(record: OperationResultRecord): PiRunResult {
+  return {
+    operationId: record.operationId,
+    status: record.status,
+    ...(record.error === undefined
+      ? {}
+      : { error: { code: record.error.code, message: record.error.message } })
+  };
+}
+
 function operationStatus(
   operation: NonNullable<LaneSnapshot["operation"]>
 ): PiOperationStatus {
@@ -264,27 +267,26 @@ function operationStatus(
     status: operation.status === "aborting" ? "aborting" : "running",
     startedAt: operation.startedAt,
     ...(streaming === undefined ? {} : { streaming }),
-    runningTools: operation.runningTools.map((tool) => ({
-      toolCallId: tool.toolCallId,
-      toolName: tool.toolName,
-      // SAFETY: pi validated these arguments against the tool schema.
-      arguments: tool.args as PiJson,
-      ...(tool.partialResult === undefined
-        ? {}
-        : { partial: projectToolResult(tool.partialResult) })
-    })),
+    // Pi reports both still-running and already-settled calls for the live
+    // operation; only the running ones belong in its running-tool view.
+    runningTools: operation.runningTools
+      .filter((tool) => tool.status === "running")
+      .map((tool) => ({
+        toolCallId: tool.toolCallId,
+        toolName: tool.toolName,
+        // SAFETY: pi validated these arguments against the tool schema.
+        arguments: tool.args as PiJson,
+        ...(tool.result === undefined
+          ? {}
+          : { partial: projectToolResult(tool.result) })
+      })),
     ...(operation.retry === undefined ? {} : { retry: operation.retry }),
     ...(operation.deferred === undefined
       ? {}
-      : { deferred: operation.deferred.handle })
+      : // SAFETY: PiDeferredHandle is the mutable-array public projection of
+        // pi's DeferredHandle.
+        { deferred: operation.deferred.handle as PiDeferredHandle })
   };
-}
-
-function errorBackoffMs(consecutiveErrors: number): number {
-  return Math.min(
-    ERROR_BACKOFF_MAX_MS,
-    ERROR_BACKOFF_BASE_MS * 2 ** Math.max(0, consecutiveErrors - 1)
-  );
 }
 
 /**
@@ -293,18 +295,33 @@ function errorBackoffMs(consecutiveErrors: number): number {
  * Pi owns the transcript, operation state, tool intents and outcomes,
  * retries, and crash recovery, all in this object's SQLite database. Around
  * it the capability composes the SDK's durable primitives: submissions queue
- * in a small intake table, each lane's work runs as one `Tasks` run whose
- * replay resumes pi from its own durable state, and every operation's live
- * events land in one `Streams` stream that clients replay and tail.
+ * in a small intake table, each operation runs as one `StateMachine` run
+ * whose checkpoint wraps pi's drive loop as a reconciled effect, and every
+ * operation's live events land in one `Streams` stream clients replay.
  *
- * @experimental This is a v0.2 integration with pi-mono's pinned `dev` API.
+ * Because pi is already a durable state machine, the outer machine follows
+ * the SDK's wrapped-runtime shape: it owns admission, parking, cancellation,
+ * and observation, and never replays pi's model or tool effects.
+ *
+ * @experimental This is a v0.3 integration with pi's published API.
  */
 export class PiHarness<
   ToolContext extends object | undefined = object | undefined
 > extends LifecycleCapability {
   readonly #config: PiHarnessConfig<ToolContext>;
-  readonly #tasks: Tasks;
   readonly #streams: Streams;
+  /**
+   * The operation machines. PiHarness owns this capability rather than
+   * receiving it, because the definition and its effect runtime are bound to
+   * this harness's pi attachment. Install it beside the harness with
+   * `.use(harness.stateMachine)`.
+   */
+  readonly #machines = new StateMachine({
+    definitions: { [PI_RUN_DEFINITION]: piRunMachine },
+    effects: {
+      [PI_DRIVE_EFFECT]: createPiDriveRuntime(this.#driveHost())
+    }
+  });
   readonly #defaultLane: string;
   #submissions: PiSubmissions | undefined;
   #attaching: Promise<Attached> | undefined;
@@ -315,17 +332,23 @@ export class PiHarness<
   readonly #laneWriters = new Map<string, OperationStreamWriter>();
   readonly #settlementWaiters = new Map<string, Set<() => void>>();
   readonly #rejections = new Map<string, PiOperationRejectedError>();
-  readonly #ensuring = new Map<string, Promise<void>>();
+  readonly #lanesOf = new Map<string, string>();
 
   constructor(config: PiHarnessConfig<ToolContext>) {
     super("pi-harness");
     this.#config = config;
-    this.#tasks = config.tasks;
     this.#streams = config.streams;
     this.#defaultLane = config.defaultLane ?? "main";
-    config.tasks.register(LANE_DRIVER_DEFINITION, (input, step) =>
-      this.#driveLane(parseLaneDriverInput(input), step)
-    );
+  }
+
+  /**
+   * The StateMachine capability driving this harness's operations. Install
+   * it on the same Lifecycle before the harness itself.
+   */
+  get stateMachine(): StateMachine<{
+    [PI_RUN_DEFINITION]: typeof piRunMachine;
+  }> {
+    return this.#machines;
   }
 
   /** The lane used when a call names none. */
@@ -340,44 +363,38 @@ export class PiHarness<
 
   // ── Lifecycle hooks ──────────────────────────────────────────────────────
 
-  /** Attach pi to this object's SQLite state and re-derive lane drivers. */
+  /**
+   * Attach pi to this object's SQLite state and re-derive operation runs.
+   *
+   * StateMachine reconciles its own runs and jobs on startup, so this hook
+   * only needs to cover operations pi knows about that never reached a
+   * machine run: a crash between the intake write and `run()`.
+   */
   override async onStart(_context: CapabilityStartContext): Promise<void> {
     this.#submissions = new PiSubmissions(this.lifecycle.storage);
     this.#submissions.ensureTable();
     const attached = await this.#attached();
-    const lanes = new Set<string>([
-      ...this.#submissions.lanes(),
-      ...attached.open.map((operation) => operation.lane)
-    ]);
-    if (lanes.size === 0) return;
-    // Drivers are re-derived after startup completes so Tasks is ready no
-    // matter the installation order; interrupted drivers also replay on
-    // their own through Tasks.
+    for (const operation of attached.open) {
+      this.#lanesOf.set(operation.operationId, operation.lane);
+    }
+    const pending = this.#submissions.list();
+    if (pending.length === 0 && attached.open.length === 0) return;
+    // Admission runs after startup completes so StateMachine is ready no
+    // matter the installation order.
     await this.lifecycle.jobs.push({
       id: RECONCILE_JOB_ID,
       fn: RECONCILE_FN,
-      time: Date.now(),
-      payload: { lanes: [...lanes] }
+      time: Date.now()
     });
   }
 
   async onJob(
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
-    const payload = context.job.payload;
     switch (context.job.fn) {
-      case RECONCILE_FN: {
-        const lanes =
-          isRecord(payload) && Array.isArray(payload.lanes)
-            ? payload.lanes.filter((lane) => typeof lane === "string")
-            : [];
-        for (const lane of lanes) await this.#ensureLaneDriver(lane);
-        return;
-      }
-      case ENSURE_DRIVER_FN:
-        if (isRecord(payload) && typeof payload.lane === "string") {
-          await this.#ensureLaneDriver(payload.lane);
-        }
+      case RECONCILE_FN:
+      case ADMIT_FN:
+        await this.#admitPending();
         return;
       default:
         this.lifecycle.events.emit("operation:invalid_job", {
@@ -385,6 +402,23 @@ export class PiHarness<
           fn: context.job.fn
         });
         return;
+    }
+  }
+
+  /**
+   * Ensure every durably queued submission owns a machine run.
+   *
+   * `run()` is idempotent on the operation id, so a submission whose run
+   * already exists is a no-op and a crash between the two writes is repaired
+   * on the next wake.
+   */
+  async #admitPending(): Promise<void> {
+    for (const submission of this.#requireSubmissions().list()) {
+      await this.#startOperationRun(
+        submission.lane,
+        submission.operationId,
+        submission.request
+      );
     }
   }
 
@@ -403,8 +437,8 @@ export class PiHarness<
 
   /**
    * Durably queue an operation and return a receipt without waiting for the
-   * model. The submission is durable before this resolves; the lane driver
-   * admits it into pi in order.
+   * model. The submission is durable before this resolves, and its machine
+   * run admits it into pi in order.
    */
   async submit(
     request: PiOperationRequest,
@@ -423,8 +457,10 @@ export class PiHarness<
     ) {
       return { operationId, lane, accepted: false };
     }
+    // Intake first: the submission is the evidence that survives a crash
+    // between here and the machine run, and `#admitPending()` repairs it.
     submissions.insert(lane, operationId, request);
-    await this.#ensureLaneDriver(lane);
+    await this.#startOperationRun(lane, operationId, request);
     return { operationId, lane, accepted: true };
   }
 
@@ -483,6 +519,9 @@ export class PiHarness<
     if (operationId === undefined) return null;
     if (current?.id !== operationId) {
       if (!this.#requireSubmissions().deleteOperation(operationId)) return null;
+      // Withdrawn before pi admitted it: cancel the machine run that was
+      // going to admit it, then publish the rejection.
+      await this.#machines.cancel(this.#runIdFor(operationId), "aborted");
       this.#reject(
         lane,
         operationId,
@@ -500,8 +539,9 @@ export class PiHarness<
       if (requested.error._tag === "OperationMismatch") return null;
       throw requested.error;
     }
-    // The marker is durable; a driver reconciles it, now or after a wake.
-    await this.#ensureLaneDriver(lane);
+    // Pi's marker is durable. Record the cancellation on the machine too, so
+    // the run stops admitting new passes and settles as cancelled.
+    await this.#machines.cancel(this.#runIdFor(operationId), "aborted");
     return { operationId, newlyRequested: requested.value.newlyRequested };
   }
 
@@ -518,6 +558,16 @@ export class PiHarness<
     );
     const queued = await upstream.steer(text, images, context);
     if (!queued.ok) throw queued.error;
+    // Wake a parked run so the steer is read at the next turn boundary
+    // instead of waiting out the park deadline.
+    const current = (await upstream.inspectExecution(context)).current;
+    if (current) {
+      await this.#machines.notify(
+        this.#runIdFor(current.id),
+        { type: "pi:steered", key: current.id },
+        { eventId: `steer:${queued.value.entryId}` }
+      );
+    }
     return { entryId: queued.value.entryId };
   }
 
@@ -594,6 +644,35 @@ export class PiHarness<
   /** The durable stream id of one operation's live events. */
   streamId(operationId: string, lane = this.#defaultLane): string {
     return `pi:${lane}:${operationId}`;
+  }
+
+  /**
+   * The durable machine checkpoint driving one operation.
+   *
+   * This is the outer control state — phase, revision, current wait, and the
+   * reconciled drive effect. Pi's transcript and tool records are read with
+   * {@link getMessages} and {@link getResult} instead.
+   */
+  async inspect(
+    operationId: string
+  ): Promise<MachineRunSnapshot<PiRunState, PiRunResult> | null> {
+    await this.lifecycle.ready();
+    return this.#machines.get(this.#runIdFor(operationId), PI_RUN_DEFINITION);
+  }
+
+  /**
+   * The machine run id that owns one operation.
+   *
+   * Exposed so a host can correlate an operation with StateMachine's own
+   * control surface, and so tests can seed recovery states directly.
+   */
+  runIdFor(operationId: string): string {
+    return this.#runIdFor(operationId);
+  }
+
+  /** Resume a paused machine run. */
+  resume(operationId: string): Promise<boolean> {
+    return this.#machines.resume(this.#runIdFor(operationId));
   }
 
   // ── Live ─────────────────────────────────────────────────────────────────
@@ -801,134 +880,138 @@ export class PiHarness<
     }
   }
 
-  // ── Lane driver ──────────────────────────────────────────────────────────
+  // ── Machine drive host ───────────────────────────────────────────────────
 
-  async #ensureLaneDriver(lane: string): Promise<void> {
-    let ensuring = this.#ensuring.get(lane);
-    if (!ensuring) {
-      ensuring = this.#startLaneDriver(lane).finally(() => {
-        this.#ensuring.delete(lane);
-      });
-      this.#ensuring.set(lane, ensuring);
-    }
-    return ensuring;
+  /**
+   * The pi-side surface the machine's reconciled effect drives.
+   *
+   * Built once in the field initializer, so the effect runtime registered
+   * with StateMachine stays stable across wakes.
+   */
+  #driveHost(): PiDriveHost {
+    return {
+      drive: (input, signal) => this.#drivePass(input, signal),
+      lookup: (operationId) => this.#lookupOperation(operationId),
+      requestAbort: (operationId) => this.#requestAbort(operationId)
+    };
   }
 
-  async #startLaneDriver(lane: string): Promise<void> {
-    const live = await this.#tasks.list({
-      definition: LANE_DRIVER_DEFINITION,
-      status: ["pending", "running", "waiting"]
-    });
-    if (live.some((run) => run.metadata?.lane === lane)) return;
-    const input: LaneDriverInput = { version: 1, lane };
-    await this.#tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      LANE_DRIVER_DEFINITION,
-      input,
-      { runId: `pi:${lane}:${uuidv7()}`, metadata: { lane }, retain: false }
+  /** Start, or re-attach to, the machine run that owns one operation. */
+  async #startOperationRun(
+    lane: string,
+    operationId: string,
+    request: PiOperationRequest
+  ): Promise<void> {
+    this.#lanesOf.set(operationId, lane);
+    await this.#machines.run(
+      PI_RUN_DEFINITION,
+      {
+        lane,
+        operationId,
+        request: toRequestJson(request),
+        streamId: this.streamId(operationId, lane)
+      },
+      { runId: this.#runIdFor(operationId), idempotencyKey: operationId }
     );
   }
 
-  async #driveLane(
-    input: LaneDriverInput,
-    step: TaskStep
-  ): Promise<{ lane: string; passes: number; rotated?: true }> {
-    const { lane } = input;
-    let consecutiveErrors = 0;
-    for (let pass = 0; pass < MAX_PASSES_PER_DRIVER; pass++) {
-      const outcome = await step.do(
-        `pass:${pass}`,
-        { timeout: DRIVE_STEP_TIMEOUT, retries: { limit: DRIVE_STEP_RETRIES } },
-        ({ signal }) => this.#drivePass(lane, signal)
-      );
-      if (outcome.kind === "error") {
-        consecutiveErrors += 1;
-        await step.status(`pi: ${outcome.message}`);
-        await step.sleep(`backoff:${pass}`, errorBackoffMs(consecutiveErrors));
-        continue;
-      }
-      consecutiveErrors = 0;
-      switch (outcome.kind) {
-        case "idle":
-          return { lane, passes: pass + 1 };
-        case "settled":
-        case "rejected":
-          continue;
-        case "retry":
-          await step.sleepUntil(`retry:${pass}`, outcome.notBefore);
-          continue;
-        case "deferred":
-          await step.sleep(`poll:${pass}`, outcome.pollAfterMs);
-          continue;
-      }
-    }
-    // Rotate: this run completes, and a fresh driver picks the lane up.
-    await this.lifecycle.jobs.push({
-      fn: ENSURE_DRIVER_FN,
-      time: Date.now() + DRIVER_ROTATION_DELAY_MS,
-      payload: { lane }
-    });
-    return { lane, passes: MAX_PASSES_PER_DRIVER, rotated: true };
+  /** The machine run id owning one pi operation. */
+  #runIdFor(operationId: string): string {
+    return `pi:${operationId}`;
   }
 
+  /**
+   * Run one bounded pass over pi's durable loop.
+   *
+   * The first pass admits the operation; later passes re-attach by id. Any
+   * failure is thrown so the machine's effect records it, rather than being
+   * folded into a private retry loop.
+   */
   async #drivePass(
-    lane: string,
+    input: PiDriveInput,
     signal: AbortSignal
-  ): Promise<DrivePassOutcome> {
+  ): Promise<PiDriveOutput> {
+    const { lane, operationId } = input;
     const context = BACKGROUND_CONTEXT;
+    this.#lanesOf.set(operationId, lane);
     try {
       const { harness } = await this.#attached();
       const upstream = await harness.lane(lane, context);
-      let execution = await upstream.inspectExecution(context);
 
-      if (!execution.current) {
-        const head = this.#requireSubmissions().head(lane);
-        if (!head) return { kind: "idle" };
-        if (await upstream.getResult(head.operationId, context)) {
-          this.#requireSubmissions().delete(head.seq);
-          return { kind: "settled", operationId: head.operationId };
+      // A settled operation is terminal evidence; report it without driving.
+      const already = await upstream.getResult(operationId, context);
+      if (already) {
+        this.#settleOperation(lane, already);
+        return { kind: "settled", result: projectRunResult(already) };
+      }
+
+      let execution = await upstream.inspectExecution(context);
+      if (execution.current?.id !== operationId) {
+        if (execution.current) {
+          // Another operation holds the lane. Park; pi admits in order.
+          return { kind: "waiting", notBefore: Date.now() + LANE_BUSY_WAIT_MS };
         }
+        if (!input.request) {
+          // Pi has no record and no request to admit it with.
+          throw new PiOperationRejectedError(
+            operationId,
+            "lost",
+            "The operation is no longer known to pi"
+          );
+        }
+        const request = toOperationRequest(input.request);
         const admission = await upstream.accept(
-          asUpstreamRequest(head.request, head.operationId),
+          asUpstreamRequest(request, operationId),
           context
         );
-        if (admission.ok) {
-          this.#requireSubmissions().delete(head.seq);
-          const writer = await this.#writerFor(
-            lane,
-            head.operationId,
-            admission.value.kind
+        if (!admission.ok) {
+          if (admission.error._tag === "LaneBusy") {
+            return {
+              kind: "waiting",
+              notBefore: Date.now() + LANE_BUSY_WAIT_MS
+            };
+          }
+          const rejection = new PiOperationRejectedError(
+            operationId,
+            admission.error._tag,
+            admission.error.message
           );
-          this.#emitLaneEvent(
-            lane,
-            {
-              type: "operation_start",
-              operationId: head.operationId,
-              kind: admission.value.kind,
-              startedAt: admission.value.startedAt
-            },
-            head.operationId,
-            writer
-          );
-        } else if (admission.error._tag !== "LaneBusy") {
-          this.#requireSubmissions().delete(head.seq);
-          this.#reject(
-            lane,
-            head.operationId,
-            requestKind(head.request),
-            new PiOperationRejectedError(
-              head.operationId,
-              admission.error._tag,
-              admission.error.message
-            ),
-            head
-          );
-          return { kind: "rejected", operationId: head.operationId };
+          this.#reject(lane, operationId, requestKind(request), rejection);
+          return {
+            kind: "settled",
+            result: {
+              operationId,
+              status: "declined",
+              error: { code: rejection.code, message: rejection.message }
+            }
+          };
         }
+        this.#requireSubmissions().deleteOperation(operationId);
+        const writer = await this.#writerFor(
+          lane,
+          operationId,
+          admission.value.kind
+        );
+        this.#emitLaneEvent(
+          lane,
+          {
+            type: "operation_start",
+            operationId,
+            kind: admission.value.kind,
+            startedAt: admission.value.startedAt
+          },
+          operationId,
+          writer
+        );
         execution = await upstream.inspectExecution(context);
-        if (!execution.current) return { kind: "idle" };
       }
 
       const current = execution.current;
+      if (!current || current.id !== operationId) {
+        // Admission raced with settlement; the next pass reads the record.
+        return { kind: "waiting", notBefore: Date.now() };
+      }
+
       await this.#refreshProcessLocal(harness, upstream, context);
       const writer = await this.#writerFor(
         lane,
@@ -949,27 +1032,25 @@ export class PiHarness<
           if (driven.error._tag === "OperationMismatch") {
             const settled = await upstream.getResult(current.id, context);
             if (settled) {
-              this.#settle(lane, writer, settled);
-              return { kind: "settled", operationId: current.id };
+              this.#settleOperation(lane, settled);
+              return { kind: "settled", result: projectRunResult(settled) };
             }
-            return { kind: "error", message: driven.error.message };
           }
           throw driven.error;
         }
         const outcome = driven.value;
-        switch (outcome.kind) {
-          case "settled":
-            this.#settle(lane, writer, outcome.outcome);
-            return { kind: "settled", operationId: current.id };
-          case "waiting":
-            writer.flush();
-            return outcome.reason === "retry"
-              ? { kind: "retry", notBefore: outcome.notBefore }
-              : {
-                  kind: "deferred",
-                  pollAfterMs: outcome.deferred.pollAfterMs ?? DEFERRED_POLL_MS
-                };
+        if (outcome.kind === "settled") {
+          this.#settleOperation(lane, outcome.outcome);
+          return { kind: "settled", result: projectRunResult(outcome.outcome) };
         }
+        writer.flush();
+        return {
+          kind: "waiting",
+          notBefore:
+            outcome.reason === "retry"
+              ? outcome.notBefore
+              : Date.now() + (outcome.deferred.pollAfterMs ?? DEFERRED_POLL_MS)
+        };
       } finally {
         signal.removeEventListener("abort", onAbort);
       }
@@ -978,8 +1059,54 @@ export class PiHarness<
       this.lifecycle.events.emit("operation:error", { lane, message });
       // A faulted harness is sealed; the next pass attaches a fresh one.
       this.#attaching = undefined;
-      return { kind: "error", message };
+      throw error;
     }
+  }
+
+  /**
+   * Read pi's own durable record for one operation.
+   *
+   * This is the recovery authority: after eviction the machine asks pi what
+   * happened rather than repeating a model request.
+   */
+  async #lookupOperation(operationId: string): Promise<PiOperationLookup> {
+    const lane = this.#lanesOf.get(operationId) ?? this.#defaultLane;
+    const context = BACKGROUND_CONTEXT;
+    try {
+      const upstream = await this.#upstreamLane(lane, context);
+      const settled = await upstream.getResult(operationId, context);
+      if (settled) {
+        this.#settleOperation(lane, settled);
+        return { status: "settled", result: projectRunResult(settled) };
+      }
+      const execution = await upstream.inspectExecution(context);
+      if (execution.current?.id === operationId) return { status: "running" };
+      // Pi neither retains a result nor holds it live: the pass never took.
+      return { status: "not-found" };
+    } catch {
+      // Treat an unreadable attachment as still running; the machine parks
+      // and asks again rather than inventing a terminal outcome.
+      return { status: "running" };
+    }
+  }
+
+  /** Durably ask pi to stop one operation, whichever lane owns it. */
+  async #requestAbort(operationId: string): Promise<void> {
+    const lane = this.#lanesOf.get(operationId) ?? this.#defaultLane;
+    try {
+      const upstream = await this.#upstreamLane(lane, BACKGROUND_CONTEXT);
+      await upstream.requestAbort(operationId, BACKGROUND_CONTEXT);
+    } catch {
+      // The abort marker is best-effort here; the durable machine
+      // cancellation has already been recorded.
+    }
+  }
+
+  /** Publish one operation's terminal record to streams and listeners. */
+  #settleOperation(lane: string, record: OperationResultRecord): void {
+    const writer = this.#writers.get(record.operationId);
+    if (!writer) return;
+    this.#settle(lane, writer, record);
   }
 
   #settle(

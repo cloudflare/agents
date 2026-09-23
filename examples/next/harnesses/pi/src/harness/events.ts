@@ -10,7 +10,7 @@ import {
   projectQueue,
   projectToolResult
 } from "./messages";
-import type { PiEvent, PiJson } from "./types";
+import type { PiDeferredHandle, PiEvent, PiJson } from "./types";
 
 /** Harness event types the capability subscribes to. */
 export const SUBSCRIBED_EVENT_TYPES = [
@@ -67,7 +67,9 @@ export function projectHarnessEvent(
           type: "operation_wait",
           operationId: event.runId,
           reason: "deferred",
-          deferred: event.deferred
+          // SAFETY: pi's DeferredHandle carries provider JSON; PiDeferredHandle
+          // is its mutable-array public projection.
+          deferred: event.deferred as PiDeferredHandle
         }
       };
     case "operation_abort":

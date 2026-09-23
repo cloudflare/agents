@@ -127,9 +127,6 @@ export function projectToolResult(
     content: result.content,
     details: asJson(result.details),
     ...(result.usage === undefined ? {} : { usage: result.usage }),
-    ...(result.addedToolNames === undefined
-      ? {}
-      : { addedToolNames: result.addedToolNames }),
     ...(result.terminate === undefined ? {} : { terminate: result.terminate })
   };
 }

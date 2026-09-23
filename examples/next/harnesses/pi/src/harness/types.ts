@@ -1,7 +1,6 @@
 import type { Static, TSchema } from "typebox";
 import type { SkillSource } from "agents/skills";
 import type { Streams } from "agents/streams";
-import type { Tasks } from "agents/tasks";
 
 /** Invocation-scoped cancellation and application values used by pi callbacks. */
 export interface PiContext {
@@ -93,7 +92,6 @@ export type PiToolResult<Details = PiJson> = {
   readonly content: readonly PiToolContent[];
   readonly details: Details;
   readonly usage?: PiUsage;
-  readonly addedToolNames?: readonly string[];
   readonly terminate?: boolean;
 };
 
@@ -247,11 +245,6 @@ export type PiHarnessConfig<
    * provider and model id resolved against `models` when the harness attaches.
    */
   readonly model: PiModel | PiModelIdentity;
-  /**
-   * Durable execution for operations. Each lane's work runs as one Task run
-   * that replays after eviction; pi's session is the recovery evidence.
-   */
-  readonly tasks: Tasks;
   /** Durable output. Every operation's live events land in one stream. */
   readonly streams: Streams;
   readonly thinkingLevel?: PiThinkingLevel;
