@@ -11438,6 +11438,7 @@ export class Think<
         }
       );
       output = result.output;
+      if (this._recoveryOwnedSubmissions.delete(row.submission_id)) return;
       const streamId =
         this._resumableStream
           .getAllStreamMetadata()
@@ -15987,6 +15988,7 @@ export class Think<
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
+      this._claimSubmissionForRecovery(recoveredRequestId, reason);
       return "scheduled";
     }
 
@@ -16005,7 +16007,24 @@ export class Think<
         ...(recoveredRequestId ? { recoveredRequestId } : {})
       }
     });
+    this._claimSubmissionForRecovery(recoveredRequestId, reason);
     return "scheduled";
+  }
+
+  /**
+   * Submissions whose turn scheduled recovery: the recovery completes them,
+   * so the submission runner must leave them `running`.
+   */
+  private _recoveryOwnedSubmissions = new Set<string>();
+
+  private _claimSubmissionForRecovery(
+    submissionId: string | undefined,
+    reason: "chained_retry" | undefined
+  ): void {
+    // Inside a recovery attempt the callback already owns the submission.
+    if (submissionId && reason === undefined) {
+      this._recoveryOwnedSubmissions.add(submissionId);
+    }
   }
 
   /** Incidents whose running recovery attempt scheduled the next attempt. */

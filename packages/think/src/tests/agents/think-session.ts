@@ -1839,6 +1839,55 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /** A submission whose first stream fails transiently, then recovers. */
+  async testTransientSubmissionForTest(): Promise<{
+    afterFailure: string | undefined;
+    final: string | undefined;
+    finalAssistantText: string;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const submissionId = `transient-sub-${crypto.randomUUID()}`;
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "trigger transient error" }]
+        }
+      ],
+      { submissionId }
+    );
+    const settle = async (done: () => boolean) => {
+      const deadline = Date.now() + 5_000;
+      while (!done() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    await settle(
+      () =>
+        recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry") >
+        0
+    );
+    await waitForThinkIdleForTest(this);
+    const afterFailure = (await this.inspectSubmission(submissionId))?.status;
+    await this.runScheduledRecoveryForTest();
+    let final: string | undefined;
+    await settle(() => false);
+    final = (await this.inspectSubmission(submissionId))?.status;
+    const finalAssistantText = (
+      (await this.getMessages()).filter((m) => m.role === "assistant").at(-1)
+        ?.parts ?? []
+    )
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    return { afterFailure, final, finalAssistantText };
+  }
+
   /** Fail the turn and `failures - 1` recoveries fast; collect each delay. */
   async collectTransientBackoffForTest(failures: number): Promise<{
     delays: Array<number | null>;

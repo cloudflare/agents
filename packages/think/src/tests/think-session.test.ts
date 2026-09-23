@@ -735,6 +735,14 @@ describe("Think — error handling", () => {
     expect(result.delays).toEqual([1, 2, 4, 8, 16, 30, 30, 30, 30, 30]);
   });
 
+  it("keeps a submission running while transient recovery finishes it", async () => {
+    const agent = await freshAgent(`transient-sub-${crypto.randomUUID()}`);
+    const result = await agent.testTransientSubmissionForTest();
+
+    expect(result.afterFailure).toBe("running");
+    expect(result.final).toBe("completed");
+  });
+
   it("leaves the incident to the attempt a failed recovery schedules", async () => {
     const agent = await freshAgent(`transient-chain-${crypto.randomUUID()}`);
     const result = await agent.collectTransientBackoffForTest(3);
