@@ -27,15 +27,19 @@ interface StreamCallback {
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
   onError(error: string): void | Promise<void>;
+  onInterrupted?(): void | Promise<void>;
 }
 ```
 
-| Method           | When it fires                                                   |
-| ---------------- | --------------------------------------------------------------- |
-| `onStart(event)` | Before work starts; exposes the request id for cancellation     |
-| `onEvent(json)`  | For each streaming chunk (JSON-serialized UIMessageChunk)       |
-| `onDone()`       | After the turn completes and the assistant message is persisted |
-| `onError(error)` | On error during the turn                                        |
+| Method            | When it fires                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| `onStart(event)`  | Before work starts; exposes the request id for cancellation                          |
+| `onEvent(json)`   | For each streaming chunk (JSON-serialized UIMessageChunk)                            |
+| `onDone()`        | After the turn completes and the assistant message is persisted                      |
+| `onError(error)`  | On error during the turn                                                             |
+| `onInterrupted()` | The stream stalled and recovery took over, so neither `onDone` nor `onError` follows |
+
+Each call ends with exactly one of `onDone`, `onError`, or `onInterrupted`. If you bridge `chat()` to an HTTP response (for example, a server-sent events stream), close the response in `onInterrupted` as well. Otherwise a stalled turn leaves the response open. The recovered answer is persisted and broadcast to WebSocket clients, not sent to this callback.
 
 ### ChatOptions
 
@@ -358,7 +362,7 @@ Every turn entry path is wrapped in `runFiber`: WebSocket chat, sub-agent `chat(
 
 ### onChatRecovery
 
-When an interrupted chat fiber is detected after DO restart, Think calls the `onChatRecovery` hook:
+When an interrupted chat fiber is detected after DO restart, or when the stream-stall watchdog (`chatStreamStallTimeoutMs`) aborts a live turn, Think calls the `onChatRecovery` hook:
 
 ```typescript
 onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions | void

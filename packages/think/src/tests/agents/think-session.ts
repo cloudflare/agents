@@ -613,6 +613,32 @@ export class ThinkTestAgent extends Think {
   private _streamChunkDelayMs: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
+  private _recoveryHookForTest: ChatRecoveryOptions | "throw" | null = null;
+  private _recoveryCallsForTest: Array<{
+    recoveryKind: ChatRecoveryContext["recoveryKind"];
+    attempt: number;
+    partialText: string;
+    recoveryData: string | null;
+    createdAt: number;
+  }> = [];
+  private _stashInBeforeTurnForTest: string | undefined;
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    this._recoveryCallsForTest.push({
+      recoveryKind: ctx.recoveryKind,
+      attempt: ctx.attempt,
+      partialText: ctx.partialText,
+      recoveryData:
+        typeof ctx.recoveryData === "string" ? ctx.recoveryData : null,
+      createdAt: ctx.createdAt
+    });
+    if (this._recoveryHookForTest === "throw") {
+      throw new Error("recovery hook boom");
+    }
+    return this._recoveryHookForTest ?? {};
+  }
 
   override onChatError(error: unknown): unknown {
     const msg = error instanceof Error ? error.message : String(error);
@@ -874,6 +900,9 @@ export class ThinkTestAgent extends Think {
     this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
     this._capturedTurnMetadata.push(this.activeTurnMetadata);
+    if (this._stashInBeforeTurnForTest !== undefined) {
+      this.stash(this._stashInBeforeTurnForTest);
+    }
     if (this._turnConfigOverride) return this._turnConfigOverride;
   }
 
@@ -1565,6 +1594,110 @@ export class ThinkTestAgent extends Think {
       this._stallAttemptsRemaining = null;
       this.chatStreamStallTimeoutMs = 0;
     }
+  }
+
+  /**
+   * Stall the first inference after `afterChunks` chunks, then report what
+   * recovery did: which callback it scheduled, what `onChatRecovery` saw, and
+   * (after running the scheduled work) the final transcript. `recovery` is what
+   * `onChatRecovery` returns, or `"throw"` to make it throw.
+   */
+  async testStallRecoveryForTest(options: {
+    afterChunks: number;
+    timeoutMs: number;
+    recovery?: ChatRecoveryOptions | "throw";
+    stash?: string;
+  }): Promise<{
+    first: TestChatResult;
+    scheduledContinues: number;
+    scheduledRetries: number;
+    recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];
+    rolesAfterStall: string[];
+    finalRoles: string[];
+    finalAssistantText: string;
+  }> {
+    this._stallAfterChunks = options.afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = options.timeoutMs;
+    this._recoveryHookForTest = options.recovery ?? null;
+    this._recoveryCallsForTest = [];
+    this._stashInBeforeTurnForTest = options.stash;
+    try {
+      const first = await this.testChat("stall recovery");
+      const rolesAfterStall = (await this.getMessages()).map((m) => m.role);
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      const scheduledRetries = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryRetry"
+      );
+      this._stashInBeforeTurnForTest = undefined;
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      if (scheduledRetries > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
+      }
+      const messages = await this.getMessages();
+      const finalAssistant = messages
+        .filter((m) => m.role === "assistant")
+        .at(-1);
+      return {
+        first,
+        scheduledContinues,
+        scheduledRetries,
+        recoveryCalls: this._recoveryCallsForTest,
+        rolesAfterStall,
+        finalRoles: messages.map((m) => m.role),
+        finalAssistantText: (finalAssistant?.parts ?? [])
+          .map((p) => (p.type === "text" ? p.text : ""))
+          .join("")
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+      this._recoveryHookForTest = null;
+      this._stashInBeforeTurnForTest = undefined;
+    }
+  }
+
+  /** Stall the next inference after `afterChunks` chunks (one attempt only). */
+  async armStallForTest(afterChunks: number, timeoutMs: number): Promise<void> {
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+  }
+
+  async runScheduledRecoveryForTest(): Promise<{
+    scheduledContinues: number;
+    scheduledRetries: number;
+    finalRoles: string[];
+  }> {
+    const scheduledContinues = recoveryWorkCountForTest(
+      this,
+      "_chatRecoveryContinue"
+    );
+    const scheduledRetries = recoveryWorkCountForTest(
+      this,
+      "_chatRecoveryRetry"
+    );
+    if (scheduledContinues > 0) {
+      await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+    }
+    if (scheduledRetries > 0) {
+      await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
+    }
+    this._stallAfterChunks = null;
+    this._stallAttemptsRemaining = null;
+    this.chatStreamStallTimeoutMs = 0;
+    return {
+      scheduledContinues,
+      scheduledRetries,
+      finalRoles: (await this.getMessages()).map((m) => m.role)
+    };
   }
 
   /**
@@ -7590,13 +7723,14 @@ export class ThinkRecoveryTestAgent extends Think {
             requestId: string;
             streamId: string;
             partialParts: unknown[];
-            targetAssistantId?: string;
+            persistPartial: () => Promise<string | undefined>;
           }): Promise<string>;
         }
       )._routeStallToBoundedRecovery({
         requestId,
         streamId: "stall-stream",
-        partialParts: []
+        partialParts: [],
+        persistPartial: async () => undefined
       });
     } finally {
       (

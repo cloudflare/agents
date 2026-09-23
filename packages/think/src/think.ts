@@ -4908,6 +4908,16 @@ export class Think<
    * it — the definition's `recover` callback hands the interruption to the
    * shared ChatRecoveryEngine instead.
    */
+  /**
+   * Start time and latest `stash()` data of each chat turn running in this
+   * isolate, keyed by request id. A stream stall is recovered while the turn is
+   * still live, so `onChatRecovery` reads these instead of a fiber snapshot.
+   */
+  private readonly _liveChatRecoveryTurns = new Map<
+    string,
+    { createdAt: number; recoveryData: unknown }
+  >();
+
   private readonly _liveChatTurnClosures = new Map<
     string,
     {
@@ -5120,9 +5130,36 @@ export class Think<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
-    const wrap = (data: unknown) =>
-      wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, data);
+    const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
+    const wrap = (data: unknown) => {
+      liveTurn.recoveryData = data;
+      return wrapChatFiberSnapshot(
+        "__cfThinkChatFiberSnapshot",
+        snapshot,
+        data
+      );
+    };
+    this._liveChatRecoveryTurns.set(requestId, liveTurn);
+    try {
+      return await this._runWrappedChatRecoveryFiber(
+        requestId,
+        continuation,
+        wrap,
+        fn
+      );
+    } finally {
+      if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
+        this._liveChatRecoveryTurns.delete(requestId);
+      }
+    }
+  }
 
+  private async _runWrappedChatRecoveryFiber<T>(
+    requestId: string,
+    continuation: boolean,
+    wrap: (data: unknown) => unknown,
+    fn: () => Promise<T>
+  ): Promise<T> {
     const acceptance = recoveredTurnAcceptanceContext.getStore();
     const onAccepted =
       acceptance?.agent === this ? acceptance.onAccepted : undefined;
@@ -13132,16 +13169,18 @@ export class Think<
       // bounded recovery, and suppress the terminal error when a continuation is
       // scheduled; fall through to terminal only once the budget is exhausted.
       if (error instanceof ChatStreamStalledError) {
-        if (!assistantMsg && accumulator.parts.length > 0) {
-          assistantMsg = accumulator.toMessage();
-          await this._persistAssistantMessage(assistantMsg);
-          this._broadcastMessages();
-        }
         const outcome = await this._routeStallToBoundedRecovery({
           requestId,
           streamId,
           partialParts: (assistantMsg ?? accumulator.toMessage()).parts,
-          targetAssistantId: assistantMsg?.id
+          persistPartial: async () => {
+            if (assistantMsg) return assistantMsg.id;
+            if (accumulator.parts.length === 0) return undefined;
+            assistantMsg = accumulator.toMessage();
+            await this._persistAssistantMessage(assistantMsg);
+            this._broadcastMessages();
+            return assistantMsg.id;
+          }
         });
         if (outcome === "scheduled") {
           if (!streamFinalized) {
@@ -13165,12 +13204,12 @@ export class Think<
           await callback.onInterrupted?.();
           return { status: "aborted" };
         }
-        if (outcome === "exhausted") {
+        if (outcome === "exhausted" || outcome === "declined") {
           // `_routeStallToBoundedRecovery` already delivered the terminal UX
-          // (configured `terminalMessage` + done/error frame + `onExhausted` +
-          // submission interrupted), identical to deploy-recovery exhaustion.
-          // Finalize the stream and return WITHOUT the generic terminal path,
-          // which would otherwise re-broadcast the raw stall error.
+          // (exhaustion: configured `terminalMessage` + `onExhausted`; declined:
+          // the declined message), with the done/error frame and the submission
+          // marked interrupted. Finalize the stream and return WITHOUT the
+          // generic terminal path, which would re-broadcast the raw stall error.
           if (!streamFinalized) {
             this._errorResumableStream(streamId, requestId);
             streamFinalized = true;
@@ -13572,21 +13611,22 @@ export class Think<
       // bounded recovery; only fall through to the terminal path below once the
       // budget is exhausted.
       if (error instanceof ChatStreamStalledError) {
-        let targetAssistantId: string | undefined;
         const partialMsg = accumulator.toMessage();
-        if (
-          this._turnQueue.generation === clearGen &&
-          accumulator.parts.length > 0
-        ) {
-          await this._persistAssistantMessage(partialMsg, parentId);
-          this._broadcastMessages();
-          targetAssistantId = partialMsg.id;
-        }
         const outcome = await this._routeStallToBoundedRecovery({
           requestId,
           streamId,
           partialParts: partialMsg.parts,
-          targetAssistantId
+          persistPartial: async () => {
+            if (
+              this._turnQueue.generation !== clearGen ||
+              accumulator.parts.length === 0
+            ) {
+              return undefined;
+            }
+            await this._persistAssistantMessage(partialMsg, parentId);
+            this._broadcastMessages();
+            return partialMsg.id;
+          }
         });
         if (outcome === "scheduled") {
           // Recovering: close the stream cleanly (no terminal error frame); the
@@ -13613,12 +13653,12 @@ export class Think<
           this._streamingAssistant = null;
           return { status: "aborted" };
         }
-        if (outcome === "exhausted") {
+        if (outcome === "exhausted" || outcome === "declined") {
           // `_routeStallToBoundedRecovery` already delivered the terminal UX
-          // (configured `terminalMessage` + done/error frame + `onExhausted` +
-          // submission interrupted), identical to deploy-recovery exhaustion.
-          // Finalize the stream and report `aborted` (not `error`) so the caller
-          // does not re-run the generic terminal path on top of it.
+          // (exhaustion: configured `terminalMessage` + `onExhausted`; declined:
+          // the declined message), with the done/error frame and the submission
+          // marked interrupted. Finalize the stream and report `aborted` (not
+          // `error`) so the caller does not re-run the generic terminal path.
           this._errorResumableStream(streamId, requestId);
           this._pendingResumeConnections.clear();
           doneSent = true;
@@ -15227,51 +15267,72 @@ export class Think<
    * Route a stream-stall watchdog abort into bounded recovery instead of a
    * terminal error (#1626). A stall happens inside a LIVE isolate (no DO
    * restart), so the normal restart-detected recovery path never runs — we
-   * open/advance a recovery incident here and schedule a continuation, reusing
-   * the SAME budget (`maxAttempts` + wall-clock window + progress-aware reset)
-   * as deploy/eviction recovery. A transient hang recovers; a persistently
-   * hanging provider exhausts the budget. Idempotency matches deploy recovery:
-   * settled tool results are durable and won't re-run, but a tool that was
-   * mid-execution when the stall fired re-runs on the continuation.
+   * open/advance a recovery incident here and schedule recovery, reusing the
+   * SAME budget (`maxAttempts` + wall-clock window + progress-aware reset) and
+   * the same `onChatRecovery` decision as deploy/eviction recovery (#2042). A
+   * transient hang recovers; a persistently hanging provider exhausts the
+   * budget. Idempotency matches deploy recovery: settled tool results are
+   * durable and won't re-run, but a tool that was mid-execution when the stall
+   * fired re-runs on the continuation.
+   *
+   * A stall before the first assistant chunk leaves the user's message as the
+   * leaf, so there is nothing to continue: it schedules a retry of that user
+   * turn instead (#1941).
+   *
+   * `persistPartial` saves the settled partial and resolves to its message id
+   * (or `undefined` when nothing was saved). It runs unless `onChatRecovery`
+   * returns `persist: false` and the partial holds no settled tool results.
    *
    * Returns:
-   * - `"scheduled"` — a continuation was scheduled; the caller suppresses the
+   * - `"scheduled"` — recovery was scheduled; the caller suppresses the
    *   terminal error and closes the stream cleanly.
    * - `"exhausted"` — the budget is spent; this routes through the SAME
    *   `_exhaustChatRecovery` path as deploy recovery (fires `onExhausted`,
    *   emits `chat:recovery:exhausted`, marks the submission interrupted, and
-   *   delivers the configured `terminalMessage`). The caller must NOT run the
-   *   generic terminal path — the terminal UX is already delivered.
+   *   delivers the configured `terminalMessage`).
+   * - `"declined"` — `onChatRecovery` returned `continue: false`; the turn is
+   *   marked interrupted and the declined message is delivered.
+   * - `"failed"` — `onChatRecovery` threw; the incident is marked `failed` and
+   *   the caller runs its generic terminal error path.
+   *
+   * For `"exhausted"` and `"declined"` the terminal UX is already delivered, so
+   * the caller must NOT run the generic terminal path.
    */
   private async _routeStallToBoundedRecovery(input: {
     requestId: string;
     streamId: string;
     partialParts: MessagePart[];
-    targetAssistantId?: string;
-  }): Promise<"scheduled" | "exhausted"> {
+    persistPartial: () => Promise<string | undefined>;
+  }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
+    const retryTargetUserId =
+      input.partialParts.length === 0 ? await this._latestUserLeafId() : null;
+    const recoveryKind: ChatRecoveryKind = retryTargetUserId
+      ? "retry"
+      : "continue";
     const { incident, config, exhausted } =
       await this._beginChatRecoveryIncident({
         requestId: input.requestId,
         recoveryRootRequestId,
         latestUserMessageId,
-        recoveryKind: "continue"
+        recoveryKind
       });
+    const partialText = input.partialParts
+      .filter(
+        (p): p is { type: "text"; text: string } =>
+          (p as { type?: string }).type === "text"
+      )
+      .map((p) => p.text)
+      .join("");
     if (exhausted) {
       // Budget spent: deliver the SAME terminal UX as deploy-recovery
       // exhaustion (terminalMessage + onExhausted + chat:recovery:exhausted +
       // submission interrupted) instead of letting the raw stall error leak
       // out. `firstSeenAt` is the closest available turn-start proxy here.
-      const partialText = input.partialParts
-        .filter(
-          (p): p is { type: "text"; text: string } =>
-            (p as { type?: string }).type === "text"
-        )
-        .map((p) => p.text)
-        .join("");
+      await input.persistPartial();
       await this._exhaustChatRecovery(
         incident,
         config,
@@ -15281,19 +15342,110 @@ export class Think<
       );
       return "exhausted";
     }
-    // If a durable submission is running for this turn, the continuation must
+
+    const liveTurn = this._liveChatRecoveryTurns.get(input.requestId);
+    let options: ChatRecoveryOptions;
+    try {
+      options =
+        (await this.onChatRecovery({
+          incidentId: incident.incidentId,
+          recoveryRootRequestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind,
+          streamId: input.streamId,
+          requestId: input.requestId,
+          partialText,
+          partialParts: input.partialParts,
+          recoveryData: liveTurn?.recoveryData ?? null,
+          messages: [...this.messages],
+          lastBody: this._lastBody,
+          lastClientTools: this._lastClientTools,
+          createdAt: liveTurn?.createdAt ?? incident.firstSeenAt
+        })) ?? {};
+    } catch (error) {
+      console.error(
+        "[Think] onChatRecovery threw during stall recovery:",
+        error
+      );
+      await input.persistPartial();
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
+      );
+      return "failed";
+    }
+
+    const targetAssistantId =
+      options.persist !== false ||
+      this._getPartialStreamText(input.streamId).hasSettledToolResults
+        ? await input.persistPartial()
+        : undefined;
+
+    // If a durable submission is running for this turn, the recovery must
     // complete it (otherwise the submission hangs) — same as deploy recovery.
     const recoveredRequestId = this._readRunningSubmissionForRecovery(
       recoveryRootRequestId
     )?.submission_id;
+
+    if (options.continue === false) {
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "skipped",
+        "continue_disabled"
+      );
+      const declinedMessage =
+        "Submission was interrupted and automatic continuation was declined.";
+      await this._markRecoveredSubmissionInterrupted(
+        recoveryRootRequestId,
+        declinedMessage
+      );
+      await this._recordTerminalChatStatus(
+        "interrupted",
+        input.requestId,
+        declinedMessage
+      );
+      this._broadcastChat({
+        type: MSG_CHAT_RESPONSE,
+        id: input.requestId,
+        body: declinedMessage,
+        done: true,
+        error: true
+      });
+      return "declined";
+    }
+
+    // Re-read the leaf: `persist: false` can leave the user's message as the
+    // leaf even when the stall produced a partial.
+    const unansweredUserId = targetAssistantId
+      ? null
+      : input.partialParts.length === 0
+        ? retryTargetUserId
+        : await this._latestUserLeafId();
+    if (unansweredUserId) {
+      await this._chatRecoveryEngine().scheduleRecovery({
+        incident,
+        recoveryKind: "retry",
+        callback: "_chatRecoveryRetry",
+        data: {
+          targetUserId: unansweredUserId,
+          originalRequestId: recoveryRootRequestId,
+          incidentId: incident.incidentId,
+          lastBody: this._lastBody ?? null,
+          lastClientTools: this._lastClientTools ?? null,
+          ...(recoveredRequestId ? { recoveredRequestId } : {})
+        }
+      });
+      return "scheduled";
+    }
+
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
       recoveryKind: "continue",
       callback: "_chatRecoveryContinue",
       data: {
-        ...(input.targetAssistantId
-          ? { targetAssistantId: input.targetAssistantId }
-          : {}),
+        ...(targetAssistantId ? { targetAssistantId } : {}),
         originalRequestId: recoveryRootRequestId,
         incidentId: incident.incidentId,
         lastBody: this._lastBody ?? null,
@@ -15302,6 +15454,11 @@ export class Think<
       }
     });
     return "scheduled";
+  }
+
+  private async _latestUserLeafId(): Promise<string | null> {
+    const leaf = await this.session.getLatestLeaf();
+    return leaf?.role === "user" ? leaf.id : null;
   }
 
   protected override async _handleInternalFiberRecovery(

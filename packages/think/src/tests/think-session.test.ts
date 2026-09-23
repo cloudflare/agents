@@ -620,6 +620,135 @@ describe("Think — error handling", () => {
     expect(result.finalAssistantText.length).toBeGreaterThan(0);
   });
 
+  it("retries the user turn when the stream stalls before its first chunk (#1941)", async () => {
+    const agent = await freshAgent(`stall-first-chunk-${crypto.randomUUID()}`);
+    const result = await agent.testStallRecoveryForTest({
+      afterChunks: 0,
+      timeoutMs: 50
+    });
+
+    expect(result.first.error).toBeUndefined();
+    expect(result.first.interruptedCalls).toBe(1);
+    // Nothing streamed, so there is no assistant message to continue.
+    expect(result.rolesAfterStall).toEqual(["user"]);
+    expect(result.scheduledRetries).toBe(1);
+    expect(result.scheduledContinues).toBe(0);
+    expect(result.recoveryCalls).toMatchObject([
+      { recoveryKind: "retry", attempt: 1, partialText: "" }
+    ]);
+    // The retry answers the original message instead of skipping silently.
+    expect(result.finalRoles).toEqual(["user", "assistant"]);
+    expect(result.finalAssistantText.length).toBeGreaterThan(0);
+  });
+
+  it("retries a WebSocket turn that stalls before its first chunk (#1941)", async () => {
+    const room = `stall-first-chunk-ws-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.armStallForTest(0, 50);
+    const ws = await connectThinkTestAgentWS(room);
+    try {
+      const done = waitForProtocolMessage(
+        ws,
+        (m) => m.type === "cf_agent_use_chat_response" && m.done === true
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "hello" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      // The stall closes the live stream cleanly; recovery owns the answer.
+      expect((await done).error).toBeUndefined();
+
+      const recovered = await agent.runScheduledRecoveryForTest();
+      expect(recovered.scheduledRetries).toBe(1);
+      expect(recovered.scheduledContinues).toBe(0);
+      expect(recovered.finalRoles).toEqual(["user", "assistant"]);
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
+  it("calls onChatRecovery with the live turn's stash when a stall schedules a continuation (#2042)", async () => {
+    const agent = await freshAgent(`stall-hook-${crypto.randomUUID()}`);
+    const before = Date.now();
+    const result = await agent.testStallRecoveryForTest({
+      afterChunks: 5,
+      timeoutMs: 50,
+      stash: "provider-response-id"
+    });
+
+    expect(result.first.error).toBeUndefined();
+    expect(result.scheduledContinues).toBe(1);
+    expect(result.recoveryCalls).toHaveLength(1);
+    const [call] = result.recoveryCalls;
+    expect(call).toMatchObject({
+      recoveryKind: "continue",
+      attempt: 1,
+      recoveryData: "provider-response-id"
+    });
+    expect(call.partialText.length).toBeGreaterThan(0);
+    expect(call.createdAt).toBeGreaterThanOrEqual(before);
+    expect(result.finalAssistantText.length).toBeGreaterThan(0);
+  });
+
+  it("stops stall recovery when onChatRecovery declines to continue", async () => {
+    const agent = await freshAgent(`stall-decline-${crypto.randomUUID()}`);
+    const result = await agent.testStallRecoveryForTest({
+      afterChunks: 3,
+      timeoutMs: 50,
+      recovery: { continue: false }
+    });
+
+    expect(result.first.error).toBeUndefined();
+    expect(result.first.interruptedCalls).toBe(1);
+    expect(result.scheduledContinues).toBe(0);
+    expect(result.scheduledRetries).toBe(0);
+    // The settled partial is still saved.
+    expect(result.finalRoles).toEqual(["user", "assistant"]);
+  });
+
+  it("drops the stalled partial when onChatRecovery returns persist: false, and retries the user turn", async () => {
+    const agent = await freshAgent(`stall-no-persist-${crypto.randomUUID()}`);
+    const result = await agent.testStallRecoveryForTest({
+      afterChunks: 3,
+      timeoutMs: 50,
+      recovery: { persist: false }
+    });
+
+    expect(result.first.error).toBeUndefined();
+    expect(result.rolesAfterStall).toEqual(["user"]);
+    expect(result.scheduledRetries).toBe(1);
+    expect(result.scheduledContinues).toBe(0);
+    expect(result.finalRoles).toEqual(["user", "assistant"]);
+  });
+
+  it("surfaces the stall as a terminal error when onChatRecovery throws", async () => {
+    const agent = await freshAgent(`stall-hook-throws-${crypto.randomUUID()}`);
+    const result = await agent.testStallRecoveryForTest({
+      afterChunks: 3,
+      timeoutMs: 50,
+      recovery: "throw"
+    });
+
+    expect(result.first.error).toBeDefined();
+    expect(result.first.interruptedCalls).toBe(0);
+    expect(result.scheduledContinues).toBe(0);
+    expect(result.scheduledRetries).toBe(0);
+  });
+
   it("does not call onInterrupted on a normally-completing or terminally-erroring turn (#1644)", async () => {
     const ok = await freshAgent(`no-interrupt-ok-${crypto.randomUUID()}`);
     const okResult = await ok.testChat("hello");
