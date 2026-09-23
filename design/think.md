@@ -218,6 +218,8 @@ Think speaks the same WebSocket protocol as `@cloudflare/ai-chat`, making it com
 | Server → Client | `cf_agent_stream_resume_none`    | No active stream to resume                                  |
 | Server → Client | `cf_agent_message_updated`       | Single message update (after tool result/approval applied)  |
 
+When a turn persists an assistant message, the `cf_agent_chat_messages` broadcast that carries it is sent before the terminal `cf_agent_use_chat_response` frame (`done: true`). Clients switch to ready on `done`, so a later transcript snapshot would overwrite a message the user sent in between ([#2119](https://github.com/cloudflare/agents/issues/2119)).
+
 ### Client tools
 
 Client tools are tools defined by the browser at runtime (via `clientTools` in the chat request body). Think handles the full lifecycle:

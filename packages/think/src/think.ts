@@ -13075,13 +13075,6 @@ export class Think<
         this._finishResumableStream(streamId);
       }
       streamFinalized = true;
-      this._broadcastChat({
-        type: MSG_CHAT_RESPONSE,
-        id: requestId,
-        body: "",
-        done: true
-      });
-      doneSent = true;
 
       assistantMsg = accumulator.toMessage();
       if (accumulator.parts.length > 0) {
@@ -13094,6 +13087,15 @@ export class Think<
         );
         this._broadcastMessages();
       }
+      // After the transcript broadcast: `done` flips `useAgentChat` to ready,
+      // and a later snapshot would drop a message sent in between (#2119).
+      this._broadcastChat({
+        type: MSG_CHAT_RESPONSE,
+        id: requestId,
+        body: "",
+        done: true
+      });
+      doneSent = true;
       // A stripped/empty response still records its outcome with settlement.
       this._finalizeSubmissionStream(requestId, {
         status: aborted ? "aborted" : "completed"
@@ -13187,23 +13189,25 @@ export class Think<
         this._errorResumableStream(streamId, requestId);
         streamFinalized = true;
       }
-      if (!doneSent) {
-        const streamError =
-          error instanceof Error ? error.message : "Stream error";
-        this._broadcastChat({
-          type: MSG_CHAT_RESPONSE,
-          id: requestId,
-          body: streamError,
-          done: true,
-          error: true
-        });
-        doneSent = true;
-      }
-
-      if (!assistantMsg && accumulator.parts.length > 0) {
-        assistantMsg = accumulator.toMessage();
-        await this._persistAssistantMessage(assistantMsg);
-        this._broadcastMessages();
+      try {
+        if (!assistantMsg && accumulator.parts.length > 0) {
+          assistantMsg = accumulator.toMessage();
+          await this._persistAssistantMessage(assistantMsg);
+          this._broadcastMessages();
+        }
+      } finally {
+        if (!doneSent) {
+          const streamError =
+            error instanceof Error ? error.message : "Stream error";
+          this._broadcastChat({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: streamError,
+            done: true,
+            error: true
+          });
+          doneSent = true;
+        }
       }
 
       const wrapped = this.onChatError(error, {
@@ -13366,6 +13370,9 @@ export class Think<
     this._streamingAssistant = accumulator;
 
     let doneSent = false;
+    // The terminal frame flips `useAgentChat` to ready, so it is held until
+    // the assistant message is persisted and the transcript broadcast (#2119).
+    let terminalFrame: Record<string, unknown> | undefined;
     let streamAborted = false;
     let streamError: string | undefined;
     let output: unknown;
@@ -13550,13 +13557,13 @@ export class Think<
         this._finishResumableStream(streamId);
       }
       this._pendingResumeConnections.clear();
-      this._broadcastChat({
+      terminalFrame = {
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         body: "",
         done: true,
         ...(continuation && { continuation: true })
-      });
+      };
       doneSent = true;
     } catch (error) {
       // #1626: a stream-stall watchdog abort is a recoverable interruption, not
@@ -13626,90 +13633,108 @@ export class Think<
       this._errorResumableStream(streamId, requestId);
       this._pendingResumeConnections.clear();
       if (!doneSent) {
-        this._broadcastChat({
+        terminalFrame = {
           type: MSG_CHAT_RESPONSE,
           id: requestId,
           body: streamError,
           done: true,
           error: true,
           ...(continuation && { continuation: true })
-        });
+        };
         doneSent = true;
       }
     } finally {
       if (!doneSent) {
         this._errorResumableStream(streamId, requestId);
         this._pendingResumeConnections.clear();
-        this._broadcastChat({
+        terminalFrame = {
           type: MSG_CHAT_RESPONSE,
           id: requestId,
           body: "",
           done: true,
           ...(continuation && { continuation: true })
-        });
+        };
       }
     }
 
-    if (
-      options?.captureOutput &&
-      result.output &&
-      !streamError &&
-      !streamAborted
-    ) {
-      try {
-        output = await result.output;
-      } catch (error) {
-        streamError =
-          error instanceof Error ? error.message : "Structured output error";
-        if (options.captureProgrammaticStreamError) {
-          this._programmaticStreamErrors.set(requestId, streamError);
+    const sendTerminalFrame = () => {
+      if (!terminalFrame) return;
+      this._broadcastChat(terminalFrame);
+      terminalFrame = undefined;
+    };
+
+    try {
+      if (
+        options?.captureOutput &&
+        result.output &&
+        !streamError &&
+        !streamAborted
+      ) {
+        try {
+          output = await result.output;
+        } catch (error) {
+          streamError =
+            error instanceof Error ? error.message : "Structured output error";
+          if (options.captureProgrammaticStreamError) {
+            this._programmaticStreamErrors.set(requestId, streamError);
+          }
+          this._errorResumableStream(streamId, requestId);
         }
-        this._errorResumableStream(streamId, requestId);
       }
-    }
 
-    const submissionResult: SubmissionTurnResult = streamAborted
-      ? { status: "aborted" }
-      : { status: "completed", output };
-    if (this._turnQueue.generation === clearGen) {
-      try {
-        const assistantMsg = accumulator.toMessage();
+      const submissionResult: SubmissionTurnResult = streamAborted
+        ? { status: "aborted" }
+        : { status: "completed", output };
+      if (this._turnQueue.generation === clearGen) {
+        try {
+          const assistantMsg = accumulator.toMessage();
 
-        if (accumulator.parts.length > 0) {
-          await this._persistAssistantMessageWithCutover(
-            streamId,
-            assistantMsg,
-            parentId,
-            this._streamCutoverOptions(requestId),
-            { requestId, result: submissionResult }
-          );
-          this._broadcastMessages();
+          if (accumulator.parts.length > 0) {
+            await this._persistAssistantMessageWithCutover(
+              streamId,
+              assistantMsg,
+              parentId,
+              this._streamCutoverOptions(requestId),
+              { requestId, result: submissionResult }
+            );
+            this._broadcastMessages();
+          }
+          sendTerminalFrame();
+          // Nothing user-facing to persist (e.g. only a final-answer tool): the
+          // output and terminal outcome still commit with stream settlement.
+          this._finalizeSubmissionStream(requestId, submissionResult);
+
+          await this._fireResponseHook({
+            message: assistantMsg,
+            requestId,
+            continuation,
+            status: streamError
+              ? "error"
+              : streamAborted
+                ? "aborted"
+                : "completed",
+            error: streamError
+          });
+        } catch (e) {
+          console.error("Failed to persist assistant message:", e);
+          streamError =
+            e instanceof Error
+              ? e.message
+              : "Assistant message persistence failed";
+          this._errorResumableStream(streamId, requestId);
+          if (terminalFrame && !terminalFrame.error) {
+            terminalFrame = {
+              ...terminalFrame,
+              body: streamError,
+              error: true
+            };
+          }
         }
-        // Nothing user-facing to persist (e.g. only a final-answer tool): the
-        // output and terminal outcome still commit with stream settlement.
-        this._finalizeSubmissionStream(requestId, submissionResult);
-
-        await this._fireResponseHook({
-          message: assistantMsg,
-          requestId,
-          continuation,
-          status: streamError
-            ? "error"
-            : streamAborted
-              ? "aborted"
-              : "completed",
-          error: streamError
-        });
-      } catch (e) {
-        console.error("Failed to persist assistant message:", e);
-        streamError =
-          e instanceof Error
-            ? e.message
-            : "Assistant message persistence failed";
-        this._errorResumableStream(streamId, requestId);
       }
+      this._finalizeSubmissionStream(requestId, submissionResult);
+    } finally {
+      sendTerminalFrame();
     }
-    this._finalizeSubmissionStream(requestId, submissionResult);
 
     // The message is now persisted (or the turn was cleared), so subsequent
     // tool results resolve against storage; stop exposing the accumulator and
