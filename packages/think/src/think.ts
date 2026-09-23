@@ -8675,9 +8675,10 @@ export class Think<
     this._validateRunTurnAdmission(options, "wait");
 
     if (options.continuation === true) {
-      const result = await this.continueLastTurn(options.body, {
+      const result = await this._continueLastTurn(options.body, {
         signal: options.signal,
-        channel: options.channel
+        channel: options.channel,
+        captureOutput: true
       });
       return this._enrichTurnResult(result, true);
     }
@@ -12083,6 +12084,21 @@ export class Think<
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
   ): Promise<SaveMessagesResult> {
+    const { output: _output, ...result } = await this._continueLastTurn(
+      body,
+      options
+    );
+    return result;
+  }
+
+  private async _continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions & {
+      trigger?: TurnTrigger;
+      channel?: string;
+      captureOutput?: boolean;
+    }
+  ): Promise<ProgrammaticMessagesResult> {
     const trigger = options?.trigger ?? "programmatic";
     this._assertNotInsideAdmittedTurn(trigger);
     const lastLeaf = await this.session.getLatestLeaf();
@@ -12100,6 +12116,7 @@ export class Think<
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
+    let output: unknown;
     let wasAborted = false;
 
     await this._admitTurn({
@@ -12148,11 +12165,13 @@ export class Think<
                 abortSignal,
                 {
                   continuation: true,
-                  extendLeafAssistant: trigger === "recovery-continue"
+                  extendLeafAssistant: trigger === "recovery-continue",
+                  captureOutput: options?.captureOutput
                 }
               );
               status = streamResult.status;
               error = streamResult.error;
+              output = streamResult.output;
             }
           };
 
@@ -12174,7 +12193,12 @@ export class Think<
       status = "aborted";
     }
 
-    return { requestId, status, ...(error !== undefined && { error }) };
+    return {
+      requestId,
+      status,
+      ...(error !== undefined && { error }),
+      ...(output !== undefined && { output })
+    };
   }
 
   private async _retryLastUserTurn(
@@ -17706,13 +17730,24 @@ export class Think<
     // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
     // (#1637), NOT here — persisting on recovery or a client reconnect must not
     // be miscounted as new forward progress.
+    let persistedId: string | undefined;
     const wrote = await persistReconstructedOrphan(chunks, {
       store: this._orphanStore(),
       fallbackId: crypto.randomUUID(),
-      prepare: (message) => this._strippedForPersist(message),
+      prepare: (message) => {
+        const prepared = this._strippedForPersist(message);
+        persistedId = prepared?.id;
+        return prepared;
+      },
       merge: (_existing, incoming) => incoming
     });
-    if (wrote) this._broadcastMessages();
+    if (!wrote) return;
+    const requestId =
+      this._resumableStream.getStreamMetadata(streamId)?.request_id;
+    if (requestId && persistedId) {
+      this._recordSubmissionMessage(requestId, persistedId);
+    }
+    this._broadcastMessages();
   }
 
   private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {

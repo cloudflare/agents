@@ -1897,6 +1897,32 @@ describe("Think — beforeTurn config overrides", () => {
     expect(result.outputJson).toBeUndefined();
   });
 
+  it("returns structured output from a wait-mode continuation", async () => {
+    const agent = await freshAgent(`bt-output-cont-${crypto.randomUUID()}`);
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    const result = await agent.runTurnWaitForTest("", { continuation: true });
+
+    expect(result.status).toBe("completed");
+    expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+  });
+
+  it("errors a wait-mode continuation whose structured output does not parse", async () => {
+    const agent = await freshAgent(`bt-output-cont-bad-${crypto.randomUUID()}`);
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+
+    await agent.setResponse("not json");
+    const result = await agent.runTurnWaitForTest("", { continuation: true });
+
+    expect(result.status).toBe("error");
+    expect(result.outputJson).toBeUndefined();
+  });
+
   it("omits output from a wait-mode turn without a structured output spec", async () => {
     const agent = await freshAgent(`bt-output-none-${crypto.randomUUID()}`);
     await agent.setResponse("plain answer");

@@ -1049,13 +1049,18 @@ export class ThinkTestAgent extends Think {
   }
 
   /** Run a wait-mode turn and return its result fields. */
-  async runTurnWaitForTest(input: string): Promise<{
+  async runTurnWaitForTest(
+    input: string,
+    options?: { continuation?: boolean }
+  ): Promise<{
     status: string;
     error?: string;
     outputJson?: string;
     messageText?: string;
   }> {
-    const result = await this.runTurn({ input });
+    const result = await this.runTurn(
+      options?.continuation ? { continuation: true } : { input }
+    );
     const text = result.message?.parts
       .map((part) => (part.type === "text" ? part.text : ""))
       .join("");
@@ -6462,6 +6467,30 @@ export class ThinkProgrammaticTestAgent extends Think {
       createdAt: Date.now(),
       recoveryReason: "interrupted"
     });
+  }
+
+  /** Leave stored chunks for `requestId`, then persist them as recovery does. */
+  async persistOrphanedStreamForTest(
+    requestId: string,
+    messageId: string
+  ): Promise<void> {
+    const internals = this as unknown as {
+      _resumableStream: {
+        start(requestId: string): string;
+        storeChunk(streamId: string, body: string): unknown;
+      };
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const streamId = internals._resumableStream.start(requestId);
+    for (const chunk of [
+      { type: "start", messageId },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "recovered" },
+      { type: "text-end", id: "t1" }
+    ]) {
+      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+    }
+    await internals._persistOrphanedStream(streamId);
   }
 
   async continueRecoveredChatForTest(requestId: string): Promise<void> {

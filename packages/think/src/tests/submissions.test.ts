@@ -125,6 +125,10 @@ type ThinkSubmissionTestStub = {
   ): Promise<void>;
   resetTurnStateForTest(): Promise<void>;
   recoverChatFiberForTest(requestId: string): Promise<void>;
+  persistOrphanedStreamForTest(
+    requestId: string,
+    messageId: string
+  ): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
   continueRecoveredChatCatchingForTest(
     requestId: string
@@ -1450,6 +1454,24 @@ describe("Think durable submissions", () => {
     } finally {
       await agent.setSubmissionRecoveryStaleMsForTest(15 * 60 * 1000);
     }
+  });
+
+  it("records the message id of an assistant persisted from orphaned chunks", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-orphan",
+      requestId: "sub-orphan",
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+
+    await agent.persistOrphanedStreamForTest("sub-orphan", "a-orphan");
+
+    const stored = await agent.getStoredMessages();
+    expect(stored.map((message) => message.id)).toContain("a-orphan");
+    expect(await agent.inspectSubmissionForTest("sub-orphan")).toMatchObject({
+      messageId: "a-orphan"
+    });
   });
 
   it("completes recovered chat fiber submissions through scheduled continuation", async () => {
