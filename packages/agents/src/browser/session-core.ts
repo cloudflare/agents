@@ -9,16 +9,15 @@ import {
   isMissingBrowserSession,
   listBrowserTargets
 } from "./browser-run";
-import {
-  type BrowserSessionStore,
-  DEFAULT_SWEEP_IDLE_MS,
-  type StoredBrowserSession
+import type {
+  BrowserSessionStore,
+  StoredBrowserSession
 } from "./session-manager";
 
 /**
  * Browser Run's server-side `keep_alive` maximum (600 seconds). Named
- * sessions pin keep-alive here by default so the platform doesn't reclaim a
- * session the store still considers live between agent turns.
+ * sessions pin keep-alive here by default so a browser survives quiet spells
+ * between agent turns; the platform reclaims it only after this long idle.
  */
 export const BROWSER_SESSION_KEEP_ALIVE_MAX_MS = 600_000;
 
@@ -40,11 +39,11 @@ export function namedBrowserSessionKey(name: string): string {
 }
 
 /**
- * Where a pruned tombstone moves to: permanent evidence that the name once
- * owned a browser, so a later resolve still reports `restarted: true`. Kept
- * outside {@link NAMED_SESSION_KEY_PREFIX} so sweeps never list it and the
- * Lifecycle sweep job can retire once no sessions remain. Grows with the
- * number of distinct names the host has ever used.
+ * Where a closed or lost session's record moves: permanent evidence that the
+ * name once owned a browser, so a later resolve reports `restarted: true`.
+ * Kept outside {@link NAMED_SESSION_KEY_PREFIX} so listing named sessions
+ * yields only names that currently own a browser. Grows with the number of
+ * distinct names the host has ever used.
  */
 const RETIRED_SESSION_KEY_PREFIX = "browser:retired:";
 
@@ -77,17 +76,11 @@ export interface NamedBrowserSessionsOptions {
   /** Default CDP command timeout for {@link NamedBrowserSessions.connect}. */
   timeoutMs?: number;
   /**
-   * Idle window before {@link NamedBrowserSessions.sweep} closes a session
-   * (and before it prunes a tombstone). Defaults to
-   * {@link DEFAULT_SWEEP_IDLE_MS} (10 minutes).
-   */
-  sweepIdleMs?: number;
-  /**
    * Minimum interval between activity-driven `updatedAt` refreshes on
    * connected sockets. Defaults to {@link SESSION_TOUCH_INTERVAL_MS} and is
-   * always capped at half of `sweepIdleMs`, so continuous CDP traffic
-   * refreshes the idle clock before a sweep deadline can pass. Overridable
-   * primarily for tests.
+   * always capped at half of the keep-alive window, so continuous CDP
+   * traffic never lets a record look older than the window the platform
+   * reclaims idle browsers after. Overridable primarily for tests.
    */
   touchIntervalMs?: number;
 }
@@ -98,7 +91,7 @@ export interface ResolvedBrowserSession {
   sessionId: string;
   /**
    * `true` when this resolution had to create a fresh browser to replace one
-   * that previously existed (died, was closed, or was swept). Page state from
+   * that previously existed (was closed, or expired or died upstream). Page state from
    * the prior browser is gone; surface this loudly to the model. `false` only
    * on first-ever use of the name — nothing was lost.
    */
@@ -113,11 +106,6 @@ export interface ConnectedBrowserSession {
   restarted: boolean;
   /** Closing this socket does NOT delete the named session. */
   cdp: CdpSession;
-}
-
-export interface BrowserSessionSweepResult {
-  /** Idle live sessions this sweep closed (tombstones left behind). */
-  swept: Array<{ name: string; sessionId: string }>;
 }
 
 /** One-shot session options for the default Chromium engine. */
@@ -150,42 +138,39 @@ export type OneShotBrowserSessionOptions =
  * never see session identity, and resolution is reattach-or-create with loud
  * mortality signaling (`restarted: true` whenever a prior browser was lost).
  *
+ * Idle browsers are reclaimed by Browser Run itself once `keep_alive`
+ * elapses without activity; there is no host-side sweep. A record whose
+ * browser the platform reclaimed stays on file until the next resolve of
+ * that name detects the loss and replaces it.
+ *
  * Store discipline mirrors {@link BrowserConnector}: locks wrap storage
  * operations only — liveness probes and Browser Run create/delete calls always
  * happen outside any lock, with a commit re-check to detect concurrent swaps.
- *
- * Use one instance per store: in-flight CDP activity is tracked in memory per
- * instance, so a sweep only sees activity from sockets its own instance
- * opened.
  */
 export class NamedBrowserSessions {
   readonly #browser: BrowserBinding;
   readonly #store: BrowserSessionStore;
   readonly #create: BrowserSessionCreateOptions;
   readonly #timeoutMs?: number;
-  readonly #sweepIdleMs: number;
   readonly #touchIntervalMs: number;
-  /**
-   * Last CDP send per Browser Run session id on sockets from this instance,
-   * recorded synchronously before the command goes out. The durable touch is
-   * throttled and asynchronous, so the sweep's locked recheck consults this
-   * too: a command sent before that recheck always keeps its browser.
-   */
-  readonly #lastActivityAt = new Map<string, number>();
 
   constructor(options: NamedBrowserSessionsOptions) {
     this.#browser = options.browser;
     this.#store = options.store;
     this.#create = options.create ?? {};
     this.#timeoutMs = options.timeoutMs;
-    this.#sweepIdleMs = options.sweepIdleMs ?? DEFAULT_SWEEP_IDLE_MS;
-    // Cap the touch cadence at half the sweep window: a session with
-    // continuous CDP traffic must always prove liveness before it can
-    // look idle, regardless of how aggressive the sweep window is.
+    // Cap the touch cadence at half the keep-alive window: a session with
+    // continuous CDP traffic must never look older than the window the
+    // platform uses to reclaim it.
     this.#touchIntervalMs = Math.min(
       options.touchIntervalMs ?? SESSION_TOUCH_INTERVAL_MS,
-      Math.floor(this.#sweepIdleMs / 2)
+      Math.floor(this.keepAliveMs / 2)
     );
+  }
+
+  /** The platform `keep_alive` every create applies. */
+  get keepAliveMs(): number {
+    return this.#create.keepAliveMs ?? BROWSER_SESSION_KEEP_ALIVE_MAX_MS;
   }
 
   /**
@@ -198,22 +183,17 @@ export class NamedBrowserSessions {
   ): Promise<ResolvedBrowserSession> {
     const key = namedBrowserSessionKey(name);
 
-    // Dead-session recovery consumes two attempts (tombstone, then create).
+    // Dead-session recovery consumes two attempts (retire, then create).
     for (let attempt = 0; attempt < 4; attempt++) {
       const existing = await this.#readStored(key);
 
-      if (existing === undefined || existing.closedAt !== undefined) {
-        // First use, or a tombstone left by close()/sweep(). A tombstone —
-        // or, once pruned, its retired marker — is evidence a prior browser
-        // existed: that's a restart.
-        const restarted =
-          existing !== undefined || (await this.#wasRetired(name));
-        const outcome = await this.#createAndCommit(key, existing?.sessionId);
-        if (outcome.winner) {
-          if (outcome.winner.closedAt !== undefined) continue; // re-tombstoned
-          return { name, restarted, ...outcome.winner };
-        }
-        return { name, restarted, ...outcome.stored };
+      if (existing === undefined) {
+        // No browser on record. A retired marker — left by close() or a
+        // dead-session recovery — is evidence a prior browser existed:
+        // that's a restart. Only first-ever use of the name is not.
+        const restarted = await this.#wasRetired(name);
+        const { stored, winner } = await this.#createAndCommit(key);
+        return { name, restarted, ...(winner ?? stored) };
       }
 
       // Live entry on record — probe it outside any lock.
@@ -221,27 +201,23 @@ export class NamedBrowserSessions {
       const lock = await this.#store.acquireLock(key);
       try {
         const current = await this.#store.get(key);
-        if (
-          current?.sessionId !== existing.sessionId ||
-          current.closedAt !== undefined
-        ) {
-          continue; // swapped or tombstoned while we probed — revalidate
+        if (current?.sessionId !== existing.sessionId) {
+          continue; // swapped or retired while we probed — revalidate
         }
         if (alive) {
           const refreshed = { ...current, updatedAt: Date.now() };
           await this.#store.set(key, refreshed);
           return { name, restarted: false, ...refreshed };
         }
-        // The browser died upstream (expired or reclaimed). Tombstone the
-        // record — never delete it — so evidence of the loss survives:
-        // any resolver that reads this key during the replacement window
-        // sees the tombstone and reports restarted: true too.
-        await this.#store.set(key, { ...current, closedAt: Date.now() });
-        this.#lastActivityAt.delete(current.sessionId);
+        // The browser died upstream (expired or reclaimed). Retire the
+        // record under this lock, so any resolver that reads this name
+        // during the replacement window sees the marker and reports
+        // restarted: true too.
+        await this.#retire(name, current);
       } finally {
         await lock.release();
       }
-      // Re-enter the loop: the next attempt takes the tombstone path.
+      // Re-enter the loop: the next attempt takes the create path.
     }
 
     throw new Error(
@@ -251,9 +227,9 @@ export class NamedBrowserSessions {
 
   /**
    * Resolve the named session and attach a CDP socket to it. Commands sent
-   * over the socket refresh the session's idle clock (throttled to
-   * {@link SESSION_TOUCH_INTERVAL_MS}), so sweeps never reap a browser that
-   * is actively in use.
+   * over the socket refresh the record's `updatedAt` (throttled to
+   * {@link SESSION_TOUCH_INTERVAL_MS}), so hosts can tell an actively used
+   * browser from one the platform has likely reclaimed.
    */
   async connect(
     name = DEFAULT_BROWSER_SESSION_NAME
@@ -266,7 +242,6 @@ export class NamedBrowserSessions {
       timeoutMs: this.#timeoutMs,
       onActivity: () => {
         const now = Date.now();
-        this.#lastActivityAt.set(resolved.sessionId, now);
         if (touchInFlight || now - lastTouchAt < this.#touchIntervalMs) return;
         touchInFlight = true;
         lastTouchAt = now;
@@ -291,11 +266,11 @@ export class NamedBrowserSessions {
   }
 
   /**
-   * Close the named session: tombstone the record (so the next resolve
-   * reports `restarted: true`) and delete its Browser Run session. Returns
-   * `false` when there was nothing live to close.
+   * Close the named session: retire the record (so the next resolve reports
+   * `restarted: true`) and delete its Browser Run session. Returns `false`
+   * when there was nothing to close.
    *
-   * The platform delete is best-effort: the tombstone is the durable
+   * The platform delete is best-effort: the retired record is the durable
    * outcome, and a browser whose delete failed is unreachable through this
    * store, so the pinned `keep_alive` (≤600s) reclaims it.
    */
@@ -305,10 +280,9 @@ export class NamedBrowserSessions {
     const lock = await this.#store.acquireLock(key);
     try {
       const current = await this.#store.get(key);
-      if (!current || current.closedAt !== undefined) return false;
+      if (!current) return false;
       stored = current;
-      await this.#store.set(key, { ...current, closedAt: Date.now() });
-      this.#lastActivityAt.delete(current.sessionId);
+      await this.#retire(name, current);
     } finally {
       await lock.release();
     }
@@ -325,13 +299,13 @@ export class NamedBrowserSessions {
 
   /**
    * Record activity for the named session beyond CDP traffic — e.g. a host
-   * minting a Live View link for a human. Refreshes the idle clock only
-   * while the same live session remains stored; a swapped, closed, or
-   * removed entry is never resurrected.
+   * minting a Live View link for a human. Refreshes `updatedAt` only while
+   * the same session remains stored; a replaced or retired entry is never
+   * resurrected.
    *
-   * @returns True when the same live session's clock was refreshed; false
-   * when a concurrent close, sweep, or replacement already retired it — the
-   * caller's knowledge of that session is definitively stale.
+   * @returns True when the same session's clock was refreshed; false when a
+   * concurrent close or replacement already retired it — the caller's
+   * knowledge of that session is definitively stale.
    */
   async touch(name: string, sessionId: string): Promise<boolean> {
     return this.#touch(namedBrowserSessionKey(name), sessionId);
@@ -342,8 +316,8 @@ export class NamedBrowserSessions {
     const lock = await this.#store.acquireLock(key);
     try {
       const current = await this.#store.get(key);
-      if (current?.sessionId !== sessionId || current.closedAt !== undefined) {
-        return false; // swapped, closed, or gone — activity no longer counts
+      if (current?.sessionId !== sessionId) {
+        return false; // replaced or gone — activity no longer counts
       }
       await this.#store.set(key, { ...current, updatedAt: Date.now() });
       return true;
@@ -353,117 +327,31 @@ export class NamedBrowserSessions {
   }
 
   /**
-   * Close named sessions idle past the configured window, leaving tombstones,
-   * and prune tombstones idle past the same window (a pruned name keeps a
-   * small retired marker, so its next resolve still reports
-   * `restarted: true`). Requires a store with
-   * `list` support (the auto-supplied Durable Object store has it); without
-   * `list` this is a no-op.
-   *
-   * Hosts should run this from a recurring alarm; the agents Lifecycle wiring
-   * schedules it automatically.
+   * Move the named record to its retired marker. Callers hold the name's
+   * key lock, so a resolver always sees either the record or the marker.
    */
-  async sweep(): Promise<BrowserSessionSweepResult> {
-    const entries = await this.#store.list?.(NAMED_SESSION_KEY_PREFIX);
-    if (!entries) return { swept: [] };
-
-    // Superseded sockets can re-record activity after their session was
-    // closed or replaced; forget every id the store no longer holds live.
-    const liveSessionIds = new Set(
-      [...entries.values()]
-        .filter((entry) => entry.closedAt === undefined)
-        .map((entry) => entry.sessionId)
-    );
-    for (const sessionId of this.#lastActivityAt.keys()) {
-      if (!liveSessionIds.has(sessionId))
-        this.#lastActivityAt.delete(sessionId);
-    }
-
-    const now = Date.now();
-    const swept: Array<{ name: string; sessionId: string }> = [];
-
-    for (const [key, entry] of entries) {
-      const name = key.slice(NAMED_SESSION_KEY_PREFIX.length);
-
-      if (entry.closedAt !== undefined) {
-        // Tombstone — prune once it has aged out, retiring it first so the
-        // name keeps its restart evidence. Both writes happen under this
-        // key's lock, so a resolver sees the tombstone or the marker.
-        if (now - entry.closedAt >= this.#sweepIdleMs) {
-          const lock = await this.#store.acquireLock(key);
-          try {
-            const current = await this.#store.get(key);
-            if (
-              current?.sessionId === entry.sessionId &&
-              current.closedAt !== undefined
-            ) {
-              await this.#store.set(retiredBrowserSessionKey(name), current);
-              await this.#store.delete(key);
-            }
-          } finally {
-            await lock.release();
-          }
-        }
-        continue;
-      }
-
-      if (now - entry.updatedAt < this.#sweepIdleMs) continue;
-
-      // Idle live session: tombstone under the lock, delete the platform
-      // session after release.
-      let tombstoned = false;
-      const lock = await this.#store.acquireLock(key);
-      try {
-        const current = await this.#store.get(key);
-        const lastSeen = Math.max(
-          current?.updatedAt ?? 0,
-          this.#lastActivityAt.get(entry.sessionId) ?? 0
-        );
-        if (
-          current?.sessionId === entry.sessionId &&
-          current.closedAt === undefined &&
-          now - lastSeen >= this.#sweepIdleMs
-        ) {
-          await this.#store.set(key, { ...current, closedAt: now });
-          this.#lastActivityAt.delete(entry.sessionId);
-          tombstoned = true;
-        }
-      } finally {
-        await lock.release();
-      }
-      if (!tombstoned) continue;
-
-      try {
-        await deleteBrowserSession(this.#browser, entry.sessionId);
-      } catch (error) {
-        console.warn(
-          `[agents/browser] Failed to delete swept Browser Run session ${entry.sessionId}`,
-          error
-        );
-      }
-      swept.push({ name, sessionId: entry.sessionId });
-    }
-
-    return { swept };
+  async #retire(name: string, current: StoredBrowserSession): Promise<void> {
+    await this.#store.set(retiredBrowserSessionKey(name), {
+      ...current,
+      closedAt: Date.now()
+    });
+    await this.#store.delete(namedBrowserSessionKey(name));
   }
 
   /**
    * Create a Browser Run session (outside any lock) and commit it under
-   * `key`, reapplying the durable creation options. `replaceSessionId` names
-   * the tombstoned entry this create is allowed to overwrite. If a concurrent
-   * caller committed a different entry first, theirs wins and the redundant
-   * session is deleted best-effort.
+   * `key`, reapplying the durable creation options. If a concurrent caller
+   * committed an entry first, theirs wins and the redundant session is
+   * deleted best-effort.
    */
   async #createAndCommit(
-    key: string,
-    replaceSessionId?: string
+    key: string
   ): Promise<
     | { stored: StoredBrowserSession; winner?: undefined }
     | { stored?: undefined; winner: StoredBrowserSession }
   > {
     const info = await createBrowserSession(this.#browser, {
-      keepAliveMs:
-        this.#create.keepAliveMs ?? BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+      keepAliveMs: this.keepAliveMs,
       recording: this.#create.recording,
       guardrails: this.#create.guardrails
     });
@@ -478,7 +366,7 @@ export class NamedBrowserSessions {
     const lock = await this.#store.acquireLock(key);
     try {
       const current = await this.#store.get(key);
-      if (current === undefined || current.sessionId === replaceSessionId) {
+      if (current === undefined) {
         await this.#store.set(key, stored);
       } else {
         winner = current;
@@ -509,11 +397,6 @@ export class NamedBrowserSessions {
       if (isMissingBrowserSession(error)) return false;
       throw error;
     }
-  }
-
-  /** @internal For testing only */
-  trackedActivityCount(): number {
-    return this.#lastActivityAt.size;
   }
 
   async #wasRetired(name: string): Promise<boolean> {

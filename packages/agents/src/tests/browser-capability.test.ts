@@ -1,16 +1,17 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { TestBrowserAgent } from "./agents/browser";
 import {
-  BROWSER_HARNESS_SWEEP_IDLE_MS,
   type BrowserHarnessObject,
   createFakeBrowserBinding
 } from "./capabilities/browser";
 import { withCapabilityHarness } from "./shared/capability-harness";
-import { BROWSER_SWEEP_JOB_ID, BrowserSessions } from "../browser/capability";
-import { JobQueue, type LifecycleJob } from "../lifecycle/job-queue";
-import { namedBrowserSessionKey } from "../browser/session-core";
+import { BrowserSessions } from "../browser/capability";
+import {
+  BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+  namedBrowserSessionKey
+} from "../browser/session-core";
 import type {
   BrowserSessionStore,
   StoredBrowserSession
@@ -48,19 +49,6 @@ function createMemoryStore(): BrowserSessionStore & {
       return result;
     }
   };
-}
-
-/**
- * Make the sweep due now: backdate its Lifecycle job. The stored session's
- * own timestamps are backdated separately, since idleness and tombstone age
- * are judged from the store, not the job.
- */
-function backdateSweepJob(storage: DurableObjectStorage): void {
-  storage.sql.exec(
-    "UPDATE cf_agents_jobs SET time = ? WHERE id = ? AND capability = 'browser'",
-    Date.now() - 1000,
-    BROWSER_SWEEP_JOB_ID
-  );
 }
 
 /** Rewrite the stored entry for `name` with backdated timestamps. */
@@ -136,19 +124,28 @@ describe("BrowserSessions capability", () => {
     });
   });
 
-  it("lists named sessions with live/closed status and host-only ids", async () => {
-    await withCapabilityHarness(async ({ install }) => {
+  it("lists named sessions with live/expired status and host-only ids", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
       const { browser } = createFakeBrowserBinding();
       const { capability } = install(new BrowserSessions({ browser }));
 
       await capability.resolve("checkout");
+      await capability.resolve("idle");
       await capability.resolve("scraper");
       await capability.close("scraper");
+      // Quiet for a full keep_alive window: the platform has likely
+      // reclaimed it, though the record stays until its next resolve.
+      const quietSince = Date.now() - BROWSER_SESSION_KEEP_ALIVE_MAX_MS;
+      await backdateStoredSession(storage, "idle", {
+        createdAt: quietSince,
+        updatedAt: quietSince
+      });
 
       const views = await capability.sessions();
+      // Closed sessions are gone, not listed.
       expect(views.map(({ name, status }) => ({ name, status }))).toEqual([
         { name: "checkout", status: "live" },
-        { name: "scraper", status: "closed" }
+        { name: "idle", status: "expired" }
       ]);
       for (const view of views) {
         expect(view.sessionId).toMatch(/^session-/);
@@ -205,176 +202,43 @@ describe("BrowserSessions capability", () => {
     });
   });
 
-  it("re-arms the sweep on startup when sessions outlived their job", async () => {
-    await withCapabilityHarness(async ({ storage, install }) => {
-      // A prior life that died between the store write and the job push.
-      const now = Date.now();
-      await storage.put(durableKey("ghost"), {
-        sessionId: "session-ghost",
-        createdAt: now,
-        updatedAt: now
-      } satisfies StoredBrowserSession);
-
-      const { browser } = createFakeBrowserBinding();
-      const { lifecycle } = install(new BrowserSessions({ browser }));
-      expect(await storage.getAlarm()).toBeNull();
-
-      await lifecycle.start();
-      expect(await storage.getAlarm()).not.toBeNull();
-    });
-  });
-
-  it("coexists with a host job named 'sweep' — job ids are namespaced", async () => {
-    await withCapabilityHarness(async ({ storage, install }) => {
-      const { browser } = createFakeBrowserBinding();
-      const { capability, lifecycle } = install(
-        new BrowserSessions({ browser })
-      );
-      // The docs teach hosts short generic job ids, and `cf_agents_jobs`
-      // keys ids globally — a cross-owner collision throws. The capability's
-      // sweep id must never contest a plausible host id.
-      await lifecycle.jobs.push({
-        id: "sweep",
-        fn: "sweep",
-        time: Date.now() + 60_000
-      });
-
-      await capability.resolve("checkout");
-
-      const owners = storage.sql
-        .exec("SELECT id, capability FROM cf_agents_jobs ORDER BY capability")
-        .toArray();
-      expect(owners).toEqual([
-        { id: BROWSER_SWEEP_JOB_ID, capability: "browser" },
-        { id: "sweep", capability: "host" }
-      ]);
-    });
-  });
-
-  it("re-arms the sweep when a session op overlaps a retiring dispatch", async () => {
-    await withCapabilityHarness(async ({ storage, install }) => {
-      const { browser } = createFakeBrowserBinding();
-      const { capability } = install(new BrowserSessions({ browser }));
-      await capability.resolve("first");
-
-      // The sweep is mid-dispatch (running = 1) and about to retire itself:
-      // it listed an empty store, so its stale outcome will be `undefined`.
-      storage.sql.exec(
-        "UPDATE cf_agents_jobs SET running = 1, execution_started_at = ? WHERE id = ? AND capability = 'browser'",
-        Date.now(),
-        BROWSER_SWEEP_JOB_ID
-      );
-
-      // A session op lands inside that window. Its push must supersede the
-      // running row so the stale delete defers to the newer schedule.
-      await capability.resolve("checkout");
-      new JobQueue(storage).applyOutcome(BROWSER_SWEEP_JOB_ID, undefined);
-
-      const rows = storage.sql
-        .exec(
-          "SELECT running FROM cf_agents_jobs WHERE id = ? AND capability = 'browser'",
-          BROWSER_SWEEP_JOB_ID
-        )
-        .toArray();
-      expect(rows).toEqual([{ running: 0 }]);
-    });
-  });
-
-  it("keeps the earliest sweep deadline while other names stay busy", async () => {
+  it("treats minting a live view as activity", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { browser } = createFakeBrowserBinding();
       const { capability } = install(new BrowserSessions({ browser }));
       await capability.resolve("checkout");
-
-      // An earlier deadline is pending — "checkout" is aging toward idle…
-      const earlier = Date.now() + 1000;
-      storage.sql.exec(
-        "UPDATE cf_agents_jobs SET time = ? WHERE id = ? AND capability = 'browser'",
-        earlier,
-        BROWSER_SWEEP_JOB_ID
-      );
-
-      // …then a different name stays busy. One job watches every name, so
-      // the push must not postpone the pending deadline — a busy name would
-      // starve idle names and tombstones of cleanup indefinitely.
-      await capability.resolve("monitor");
-
-      const row = storage.sql
-        .exec(
-          "SELECT time FROM cf_agents_jobs WHERE id = ? AND capability = 'browser'",
-          BROWSER_SWEEP_JOB_ID
-        )
-        .one();
-      expect(row.time).toBe(earlier);
-    });
-  });
-
-  it("recovers a lost physical alarm for a surviving sweep job row", async () => {
-    await withCapabilityHarness(async ({ storage, install }) => {
-      // A prior life pushed the sweep row but died before `setAlarm`
-      // landed: the row is durable, the physical alarm is gone.
-      new JobQueue(storage).push("browser", {
-        id: BROWSER_SWEEP_JOB_ID,
-        fn: BROWSER_SWEEP_JOB_ID,
-        time: Date.now() + 60_000,
-        singleflight: true
-      });
-      const { browser } = createFakeBrowserBinding();
-      const { lifecycle } = install(new BrowserSessions({ browser }));
-      expect(await storage.getAlarm()).toBeNull();
-
-      await lifecycle.start();
-      expect(await storage.getAlarm()).not.toBeNull();
-    });
-  });
-
-  it("treats minting a live view as activity — the sweep spares the link", async () => {
-    await withCapabilityHarness(async ({ storage, install }) => {
-      const { browser } = createFakeBrowserBinding();
-      const { capability } = install(new BrowserSessions({ browser }));
-      await capability.resolve("checkout");
-      // Quiet past the idle window but still alive — e.g. a connected
-      // socket parked waiting on a human.
+      // Quiet past the keep-alive window on record, but still alive — e.g.
+      // a human already driving it through an earlier Live View link.
       await backdateStoredSession(storage, "checkout", {
-        updatedAt: Date.now() - 20 * 60_000
+        updatedAt: Date.now() - BROWSER_SESSION_KEEP_ALIVE_MAX_MS
       });
+      expect((await capability.sessions())[0].status).toBe("expired");
 
-      const view = await capability.liveView("checkout");
-      expect(view).toBeDefined();
+      expect(await capability.liveView("checkout")).toBeDefined();
+      expect((await capability.sessions())[0].status).toBe("live");
 
-      // Without the mint-time touch, this sweep would tombstone the browser
-      // and kill the ~5-minute link seconds after it was handed out.
-      const result = await capability.sweep();
-      expect(result.swept).toEqual([]);
-
-      // Minting never resurrects a tombstoned entry.
+      // Minting never resurrects a closed session.
       await capability.close("checkout");
       expect(await capability.liveView("checkout")).toBeUndefined();
-      const after = await storage.get<StoredBrowserSession>(
-        durableKey("checkout")
-      );
-      expect(after?.closedAt).toBeDefined();
+      expect(await storage.get(durableKey("checkout"))).toBeUndefined();
     });
   });
 
-  it("reports the session gone when a sweep wins during live view minting", async () => {
+  it("reports the session gone when a close wins during live view minting", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const { browser } = createFakeBrowserBinding();
       const inner = createMemoryStore();
       const key = namedBrowserSessionKey("checkout");
-      // After liveView's initial read, a due sweep tombstones the entry —
-      // exactly the interleaving a network-yielding target listing allows.
-      let sweepWinsAfterNextRead = false;
+      // After liveView's initial read, a concurrent close retires the entry
+      // — exactly the interleaving a network-yielding target listing allows.
+      let closeWinsAfterNextRead = false;
       const store: BrowserSessionStore = {
         ...inner,
         get: async (k) => {
           const value = await inner.get(k);
-          if (sweepWinsAfterNextRead) {
-            sweepWinsAfterNextRead = false;
-            const entry = inner.sessions.get(key);
-            if (entry) {
-              inner.sessions.set(key, { ...entry, closedAt: Date.now() });
-            }
+          if (closeWinsAfterNextRead) {
+            closeWinsAfterNextRead = false;
+            inner.sessions.delete(key);
           }
           return value;
         }
@@ -382,106 +246,29 @@ describe("BrowserSessions capability", () => {
       const { capability } = install(new BrowserSessions({ browser, store }));
       await capability.resolve("checkout");
 
-      sweepWinsAfterNextRead = true;
-      // The listed targets predate the sweep — links minted from them could
+      closeWinsAfterNextRead = true;
+      // The listed targets predate the close — links minted from them could
       // never connect. The lost touch must surface as "session gone".
       expect(await capability.liveView("checkout")).toBeUndefined();
-      expect(inner.sessions.get(key)?.closedAt).toBeDefined();
+      expect(inner.sessions.has(key)).toBe(false);
     });
-  });
-
-  it("reschedules rather than retires the sweep on terminal failure", async () => {
-    const { browser } = createFakeBrowserBinding();
-    const sessions = new BrowserSessions({ browser, sweepIdleMs: 5_000 });
-    const job: LifecycleJob = {
-      id: BROWSER_SWEEP_JOB_ID,
-      capability: "browser",
-      fn: BROWSER_SWEEP_JOB_ID,
-      time: 0,
-      payload: undefined,
-      retry: undefined,
-      singleflight: true,
-      exclusive: false,
-      recoveryLoop: false,
-      createdAt: 0
-    };
-
-    // A custom store outage that survives Lifecycle's in-process retries
-    // must not delete the recurring job while entries may remain.
-    const before = Date.now();
-    const outcome = await sessions.onJobError(
-      { job, attempt: 3 },
-      new Error("remote store outage")
-    );
-    if (outcome === undefined || outcome === "yield") {
-      throw new Error(`expected a reschedule outcome, got ${String(outcome)}`);
-    }
-    expect(outcome.rescheduleAt).toBeGreaterThanOrEqual(before + 5_000);
-    expect(outcome.rescheduleAt).toBeLessThanOrEqual(Date.now() + 5_000);
-
-    // Foreign job names complete normally.
-    const foreign = await sessions.onJobError(
-      { job: { ...job, fn: "other" }, attempt: 3 },
-      new Error("unrelated")
-    );
-    expect(foreign).toBeUndefined();
   });
 });
 
-describe("BrowserSessions alarm-scheduled sweep", () => {
-  it("sweeps idle sessions, prunes tombstones, then lets the alarm rest", async () => {
+describe("BrowserSessions on a Durable Object", () => {
+  it("schedules nothing — the platform's keep_alive reclaims idle browsers", async () => {
     const stub = env.BrowserHarnessObject.getByName(crypto.randomUUID());
-    const pastIdle = Date.now() - BROWSER_HARNESS_SWEEP_IDLE_MS - 1000;
 
     await runInDurableObject(
       stub,
       async (instance: BrowserHarnessObject, state) => {
-        const resolved = await instance.browser.resolve();
-        expect(resolved.restarted).toBe(false);
-        // Resolving armed the sweep job, which armed the physical alarm.
-        expect(await state.storage.getAlarm()).not.toBeNull();
+        await instance.lifecycle.start();
+        await instance.browser.resolve("checkout");
+        const { cdp } = await instance.browser.connect("research");
+        cdp.close();
+        await instance.browser.close("checkout");
 
-        // Make the session look idle past the window, and the sweep due now.
-        await backdateStoredSession(state.storage, "default", {
-          createdAt: pastIdle,
-          updatedAt: pastIdle
-        });
-        backdateSweepJob(state.storage);
-      }
-    );
-
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
-
-    await runInDurableObject(
-      stub,
-      async (instance: BrowserHarnessObject, state) => {
-        const stored = await state.storage.get<StoredBrowserSession>(
-          durableKey("default")
-        );
-        expect(stored?.closedAt).toBeDefined();
-        expect(
-          instance.browserRequests.some(
-            (request) => request.method === "DELETE"
-          )
-        ).toBe(true);
-        // The tombstone still needs pruning — the sweep rescheduled itself.
-        expect(await state.storage.getAlarm()).not.toBeNull();
-
-        // Age the tombstone out and make the next sweep due now.
-        await backdateStoredSession(state.storage, "default", {
-          closedAt: pastIdle
-        });
-        backdateSweepJob(state.storage);
-      }
-    );
-
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
-
-    await runInDurableObject(
-      stub,
-      async (_instance: BrowserHarnessObject, state) => {
-        expect(await state.storage.get(durableKey("default"))).toBeUndefined();
-        // Nothing left to sweep: the job completed and the alarm is quiet.
+        expect(instance.lifecycle.jobs.list()).toEqual([]);
         expect(await state.storage.getAlarm()).toBeNull();
       }
     );

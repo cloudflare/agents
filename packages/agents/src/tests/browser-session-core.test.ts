@@ -7,7 +7,6 @@ import {
   openOneShotBrowserSession
 } from "../browser/session-core";
 import type { OneShotBrowserSessionOptions } from "../browser/session-core";
-import { DEFAULT_SWEEP_IDLE_MS } from "../browser/session-manager";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
@@ -202,7 +201,7 @@ describe("NamedBrowserSessions.resolve", () => {
     expect(second.sessionId).toBe(first.sessionId);
     expect(second.restarted).toBe(false);
     expect(creates(requests)).toHaveLength(1);
-    // Reattach freshens the record so sweep sees activity.
+    // Reattach freshens the record so the host sees activity.
     expect(second.updatedAt).toBeGreaterThanOrEqual(first.updatedAt);
   });
 
@@ -218,27 +217,6 @@ describe("NamedBrowserSessions.resolve", () => {
     expect(second.sessionId).not.toBe(first.sessionId);
     expect(second.restarted).toBe(true);
     expect(creates(requests)).toHaveLength(2);
-  });
-
-  it("recreates after a tombstone and reports restarted: true", async () => {
-    const { browser } = createFakeBrowser();
-    const store = new MemorySessionStore();
-    const now = Date.now();
-    // A sweep closed this named session earlier and left the tombstone.
-    store.sessions.set(namedBrowserSessionKey("default"), {
-      sessionId: "session-swept",
-      createdAt: now - 60_000,
-      updatedAt: now - 60_000,
-      closedAt: now - 30_000
-    });
-    const sessions = new NamedBrowserSessions({ browser, store });
-
-    const resolved = await sessions.resolve();
-
-    expect(resolved.restarted).toBe(true);
-    expect(resolved.sessionId).toBe("session-1");
-    const stored = store.sessions.get(namedBrowserSessionKey("default"));
-    expect(stored?.closedAt).toBeUndefined();
   });
 
   it("keeps sessions separate per name", async () => {
@@ -340,7 +318,7 @@ describe("NamedBrowserSessions.resolve", () => {
 });
 
 describe("NamedBrowserSessions.close", () => {
-  it("tombstones the record and deletes the Browser Run session", async () => {
+  it("retires the record and deletes the Browser Run session", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
     const sessions = new NamedBrowserSessions({ browser, store });
@@ -350,27 +328,40 @@ describe("NamedBrowserSessions.close", () => {
 
     expect(closed).toBe(true);
     expect(deletes(requests, "session-1")).toHaveLength(1);
-    const stored = store.sessions.get(namedBrowserSessionKey("default"));
-    expect(stored?.closedAt).toBeDefined();
+    expect(store.sessions.has(namedBrowserSessionKey("default"))).toBe(false);
 
     // The next resolve is the loud-mortality path.
     const resolved = await sessions.resolve();
     expect(resolved.restarted).toBe(true);
   });
 
-  it("keeps the tombstone when the platform delete fails — keep-alive reclaims it", async () => {
+  it("keeps restart evidence out of the named-session keyspace", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const sessions = new NamedBrowserSessions({ browser, store });
+
+    await sessions.resolve("checkout");
+    await sessions.close("checkout");
+
+    // Listing named sessions yields only names that own a browser…
+    expect(await store.list(namedBrowserSessionKey(""))).toEqual(new Map());
+    // …yet the closed name still remembers it once had one.
+    expect((await sessions.resolve("checkout")).restarted).toBe(true);
+    // A never-used name is still first use.
+    expect((await sessions.resolve("fresh")).restarted).toBe(false);
+  });
+
+  it("retires the record even when the platform delete fails — keep-alive reclaims it", async () => {
     const { browser, requests } = createFakeBrowser({ deleteStatuses: [500] });
     const store = new MemorySessionStore();
     const sessions = new NamedBrowserSessions({ browser, store });
 
     await sessions.resolve();
 
-    // The delete is best-effort: the tombstone is the durable outcome, and
-    // the pinned keep_alive reclaims the unreachable browser within 600s.
+    // The delete is best-effort: the retired record is the durable outcome,
+    // and the pinned keep_alive reclaims the unreachable browser within 600s.
     expect(await sessions.close("default")).toBe(true);
-    expect(
-      store.sessions.get(namedBrowserSessionKey("default"))?.closedAt
-    ).toBeDefined();
+    expect(store.sessions.has(namedBrowserSessionKey("default"))).toBe(false);
     expect(deletes(requests, "session-1")).toHaveLength(1);
 
     // Closing again is a no-op — the closure already happened.
@@ -384,123 +375,6 @@ describe("NamedBrowserSessions.close", () => {
       store: new MemorySessionStore()
     });
     expect(await sessions.close("missing")).toBe(false);
-  });
-});
-
-describe("NamedBrowserSessions.sweep", () => {
-  it("closes idle sessions, keeps fresh ones, prunes old tombstones", async () => {
-    const { browser, requests } = createFakeBrowser();
-    const store = new MemorySessionStore();
-    const now = Date.now();
-    const idleMs = DEFAULT_SWEEP_IDLE_MS;
-
-    store.sessions.set(namedBrowserSessionKey("stale"), {
-      sessionId: "session-stale",
-      createdAt: now - idleMs * 3,
-      updatedAt: now - idleMs * 2
-    });
-    store.sessions.set(namedBrowserSessionKey("busy"), {
-      sessionId: "session-busy",
-      createdAt: now - idleMs * 3,
-      updatedAt: now - 1_000
-    });
-    store.sessions.set(namedBrowserSessionKey("gone"), {
-      sessionId: "session-gone",
-      createdAt: now - idleMs * 4,
-      updatedAt: now - idleMs * 3,
-      closedAt: now - idleMs * 2
-    });
-
-    const sessions = new NamedBrowserSessions({ browser, store });
-    const result = await sessions.sweep();
-
-    // Idle live session: platform session deleted, tombstone left behind.
-    expect(result.swept).toEqual([
-      { name: "stale", sessionId: "session-stale" }
-    ]);
-    expect(deletes(requests, "session-stale")).toHaveLength(1);
-    expect(
-      store.sessions.get(namedBrowserSessionKey("stale"))?.closedAt
-    ).toBeDefined();
-
-    // Fresh session untouched.
-    expect(deletes(requests, "session-busy")).toHaveLength(0);
-    expect(
-      store.sessions.get(namedBrowserSessionKey("busy"))?.closedAt
-    ).toBeUndefined();
-
-    // Old tombstone pruned from the store (no platform call — already gone).
-    expect(store.sessions.has(namedBrowserSessionKey("gone"))).toBe(false);
-    expect(deletes(requests, "session-gone")).toHaveLength(0);
-  });
-
-  it("still reports restarted: true after the tombstone is pruned", async () => {
-    const { browser } = createFakeBrowser();
-    const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({
-      browser,
-      store,
-      sweepIdleMs: 1_000
-    });
-
-    await sessions.resolve("checkout");
-    await sessions.close("checkout");
-    const key = namedBrowserSessionKey("checkout");
-    store.sessions.set(key, {
-      ...store.sessions.get(key)!,
-      closedAt: Date.now() - 5_000
-    });
-    await sessions.sweep();
-    expect(store.sessions.has(key)).toBe(false); // tombstone pruned
-
-    const resolved = await sessions.resolve("checkout");
-    expect(resolved.restarted).toBe(true);
-  });
-
-  it("keeps pruned-name evidence out of the swept keyspace", async () => {
-    const { browser } = createFakeBrowser();
-    const store = new MemorySessionStore();
-    const now = Date.now();
-    store.sessions.set(namedBrowserSessionKey("gone"), {
-      sessionId: "session-gone",
-      createdAt: now - 10_000,
-      updatedAt: now - 10_000,
-      closedAt: now - 5_000
-    });
-    const sessions = new NamedBrowserSessions({
-      browser,
-      store,
-      sweepIdleMs: 1_000
-    });
-
-    await sessions.sweep();
-
-    // Nothing left under the named-session prefix, so the Lifecycle sweep
-    // job can still retire once every session is gone.
-    expect(await store.list(namedBrowserSessionKey(""))).toEqual(new Map());
-    // A never-used name is still first use.
-    expect((await sessions.resolve("fresh")).restarted).toBe(false);
-  });
-
-  it("honors a creator-overridden idle TTL", async () => {
-    const { browser, requests } = createFakeBrowser();
-    const store = new MemorySessionStore();
-    const now = Date.now();
-    store.sessions.set(namedBrowserSessionKey("default"), {
-      sessionId: "session-1",
-      createdAt: now - 10_000,
-      updatedAt: now - 5_000
-    });
-
-    const sessions = new NamedBrowserSessions({
-      browser,
-      store,
-      sweepIdleMs: 1_000
-    });
-    const result = await sessions.sweep();
-
-    expect(result.swept).toEqual([{ name: "default", sessionId: "session-1" }]);
-    expect(deletes(requests, "session-1")).toHaveLength(1);
   });
 });
 
@@ -523,7 +397,7 @@ describe("NamedBrowserSessions.connect", () => {
     expect(deletes(requests, "session-1")).toHaveLength(0);
   });
 
-  it("CDP activity refreshes the idle clock so sweeps keep active sessions", async () => {
+  it("CDP activity refreshes the record's updatedAt", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();
     const sessions = new NamedBrowserSessions({
@@ -538,7 +412,7 @@ describe("NamedBrowserSessions.connect", () => {
     const key = namedBrowserSessionKey("work");
     const stale = {
       ...store.sessions.get(key)!,
-      updatedAt: Date.now() - DEFAULT_SWEEP_IDLE_MS * 2
+      updatedAt: Date.now() - BROWSER_SESSION_KEEP_ALIVE_MAX_MS * 2
     };
     store.sessions.set(key, stale);
 
@@ -548,52 +422,6 @@ describe("NamedBrowserSessions.connect", () => {
     await waitUntil(
       () => store.sessions.get(key)!.updatedAt !== stale.updatedAt
     );
-
-    const result = await sessions.sweep();
-    expect(result.swept).toEqual([]);
-    expect(store.sessions.get(key)?.closedAt).toBeUndefined();
-  });
-
-  it("a command racing the sweep keeps its session even before its touch lands", async () => {
-    const { browser, requests } = createFakeBrowser();
-    const store = new MemorySessionStore();
-    // Default 60s touch interval: a send right after connect writes nothing
-    // durable, so only in-memory activity can protect this session.
-    const sessions = new NamedBrowserSessions({ browser, store });
-    const { cdp, sessionId } = await sessions.connect("work");
-
-    const key = namedBrowserSessionKey("work");
-    const stale = {
-      ...store.sessions.get(key)!,
-      updatedAt: Date.now() - DEFAULT_SWEEP_IDLE_MS * 2
-    };
-    store.sessions.set(key, stale);
-
-    cdp.send("Page.navigate", {}, { timeoutMs: 50 }).catch(() => {});
-    const result = await sessions.sweep();
-
-    expect(result.swept).toEqual([]);
-    expect(store.sessions.get(key)).toEqual(stale);
-    expect(deletes(requests, sessionId)).toHaveLength(0);
-  });
-
-  it("sweeps forget activity from sockets whose session is gone", async () => {
-    const { browser } = createFakeBrowser();
-    const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
-    const { cdp } = await sessions.connect("work");
-    const { cdp: other } = await sessions.connect("other");
-
-    // A superseded socket keeps sending after its session was closed.
-    await sessions.close("work");
-    cdp.send("Page.navigate", {}, { timeoutMs: 50 }).catch(() => {});
-    other.send("Page.navigate", {}, { timeoutMs: 50 }).catch(() => {});
-    expect(sessions.trackedActivityCount()).toBe(2);
-
-    await sessions.sweep();
-
-    // Only the live session's activity survives.
-    expect(sessions.trackedActivityCount()).toBe(1);
   });
 
   it("throttles activity touches to the configured interval", async () => {
@@ -611,16 +439,16 @@ describe("NamedBrowserSessions.connect", () => {
     expect(store.sessions.get(key)).toEqual(before);
   });
 
-  it("derives the touch interval from a short sweep window", async () => {
+  it("derives the touch interval from a short keep-alive window", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();
-    // Aggressive idle window, default 60s touch interval: the touch cadence
-    // must tighten itself, or continuous traffic could never prove liveness
-    // before the sweep deadline.
+    // Short keep-alive, default 60s touch interval: the touch cadence must
+    // tighten itself, or a busy browser's record could look older than the
+    // window the platform reclaims idle browsers after.
     const sessions = new NamedBrowserSessions({
       browser,
       store,
-      sweepIdleMs: 200
+      create: { keepAliveMs: 200 }
     });
     const { cdp } = await sessions.connect("work");
 
@@ -631,16 +459,13 @@ describe("NamedBrowserSessions.connect", () => {
     };
     store.sessions.set(key, stale);
 
-    // Past the derived interval (sweepIdleMs / 2 = 100ms) but well inside
-    // the 60s default: this send must refresh the idle clock.
+    // Past the derived interval (keepAliveMs / 2 = 100ms) but well inside
+    // the 60s default: this send must refresh the record.
     await new Promise((resolve) => setTimeout(resolve, 120));
     cdp.send("Page.navigate", {}, { timeoutMs: 50 }).catch(() => {});
     await waitUntil(
       () => store.sessions.get(key)!.updatedAt !== stale.updatedAt
     );
-
-    const result = await sessions.sweep();
-    expect(result.swept).toEqual([]);
   });
 
   it("a late activity touch cannot resurrect a closed session", async () => {
@@ -655,12 +480,11 @@ describe("NamedBrowserSessions.connect", () => {
 
     await sessions.close("work");
     const key = namedBrowserSessionKey("work");
-    const tombstone = store.sessions.get(key)!;
-    expect(tombstone.closedAt).toBeDefined();
+    expect(store.sessions.has(key)).toBe(false);
 
     cdp.send("Page.navigate", {}, { timeoutMs: 50 }).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(store.sessions.get(key)).toEqual(tombstone);
+    expect(store.sessions.has(key)).toBe(false);
   });
 });
 
