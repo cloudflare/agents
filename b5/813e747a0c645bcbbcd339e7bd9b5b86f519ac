@@ -1,0 +1,29 @@
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_f5aecefb2d2cc4 21,607,609-611,1235-1242,1278,1299-1301,1305-1311,1785-1836,1846,1849-1856,1874-1876,1880
+packages/think/src/think.ts
+  s_368991bdec7f77::t_798e561467c8b2 314-324,2575-2578,6147-6156,6220-6245,13302-13304,13442-13446,13450,13801-13803,13913-13918,13923,15765-15766,15887-15889,15893,15910
+.changeset/transient-stream-recovery.md
+  s_368991bdec7f77::t_431ae6fafde3db 1-6
+docs/think/lifecycle-hooks.md
+  s_368991bdec7f77::t_90f3ee248ee7cb 851-855
+packages/agents/src/chat/recovery-engine.ts
+  s_368991bdec7f77::t_76c21e42caa660 613,629
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_1b4bc134bc3b62 686-772
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b5813e747a0c645bcbbcd339e7bd9b5b86f519ac",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
