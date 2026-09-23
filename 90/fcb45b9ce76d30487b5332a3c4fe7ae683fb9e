@@ -1,0 +1,29 @@
+packages/think/src/messengers/chat-sdk.ts
+  s_368991bdec7f77::t_3e00acca2c47aa 668-670
+packages/think/src/messengers/delivery.ts
+  s_368991bdec7f77::t_5c8e7ba7d657f6 21-25,31,49,73,94-101,403,474
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_0c6702b82fe720 801-804,813,886-905
+.changeset/messenger-no-placeholder-post.md
+  s_368991bdec7f77::t_5bc7c744dd2c88 5
+examples/chat-sdk-messenger/src/index.ts
+  s_368991bdec7f77::t_6bd4d615e82d7b 446,474
+examples/chat-sdk-messenger/src/tests/intelligence.test.ts
+  s_368991bdec7f77::t_1dcef5e4216c67 8,310-320
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "90fcb45b9ce76d30487b5332a3c4fe7ae683fb9e",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
