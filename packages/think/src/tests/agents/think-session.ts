@@ -980,6 +980,12 @@ export class ThinkTestAgent extends Think {
     return this.getMessages();
   }
 
+  async getAutoContinuationChannelForTest(): Promise<string | undefined> {
+    return (
+      this as unknown as { _channelForAutoContinuation(): string | undefined }
+    )._channelForAutoContinuation();
+  }
+
   async resetCapturedTurnChannelsForTest(): Promise<void> {
     this._capturedTurnChannels = [];
   }

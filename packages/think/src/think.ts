@@ -2037,12 +2037,6 @@ function cachedMessageBytes(message: UIMessage): number {
   return cachedMessageEncoder.encode(JSON.stringify(message)).byteLength;
 }
 
-/**
- * The stored form of a client-sourced message's metadata: Sessions drops the
- * reserved keys on every client write, so a compare against a stored row has
- * to drop them too. Mirrors `SessionCore.stripReservedMetadata` for the keys
- * Think registers.
- */
 function reservedMetadataOf(
   message: UIMessage
 ): Record<string, unknown> | undefined {
@@ -2063,6 +2057,12 @@ function reservedMetadataOf(
   return Object.keys(reserved).length > 0 ? reserved : undefined;
 }
 
+/**
+ * The stored form of a client-sourced message's metadata: Sessions drops the
+ * reserved keys on every client write, so a compare against a stored row has
+ * to drop them too. Mirrors `SessionCore.stripReservedMetadata` for the keys
+ * Think registers.
+ */
 function stripReservedMetadata(message: UIMessage): UIMessage {
   const metadata = message.metadata;
   if (
@@ -3117,6 +3117,14 @@ export class Think<
    * `deliverNotice` and per-channel policy. Save/restore keeps nested turns safe.
    */
   private _activeChannelContext?: ChannelContext;
+
+  /**
+   * Channel of the latest admitted non-continuation turn, which an
+   * auto-continuation extends. Differs from the latest user message's channel
+   * when a WebSocket regeneration reuses a message another channel stored.
+   * In memory only: after an eviction, continuations fall back to history.
+   */
+  private _lastTurnChannel?: { channel: string | undefined };
 
   /**
    * Live delivery surface for the active turn, bound by `deliverMessengerReply`
@@ -4788,6 +4796,12 @@ export class Think<
   /** Re-resolve the channel for a continuation from the latest user message. */
   private _channelFromLatestUserMessage(): string | undefined {
     return this._channelFromMessages(this.messages);
+  }
+
+  private _channelForAutoContinuation(): string | undefined {
+    return this._lastTurnChannel
+      ? this._lastTurnChannel.channel
+      : this._channelFromLatestUserMessage();
   }
 
   /**
@@ -8128,6 +8142,9 @@ export class Think<
 
                 this._activeTurnReplyAttachments = [];
                 this._activeTurnReplyAttachmentsRequestId = spec.requestId;
+                if (!spec.continuation) {
+                  this._lastTurnChannel = { channel: spec.channel };
+                }
 
                 try {
                   const value = await this._withChannelContext(
@@ -16831,7 +16848,7 @@ export class Think<
       trigger: "auto-continuation",
       requestId,
       continuation: true,
-      channel: this._channelFromLatestUserMessage(),
+      channel: this._channelForAutoContinuation(),
       allowNested: true,
       execute: async () => {
         if (this._continuation.pending) {
@@ -16916,7 +16933,7 @@ export class Think<
         trigger: "auto-continuation",
         requestId,
         continuation: true,
-        channel: this._channelFromLatestUserMessage(),
+        channel: this._channelForAutoContinuation(),
         allowNested: true,
         execute: async () => {
           const continuationBody = async () => {

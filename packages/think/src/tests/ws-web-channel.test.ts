@@ -41,7 +41,11 @@ function userMessage(
 }
 
 /** Sends a chat request and resolves once its terminal `done` frame arrives. */
-function sendChat(ws: WebSocket, messages: UIMessage[]): Promise<void> {
+function sendChat(
+  ws: WebSocket,
+  messages: UIMessage[],
+  trigger?: string
+): Promise<void> {
   const id = crypto.randomUUID();
   const done = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(
@@ -62,7 +66,7 @@ function sendChat(ws: WebSocket, messages: UIMessage[]): Promise<void> {
     JSON.stringify({
       type: MSG_CHAT_REQUEST,
       id,
-      init: { method: "POST", body: JSON.stringify({ messages }) }
+      init: { method: "POST", body: JSON.stringify({ messages, trigger }) }
     })
   );
   return done;
@@ -141,6 +145,31 @@ describe("Think — WebSocket chat runs on the web channel (#2255)", () => {
     await agent.runChannelTurnForTest({ continuation: true });
 
     expect(await agent.getCapturedTurnChannelsForTest()).toEqual(["web"]);
+    ws.close();
+  });
+
+  it("continues a regeneration of another channel's message on web", async () => {
+    const { agent, ws } = await freshAgent();
+    await agent.runChannelTurnForTest({ input: "hello", channel: "voice" });
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const voiceUser = stored.find((m) => m.role === "user");
+    expect(channelOf(voiceUser)).toBe("voice");
+    await agent.resetCapturedTurnChannelsForTest();
+
+    await sendChat(
+      ws,
+      [{ ...voiceUser!, metadata: undefined }],
+      "regenerate-message"
+    );
+
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual(["web"]);
+    // The stored message keeps the channel it was sent on.
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(channelOf(messages.find((m) => m.id === voiceUser!.id))).toBe(
+      "voice"
+    );
+    // A tool-result continuation extends the web turn, not the voice one.
+    expect(await agent.getAutoContinuationChannelForTest()).toBe("web");
     ws.close();
   });
 
