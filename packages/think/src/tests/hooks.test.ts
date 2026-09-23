@@ -1943,6 +1943,45 @@ describe("Think — beforeTurn config overrides", () => {
     expect(invalid.outputJson).toBeUndefined();
   });
 
+  it("keeps the status an overridden continueLastTurn returns", async () => {
+    const agent = await getAgentByName(
+      env.ThinkContinueOverrideTestAgent,
+      `bt-output-override-status-${crypto.randomUUID()}`
+    );
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+    await agent.configureContinueOverrideForTest({ forcedStatus: "error" });
+
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    const result = await agent.runTurnWaitForTest("", { continuation: true });
+
+    expect(result.status).toBe("error");
+    expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+  });
+
+  it("keeps structured output for overlapping overridden continuations", async () => {
+    const agent = await getAgentByName(
+      env.ThinkContinueOverrideTestAgent,
+      `bt-output-override-overlap-${crypto.randomUUID()}`
+    );
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+    await agent.configureContinueOverrideForTest({ delayBeforeSuperMs: 50 });
+
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    const results = await Promise.all([
+      agent.runTurnWaitForTest("", { continuation: true }),
+      agent.runTurnWaitForTest("", { continuation: true })
+    ]);
+
+    for (const result of results) {
+      expect(result.status).toBe("completed");
+      expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+    }
+  });
+
   it("omits output from a wait-mode turn without a structured output spec", async () => {
     const agent = await freshAgent(`bt-output-none-${crypto.randomUUID()}`);
     await agent.setResponse("plain answer");

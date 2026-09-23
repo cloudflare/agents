@@ -5504,13 +5504,35 @@ export class ThinkToolsTestAgent extends Think {
 // ── ThinkProgrammaticTestAgent ──────────────────────────────
 // Tests saveMessages, continueLastTurn, and body persistence.
 
-/** A `continueLastTurn` override that only delegates to `super`. */
+/**
+ * A `continueLastTurn` override that delegates to `super`, optionally after a
+ * delay or replacing the status it returns.
+ */
 export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
+  private _delayBeforeSuperMs = 0;
+  private _forcedStatus: SaveMessagesResult["status"] | null = null;
+
+  async configureContinueOverrideForTest(options: {
+    delayBeforeSuperMs?: number;
+    forcedStatus?: SaveMessagesResult["status"];
+  }): Promise<void> {
+    this._delayBeforeSuperMs = options.delayBeforeSuperMs ?? 0;
+    this._forcedStatus = options.forcedStatus ?? null;
+  }
+
   protected override async continueLastTurn(
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
-    return super.continueLastTurn(body, options);
+    if (this._delayBeforeSuperMs > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, this._delayBeforeSuperMs)
+      );
+    }
+    const result = await super.continueLastTurn(body, options);
+    return this._forcedStatus
+      ? { ...result, status: this._forcedStatus }
+      : result;
   }
 }
 

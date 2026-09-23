@@ -1729,6 +1729,15 @@ const recoveredTurnAcceptanceContext = new AsyncLocalStorage<{
   onAccepted: (successorRequestId: string) => void;
 }>();
 
+// A `runTurn` continuation dispatched through an overridden `continueLastTurn`:
+// the base method, when the override delegates to it, records the full result
+// (with structured output) for that `runTurn` call alone.
+const continuationOutputContext = new AsyncLocalStorage<{
+  agent: unknown;
+  taken: boolean;
+  result?: ProgrammaticMessagesResult;
+}>();
+
 // Drains the underlying model stream when a drain loop exits early (in-stream
 // error break, stall abort, user abort). The AI SDK tees its base stream, so
 // an abandoned tee branch would otherwise leave the tracing wrapper's
@@ -5675,9 +5684,6 @@ export class Think<
 
   /** One-time guard for the "recovery enabled but no classifier" DX warning. */
   private _warnedMissingClassifier = false;
-  private _continuationCapture: {
-    result?: ProgrammaticMessagesResult;
-  } | null = null;
 
   /**
    * Configure conversation storage. Called once during `onStart`. Override to
@@ -8689,27 +8695,18 @@ export class Think<
         });
         return this._enrichTurnResult(result, true);
       }
-      // The override owns the continuation; when it delegates to `super`, the
-      // base method captures structured output into this slot.
-      const capture: { result?: ProgrammaticMessagesResult } = {};
-      this._continuationCapture = capture;
-      let returned: SaveMessagesResult;
-      try {
-        returned = await this.continueLastTurn(options.body, continueOptions);
-      } finally {
-        if (this._continuationCapture === capture) {
-          this._continuationCapture = null;
-        }
-      }
+      const capture: {
+        agent: unknown;
+        taken: boolean;
+        result?: ProgrammaticMessagesResult;
+      } = { agent: this, taken: false };
+      const returned = await continuationOutputContext.run(capture, () =>
+        this.continueLastTurn(options.body, continueOptions)
+      );
       const captured = capture.result;
       return this._enrichTurnResult(
-        captured?.requestId === returned.requestId
-          ? {
-              ...returned,
-              status: captured.status,
-              ...(captured.error !== undefined && { error: captured.error }),
-              ...("output" in captured && { output: captured.output })
-            }
+        captured?.requestId === returned.requestId && "output" in captured
+          ? { ...returned, output: captured.output }
           : returned,
         true
       );
@@ -12116,8 +12113,9 @@ export class Think<
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
   ): Promise<SaveMessagesResult> {
-    const capture = this._continuationCapture;
-    this._continuationCapture = null;
+    const store = continuationOutputContext.getStore();
+    const capture = store?.agent === this && !store.taken ? store : undefined;
+    if (capture) capture.taken = true;
     const full = await this._continueLastTurn(
       body,
       capture ? { ...options, captureOutput: true } : options
