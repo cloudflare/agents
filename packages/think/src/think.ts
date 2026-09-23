@@ -15966,6 +15966,7 @@ export class Think<
       );
       delaySeconds = Math.min(2 ** (retries - 1), 30);
     }
+    this._rescheduledRecoveryIncidents.add(incident.incidentId);
     if (unansweredUserId) {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
@@ -15999,6 +16000,16 @@ export class Think<
       }
     });
     return "scheduled";
+  }
+
+  /** Incidents whose running recovery attempt scheduled the next attempt. */
+  private _rescheduledRecoveryIncidents = new Set<string>();
+
+  private _takeRecoveryReschedule(incidentId: string | undefined): boolean {
+    return (
+      incidentId !== undefined &&
+      this._rescheduledRecoveryIncidents.delete(incidentId)
+    );
   }
 
   private async _latestUserLeafId(): Promise<string | null> {
@@ -16811,6 +16822,7 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      this._takeRecoveryReschedule(data?.incidentId);
       const result = await this._runRecoveredTurnAfterAcceptance(
         recoveredSubmission,
         onTurnStarted,
@@ -16823,6 +16835,13 @@ export class Think<
               : { trigger: "recovery-retry" }
           )
       );
+      if (
+        result.status !== "completed" &&
+        this._takeRecoveryReschedule(data?.incidentId)
+      ) {
+        // Interrupted again: the attempt it scheduled owns the outcome.
+        return;
+      }
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -17099,6 +17118,7 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
+      this._takeRecoveryReschedule(data?.incidentId);
       const result = await this._runRecoveredTurnAfterAcceptance(
         recoveredSubmission,
         onTurnStarted,
@@ -17110,6 +17130,13 @@ export class Think<
               : { trigger: "recovery-continue" }
           )
       );
+      if (
+        result.status !== "completed" &&
+        this._takeRecoveryReschedule(data?.incidentId)
+      ) {
+        // Interrupted again: the attempt it scheduled owns the outcome.
+        return;
+      }
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"

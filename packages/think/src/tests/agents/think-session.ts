@@ -1842,6 +1842,7 @@ export class ThinkTestAgent extends Think {
   /** Fail the turn and `failures - 1` recoveries fast; collect each delay. */
   async collectTransientBackoffForTest(failures: number): Promise<{
     delays: Array<number | null>;
+    incidentStatuses: string[];
     finalRoles: string[];
   }> {
     await this.armTransientErrorForTest({
@@ -1851,6 +1852,7 @@ export class ThinkTestAgent extends Think {
     this._errorAttemptsRemaining = failures;
     await this.testChat("trigger transient error");
     const delays: Array<number | null> = [];
+    const incidentStatuses: string[] = [];
     for (let i = 0; i <= failures; i++) {
       const continues = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
       const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
@@ -1869,12 +1871,20 @@ export class ThinkTestAgent extends Think {
         this,
         continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
       );
+      const incidents = await this.ctx.storage.list<{ status: string }>({
+        prefix: "cf:chat-recovery:incident:"
+      });
+      incidentStatuses.push(
+        [...incidents.values()].map((incident) => incident.status).join(",") ||
+          "none"
+      );
     }
     this._errorConfig = null;
     this._errorAttemptsRemaining = null;
     Reflect.deleteProperty(this, "classifyChatError");
     return {
       delays,
+      incidentStatuses,
       finalRoles: (await this.getMessages()).map((m) => m.role)
     };
   }
