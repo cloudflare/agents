@@ -728,6 +728,13 @@ describe("Think — error handling", () => {
     }
   );
 
+  it("backs off and stops retrying a transient error that fails fast", async () => {
+    const agent = await freshAgent(`transient-backoff-${crypto.randomUUID()}`);
+    const result = await agent.collectTransientBackoffForTest(20);
+
+    expect(result.delays).toEqual([1, 2, 4, 8, 16, 30, 30, 30, 30, 30]);
+  });
+
   it("routes a transient WebSocket stream error into bounded recovery (#2085)", async () => {
     const room = `transient-ws-${crypto.randomUUID()}`;
     const agent = await freshAgent(room);

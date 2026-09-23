@@ -15959,9 +15959,13 @@ export class Think<
       : input.partialParts.length === 0
         ? retryTargetUserId
         : await this._latestUserLeafId();
-    const delaySeconds = input.backoff
-      ? Math.min(2 ** Math.max(0, incident.attempt - 1), 30)
-      : undefined;
+    let delaySeconds: number | undefined;
+    if (input.backoff) {
+      const retries = await this._chatRecoveryEngine().recordTransientRetry(
+        incident.incidentId
+      );
+      delaySeconds = Math.min(2 ** (retries - 1), 30);
+    }
     if (unansweredUserId) {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,

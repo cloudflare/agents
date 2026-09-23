@@ -680,6 +680,22 @@ export class ChatRecoveryEngine {
   }
 
   /**
+   * Bump the incident's durable `transientRetries` counter before scheduling a
+   * recovery for a transient or rate-limited stream error, and return the new
+   * count so the caller can derive its backoff. Returns `1` when the incident
+   * record is gone.
+   */
+  async recordTransientRetry(incidentId: string): Promise<number> {
+    const { adapter } = this;
+    const key = chatRecoveryIncidentKey(incidentId);
+    const incident = await adapter.getIncident(key);
+    if (!incident) return 1;
+    const transientRetries = (incident.transientRetries ?? 0) + 1;
+    await adapter.putIncident(key, { ...incident, transientRetries });
+    return transientRetries;
+  }
+
+  /**
    * Record that a recovery callback observed a Durable Object memory-limit reset
    * (the isolate exceeded its 128 MB limit — `isDurableObjectMemoryLimitReset`)
    * and decide what to do next (#1825).

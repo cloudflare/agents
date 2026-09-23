@@ -1839,6 +1839,46 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /** Fail the turn and `failures - 1` recoveries fast; collect each delay. */
+  async collectTransientBackoffForTest(failures: number): Promise<{
+    delays: Array<number | null>;
+    finalRoles: string[];
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    this._errorAttemptsRemaining = failures;
+    await this.testChat("trigger transient error");
+    const delays: Array<number | null> = [];
+    for (let i = 0; i <= failures; i++) {
+      const continues = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
+      const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
+      if (continues === 0 && retries === 0) break;
+      delays.push(
+        this.sql<{ delay: number | null }>`
+          SELECT json_extract(input, '$.delaySeconds') AS delay
+          FROM cf_agents_task_runs
+          WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+            AND state IN ('pending', 'waiting')
+          ORDER BY created_at DESC
+          LIMIT 1
+        `[0]?.delay ?? null
+      );
+      await runRecoveryWorkForTest(
+        this,
+        continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
+      );
+    }
+    this._errorConfig = null;
+    this._errorAttemptsRemaining = null;
+    Reflect.deleteProperty(this, "classifyChatError");
+    return {
+      delays,
+      finalRoles: (await this.getMessages()).map((m) => m.role)
+    };
+  }
+
   async armStallForTest(afterChunks: number, timeoutMs: number): Promise<void> {
     this._stallAfterChunks = afterChunks;
     this._stallAttemptsRemaining = 1;
