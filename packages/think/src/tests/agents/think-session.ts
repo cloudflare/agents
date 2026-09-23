@@ -847,6 +847,11 @@ export class ThinkTestAgent extends Think {
 
   override configureChannels() {
     return {
+      web: {
+        kind: "web" as const,
+        ingress: { transport: "websocket" as const },
+        instructions: "WEB MODE"
+      },
       voice: {
         kind: "voice" as const,
         ingress: { transport: "voice" as const },

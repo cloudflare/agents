@@ -100,8 +100,16 @@ await this.runTurn({ input: "Read this out loud", channel: "voice" });
 
 Inside a turn, the active channel is available as `this.activeChannel` (a
 `ChannelContext` with `channelId`, `kind`, and messenger details when relevant).
-A turn with no `channel` runs without a channel context and applies no channel
-policy.
+
+Turns from browser clients over WebSocket chat (`useAgentChat`) always run on the
+implicit `web` channel, so a `web` entry in `configureChannels()` applies its
+`instructions`, `tools`, and `maxTurns` to them. The channel is stamped on each
+new user message, so continuations after tool results and recovered turns keep
+it. Clients cannot choose or forge a channel.
+
+A `runTurn()` or `chat()` call with no `channel` runs without a channel context
+and applies no channel policy. Pass `channel: "web"` to apply the `web` policy to
+such a turn.
 
 ## Deliver out of band
 

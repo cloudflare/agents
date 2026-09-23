@@ -1325,8 +1325,9 @@ export interface RunTurnBase {
   /**
    * Channel id this turn belongs to (resolved against `configureChannels()` /
    * `getMessengers()`). Sets the turn-scoped channel context and is persisted on
-   * the user message so a recovered/continued turn re-resolves it. Defaults to
-   * the implicit `web` channel.
+   * the user message so a recovered/continued turn re-resolves it. Omit it to
+   * run without a channel context. (WebSocket chat turns always run on the
+   * implicit `web` channel.)
    */
   channel?: string;
 }
@@ -2042,6 +2043,26 @@ function cachedMessageBytes(message: UIMessage): number {
  * to drop them too. Mirrors `SessionCore.stripReservedMetadata` for the keys
  * Think registers.
  */
+function reservedMetadataOf(
+  message: UIMessage
+): Record<string, unknown> | undefined {
+  const metadata = message.metadata;
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    Array.isArray(metadata)
+  ) {
+    return undefined;
+  }
+  const reserved: Record<string, unknown> = {};
+  for (const key of RESERVED_MESSAGE_METADATA_KEYS) {
+    if (key in metadata) {
+      reserved[key] = (metadata as Record<string, unknown>)[key];
+    }
+  }
+  return Object.keys(reserved).length > 0 ? reserved : undefined;
+}
+
 function stripReservedMetadata(message: UIMessage): UIMessage {
   const metadata = message.metadata;
   if (
@@ -12394,7 +12415,8 @@ export class Think<
         {
           requestId,
           isRegeneration,
-          isCurrent: () => this._turnQueue.generation === epoch
+          isCurrent: () => this._turnQueue.generation === epoch,
+          channel: "web"
         }
       );
       if (!reconciledTurn) {
@@ -12417,6 +12439,7 @@ export class Think<
           requestId,
           generation: epoch,
           continuation: false,
+          channel: "web",
           onQueued: releaseIfPending,
           execute: async () => {
             // Superseded by a later overlapping submit (latest/merge/debounce)
@@ -14006,6 +14029,8 @@ export class Think<
       requestId: string;
       isRegeneration: boolean;
       isCurrent: () => boolean;
+      /** Channel stamped on user messages the server has not stored yet. */
+      channel?: string;
     }
   ): Promise<{ branchParentId: string | undefined } | null> {
     const spanAttributes = {
@@ -14047,7 +14072,8 @@ export class Think<
           await this._persistIncomingMessage(
             msg,
             serverMessages,
-            serverMessagesById
+            serverMessagesById,
+            options.channel
           );
         }
 
@@ -14091,23 +14117,47 @@ export class Think<
    * without this every prior message would cost Sessions an existence read
    * plus a full-row compare (and, for media, a decode and hash of every
    * payload) per turn — reads spent discovering nothing changed.
+   *
+   * Reserved metadata (`channel`, `turnMetadata`) is server-owned. The client's
+   * copy is ignored, a stored row keeps its own, and a new user message gets
+   * `channel` when the caller supplies one.
    */
   private async _persistIncomingMessage(
     msg: UIMessage,
     serverMessages: readonly UIMessage[],
-    serverMessagesById?: ReadonlyMap<string, UIMessage>
+    serverMessagesById?: ReadonlyMap<string, UIMessage>,
+    channel?: string
   ): Promise<void> {
     const resolved =
       msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
     const prior = serverMessagesById?.get(resolved.id);
+    const incoming = stripReservedMetadata(sanitizeMessage(resolved));
     if (
       prior &&
-      JSON.stringify(prior) ===
-        JSON.stringify(stripReservedMetadata(sanitizeMessage(resolved)))
+      JSON.stringify(stripReservedMetadata(prior)) === JSON.stringify(incoming)
     ) {
       return;
     }
-    await this._upsertMessageInHistory(resolved, undefined, "client");
+    const reserved = prior
+      ? reservedMetadataOf(prior)
+      : incoming.role === "user" && channel
+        ? { channel }
+        : undefined;
+    if (!reserved) {
+      await this._upsertMessageInHistory(resolved, undefined, "client");
+      return;
+    }
+    await this._upsertMessageInHistory(
+      {
+        ...incoming,
+        metadata: {
+          ...(incoming.metadata as Record<string, unknown> | undefined),
+          ...reserved
+        }
+      },
+      undefined,
+      "server"
+    );
   }
 
   /**
@@ -16781,6 +16831,7 @@ export class Think<
       trigger: "auto-continuation",
       requestId,
       continuation: true,
+      channel: this._channelFromLatestUserMessage(),
       allowNested: true,
       execute: async () => {
         if (this._continuation.pending) {
@@ -16865,6 +16916,7 @@ export class Think<
         trigger: "auto-continuation",
         requestId,
         continuation: true,
+        channel: this._channelFromLatestUserMessage(),
         allowNested: true,
         execute: async () => {
           const continuationBody = async () => {
