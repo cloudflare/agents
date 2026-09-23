@@ -2064,6 +2064,25 @@ function reservedMetadataOf(
 }
 
 /**
+ * `parts` without the text and reasoning that follow the part for
+ * `toolCallId`. Returns `parts` itself when nothing is dropped.
+ */
+function dropGenerationAfterToolCall(
+  parts: UIMessage["parts"],
+  toolCallId: string
+): UIMessage["parts"] {
+  const index = parts.findIndex(
+    (part) => "toolCallId" in part && part.toolCallId === toolCallId
+  );
+  if (index === -1) return parts;
+  const kept = parts.filter(
+    (part, i) =>
+      i <= index || (part.type !== "text" && part.type !== "reasoning")
+  );
+  return kept.length === parts.length ? parts : kept;
+}
+
+/**
  * The stored form of a client-sourced message's metadata: Sessions drops the
  * reserved keys on every client write, so a compare against a stored row has
  * to drop them too. Mirrors `SessionCore.stripReservedMetadata` for the keys
@@ -4205,6 +4224,9 @@ export class Think<
   // persist. Null when no stream is active. Mirrors `@cloudflare/ai-chat`'s
   // `_streamingMessage` handling.
   private _streamingAssistant: StreamAccumulator | null = null;
+  // Tool calls whose pause resolved while their own turn was still streaming;
+  // see `_dropGenerationAfterResolvedPause`.
+  private _deferredResolvedPauses = new Set<string>();
   private _submitConcurrency = new SubmitConcurrencyController({
     defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
   });
@@ -6483,6 +6505,9 @@ export class Think<
   private async _prepareInferenceInvocation(
     input: TurnInput
   ): Promise<() => StreamableResult> {
+    if (input.continuation && this._deferredResolvedPauses.size > 0) {
+      await this._flushDeferredResolvedPauses();
+    }
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.
     const includeMcpTools = this.includeMcpTools;
@@ -14718,11 +14743,12 @@ export class Think<
         ]
       } as UIMessage);
     } else {
-      await this._enqueueInteractionApply(() =>
-        this._applyToolUpdateToMessages(
+      await this._enqueueInteractionApply(async () => {
+        await this._applyToolUpdateToMessages(
           pausedExecutionUpdate(toolCallId, executionId, output)
-        )
-      );
+        );
+        await this._dropGenerationAfterResolvedPause(toolCallId);
+      });
     }
     // Continue on the approving connection when there is one (WS callable),
     // else any open connection (DO-stub approval with clients attached). When
@@ -14799,6 +14825,46 @@ export class Think<
       }
     }
     return null;
+  }
+
+  /**
+   * Text and reasoning the model wrote after a paused tool result were written
+   * against the pending state ("once approved, ..."). Once the pause resolves
+   * they contradict the result, so drop them before the continuation reads the
+   * transcript. Tool, file, and other parts after the pause stay.
+   *
+   * While the turn that paused is still streaming, its accumulator owns the
+   * message and appends deltas to the last text part, so parts cannot be
+   * removed underneath it. The drop is deferred to the continuation, which is
+   * queued behind that turn and runs after it persists.
+   */
+  private async _dropGenerationAfterResolvedPause(
+    toolCallId: string
+  ): Promise<void> {
+    const streaming = this._streamingAssistant;
+    if (
+      streaming?.parts.some(
+        (part) => "toolCallId" in part && part.toolCallId === toolCallId
+      )
+    ) {
+      this._deferredResolvedPauses.add(toolCallId);
+      return;
+    }
+    const owner = await this._resolveToolCallOwner(toolCallId, undefined);
+    if (!owner) return;
+    const parts = dropGenerationAfterToolCall(owner.parts, toolCallId);
+    if (parts === owner.parts) return;
+    const safe = await this._updateMessageInHistory({ ...owner, parts });
+    this._patchCachedMessage(safe);
+    this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
+  }
+
+  private async _flushDeferredResolvedPauses(): Promise<void> {
+    const toolCallIds = [...this._deferredResolvedPauses];
+    this._deferredResolvedPauses.clear();
+    for (const toolCallId of toolCallIds) {
+      await this._dropGenerationAfterResolvedPause(toolCallId);
+    }
   }
 
   private async _applyToolUpdateToMessages(update: {
