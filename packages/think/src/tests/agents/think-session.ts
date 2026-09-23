@@ -5504,6 +5504,16 @@ export class ThinkToolsTestAgent extends Think {
 // ── ThinkProgrammaticTestAgent ──────────────────────────────
 // Tests saveMessages, continueLastTurn, and body persistence.
 
+/** A `continueLastTurn` override that only delegates to `super`. */
+export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
+  protected override async continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
+  ): Promise<SaveMessagesResult> {
+    return super.continueLastTurn(body, options);
+  }
+}
+
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
 
@@ -6024,6 +6034,15 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async testRunTurnWait(options: RunTurnWait): Promise<TurnResult> {
     return this.runTurn(options);
+  }
+
+  async testRunTurnWaitError(options: RunTurnWait): Promise<string | null> {
+    try {
+      await this.runTurn(options);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   async testRunTurnWaitString(text: string): Promise<TurnResult> {

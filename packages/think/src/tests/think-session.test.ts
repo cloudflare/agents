@@ -2432,7 +2432,7 @@ describe("Think — continueLastTurn", () => {
     await agent.testSaveMessagesWithFn("Start");
     await agent.failNextRecoveredContinueForTest("override ran");
 
-    await expect(agent.testRunTurnWait({ continuation: true })).rejects.toThrow(
+    expect(await agent.testRunTurnWaitError({ continuation: true })).toContain(
       "override ran"
     );
   });

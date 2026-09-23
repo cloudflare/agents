@@ -717,6 +717,32 @@ describe("Think durable submissions", () => {
     ).resolves.toMatchObject({ status: "aborted", messageId: assistant?.id });
   });
 
+  it("does not link a cancelled turn's partial to a reused submission id", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+
+    const first = await agent.testSubmitMessages("cancel me", {
+      submissionId: "sub-reused"
+    });
+    await waitForSubmission(
+      agent,
+      first.submissionId,
+      (submission) => submission.status === "running"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await agent.cancelSubmissionForTest(first.submissionId, "stop");
+    await agent.deleteSubmissionForTest(first.submissionId);
+    const second = await agent.testSubmitMessages("again", {
+      submissionId: "sub-reused"
+    });
+    await agent.cancelSubmissionForTest(second.submissionId, "stop");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const submission = await agent.inspectSubmissionForTest("sub-reused");
+    expect(submission?.status).toBe("aborted");
+    expect(submission?.messageId).toBeUndefined();
+  });
+
   it("aborts a running submission without letting late completion overwrite it", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);

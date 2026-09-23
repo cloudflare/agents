@@ -1923,6 +1923,26 @@ describe("Think — beforeTurn config overrides", () => {
     expect(result.outputJson).toBeUndefined();
   });
 
+  it("keeps structured output when an overridden continueLastTurn delegates to super", async () => {
+    const agent = await getAgentByName(
+      env.ThinkContinueOverrideTestAgent,
+      `bt-output-override-${crypto.randomUUID()}`
+    );
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    const valid = await agent.runTurnWaitForTest("", { continuation: true });
+    expect(valid.status).toBe("completed");
+    expect(JSON.parse(valid.outputJson ?? "null")).toEqual({ answer: "42" });
+
+    await agent.setResponse("not json");
+    const invalid = await agent.runTurnWaitForTest("", { continuation: true });
+    expect(invalid.status).toBe("error");
+    expect(invalid.outputJson).toBeUndefined();
+  });
+
   it("omits output from a wait-mode turn without a structured output spec", async () => {
     const agent = await freshAgent(`bt-output-none-${crypto.randomUUID()}`);
     await agent.setResponse("plain answer");

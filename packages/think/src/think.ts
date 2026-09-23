@@ -5675,6 +5675,9 @@ export class Think<
 
   /** One-time guard for the "recovery enabled but no classifier" DX warning. */
   private _warnedMissingClassifier = false;
+  private _continuationCapture: {
+    result?: ProgrammaticMessagesResult;
+  } | null = null;
 
   /**
    * Configure conversation storage. Called once during `onStart`. Override to
@@ -8679,15 +8682,37 @@ export class Think<
         signal: options.signal,
         channel: options.channel
       };
-      // An overridden `continueLastTurn` owns the continuation; it has no
-      // output channel, so only the built-in one captures structured output.
-      const result = isMethodOverridden(this, "continueLastTurn")
-        ? await this.continueLastTurn(options.body, continueOptions)
-        : await this._continueLastTurn(options.body, {
-            ...continueOptions,
-            captureOutput: true
-          });
-      return this._enrichTurnResult(result, true);
+      if (!isMethodOverridden(this, "continueLastTurn")) {
+        const result = await this._continueLastTurn(options.body, {
+          ...continueOptions,
+          captureOutput: true
+        });
+        return this._enrichTurnResult(result, true);
+      }
+      // The override owns the continuation; when it delegates to `super`, the
+      // base method captures structured output into this slot.
+      const capture: { result?: ProgrammaticMessagesResult } = {};
+      this._continuationCapture = capture;
+      let returned: SaveMessagesResult;
+      try {
+        returned = await this.continueLastTurn(options.body, continueOptions);
+      } finally {
+        if (this._continuationCapture === capture) {
+          this._continuationCapture = null;
+        }
+      }
+      const captured = capture.result;
+      return this._enrichTurnResult(
+        captured?.requestId === returned.requestId
+          ? {
+              ...returned,
+              status: captured.status,
+              ...(captured.error !== undefined && { error: captured.error }),
+              ...("output" in captured && { output: captured.output })
+            }
+          : returned,
+        true
+      );
     }
 
     const input = options.input;
@@ -12091,10 +12116,14 @@ export class Think<
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
   ): Promise<SaveMessagesResult> {
-    const { output: _output, ...result } = await this._continueLastTurn(
+    const capture = this._continuationCapture;
+    this._continuationCapture = null;
+    const full = await this._continueLastTurn(
       body,
-      options
+      capture ? { ...options, captureOutput: true } : options
     );
+    if (capture) capture.result = full;
+    const { output: _output, ...result } = full;
     return result;
   }
 
@@ -14199,7 +14228,9 @@ export class Think<
 
   /**
    * Cancellation settles a submission as `aborted` before the stream persists
-   * its partial; link that message without touching the terminal status.
+   * its partial; link that message without touching the terminal status. A
+   * row that never started (a reused submission id cancelled while queued)
+   * cannot own the partial.
    */
   private _recordAbortedSubmissionMessage(
     requestId: string,
@@ -14210,6 +14241,7 @@ export class Think<
       SET message_id = ${messageId}
       WHERE request_id = ${requestId}
         AND status = 'aborted'
+        AND started_at IS NOT NULL
         AND message_id IS NULL
     `;
   }

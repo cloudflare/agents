@@ -48,6 +48,10 @@
         "name": "ThinkTestAgent"
       },
       {
+        "class_name": "ThinkContinueOverrideTestAgent",
+        "name": "ThinkContinueOverrideTestAgent"
+      },
+      {
         "class_name": "ThinkPropsTestAgent",
         "name": "ThinkPropsTestAgent"
       },
@@ -234,6 +238,7 @@
         "LoopToolTestAgent",
         "OverflowRecoveryTestAgent",
         "ThinkTestAgent",
+        "ThinkContinueOverrideTestAgent",
         "ThinkPropsTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",

@@ -21,6 +21,7 @@ export {
   LoopToolTestAgent,
   OverflowRecoveryTestAgent,
   ThinkTestAgent,
+  ThinkContinueOverrideTestAgent,
   ThinkPropsTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
@@ -70,6 +71,7 @@ import type {
   LoopToolTestAgent,
   OverflowRecoveryTestAgent,
   ThinkTestAgent,
+  ThinkContinueOverrideTestAgent,
   ThinkPropsTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
@@ -223,6 +225,7 @@ export type Env = {
   LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
   OverflowRecoveryTestAgent: DurableObjectNamespace<OverflowRecoveryTestAgent>;
   ThinkTestAgent: DurableObjectNamespace<ThinkTestAgent>;
+  ThinkContinueOverrideTestAgent: DurableObjectNamespace<ThinkContinueOverrideTestAgent>;
   ThinkPropsTestAgent: DurableObjectNamespace<ThinkPropsTestAgent>;
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
