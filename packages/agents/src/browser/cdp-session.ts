@@ -58,7 +58,28 @@ export class CdpSession {
   #onActivity?: () => void;
   readonly sessionId?: string;
 
-  constructor(socket: WebSocket, options: CdpSessionOptions = {}) {
+  constructor(socket: WebSocket, options?: CdpSessionOptions);
+  /**
+   * @deprecated Pass a {@link CdpSessionOptions} object instead —
+   * `new CdpSession(socket, { timeoutMs, onClose, sessionId })`. The
+   * positional form will be removed.
+   */
+  constructor(
+    socket: WebSocket,
+    timeoutMs?: number,
+    onClose?: () => void,
+    sessionId?: string
+  );
+  constructor(
+    socket: WebSocket,
+    optionsOrTimeoutMs?: CdpSessionOptions | number,
+    onClose?: () => void,
+    sessionId?: string
+  ) {
+    const options: CdpSessionOptions =
+      typeof optionsOrTimeoutMs === "object"
+        ? optionsOrTimeoutMs
+        : { timeoutMs: optionsOrTimeoutMs, onClose, sessionId };
     this.#socket = socket;
     this.#defaultTimeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#dispose = options.onClose;
