@@ -34,7 +34,16 @@ allowBuilds:
   "@openrouter/sdk": false
   # agent-think's unit tests mock GitHub over MSW; its postinstall is not needed.
   msw: false
+overrides:
+  # @cloudflare/vite-plugin 1.57.2+ requires wrangler ^4.136.3, which is newer
+  # than `minimumReleaseAge` allows. Pin the plugin to the newest release that
+  # pairs with the newest mature wrangler until the cutoff moves on.
+  "@cloudflare/vite-plugin": "1.57.1"
+
 minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"
+  # The pi harness example tracks pi's current release deliberately; it is an
+  # example, not a published package, and pi ships several times a week.
+  - "@earendil-works/*"
