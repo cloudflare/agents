@@ -333,7 +333,7 @@ export class ChatIngressAgent extends Agent {
     const restored = JSON.parse(JSON.stringify(snapshot), bot.reviver()) as {
       message: Message;
     };
-    const thread = reviveReplyThread(snapshot.thread);
+    const thread = reviveReplyThread(bot, snapshot.thread);
     const mode = aiReplyRecoveryMode(snapshot);
     if (mode === "answer") {
       await this.answerWithConversationAgent(thread, restored.message);

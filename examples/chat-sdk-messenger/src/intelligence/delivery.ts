@@ -1,5 +1,5 @@
 import { Message, ThreadImpl } from "chat";
-import type { SerializedThread, Thread } from "chat";
+import type { Chat, SerializedThread, Thread } from "chat";
 
 export const AI_REPLY_FIBER_NAME = "chat-sdk-messenger:ai-reply";
 export const EMPTY_AI_RESPONSE =
@@ -91,13 +91,21 @@ export function aiReplySnapshot(
 /**
  * `bot.reviver()` rebuilds threads with `ThreadImpl.fromJSON`, which drops the
  * bot's `fallbackStreamingPlaceholderText`, so a recovered reply would post
- * "..." first. Rebuild the thread from the same fields with that setting. The
- * adapter resolves lazily through the bot, so call `bot.reviver()` first.
+ * "..." first. Rebuild the thread from the same fields with that setting.
+ *
+ * The adapter is bound from `bot` rather than resolved lazily: a lazy thread
+ * reads the module-global Chat singleton on first use, which another agent
+ * instance in the same isolate can replace while recovery awaits.
  */
-export function reviveReplyThread(value: unknown): Thread {
+export function reviveReplyThread(bot: Chat, value: unknown): Thread {
   const json = JSON.parse(JSON.stringify(value)) as SerializedThread;
+  const adapter = bot.getAdapter(json.adapterName);
+  if (!adapter) {
+    throw new Error(`Adapter "${json.adapterName}" is not registered`);
+  }
   return new ThreadImpl({
-    adapterName: json.adapterName,
+    adapter,
+    stateAdapter: bot.getState(),
     channelId: json.channelId,
     channelVisibility: json.channelVisibility,
     currentMessage: json.currentMessage

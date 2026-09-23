@@ -89,8 +89,7 @@ describe("recovered reply threads", () => {
 
   it("posts the reply text first instead of a `...` placeholder", async () => {
     const { bot, sent } = recordingBot();
-    bot.reviver();
-    const thread = reviveReplyThread({
+    const thread = reviveReplyThread(bot, {
       _type: "chat:Thread",
       adapterName: "fake",
       channelId: "fake:dm",

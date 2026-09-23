@@ -800,7 +800,8 @@ describe("think messengers core", () => {
   describe("streamed replies on adapters without native streaming", () => {
     function recordingRuntime(
       overrides: Partial<Adapter> = {},
-      deltas = ["Hello", " there"]
+      deltas = ["Hello", " there"],
+      beforeDelivery?: () => void
     ) {
       const calls: Array<{ kind: "post" | "edit"; text: string }> = [];
       const text = (message: unknown) =>
@@ -833,7 +834,11 @@ describe("think messengers core", () => {
               },
               ...overrides
             }),
-            conversation: "self",
+            conversation: async () => {
+              await Promise.resolve();
+              beforeDelivery?.();
+              return { target: "self" as const };
+            },
             provider: "fake",
             userName: "fake_bot",
             verifyWebhook: false
@@ -901,6 +906,19 @@ describe("think messengers core", () => {
 
       expect(calls.at(-1)?.text).toBe("Hello there");
       expect(other.calls).toEqual([]);
+    });
+
+    it("keeps its own adapter when another runtime registers its Chat mid-recovery", async () => {
+      let other: ReturnType<typeof recordingRuntime> | undefined;
+      const { calls, runtime } = recordingRuntime({}, undefined, () => {
+        other = recordingRuntime();
+      });
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(other).toBeDefined();
+      expect(calls.at(-1)?.text).toBe("Hello there");
+      expect(other?.calls).toEqual([]);
     });
 
     it("posts a live webhook reply's text first instead of a `...` placeholder (#2310)", async () => {

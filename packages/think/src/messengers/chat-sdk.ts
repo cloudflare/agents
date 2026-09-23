@@ -307,7 +307,7 @@ export class ThinkMessengerRuntime {
       );
     }
 
-    const thread = this.reviveThread(snapshot.thread);
+    const thread = this.reviveThread(definition, snapshot.thread);
     const mode = messengerReplyRecoveryMode(snapshot);
 
     if (mode === "answer") {
@@ -659,18 +659,23 @@ export class ThinkMessengerRuntime {
    * without the Chat's streaming config, so a recovered reply would fall back to
    * the `"..."` placeholder. Rebuild it from the same fields with that config.
    */
-  private reviveThread(value: unknown): ChatThread {
+  private reviveThread(
+    definition: NormalizedMessengerDefinition,
+    value: unknown
+  ): ChatThread {
     if (value === undefined) {
       throw new Error(
         "Messenger recovery snapshot is missing chat object data"
       );
     }
-    // The thread resolves its adapter from the module-global Chat singleton,
-    // which another runtime in this isolate may have registered since.
-    (this.chat ??= this.createChat()).registerSingleton();
+    const chat = (this.chat ??= this.createChat());
     const json = JSON.parse(JSON.stringify(value)) as SerializedThread;
+    // Bound explicitly: a lazy thread resolves its adapter from the
+    // module-global Chat singleton on first use, which another runtime in
+    // this isolate can replace while recovery awaits.
     return new ThreadImpl({
-      adapterName: json.adapterName,
+      adapter: definition.adapter,
+      stateAdapter: chat.getState(),
       channelId: json.channelId,
       channelVisibility: json.channelVisibility,
       currentMessage: json.currentMessage
