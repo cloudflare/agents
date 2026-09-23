@@ -1,0 +1,27 @@
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_898f16d253f04c 2159,2161-2165,2180-2183,2187,2190,2194,2196-2208,7098,7281,7296
+.changeset/ai-chat-persist-before-done.md
+  s_368991bdec7f77::t_27b711f5687ccb 7
+design/chat-shared-layer.md
+  s_368991bdec7f77::t_6131f747092e09 342
+packages/ai-chat/src/tests/terminal-frame-order.test.ts
+  s_368991bdec7f77::t_deb4ec8d634825 20,23-27,42-43,139-174
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_2e3b4ddaa763d3 1502,1512,1519,1555-1561
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "39dff481338e7157a0e6254e5a63bbc352a74216",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
