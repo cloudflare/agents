@@ -182,7 +182,7 @@ export class PiTransport {
     } catch (error) {
       send(connection, {
         type: "error",
-        ...(id === undefined ? {} : { id }),
+        id,
         message: error instanceof Error ? error.message : String(error)
       });
     }
@@ -225,9 +225,7 @@ export class PiTransport {
       case "abort":
         return this.#host.abort({
           lane,
-          ...(message.operationId === undefined
-            ? {}
-            : { operationId: message.operationId })
+          operationId: message.operationId
         });
       case "steer":
         return this.#host.steer(message.message, { lane });

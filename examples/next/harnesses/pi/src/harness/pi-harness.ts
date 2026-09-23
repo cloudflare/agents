@@ -130,37 +130,29 @@ function asUpstreamRequest(
         kind: "prompt",
         operationId,
         prompt: request.prompt,
-        ...(request.images === undefined
-          ? {}
-          : {
-              images: request.images.map(
-                (image): ImageContent => ({ type: "image", ...image })
-              )
-            })
+        images: request.images?.map(
+          (image): ImageContent => ({ type: "image", ...image })
+        )
       };
     case "skill":
       return {
         kind: "skill",
         operationId,
         name: request.name,
-        ...(request.additionalInstructions === undefined
-          ? {}
-          : { additionalInstructions: request.additionalInstructions })
+        additionalInstructions: request.additionalInstructions
       };
     case "prompt_template":
       return {
         kind: "prompt_template",
         operationId,
         name: request.name,
-        ...(request.args === undefined ? {} : { args: [...request.args] })
+        args: request.args ? [...request.args] : undefined
       };
     case "compaction":
       return {
         kind: "compaction",
         operationId,
-        ...(request.customInstructions === undefined
-          ? {}
-          : { customInstructions: request.customInstructions })
+        customInstructions: request.customInstructions
       };
     case "navigation":
       return {
@@ -168,13 +160,9 @@ function asUpstreamRequest(
         operationId,
         targetId: request.targetId,
         options: {
-          ...(request.summarize === undefined
-            ? {}
-            : { summarize: request.summarize }),
-          ...(request.label === undefined ? {} : { label: request.label }),
-          ...(request.customInstructions === undefined
-            ? {}
-            : { customInstructions: request.customInstructions })
+          summarize: request.summarize,
+          label: request.label,
+          customInstructions: request.customInstructions
         }
       };
   }
@@ -212,12 +200,10 @@ function asUpstreamTools<ToolContext extends object | undefined>(
 function asUpstreamResources(resources: PiResources): UpstreamResources {
   // SAFETY: PiSkill and PiPromptTemplate mirror pi's Skill and PromptTemplate.
   return {
-    ...(resources.skills === undefined
-      ? {}
-      : { skills: [...resources.skills] as UpstreamSkill[] }),
-    ...(resources.promptTemplates === undefined
-      ? {}
-      : { promptTemplates: [...resources.promptTemplates] })
+    skills: resources.skills as UpstreamSkill[] | undefined,
+    promptTemplates: resources.promptTemplates
+      ? [...resources.promptTemplates]
+      : undefined
   };
 }
 
@@ -226,9 +212,10 @@ function projectResult(record: OperationResultRecord): PiOperationResult {
     operationId: record.operationId,
     kind: record.kind,
     status: record.status,
-    ...(record.error === undefined
-      ? {}
-      : { error: { code: record.error.code, message: record.error.message } }),
+    error: record.error && {
+      code: record.error.code,
+      message: record.error.message
+    },
     fromTipId: record.fromTipId,
     tipId: record.tipId,
     startedAt: record.startedAt,
@@ -246,9 +233,10 @@ function projectRunResult(record: OperationResultRecord): PiRunResult {
   return {
     operationId: record.operationId,
     status: record.status,
-    ...(record.error === undefined
-      ? {}
-      : { error: { code: record.error.code, message: record.error.message } })
+    error: record.error && {
+      code: record.error.code,
+      message: record.error.message
+    }
   };
 }
 
@@ -263,7 +251,7 @@ function operationStatus(
     kind: operation.kind,
     status: operation.status === "aborting" ? "aborting" : "running",
     startedAt: operation.startedAt,
-    ...(streaming === undefined ? {} : { streaming }),
+    streaming,
     // Pi reports both still-running and already-settled calls for the live
     // operation; only the running ones belong in its running-tool view.
     runningTools: operation.runningTools
@@ -273,14 +261,10 @@ function operationStatus(
         toolName: tool.toolName,
         // SAFETY: pi validated these arguments against the tool schema.
         arguments: tool.args as PiJson,
-        ...(tool.result === undefined
-          ? {}
-          : { partial: projectToolResult(tool.result) })
+        partial: tool.result && projectToolResult(tool.result)
       })),
-    ...(operation.retry === undefined ? {} : { retry: operation.retry }),
-    ...(operation.deferred === undefined
-      ? {}
-      : { deferred: operation.deferred.handle })
+    retry: operation.retry,
+    deferred: operation.deferred?.handle
   };
 }
 
@@ -469,7 +453,7 @@ export class PiHarness<
       {
         kind: "prompt",
         prompt: text,
-        ...(images === undefined ? {} : { images })
+        images
       },
       options
     );
@@ -729,9 +713,7 @@ export class PiHarness<
         // SAFETY: PiModels and PiModel are narrow public projections.
         models: config.models as Models,
         model: model as Model<Api>,
-        ...(config.thinkingLevel === undefined
-          ? {}
-          : { thinkingLevel: config.thinkingLevel }),
+        thinkingLevel: config.thinkingLevel,
         activeToolNames:
           config.activeToolNames === undefined
             ? tools.map((tool) => tool.name)
@@ -758,22 +740,12 @@ export class PiHarness<
           const catalog = (await this.#resolvedSkills())?.catalog;
           return catalog ? [base, catalog].filter(Boolean).join("\n\n") : base;
         },
-        ...(config.streamOptions === undefined
-          ? {}
-          : { streamOptions: config.streamOptions }),
-        ...(config.retry === undefined ? {} : { retry: config.retry }),
-        ...(config.compaction === undefined
-          ? {}
-          : { compaction: config.compaction }),
-        ...(config.steeringMode === undefined
-          ? {}
-          : { steeringMode: config.steeringMode }),
-        ...(config.followUpMode === undefined
-          ? {}
-          : { followUpMode: config.followUpMode }),
-        ...(config.toolExecution === undefined
-          ? {}
-          : { toolExecution: config.toolExecution })
+        streamOptions: config.streamOptions,
+        retry: config.retry,
+        compaction: config.compaction,
+        steeringMode: config.steeringMode,
+        followUpMode: config.followUpMode,
+        toolExecution: config.toolExecution
       };
       const created = await createAgentHarness.create(options, context);
       attached = created.harness;
@@ -1255,7 +1227,7 @@ export class PiHarness<
     else this.#transport?.laneEvent(lane, event);
     const context = {
       lane,
-      ...(operationId === undefined ? {} : { operationId })
+      operationId
     };
     for (const listener of this.#listeners) {
       try {

@@ -78,9 +78,7 @@ export function projectAgentMessage(
         parts: assistantParts(message.content),
         timestamp,
         stopReason: message.stopReason,
-        ...(message.errorMessage === undefined
-          ? {}
-          : { error: message.errorMessage })
+        error: message.errorMessage
       };
     case "toolResult":
       return {
@@ -92,9 +90,7 @@ export function projectAgentMessage(
             id: message.toolCallId,
             name: message.toolName,
             content: message.content,
-            ...(message.details === undefined
-              ? {}
-              : { details: asJson(message.details) }),
+            details: asJson(message.details),
             error: message.isError
           }
         ],
@@ -126,8 +122,8 @@ export function projectToolResult(
   return {
     content: result.content,
     details: asJson(result.details),
-    ...(result.usage === undefined ? {} : { usage: result.usage }),
-    ...(result.terminate === undefined ? {} : { terminate: result.terminate })
+    usage: result.usage,
+    terminate: result.terminate
   };
 }
 
@@ -218,7 +214,7 @@ export function projectQueue(items: readonly LaneQueuedItem[]): PiQueuedItem[] {
     return {
       entryId: item.entryId,
       kind: item.kind,
-      ...(message === undefined ? {} : { message })
+      message
     };
   });
 }
