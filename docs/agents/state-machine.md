@@ -305,14 +305,24 @@ const machines = new StateMachine({
 
 ## Join a child
 
-An attached child starts with the parent checkpoint. `children.take()` returns its durable result and parent cancellation includes the child.
+A child is a built-in reconcile effect. `spawn()` commits its intent, `join()` starts or inspects it, and a durable completion event wakes the parent. Attached children follow parent cancellation.
 
 ```ts
-import type { MachineChildRef } from "agents/state-machine";
-
 type ParentState =
   | { phase: "spawn"; topic: string }
-  | { phase: "join"; child: MachineChildRef<string> };
+  | {
+      phase: "join";
+      child: {
+        runId: string;
+        definition: string;
+        mode: "attached" | "background";
+        effect: {
+          id: string;
+          kind: string;
+          recovery: "reconcile";
+        };
+      };
+    };
 
 const parent = defineMachine<ParentState, string, { topic: string }>({
   version: 1,
@@ -327,13 +337,14 @@ const parent = defineMachine<ParentState, string, { topic: string }>({
 
       return context.transition({ phase: "join", child });
     },
-    join: (state, context) => {
-      const result = context.children.take(state.child);
+    join: async (state, context) => {
+      const result = await context.children.join(state.child);
 
       if (!result) {
         return context.wait(state, {
           type: "state-machine:child-completed",
-          key: state.child.runId
+          key: state.child.runId,
+          timeoutAt: Date.now() + 30_000
         });
       }
 
@@ -345,45 +356,7 @@ const parent = defineMachine<ParentState, string, { topic: string }>({
 });
 ```
 
-Use `mode: "background"` to exclude the child from parent cancellation.
-
-## Detach a child
-
-A detached child may outlive its parent run. Completion goes to a named, at-least-once handler instead of back to a waiting parent phase.
-
-```ts
-import type { MachineDetachedDelivery } from "agents/state-machine";
-
-async function record(delivery: MachineDetachedDelivery) {
-  if (delivery.kind === "give-up") {
-    await markTimedOut(delivery.childRunId, delivery.deliveryId);
-    return;
-  }
-
-  await saveResult(delivery.childRunId, delivery.outcome, delivery.deliveryId);
-}
-
-const machines = new StateMachine({
-  definitions: { parent, research },
-  detachedHandlers: { "research-finished": record }
-});
-```
-
-```ts
-const child = context.children.spawn<string>(
-  "research",
-  { topic: state.topic },
-  {
-    mode: "detached",
-    onFinish: "research-finished",
-    maxBudgetMs: 60 * 60 * 1000
-  }
-);
-
-return context.complete(child.runId);
-```
-
-Deduplicate handler work with `delivery.deliveryId`.
+Use `mode: "background"` to exclude the child from parent cancellation. The completion event is the normal wake path; the timeout reconciles the child if event delivery is delayed.
 
 ## Pause, resume, terminate, and delete
 

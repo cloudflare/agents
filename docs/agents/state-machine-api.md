@@ -16,7 +16,7 @@ See [State machine examples](./state-machine.md) for complete patterns.
 
 ## `StateMachine`
 
-`StateMachine` is the installed Lifecycle capability. Use it to accept runs, inspect snapshots, deliver events, and control execution.
+`StateMachine` is a Lifecycle capability. Use it to accept runs, inspect snapshots, deliver events, and control execution.
 
 ```ts
 class StateMachine<Definitions extends MachineDefinitions> {
@@ -61,13 +61,12 @@ class StateMachine<Definitions extends MachineDefinitions> {
 }
 ```
 
-`StateMachineOptions` registers every definition and the runtime handlers used by effects and detached children.
+`StateMachineOptions` registers every definition and external effect runtime.
 
 ```ts
 interface StateMachineOptions<Definitions extends MachineDefinitions> {
   definitions: Definitions;
   effects?: MachineEffectRuntimes;
-  detachedHandlers?: Readonly<Record<string, MachineDetachedHandler>>;
 }
 
 interface MachineRunOptions {
@@ -430,10 +429,10 @@ type MachineEffectOutcome<Output extends MachineValue> =
 
 ## Children
 
-`MachineChildren` starts another registered definition and reads its terminal result. `MachineChildMode` controls cancellation and result delivery.
+`MachineChildren` is a typed layer over reconcile effects. `spawn()` plans the child effect with the parent checkpoint. `join()` starts or reconciles the child. Child completion also sends a durable event that wakes a waiting parent.
 
 ```ts
-type MachineChildMode = "attached" | "background" | "detached";
+type MachineChildMode = "attached" | "background";
 
 interface MachineChildren<Definitions extends MachineDefinitions> {
   spawn<Output extends MachineValue = MachineValue>(
@@ -442,13 +441,13 @@ interface MachineChildren<Definitions extends MachineDefinitions> {
     options?: MachineSpawnOptions
   ): MachineChildRef<Output>;
 
-  take<Output extends MachineValue>(
+  join<Output extends MachineValue>(
     child: MachineChildRef<Output>
-  ): MachineChildResult<Output> | null;
+  ): Promise<MachineChildResult<Output> | null>;
 }
 ```
 
-`MachineChildRef` is stored in the parent checkpoint. `MachineSpawnOptions` selects identity, mode, owner, and detached delivery settings.
+`MachineChildRef` stores the underlying effect reference in the parent checkpoint. `MachineSpawnOptions` selects identity, cancellation mode, and owner.
 
 ```ts
 interface MachineChildRef<Output extends MachineValue = MachineValue> {
@@ -456,6 +455,7 @@ interface MachineChildRef<Output extends MachineValue = MachineValue> {
   definition: string;
   mode: MachineChildMode;
   owner?: MachineOwnerAddress;
+  effect: MachineEffectRef<MachineJson>;
 }
 
 interface MachineOwnerAddress {
@@ -467,8 +467,6 @@ interface MachineSpawnOptions {
   runId?: string;
   mode?: MachineChildMode; // Default: "attached"
   owner?: MachineOwnerAddress;
-  onFinish?: string;
-  maxBudgetMs?: number; // Detached default: 24 hours
 }
 
 type MachineChildResult<Output extends MachineValue> =
@@ -476,35 +474,14 @@ type MachineChildResult<Output extends MachineValue> =
   | { ok: false; error: { name: string; message: string } };
 ```
 
-| Mode         | Parent cancellation         | Completion                      |
-| ------------ | --------------------------- | ------------------------------- |
-| `attached`   | Cancels the child.          | Read with `children.take()`.    |
-| `background` | Does not cancel the child.  | Read with `children.take()`.    |
-| `detached`   | Uses its own finite budget. | Calls a named detached handler. |
+| Mode         | Parent cancellation        | Completion                   |
+| ------------ | -------------------------- | ---------------------------- |
+| `attached`   | Cancels the child.         | Read with `children.join()`. |
+| `background` | Does not cancel the child. | Read with `children.join()`. |
+
+A `state-machine:child-completed` event is the normal wake path. A timer-backed wait can call `join()` again as a reconciliation fallback.
 
 `owner` is reserved for routed child ownership. Omit it for the supported local child lifecycle.
-
-## Detached delivery
-
-`MachineDetachedDelivery` is passed to the named handler registered in `StateMachineOptions.detachedHandlers`.
-
-```ts
-interface MachineDetachedDelivery {
-  deliveryId: string;
-  kind: "finish" | "give-up";
-  parentRunId: string;
-  childRunId: string;
-  handler: string;
-  attempt: number;
-  outcome?: MachineChildResult<MachineValue>;
-}
-
-type MachineDetachedHandler = (
-  delivery: MachineDetachedDelivery
-) => void | Promise<void>;
-```
-
-Delivery is at least once. Deduplicate handler work with `deliveryId`. `give-up` and `finish` use different delivery IDs.
 
 ## Snapshots
 
