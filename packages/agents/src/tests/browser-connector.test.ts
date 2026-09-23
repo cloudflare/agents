@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createBrowserRuntime } from "../browser/ai";
 import { BrowserConnector } from "../browser/connector";
+import { CdpSession } from "../browser/cdp-session";
 import { connectBrowser, getBrowserRecording } from "../browser/browser-run";
 import type { ConnectBrowserOptions } from "../browser/browser-run";
 import type {
@@ -336,6 +337,55 @@ describe("browser_execute model output", () => {
     expect(await tool.toModelOutput({ output: { value: 1n } })).toMatchObject({
       type: "text"
     });
+  });
+});
+
+describe("CdpSession construction", () => {
+  /** A socket that never answers, so commands can only time out. */
+  function silentSocket(): WebSocket {
+    const listeners = new Map<string, Array<(event: unknown) => void>>();
+    return {
+      addEventListener(type: string, fn: (event: unknown) => void) {
+        listeners.set(type, [...(listeners.get(type) ?? []), fn]);
+      },
+      send() {},
+      close() {
+        for (const fn of listeners.get("close") ?? []) fn({});
+      }
+    } as unknown as WebSocket;
+  }
+
+  it("still honors the deprecated positional arguments", async () => {
+    let closed = 0;
+    const session = new CdpSession(
+      silentSocket(),
+      25,
+      () => closed++,
+      "session-1"
+    );
+
+    expect(session.sessionId).toBe("session-1");
+    await expect(session.send("Page.enable")).rejects.toThrow(
+      "CDP command timed out after 25ms: Page.enable"
+    );
+    session.close();
+    expect(closed).toBe(1);
+  });
+
+  it("accepts the options object", async () => {
+    let closed = 0;
+    const session = new CdpSession(silentSocket(), {
+      timeoutMs: 25,
+      onClose: () => closed++,
+      sessionId: "session-1"
+    });
+
+    expect(session.sessionId).toBe("session-1");
+    await expect(session.send("Page.enable")).rejects.toThrow(
+      "CDP command timed out after 25ms: Page.enable"
+    );
+    session.close();
+    expect(closed).toBe(1);
   });
 });
 
