@@ -224,7 +224,7 @@ export class StateMachine<
         definitionVersion: definition.version,
         phase: initial.phase,
         checkpoint,
-        retain: options.retain !== false,
+        persist: options.persist !== false,
         idempotencyKey: options.idempotencyKey,
         now
       });
@@ -626,7 +626,7 @@ export class StateMachine<
              WHERE run_id = ? AND state = 'open'`,
             [now, now, row.run_id]
           );
-          if (row.retain === 0) {
+          if (row.persist === 0) {
             this.#store.deleteOwnedRows(row.run_id);
             this.#store.write(
               "DELETE FROM cf_agents_state_machine_runs WHERE run_id = ?",
@@ -698,7 +698,7 @@ export class StateMachine<
     definitionVersion: number;
     phase: string;
     checkpoint: string | null;
-    retain: boolean;
+    persist: boolean;
     idempotencyKey?: string;
     now: number;
   }): void {
@@ -722,7 +722,7 @@ export class StateMachine<
       result_json: null,
       error_name: null,
       error_message: null,
-      retain: input.retain ? 1 : 0,
+      persist: input.persist ? 1 : 0,
       idempotency_key: input.idempotencyKey ?? null,
       created_at: input.now,
       updated_at: input.now,

@@ -541,7 +541,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
           (run_id, definition, definition_version, status, phase,
            checkpoint_json, revision, control_json, job_id, wait_kind,
            wait_type, wait_key, next_at, cancel_requested, cancel_reason,
-           result_json, error_name, error_message, retain, idempotency_key,
+           result_json, error_name, error_message, persist, idempotency_key,
            created_at, updated_at, settled_at)
          VALUES (?, 'effect', 1, 'paused', 'execute', ?, 1,
                  '{"status":"running"}', ?, NULL, NULL, NULL, NULL, 0,
@@ -598,7 +598,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
       result_json TEXT,
       error_name TEXT,
       error_message TEXT,
-      retain INTEGER NOT NULL DEFAULT 1,
+      persist INTEGER NOT NULL DEFAULT 1,
       idempotency_key TEXT UNIQUE,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -609,7 +609,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.sql.exec(
       `INSERT INTO cf_agents_state_machine_runs
         (run_id, definition, definition_version, status, phase,
-         checkpoint_json, revision, control_json, job_id, retain,
+         checkpoint_json, revision, control_json, job_id, persist,
          created_at, updated_at)
        VALUES (?, 'pipeline', 1, 'running', 'first', ?, 0,
                '{"status":"running"}', ?, 1, ?, ?)`,

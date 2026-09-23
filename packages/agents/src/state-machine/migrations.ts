@@ -28,13 +28,13 @@ export function migrateStateMachineSchema(
           (run_id, definition, definition_version, status, phase,
            checkpoint_json, revision, control_json, job_id, wait_kind,
            wait_type, wait_key, next_at, event_sequence, cancel_requested,
-           cancel_reason, result_json, error_name, error_message, retain,
+           cancel_reason, result_json, error_name, error_message, persist,
            idempotency_key,
            created_at, updated_at, settled_at)
           SELECT run_id, definition, definition_version, status, phase,
                  checkpoint_json, revision, control_json, job_id, NULL,
                  NULL, NULL, NULL, 0, 0, NULL, result_json, error_name,
-                 error_message, retain, idempotency_key, created_at,
+                 error_message, persist, idempotency_key, created_at,
                  updated_at, settled_at
           FROM cf_agents_state_machine_runs_v1`);
         store.sql("DROP TABLE cf_agents_state_machine_runs_v1");

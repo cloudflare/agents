@@ -288,7 +288,7 @@ export type MachineEventOf<Definition> =
 export interface MachineRunOptions {
   readonly runId?: string;
   readonly idempotencyKey?: string;
-  readonly retain?: boolean;
+  readonly persist?: boolean;
 }
 
 export interface MachineReceipt {
@@ -410,7 +410,7 @@ export interface MachineRunRow {
   result_json: string | null;
   error_name: string | null;
   error_message: string | null;
-  retain: number;
+  persist: number;
   idempotency_key: string | null;
   created_at: number;
   updated_at: number;
