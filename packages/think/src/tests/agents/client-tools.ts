@@ -12,7 +12,9 @@ import { Think } from "../../think";
 import type {
   ChatResponseResult,
   MessageConcurrency,
-  StreamCallback
+  StreamCallback,
+  TurnConfig,
+  TurnContext
 } from "../../think";
 import { StreamAccumulator, type ClientToolSchema } from "agents/chat";
 
@@ -727,9 +729,44 @@ export class ThinkClientToolsAgent extends Think {
   private _slowChunkCount = 4;
   private _responseLog: ChatResponseResult[] = [];
   private _lastTurnToolNames: string[] = [];
+  private _stampMetadata = false;
 
-  override beforeTurn(ctx: { tools: ToolSet }): void {
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
     this._lastTurnToolNames = Object.keys(ctx.tools);
+    if (this._stampMetadata) {
+      // Per-turn write path (`TurnConfig.messageMetadata`) for issue #1873.
+      // `createdAt` on `start` and `source` on `finish` prove the two are
+      // shallow-merged; `scope: "turn"` distinguishes this from the
+      // instance-level writer below. `continued` shows `beforeTurn` resolved the
+      // writer again for an auto-continuation turn.
+      return {
+        messageMetadata: ({ part }) => {
+          if (part.type === "start") {
+            return ctx.continuation
+              ? { continued: true }
+              : { createdAt: 1_700_000_000_000, scope: "turn" };
+          }
+          if (part.type === "finish") return { source: "server" };
+          return undefined;
+        }
+      };
+    }
+  }
+
+  async setMessageMetadataMode(value: boolean): Promise<void> {
+    this._stampMetadata = value;
+  }
+
+  // Instance-level default writer (`this.messageMetadata`), which applies to
+  // every turn without a `beforeTurn` override. `scope: "instance"` lets the
+  // precedence test confirm the per-turn config wins when both are set.
+  async setInstanceMessageMetadataMode(value: boolean): Promise<void> {
+    this.messageMetadata = value
+      ? ({ part }) =>
+          part.type === "start"
+            ? { createdAt: 1_600_000_000_000, scope: "instance" }
+            : undefined
+      : undefined;
   }
 
   async getLastTurnToolNames(): Promise<string[]> {
@@ -1321,6 +1358,38 @@ export class ThinkClientToolsAgent extends Think {
       internal._interactionApplyTail = Promise.resolve();
       internal._autoContinuation.reset();
     }
+  }
+
+  /**
+   * Drive the sub-agent RPC `chat()` entry point and return the streamed
+   * chunks plus the persisted assistant message's metadata (#1873).
+   */
+  async runChatForMetadata(message: string): Promise<{
+    startMetadataJson: string | undefined;
+    metadataJson: string | undefined;
+  }> {
+    const events: Array<Record<string, unknown>> = [];
+    let error: string | undefined;
+    await this.chat(message, {
+      onStart() {},
+      onEvent(json: string) {
+        events.push(JSON.parse(json) as Record<string, unknown>);
+      },
+      onDone() {},
+      onError(e: string) {
+        error = e;
+      }
+    });
+    if (error) throw new Error(error);
+    const messages = (await this.getMessages()) as UIMessage[];
+    const assistant = [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant");
+    const start = events.find((e) => e.type === "start");
+    return {
+      startMetadataJson: JSON.stringify(start?.messageMetadata),
+      metadataJson: JSON.stringify(assistant?.metadata)
+    };
   }
 
   /**

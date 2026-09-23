@@ -367,6 +367,7 @@ Script execution requires a Worker Loader binding:
 | `getDefaultTimezone()`     | `undefined`                        | Default timezone for wall-clock schedules                                                                                                                                                                                    |
 | `maxSteps`                 | `10`                               | Max tool-call rounds per turn (property)                                                                                                                                                                                     |
 | `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
+| `messageMetadata`          | `undefined`                        | Default writer for server-authored assistant-message metadata (override per turn via `TurnConfig`)                                                                                                                           |
 | `configureSession()`       | identity                           | Configure the default session handle: compaction and search                                                                                                                                                                  |
 | `configureContext()`       | `[]`                               | Declare prompt context blocks. See [Session and context](#session-and-context)                                                                                                                                               |
 | `hydrationByteBudget`      | 32 MiB                             | Byte budget for startup transcript hydration. Charges each row its full stored size, including the continuation rows a large message is split across                                                                         |
@@ -601,6 +602,8 @@ The AI SDK-derived contexts spread the SDK's own types at the top level — no i
 
 `TurnConfig` also accepts `sendReasoning` to override whether reasoning chunks are emitted for the current UI message stream. The instance-level `sendReasoning` property defaults to `true`; return `{ sendReasoning: false }` from `beforeTurn` to hide reasoning for a single turn, for example on internal continuation turns.
 
+`TurnConfig.messageMetadata` writes server-authored metadata onto the assistant message a turn persists — the same AI SDK `messageMetadata` callback base `AIChatAgent` + `streamText` accept, now forwarded through Think. It is called with each stream part; return a JSON-serializable object (typically from the `start` and/or `finish` part) and each return is shallow-merged into the message's metadata. An auto-continuation is its own turn: `beforeTurn` runs again with `ctx.continuation: true`, and the continuation persists as a separate assistant message with its own metadata. Its return value is broadcast to clients and persisted, so it must not carry server-only secrets. Set the instance-level `messageMetadata` property for turn-independent metadata (e.g. stamping a `createdAt` timestamp on every assistant message); return `messageMetadata` from `beforeTurn` to override it for a single turn. Because it is a function, configure it from a Think subclass — sandboxed extension hooks cannot provide it over RPC.
+
 `TurnConfig` also accepts stable AI SDK `streamText` call settings such as `maxOutputTokens`, `temperature`, `stopSequences`, `seed`, `maxRetries`, `timeout`, and `headers`. Use them to tune model behavior per turn, for example disabling retries or adding a chunk timeout during recovery flows.
 
 `TurnConfig.stopWhen` accepts AI SDK stop conditions such as `hasToolCall("finalAnswer")` for ending a turn early. Think composes these with its own `maxSteps` bound, so a custom condition can stop before the cap without removing the safety limit. Because stop conditions are functions, return `stopWhen` from a Think subclass's `beforeTurn`; sandboxed extension hooks cannot provide it over RPC.
@@ -726,6 +729,7 @@ interface TurnConfig {
   maxSteps?: number; // override maxSteps for this turn
   stopWhen?: StopCondition | StopCondition[]; // additional early-exit conditions
   sendReasoning?: boolean; // send reasoning chunks for this turn
+  messageMetadata?: MessageMetadataCallback; // write assistant-message metadata for this turn
   maxOutputTokens?: number;
   temperature?: number;
   topP?: number;

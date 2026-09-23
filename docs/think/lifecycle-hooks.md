@@ -155,32 +155,33 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 
 All fields are optional. Return only what you want to change.
 
-| Field                      | Type                                           | Description                                                                                                                                                                       |
-| -------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                    | `ThinkModel`                                   | Override the model for this turn — a model id string or a `LanguageModel`                                                                                                         |
-| `system`                   | `string`                                       | Override the system prompt                                                                                                                                                        |
-| `messages`                 | `ModelMessage[]`                               | Override the assembled messages                                                                                                                                                   |
-| `tools`                    | `ToolSet`                                      | Extra tools to merge (additive)                                                                                                                                                   |
-| `activeTools`              | `string[]`                                     | Limit which tools the model can call                                                                                                                                              |
-| `toolChoice`               | `ToolChoice`                                   | Force a specific tool call                                                                                                                                                        |
-| `maxSteps`                 | `number`                                       | Override `maxSteps` for this turn                                                                                                                                                 |
-| `stopWhen`                 | `StopCondition \| StopCondition[]`             | Additional early-exit conditions                                                                                                                                                  |
-| `sendReasoning`            | `boolean`                                      | Send reasoning chunks for this turn                                                                                                                                               |
-| `maxOutputTokens`          | `number`                                       | Maximum tokens to generate                                                                                                                                                        |
-| `temperature`              | `number`                                       | Sampling temperature                                                                                                                                                              |
-| `topP`                     | `number`                                       | Nucleus sampling value                                                                                                                                                            |
-| `topK`                     | `number`                                       | Top-K sampling value                                                                                                                                                              |
-| `presencePenalty`          | `number`                                       | Presence penalty                                                                                                                                                                  |
-| `frequencyPenalty`         | `number`                                       | Frequency penalty                                                                                                                                                                 |
-| `stopSequences`            | `string[]`                                     | Stop generation sequences                                                                                                                                                         |
-| `seed`                     | `number`                                       | Sampling seed when supported                                                                                                                                                      |
-| `maxRetries`               | `number`                                       | Maximum retries for this turn                                                                                                                                                     |
-| `timeout`                  | `TimeoutConfiguration`                         | Timeout for this turn                                                                                                                                                             |
-| `chatStreamStallTimeoutMs` | `number`                                       | Override the stream-stall watchdog for this turn (`0` disables it); auto-resets after the turn. Useful for a turn with a known-slow tool — see [Think configuration](./index.md). |
-| `headers`                  | `Record<string, string>`                       | Additional provider request headers                                                                                                                                               |
-| `providerOptions`          | `Record<string, unknown>`                      | Provider-specific options                                                                                                                                                         |
-| `repairToolCall`           | `ToolCallRepairFunction`                       | Repair a tool call that the AI SDK cannot parse or validate. The returned call is revalidated before execution.                                                                   |
-| `experimental_transform`   | `StreamTextTransform \| StreamTextTransform[]` | AI SDK stream transform(s) for this turn — inspect or rewrite stream parts (for example, emit `source` parts derived from tool results). Applied in order.                        |
+| Field                      | Type                                           | Description                                                                                                                                                                                                                     |
+| -------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                    | `ThinkModel`                                   | Override the model for this turn — a model id string or a `LanguageModel`                                                                                                                                                       |
+| `system`                   | `string`                                       | Override the system prompt                                                                                                                                                                                                      |
+| `messages`                 | `ModelMessage[]`                               | Override the assembled messages                                                                                                                                                                                                 |
+| `tools`                    | `ToolSet`                                      | Extra tools to merge (additive)                                                                                                                                                                                                 |
+| `activeTools`              | `string[]`                                     | Limit which tools the model can call                                                                                                                                                                                            |
+| `toolChoice`               | `ToolChoice`                                   | Force a specific tool call                                                                                                                                                                                                      |
+| `maxSteps`                 | `number`                                       | Override `maxSteps` for this turn                                                                                                                                                                                               |
+| `stopWhen`                 | `StopCondition \| StopCondition[]`             | Additional early-exit conditions                                                                                                                                                                                                |
+| `sendReasoning`            | `boolean`                                      | Send reasoning chunks for this turn                                                                                                                                                                                             |
+| `messageMetadata`          | `MessageMetadataCallback`                      | Write server-authored metadata onto the assistant message this turn persists. Called per stream part; return JSON-serializable metadata from `start`/`finish` (shallow-merged). Overrides the instance-level `messageMetadata`. |
+| `maxOutputTokens`          | `number`                                       | Maximum tokens to generate                                                                                                                                                                                                      |
+| `temperature`              | `number`                                       | Sampling temperature                                                                                                                                                                                                            |
+| `topP`                     | `number`                                       | Nucleus sampling value                                                                                                                                                                                                          |
+| `topK`                     | `number`                                       | Top-K sampling value                                                                                                                                                                                                            |
+| `presencePenalty`          | `number`                                       | Presence penalty                                                                                                                                                                                                                |
+| `frequencyPenalty`         | `number`                                       | Frequency penalty                                                                                                                                                                                                               |
+| `stopSequences`            | `string[]`                                     | Stop generation sequences                                                                                                                                                                                                       |
+| `seed`                     | `number`                                       | Sampling seed when supported                                                                                                                                                                                                    |
+| `maxRetries`               | `number`                                       | Maximum retries for this turn                                                                                                                                                                                                   |
+| `timeout`                  | `TimeoutConfiguration`                         | Timeout for this turn                                                                                                                                                                                                           |
+| `chatStreamStallTimeoutMs` | `number`                                       | Override the stream-stall watchdog for this turn (`0` disables it); auto-resets after the turn. Useful for a turn with a known-slow tool — see [Think configuration](./index.md).                                               |
+| `headers`                  | `Record<string, string>`                       | Additional provider request headers                                                                                                                                                                                             |
+| `providerOptions`          | `Record<string, unknown>`                      | Provider-specific options                                                                                                                                                                                                       |
+| `repairToolCall`           | `ToolCallRepairFunction`                       | Repair a tool call that the AI SDK cannot parse or validate. The returned call is revalidated before execution.                                                                                                                 |
+| `experimental_transform`   | `StreamTextTransform \| StreamTextTransform[]` | AI SDK stream transform(s) for this turn — inspect or rewrite stream parts (for example, emit `source` parts derived from tool results). Applied in order.                                                                      |
 
 ### Examples
 
@@ -300,6 +301,25 @@ beforeTurn(ctx: TurnContext) {
   }
 }
 ```
+
+Stamp server-authored metadata on the assistant message this turn persists. The callback runs for every stream part and each non-`undefined` return is shallow-merged into the message's metadata, then broadcast to clients and persisted. An auto-continuation (for example, after a tool approval or client tool result) is its own turn: `beforeTurn` runs again with `ctx.continuation: true` and the continuation persists as a separate assistant message with its own metadata.
+
+```typescript
+beforeTurn(ctx: TurnContext) {
+  return {
+    messageMetadata: ({ part }) => {
+      if (part.type === "start") {
+        return { createdAt: Date.now(), continuation: ctx.continuation };
+      }
+      if (part.type === "finish") {
+        return { finishReason: part.finishReason };
+      }
+    }
+  };
+}
+```
+
+For metadata that applies to every turn, set the instance-level `messageMetadata` property on your `Think` subclass instead of returning it from `beforeTurn`. A `TurnConfig.messageMetadata` overrides it for one turn.
 
 Disable retries and apply a streaming timeout for a recovery turn:
 

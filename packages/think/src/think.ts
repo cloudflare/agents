@@ -99,6 +99,7 @@ import type {
   StreamTextOnChunkCallback,
   GenerateTextOnStepFinishCallback,
   StopCondition,
+  TextStreamPart,
   ToolSet,
   TypedToolCall,
   UIMessage
@@ -1225,6 +1226,24 @@ export interface StreamCallback {
 }
 
 /**
+ * Produces server-authored assistant-message metadata from AI SDK stream parts.
+ * Forwarded to the AI SDK `toUIMessageStream` so a Think turn can stamp
+ * structured metadata onto the assistant message it persists. Called for every
+ * stream part; use `part.type` to choose when to return metadata (`start` and
+ * `finish` are the conventional points). Each non-`undefined` return is
+ * shallow-merged into the message's metadata. The return value is broadcast to
+ * clients and persisted, so it must be
+ * JSON-serializable and must not carry server-only secrets.
+ *
+ * The `Metadata` parameter defaults to the opaque `Record<string, unknown>` used
+ * everywhere metadata rides today; it is the seam a future typed-metadata story
+ * (issue #1676) narrows without a breaking change.
+ */
+export type MessageMetadataCallback<
+  Metadata extends Record<string, unknown> = Record<string, unknown>
+> = (options: { part: TextStreamPart<ToolSet> }) => Metadata | undefined;
+
+/**
  * Minimal interface for the result of the inference loop.
  * The AI SDK's `streamText()` result satisfies this interface.
  */
@@ -2264,6 +2283,17 @@ export interface TurnConfig {
    * for this turn. Defaults to the instance-level `sendReasoning` setting.
    */
   sendReasoning?: boolean;
+  /**
+   * Produces server-authored assistant-message metadata for this turn — the
+   * write path that lets a turn attach structured metadata (e.g. a `createdAt`
+   * timestamp) to the assistant message Think persists, matching the AI SDK
+   * `messageMetadata` callback base `AIChatAgent` + `streamText` already accept.
+   * Overrides the instance-level {@link Think.messageMetadata} for this turn.
+   * Configure from a Think subclass; sandboxed extensions cannot send functions
+   * over RPC. See {@link MessageMetadataCallback} for when it is called and the
+   * serialization constraints on its return value.
+   */
+  messageMetadata?: MessageMetadataCallback;
   /**
    * Override the stream-stall inactivity watchdog timeout for THIS turn only
    * (ms; `0` disables it for this turn). Defaults to the instance-level
@@ -5237,6 +5267,17 @@ export class Think<
   sendReasoning = true;
 
   /**
+   * Default writer for server-authored assistant-message metadata, applied to
+   * every turn. Override (or supply) per turn by returning `messageMetadata`
+   * from `beforeTurn` ({@link TurnConfig.messageMetadata}). Set this when the
+   * metadata is turn-independent — e.g. stamping a `createdAt` timestamp on
+   * every assistant message — so callers need not repeat it in `beforeTurn`.
+   * See {@link MessageMetadataCallback} for when it is called and the
+   * serialization constraints on its return value.
+   */
+  messageMetadata?: MessageMetadataCallback;
+
+  /**
    * Inactivity watchdog for the streaming read loop, in milliseconds.
    *
    * If a turn's model stream produces no chunk for this long, the watchdog
@@ -6497,6 +6538,7 @@ export class Think<
     const finalMaxSteps =
       config.maxSteps ?? channelDefinition?.maxTurns ?? this.maxSteps;
     const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
+    const finalMessageMetadata = config.messageMetadata ?? this.messageMetadata;
     // Resolve the per-turn stall-watchdog override (explicit `0` = off for this
     // turn). Read by `_streamResult` / `_streamResultToRpcCallback` when arming
     // the watchdog. `??` so a `0` override is honored, not treated as "unset".
@@ -6779,9 +6821,14 @@ export class Think<
               toUIMessageStream: (o: {
                 sendReasoning?: boolean;
                 onError?: (error: unknown) => string;
+                messageMetadata?: MessageMetadataCallback;
               }) => ReadableStream;
             }
-          ).toUIMessageStream({ sendReasoning, onError });
+          ).toUIMessageStream({
+            sendReasoning,
+            onError,
+            messageMetadata: finalMessageMetadata
+          });
           return readableStreamToAsyncIterable(uiStream);
         },
         output: outputPromise
