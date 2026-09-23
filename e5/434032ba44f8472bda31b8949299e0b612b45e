@@ -1,0 +1,27 @@
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_368991bdec7f77::t_284e51b408777f 643-688
+.changeset/think-drop-pending-pause-text.md
+  s_368991bdec7f77::t_3d940e2e71663f 7
+docs/think/actions.md
+  s_368991bdec7f77::t_9c796c95e88d98 194-196
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_1a2e4310125a19 4340-4359
+packages/think/src/think.ts
+  s_368991bdec7f77::t_2ef28b50b4a316 307-316,319-398,401-402,14204-14206,14820-14823,14827-14829,14885-14887,14899-14904,14908-14935
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e5434032ba44f8472bda31b8949299e0b612b45e",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
