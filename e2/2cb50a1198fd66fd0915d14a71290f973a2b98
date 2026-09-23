@@ -1,0 +1,23 @@
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_368991bdec7f77::t_10d87850459112 645-658
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_a900bccacd3219 4364-4376,4381,4384
+packages/think/src/think.ts
+  s_368991bdec7f77::t_e02751cff61fdc 4334,14977-14992
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e22cb50a1198fd66fd0915d14a71290f973a2b98",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
