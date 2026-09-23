@@ -458,9 +458,8 @@ export async function deliverMessengerReply(
       // knows to retry (#1644). `completedModelTurn` stays false.
       callback.close();
       await post.catch(() => undefined);
-      await options.surface
-        .post(interruptedResponseText)
-        .catch(() => undefined);
+      // Checkpoint before the post: a reset after it must not let recovery
+      // (which apologizes for a `streaming` snapshot) post a second apology.
       await checkpoint(
         messengerReplySnapshot(
           "completed",
@@ -468,6 +467,9 @@ export async function deliverMessengerReply(
           options.snapshotThread
         )
       );
+      await options.surface
+        .post(interruptedResponseText)
+        .catch(() => undefined);
       return;
     }
     completedModelTurn = true;
@@ -500,17 +502,13 @@ export async function deliverMessengerReply(
       return;
     }
 
+    await checkpoint(
+      messengerReplySnapshot("completed", snapshotEvent, options.snapshotThread)
+    );
     if (failureMode === "apologize") {
       await options.surface
         .post(interruptedResponseText)
         .catch(() => undefined);
-      await checkpoint(
-        messengerReplySnapshot(
-          "completed",
-          snapshotEvent,
-          options.snapshotThread
-        )
-      );
       return;
     }
 
@@ -519,9 +517,6 @@ export async function deliverMessengerReply(
         markdown: errorResponseText
       })
       .catch(() => undefined);
-    await checkpoint(
-      messengerReplySnapshot("completed", snapshotEvent, options.snapshotThread)
-    );
   }
 }
 
