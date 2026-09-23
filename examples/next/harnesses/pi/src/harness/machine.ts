@@ -1,47 +1,15 @@
 import {
   defineMachine,
   type MachineDefinition,
-  type MachineEffectRecovery,
-  type MachineJson
+  type MachineEffectRecovery
 } from "agents/state-machine";
 import type { PiOperationRequest, PiOperationResult } from "./types";
-
-/**
- * A request as it is stored in a durable checkpoint.
- *
- * This is the same JSON as {@link PiOperationRequest}, typed so it satisfies
- * `MachineJson`. The two cannot be assigned to each other directly because
- * `PiOperationRequest` uses `readonly` arrays and `MachineJson` uses mutable
- * ones, and TypeScript rejects that in both directions.
- */
-export type PiRequestJson = { readonly [key: string]: MachineJson };
-
-/**
- * Retype a request for storage in a checkpoint or effect input.
- *
- * An unchecked cast: it changes no values and validates nothing, it only
- * moves between the two spellings of the same JSON described above.
- */
-export function toRequestJson(request: PiOperationRequest): PiRequestJson {
-  return request as unknown as PiRequestJson;
-}
-
-/**
- * Retype a stored request back to pi's own request union.
- *
- * The inverse of {@link toRequestJson}, and equally unchecked. A checkpoint
- * written by an older version is not validated here; pi rejects a request it
- * does not understand at the point it is used.
- */
-export function toOperationRequest(request: PiRequestJson): PiOperationRequest {
-  return request as unknown as PiOperationRequest;
-}
 
 /** Input accepted when one pi operation run is started. */
 export type PiRunInput = {
   readonly lane: string;
   readonly operationId: string;
-  readonly request: PiRequestJson;
+  readonly request: PiOperationRequest;
   readonly streamId: string;
 };
 
@@ -65,7 +33,7 @@ export type PiRunState =
       phase: "admit";
       lane: string;
       operationId: string;
-      request: PiRequestJson;
+      request: PiOperationRequest;
       streamId: string;
     }
   | {
@@ -122,7 +90,7 @@ export const MAX_DRIVE_PASSES = 4_000;
 export type PiDriveInput = {
   readonly lane: string;
   readonly operationId: string;
-  readonly request: PiRequestJson | null;
+  readonly request: PiOperationRequest | null;
   readonly streamId: string;
   readonly pass: number;
 };
@@ -169,7 +137,7 @@ function planPass(
     readonly streamId: string;
   },
   pass: number,
-  request: PiRequestJson | null
+  request: PiOperationRequest | null
 ): PiEffectRef {
   return context.effects.plan(
     PI_DRIVE_EFFECT,

@@ -54,8 +54,6 @@ import {
   PI_DRIVE_EFFECT,
   PI_RUN_DEFINITION,
   piRunMachine,
-  toOperationRequest,
-  toRequestJson,
   type PiDriveInput,
   type PiDriveOutput,
   type PiRunResult,
@@ -64,7 +62,6 @@ import {
 import type {
   PiAbortResult,
   PiContext,
-  PiDeferredHandle,
   PiEvent,
   PiEventListener,
   PiHarnessConfig,
@@ -283,9 +280,7 @@ function operationStatus(
     ...(operation.retry === undefined ? {} : { retry: operation.retry }),
     ...(operation.deferred === undefined
       ? {}
-      : // SAFETY: PiDeferredHandle is the mutable-array public projection of
-        // pi's DeferredHandle.
-        { deferred: operation.deferred.handle as PiDeferredHandle })
+      : { deferred: operation.deferred.handle })
   };
 }
 
@@ -908,7 +903,7 @@ export class PiHarness<
       {
         lane,
         operationId,
-        request: toRequestJson(request),
+        request,
         streamId: this.streamId(operationId, lane)
       },
       { runId: this.#runIdFor(operationId), idempotencyKey: operationId }
@@ -959,7 +954,7 @@ export class PiHarness<
             "The operation is no longer known to pi"
           );
         }
-        const request = toOperationRequest(input.request);
+        const request = input.request;
         const admission = await upstream.accept(
           asUpstreamRequest(request, operationId),
           context

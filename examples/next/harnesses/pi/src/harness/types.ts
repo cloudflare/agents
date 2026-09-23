@@ -48,15 +48,20 @@ export type PiThinkingLevel =
   | "xhigh"
   | "max";
 
-/** JSON value carried by projected messages, events, and tool results. */
+/**
+ * JSON value carried by projected messages, events, and tool results.
+ *
+ * Arrays and objects are `readonly` to match pi's own `JsonValue`, so values
+ * projected straight out of pi assign without a cast.
+ */
 export type PiJson =
   | string
   | number
   | boolean
   | null
   | undefined
-  | PiJson[]
-  | { [key: string]: PiJson };
+  | readonly PiJson[]
+  | { readonly [key: string]: PiJson };
 
 /** Base64 image content accepted in prompts and returned by tools. */
 export type PiImage = {

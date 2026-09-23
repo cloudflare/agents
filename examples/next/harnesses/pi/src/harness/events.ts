@@ -10,7 +10,7 @@ import {
   projectQueue,
   projectToolResult
 } from "./messages";
-import type { PiDeferredHandle, PiEvent, PiJson } from "./types";
+import type { PiEvent, PiJson } from "./types";
 
 /** Harness event types the capability subscribes to. */
 export const SUBSCRIBED_EVENT_TYPES = [
@@ -67,12 +67,7 @@ export function projectHarnessEvent(
           type: "operation_wait",
           operationId: event.runId,
           reason: "deferred",
-          // SAFETY: the two handles hold the same provider JSON and differ
-          // only in how their `data` field types arrays. Pi's `JsonValue`
-          // uses `readonly` arrays; our `PiJson` uses mutable ones, and a
-          // `readonly` array is not assignable to a mutable one. We only
-          // ever read this value, so the cast is sound.
-          deferred: event.deferred as PiDeferredHandle
+          deferred: event.deferred
         }
       };
     case "operation_abort":

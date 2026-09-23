@@ -1,10 +1,20 @@
+/**
+ * Any value a machine can persist.
+ *
+ * Arrays and objects are `readonly` so that a caller's own immutable types
+ * satisfy this without copying or casting. A `readonly` array is not
+ * assignable to a mutable one, so requiring mutability here would force
+ * every caller holding `readonly` data through an unchecked cast. Nothing
+ * in the engine mutates a checkpoint in place, so nothing needs the looser
+ * form.
+ */
 export type MachineJson =
   | string
   | number
   | boolean
   | null
-  | MachineJson[]
-  | { [key: string]: MachineJson };
+  | readonly MachineJson[]
+  | { readonly [key: string]: MachineJson };
 
 export type MachineValue = MachineJson | undefined | void;
 export type MachinePhased = { phase: string } & Record<string, MachineJson>;
