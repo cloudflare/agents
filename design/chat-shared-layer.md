@@ -339,6 +339,8 @@ The machine handles accumulator creation (including continuation context walking
 
 **What still uses independent variables**: `localRequestIdsRef` (path A vs B switch), `resumingToolContinuationRef` (tool continuation re-entrancy guard), `useChatHelpers.status` (AI SDK lifecycle), and the transport's resolver state. These cross-cut the broadcast/transport boundary and aren't part of the accumulator lifecycle.
 
+**Server frame order**: a `done: true` frame switches the client to ready, and a later `cf_agent_chat_messages` snapshot replaces the client's message list. So when a turn persists an assistant message, the server sends that transcript broadcast before the turn's terminal `done` frame. Otherwise a message the user sends right after `done` is lost from the UI until the next turn. `AIChatAgent` holds terminal frames in `_broadcastChatMessage` while `_reply` owns the request, and turns a held frame into an error when persistence fails.
+
 ## History
 
 - This design doc was created alongside the initial shared layer extraction.

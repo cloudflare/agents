@@ -2154,6 +2154,14 @@ export class AIChatAgent<
   }
 
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
+    if (
+      message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+      message.done &&
+      this._heldTerminalFrames.has(message.id)
+    ) {
+      this._heldTerminalFrames.set(message.id, { message, exclude });
+      return;
+    }
     // Combine explicit exclusions with connections pending stream resume.
     // Pending connections should not receive live stream chunks until they ACK,
     // at which point they'll receive the full replay via _sendStreamChunks.
@@ -2162,6 +2170,32 @@ export class AIChatAgent<
       ...this._pendingResumeConnections
     ];
     this.broadcast(JSON.stringify(message), allExclusions);
+  }
+
+  /**
+   * `useAgentChat` flips to ready on the terminal `done` frame, and a message
+   * the user sends after that is replaced by any transcript broadcast that
+   * arrives later. So while `_reply` owns a request, its terminal frame is held
+   * here and sent only after the assistant message is persisted and broadcast.
+   */
+  private _heldTerminalFrames = new Map<
+    string,
+    { message: OutgoingMessage; exclude?: string[] } | null
+  >();
+
+  private _releaseTerminalFrame(id: string, errorText?: string): void {
+    const held = this._heldTerminalFrames.get(id);
+    this._heldTerminalFrames.delete(id);
+    if (!held) return;
+    const { message, exclude } = held;
+    this._broadcastChatMessage(
+      errorText !== undefined &&
+        message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        !message.error
+        ? { ...message, body: errorText, error: true }
+        : message,
+      exclude
+    );
   }
 
   /**
@@ -7051,6 +7085,8 @@ export class AIChatAgent<
         // tool parts) is persisted to `this.messages` — so the re-armed barrier
         // check sees the fully-materialized batch.
         this._streamingTurnActive = true;
+        this._heldTerminalFrames.set(id, null);
+        let persisted = false;
         try {
           try {
             if (isSSE) {
@@ -7231,6 +7267,8 @@ export class AIChatAgent<
           // mistaken for an interrupted turn.
           this.#pendingCutover = null;
           this._resumableStream.finalizePending();
+          persisted = true;
+          this._releaseTerminalFrame(id);
 
           this._pendingChatResponseResults.push({
             message,
@@ -7245,6 +7283,10 @@ export class AIChatAgent<
         } finally {
           this.#pendingCutover = null;
           this._resumableStream.finalizePending();
+          this._releaseTerminalFrame(
+            id,
+            persisted ? undefined : "Failed to save the response."
+          );
           // The streamed assistant message (with all tool parts) is now
           // persisted: clear the stream-active gate and re-run the
           // auto-continuation barrier for a continuation it held (#1650). This

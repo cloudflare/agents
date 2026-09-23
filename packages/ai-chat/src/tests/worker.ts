@@ -1575,6 +1575,28 @@ export class ResponseAgent extends AIChatAgent<Env> {
     this._responseResults = [];
   }
 
+  private _failNextAssistantPersist = false;
+
+  /** Make the next persist that ends in an assistant message throw. */
+  failNextAssistantPersist(): void {
+    this._failNextAssistantPersist = true;
+  }
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = [],
+    options?: { _deleteStaleRows?: boolean }
+  ) {
+    if (
+      this._failNextAssistantPersist &&
+      messages.at(-1)?.role === "assistant"
+    ) {
+      this._failNextAssistantPersist = false;
+      throw new Error("Simulated persistence failure");
+    }
+    return super.persistMessages(messages, excludeBroadcastIds, options);
+  }
+
   async saveSyntheticUserMessage(text: string): Promise<void> {
     const message: ChatMessage = {
       id: `saved-${crypto.randomUUID()}`,
