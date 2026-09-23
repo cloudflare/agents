@@ -641,6 +641,34 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
     expect(generatedAfter(resolved, "dp1")).toEqual([]);
   });
+
+  it("writes the outcome after a restart when the paused part is outside the hydrated window", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-windowed");
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.skipNextToolUpdateForTest();
+    await agent.skipNextResolvedPauseDropForTest();
+    await agent.approveExecutionForTest(executionId);
+    await agent.appendMessagesForTest([
+      {
+        id: "u-later",
+        role: "user",
+        parts: [{ type: "text", text: "anything else?" }]
+      },
+      {
+        id: "a-later",
+        role: "assistant",
+        parts: [{ type: "text", text: "Not yet." }]
+      }
+    ]);
+    await agent.forgetDeferredResolvedPausesForTest();
+    await agent.windowCachedMessagesForTest(1);
+
+    await agent.testChat("what is the status?");
+
+    const resolved = ownerOf(await agent.getDurableMessagesForTest(), "dp1");
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
 });
 
 describe("paused-output descriptor derivation", () => {

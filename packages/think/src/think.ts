@@ -303,6 +303,21 @@ const ACTION_LEDGER_LAST_SWEPT_KEY = "cf_think_action_ledger:last_swept_at";
 const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
 
 type ResolvedPauseOutcome = { executionId: string; output: unknown };
+
+function ownsPausedToolCall(message: UIMessage, toolCallId: string): boolean {
+  return (message.parts as unknown as Array<Record<string, unknown>>).some(
+    (part) => {
+      if (part.toolCallId !== toolCallId) return false;
+      const output = part.output as { status?: unknown } | null | undefined;
+      return (
+        part.state === "output-available" &&
+        output != null &&
+        typeof output === "object" &&
+        output.status === "paused"
+      );
+    }
+  );
+}
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
@@ -14910,34 +14925,16 @@ export class Think<
     await this._loadResolvedPauses();
     for (const [toolCallId, outcome] of [...this._deferredResolvedPauses]) {
       // Still paused: a restart landed before the outcome was written, and the
-      // execution it resolved is already consumed, so write it now.
-      if (this._findToolCallStillPaused(toolCallId)) {
+      // execution it resolved is already consumed, so write it now. The owner
+      // is looked up in storage when the hydrated window does not hold it.
+      const owner = await this._resolveToolCallOwner(toolCallId, undefined);
+      if (owner && ownsPausedToolCall(owner, toolCallId)) {
         await this._applyToolUpdateToMessages(
           pausedExecutionUpdate(toolCallId, outcome.executionId, outcome.output)
         );
       }
       await this._dropGenerationAfterResolvedPause(toolCallId);
     }
-  }
-
-  private _findToolCallStillPaused(toolCallId: string): boolean {
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const message = this.messages[i];
-      if (message.role !== "assistant") continue;
-      for (const part of message.parts as unknown as Array<
-        Record<string, unknown>
-      >) {
-        if (part.toolCallId !== toolCallId) continue;
-        const output = part.output as { status?: unknown } | null | undefined;
-        return (
-          part.state === "output-available" &&
-          output != null &&
-          typeof output === "object" &&
-          output.status === "paused"
-        );
-      }
-    }
-    return false;
   }
 
   private async _applyToolUpdateToMessages(update: {

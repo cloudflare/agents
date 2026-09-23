@@ -4327,6 +4327,20 @@ export class ThinkToolsTestAgent extends Think {
     };
   }
 
+  /** Keep only the newest `count` messages in memory, as a windowed hydration. */
+  async windowCachedMessagesForTest(count: number): Promise<void> {
+    const self = this as unknown as {
+      _cachedMessages: UIMessage[];
+      _cacheCoversActivePath: boolean;
+    };
+    self._cachedMessages = self._cachedMessages.slice(-count);
+    self._cacheCoversActivePath = false;
+  }
+
+  async getDurableMessagesForTest(): Promise<UIMessage[]> {
+    return (await this.session.getHistory()) as UIMessage[];
+  }
+
   /** Drop in-memory deferred-pause state, as an eviction would. */
   async forgetDeferredResolvedPausesForTest(): Promise<void> {
     const state = this as unknown as {
