@@ -1,0 +1,19 @@
+examples/chat-sdk-messenger/src/tests/intelligence.test.ts
+  s_368991bdec7f77::t_e141f53778b1c6 173-177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5db43c1e9ec7cb11c43e18bc0aeacfc786e1eb8b",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
