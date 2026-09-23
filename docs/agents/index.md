@@ -143,7 +143,8 @@ The differentiator is not "we have durable state" — it is what happens when a 
 
 - [Durable Object Lifecycle](./lifecycle.md) - Compose reusable durable components outside the Agent base class
 - [Tasks](./tasks.md) - Durable, replayable background work with journaled steps and durable sleeps (experimental)
-- [State machines](./state-machine.md) - Durable checkpoints, events, gates, effects, and local child coordination (experimental)
+- [State machine examples](./state-machine.md) - Checkpoints, events, gates, effects, and children (experimental)
+- [State machine API](./state-machine-api.md) - StateMachine methods, phase context, receipts, and types (experimental)
 - [Agent harness contract](./harness.md) - Transport-neutral submission, inspection, control, and result lifecycle (experimental)
 - [Streams](./streams.md) - Durable incremental output: chunk log, cursor, replay-then-tail reads (experimental)
 - TODO: [API Reference](./api-reference.md) - Complete API documentation
