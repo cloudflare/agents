@@ -316,6 +316,39 @@ describe("truncateOlderToolResults", () => {
     expect(output.value.at(-1)).toBe(media);
   });
 
+  it("marks text dropped after earlier items fill the budget exactly", () => {
+    const messages = [
+      toolMessage("old", {}),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+    const modelMessages = [
+      toolResults([
+        "tc-old",
+        {
+          type: "content",
+          value: [
+            { type: "text", text: "a".repeat(500) },
+            { type: "text", text: "error details" }
+          ]
+        }
+      ])
+    ];
+
+    const [message] = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 500
+    });
+
+    const output = outputOf(message);
+    if (output.type !== "content") throw new Error("expected content");
+    const texts = output.value.flatMap((item) =>
+      item.type === "text" ? [item.text] : []
+    );
+    expect(texts.join("").length).toBeLessThanOrEqual(500);
+    expect(texts.at(-1)).toContain("[truncated");
+  });
+
   it("leaves provider-executed results intact", () => {
     const old = toolMessage("old", {});
     (old.parts[0] as { providerExecuted?: boolean }).providerExecuted = true;

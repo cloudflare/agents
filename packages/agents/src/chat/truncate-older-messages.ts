@@ -12,7 +12,7 @@
  */
 
 import type { ModelMessage } from "ai";
-import { truncateToolOutput } from "./tool-output-truncation";
+import { truncatedSuffix, truncateToolOutput } from "./tool-output-truncation";
 import type { SessionMessage } from "../sessions/types";
 
 export interface TruncateOptions {
@@ -186,23 +186,32 @@ function truncateModelOutput(
         : output;
     }
     case "content": {
-      // `maxChars` bounds the whole result, so text items share one budget.
-      let remaining = maxChars;
-      let changed = false;
+      const total = output.value.reduce(
+        (sum, item) => sum + (item.type === "text" ? item.text.length : 0),
+        0
+      );
+      if (total <= maxChars) return output;
+      // `maxChars` bounds the whole result, so text items share one budget,
+      // and room is kept for the marker so a dropped tail is never silent.
+      const suffix = truncatedSuffix(total);
+      let remaining = Math.max(0, maxChars - suffix.length);
+      let truncated = false;
       type ContentItem = (typeof output.value)[number];
       const value = output.value.flatMap((item): ContentItem[] => {
         if (item.type !== "text") return [item];
+        if (truncated) return [];
         if (item.text.length <= remaining) {
           remaining -= item.text.length;
           return [item];
         }
-        changed = true;
-        if (remaining <= 0) return [];
-        const truncated = truncateToolOutput(item.text, remaining);
-        remaining = 0;
-        return [{ ...item, text: truncated.output as string }];
+        truncated = true;
+        const text =
+          maxChars <= suffix.length
+            ? suffix.slice(0, maxChars)
+            : `${item.text.slice(0, remaining)}${suffix}`;
+        return [{ ...item, text }];
       });
-      return changed ? { ...output, value } : output;
+      return { ...output, value };
     }
     default:
       return output;
