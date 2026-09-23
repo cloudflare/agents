@@ -4331,7 +4331,7 @@ export class Think<
   // storage with the outcome so both survive a restart before the next turn;
   // loaded once per isolate.
   private _deferredResolvedPauses = new Map<string, ResolvedPauseOutcome>();
-  private _deferredResolvedPausesLoaded = false;
+  private _deferredResolvedPausesLoad: Promise<void> | undefined;
   private _submitConcurrency = new SubmitConcurrencyController({
     defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
   });
@@ -14974,15 +14974,22 @@ export class Think<
     await this._forgetResolvedPause(toolCallId);
   }
 
-  private async _loadResolvedPauses(): Promise<void> {
-    if (this._deferredResolvedPausesLoaded) return;
-    this._deferredResolvedPausesLoaded = true;
-    const stored = await this.ctx.storage.get<
-      Array<[string, ResolvedPauseOutcome]>
-    >(DEFERRED_RESOLVED_PAUSES_KEY);
-    for (const [toolCallId, outcome] of stored ?? []) {
-      this._deferredResolvedPauses.set(toolCallId, outcome);
-    }
+  private _loadResolvedPauses(): Promise<void> {
+    this._deferredResolvedPausesLoad ??= (async () => {
+      const stored = await this.ctx.storage.get<
+        Array<[string, ResolvedPauseOutcome]>
+      >(DEFERRED_RESOLVED_PAUSES_KEY);
+      for (const [toolCallId, outcome] of stored ?? []) {
+        if (!this._deferredResolvedPauses.has(toolCallId)) {
+          this._deferredResolvedPauses.set(toolCallId, outcome);
+        }
+      }
+    })().catch((error: unknown) => {
+      // Let the next caller retry instead of treating the key as empty.
+      this._deferredResolvedPausesLoad = undefined;
+      throw error;
+    });
+    return this._deferredResolvedPausesLoad;
   }
 
   private async _rememberResolvedPause(

@@ -4361,14 +4361,27 @@ export class ThinkToolsTestAgent extends Think {
     return (await this.session.getHistory()) as UIMessage[];
   }
 
+  /** Fail the next storage read of `key`. */
+  async failNextStorageGetForTest(key: string): Promise<void> {
+    const storage = this.ctx.storage as unknown as {
+      get(key: string): Promise<unknown>;
+    };
+    const get = storage.get.bind(storage);
+    storage.get = async (requested: string) => {
+      if (requested !== key) return get(requested);
+      storage.get = get;
+      throw new Error("simulated storage read failure");
+    };
+  }
+
   /** Drop in-memory deferred-pause state, as an eviction would. */
   async forgetDeferredResolvedPausesForTest(): Promise<void> {
     const state = this as unknown as {
       _deferredResolvedPauses: Map<string, unknown>;
-      _deferredResolvedPausesLoaded: boolean;
+      _deferredResolvedPausesLoad: Promise<void> | undefined;
     };
     state._deferredResolvedPauses.clear();
-    state._deferredResolvedPausesLoaded = false;
+    state._deferredResolvedPausesLoad = undefined;
   }
 
   private _listActionPendingRowsForTest(): Array<{ execution_id: string }> {

@@ -642,6 +642,20 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(generatedAfter(resolved, "dp1")).toEqual([]);
   });
 
+  it("retries loading deferred cleanup after a failed storage read", async () => {
+    const agent = await approvedMidStreamWithoutContinuation("dp-stale-load");
+    await agent.forgetDeferredResolvedPausesForTest();
+    await agent.failNextStorageGetForTest("cf_think_deferred_resolved_pauses");
+
+    const failed = await agent.testChat("first try");
+    expect(failed.error).toContain("simulated storage read failure");
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts.at(-1)).toContain("paused-exec: hello");
+    expect(prompts.at(-1)).not.toContain("Once approved");
+  });
+
   it("keeps the outcome when a stale client resubmits the paused message", async () => {
     const { agent, executionId } = await parkInTurn("dp-stale-client");
     await agent.holdConnectionlessContinuationForTest();
