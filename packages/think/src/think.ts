@@ -300,6 +300,7 @@ const ACTION_OUTPUT_MAX_CHARS = 20_000;
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_LEDGER_LAST_SWEPT_KEY = "cf_think_action_ledger:last_swept_at";
+const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
@@ -4225,8 +4226,10 @@ export class Think<
   // `_streamingMessage` handling.
   private _streamingAssistant: StreamAccumulator | null = null;
   // Tool calls whose pause resolved while their own turn was still streaming;
-  // see `_dropGenerationAfterResolvedPause`.
+  // see `_dropGenerationAfterResolvedPause`. Mirrored in storage so the drop
+  // survives an eviction before the next turn; loaded once per isolate.
   private _deferredResolvedPauses = new Set<string>();
+  private _deferredResolvedPausesLoaded = false;
   private _submitConcurrency = new SubmitConcurrencyController({
     defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
   });
@@ -6505,9 +6508,7 @@ export class Think<
   private async _prepareInferenceInvocation(
     input: TurnInput
   ): Promise<() => StreamableResult> {
-    if (input.continuation && this._deferredResolvedPauses.size > 0) {
-      await this._flushDeferredResolvedPauses();
-    }
+    await this._flushDeferredResolvedPauses();
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.
     const includeMcpTools = this.includeMcpTools;
@@ -14835,8 +14836,8 @@ export class Think<
    *
    * While the turn that paused is still streaming, its accumulator owns the
    * message and appends deltas to the last text part, so parts cannot be
-   * removed underneath it. The drop is deferred to the continuation, which is
-   * queued behind that turn and runs after it persists.
+   * removed underneath it. The drop is deferred to the next inference, which
+   * is queued behind that turn and runs after it persists.
    */
   private async _dropGenerationAfterResolvedPause(
     toolCallId: string
@@ -14848,6 +14849,9 @@ export class Think<
       )
     ) {
       this._deferredResolvedPauses.add(toolCallId);
+      await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
+        ...this._deferredResolvedPauses
+      ]);
       return;
     }
     const owner = await this._resolveToolCallOwner(toolCallId, undefined);
@@ -14860,8 +14864,19 @@ export class Think<
   }
 
   private async _flushDeferredResolvedPauses(): Promise<void> {
+    if (!this._deferredResolvedPausesLoaded) {
+      this._deferredResolvedPausesLoaded = true;
+      const stored = await this.ctx.storage.get<string[]>(
+        DEFERRED_RESOLVED_PAUSES_KEY
+      );
+      for (const toolCallId of stored ?? []) {
+        this._deferredResolvedPauses.add(toolCallId);
+      }
+    }
+    if (this._deferredResolvedPauses.size === 0) return;
     const toolCallIds = [...this._deferredResolvedPauses];
     this._deferredResolvedPauses.clear();
+    await this.ctx.storage.delete(DEFERRED_RESOLVED_PAUSES_KEY);
     for (const toolCallId of toolCallIds) {
       await this._dropGenerationAfterResolvedPause(toolCallId);
     }

@@ -4298,6 +4298,23 @@ export class ThinkToolsTestAgent extends Think {
     this._approveParkedInNextStepForTest = true;
   }
 
+  /** Keep a resolved pause's connectionless continuation from running. */
+  async holdConnectionlessContinuationForTest(): Promise<void> {
+    (
+      this as unknown as { _queueConnectionlessContinuation(): Promise<void> }
+    )._queueConnectionlessContinuation = () => Promise.resolve();
+  }
+
+  /** Drop in-memory deferred-pause state, as an eviction would. */
+  async forgetDeferredResolvedPausesForTest(): Promise<void> {
+    const state = this as unknown as {
+      _deferredResolvedPauses: Set<string>;
+      _deferredResolvedPausesLoaded: boolean;
+    };
+    state._deferredResolvedPauses.clear();
+    state._deferredResolvedPausesLoaded = false;
+  }
+
   private _listActionPendingRowsForTest(): Array<{ execution_id: string }> {
     return (
       this as unknown as {

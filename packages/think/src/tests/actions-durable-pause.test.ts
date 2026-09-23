@@ -555,6 +555,42 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
     expect(generatedAfter(resolved, "dp1")).toEqual([]);
   });
+
+  async function approvedMidStreamWithoutContinuation(name: string) {
+    const agent = await freshPauseAgent(`${name}-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.approveParkedInNextStepForTest();
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+    return agent;
+  }
+
+  it("drops the generation before a user turn that runs ahead of the continuation", async () => {
+    const agent = await approvedMidStreamWithoutContinuation("dp-stale-user");
+
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts[2]).toContain("paused-exec: hello");
+    expect(prompts[2]).not.toContain("Once approved");
+    expect(prompts[2]).not.toContain("waiting for approval");
+  });
+
+  it("drops the generation after an eviction between the pause resolving and the next turn", async () => {
+    const agent = await approvedMidStreamWithoutContinuation("dp-stale-evict");
+    await agent.forgetDeferredResolvedPausesForTest();
+
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts[2]).not.toContain("Once approved");
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
 });
 
 describe("paused-output descriptor derivation", () => {
