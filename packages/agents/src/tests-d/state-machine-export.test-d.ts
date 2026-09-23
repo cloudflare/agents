@@ -6,9 +6,21 @@ import {
   defineMachine,
   type MachineDefinition,
   type MachineEffectOutcome,
+  type MachineEffectRef,
+  type MachineJson,
   type MachineListOptions,
   type MachineRunSnapshot
 } from "../state-machine";
+
+// A wrapped runtime parks between passes holding the effect it planned, so an
+// effect handle has to be storable in a checkpoint. This fails if
+// `MachineEffectRef` is ever declared as an interface again, because an
+// interface has no implicit index signature.
+declare const effectRef: MachineEffectRef<{ done: boolean }>;
+const checkpointed: { readonly [key: string]: MachineJson } = {
+  effect: effectRef
+};
+checkpointed satisfies object;
 
 type State =
   | { phase: "first"; value: string }

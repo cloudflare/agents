@@ -139,7 +139,16 @@ export interface MachineGates {
 
 export type MachineEffectRecovery = "safe" | "never" | "reconcile";
 
-export interface MachineEffectRef<Output extends MachineValue = MachineValue> {
+/**
+ * A handle to one planned effect.
+ *
+ * Declared as a type alias rather than an interface so it satisfies
+ * {@link MachineJson}: TypeScript gives an interface no implicit index
+ * signature, which would stop a machine storing its own effect handle in its
+ * own checkpoint. A wrapped runtime that parks between passes has to do
+ * exactly that, so the alias is load-bearing.
+ */
+export type MachineEffectRef<Output extends MachineValue = MachineValue> = {
   readonly id: string;
   readonly kind: string;
   readonly recovery: MachineEffectRecovery;
@@ -149,7 +158,7 @@ export interface MachineEffectRef<Output extends MachineValue = MachineValue> {
   readonly retries?: MachineEffectRetryPolicy;
   /** @internal Type carrier. */
   readonly __output?: Output;
-}
+};
 
 export interface MachineEffectPlanOptions {
   readonly recovery: MachineEffectRecovery;
